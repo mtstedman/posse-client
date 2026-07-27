@@ -18,6 +18,9 @@ const ONESHOT_SIMPLE_UI_CONTROL_RE = /(?:\bicon(?:-only)?\s+buttons?\b[^.\n]{0,1
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
 const FANOUT_TRIGGER_RE = /\b(?:audit|review\s+all|verify\s+each|find\s+all|scan\s+all|check\s+every|across)\b/i;
 const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|verify|investigate)\b/i;
+const IMPLEMENTATION_ACTION_RE = /\b(?:add|change|correct|fix|implement|remove|repair|replace|update)\b/i;
+const RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|debug|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand|verify)\b/i;
+const OPERATOR_COMMENT_ACTION_RE = /\bcomment\s+(?:for|to)\s+(?:the\s+)?user\b/i;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
 
@@ -64,7 +67,7 @@ const FILE_EXTENSIONS = [
 ];
 
 const FILE_MENTION_RE = new RegExp(
-  `(?:^|[\\s\`"'(\\[])((?:\\.{1,2}[\\\\/])?(?:[A-Za-z0-9_.-]+[\\\\/])*[A-Za-z0-9_.-]+\\.(?:${FILE_EXTENSIONS.join("|")}))(?=$|[^A-Za-z0-9_.-])`,
+  `(?:^|[\\s\`"'(\\[])((?:\\.{1,2}[\\\\/])?(?:[A-Za-z0-9_.-]+[\\\\/])*[A-Za-z0-9_.-]+\\.(?:${FILE_EXTENSIONS.join("|")}))(?=$|\\.(?=\\s|$)|[^A-Za-z0-9_.-])`,
   "gi",
 );
 
@@ -393,6 +396,41 @@ function isLowBlastRadiusSingleFileEdit({
   return LOW_BLAST_SCOPE_RE.test(text);
 }
 
+function isExplicitScopedImplementation({
+  text,
+  noResearchText,
+  fileMentions,
+  protectedFileMention,
+  webBranches,
+  listItems,
+  lowerMode,
+  intakeHints,
+}) {
+  if (protectedFileMention) return false;
+  if (lowerMode && lowerMode !== "build") return false;
+  if (fileMentions.length < 1 || fileMentions.length > 4) return false;
+  if (webBranches.length > 0 || listItems.length > 0) return false;
+  if (noResearchText.length > 1200) return false;
+  if (
+    !IMPLEMENTATION_ACTION_RE.test(text)
+    || RESEARCH_INTENT_RE.test(text)
+    || OPERATOR_COMMENT_ACTION_RE.test(text)
+  ) {
+    return false;
+  }
+  if (
+    COMPLEX_RE.test(text)
+    || AMBIGUOUS_RE.test(text)
+    || FANOUT_TRIGGER_RE.test(text)
+    || BROAD_SCOPE_RE.test(text)
+    || FORMAT_RE.test(text)
+    || LOW_NO_LOGIC_RE.test(text)
+  ) {
+    return false;
+  }
+  return evaluateOneshotRequestEligibility({ text, mode: lowerMode, intakeHints }).ok;
+}
+
 export function buildSyntheticResearchBrief(routingOrReason = null) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
@@ -464,6 +502,16 @@ export function classifyResearchTask({
     listItems,
     lowerMode,
   });
+  const scopedImplementationNoResearch = isExplicitScopedImplementation({
+    text,
+    noResearchText,
+    fileMentions,
+    protectedFileMention,
+    webBranches,
+    listItems,
+    lowerMode,
+    intakeHints,
+  });
 
   let result = null;
   if (lowerMode === "question" && webFanoutCandidate && webBranches.length <= 3) {
@@ -528,6 +576,12 @@ export function classifyResearchTask({
     result = { bucket: "no_research", reason: "single-file low-risk text edit" };
   } else if (renameMultiNoResearch) {
     result = { bucket: "no_research", reason: "same-module multi-file rename" };
+  } else if (scopedImplementationNoResearch) {
+    result = {
+      bucket: "no_research",
+      reason: "explicit low-risk implementation scope",
+      candidate_files: fileMentions,
+    };
   }
 
   if (!result) {

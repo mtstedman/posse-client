@@ -38,6 +38,7 @@ import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAut
 import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
+import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 
 export async function callProvider(promptText, {
   role = "planner",
@@ -490,10 +491,13 @@ export async function callProvider(promptText, {
     }
 
     const processTerminator = new ProviderProcessTerminator(proc);
+    const terminalUsageFlush = new CodexTerminalUsageFlush(
+      (reason) => processTerminator.requestAbort(reason),
+    );
 
     if (abortSignal) {
       const onAbort = () => {
-        processTerminator.requestAbort(abortSignal.reason);
+        terminalUsageFlush.request(abortSignal.reason);
       };
       if (abortSignal.aborted) onAbort();
       else {
@@ -527,6 +531,9 @@ export async function callProvider(promptText, {
         if (totals.outputTokens != null) totalOutputTokens = totals.outputTokens;
         if (totals.cachedInputTokens != null) totalCachedInputTokens = totals.cachedInputTokens;
         if (totals.longContextInputTokens != null) longContextInputTokens = totals.longContextInputTokens;
+        if (usage.inputTokens != null || usage.outputTokens != null || usage.cachedInputTokens != null) {
+          terminalUsageFlush.noteUsage();
+        }
         const turnCount = extractTurnCountFromEvent(msg);
         if (turnCount != null) latestTurnCount = Math.max(latestTurnCount ?? 0, turnCount);
         if (isTurnCompletedEvent(msg)) completedTurnEvents++;
@@ -613,6 +620,7 @@ export async function callProvider(promptText, {
     proc.on("error", (err) => {
       clearInterval(heartbeat);
       processTerminator.cancelTimer();
+      terminalUsageFlush.cancel();
       clearExitCleanup();
       cleanupRunTemps({ deterministicReadMcp, exitCode: null, phase: "provider_error" });
       reject(buildSpawnError(err));
@@ -620,6 +628,7 @@ export async function callProvider(promptText, {
 
     proc.on("close", (code) => {
       clearInterval(heartbeat);
+      terminalUsageFlush.cancel();
       clearExitCleanup();
       const durationMs = Date.now() - startTime;
       const termination = processTerminator.noteClose();
@@ -667,6 +676,7 @@ export async function callProvider(promptText, {
       stats.mcpAttachProof = mcpCleanup?.attachProofResult?.proof || null;
       stats.mcpAttachMissingProof = mcpCleanup?.attachProofResult?.missingProof === true;
       Object.assign(stats, termination);
+      Object.assign(stats, terminalUsageFlush.snapshot());
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
       // attach-under-load failure leaves a trace even on a clean exit.

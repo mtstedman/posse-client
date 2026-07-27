@@ -38,6 +38,7 @@ export {
   __testClassifyCodexStderrLine,
   __testExtractCodexToolUse,
   __testAppendCodexToolUseEvent,
+  codexAgentMessageText as __testCodexAgentMessageText,
   extractUsageFromEvent as __testExtractCodexUsageFromEvent,
   extractTurnCountFromEvent as __testExtractCodexTurnCountFromEvent,
   isTurnCompletedEvent as __testIsCodexTurnCompletedEvent,

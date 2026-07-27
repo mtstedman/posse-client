@@ -5,6 +5,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { _extractCodexEventBody } from "./session.js";
 
 const CODEX_STREAM_CAPTURE_MAX_CHARS = 4 * 1024 * 1024;
+const CODEX_LIVE_COMMENTARY_MAX_CHARS = 2 * 1024;
 
 export function appendBoundedCodexOutput(current, text, maxChars = CODEX_STREAM_CAPTURE_MAX_CHARS) {
   return appendBoundedText(current, text, maxChars);
@@ -342,8 +343,56 @@ export function __testAppendCodexToolUseEvent(toolUses, msg) {
   return toolUses;
 }
 
+function boundedLiveCommentary(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (text.length <= CODEX_LIVE_COMMENTARY_MAX_CHARS) return text;
+  return `${text.slice(0, CODEX_LIVE_COMMENTARY_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function outputTextFromContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((entry) => entry && typeof entry === "object")
+    .filter((entry) => ["output_text", "text"].includes(String(entry.type || "").toLowerCase()))
+    .map((entry) => String(entry.text || entry.output_text || ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function codexAgentMessageText(msg) {
+  if (!msg || typeof msg !== "object") return null;
+
+  // `codex exec --json` emits completed assistant messages in this shape.
+  if (
+    String(msg.type || "").toLowerCase() === "item.completed"
+    && String(msg.item?.type || "").toLowerCase() === "agent_message"
+  ) {
+    return boundedLiveCommentary(msg.item?.text);
+  }
+
+  // Persisted rollouts and some CLI versions wrap response items in
+  // `payload`/`msg`. Only assistant output is eligible for the live channel;
+  // never echo user, developer, or system prompt contents.
+  const body = _extractCodexEventBody(msg);
+  if (
+    String(body?.type || "").toLowerCase() !== "message"
+    || String(body?.role || "").toLowerCase() !== "assistant"
+  ) {
+    return null;
+  }
+  return boundedLiveCommentary(
+    body?.text
+      || body?.output_text
+      || outputTextFromContent(body?.content),
+  );
+}
+
 export function summarizeJsonEvent(msg) {
   if (!msg || typeof msg !== "object") return null;
+  const agentMessage = codexAgentMessageText(msg);
+  if (agentMessage) return agentMessage;
   if (typeof msg.msg === "string") return msg.msg;
   if (typeof msg.message === "string") return msg.message;
   if (typeof msg.text === "string") return msg.text;

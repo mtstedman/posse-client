@@ -1292,6 +1292,11 @@ export class TrackedProviderClient {
             graceful_termination_attempted: stats.gracefulTerminationAttempted === true,
             force_kill_timer_fired: stats.forceKillTimerFired === true,
             force_kill_used: stats.forceKillUsed === true,
+            terminal_usage_flush_attempted: stats.terminalUsageFlushAttempted === true,
+            terminal_usage_flush_completed: stats.terminalUsageFlushCompleted === true,
+            terminal_usage_flush_timed_out: stats.terminalUsageFlushTimedOut === true,
+            terminal_usage_flush_duration_ms: stats.terminalUsageFlushDurationMs ?? null,
+            terminal_usage_flush_timeout_ms: stats.terminalUsageFlushTimeoutMs ?? null,
             external_abort_observed: abortSignal?.aborted === true,
             mcp_attach_proof: stats.mcpAttachProof ? {
               initialize_seen_at: stats.mcpAttachProof.initializeSeenAt ?? null,
