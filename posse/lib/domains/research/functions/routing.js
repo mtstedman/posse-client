@@ -18,8 +18,10 @@ const ONESHOT_SIMPLE_UI_CONTROL_RE = /(?:\bicon(?:-only)?\s+buttons?\b[^.\n]{0,1
 const LOW_NO_LOGIC_RE = /\b(?:typo|spelling|comments?\s+fix|comment-only|rename|copy\s*edit|docs?|readme|formatting|whitespace|no\s+(?:logic|behavior|behaviour)\s+change)\b/i;
 const FANOUT_TRIGGER_RE = /\b(?:audit|review\s+all|verify\s+each|find\s+all|scan\s+all|check\s+every|across)\b/i;
 const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|verify|investigate)\b/i;
-const IMPLEMENTATION_ACTION_RE = /\b(?:add|change|correct|fix|implement|remove|repair|replace|update)\b/i;
+const IMPLEMENTATION_ACTION_RE = /\b(?:add|build|change|complete|correct|create|fix|implement|remove|repair|replace|update)\b/i;
 const RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|debug|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand|verify)\b/i;
+const PREPLAN_RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand|verify)\b/i;
+const PREPLAN_BROAD_SCOPE_RE = /(?:\b(?:all|every|each)\s+(?:callers?|components?|endpoints?|files?|modules?|occurrences?|packages?|projects?|references?|repositories?|repos?|routes?|services?|usages?|workspaces?)\b|\b(?:across|throughout)\s+(?:the\s+)?(?:codebase|project|repository|repo|system|workspace)\b|\b(?:entire|whole)\s+(?:codebase|project|repository|repo|system|workspace)\b)/i;
 const OPERATOR_COMMENT_ACTION_RE = /\bcomment\s+(?:for|to)\s+(?:the\s+)?user\b/i;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
@@ -447,13 +449,16 @@ function isPreplanningCandidate({
   if (noResearchText.length > 1600) return false;
   if (isMultiParagraph(noResearchText)) return false;
   if (!IMPLEMENTATION_ACTION_RE.test(text)) return false;
+  const preplanningResearchIntent = PREPLAN_RESEARCH_INTENT_RE.test(text)
+    || /\bdebug\b/.test(text)
+    || /\bDebug\s+(?:bug|crash|error|failure|issue|problem|why)\b/.test(text);
   if (
-    RESEARCH_INTENT_RE.test(text)
+    preplanningResearchIntent
     || OPERATOR_COMMENT_ACTION_RE.test(text)
     || COMPLEX_RE.test(text)
     || AMBIGUOUS_RE.test(text)
     || FANOUT_TRIGGER_RE.test(text)
-    || BROAD_SCOPE_RE.test(text)
+    || PREPLAN_BROAD_SCOPE_RE.test(text)
     || FORMAT_RE.test(text)
   ) {
     return false;
