@@ -538,15 +538,23 @@ export class PlannerRole extends BaseRole {
     });
     const atlasHandoffBlock = renderAtlasHandoffSections(plannerPacket);
 
-    const contextDirsBlock = fastFileCount > 0 || fullCount > 0 ? [
-      "RESEARCH CONTEXT:",
-      "  Call the get_brief tool ONCE before planning. In a single response it returns the researcher's full",
-      "  analysis, the structured research data (key files, patterns, constraints), the ranked file-priority list,",
-      "  a function/class index for the key files, and a manifest of staged source files.",
-      "  Start from get_brief. Read a path from its full_sources manifest only when you need a specific function",
-      "  body or pattern the brief does not cover; fall back to the project root only as a last resort.",
-      "",
-    ].join("\n") : "";
+    const contextDirsBlock = researchSkipped
+      ? [
+        "RESEARCH WAS SKIPPED:",
+        "  The original work item, intake hints, and candidate files below are the complete planning input.",
+        "  Do not call get_brief solely to reload the synthetic routing record; plan directly from this prompt.",
+        promptLiteral("SYNTHETIC ROUTING RECORD", researchBrief || "(none)"),
+        "",
+      ].join("\n")
+      : fastFileCount > 0 || fullCount > 0 ? [
+        "RESEARCH CONTEXT:",
+        "  Call the get_brief tool ONCE before planning. In a single response it returns the researcher's full",
+        "  analysis, the structured research data (key files, patterns, constraints), the ranked file-priority list,",
+        "  a function/class index for the key files, and a manifest of staged source files.",
+        "  Start from get_brief. Read a path from its full_sources manifest only when you need a specific function",
+        "  body or pattern the brief does not cover; fall back to the project root only as a last resort.",
+        "",
+      ].join("\n") : "";
 
     const contextText = [
       promptLiteral("WORK ITEM", workItem.title),
