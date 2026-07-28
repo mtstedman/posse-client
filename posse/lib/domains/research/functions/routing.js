@@ -466,6 +466,39 @@ function isPreplanningCandidate({
   return true;
 }
 
+function isBoundedHighRiskPreplanningCandidate({
+  text,
+  noResearchText,
+  protectedFileMention,
+  webBranches,
+  fileMentions,
+  listItems,
+  lowerMode,
+}) {
+  if (protectedFileMention) return false;
+  if (lowerMode && lowerMode !== "build") return false;
+  if (fileMentions.length < 1 || fileMentions.length > 4) return false;
+  if (webBranches.length > 0 || listItems.length > 1) return false;
+  if (noResearchText.length < 240 || noResearchText.length > 1600) return false;
+  if (!IMPLEMENTATION_ACTION_RE.test(text) || !COMPLEX_RE.test(text)) return false;
+  const requirementSignals = noResearchText.match(
+    /\b(?:after|before|exactly|must|once|only|requires?|returns?|when|while|without)\b/gi,
+  ) || [];
+  if (requirementSignals.length < 4) return false;
+  if (
+    PREPLAN_RESEARCH_INTENT_RE.test(text)
+    || /\bdebug\b/.test(text)
+    || OPERATOR_COMMENT_ACTION_RE.test(text)
+    || AMBIGUOUS_RE.test(text)
+    || FANOUT_TRIGGER_RE.test(text)
+    || PREPLAN_BROAD_SCOPE_RE.test(text)
+    || FORMAT_RE.test(text)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function buildSyntheticResearchBrief(routingOrReason = null) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
@@ -556,6 +589,15 @@ export function classifyResearchTask({
     listItems,
     lowerMode,
   });
+  const boundedHighRiskPreplanningCandidate = isBoundedHighRiskPreplanningCandidate({
+    text,
+    noResearchText,
+    protectedFileMention,
+    webBranches,
+    fileMentions,
+    listItems,
+    lowerMode,
+  });
 
   let result = null;
   if (lowerMode === "question" && webFanoutCandidate && webBranches.length <= 3) {
@@ -626,6 +668,13 @@ export function classifyResearchTask({
       reason: "explicit low-risk implementation scope needs preplanning",
       candidate_files: fileMentions,
       budget: "low",
+    };
+  } else if (boundedHighRiskPreplanningCandidate) {
+    result = {
+      bucket: "preplan",
+      reason: "bounded high-risk implementation needs preplanning",
+      candidate_files: fileMentions,
+      budget: "high",
     };
   } else if (preplanningCandidate) {
     result = {
