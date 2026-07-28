@@ -428,7 +428,7 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
     parent_job_id: parentJob?.id || null,
     priority: workItem.priority,
     model_tier: "cheap",
-    reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "high"),
+    reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
     payload_json: JSON.stringify(researchPayload({
       research_skipped: true,
       research_skip_reason: reason,
@@ -680,6 +680,11 @@ export function createPreflightResearchJob(workItem, {
 } = {}) {
   const metadata = parseWorkItemMetadata(workItem);
   const fallbackBudget = normalizeResearchBudget(deepthinkBudget, "normal");
+  const preflightObjective = routing?.bucket === "oneshot_candidate"
+    ? "oneshot_scope"
+    : routing?.bucket === "preplan"
+      ? "pipeline_route"
+      : null;
   // The preflight role handler reads `payload.routing`,
   // `payload.fallback_budget`, and `payload.project_map` directly
   // (lib/domains/worker/classes/roles/preflight.js). Keep them on the payload —
@@ -698,7 +703,7 @@ export function createPreflightResearchJob(workItem, {
       routing: routing || null,
       fallback_budget: fallbackBudget,
       fallback_budget_explicit: !!deepthinkBudgetExplicit,
-      ...(routing?.bucket === "oneshot_candidate" ? { preflight_objective: "oneshot_scope" } : {}),
+      ...(preflightObjective ? { preflight_objective: preflightObjective } : {}),
       upstream_mode: workItem.mode || metadata.mode || null,
       upstream_source: source,
       ...redTeamPlanningPayload(redTeamPlan),
@@ -794,6 +799,17 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
   if (effectiveRouting.bucket === "ambiguous") {
     const job = createPreflightResearchJob(workItem, {
       deepthinkBudget,
+      deepthinkBudgetExplicit,
+      routing: effectiveRouting,
+      source,
+      redTeamPlan,
+      projectDir,
+    });
+    return { kind: "preflight", job, routing: effectiveRouting };
+  }
+  if (effectiveRouting.bucket === "preplan") {
+    const job = createPreflightResearchJob(workItem, {
+      deepthinkBudget: actualBudget,
       deepthinkBudgetExplicit,
       routing: effectiveRouting,
       source,

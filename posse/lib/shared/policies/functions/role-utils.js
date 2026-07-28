@@ -36,12 +36,12 @@ export function isResearchBudgetDeep(budget) {
 }
 
 export function maxResearchBudget(...budgets) {
-  let best = "normal";
+  let best = null;
   for (const budget of budgets) {
     const normalized = normalizeResearchBudget(budget, "normal");
-    if (RESEARCH_BUDGET_RANK[normalized] > RESEARCH_BUDGET_RANK[best]) best = normalized;
+    if (best == null || RESEARCH_BUDGET_RANK[normalized] > RESEARCH_BUDGET_RANK[best]) best = normalized;
   }
-  return best;
+  return best || "normal";
 }
 
 export function defaultResearchModelTier() {

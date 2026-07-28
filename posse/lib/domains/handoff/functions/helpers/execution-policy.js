@@ -381,15 +381,12 @@ export function resolvePlannerBudgetFromResearchScope({
   const keyCount = uniqueStrings(keyFiles).length;
   const relatedCount = uniqueStrings(relatedFiles).length;
   const priorityCount = uniqueStrings(plannerFilePriorities.map((entry) => entry?.path || entry)).length;
-  let budget = "normal";
+  let budget = normalizeRanked(currentBudget, BUDGET_RANK, "normal");
   const reasons = [];
 
   if (confidence === "low") {
-    budget = maxBudget(budget, "xhigh");
-    reasons.push("low researcher scope confidence");
-  } else if (confidence === "medium") {
     budget = maxBudget(budget, "high");
-    reasons.push("medium researcher scope confidence");
+    reasons.push("low researcher scope confidence");
   }
   if (likelyTouchCount != null && likelyTouchCount >= 8) {
     budget = maxBudget(budget, "xhigh");
@@ -407,7 +404,7 @@ export function resolvePlannerBudgetFromResearchScope({
   }
 
   return {
-    budget: maxBudget(currentBudget, budget),
+    budget,
     confidence,
     key_file_count: keyCount,
     related_file_count: relatedCount,

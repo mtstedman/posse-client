@@ -85,6 +85,17 @@ export class PreflightRole extends BaseRole {
           "If it is low-research but not one-shot-safe, return mode \"plan_direct\". Otherwise return mode \"solo\".",
           "",
         ].join("\n")
+        : payload.preflight_objective === "pipeline_route"
+          ? [
+            "Preflight objective: choose the cheapest safe implementation pipeline before planning begins.",
+            "Return mode \"oneshot\" for a simple, self-contained change with exactly one clear existing repo file; this routes directly to development and still receives external assessment.",
+            "Return mode \"plan_direct\" when repository research is unnecessary but decomposition, multiple files, or broader implementation coordination makes a planner useful.",
+            "Return mode \"solo\" when correctness depends on repository investigation, unclear ownership, cross-cutting implications, or elevated security/concurrency/data-loss risk.",
+            "Return mode \"fanout_clear\" only for genuinely independent research branches.",
+            "Do not default to solo merely because this preplanning call exists. Choose the least expensive route that remains safe.",
+            "A later deterministic gate revalidates every one-shot file and risk boundary; your decision cannot bypass it.",
+            "",
+          ].join("\n")
         : null,
       `Fallback budget: ${fallbackBudget}`,
       "",

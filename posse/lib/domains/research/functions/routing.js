@@ -431,6 +431,36 @@ function isExplicitScopedImplementation({
   return evaluateOneshotRequestEligibility({ text, mode: lowerMode, intakeHints }).ok;
 }
 
+function isPreplanningCandidate({
+  text,
+  noResearchText,
+  protectedFileMention,
+  webBranches,
+  fileMentions,
+  listItems,
+  lowerMode,
+}) {
+  if (protectedFileMention) return false;
+  if (lowerMode && lowerMode !== "build") return false;
+  if (fileMentions.length > 4) return false;
+  if (webBranches.length > 0 || listItems.length > 1) return false;
+  if (noResearchText.length > 1600) return false;
+  if (isMultiParagraph(noResearchText)) return false;
+  if (!IMPLEMENTATION_ACTION_RE.test(text)) return false;
+  if (
+    RESEARCH_INTENT_RE.test(text)
+    || OPERATOR_COMMENT_ACTION_RE.test(text)
+    || COMPLEX_RE.test(text)
+    || AMBIGUOUS_RE.test(text)
+    || FANOUT_TRIGGER_RE.test(text)
+    || BROAD_SCOPE_RE.test(text)
+    || FORMAT_RE.test(text)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function buildSyntheticResearchBrief(routingOrReason = null) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
@@ -512,6 +542,15 @@ export function classifyResearchTask({
     lowerMode,
     intakeHints,
   });
+  const preplanningCandidate = isPreplanningCandidate({
+    text,
+    noResearchText,
+    protectedFileMention,
+    webBranches,
+    fileMentions,
+    listItems,
+    lowerMode,
+  });
 
   let result = null;
   if (lowerMode === "question" && webFanoutCandidate && webBranches.length <= 3) {
@@ -578,9 +617,17 @@ export function classifyResearchTask({
     result = { bucket: "no_research", reason: "same-module multi-file rename" };
   } else if (scopedImplementationNoResearch) {
     result = {
-      bucket: "no_research",
-      reason: "explicit low-risk implementation scope",
+      bucket: "preplan",
+      reason: "explicit low-risk implementation scope needs preplanning",
       candidate_files: fileMentions,
+      budget: "low",
+    };
+  } else if (preplanningCandidate) {
+    result = {
+      bucket: "preplan",
+      reason: "ordinary low-risk build needs preplanning",
+      candidate_files: editTargetFiles,
+      budget: "normal",
     };
   }
 
@@ -629,6 +676,7 @@ export function classifyResearchTask({
 
   const noResearch = result.bucket === "no_research";
   const oneshotBucket = ["oneshot", "oneshot_candidate"].includes(result.bucket);
+  const preplanningBucket = result.bucket === "preplan";
   const budget = oneshotBucket
     ? normalizeExplicitBudget(
       intakeHints?.deepthink_budget
@@ -636,6 +684,13 @@ export function classifyResearchTask({
         ?? intakeHints?.reasoning_budget
         ?? intakeHints?.budget,
     ) || "low"
+    : preplanningBucket
+      ? normalizeExplicitBudget(
+        intakeHints?.deepthink_budget
+          ?? intakeHints?.research_budget
+          ?? intakeHints?.reasoning_budget
+          ?? intakeHints?.budget,
+      ) || result.budget || "normal"
     : determineBudget({ text, intakeHints, mentionedModules, fileMentions, noResearch });
   const finalResult = {
     ...result,
