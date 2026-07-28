@@ -498,9 +498,18 @@ function ownerResearchTaskText(session) {
   }
 }
 
+function ownerResearchExplorationRequests(session) {
+  try {
+    return session?.atlasGateEventsSnapshot?.() || [];
+  } catch {
+    return [];
+  }
+}
+
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.explorationSteps + 1;
+  const explorationRequests = ownerResearchExplorationRequests(session);
   let notice = null;
   if (explorationSteps === 1) {
     notice = buildResearchCoverageStartText({
@@ -521,12 +530,14 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     notice = buildResearchCurtainCallText({
       explorationSteps,
       taskText: ownerResearchTaskText(session),
+      explorationRequests,
     });
   } else if (
     explorationSteps === Math.floor(RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS / 2)
   ) {
     notice = buildResearchMidpointAuditText({
       taskText: ownerResearchTaskText(session),
+      explorationRequests,
     });
   }
   if (!notice) return result;

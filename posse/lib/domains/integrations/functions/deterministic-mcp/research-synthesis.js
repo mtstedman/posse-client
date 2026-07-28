@@ -1,7 +1,7 @@
 export const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 export const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
 // Leave enough room for broad source-read tasks to close late-discovered gaps;
-// the curtain call reserves the final four calls for targeted closure.
+// the curtain call reserves the final five calls for targeted closure.
 const DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 30;
 const configuredExplorationCeiling = Number(
   process.env.POSSE_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
@@ -13,9 +13,63 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
         + RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
-export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 4;
+export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 5;
 const RESEARCH_COVERAGE_CHECKLIST_MAX_ITEMS = 20;
 const RESEARCH_COVERAGE_CHECKLIST_ITEM_MAX_CHARS = 260;
+const RESEARCH_COVERAGE_PRIORITY_MAX_ITEMS = 8;
+
+const COVERAGE_GENERIC_IDENTIFIER_TOKENS = new Set([
+  "build",
+  "builder",
+  "create",
+  "fn",
+  "function",
+  "get",
+  "impl",
+  "load",
+  "make",
+  "method",
+  "parse",
+  "print",
+  "pub",
+  "read",
+  "run",
+  "set",
+  "write",
+]);
+
+const COVERAGE_LABEL_STOP_TOKENS = new Set([
+  "choice",
+  "effect",
+  "effects",
+  "file",
+  "files",
+  "handler",
+  "handlers",
+  "status",
+]);
+
+const COVERAGE_TOKEN_ALIASES = new Map([
+  ["arg", "argument"],
+  ["args", "argument"],
+  ["arguments", "argument"],
+  ["async", "asynchronous"],
+  ["exitcode", "exit"],
+  ["globs", "glob"],
+  ["matcher", "engine"],
+  ["matching", "match"],
+  ["overrides", "override"],
+  ["pcre2", "engine"],
+  ["pipes", "pipe"],
+  ["printers", "printer"],
+  ["regex", "engine"],
+  ["sorted", "sort"],
+  ["sorting", "sort"],
+  ["statistics", "stat"],
+  ["stats", "stat"],
+  ["sync", "synchronous"],
+  ["types", "type"],
+]);
 
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([
   "buffer.push",
@@ -132,6 +186,133 @@ export function extractResearchCoverageChecklist(taskText = "") {
   );
 }
 
+function namedFocusAreaLabel(item) {
+  const component = /^Cover named focus area component:\s*(.+?)\s+\(from\s+"/i.exec(item)?.[1];
+  if (component) return component;
+  return /^Cover named focus area:\s*(.+)$/i.exec(item)?.[1] || "";
+}
+
+function coverageTokens(value) {
+  const splitCamelCase = String(value || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  return splitCamelCase
+    .split(/[^a-z0-9]+/)
+    .map((token) => COVERAGE_TOKEN_ALIASES.get(token) || token)
+    .filter(Boolean);
+}
+
+function coverageLabelTokens(label) {
+  return coverageTokens(label)
+    .filter((token) => !COVERAGE_LABEL_STOP_TOKENS.has(token));
+}
+
+function directResearchRequestTarget(event) {
+  if (!event || event.ok !== true || event.empty === true) return null;
+  const action = normalizeResearchAtlasAction(event.action);
+  if (action !== "code.window" && action !== "code.lens") return null;
+  const args = event.args && typeof event.args === "object" ? event.args : {};
+  const rawIdentifiers = args.identifiersToFind ?? args.identifiers_to_find ?? args.identifiers;
+  const identifiers = [
+    ...(Array.isArray(rawIdentifiers)
+      ? rawIdentifiers
+      : typeof rawIdentifiers === "string"
+        ? rawIdentifiers.split(/\s*[,;]\s*/)
+        : []),
+    args.identifier,
+    args.symbol,
+    args.symbolName,
+  ].filter((value) => typeof value === "string" && value.trim());
+  const identifierTokenSets = identifiers.map((identifier) => {
+    const tokens = coverageTokens(identifier);
+    const materialTokens = tokens.filter(
+      (token) => !COVERAGE_GENERIC_IDENTIFIER_TOKENS.has(token),
+    );
+    return materialTokens.length > 0 ? materialTokens : tokens;
+  });
+  const pathTokens = coverageTokens(args.file || args.path || "");
+  return {
+    identifierTokenSets,
+    pathTokens,
+  };
+}
+
+function focusRequestSignal(label, explorationRequests) {
+  const required = [...new Set(coverageLabelTokens(label))];
+  if (required.length === 0) return { strength: 0, count: 0 };
+  let strength = 0;
+  let count = 0;
+  for (const event of explorationRequests || []) {
+    const target = directResearchRequestTarget(event);
+    if (!target) continue;
+    let eventStrength = 0;
+    for (const identifierTokens of target.identifierTokenSets) {
+      const hits = required.filter((token) => identifierTokens.includes(token)).length;
+      if (hits === required.length) {
+        const extraTokens = identifierTokens.filter((token) => !required.includes(token));
+        eventStrength = Math.max(eventStrength, extraTokens.length === 0 ? 2 : 1);
+      } else if (hits > 0) {
+        eventStrength = Math.max(eventStrength, 1);
+      }
+    }
+    if (eventStrength === 0) {
+      const pathHits = required.filter((token) => target.pathTokens.includes(token)).length;
+      if (pathHits === required.length) eventStrength = 2;
+      else if (pathHits > 0) eventStrength = 1;
+    }
+    if (eventStrength > 0) {
+      strength = Math.max(strength, eventStrength);
+      count++;
+    }
+  }
+  return { strength, count };
+}
+
+export function buildResearchCoveragePriorityText({
+  taskText = "",
+  explorationRequests = [],
+} = {}) {
+  const focusAreas = extractResearchCoverageChecklist(taskText)
+    .map((item, index) => ({
+      index,
+      label: namedFocusAreaLabel(item),
+    }))
+    .filter(({ label }) => !!label)
+    .map(({ index, label }) => ({
+      index,
+      label,
+      ...focusRequestSignal(label, explorationRequests),
+    }));
+  if (focusAreas.length === 0) return "";
+
+  const undercovered = focusAreas
+    .filter(({ strength }) => strength < 2)
+    .sort((left, right) => (
+      left.strength - right.strength
+      || left.count - right.count
+      || left.index - right.index
+    ))
+    .slice(0, RESEARCH_COVERAGE_PRIORITY_MAX_ITEMS);
+  if (undercovered.length === 0) {
+    return [
+      "REQUEST-HISTORY COVERAGE PRIORITY: every named focus area has at least one exact direct-target signal.",
+      "This lexical signal is not proof of evidence completeness. Use your evidence audit to revisit a row only when its governing body or branch is still missing.",
+    ].join("\n");
+  }
+
+  return [
+    "REQUEST-HISTORY UNDERCOVERAGE PRIORITY (conservative lexical signal, not proof):",
+    ...undercovered.map(({ label, strength, count }, index) => (
+      `${index + 1}. ${label} — ${
+        strength === 0
+          ? "no successful direct body request targeted this mechanism"
+          : `${count} related-only direct target signal${count === 1 ? "" : "s"}; no exact mechanism target`
+      }`
+    )),
+    "Prefer an item near the top when your gathered evidence does not already contain its exact governing body. If the evidence really does close it, skip it and take the next listed gap; do not treat this request-history signal as a grading rule.",
+  ].join("\n");
+}
+
 function buildResearchCoverageChecklistText(taskText, { explorationAvailable = true } = {}) {
   const items = extractResearchCoverageChecklist(taskText);
   if (items.length === 0) {
@@ -158,19 +339,24 @@ export function buildResearchCoverageStartText({ taskText = "" } = {}) {
   ].join("\n");
 }
 
-export function buildResearchMidpointAuditText({ taskText = "" } = {}) {
+export function buildResearchMidpointAuditText({
+  taskText = "",
+  explorationRequests = [],
+} = {}) {
   return [
     "RESEARCH MIDPOINT AUDIT: half of the exploration budget is now used.",
     buildResearchCoverageChecklistText(taskText),
+    buildResearchCoveragePriorityText({ taskText, explorationRequests }),
     "Pause before deepening the current trail. Identify every checklist row that still lacks its exact governing helper body, precedence branch, failure path, or lifecycle boundary.",
     "Continue flexibly with the highest-materiality unsupported row. Do not follow a fixed file order, and do not spend another call on a mechanism that already has exact evidence while a named focus area remains unsupported.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export function buildResearchCurtainCallText({
   explorationSteps = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   taskText = "",
+  explorationRequests = [],
 } = {}) {
   const remainingCalls = Math.max(
     0,
@@ -179,12 +365,13 @@ export function buildResearchCurtainCallText({
   return [
     `RESEARCH CURTAIN CALL: ${remainingCalls} targeted exploration call${remainingCalls === 1 ? "" : "s"} ${remainingCalls === 1 ? "remains" : "remain"} before mandatory closeout.`,
     buildResearchCoverageChecklistText(taskText),
+    buildResearchCoveragePriorityText({ taskText, explorationRequests }),
     "Use each remaining call only to close an exact unsupported checklist item with the governing helper body, precedence branch, failure path, or lifecycle boundary. Do not start a new research branch, repeat an earlier search/read, or use atlas.fetch_ref as a discovery workaround.",
     "A search-only result does not close an evidence gap. When the file and helper name are already known, do not spend a remaining call on symbol.search, code.skeleton, code.structure, or another locator: open the governing body directly with code.window or code.lens. With one call left, never locate evidence that would require a later call to read.",
     "For code.window or code.lens, target exactly one named mechanism and pass exactly one identifiersToFind entry per remaining call. Bundling identifiers can omit the load-bearing body while appearing complete.",
     "Do not leave a named focus area unsupported while spending a call on an already-supported area. Do not stop early merely to report a limitation that an available exact call can close.",
     "Then stop tool use and synthesize the final report with the information already gathered.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export function buildResearchSynthesisRequiredText({
