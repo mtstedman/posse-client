@@ -342,7 +342,12 @@ function normalizeIdentifiers(value) {
       // Fall through to lightweight splitting below.
     }
   }
-  return text.split(/[\s,;]+/u).map((item) => item.trim()).filter(Boolean);
+  // Preserve declaration/signature phrases such as "fn types" or
+  // "pub(crate) fn printer". Splitting legacy scalar input on whitespace
+  // silently turned those into broad identifiers ("fn", "types"), causing
+  // code.window to anchor on earlier references instead of the requested
+  // declaration. Comma/semicolon-delimited legacy lists remain supported.
+  return text.split(/[,;]+/u).map((item) => item.trim()).filter(Boolean);
 }
 
 async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
