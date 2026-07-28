@@ -299,6 +299,7 @@ export function buildResearchCoveragePriorityText({
       "This lexical signal is not proof of evidence completeness. Use your evidence audit to revisit a row only when its governing body or branch is still missing.",
     ].join("\n");
   }
+  const nextZeroSignal = undercovered.find(({ strength }) => strength === 0);
 
   return [
     "REQUEST-HISTORY UNDERCOVERAGE PRIORITY (conservative lexical signal, not proof):",
@@ -309,8 +310,14 @@ export function buildResearchCoveragePriorityText({
           : `${count} related-only direct target signal${count === 1 ? "" : "s"}; no exact mechanism target`
       }`
     )),
+    nextZeroSignal
+      ? `NEXT-CALL REQUIREMENT: "${nextZeroSignal.label}" has no successful direct target. Unless evidence already gathered contains its exact governing body or boundary, target this row next; you may skip it only when you can cite that exact evidence in the final report.`
+      : null,
+    nextZeroSignal
+      ? "A named mechanism owned by another or downstream subsystem is still required coverage: retrieve its actual owner or the exact handoff boundary. Do not classify it as out of scope or reserve it as a limitation merely because the current subsystem does not implement it."
+      : null,
     "Prefer an item near the top when your gathered evidence does not already contain its exact governing body. If the evidence really does close it, skip it and take the next listed gap; do not treat this request-history signal as a grading rule.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function buildResearchCoverageChecklistText(taskText, { explorationAvailable = true } = {}) {
@@ -370,6 +377,7 @@ export function buildResearchCurtainCallText({
     "A search-only result does not close an evidence gap. When the file and helper name are already known, do not spend a remaining call on symbol.search, code.skeleton, code.structure, or another locator: open the governing body directly with code.window or code.lens. With one call left, never locate evidence that would require a later call to read.",
     "For code.window or code.lens, target exactly one named mechanism and pass exactly one identifiersToFind entry per remaining call. Bundling identifiers can omit the load-bearing body while appearing complete.",
     "Do not leave a named focus area unsupported while spending a call on an already-supported area. Do not stop early merely to report a limitation that an available exact call can close.",
+    "When a named area belongs to a downstream or adjacent subsystem, close it by retrieving the actual owner or exact handoff boundary; subsystem placement does not make an assigned focus area optional.",
     "Then stop tool use and synthesize the final report with the information already gathered.",
   ].filter(Boolean).join("\n");
 }
