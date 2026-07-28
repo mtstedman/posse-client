@@ -172,6 +172,7 @@ export function buildResearchCurtainCallText({
     `RESEARCH CURTAIN CALL: ${remainingCalls} targeted exploration call${remainingCalls === 1 ? "" : "s"} ${remainingCalls === 1 ? "remains" : "remain"} before mandatory closeout.`,
     buildResearchCoverageChecklistText(taskText),
     "Use each remaining call only to close an exact unsupported checklist item with the governing helper body, precedence branch, failure path, or lifecycle boundary. Do not start a new research branch, repeat an earlier search/read, or use atlas.fetch_ref as a discovery workaround.",
+    "A search-only result does not close an evidence gap. When the file and helper name are already known, do not spend a remaining call on symbol.search, code.skeleton, code.structure, or another locator: open the governing body directly with code.window or code.lens. With one call left, never locate evidence that would require a later call to read.",
     "For code.window or code.lens, target exactly one named mechanism and pass exactly one identifiersToFind entry per remaining call. Bundling identifiers can omit the load-bearing body while appearing complete.",
     "Do not leave a named focus area unsupported while spending a call on an already-supported area. Do not stop early merely to report a limitation that an available exact call can close.",
     "Then stop tool use and synthesize the final report with the information already gathered.",
