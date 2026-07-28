@@ -2,6 +2,7 @@ import { normalizeResearchBudget } from "../../../shared/policies/functions/role
 import { slugify } from "../../../shared/format/functions/slug.js";
 import { hasExplicitOneshotIntent } from "../../intake/functions/hints.js";
 import {
+  evaluateScopedContractDirectEligibility,
   ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE,
   ONESHOT_BROAD_SCOPE_SIGNAL_RE as BROAD_SCOPE_RE,
   ONESHOT_COMPLEX_SIGNAL_RE as COMPLEX_RE,
@@ -23,6 +24,12 @@ const RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|debug|diagnose|discover|explai
 const PREPLAN_RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand|verify)\b/i;
 const PREPLAN_BROAD_SCOPE_RE = BROAD_SCOPE_RE;
 const OPERATOR_COMMENT_ACTION_RE = /\bcomment\s+(?:for|to)\s+(?:the\s+)?user\b/i;
+const SCOPED_CONTRACT_ELIGIBILITY_REASONS = new Set([
+  "broad_scope_signal",
+  "complex_signal",
+  "formatting_requested",
+]);
+const SCOPED_CONTRACT_SIGNAL_RE = /\b(?:allows?|converts?|discards?|emits?|exactly|must|preserves?|rejects?|renders?|requires?|resolves?|returns?|throws?|when|while|without)\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
 
@@ -499,6 +506,38 @@ function isBoundedHighRiskPreplanningCandidate({
   return true;
 }
 
+function isScopedContractNoResearchCandidate({
+  text,
+  noResearchText,
+  protectedFileMention,
+  webBranches,
+  fileMentions,
+  listItems,
+  lowerMode,
+  oneshotEligibility,
+}) {
+  if (protectedFileMention) return false;
+  if (lowerMode && lowerMode !== "build") return false;
+  if (fileMentions.length < 1 || fileMentions.length > 4) return false;
+  if (webBranches.length > 0 || listItems.length > 1) return false;
+  if (noResearchText.length < 240 || noResearchText.length > 1600) return false;
+  if (!IMPLEMENTATION_ACTION_RE.test(text)) return false;
+  if (!SCOPED_CONTRACT_ELIGIBILITY_REASONS.has(oneshotEligibility?.reason)) return false;
+  if (oneshotEligibility.reason === "complex_signal" && fileMentions.length !== 1) return false;
+  const contractSignals = noResearchText.match(SCOPED_CONTRACT_SIGNAL_RE) || [];
+  if (contractSignals.length < 4) return false;
+  if (
+    PREPLAN_RESEARCH_INTENT_RE.test(text)
+    || /\bdebug\s+(?:why|issue|problem|failure|error|crash|bug)\b/i.test(text)
+    || OPERATOR_COMMENT_ACTION_RE.test(text)
+    || AMBIGUOUS_RE.test(text)
+    || FANOUT_TRIGGER_RE.test(text)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function buildSyntheticResearchBrief(routingOrReason = null) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
@@ -598,6 +637,22 @@ export function classifyResearchTask({
     listItems,
     lowerMode,
   });
+  const scopedContractNoResearchCandidate = isScopedContractNoResearchCandidate({
+    text,
+    noResearchText,
+    protectedFileMention,
+    webBranches,
+    fileMentions,
+    listItems,
+    lowerMode,
+    oneshotEligibility,
+  });
+  const scopedContractDirectEligibility = evaluateScopedContractDirectEligibility({
+    text,
+    mode: lowerMode,
+    intakeHints,
+    candidateFiles: fileMentions,
+  });
 
   let result = null;
   if (lowerMode === "question" && webFanoutCandidate && webBranches.length <= 3) {
@@ -662,6 +717,21 @@ export function classifyResearchTask({
     result = { bucket: "no_research", reason: "single-file low-risk text edit" };
   } else if (renameMultiNoResearch) {
     result = { bucket: "no_research", reason: "same-module multi-file rename" };
+  } else if (scopedContractDirectEligibility.ok) {
+    result = {
+      bucket: "oneshot",
+      reason: "explicit dense single-file behavioral contract can go directly to development",
+      candidate_files: scopedContractDirectEligibility.candidate_files,
+      oneshot_source: "scoped_contract",
+      budget: scopedContractDirectEligibility.high_risk ? "high" : "low",
+    };
+  } else if (scopedContractNoResearchCandidate) {
+    result = {
+      bucket: "no_research",
+      reason: "explicit scoped behavioral contract does not need repository research",
+      candidate_files: fileMentions,
+      budget: COMPLEX_RE.test(text) ? "high" : "normal",
+    };
   } else if (scopedImplementationNoResearch) {
     result = {
       bucket: "preplan",
@@ -735,13 +805,20 @@ export function classifyResearchTask({
   const noResearch = result.bucket === "no_research";
   const oneshotBucket = ["oneshot", "oneshot_candidate"].includes(result.bucket);
   const preplanningBucket = result.bucket === "preplan";
-  const budget = oneshotBucket
+  const budget = noResearch
     ? normalizeExplicitBudget(
       intakeHints?.deepthink_budget
         ?? intakeHints?.research_budget
         ?? intakeHints?.reasoning_budget
         ?? intakeHints?.budget,
-    ) || "low"
+    ) || result.budget || "low"
+    : oneshotBucket
+    ? normalizeExplicitBudget(
+      intakeHints?.deepthink_budget
+        ?? intakeHints?.research_budget
+        ?? intakeHints?.reasoning_budget
+        ?? intakeHints?.budget,
+    ) || result.budget || "low"
     : preplanningBucket
       ? normalizeExplicitBudget(
         intakeHints?.deepthink_budget

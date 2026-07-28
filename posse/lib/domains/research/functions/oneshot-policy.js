@@ -10,8 +10,8 @@
 //   - the work item mode is build (report/image WIs keep their planner path),
 //   - the requested output resolves to repository output (explicit artifact or
 //     question-only outputs keep their normal path),
-//   - the request text carries no risk signals (security, auth, concurrency,
-//     migration, data loss, ambiguity, broad scope, rename, formatting sweep),
+//   - ordinary requests carry no risk signals; a separate dense-contract gate
+//     may admit a bounded one-file high-risk request at elevated effort,
 //   - exactly one safe, tracked, non-configuration target file is in scope.
 
 import path from "path";
@@ -29,6 +29,14 @@ export const ONESHOT_RENAME_SIGNAL_RE = /\b(?:rename|renaming)\b/i;
 export const ONESHOT_FORMAT_SWEEP_SIGNAL_RE = /\bformatting\b/i;
 export const ONESHOT_EXTERNAL_VERIFICATION_SIGNAL_RE = /(?:\b(?:run|execute|verify|check|pass)\b[\s\S]{0,80}\b(?:browser|playwright|cypress|selenium|puppeteer|visual\s+regression|end[-\s]?to[-\s]?end|e2e|lint(?:er|ing)?|eslint)\b|\b(?:browser|playwright|cypress|selenium|puppeteer|visual\s+regression|end[-\s]?to[-\s]?end|e2e|lint(?:er|ing)?|eslint)\b[\s\S]{0,80}\b(?:test|suite|check|verify|pass|run)\b)/i;
 export const ONESHOT_MULTI_OUTPUT_SIGNAL_RE = /(?:\b(?:build|create|implement|scaffold)\b[^.\n]{0,120}\b(?:project|library|package|application|service|cli)\b|\b(?:including|plus|along\s+with)\b[^.\n]{0,160}\b(?:tests?|test\s+suite|cli|package|documentation)\b|\b(?:implementation|source|package|cli)\b[^.\n]{0,100}\band\s+(?:unit\s+|integration\s+)?tests?\b)/i;
+const SCOPED_CONTRACT_ACTION_RE = /\b(?:change|complete|correct|fix|implement|repair|replace|restore|update)\b/i;
+const SCOPED_CONTRACT_RESEARCH_RE = /\b(?:analy[sz]e|audit|debug\s+(?:why|issue|problem|failure|error|crash|bug)|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand)\b/i;
+const SCOPED_CONTRACT_SIGNAL_RE = /\b(?:allows?|converts?|discards?|emits?|exactly|must|preserves?|rejects?|renders?|requires?|resolves?|returns?|throws?|when|while|without)\b/gi;
+const SCOPED_CONTRACT_DIRECT_SIGNALS = new Set([
+  "broad_scope_signal",
+  "complex_signal",
+  "formatting_requested",
+]);
 
 const REPO_OUTPUT_MODES = new Set(["", "auto", "repo"]);
 const NON_CODE_INTENTS = new Set(["image", "report", "question", "analysis"]);
@@ -289,6 +297,60 @@ export function evaluateOneshotRequestEligibility({ text = "", mode = null, inta
   }
 
   return { ok: true, reason: "eligible", reclassify: null };
+}
+
+/**
+ * Allows a narrow direct-development path for dense single-file contracts:
+ * ordinarily eligible requests do not need a preflight to rediscover their
+ * explicit scope, and semantic false positives such as formatting *behavior*
+ * or an overloaded "component" scope term may use the same path. A bounded
+ * high-risk contract may also skip the planner, but is marked for high
+ * developer/assessor effort. Ambiguous, sparse, and multi-file work never
+ * qualifies.
+ */
+export function evaluateScopedContractDirectEligibility({
+  text = "",
+  mode = null,
+  intakeHints = null,
+  candidateFiles = [],
+} = {}) {
+  const value = String(text || "").trim();
+  const candidates = [...new Set(
+    (Array.isArray(candidateFiles) ? candidateFiles : [])
+      .map(normalizeCandidatePath)
+      .filter(Boolean),
+  )];
+  if (String(mode || "").trim().toLowerCase() !== "build") {
+    return { ok: false, reason: "mode_not_build" };
+  }
+  if (candidates.length !== 1) return { ok: false, reason: `candidate_count_${candidates.length}` };
+  if (value.length < 240 || value.length > 1800) return { ok: false, reason: "contract_length" };
+  if (!SCOPED_CONTRACT_ACTION_RE.test(value)) return { ok: false, reason: "missing_implementation_action" };
+  if (SCOPED_CONTRACT_RESEARCH_RE.test(value) || ONESHOT_AMBIGUOUS_SIGNAL_RE.test(value)) {
+    return { ok: false, reason: "research_or_ambiguity_signal" };
+  }
+  const ordinary = evaluateOneshotRequestEligibility({ text: value, mode, intakeHints });
+  const overriddenSignals = ordinary.ok ? [] : ordinary.signals;
+  if (!ordinary.ok) {
+    if (!Array.isArray(overriddenSignals) || overriddenSignals.length === 0) {
+      return { ok: false, reason: ordinary.reason };
+    }
+    if (!overriddenSignals.every((signal) => SCOPED_CONTRACT_DIRECT_SIGNALS.has(signal))) {
+      return { ok: false, reason: "nonsemantic_risk_signal", signals: overriddenSignals };
+    }
+  }
+  const contractSignals = value.match(SCOPED_CONTRACT_SIGNAL_RE) || [];
+  if (contractSignals.length < 4) {
+    return { ok: false, reason: "sparse_behavioral_contract", contract_signal_count: contractSignals.length };
+  }
+  return {
+    ok: true,
+    reason: "scoped_behavioral_contract",
+    candidate_files: candidates,
+    contract_signal_count: contractSignals.length,
+    high_risk: overriddenSignals.includes("complex_signal"),
+    overridden_signals: overriddenSignals,
+  };
 }
 
 /**

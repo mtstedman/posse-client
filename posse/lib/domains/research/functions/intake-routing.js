@@ -25,6 +25,7 @@ import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
 import { buildOneshotScopeSelector } from "./oneshot-scope-selection.js";
 import {
+  evaluateScopedContractDirectEligibility,
   evaluateOneshotRequestEligibility,
   isOneshotRiskyTargetPath,
   normalizeCandidatePath,
@@ -51,7 +52,7 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 
-const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "scope", "fuzzy", "intake", "preflight", "internal"]);
+const ONESHOT_SOURCES = new Set(["explicit", "heuristic", "scope", "fuzzy", "intake", "preflight", "internal", "scoped_contract"]);
 
 export function oneshotReasoningEffort(routing = {}) {
   // One-shot removes both researcher and planner calls, so even a trivial
@@ -475,6 +476,14 @@ export function createOneshotDevJob(workItem, {
     mode: wiMode,
     intakeHints,
   });
+  const scopedContractEligibility = routing?.oneshot_source === "scoped_contract"
+    ? evaluateScopedContractDirectEligibility({
+      text: requestedText,
+      mode: wiMode,
+      intakeHints,
+      candidateFiles: requestedCandidates,
+    })
+    : null;
   const gate = validateOneshotGate({
     candidateFiles: requestedCandidates,
     projectDir,
@@ -482,7 +491,7 @@ export function createOneshotDevJob(workItem, {
     requestText: requestedText,
     corroborationText: requestedText,
     requirePathCorroboration,
-    requestEligibility,
+    requestEligibility: scopedContractEligibility?.ok ? scopedContractEligibility : requestEligibility,
   });
   if (!gate.ok) {
     // Risk-signal demotions (security/concurrency/ambiguity/broad scope) go
