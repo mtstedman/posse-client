@@ -85,9 +85,17 @@ function expandNamedFocusAreaItem(value) {
     .split(/\s*,\s*(?:and\s+)?|\s+\band\b\s+/i)
     .map((area) => boundedCoverageItem(area))
     .filter(Boolean);
-  return areas.length > 1
-    ? areas.map((area) => `Cover named focus area: ${area}`)
-    : [item];
+  const expanded = areas.flatMap((area) => {
+    const components = area
+      .split(/\s*\/\s*/)
+      .map((component) => boundedCoverageItem(component))
+      .filter(Boolean);
+    if (components.length <= 1) return [`Cover named focus area: ${area}`];
+    return components.map(
+      (component) => `Cover named focus area component: ${component} (from "${area}")`,
+    );
+  });
+  return expanded.length > 1 ? expanded : [item];
 }
 
 function uniqueCoverageItems(items) {
