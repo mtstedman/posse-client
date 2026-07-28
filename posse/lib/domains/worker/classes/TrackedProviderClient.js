@@ -139,11 +139,26 @@ function assertExpectedCoordination(options, { localHandoff, remoteHandoff } = {
   const expected = expectedCoordinationMode(options);
   if (!expected) return;
   const coordinationChild = options?._subAgentChild === true;
+  const role = String(options?._agentCallRole || options?.role || "").trim().toLowerCase();
   const effectiveExpected = coordinationChild && expected === "subagents" ? "handoff" : expected;
   const localSubAgent = options?.sessionPacket?.agent_coordination?.sub_agent_v1 === true;
   const remoteSubAgent = options?._remoteIssuedPolicy?.coordination?.subAgentV1 === true;
   const localChildCursor = options?.sessionPacket?.agent_coordination?.sub_agent_next_input_v1 === true;
   const remoteChildCursor = options?._remoteIssuedPolicy?.coordination?.subAgentNextInputV1 === true;
+  const toolFreePreflight = role === "preflight";
+  if (toolFreePreflight && (expected === "handoff" || expected === "subagents")) {
+    if (!localHandoff && !remoteHandoff && !localSubAgent && !remoteSubAgent && !localChildCursor && !remoteChildCursor) {
+      return;
+    }
+    const error = new Error(
+      `Task A/B coordination preflight mismatch: tool-free preflight unexpectedly received coordination capabilities, `
+      + `local_handoff=${localHandoff} remote_handoff=${remoteHandoff} `
+      + `local_subagent=${localSubAgent} remote_subagent=${remoteSubAgent} `
+      + `local_child_cursor=${localChildCursor} remote_child_cursor=${remoteChildCursor}`,
+    );
+    error.code = "TASK_AB_COORDINATION_PREFLIGHT_FAILED";
+    throw error;
+  }
   const handoffExpected = effectiveExpected === "handoff" || effectiveExpected === "subagents";
   const subAgentExpected = effectiveExpected === "subagents";
   const childCursorExpected = coordinationChild && expected === "subagents";
