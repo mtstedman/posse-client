@@ -21,7 +21,7 @@ const WEB_FANOUT_RE = /\b(?:compare|versus|vs\.?|between|across|audit|review|ver
 const IMPLEMENTATION_ACTION_RE = /\b(?:add|build|change|complete|correct|create|fix|implement|remove|repair|replace|update)\b/i;
 const RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|debug|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand|verify)\b/i;
 const PREPLAN_RESEARCH_INTENT_RE = /\b(?:analy[sz]e|audit|diagnose|discover|explain|find|inspect|investigate|review|root\s+cause|trace|understand|verify)\b/i;
-const PREPLAN_BROAD_SCOPE_RE = /(?:\b(?:all|every|each)\s+(?:callers?|components?|endpoints?|files?|modules?|occurrences?|packages?|projects?|references?|repositories?|repos?|routes?|services?|usages?|workspaces?)\b|\b(?:across|throughout)\s+(?:the\s+)?(?:codebase|project|repository|repo|system|workspace)\b|\b(?:entire|whole)\s+(?:codebase|project|repository|repo|system|workspace)\b)/i;
+const PREPLAN_BROAD_SCOPE_RE = BROAD_SCOPE_RE;
 const OPERATOR_COMMENT_ACTION_RE = /\bcomment\s+(?:for|to)\s+(?:the\s+)?user\b/i;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
@@ -638,7 +638,11 @@ export function classifyResearchTask({
 
   if (!result) {
     const fanoutTriggered = FANOUT_TRIGGER_RE.test(text);
-    const broadStructuredRequest = fanoutTriggered && (listItems.length >= 3 || BROAD_SCOPE_RE.test(text));
+    const broadStructuredRequest = fanoutTriggered && (
+      listItems.length >= 3
+      || mentionedModules.length >= 3
+      || BROAD_SCOPE_RE.test(text)
+    );
     if (fanoutTriggered && mentionedModules.length > 3) {
       result = { bucket: "ambiguous", reason: "fanout guard: more than 3 candidate branches" };
     } else if (webFanoutCandidate && webBranches.length > 3) {

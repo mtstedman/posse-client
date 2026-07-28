@@ -23,7 +23,7 @@ import { isHighRiskPath } from "../../handoff/functions/helpers/file-request.js"
 // trivial-but-unsafe sweeps that return to planning instead.
 export const ONESHOT_COMPLEX_SIGNAL_RE = /\b(?:race|concurren\w*|security|auth|authorization|authentication|lock|locking|deadlock|transaction|migration|corruption|data\s+loss|permission|credential|secret|encryption|oauth|session)\b/i;
 export const ONESHOT_AMBIGUOUS_SIGNAL_RE = /\b(?:investigate|figure\s+out\s+why|diagnose|debug\s+why|root\s+cause|trace\s+why|why\s+(?:is|does|did)|flaky|intermittent)\b/i;
-export const ONESHOT_BROAD_SCOPE_SIGNAL_RE = /\b(?:all|every|each|across|whole|entire)\b/i;
+export const ONESHOT_BROAD_SCOPE_SIGNAL_RE = /(?:\b(?:all|every|each)\s+(?:applications?|callers?|components?|endpoints?|files?|modules?|occurrences?|packages?|pages?|projects?|references?|repositories?|repos?|routes?|screens?|services?|usages?|views?|workspaces?)\b|\b(?:across|throughout)\s+(?:the\s+)?(?:application|app|codebase|project|repository|repo|system|workspace)\b|\b(?:entire|whole)\s+(?:application|app|codebase|project|repository|repo|system|workspace)\b)/i;
 export const ONESHOT_LOW_BLAST_SCOPE_RE = /\b(?:single[-\s]?file|one[-\s]?file|scop(?:e|ed)\s+to|(?:keep|limit(?:ed)?)[^.\n]{0,100}\bfile|(?:modify|edit|change|touch)\s+only|do\s+not\s+change|don't\s+change|without\s+changing|no\s+(?:runtime\s+)?behaviou?r|smallest\s+change)\b/i;
 export const ONESHOT_RENAME_SIGNAL_RE = /\b(?:rename|renaming)\b/i;
 export const ONESHOT_FORMAT_SWEEP_SIGNAL_RE = /\bformatting\b/i;
