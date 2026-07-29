@@ -711,8 +711,8 @@ const CITATION_DECOY = {
     selector: CITATION_EVIDENCE_SELECTOR,
     ref: HANDOFF_REF,
     lines: CITATION_EVIDENCE_SELECTOR.properties.lines,
-    reason: { type: "string", minLength: 1, maxLength: 100 },
-    summary: { type: "string", minLength: 1, maxLength: 100 },
+    reason: { type: "string", minLength: 1, maxLength: 80 },
+    summary: { type: "string", minLength: 1, maxLength: 80 },
   },
   anyOf: [
     { type: "object", required: ["selector"] },
@@ -725,13 +725,13 @@ const CITATION_CLAIM = {
   type: "object",
   description: "Concise citation-child claim. claim/name and summary/prose are migration aliases; prefer claim and summary.",
   properties: {
-    claim: { type: "string", minLength: 1, maxLength: 200 },
-    name: { type: "string", minLength: 1, maxLength: 200 },
+    claim: { type: "string", minLength: 1, maxLength: 160 },
+    name: { type: "string", minLength: 1, maxLength: 160 },
     proof: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
     support: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
     decoy: { type: "array", maxItems: 1, items: CITATION_DECOY },
-    summary: { type: "string", maxLength: 200 },
-    prose: { type: "string", maxLength: 200 },
+    summary: { type: "string", maxLength: 100 },
+    prose: { type: "string", maxLength: 100 },
   },
   anyOf: [
     { type: "object", required: ["claim"] },
@@ -748,7 +748,7 @@ const CITATION_CLAIMS = {
 
 const CITATION_HANDOFF_FIELDS = {
   ...COMMON_HANDOFF_FIELDS,
-  intent: { type: "string", minLength: 1, maxLength: 200 },
+  intent: { type: "string", minLength: 1, maxLength: 100 },
 };
 
 const V2_HANDOFF_DECOY = {
@@ -1024,9 +1024,9 @@ export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   profile: "citation_synthesis.v1",
   outcomes: ["complete", "partial", "failed"],
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
-    summaryMaxLength: 800,
+    summaryMaxLength: 500,
     claims: CITATION_CLAIMS,
-    summaryDescription: "At most 800 characters. Together with intent, claims, claim synthesis, and decoy reasons, total narrative cannot exceed 2000 characters.",
+    summaryDescription: "At most 500 characters. Target 350 or fewer; together with intent, claims, claim synthesis, and decoy reasons, total narrative cannot exceed 2000 characters.",
   }), { commonFields: CITATION_HANDOFF_FIELDS }),
   maxHandoffs: 1,
 });
@@ -1094,11 +1094,12 @@ export const TOOL_SUB_AGENT_NEXT_INPUT = {
   name: "sub_agent_next_input",
   description:
     "Advance an isolated citation child through its backend-owned ordered inputs. " +
-    "Start at position 0 and use only the returned next_position; exact-position replay is idempotent.",
+    "Start at position 0 and use only the returned next_position; count batches up to three ordered inputs in one turn, and exact-position replay is idempotent.",
   parameters: {
     type: "object",
     properties: {
       position: { type: "integer", minimum: 0, maximum: 2 },
+      count: { type: "integer", minimum: 1, maximum: 3 },
     },
     required: ["position"],
     additionalProperties: false,
@@ -1110,7 +1111,7 @@ const SUB_AGENT_REQUEST = {
   properties: {
     id: { type: "string", minLength: 1, maxLength: 40 },
     profile: { type: "string", enum: ["citation_synthesis.v1"] },
-    intent: { type: "string", minLength: 1, maxLength: 1000 },
+    intent: { type: "string", minLength: 1, maxLength: 2000 },
     inputs: {
       type: "array",
       minItems: 1,
@@ -1160,6 +1161,7 @@ export const TOOL_SUB_AGENT = {
   name: "sub_agent",
   description:
     "Dispatch or control an admin-gated batch of one to three isolated citation agents. " +
+    "Mandatory routing check: when two or more independent files, components, or spec sections need synthesis and four or more direct read/materialization calls are expected, you MUST dispatch one batch before your fourth direct read; making that fourth read instead is a protocol error. Prefetched names, skeletons, and file lists are not answers. Skip only when current context contains the answers or one targeted call is sufficient. Developer parents may use child evidence to guide implementation, but children do not implement. " +
     "Children receive a private lazy input cursor plus terminal agent_handoff. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
   parameters: {
     oneOf: [

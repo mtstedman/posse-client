@@ -18,13 +18,21 @@ function hasImageModeIntent(text) {
 export function inferWiMode(text) {
   const lower = String(text || "").toLowerCase();
   if (hasImageModeIntent(lower)) return "image";
+  // Creation verbs are legitimate report-generation signals, but explicit
+  // repository mutation verbs must keep a mixed "analyze ... and fix it"
+  // request in build mode.
+  const repoMutationRe = /\b(fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build|repair|replace|clean)\b/i;
+  const negatedRepoMutationRe = /\b(?:do\s+not|don't|dont|never|without|no\s+need\s+to)\b[^.!?\r\n]{0,80}\b(?:fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build|repair|replace|clean)\b/i;
+  const sentences = lower.match(/[^.!?\r\n]+[.!?\r\n]*/g) || [lower];
+  const repoMutationIntent = sentences.some((sentence) => (
+    repoMutationRe.test(sentence) && !negatedRepoMutationRe.test(sentence)
+  ));
   const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
   const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
-  if (new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
-  if (new RegExp(`${reportObject}[\\s\\S]{0,80}${reportAction}`, "i").test(lower)) return "report";
+  if (!repoMutationIntent && new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
+  if (!repoMutationIntent && new RegExp(`${reportObject}[\\s\\S]{0,80}${reportAction}`, "i").test(lower)) return "report";
   const directAnalysisIntent = /\b(summary|analysis|brief)\s+of\b/i.test(lower)
     || /\b(analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\b/i.test(lower);
-  const mutationIntent = /\b(fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build)\b/i.test(lower);
-  if (directAnalysisIntent && !mutationIntent) return "report";
+  if (directAnalysisIntent && !repoMutationIntent) return "report";
   return null;
 }

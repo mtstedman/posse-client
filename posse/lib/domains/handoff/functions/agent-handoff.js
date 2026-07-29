@@ -17,6 +17,7 @@ import {
   findCopiedAgentHandoffEvidence,
 } from "./agent-handoff-boundaries.js";
 import {
+  containsNarrativeHashRef,
   normalizePlannerReportMetadata,
   normalizeResearchData,
   PLANNER_REPORT_METADATA_KEYS,
@@ -154,7 +155,7 @@ function boundedString(value, label, max, { required = true, allowRef = false } 
   const text = value.trim();
   if (required && !text) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} is required`);
   if (text.length > max) fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${max} characters`);
-  if (!allowRef && /#[0-9a-z]{4,12}\b/i.test(text)) {
+  if (!allowRef && containsNarrativeHashRef(text)) {
     fail("AGENT_HANDOFF_REF_OUTSIDE_SELECTOR", `${label} contains a hash ref outside an evidence selector`);
   }
   const sensitiveLabel = detectSensitiveAgentHandoffText(text);

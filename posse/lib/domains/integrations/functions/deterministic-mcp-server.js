@@ -2821,6 +2821,7 @@ function sendMessage(payload) {
 
 async function handleRequest(msg) {
   const session = hiddenSessionFromParams(msg?.params);
+  const delegatedEvidenceCursor = session?.bootConfig?.delegatedEvidenceCursor === true;
   // Owner-hot messages are session-scoped per message; without the hidden
   // param the module globals (mcpJobId/mcpAttemptId/role/cwd) are STICKY
   // leftovers from the previous message. Job-scoped tools consult this flag
@@ -3166,7 +3167,7 @@ async function handleRequest(msg) {
     // Route 2: Native tool, but the ATLAS-first gate is active for this role
     // and the tool is still locked. Return a verbose isError so the LLM reads
     // the rule and redirects to an ATLAS call.
-    if (isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
+    if (!delegatedEvidenceCursor && isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
       const gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
       if (gateDecision.allowed) {
         // Continue to the native handler below.

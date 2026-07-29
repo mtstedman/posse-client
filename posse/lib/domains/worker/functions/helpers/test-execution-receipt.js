@@ -366,6 +366,16 @@ async function currentHeadRef(cwd) {
   }
 }
 
+async function isAncestorCommit(cwd, ancestor, descendant) {
+  if (!ancestor || !descendant) return false;
+  try {
+    await gitExecAsync(["merge-base", "--is-ancestor", ancestor, descendant], cwd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function restoreGitHead(cwd, { commit, headRef } = {}) {
   if (!commit) throw new Error("cannot restore test-mutated Git HEAD without the original commit");
   if (headRef) {
@@ -396,6 +406,12 @@ async function executeReceipt({
 } = {}) {
   const actualCommit = await currentCommit(cwd);
   const originalHeadRef = await currentHeadRef(cwd);
+  const testedIntegratedDescendant = !!(
+    commitHash
+    && actualCommit
+    && commitHash !== actualCommit
+    && await isAncestorCommit(cwd, commitHash, actualCommit)
+  );
   if (plan.validation_error) {
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
@@ -420,7 +436,7 @@ async function executeReceipt({
       created_at: new Date().toISOString(),
     });
   }
-  if (commitHash && actualCommit && commitHash !== actualCommit) {
+  if (commitHash && actualCommit && commitHash !== actualCommit && !testedIntegratedDescendant) {
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
       schema_version: RECEIPT_SCHEMA_VERSION,
@@ -521,6 +537,8 @@ async function executeReceipt({
     command: plan.command,
     source: plan.source,
     commit_hash: commitHash || actualCommit,
+    executed_commit_hash: actualCommit,
+    tested_integrated_descendant: testedIntegratedDescendant,
     status: cleanupStatus === "failed" || cleanupStatus === "unavailable"
       ? "infrastructure_error"
       : result.status,
@@ -660,6 +678,9 @@ export function renderTestExecutionEvidence({
     `baseline: ${statusLabel(baseline)} (exit ${baseline?.exit_code ?? "unknown"}, ${baseline?.duration_ms ?? 0}ms)`,
     `post_change: ${statusLabel(postChange)} (exit ${postChange?.exit_code ?? "unknown"}, ${postChange?.duration_ms ?? 0}ms)`,
     `delta: ${delta}`,
+    postChange?.tested_integrated_descendant === true
+      ? "post_change_scope: assessed commit plus later integrated descendant commits"
+      : null,
     baseline?.cleanup_status === "completed" || postChange?.cleanup_status === "completed"
       ? "worktree_side_effects: snapshotted and removed by the orchestration layer"
       : null,
@@ -683,6 +704,8 @@ export function testReceiptObservationDetail(receipt = {}) {
     exit_code: receipt.exit_code ?? null,
     duration_ms: receipt.duration_ms ?? null,
     commit_hash: receipt.commit_hash || null,
+    executed_commit_hash: receipt.executed_commit_hash || null,
+    tested_integrated_descendant: receipt.tested_integrated_descendant === true,
     plan_id: receipt.plan_id || null,
     cleanup_status: receipt.cleanup_status || null,
     failure_fingerprint: receipt.failure_fingerprint || null,

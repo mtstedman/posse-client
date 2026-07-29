@@ -1,5 +1,8 @@
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
-import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import {
+  HeartbeatAuthManager,
+  heartbeatAuthManager,
+} from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import {
   PulseTokenManager,
   pulseTokenManager,
@@ -9,11 +12,18 @@ import {
   readResponseTextWithLimit,
   verifyRemoteResponseIntegrity,
 } from "../functions/client.js";
-import { getPosseRemoteResponseSigningSecret } from "../functions/mode.js";
+import {
+  getAgentFlowRemoteUrl,
+  getPosseRemoteResponseSigningSecret,
+} from "../functions/mode.js";
 import { runRemoteNativeRequestJson } from "../functions/native-client.js";
 
 const DEFAULT_REMOTE_PROMPT_TIMEOUT_MS = 60_000;
 const TRUSTED_COMPILE_ISSUANCES = new WeakSet();
+const AGENT_FLOW_AUTH = new HeartbeatAuthManager({
+  env: process.env,
+  developmentMode: true,
+});
 
 function deepFreezeJson(value) {
   const clone = JSON.parse(JSON.stringify(value));
@@ -72,7 +82,12 @@ export class RemotePromptClient {
     this.fetchImpl = fetchImpl;
     this.usesDefaultFetch = fetchImpl === globalThis.fetch;
     this.nativeManager = nativeManager;
-    this.authManager = authManager || nativeManager?.nativeAuthManager || heartbeatAuthManager;
+    const experimentUrl = getAgentFlowRemoteUrl();
+    const useExperimentAuth = experimentUrl && this.baseUrl === experimentUrl;
+    this.authManager = authManager
+      || (useExperimentAuth ? AGENT_FLOW_AUTH : null)
+      || nativeManager?.nativeAuthManager
+      || heartbeatAuthManager;
     this.pulseTokens = pulseTokens || (
       this.authManager === heartbeatAuthManager && fetchImpl === globalThis.fetch
         ? pulseTokenManager

@@ -78,6 +78,195 @@ const MAX_CONSECUTIVE_REQUEST_TIMEOUTS = 2;
 const GATEWAY_RESTART_BACKOFF_MS = 2000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
+const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 1;
+const SUB_AGENT_ROUTING_MIN_TARGETS = 2;
+const SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS = 3000;
+const SUB_AGENT_ROUTING_REMINDER =
+  "\n\nSUB-AGENT ROUTING CHECKPOINT: multiple repository targets have now required two parent evidence calls. " +
+  "Before another read or materialization call, dispatch one sub_agent batch with completion.mode=wait_all when at least two related targets still need synthesis. " +
+  "Prefer one citation_synthesis.v1 request with two or three ordered inputs; use separate requests only for genuinely independent syntheses. " +
+  "Treat the returned cited synthesis as a substitute for those reads rather than immediately reopening the delegated inputs. " +
+  "Continue directly only when the current context already contains the answers or the remaining question needs one targeted call.";
+const SUB_AGENT_ROUTING_BLOCK =
+  "Sub-agent routing required before another parent evidence call: at least two reads across multiple repository targets have already completed. " +
+  "Dispatch one sub_agent batch with completion.mode=wait_all, preferring one citation_synthesis.v1 request with two or three ordered inputs for related targets, " +
+  "or continue without another read if current context is sufficient.";
+const SUB_AGENT_DELEGATED_REPEAT_BLOCK =
+  "This target was already materialized and synthesized by the completed citation child. " +
+  "Use the returned cited packet as the inspection result and proceed without reopening the delegated input. " +
+  "A successful write to the target clears this guard so post-edit verification can read it.";
+const SUB_AGENT_REDUNDANT_DISPATCH_BLOCK =
+  "Every requested sub-agent input target is already present in the parent context from successful evidence calls. " +
+  "Do not dispatch a child to reread completed parent work; make the decision or mutation directly.";
+
+const SUB_AGENT_EVIDENCE_TOOLS = new Set([
+  "tools.read_file",
+  "tools.search_files",
+  "tools.chain_read",
+  "atlas.code.window",
+  "atlas.code.survey",
+  "atlas.code.structure",
+]);
+const SUB_AGENT_WRITE_TOOLS = new Set([
+  "tools.write_file",
+  "tools.edit_file",
+  "tools.apply_patch",
+  "atlas.edit.apply",
+]);
+
+function createSubAgentRoutingState() {
+  return {
+    evidenceCalls: 0,
+    targets: new Set(),
+    delegatedTargets: new Set(),
+    dispatched: false,
+    reminderIssued: false,
+    materializedChars: 0,
+    mutated: false,
+  };
+}
+
+function subAgentRoutingEnabled(policy) {
+  return policy?.suites?.tools?.has("sub_agent") === true;
+}
+
+function subAgentEvidenceTargets(args = {}) {
+  const found = new Set();
+  const visit = (value, key = "") => {
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry, key);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      if (
+        typeof value === "string"
+        && /(?:^|_)(?:file|files|path|paths)$/u.test(key)
+        && value.trim()
+      ) {
+        found.add(value.trim());
+      }
+      return;
+    }
+    for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+  };
+  visit(args);
+  return found;
+}
+
+function subAgentRoutingBlockReason(state, requested, args = {}) {
+  if (!state) return "";
+  const requestedTargets = subAgentEvidenceTargets(args);
+  if (
+    requested?.suite === "tools"
+    && requested?.name === "sub_agent"
+    && args?.op === "dispatch"
+    && requestedTargets.size > 0
+    && [...requestedTargets].every((target) => state.targets.has(target))
+  ) {
+    return "redundant_dispatch";
+  }
+  if (!SUB_AGENT_EVIDENCE_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
+  const targets = new Set([...state.targets, ...requestedTargets]);
+  if (state.dispatched && [...requestedTargets].some((target) => state.delegatedTargets.has(target))) {
+    return "delegated_repeat";
+  }
+  if (state.mutated) return "";
+  if (state.dispatched) return "";
+  return state.evidenceCalls >= SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS
+    && state.materializedChars >= SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS
+    && targets.size >= SUB_AGENT_ROUTING_MIN_TARGETS
+    ? "required"
+    : "";
+}
+
+function subAgentMaterializedChars(result) {
+  const content = result?.result?.content;
+  if (!Array.isArray(content)) return 0;
+  return content.reduce((total, part) => (
+    total + (part?.type === "text" && typeof part.text === "string" ? part.text.length : 0)
+  ), 0);
+}
+
+function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null) {
+  if (!state) return "";
+  if (requested?.suite === "tools" && requested?.name === "sub_agent") {
+    state.dispatched = true;
+    const completedWaitAll = args?.op === "dispatch"
+      && args?.completion?.mode === "wait_all"
+      && Array.isArray(result?.results)
+      && result.results.length > 0
+      && result.results.every((entry) => (
+        entry?.status === "completed"
+        && entry?.packet?.outcome === "complete"
+      ));
+    if (completedWaitAll) {
+      for (const target of subAgentEvidenceTargets(args)) state.delegatedTargets.add(target);
+    }
+    return "";
+  }
+  if (SUB_AGENT_WRITE_TOOLS.has(`${requested?.suite}.${requested?.name}`)) {
+    state.mutated = true;
+    for (const target of subAgentEvidenceTargets(args)) state.delegatedTargets.delete(target);
+    return "";
+  }
+  if (!SUB_AGENT_EVIDENCE_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
+  state.evidenceCalls += 1;
+  state.materializedChars += subAgentMaterializedChars(result);
+  for (const target of subAgentEvidenceTargets(args)) state.targets.add(target);
+  if (
+    !state.mutated
+    && !state.dispatched
+    && !state.reminderIssued
+    && state.evidenceCalls >= SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS
+    && state.materializedChars >= SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS
+    && state.targets.size >= SUB_AGENT_ROUTING_MIN_TARGETS
+  ) {
+    state.reminderIssued = true;
+    return SUB_AGENT_ROUTING_REMINDER;
+  }
+  return "";
+}
+
+function appendToolResultText(response, suffix) {
+  if (!suffix || !response || response?.result?.isError === true) return response;
+  const content = response?.result?.content;
+  if (!Array.isArray(content)) return response;
+  const textPart = content.find((part) => part?.type === "text" && typeof part.text === "string");
+  if (textPart) textPart.text += suffix;
+  return response;
+}
+
+export function __testSubAgentRoutingSequence(calls = []) {
+  const state = createSubAgentRoutingState();
+  return calls.map((call) => {
+    const requested = {
+      suite: String(call?.suite || ""),
+      name: String(call?.name || ""),
+    };
+    const delegatedEvidence = call?.delegatedEvidence === true;
+    const blockReason = delegatedEvidence
+      ? ""
+      : subAgentRoutingBlockReason(state, requested, call?.args || {});
+    const blocked = !!blockReason;
+    const reminder = blocked || delegatedEvidence
+      ? ""
+      : noteSubAgentRoutingSuccess(state, requested, call?.args || {}, call?.result || null);
+    return {
+      blocked,
+      reminder: !!reminder,
+      evidenceCalls: state.evidenceCalls,
+      targets: state.targets.size,
+      delegatedTargets: state.delegatedTargets.size,
+      dispatched: state.dispatched,
+    };
+  });
+}
+
+export function __testSubAgentRoutingEnabled(toolNames = []) {
+  return subAgentRoutingEnabled({
+    suites: { tools: new Set(toolNames.map((name) => String(name))) },
+  });
+}
 const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
@@ -326,7 +515,7 @@ function attachTelemetryContext(session, ownerBootId) {
   };
 }
 
-function injectSessionContext(message, session) {
+function injectSessionContext(message, session, { delegatedEvidence = false } = {}) {
   const outbound = cloneJson(message);
   const params = outbound.params && typeof outbound.params === "object" && !Array.isArray(outbound.params)
     ? { ...outbound.params }
@@ -334,6 +523,7 @@ function injectSessionContext(message, session) {
   delete params._posseSession;
   const bootConfig = stripGatewaySessionTokenFields(session.bootConfig || {});
   bootConfig.ownerAtlasGateEvents = session.atlasGateEventsSnapshot();
+  if (delegatedEvidence === true) bootConfig.delegatedEvidenceCursor = true;
   params._posseSession = {
     sessionId: session.id,
     bootConfig,
@@ -797,6 +987,7 @@ class PersistentMcpSession {
     this.attachProof = this._newAttachProof();
     this._atlasGateEventSeq = 0;
     this._atlasGateEvents = [];
+    this._subAgentRouting = createSubAgentRoutingState();
   }
 
   _newAttachProof() {
@@ -825,10 +1016,16 @@ class PersistentMcpSession {
     if (bootConfig) {
       const previousJobId = this.bootConfig?.jobId ?? null;
       const previousWorkItemId = this.bootConfig?.workItemId ?? null;
+      const previousAgentCallId = this.bootConfig?.agentCallId ?? null;
       this.bootConfig = bootConfig;
-      if (previousJobId !== (bootConfig.jobId ?? null) || previousWorkItemId !== (bootConfig.workItemId ?? null)) {
+      if (
+        previousJobId !== (bootConfig.jobId ?? null)
+        || previousWorkItemId !== (bootConfig.workItemId ?? null)
+        || previousAgentCallId !== (bootConfig.agentCallId ?? null)
+      ) {
         this._atlasGateEventSeq = 0;
         this._atlasGateEvents = [];
+        this._subAgentRouting = createSubAgentRoutingState();
       }
     }
     if (serverSpec) this.serverSpec = serverSpec;
@@ -1674,6 +1871,7 @@ export class PersistentMcpOwner {
     const body = await readJsonBody(req);
     const token = String(body?.token || "").trim();
     const message = body?.message && typeof body.message === "object" ? body.message : null;
+    const delegatedEvidence = body?.delegatedEvidence === true;
     if (!token || !message) {
       sendJson(res, 400, { ok: false, error: "invalid_request" });
       return;
@@ -1790,6 +1988,58 @@ export class PersistentMcpOwner {
           return;
         }
         const requested = requestedToolPolicyName(toolName, toolArgs);
+        const routingState = subAgentRoutingEnabled(policy)
+          ? session._subAgentRouting
+          : null;
+        const routingBlockReason = delegatedEvidence
+          ? ""
+          : subAgentRoutingBlockReason(routingState, requested, toolArgs);
+        if (routingBlockReason) {
+          const delegatedRepeat = routingBlockReason === "delegated_repeat";
+          const redundantDispatch = routingBlockReason === "redundant_dispatch";
+          recordObservation({
+            work_item_id: session?.bootConfig?.workItemId ?? null,
+            job_id: session?.bootConfig?.jobId ?? null,
+            attempt_id: session?.bootConfig?.attemptId ?? null,
+            observation_type: "sub_agent.routing_guard",
+            summary: delegatedRepeat
+              ? "Parent duplicate evidence call blocked after child synthesis"
+              : redundantDispatch
+                ? "Redundant sub-agent dispatch blocked after parent inspection"
+                : "Parent evidence call paused for required sub-agent routing",
+            detail: {
+              reason: routingBlockReason,
+              tool: `${requested.suite}.${requested.name}`,
+              evidence_calls: routingState?.evidenceCalls ?? null,
+              materialized_chars: routingState?.materializedChars ?? null,
+              distinct_targets: routingState?.targets?.size ?? null,
+              delegated_targets: routingState?.delegatedTargets?.size ?? null,
+              mutated: routingState?.mutated ?? null,
+              parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
+            },
+          });
+          sendJson(res, 200, {
+            ok: true,
+            bootId: this.bootId,
+            sessionId: id,
+            message: {
+              jsonrpc: "2.0",
+              id: message?.id ?? null,
+              result: {
+                content: [{
+                  type: "text",
+                  text: delegatedRepeat
+                    ? SUB_AGENT_DELEGATED_REPEAT_BLOCK
+                    : redundantDispatch
+                      ? SUB_AGENT_REDUNDANT_DISPATCH_BLOCK
+                      : SUB_AGENT_ROUTING_BLOCK,
+                }],
+                isError: true,
+              },
+            },
+          });
+          return;
+        }
         if (requested.suite === "tools" && requested.name === "agent_handoff") {
           try {
             assertSubAgentParentReady(session?.bootConfig?.agentCallId);
@@ -1874,6 +2124,25 @@ export class PersistentMcpOwner {
               },
             });
           } catch (error) {
+            const rawCode = String(error?.code || "SUB_AGENT_ERROR").trim();
+            const errorCode = /^[A-Z0-9_]{3,80}$/.test(rawCode)
+              ? rawCode
+              : "SUB_AGENT_ERROR";
+            recordObservation({
+              work_item_id: session?.bootConfig?.workItemId ?? null,
+              job_id: session?.bootConfig?.jobId ?? null,
+              attempt_id: session?.bootConfig?.attemptId ?? null,
+              observation_type: "tool.sub_agent_next_input.error",
+              summary: `Sub-agent input ${toolArgs?.position ?? "?"} rejected`,
+              detail: {
+                position: toolArgs?.position ?? null,
+                code: errorCode,
+                stage: String(error?.stage || "runtime").slice(0, 40),
+                retryable: error?.retryable === true,
+                child_agent_call_id: session?.bootConfig?.agentCallId ?? null,
+                duration_ms: Date.now() - startedAt,
+              },
+            });
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -1929,6 +2198,7 @@ export class PersistentMcpOwner {
                 duration_ms: Date.now() - startedAt,
               },
             });
+            noteSubAgentRoutingSuccess(routingState, requested, toolArgs, result);
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -1943,6 +2213,25 @@ export class PersistentMcpOwner {
               },
             });
           } catch (error) {
+            const rawCode = String(error?.code || "SUB_AGENT_ERROR").trim();
+            const errorCode = /^[A-Z0-9_]{3,80}$/.test(rawCode)
+              ? rawCode
+              : "SUB_AGENT_ERROR";
+            recordObservation({
+              work_item_id: session?.bootConfig?.workItemId ?? null,
+              job_id: session?.bootConfig?.jobId ?? null,
+              attempt_id: session?.bootConfig?.attemptId ?? null,
+              observation_type: "tool.sub_agent.error",
+              summary: `Sub-agent ${toolArgs?.op || "operation"} rejected`,
+              detail: {
+                op: toolArgs?.op || null,
+                code: errorCode,
+                stage: String(error?.stage || "runtime").slice(0, 40),
+                retryable: error?.retryable === true,
+                parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
+                duration_ms: Date.now() - startedAt,
+              },
+            });
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -1983,16 +2272,21 @@ export class PersistentMcpOwner {
             });
             return;
           }
+          const reminder = mcpToolCallSuccess(response) && !delegatedEvidence
+            ? noteSubAgentRoutingSuccess(routingState, requested, toolArgs)
+            : "";
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
-            message: response,
+            message: appendToolResultText(response, reminder),
           });
           return;
         }
       }
-      let response = await this._gatewaySession.request(injectSessionContext(message, session));
+      let response = await this._gatewaySession.request(injectSessionContext(message, session, {
+        delegatedEvidence,
+      }));
       if (message.method === "tools/call") {
         const requested = requestedToolPolicyName(
           String(message?.params?.name || ""),
@@ -2012,6 +2306,16 @@ export class PersistentMcpOwner {
         if (signal && Array.isArray(content)) {
           const textPart = content.find((part) => part?.type === "text" && typeof part.text === "string");
           if (textPart) textPart.text += signal;
+        }
+        if (mcpToolCallSuccess(response) && !delegatedEvidence) {
+          const reminder = noteSubAgentRoutingSuccess(
+            subAgentRoutingEnabled(policy)
+              ? session._subAgentRouting
+              : null,
+            requested,
+            message?.params?.arguments || {},
+          );
+          response = appendToolResultText(response, reminder);
         }
       }
       if (message.method === "tools/call" && mcpToolCallSuccess(response)) {

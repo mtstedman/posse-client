@@ -110,6 +110,7 @@ const RUNTIME_MODEL_ERROR_PATTERNS = [
   /\b(?:do\s+not|don't|does\s+not)\s+have\s+access\b[^\n]{0,100}\bmodel\b/i,
 ];
 const SLOW_PROVIDER_SETUP_PHASE_MS = 1000;
+const SUB_AGENT_CALLER_ROLES = new Set(["dev", "artificer"]);
 
 function providerCallAbortedError(abortSignal, worker, jobId) {
   const err = signalAbortError(abortSignal, "Provider call aborted");
@@ -160,7 +161,9 @@ function assertExpectedCoordination(options, { localHandoff, remoteHandoff } = {
     throw error;
   }
   const handoffExpected = effectiveExpected === "handoff" || effectiveExpected === "subagents";
-  const subAgentExpected = effectiveExpected === "subagents";
+  const subAgentExpected = effectiveExpected === "subagents"
+    && SUB_AGENT_CALLER_ROLES.has(role)
+    && options?.sessionPacket?.job_type !== "fix";
   const childCursorExpected = coordinationChild && expected === "subagents";
   if (!["off", "handoff", "subagents"].includes(expected)
     || localHandoff !== handoffExpected
@@ -1122,7 +1125,10 @@ export class TrackedProviderClient {
             || effectiveCapabilityOpts?.sessionPacket?.remote_issuance?.tools
             || [],
           executeInput: async ({ tool, arguments: inputArguments, signal }) => (
-            await agent.mcpGate.callTool(tool, inputArguments, { signal })
+            await agent.mcpGate.callTool(tool, inputArguments, {
+              signal,
+              delegatedEvidence: true,
+            })
           ),
           runChild: async ({ batchId, dispatchId, intent, manifest, maxInputs, signal, requestId }) => {
             const childRole = String(opts.role || "researcher");
@@ -1186,6 +1192,7 @@ export class TrackedProviderClient {
               {
                 job_id,
                 work_item_id,
+                attempt_id: observationContext?.attempt_id ?? null,
                 cwd,
                 jobProvider: providerName,
                 jobModelName: modelName,
@@ -1654,6 +1661,7 @@ export class TrackedProviderClient {
   async call(prompt, opts, {
     job_id = null,
     work_item_id = null,
+    attempt_id = null,
     jobDir = null,
     cwd = null,
     jobProvider = null,
@@ -1904,7 +1912,7 @@ export class TrackedProviderClient {
       const observationContext = {
         work_item_id,
         job_id,
-        attempt_id: ambient.attempt_id ?? null,
+        attempt_id: attempt_id ?? ambient.attempt_id ?? null,
         role: opts.role ?? ambient.role ?? null,
       };
       const result = await this._executeOneAttempt(prompt, opts, {

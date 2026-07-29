@@ -41,7 +41,7 @@ const SENSITIVE_KEY_PAIRS = new Set([
   "setup:token",
 ]);
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi;
-const BASIC_RE = /\bBasic\s+[A-Za-z0-9+/=]{8,}/gi;
+const BASIC_RE = /\bBasic[ \t]+([A-Za-z0-9+/]{4,}={0,2})(?=$|[^A-Za-z0-9+/=])/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]{4,}\b/g;
 const GITHUB_TOKEN_RE = /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b/g;
 const SLACK_TOKEN_RE = /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g;
@@ -88,13 +88,26 @@ function isSensitiveKey(key) {
   return false;
 }
 
+function redactBasicCredential(match, token) {
+  try {
+    const encoded = String(token).replace(/=+$/u, "");
+    const decoded = Buffer.from(String(token), "base64");
+    if (!decoded.length || decoded.toString("base64").replace(/=+$/u, "") !== encoded) return match;
+    const text = decoded.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(decoded) || !text.includes(":")) return match;
+    return "Basic [REDACTED]";
+  } catch {
+    return match;
+  }
+}
+
 // Exported for reuse by the telemetry log scrubber (secret-scrub.js) so file
 // logs catch the same token shapes the bridge redacts (Bearer/JWT/cloud keys).
 export function redactString(value) {
   return String(value)
     .replace(URL_USERINFO_RE, "$1[REDACTED]@")
     .replace(BEARER_RE, "Bearer [REDACTED]")
-    .replace(BASIC_RE, "Basic [REDACTED]")
+    .replace(BASIC_RE, redactBasicCredential)
     .replace(OPENAI_KEY_RE, "sk-[REDACTED]")
     .replace(GITHUB_TOKEN_RE, "[REDACTED]")
     .replace(SLACK_TOKEN_RE, "[REDACTED]")

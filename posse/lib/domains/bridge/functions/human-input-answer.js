@@ -140,6 +140,24 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   await runHumanInputJob(worker, claim.job, { leaseToken: claim.leaseToken });
 
   const fresh = getJob(id);
+  const freshContract = getHumanGate(id);
+  const resolved = fresh?.status === "succeeded" && freshContract?.gate_state === "resolved";
+  if (!resolved) {
+    const status = fresh?.status || "unknown";
+    const reason = status === "canceled"
+      ? "gate_no_longer_applicable"
+      : status === "failed" || status === "dead_letter"
+        ? "resolution_failed"
+        : "answer_not_applied";
+    return {
+      ok: false,
+      reason,
+      job_id: id,
+      status,
+      gate_state: freshContract?.gate_state || "unknown",
+      work_item_id: fresh?.work_item_id || current.work_item_id,
+    };
+  }
   return {
     ok: true,
     job_id: id,

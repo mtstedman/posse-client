@@ -58,6 +58,37 @@ const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
 const NON_COMPLETION_BLOCKING_JOB_TYPES = new Set(["atlas_warm"]);
+const PIPELINE_BOOTSTRAP_JOB_TYPES = new Set(["preflight", "research", "plan"]);
+
+function parseWorkItemMetadataRecord(wi) {
+  try {
+    const parsed = wi?.metadata_json ? JSON.parse(wi.metadata_json) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isExplicitResearchOnlyWorkItem(wi) {
+  if (!wi) return false;
+  if (wi.mode === "report" || wi.source === "ask") return true;
+  const metadata = parseWorkItemMetadataRecord(wi);
+  if (String(metadata.mode || "").trim().toLowerCase() === "question") return true;
+  if (String(metadata.workflow_mode || "").trim().toLowerCase() === "audit") return true;
+  const hints = metadata.intake_hints && typeof metadata.intake_hints === "object"
+    ? metadata.intake_hints
+    : {};
+  const outputMode = String(hints.output_mode || "").trim().toLowerCase();
+  const outputModeSource = String(hints.output_mode_source || "").trim().toLowerCase();
+  return outputMode === "question_only"
+    && (!outputModeSource || outputModeSource === "explicit");
+}
+
+function missingRequiredBuildExecution(wi, jobs) {
+  if (!wi || wi.mode !== "build" || isExplicitResearchOnlyWorkItem(wi)) return false;
+  if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
+  return !jobs.some((job) => MUTATING_JOB_TYPES.has(job.job_type));
+}
 
 function isActiveIterativeWorkItemRecord(wi) {
   if (!wi?.metadata_json) return false;
@@ -376,6 +407,26 @@ export function updateWorkItemStatus(id, status, {
 
     if (status === "complete") {
       const blockers = completionBlockersForWorkItem(id);
+      const jobs = listJobsByWorkItem(id).filter((job) => !isShadowFanoutJob(job));
+      if (missingRequiredBuildExecution(current, jobs)) {
+        logEvent({
+          work_item_id: id,
+          event_type: EVENT_TYPES.WORK_ITEM_COMPLETION_BLOCKED,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: "Blocked build completion: research/planning produced no executable job",
+          event_json: JSON.stringify({
+            reason: "missing_required_build_execution",
+            pipeline_jobs: jobs
+              .filter((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))
+              .map((job) => ({
+                job_id: job.id,
+                job_type: job.job_type,
+                status: job.status,
+              })),
+          }),
+        });
+        return false;
+      }
       const reviewPlan = resolvePendingReviews
         ? pendingWorkItemReviewSettlement(id)
         : null;
@@ -893,9 +944,10 @@ export function refreshWorkItemStatus(workItemId) {
 
     if (allTerminal) {
       const blockers = completionBlockersForWorkItem(workItemId);
+      const missingBuildExecution = missingRequiredBuildExecution(wi, completionJobs);
       newStatus = completionJobs.every(j => j.status === "canceled")
         ? "canceled"
-        : (blockers.length === 0 ? "complete" : "failed");
+        : (blockers.length === 0 && !missingBuildExecution ? "complete" : "failed");
     } else if (stateJobs.some(j => j.status === "waiting_on_human")) {
       newStatus = "waiting_on_human";
     } else if (stateJobs.some(j => ["running", "leased", "awaiting_assessment"].includes(j.status))) {

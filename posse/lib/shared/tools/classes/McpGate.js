@@ -246,6 +246,7 @@ export class McpGate {
     timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
     maxResponseBytes = DEFAULT_RPC_MAX_RESPONSE_BYTES,
     signal = null,
+    delegatedEvidence = false,
   } = {}) {
     if (this.disposed) throw gateError("POSSE_MCP_GATE_DISPOSED", "MCP gate has been disposed");
     if (!this.binding) throw gateError("POSSE_MCP_GATE_ATTACHMENT_MISSING", "MCP gate has no active Job attachment");
@@ -253,7 +254,11 @@ export class McpGate {
       throw gateError("POSSE_MCP_GATE_ABORTED", "MCP gate request was aborted");
     }
     const endpoint = this.owner.endpoint();
-    const body = JSON.stringify({ token: this.token, message });
+    const body = JSON.stringify({
+      token: this.token,
+      message,
+      ...(delegatedEvidence === true ? { delegatedEvidence: true } : {}),
+    });
     const payload = await new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;

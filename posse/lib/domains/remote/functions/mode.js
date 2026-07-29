@@ -4,6 +4,8 @@ import { getSetting } from "../../queue/functions/index.js";
 export const POSSE_REMOTE_DEFAULT_URL = "https://api.yourposseai.com";
 export const POSSE_REMOTE_DEFAULT_TIMEOUT_MS = 60_000;
 export const POSSE_REMOTE_MODE = "required";
+const AGENT_FLOW_REMOTE_FLAG = "POSSE_AGENT_FLOW_HARNESS";
+const AGENT_FLOW_REMOTE_URL = "POSSE_AGENT_FLOW_REMOTE_URL";
 
 export function normalizePosseRemoteMode(value) {
   return POSSE_REMOTE_MODE;
@@ -22,11 +24,28 @@ function settingValue(key) {
   }
 }
 
-export function getPosseRemoteUrl() {
+export function getAgentFlowRemoteUrl(env = process.env) {
+  if (String(env?.[AGENT_FLOW_REMOTE_FLAG] || "").trim() !== "1") return "";
+  const raw = String(env?.[AGENT_FLOW_REMOTE_URL] || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname);
+    if (parsed.protocol !== "http:" || !loopback || parsed.username || parsed.password) return "";
+    return parsed.href.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+export function getPosseRemoteUrl({ env = process.env } = {}) {
+  const experimentUrl = getAgentFlowRemoteUrl(env);
+  if (experimentUrl) return experimentUrl;
   // Singular authoritative remote — the compiled default. No longer a settable
   // knob: `posse_remote_url` was an early-testing override that could strand the
-  // client (and native heartbeat auth) on a dead localhost endpoint. Always
-  // return the compiled URL.
+  // client (and native heartbeat auth) on a dead localhost endpoint. The only
+  // override is a loopback-only, double-gated full-funnel experiment endpoint;
+  // native heartbeat auth remains pinned to the compiled production identity.
   return POSSE_REMOTE_DEFAULT_URL;
 }
 

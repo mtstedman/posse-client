@@ -73,6 +73,11 @@ const ASSESSMENT_REVIEW_TYPES = new Set([
   "assessment_transport_error",
   "assessment_retry_limit",
 ]);
+const TERMINAL_HUMAN_GATE_CLAIM_FAILURES = new Set([
+  "gate_already_resolved",
+  "original_job_missing",
+  "original_state_changed",
+]);
 
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
@@ -334,8 +339,15 @@ export async function runHumanInputJob(worker, job, {
         duration_ms: Date.now() - startTime,
         error_text: `Human gate resolution rejected: ${resolutionClaim.reason}`,
       });
-      worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); keeping the gate open${C.reset}`);
-      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+      if (TERMINAL_HUMAN_GATE_CLAIM_FAILURES.has(resolutionClaim.reason)) {
+        const reason = `Human gate is no longer applicable: ${resolutionClaim.reason}`;
+        supersedeHumanGate(job.id, reason);
+        worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); retired the stale gate${C.reset}`);
+        worker._releaseLease(job, leaseToken, "canceled");
+      } else {
+        worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); keeping the gate open${C.reset}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+      }
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
@@ -998,18 +1010,23 @@ export async function runHumanInputJob(worker, job, {
       cancelPendingReviewGatesForOriginal(payload.original_job_id, { exceptJobId: job.id });
     }
     if (finalHumanStatus === "failed") {
-      reopenHumanGateResolution({
-        gateJobId: job.id,
-        leaseToken,
-        error: "The selected action could not be applied; the gate remains open.",
-      });
+      const failureMessage = "The selected action could not be applied; the human gate was retired.";
+      supersedeHumanGate(job.id, failureMessage);
       completeAttempt(attempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - startTime,
         output_chars: (output || "").length,
-        error_text: "Human action could not be applied; gate reopened",
+        error_text: "Human action could not be applied; gate retired",
       });
-      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.attempt.id,
+        event_type: EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: failureMessage,
+      });
+      worker._releaseLease(job, leaseToken, "failed");
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
@@ -1054,18 +1071,14 @@ export async function runHumanInputJob(worker, job, {
     refreshAndExtractInsights(job.work_item_id);
     } catch (postErr) {
       const message = postErr instanceof Error ? postErr.message : String(postErr);
-      worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed after human input was recorded: ${message}${C.reset}`);
+      worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed after human input was recorded; retired the gate instead of asking again: ${message}${C.reset}`);
       completeAttempt(attempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - startTime,
         output_chars: (output || "").length,
         error_text: `Post-answer resolution failed: ${message}`,
       });
-      reopenHumanGateResolution({
-        gateJobId: job.id,
-        leaseToken,
-        error: message,
-      });
+      supersedeHumanGate(job.id, `Post-answer resolution failed: ${message}`);
       try {
         logEvent({
           work_item_id: job.work_item_id,
@@ -1080,8 +1093,8 @@ export async function runHumanInputJob(worker, job, {
       }
       if (!leaseReleased) {
         try {
-          worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
-        } catch { /* best-effort gate reopening */ }
+          worker._releaseLease(job, leaseToken, "failed");
+        } catch { /* best-effort terminal settlement */ }
       }
       try { refreshAndExtractInsights(job.work_item_id); } catch { /* best effort */ }
     }

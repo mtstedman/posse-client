@@ -1,7 +1,27 @@
 // Canonical local policy for deterministic tools that a citation child may
-// consume through its private evidence cursor. Atlas uses one broad access
-// class for both reads and durable side effects, so evidence safety must be an
-// explicit closed set rather than inferred from the `atlas.` prefix.
+// consume through its private evidence cursor. Remote issuance surfaces carry
+// canonical tool names but do not trust remote-provided access labels, so both
+// native and Atlas evidence safety must be explicit closed sets.
+
+export const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS = Object.freeze([
+  "tools.read_file",
+  "tools.pull_brief",
+  "tools.get_brief",
+  "tools.list_files",
+  "tools.search_files",
+  "tools.git_history",
+  "tools.inspect_file",
+  "tools.hash_file",
+  "tools.read_image_metadata",
+  "tools.validate_artifact_output",
+  "tools.extract_image_text",
+]);
+
+const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOL_SET = new Set(SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS);
+
+export function isSubAgentEvidenceSafeNativeTool(name) {
+  return SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOL_SET.has(String(name || ""));
+}
 
 export const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS = Object.freeze([
   "atlas.query",

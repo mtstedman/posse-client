@@ -384,6 +384,8 @@ export function normalizeRemoteIssuedPolicy(value, {
     subAgentAvailable: false,
     subAgentNextInputAvailable: coordination.subAgentNextInputV1,
   }).filter((name) => name === "tools.sub_agent_next_input");
+  const childCursorIssued = childToolSurface.includes("tools.sub_agent_next_input")
+    || toolSurface.includes("tools.sub_agent_next_input");
   const subAgentEnabled = coordination.subAgentV1
     && coordination.subAgentNextInputV1
     && childToolSurface.includes("tools.sub_agent_next_input")
@@ -414,7 +416,7 @@ export function normalizeRemoteIssuedPolicy(value, {
       agentHandoffCompactV3: coordination.agentHandoffCompactV3
         && toolSurface.includes("tools.agent_handoff"),
       subAgentV1: subAgentEnabled,
-      ...(coordination.subAgentNextInputV1 && childToolSurface.includes("tools.sub_agent_next_input")
+      ...(coordination.subAgentNextInputV1 && childCursorIssued
         ? { subAgentNextInputV1: true }
         : {}),
     },

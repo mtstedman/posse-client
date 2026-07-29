@@ -842,7 +842,9 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     .trim()
     .toLowerCase();
   const handoffEnabled = coordinationMode === "handoff" || coordinationMode === "subagents";
-  const subAgentEnabled = coordinationMode === "subagents";
+  const subAgentEnabled = coordinationMode === "subagents"
+    && ["dev", "artificer"].includes(recipient)
+    && packet.job_type !== "fix";
   packet.agent_coordination = {
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,

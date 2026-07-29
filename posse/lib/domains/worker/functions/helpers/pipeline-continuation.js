@@ -541,6 +541,15 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
       redTeamPlan: isRedTeamPlanningPayload(preflightPayload),
       parentJob: preflightJob,
     });
+    const inheritedPayload = replanPayloadFields(preflightPayload);
+    if (Object.keys(inheritedPayload).length > 0) {
+      const planPayload = parseJobPayload(planJob);
+      planJob.payload_json = JSON.stringify({
+        ...planPayload,
+        ...inheritedPayload,
+      });
+      updateJobPayload(planJob.id, planJob.payload_json);
+    }
     logEvent({
       work_item_id: preflightJob.work_item_id,
       job_id: planJob.id,

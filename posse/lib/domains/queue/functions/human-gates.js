@@ -379,6 +379,42 @@ export function reconcileHumanGates() {
       }
     }
 
+    // Older workers reopened a gate after a valid answer whenever applying
+    // the selected action failed. That converts an internal/stale-target
+    // failure into an endless human prompt. The durable failure event proves
+    // the human already answered; retire those legacy rows instead of
+    // resurfacing them again after upgrade.
+    const failedResolutions = db.prepare(`
+      SELECT DISTINCT hg.gate_job_id
+      FROM human_gates hg
+      JOIN jobs j ON j.id = hg.gate_job_id
+      JOIN events e ON e.job_id = hg.gate_job_id
+      WHERE hg.gate_state IN ('open','resolving')
+        AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+        AND e.event_type = ?
+    `).all(EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED);
+    for (const row of failedResolutions) {
+      db.prepare(`
+        UPDATE jobs
+        SET status='failed', finished_at=COALESCE(finished_at, ?),
+            lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+            last_error=COALESCE(last_error, 'Human answer could not be applied'),
+            updated_at=?
+        WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+      `).run(now(), now(), row.gate_job_id);
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state='superseded', resolver_lease_token=NULL,
+            resolution_error=COALESCE(
+              resolution_error,
+              'Human answer was accepted but its action could not be applied'
+            ),
+            resolved_at=COALESCE(resolved_at, ?), updated_at=?
+        WHERE gate_job_id=? AND gate_state IN ('open','resolving')
+      `).run(now(), now(), row.gate_job_id);
+      retired += 1;
+    }
+
     // A gate stuck in 'resolving' whose resolver died (crash between
     // beginHumanGateResolution and completeHumanGateResolution) rejects
     // every later answer with gate_not_open — permanently, because the
