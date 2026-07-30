@@ -2273,7 +2273,7 @@ export class PersistentMcpOwner {
             return;
           }
           const reminder = mcpToolCallSuccess(response) && !delegatedEvidence
-            ? noteSubAgentRoutingSuccess(routingState, requested, toolArgs)
+            ? noteSubAgentRoutingSuccess(routingState, requested, toolArgs, response)
             : "";
           sendJson(res, 200, {
             ok: true,
@@ -2314,6 +2314,7 @@ export class PersistentMcpOwner {
               : null,
             requested,
             message?.params?.arguments || {},
+            response,
           );
           response = appendToolResultText(response, reminder);
         }

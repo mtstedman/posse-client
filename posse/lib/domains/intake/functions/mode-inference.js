@@ -1,3 +1,5 @@
+import { hasRepoMutationIntent } from "./implementation-intent.js";
+
 const IMAGE_MODE_ACTION_RE = /\b(generate|create|make|draw|design)\b/i;
 const IMAGE_MODE_NOUN_RE = /\b(image|photo|picture|illustration|banner|icon|logo|artwork|mermaid)\b/i;
 const IMAGE_MODE_DIRECT_RE = /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/i;
@@ -21,12 +23,7 @@ export function inferWiMode(text) {
   // Creation verbs are legitimate report-generation signals, but explicit
   // repository mutation verbs must keep a mixed "analyze ... and fix it"
   // request in build mode.
-  const repoMutationRe = /\b(fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build|repair|replace|clean)\b/i;
-  const negatedRepoMutationRe = /\b(?:do\s+not|don't|dont|never|without|no\s+need\s+to)\b[^.!?\r\n]{0,80}\b(?:fix|implement|change|update|modify|edit|refactor|add|remove|delete|migrate|build|repair|replace|clean)\b/i;
-  const sentences = lower.match(/[^.!?\r\n]+[.!?\r\n]*/g) || [lower];
-  const repoMutationIntent = sentences.some((sentence) => (
-    repoMutationRe.test(sentence) && !negatedRepoMutationRe.test(sentence)
-  ));
+  const repoMutationIntent = hasRepoMutationIntent(lower);
   const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
   const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
   if (!repoMutationIntent && new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";

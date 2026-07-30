@@ -1,5 +1,9 @@
 import fs from "fs";
 import path from "path";
+import {
+  hasRepoMutationIntent,
+  hasUnnegatedVerbIntent,
+} from "./implementation-intent.js";
 
 const VALID_INTENTS = new Set([
   "task",
@@ -153,8 +157,12 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
 
   const questionIntent = /\b(why|what|where|how|explain|understand|investigate)\b/.test(lower);
   const selfDirectedImplementationQuestion = /\b(?:how|what|where)\s+(?:do|can|should|would)\s+(?:i|we)\b/.test(lower);
-  const implementationIntent = /\b(add|build|change|clean|complete|correct|create|delete|edit|fix|implement|migrate|modify|refactor|remove|repair|replace|update)\b/.test(lower);
-  const strongImplementationIntent = /\b(add|build|change|clean|complete|correct|delete|edit|fix|implement|migrate|modify|refactor|remove|repair|replace|update)\b/.test(lower);
+  const implementationIntent = hasRepoMutationIntent(lower, {
+    includeCreate: true,
+    includeCompletion: true,
+  });
+  const strongImplementationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
+  const bugfixVerbIntent = hasUnnegatedVerbIntent(lower, ["fix", "correct", "repair"]);
 
   // Mutation language is authoritative for build intake. Requests such as
   // "investigate why this loops and fix it" used to hit the broad question
@@ -175,7 +183,7 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "answer";
     hints.output_mode = "auto";
     hints.desired_outputs = ["question_only"];
-  } else if (/\b(fix|bug|broken|regression|error|crash|failing)\b/.test(lower)) {
+  } else if (bugfixVerbIntent || /\b(bug|broken|regression|error|crash|failing)\b/.test(lower)) {
     hints.intent_type = "bugfix";
     hints.deliverable_type = "code";
     hints.output_mode = "auto";
