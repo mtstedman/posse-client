@@ -6,6 +6,7 @@
 import { ROLE_DRIVEN_JOB_TYPES } from "../../../../catalog/job.js";
 import {
   applyDelegation,
+  cancelDeadlockedJobsAtomic,
   createJob,
   getArtifacts,
   getAttempts,
@@ -206,11 +207,15 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
   reasonText = "exhausted all retries and was dead-lettered",
   providerHint = null,
   context = null,
+  suppressHumanRecovery = false,
 } = {}) {
   const dependents = getDependents(job.id);
   const isRecoveryJob = job.job_type === "human_input" || (job.title && job.title.startsWith("Dead-letter recovery:"));
   if (dependents.length === 0 || isRecoveryJob) {
     return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: false };
+  }
+  if (suppressHumanRecovery) {
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true };
   }
   if (recoveryIsUnattended(worker)) {
     emitUnattendedRecoverySkipped(worker, job, "Dependent job", {
@@ -404,7 +409,10 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
   };
 }
 
-export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhausted = false } = {}) {
+export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
+  stallExhausted = false,
+  suppressHumanRecovery = false,
+} = {}) {
   const freshJob = getJob(job.id);
   const errorDetails = getErrorDetails(errorOrMsg);
   const errSummary = errorDetails.summary || "unknown error";
@@ -553,7 +561,10 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
     const providerHint = permanentProviderConfigError
       ? buildPermanentProviderConfigHint(job, errorDetails)
       : buildFastFailureProviderHint(job, getAttempts(job.id));
-    const recovery = spawnDeadLetterRecoveryForDependents(worker, job, freshJob, { providerHint });
+    const recovery = spawnDeadLetterRecoveryForDependents(worker, job, freshJob, {
+      providerHint,
+      suppressHumanRecovery,
+    });
     const { dependents, isRecoveryJob } = recovery;
     const deadLetterPayload = parseJobPayload(job);
     const isOneshotLeaf = job.job_type === "dev" && (deadLetterPayload.oneshot === true || deadLetterPayload.oneshot_origin === true);
@@ -647,6 +658,11 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, { stallExhauste
     }
 
     worker._releaseLease(job, leaseToken, "dead_letter");
+    if (suppressHumanRecovery) {
+      cancelDeadlockedJobsAtomic(`terminal-provider-failure:${job.id}`, {
+        workItemId: job.work_item_id,
+      });
+    }
     refreshAndExtractInsights(job.work_item_id);
     worker._cleanupWorktreeIfDone(job.work_item_id);
   } else {

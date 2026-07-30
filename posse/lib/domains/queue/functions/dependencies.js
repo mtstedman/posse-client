@@ -302,11 +302,15 @@ export function getDependents(jobId) {
  * A single failed/dead_letter/canceled hard dependency is sufficient because a
  * hard dependency can only be satisfied by "succeeded".
  */
-export function findDeadlockedJobs() {
+export function findDeadlockedJobs({ workItemId = null } = {}) {
   const db = getDb();
   // Only treat truly terminal dependency states as deadlocked.
   // blocked and waiting_on_review are recoverable — a human can unblock them
   // or the review can complete — so they must NOT trigger cancellation.
+  const workItemFilter = Number.isInteger(Number(workItemId)) && Number(workItemId) > 0
+    ? "AND j.work_item_id = ?"
+    : "";
+  const params = workItemFilter ? [Number(workItemId)] : [];
   return db.prepare(`
     SELECT j.*,
       (SELECT GROUP_CONCAT('#' || dep.id || ' (' || dep.status || ')', ', ')
@@ -318,6 +322,7 @@ export function findDeadlockedJobs() {
       ) AS failed_deps
     FROM jobs j
     WHERE j.status = 'queued'
+      ${workItemFilter}
       AND EXISTS (
         SELECT 1
         FROM job_dependencies jd
@@ -326,5 +331,5 @@ export function findDeadlockedJobs() {
           AND jd.dependency_kind = 'hard'
           AND dep.status IN (${DEADLOCK_TERMINAL_STATUSES_SQL})
       )
-  `).all();
+  `).all(...params);
 }

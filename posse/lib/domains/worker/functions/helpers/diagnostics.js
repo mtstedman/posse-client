@@ -3,6 +3,8 @@
 // Small diagnostics and formatting helpers for failure artifacts, retry
 // context, and execution-provider summaries.
 
+import { isPermanentProviderRuntimeBlock } from "./block-reason.js";
+
 export function buildPromptExcerpt(text = "", maxChars = 1200) {
   const value = String(text || "").trim();
   if (!value) return "(none)";
@@ -112,6 +114,7 @@ export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   ].filter(Boolean);
   const text = (primaryTextParts.length > 0 ? primaryTextParts : [errorDetails.summary || ""]).join("\n");
   if (errorDetails.classification === "invalid_client") return true;
+  if (isPermanentProviderRuntimeBlock(text)) return true;
   return [
     /\b401\b[^\n]{0,160}\b(?:incorrect\s+(?:api\s+)?key|invalid\s+(?:api\s+)?key|unauthorized|authentication)\b/i,
     /\binvalid[_\s-]+api[_\s-]+key\b/i,

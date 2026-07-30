@@ -18,6 +18,10 @@ export {
   __testFindCodexNativeExecutableForShim,
   __testResolveCodexLaunchPath,
   __testSelectCodexCandidateFromProbes,
+  __testFindWindowsStandaloneCodexExecutables,
+  __testFindWindowsLegacyCodexExecutables,
+  __testBuildCodexWindowsLaunchEnv,
+  __testCodexLaunchNeedsResolution,
 } from "./cli-discovery.js";
 export {
   refreshUsageSummary,

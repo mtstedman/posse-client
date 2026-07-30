@@ -9,7 +9,13 @@ import {
   rejectPlan,
   respawnAfterRejection,
 } from "../../planning/functions/plan-approval.js";
-import { getJob, logEvent, updateWorkItemStatus } from "../../queue/functions/index.js";
+import {
+  getHumanGate,
+  getJob,
+  getWorkItem,
+  logEvent,
+  updateWorkItemStatus,
+} from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import {
   collectStateSnapshot,
@@ -20,7 +26,12 @@ import {
   tailEventsEnvelope,
 } from "./state-snapshot.js";
 import { answerHumanInput } from "./human-input-answer.js";
-import { approveReview, rejectReview, resolveReviewGateJob } from "./review-decision.js";
+import {
+  approveReview,
+  finalizeApprovedReview,
+  rejectReview,
+  resolveReviewGateJob,
+} from "./review-decision.js";
 import { executeGitPushGate } from "./git-push-gate.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
@@ -178,6 +189,20 @@ function workItemIdFromGateJob(jobId, expectedSubtype = null) {
   return { ok: true, workItemId: wiId, job, payload };
 }
 
+function reviewPassAlreadyApplied(resolved) {
+  const wi = getWorkItem(resolved.workItemId);
+  if (wi?.merge_state === "merged") return true;
+  const originalJobId = Number(resolved.payload?.original_job_id);
+  const originalJob = Number.isInteger(originalJobId) ? getJob(originalJobId) : null;
+  if (originalJob?.status !== "succeeded" || originalJob?.assessor_verdict === "fail") {
+    return false;
+  }
+  if (resolved.job.status === "succeeded") return true;
+  const gate = getHumanGate(resolved.job.id);
+  return ["resolving", "resolved"].includes(gate?.gate_state)
+    && gate?.resolution_action === "pass";
+}
+
 async function executeAllowedCommand(name, args = {}, context = {}) {
   switch (name) {
     case BRIDGE_COMMANDS.STATE_SNAPSHOT: {
@@ -276,16 +301,45 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         const resolved = resolveReviewGateJob(reviewJobId);
         if (!resolved.ok) return resolved;
         const note = String(args.note || args.response || "").trim();
-        return answerHumanInput(reviewJobId, {
-          job_id: reviewJobId,
-          lease_seconds: args.lease_seconds,
-          answer: "pass",
-          ...(note ? { answer_metadata: { operator_note: note } } : {}),
-        }, { ...context, allowReviewGateAnswer: true });
+        const alreadyApproved = reviewPassAlreadyApplied(resolved);
+        let reviewResult;
+        if (alreadyApproved) {
+          reviewResult = {
+            ok: true,
+            job_id: reviewJobId,
+            status: resolved.job.status,
+            work_item_id: resolved.workItemId,
+            already_approved: true,
+          };
+        } else {
+          reviewResult = await answerHumanInput(reviewJobId, {
+            job_id: reviewJobId,
+            lease_seconds: args.lease_seconds,
+            answer: "pass",
+            ...(note ? { answer_metadata: { operator_note: note } } : {}),
+          }, { ...context, allowReviewGateAnswer: true });
+        }
+        if (!reviewResult.ok) return reviewResult;
+        const finalized = await finalizeApprovedReview(resolved.workItemId, {
+          actor: context.actor || "bridge",
+          projectDir: context.projectDir || process.cwd(),
+          approvalLogged: alreadyApproved,
+          reviewWorkflow: context.reviewWorkflow || null,
+        });
+        return finalized.ok
+          ? { ...reviewResult, ...finalized, ok: true }
+          : { ...finalized, review_job_id: reviewJobId };
       }
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };
-      return approveReview(wiId, { actor: context.actor || "bridge" });
+      const approved = approveReview(wiId, { actor: context.actor || "bridge" });
+      if (!approved.ok) return approved;
+      return finalizeApprovedReview(wiId, {
+        actor: context.actor || "bridge",
+        projectDir: context.projectDir || process.cwd(),
+        approvalLogged: true,
+        reviewWorkflow: context.reviewWorkflow || null,
+      });
     }
 
     case BRIDGE_COMMANDS.REVIEW_REJECT: {

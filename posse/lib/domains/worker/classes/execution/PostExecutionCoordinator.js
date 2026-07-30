@@ -66,6 +66,7 @@ import {
   shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule,
 } from "../../functions/helpers/no-write-retry.js";
 import {
+  isPermanentProviderRuntimeBlock,
   isTransientMcpInfraBlock,
   MAX_MCP_INFRA_BLOCK_RETRIES,
   MCP_INFRA_BLOCK_BACKOFF_MS,
@@ -319,8 +320,9 @@ export async function handlePostExecutionForWorker({
 
           const allAttempts = getAttempts(job.id);
           const blockedCount = allAttempts.filter(a => a.status === "blocked").length;
+          const permanentProviderRuntimeBlock = isPermanentProviderRuntimeBlock(blockReason);
           completeAttempt(attempt.id, {
-            status: "blocked",
+            status: permanentProviderRuntimeBlock ? "failed" : "blocked",
             duration_ms: Date.now() - startTime,
             error_text: blockMsg,
           });
@@ -328,11 +330,23 @@ export async function handlePostExecutionForWorker({
             work_item_id: job.work_item_id,
             job_id: job.id,
             attempt_id: attempt.id,
-            event_type: EVENT_TYPES.JOB_BLOCKED,
-            actor_type: EVENT_ACTORS.WORKER,
+            event_type: permanentProviderRuntimeBlock
+              ? EVENT_TYPES.JOB_ATTEMPT_FAILED
+              : EVENT_TYPES.JOB_BLOCKED,
+            actor_type: permanentProviderRuntimeBlock
+              ? EVENT_ACTORS.SYSTEM
+              : EVENT_ACTORS.WORKER,
             message: blockMsg,
           });
           await wrappedJob.setError(blockMsg);
+
+          if (permanentProviderRuntimeBlock) {
+            this._invalidatePendingSessionRecycleForMcpInfra(job, "provider_runtime_bootstrap_failure");
+            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: provider runtime bootstrap failed — terminating without a human recovery gate${C.reset}`);
+            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+            await this._cleanupWorktreeIfDone(job.work_item_id);
+            return;
+          }
 
           // Transient MCP-gateway attach failures are infrastructure, not a real
           // block: the agent ran without its write tools because the CLI couldn't
@@ -1344,9 +1358,10 @@ export async function handlePostExecutionForWorker({
             const MAX_BLOCKED_CYCLES = 2;
             const allAttempts = getAttempts(job.id);
             const blockedCount = allAttempts.filter(a => a.status === "blocked").length;
+            const permanentProviderRuntimeBlock = isPermanentProviderRuntimeBlock(blockReason);
 
             completeAttempt(attempt.id, {
-              status: "blocked",
+              status: permanentProviderRuntimeBlock ? "failed" : "blocked",
               duration_ms: Date.now() - startTime,
               error_text: blockMsg,
             });
@@ -1354,11 +1369,23 @@ export async function handlePostExecutionForWorker({
               work_item_id: job.work_item_id,
               job_id: job.id,
               attempt_id: attempt.id,
-              event_type: EVENT_TYPES.JOB_BLOCKED,
-              actor_type: EVENT_ACTORS.WORKER,
+              event_type: permanentProviderRuntimeBlock
+                ? EVENT_TYPES.JOB_ATTEMPT_FAILED
+                : EVENT_TYPES.JOB_BLOCKED,
+              actor_type: permanentProviderRuntimeBlock
+                ? EVENT_ACTORS.SYSTEM
+                : EVENT_ACTORS.WORKER,
               message: blockMsg,
             });
             await wrappedJob.setError(blockMsg);
+
+            if (permanentProviderRuntimeBlock) {
+              this._invalidatePendingSessionRecycleForMcpInfra(job, "provider_runtime_bootstrap_failure");
+              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: provider runtime bootstrap failed — terminating without a human recovery gate${C.reset}`);
+              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+              await this._cleanupWorktreeIfDone(job.work_item_id);
+              return;
+            }
 
             // Transient MCP-gateway attach failures are infrastructure, not a real
             // block — auto-requeue with backoff instead of escalating to a human

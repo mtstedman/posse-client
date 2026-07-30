@@ -9,11 +9,10 @@ import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import {
-  acquireMergeLock,
   forceUpdateJobStatus,
   getJob,
-  releaseMergeLock,
   setJobResult,
+  withMergeLock,
 } from "../../queue/functions/index.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
@@ -71,13 +70,13 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
         projectDir,
         targetBranch: await resolveTargetBranchSafe(projectDir, gatePayload),
       });
-  const collectState = deps.collectState || (() => helpers._collectPushOfferState(0));
-  const runPush = deps.push || ((pushArgs) => helpers._executePush(pushArgs));
+  const collectState = deps.collectState || (() => helpers._collectPushOfferStateAsync(0));
+  const runPush = deps.push || ((pushArgs) => helpers._executePushAsync(pushArgs));
 
   // The offer payload is advisory; the push acts on CURRENT repo state.
   let state;
   try {
-    state = collectState();
+    state = await collectState();
   } catch (err) {
     return { ok: false, reason: "push_state_failed", message: err?.message || String(err) };
   }
@@ -101,21 +100,22 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   }
 
   // Don't push while a merge is rewriting the branch underneath us.
-  const lockOwner = `bridge-git-push:${process.pid}:${jobId}`;
-  if (!acquireMergeLock(lockOwner, 120)) {
-    return { ok: false, reason: "merge_in_progress" };
-  }
+  const lockOwner = `merge-${process.pid}-bridge-git-push-${jobId}`;
   let pushed;
   try {
-    pushed = runPush({
+    const pushOutcome = await withMergeLock(() => runPush({
       effectiveRemote: state.effectiveRemote,
       pushBranch: state.pushBranch,
       mergedCount: Number(gatePayload?.merged_count) || 0,
+    }), {
+      ownerId: lockOwner,
     });
+    if (!pushOutcome.acquired) {
+      return { ok: false, reason: "merge_in_progress" };
+    }
+    pushed = pushOutcome.result;
   } catch (err) {
     pushed = { ok: false, reason: "push_failed", output: err?.message || String(err) };
-  } finally {
-    try { releaseMergeLock(lockOwner); } catch { /* lock expiry covers us */ }
   }
 
   if (pushed?.ok) {

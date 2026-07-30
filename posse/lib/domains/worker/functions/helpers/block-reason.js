@@ -37,6 +37,21 @@ const SCOPED_PATH_MUTATION_FAILURE = /scoped\s+[`'\"]?[a-z0-9_./\\-]+[`'\"]?\s+(
 const REQUIRED_EXECUTION_CAPABILITY_FAILURE = /missing\s+execution\s+capability\s+prevented\s+reading,\s*editing,\s*and\s+running\s+[`'\"]?node\s+--test\s+[a-z0-9_./\\-]+[`'\"]?/i;
 const SCOPED_EXECUTABLE_ACCESS_FAILURE = /missing\s+executable\s+access\s+to\s+[`'\"]?[a-z0-9_./\\-]+[`'\"]?\s+through\s+the\s+provided\s+posse\s+tools\s+prevented\s+any\s+in-scope\s+change/i;
 const HUMAN_FILE_AUTHORITY_REQUIRED = /(?:human|operator)\s+(?:permission|approval)|credentials?|access\s+policy|scope\s+expansion/i;
+const CODEX_WINDOWS_SANDBOX_HELPER = /\b(?:codex-windows-sandbox-setup|codex(?:-windows)?-command-runner)\.exe\b/i;
+const CODEX_WINDOWS_SANDBOX_HELPER_FAILURE = /(?:orchestrator_helper_launch_failed|not found|program not found|failed to launch|could not (?:be )?launch(?:ed)?|unable to launch)/i;
+
+/**
+ * Returns true for a provider runtime/bootstrap failure that cannot be fixed
+ * by human task guidance. These blocks must follow the provider failure path
+ * so headless runs terminate and clean their WI worktrees instead of parking a
+ * synthetic human_input gate.
+ */
+export function isPermanentProviderRuntimeBlock(reason) {
+  const text = String(reason || "").trim();
+  if (!text) return false;
+  return CODEX_WINDOWS_SANDBOX_HELPER.test(text)
+    && CODEX_WINDOWS_SANDBOX_HELPER_FAILURE.test(text);
+}
 
 /**
  * Returns true when a BLOCKED reason (or attempt error_text) looks like a
@@ -47,6 +62,7 @@ const HUMAN_FILE_AUTHORITY_REQUIRED = /(?:human|operator)\s+(?:permission|approv
 export function isTransientMcpInfraBlock(reason) {
   const text = String(reason || "").trim();
   if (!text) return false;
+  if (isPermanentProviderRuntimeBlock(text)) return false;
 
   // Direct gateway identity + an unavailability signal.
   if (GATEWAY_IDENTITY.test(text) && UNAVAILABLE.test(text)) return true;

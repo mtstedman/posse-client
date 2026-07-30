@@ -31,7 +31,7 @@ import {
   buildCodexWebToolsOverrides,
 } from "./prompt-blocks.js";
 import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth.js";
-import { formatSpawnLaunchForError, getCodexLaunchState, isReadyAsync } from "./cli-discovery.js";
+import { buildCodexWindowsLaunchEnv, formatSpawnLaunchForError, getCodexLaunchState, isReadyAsync } from "./cli-discovery.js";
 import { buildCodexExecArgs, cleanupTempDir, collectCodexExtraDirs, makeTempOutputFile, prepareCodexConfigForSpawn } from "./cli-spawn.js";
 import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
@@ -421,7 +421,10 @@ export async function callProvider(promptText, {
       else if (onLine) onLine(line);
     };
 
-    const childEnv = buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env);
+    const childEnv = buildCodexWindowsLaunchEnv(
+      buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env),
+      codexCmd,
+    );
     if (preferredAuthMode === "oauth") {
       delete childEnv.CODEX_API_KEY;
       delete childEnv.OPENAI_API_KEY;

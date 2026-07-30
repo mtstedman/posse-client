@@ -28,6 +28,7 @@ const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_MAX_WS_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_WS_HELLO_TIMEOUT_MS = 5000;
+const DEFAULT_MAX_WS_BUFFERED_BYTES = 2 * DEFAULT_MAX_WS_FRAME_BYTES;
 const WS_CLOSE_REASON_MAX_BYTES = 123;
 
 function sendJson(res, status, body) {
@@ -169,6 +170,7 @@ export class LocalServer {
     getRelayStatus = null,
     startPosse = null,
     maxWsFrameBytes = DEFAULT_MAX_WS_FRAME_BYTES,
+    maxWsBufferedBytes = DEFAULT_MAX_WS_BUFFERED_BYTES,
     wsHelloTimeoutMs = DEFAULT_WS_HELLO_TIMEOUT_MS,
   } = {}) {
     this.host = host;
@@ -183,6 +185,10 @@ export class LocalServer {
     this.getRelayStatus = getRelayStatus;
     this.startPosse = startPosse;
     this.maxWsFrameBytes = Math.max(1024, Number(maxWsFrameBytes) || DEFAULT_MAX_WS_FRAME_BYTES);
+    this.maxWsBufferedBytes = Math.max(
+      this.maxWsFrameBytes,
+      Number(maxWsBufferedBytes) || DEFAULT_MAX_WS_BUFFERED_BYTES,
+    );
     this.wsHelloTimeoutMs = Math.max(1000, Number(wsHelloTimeoutMs) || DEFAULT_WS_HELLO_TIMEOUT_MS);
     this.server = null;
     this.clients = new Set();
@@ -517,8 +523,28 @@ export class LocalServer {
 
   sendWs(client, frame) {
     if (!client?.socket || client.socket.destroyed || client.closing) return false;
-    client.socket.write(encodeWsFrame(frame));
-    return true;
+    let encoded;
+    try {
+      encoded = encodeWsFrame(frame);
+    } catch {
+      this.closeWs(client, "internal");
+      return false;
+    }
+    const bufferedBytes = Math.max(0, Number(client.socket.writableLength) || 0);
+    if (bufferedBytes + encoded.length > this.maxWsBufferedBytes) {
+      client.closing = true;
+      this.removeClient(client);
+      try { client.socket.destroy(); } catch {}
+      return false;
+    }
+    try {
+      client.socket.write(encoded);
+      return true;
+    } catch {
+      this.removeClient(client);
+      try { client.socket.destroy(); } catch {}
+      return false;
+    }
   }
 
   broadcast(frame) {

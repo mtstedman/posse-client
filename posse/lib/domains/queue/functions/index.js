@@ -257,6 +257,7 @@ export {
   releaseMergeLock,
   releaseSchedulerLock,
   renewSchedulerLock,
+  withMergeLock,
 } from "./locks.js";
 
 export {
@@ -2664,7 +2665,7 @@ export function clearAll() {
 
 export { getJobStats, getWorkItemJobStats } from "./stats.js";
 
-export function cancelDeadlockedJobsAtomic(actorId = null) {
+export function cancelDeadlockedJobsAtomic(actorId = null, { workItemId = null } = {}) {
   const db = getDb();
   const ts = now();
   return runImmediateTransaction(db, () => {
@@ -2693,7 +2694,7 @@ export function cancelDeadlockedJobsAtomic(actorId = null) {
     // pass only updates rows still in queued state, so a changed row cannot be
     // canceled twice; if a pass makes no progress, the loop terminates.
     while (true) {
-      const deadlocked = findDeadlockedJobs();
+      const deadlocked = findDeadlockedJobs({ workItemId });
       if (deadlocked.length === 0) break;
 
       let changedThisPass = 0;

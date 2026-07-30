@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { createSingleflight } from "../../../../shared/concurrency/functions/singleflight.js";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { buildWindowsSpawn } from "../shared/windows-spawn.js";
 import { discoverCommandCandidates } from "../shared/cli-discovery.js";
@@ -13,6 +14,7 @@ import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth
 let CODEX_CMD = null;
 let CODEX_ARGS = [];
 let CODEX_RESOLVE_ERROR = null;
+const CODEX_RESOLVE_SINGLEFLIGHT = createSingleflight();
 const CODEX_REQUIRED_EXEC_FLAGS = [
   "--json",
   "--output-last-message",
@@ -31,6 +33,165 @@ function splitPathEntries(pathValue) {
 
 function getWindowsEnvPath() {
   return process.env.PATH || process.env.Path || "";
+}
+
+function windowsCodexHelperCandidates(executable, helperNames) {
+  const winPath = path.win32;
+  const commandDir = winPath.dirname(executable);
+  const packageRoot = winPath.dirname(commandDir);
+  return helperNames.flatMap((helperName) => [
+    winPath.join(commandDir, helperName),
+    winPath.join(packageRoot, "codex-resources", helperName),
+    winPath.join(packageRoot, "codex-path", helperName),
+  ]);
+}
+
+function windowsCodexExecutableHasRuntimeHelpers(executable, existsSyncImpl = fs.existsSync) {
+  try {
+    return existsSyncImpl(executable)
+      && windowsCodexHelperCandidates(executable, [
+        "codex-windows-sandbox-setup.exe",
+      ]).some((helper) => existsSyncImpl(helper))
+      && windowsCodexHelperCandidates(executable, [
+        "codex-command-runner.exe",
+        "codex-windows-command-runner.exe",
+      ]).some((helper) => existsSyncImpl(helper));
+  } catch {
+    return false;
+  }
+}
+
+export function findWindowsStandaloneCodexExecutables({
+  platform = process.platform,
+  homeDir = process.env.USERPROFILE || os.homedir(),
+  codexHome = process.env.CODEX_HOME || null,
+  existsSyncImpl = fs.existsSync,
+  readdirSyncImpl = fs.readdirSync,
+} = {}) {
+  if (platform !== "win32") return [];
+  const winPath = path.win32;
+  const standaloneRoot = winPath.join(
+    codexHome || winPath.join(homeDir, ".codex"),
+    "packages",
+    "standalone",
+  );
+  const candidates = [];
+  const add = (candidate) => {
+    if (!windowsCodexExecutableHasRuntimeHelpers(candidate, existsSyncImpl)) return;
+    const key = String(candidate).toLowerCase();
+    if (!candidates.some((entry) => String(entry).toLowerCase() === key)) {
+      candidates.push(candidate);
+    }
+  };
+
+  // The standalone installer maintains `current` as the active package. Use
+  // that stable path first so Posse never depends on a versioned directory.
+  add(winPath.join(standaloneRoot, "current", "bin", "codex.exe"));
+
+  // Keep release directories as a recovery path for partial installer
+  // upgrades where the `current` junction was not refreshed.
+  const releasesRoot = winPath.join(standaloneRoot, "releases");
+  try {
+    const entries = readdirSyncImpl(releasesRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry?.isDirectory?.()) continue;
+      add(winPath.join(releasesRoot, entry.name, "bin", "codex.exe"));
+    }
+  } catch {
+    // A missing/unreadable standalone package is normal for npm installs.
+  }
+  return candidates;
+}
+
+export function findWindowsLegacyCodexExecutables({
+  platform = process.platform,
+  localAppData = process.env.LOCALAPPDATA || "",
+  existsSyncImpl = fs.existsSync,
+  readdirSyncImpl = fs.readdirSync,
+} = {}) {
+  if (platform !== "win32" || !localAppData) return [];
+  const winPath = path.win32;
+  const binRoot = winPath.join(localAppData, "OpenAI", "Codex", "bin");
+  const candidates = [];
+  const addCompletePackage = (dir) => {
+    const executable = winPath.join(dir, "codex.exe");
+    if (!windowsCodexExecutableHasRuntimeHelpers(executable, existsSyncImpl)) return;
+    const key = executable.toLowerCase();
+    if (!candidates.some((entry) => entry.toLowerCase() === key)) candidates.push(executable);
+  };
+
+  // Older desktop/CLI installers placed one active package at the root and
+  // additional versioned packages in immediate child directories.
+  addCompletePackage(binRoot);
+  try {
+    for (const entry of readdirSyncImpl(binRoot, { withFileTypes: true })) {
+      if (entry?.isDirectory?.()) addCompletePackage(winPath.join(binRoot, entry.name));
+    }
+  } catch {
+    // This legacy layout is optional; standalone is preferred.
+  }
+  return candidates;
+}
+
+function windowsEnvPathKey(env = {}) {
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") || "Path";
+}
+
+export function buildCodexWindowsLaunchEnv(baseEnv = process.env, codexCmd = null, {
+  platform = process.platform,
+  existsSyncImpl = fs.existsSync,
+} = {}) {
+  const env = { ...(baseEnv || {}) };
+  if (platform !== "win32" || !codexCmd) return env;
+
+  const winPath = path.win32;
+  const commandDir = winPath.dirname(String(codexCmd));
+  const packageRoot = winPath.basename(commandDir).toLowerCase() === "bin"
+    ? winPath.dirname(commandDir)
+    : null;
+  const preferredDirs = [];
+  const addExistingDir = (dir) => {
+    if (!dir) return;
+    try {
+      if (!existsSyncImpl(dir)) return;
+    } catch {
+      return;
+    }
+    const key = String(dir).replace(/[\\/]+$/u, "").toLowerCase();
+    if (!preferredDirs.some((entry) => String(entry).replace(/[\\/]+$/u, "").toLowerCase() === key)) {
+      preferredDirs.push(dir);
+    }
+  };
+
+  if (packageRoot) {
+    const resourceDir = winPath.join(packageRoot, "codex-resources");
+    try {
+      if (existsSyncImpl(resourceDir)) {
+        addExistingDir(winPath.join(packageRoot, "bin"));
+        addExistingDir(resourceDir);
+        addExistingDir(winPath.join(packageRoot, "codex-path"));
+      }
+    } catch {
+      // Fall through to the executable directory below.
+    }
+  }
+  // npm/native layouts keep their helper executables beside codex.exe.
+  addExistingDir(commandDir);
+
+  if (preferredDirs.length === 0) return env;
+  const pathKey = windowsEnvPathKey(env);
+  const existing = String(env[pathKey] || "")
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const preferredKeys = new Set(
+    preferredDirs.map((entry) => String(entry).replace(/[\\/]+$/u, "").toLowerCase()),
+  );
+  const remaining = existing.filter(
+    (entry) => !preferredKeys.has(String(entry).replace(/[\\/]+$/u, "").toLowerCase()),
+  );
+  env[pathKey] = [...preferredDirs, ...remaining].join(";");
+  return env;
 }
 
 export function isProtectedWindowsAppCodexPath(candidate) {
@@ -256,6 +417,13 @@ function isCodexSandboxBinPath(candidate) {
   return /[\\/]\.codex[\\/]\.sandbox-bin[\\/]codex\.exe$/i.test(String(candidate || ""));
 }
 
+function isCodexWindowsBootstrapLauncherPath(candidate) {
+  const normalized = String(candidate || "").replace(/\//g, "\\").toLowerCase();
+  return isCodexSandboxBinPath(normalized)
+    || normalized.endsWith("\\programs\\openai\\codex\\bin\\codex.exe")
+    || normalized.endsWith("\\openai\\codex\\bin\\codex.exe");
+}
+
 function prioritizeCodexCandidatePaths(candidates = [], { configuredPath = null } = {}) {
   const configuredKey = String(configuredPath || "").replace(/\//g, "\\").toLowerCase();
   const configured = [];
@@ -306,13 +474,50 @@ function findCodexNativeExecutableForShim(candidate, {
 }
 
 function resolveCodexLaunchPath(candidate, options) {
-  return findCodexNativeExecutableForShim(candidate, options) || candidate;
+  const nativeNpmExecutable = findCodexNativeExecutableForShim(candidate, options);
+  if (nativeNpmExecutable) return nativeNpmExecutable;
+
+  const platform = options?.platform ?? process.platform;
+  if (platform === "win32" && isCodexWindowsBootstrapLauncherPath(candidate)) {
+    const homeDir = options?.homeDir ?? process.env.USERPROFILE ?? os.homedir();
+    const codexHome = options?.codexHome ?? process.env.CODEX_HOME ?? path.win32.join(homeDir, ".codex");
+    const current = path.win32.join(
+      codexHome,
+      "packages",
+      "standalone",
+      "current",
+      "bin",
+      "codex.exe",
+    );
+    const existsSyncImpl = options?.existsSyncImpl || fs.existsSync;
+    if (windowsCodexExecutableHasRuntimeHelpers(current, existsSyncImpl)) return current;
+    const legacy = findWindowsLegacyCodexExecutables({
+      platform,
+      localAppData: options?.localAppData ?? process.env.LOCALAPPDATA,
+      existsSyncImpl,
+      readdirSyncImpl: options?.readdirSyncImpl || fs.readdirSync,
+    });
+    if (legacy.length > 0) return legacy[0];
+  }
+  return candidate;
 }
 
 function getCodexCandidatePaths(configuredPath = getCodexConfiguredPath()) {
   const extraPaths = [];
   if (configuredPath) extraPaths.push(configuredPath);
   if (process.platform === "win32") {
+    extraPaths.push(...findWindowsStandaloneCodexExecutables());
+    extraPaths.push(...findWindowsLegacyCodexExecutables());
+    if (process.env.LOCALAPPDATA) {
+      extraPaths.push(path.win32.join(
+        process.env.LOCALAPPDATA,
+        "Programs",
+        "OpenAI",
+        "Codex",
+        "bin",
+        "codex.exe",
+      ));
+    }
     extraPaths.push(path.join(os.homedir(), ".codex", ".sandbox-bin", "codex.exe"));
     const appExe = findWindowsAppCodex();
     if (appExe) extraPaths.push(appExe);
@@ -464,7 +669,7 @@ function resolveCodex() {
   CODEX_ARGS = [];
 }
 export function ensureCodexResolved() {
-  if (!CODEX_CMD || (process.platform === "win32" && isBareCommand(CODEX_CMD))) {
+  if (codexLaunchNeedsResolution(CODEX_CMD)) {
     resolveCodex();
   }
 }
@@ -482,8 +687,25 @@ async function resolveCodexAsync() {
   CODEX_ARGS = [];
 }
 export async function ensureCodexResolvedAsync() {
-  if (!CODEX_CMD || (process.platform === "win32" && isBareCommand(CODEX_CMD))) {
-    await resolveCodexAsync();
+  if (!codexLaunchNeedsResolution(CODEX_CMD)) return;
+  await CODEX_RESOLVE_SINGLEFLIGHT.run("codex-cli-resolution", async () => {
+    // Another caller may have completed discovery while this caller was
+    // joining the single-flight.
+    if (codexLaunchNeedsResolution(CODEX_CMD)) await resolveCodexAsync();
+  });
+}
+
+function codexLaunchNeedsResolution(cmd, {
+  platform = process.platform,
+  existsSyncImpl = fs.existsSync,
+} = {}) {
+  if (!cmd) return true;
+  if (platform !== "win32") return false;
+  if (isBareCommand(cmd)) return true;
+  try {
+    return !existsSyncImpl(cmd);
+  } catch {
+    return true;
   }
 }
 
@@ -522,6 +744,22 @@ export function __testResolveCodexLaunchPath(candidate, options) {
 
 export function __testSelectCodexCandidateFromProbes(checked, options) {
   return selectCodexCandidateFromProbes(checked, options);
+}
+
+export function __testFindWindowsStandaloneCodexExecutables(options) {
+  return findWindowsStandaloneCodexExecutables(options);
+}
+
+export function __testFindWindowsLegacyCodexExecutables(options) {
+  return findWindowsLegacyCodexExecutables(options);
+}
+
+export function __testBuildCodexWindowsLaunchEnv(baseEnv, codexCmd, options) {
+  return buildCodexWindowsLaunchEnv(baseEnv, codexCmd, options);
+}
+
+export function __testCodexLaunchNeedsResolution(cmd, options) {
+  return codexLaunchNeedsResolution(cmd, options);
 }
 
 export function getCodexLaunchState() {

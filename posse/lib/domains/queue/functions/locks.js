@@ -120,6 +120,33 @@ export function forceAcquireSchedulerLock(lockName, ownerId, durationSec = 60) {
 }
 
 export function acquireMergeLock(ownerId, durationSec = 120) {
+  if (acquireSchedulerLock("merge", ownerId, durationSec)) return true;
+
+  // A merge process can die after acquiring its long-lived lease. Do not make
+  // every approval wait for the full lease when the recorded PID is positively
+  // gone, but never steal an unrecognized or merely inaccessible owner.
+  const held = getSchedulerLockInfo("merge");
+  const pidMatch = /^merge-(\d+)(?:$|[-:])/.exec(String(held?.owner_id || ""));
+  const heldPid = Number(pidMatch?.[1]);
+  if (!Number.isSafeInteger(heldPid) || heldPid <= 0 || heldPid === process.pid) return false;
+
+  try {
+    process.kill(heldPid, 0);
+    return false;
+  } catch (err) {
+    if (err?.code !== "ESRCH") return false;
+  }
+
+  // Match the complete observed lease so a PID-reuse or expiry/reacquire race
+  // cannot delete a newer lock that happens to have the same owner string.
+  const db = getDb();
+  db.prepare(`
+    DELETE FROM scheduler_locks
+    WHERE lock_name = 'merge'
+      AND owner_id = ?
+      AND acquired_at IS ?
+      AND expires_at IS ?
+  `).run(held.owner_id, held.acquired_at, held.expires_at);
   return acquireSchedulerLock("merge", ownerId, durationSec);
 }
 
@@ -134,9 +161,20 @@ const MERGE_LOCK_OWNER = `merge-${process.pid}`;
 
 export async function withMergeLock(fn, { ownerId = MERGE_LOCK_OWNER, durationSec = MERGE_LOCK_LEASE_SEC } = {}) {
   if (!acquireMergeLock(ownerId, durationSec)) return { acquired: false, result: undefined };
+  const renewEveryMs = Math.max(25, Math.floor(durationSec * 1000 / 3));
+  const renewInterval = setInterval(() => {
+    try {
+      renewSchedulerLock("merge", ownerId, durationSec);
+    } catch {
+      // A transient SQLite contention error should not abort a merge that is
+      // already in progress. The next renewal tick gets another chance.
+    }
+  }, renewEveryMs);
+  renewInterval.unref?.();
   try {
     return { acquired: true, result: await fn() };
   } finally {
+    clearInterval(renewInterval);
     releaseMergeLock(ownerId);
   }
 }

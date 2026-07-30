@@ -12,6 +12,7 @@ import {
 const DEFAULT_RECONNECT_BASE_MS = 1000;
 const DEFAULT_RECONNECT_MAX_MS = 30000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20000;
+const DEFAULT_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 
 function safeJsonParse(text) {
   try {
@@ -36,6 +37,7 @@ export class RelayClient extends EventEmitter {
     reconnectBaseMs = DEFAULT_RECONNECT_BASE_MS,
     reconnectMaxMs = DEFAULT_RECONNECT_MAX_MS,
     handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
+    maxBufferedBytes = DEFAULT_MAX_BUFFERED_BYTES,
   } = {}) {
     super();
     this.url = url;
@@ -51,6 +53,7 @@ export class RelayClient extends EventEmitter {
     this.reconnectBaseMs = Math.max(100, Number(reconnectBaseMs) || DEFAULT_RECONNECT_BASE_MS);
     this.reconnectMaxMs = Math.max(this.reconnectBaseMs, Number(reconnectMaxMs) || DEFAULT_RECONNECT_MAX_MS);
     this.handshakeTimeoutMs = Math.max(10, Number(handshakeTimeoutMs) || DEFAULT_HANDSHAKE_TIMEOUT_MS);
+    this.maxBufferedBytes = Math.max(1024, Number(maxBufferedBytes) || DEFAULT_MAX_BUFFERED_BYTES);
     this.socket = null;
     this.stopped = true;
     this.reconnectTimer = null;
@@ -291,7 +294,17 @@ export class RelayClient extends EventEmitter {
     const socket = this.socket;
     const generation = this.connectionGeneration;
     try {
-      socket.send(JSON.stringify(frame));
+      const payload = JSON.stringify(frame);
+      const bufferedBytes = Math.max(0, Number(socket.bufferedAmount) || 0);
+      if (bufferedBytes + Buffer.byteLength(payload) > this.maxBufferedBytes) {
+        this.failSocket(
+          socket,
+          generation,
+          new Error("relay websocket send buffer exceeded the safe limit"),
+        );
+        return false;
+      }
+      socket.send(payload);
       return true;
     } catch (err) {
       this.failSocket(socket, generation, err);

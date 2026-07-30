@@ -71,7 +71,9 @@ export function createGitWorkflowHelpers(options = {}) {
     _currentTargetBranch: context.currentTargetBranch,
     _collectDirtyState: review.collectDirtyState,
     _collectPushOfferState: push.collectPushOfferState,
+    _collectPushOfferStateAsync: push.collectPushOfferStateAsync,
     _executePush: push.executePush,
+    _executePushAsync: push.executePushAsync,
     _snapshotAndRemoveWorktreeOnly: cleanup.snapshotAndRemoveWorktreeOnly,
   };
 }
