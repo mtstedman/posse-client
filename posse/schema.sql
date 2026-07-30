@@ -7,7 +7,8 @@ PRAGMA foreign_keys = ON;
 -- end-state directly.
 --   1 = pre-ATLAS-v2 schema (implicit; older DBs return 0 by default).
 --   7 = + bridge change tracking for read-only stream cursors.
-PRAGMA user_version = 7;
+--   8 = + durable human-gate and assessment lifecycle state.
+PRAGMA user_version = 8;
 
 CREATE TABLE IF NOT EXISTS work_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
