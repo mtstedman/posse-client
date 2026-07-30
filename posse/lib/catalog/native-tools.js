@@ -675,7 +675,14 @@ const PLANNER_COMPACT_TASK_V3 = {
     role: { type: "string", enum: ["dev", "artificer", "promote"] },
     job_type: { type: "string", enum: ["dev", "artificer", "promote"], description: "Deprecated migration alias for role." },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
-    summary: { type: "string", minLength: 1, maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
+    summary: {
+      type: "string",
+      minLength: 1,
+      maxLength: 4000,
+      description:
+        "Target 2000 characters or fewer; 4000 is the summary hard ceiling. " +
+        "Posse preserves longer complete derived task text while the task stays within the 12000-character narrative safety ceiling.",
+    },
     claims: HANDOFF_CLAIMS,
     scope: PLANNER_SCOPE,
     constraints: HANDOFF_STRING_LIST,
@@ -859,7 +866,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; promote is a system role. " +
-    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. " +
+    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
     "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
@@ -999,7 +1006,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; promote is a system role. " +
-    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. " +
+    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
     "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",

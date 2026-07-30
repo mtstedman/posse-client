@@ -1276,6 +1276,13 @@ export class TrackedProviderClient {
             report_calls: handoffFinalization.reportCalls,
             evidence_chars: handoffFinalization.evidenceChars,
             materialized_packet_chars: handoffFinalization.materializedPacketChars,
+            planner_task_spec_count: handoffFinalization.plannerTaskSpecCount ?? null,
+            planner_task_spec_chars_max: handoffFinalization.plannerTaskSpecCharsMax ?? null,
+            planner_task_spec_chars_total: handoffFinalization.plannerTaskSpecCharsTotal ?? null,
+            planner_task_spec_over_recommended_count:
+              handoffFinalization.plannerTaskSpecOverRecommendedCount ?? null,
+            planner_task_spec_recommended_chars:
+              handoffFinalization.plannerTaskSpecRecommendedChars ?? null,
             continuation_prose_chars: handoffFinalization.continuationProseChars,
             materialized_output_chars: materializedOutput.length,
             materialized_output_sha256: crypto.createHash("sha256").update(materializedOutput).digest("hex"),

@@ -428,6 +428,7 @@ function _resolveObservationScopeForInsert(db, {
  *   observation_type?: string,
  *   summary?: string,
  *   detail?: unknown,
+ *   db?: import("better-sqlite3").Database | null,
  * }} input
  */
 export function recordObservation({
@@ -437,11 +438,12 @@ export function recordObservation({
   observation_type,
   summary,
   detail = null,
+  db: suppliedDb = null,
 } = {}) {
   if (!observation_type || !summary) return false;
 
   try {
-    const db = getDb();
+    const db = suppliedDb || getDb();
     const detailJson = normalizeJsonText(detail);
     const createdAt = nowIso();
     let scope = { work_item_id, job_id, attempt_id };

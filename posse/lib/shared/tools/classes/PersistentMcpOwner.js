@@ -25,7 +25,11 @@ import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contract
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import { getWorkItem } from "../../../domains/queue/functions/index.js";
-import { getAgentHandoffRecord, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
+import {
+  getAgentHandoffRecord,
+  recordAgentHandoffRejection,
+  rejectAgentHandoffForLaterTool,
+} from "../../../domains/handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
 import {
   assertSubAgentParentReady,
@@ -2048,6 +2052,7 @@ export class PersistentMcpOwner {
               toolArgs,
             );
           } catch (error) {
+            recordAgentHandoffRejection(session?.bootConfig?.agentCallId, error);
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,

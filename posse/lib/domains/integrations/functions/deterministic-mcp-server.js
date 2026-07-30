@@ -41,6 +41,7 @@ import {
 import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
+  recordAgentHandoffRejection,
   rejectAgentHandoffForLaterTool,
   stageAgentHandoff,
 } from "../../handoff/functions/agent-handoff.js";
@@ -3272,6 +3273,9 @@ async function handleRequest(msg) {
       });
       sendMessage(jsonRpcSuccess(id, { content: [{ type: "text", text: responseText }] }));
     } catch (err) {
+      if (toolName === "agent_handoff") {
+        recordAgentHandoffRejection(mcpAgentCallId, err);
+      }
       const handoffIssues = toolName === "agent_handoff" && Array.isArray(err?.issues)
         ? err.issues.slice(0, 24).map((issue) => ({
             code: String(issue?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),

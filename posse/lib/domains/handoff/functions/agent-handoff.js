@@ -9,6 +9,7 @@ import {
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
 import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
 import { fetchHashRefForContext } from "../../queue/functions/hash-refs.js";
+import { recordObservation } from "../../observability/functions/observations.js";
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
@@ -39,6 +40,7 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxIdChars: 80,
   recommendedSummaryChars: 2000,
   maxSummaryChars: 4000,
+  recommendedPlannerTaskSpecChars: 2000,
   recommendedSelectorLines: 40,
   maxSelectorLines: 300,
   recommendedSelectorChars: 4000,
@@ -1999,6 +2001,73 @@ function handoffRow(agentCallId, db = getDb()) {
   return ensureSchema(db).prepare(`SELECT * FROM ${TABLE} WHERE agent_call_id = ?`).get(id) || null;
 }
 
+function boundedHandoffRejection(error) {
+  const code = String(error?.code || "AGENT_HANDOFF_REJECTED").slice(0, 120);
+  const message = String(error?.message || error || "agent_handoff was rejected").slice(0, 1000);
+  const issues = Array.isArray(error?.issues)
+    ? error.issues.slice(0, 24).map((issue) => ({
+        code: String(issue?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
+        message: String(issue?.message || "Invalid agent_handoff arguments").slice(0, 500),
+      }))
+    : [];
+  return { code, message, issues };
+}
+
+export function recordAgentHandoffRejection(agentCallId, error, { db = getDb() } = {}) {
+  const id = positiveInt(agentCallId);
+  if (!id) return false;
+  try {
+    const call = db.prepare(`
+      SELECT work_item_id, job_id, attempt_id
+      FROM agent_calls
+      WHERE id = ?
+    `).get(id);
+    if (!call) return false;
+    const rejection = boundedHandoffRejection(error);
+    return recordObservation({
+      db,
+      work_item_id: positiveInt(call.work_item_id),
+      job_id: positiveInt(call.job_id),
+      attempt_id: positiveInt(call.attempt_id),
+      observation_type: "agent_handoff.rejected",
+      summary: `Rejected terminal agent handoff (${rejection.code})`,
+      detail: {
+        agent_call_id: id,
+        code: rejection.code,
+        message: rejection.message,
+        ...(rejection.issues.length > 0 ? { issues: rejection.issues } : {}),
+      },
+    });
+  } catch {
+    return false;
+  }
+}
+
+function latestAgentHandoffRejection(agentCallId, db = getDb()) {
+  const id = positiveInt(agentCallId);
+  if (!id) return null;
+  try {
+    const row = db.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE observation_type = 'agent_handoff.rejected'
+        AND json_valid(detail_json)
+        AND json_extract(detail_json, '$.agent_call_id') = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(id);
+    if (!row?.detail_json) return null;
+    const detail = JSON.parse(row.detail_json);
+    return plainObject(detail) ? boundedHandoffRejection({
+      code: detail.code,
+      message: detail.message,
+      issues: detail.issues,
+    }) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
   const row = handoffRow(agentCallId, db);
   if (!row) return null;
@@ -2204,8 +2273,6 @@ function evidenceRefs(report) {
   return lanes;
 }
 
-const PLANNER_TASK_SPEC_MAX_CHARS = 2000;
-
 function plannerTaskSpec(handoff) {
   const report = handoff.report || {};
   const sections = [];
@@ -2225,14 +2292,7 @@ function plannerTaskSpec(handoff) {
   if (constraints.length > 0) {
     sections.push(`Constraints:\n${constraints.map((constraint) => `- ${constraint}`).join("\n")}`);
   }
-  const taskSpec = sections.join("\n\n") || String(handoff.intent || "").trim();
-  if (taskSpec.length > PLANNER_TASK_SPEC_MAX_CHARS) {
-    fail(
-      "AGENT_HANDOFF_TOO_LARGE",
-      `planner task_spec exceeds ${PLANNER_TASK_SPEC_MAX_CHARS} characters; shorten summary, claims, or constraints`,
-    );
-  }
-  return taskSpec;
+  return sections.join("\n\n") || String(handoff.intent || "").trim();
 }
 
 function packetEvidence(packet) {
@@ -2442,6 +2502,14 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
     return { output, packet: null, applied: false };
   }
   if (!row) {
+    const rejection = latestAgentHandoffRejection(agentCallId, db);
+    if (rejection) {
+      const error = new Error(`agent_handoff was rejected (${rejection.code}: ${rejection.message})`);
+      error.code = "TERMINAL_PROTOCOL_ERROR";
+      error.handoffCode = rejection.code;
+      if (rejection.issues.length > 0) error.issues = rejection.issues;
+      throw error;
+    }
     fail("TERMINAL_PROTOCOL_ERROR", "agent_handoff was required but no report was staged");
   }
   if (row.status === "rejected") fail("TERMINAL_PROTOCOL_ERROR", `agent_handoff was rejected (${row.rejection_code || "protocol violation"})`);
@@ -2459,6 +2527,10 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
     fail("TERMINAL_PROTOCOL_ERROR", `agent_handoff evidence recheck failed: ${error?.message || String(error)}`);
   }
   const continuationChars = typeof output === "string" ? output.length : String(output ?? "").length;
+  const isPlannerPacket = packet.profile === "planner.plan.v1";
+  const plannerTaskSpecChars = isPlannerPacket
+    ? plannerCompatibilityTasks(packet).map((task) => task.task_spec.length)
+    : [];
   if (row.status === "staged") {
     ensureSchema(db).prepare(`
       UPDATE ${TABLE}
@@ -2475,5 +2547,18 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
     continuationProseChars: continuationChars,
     evidenceChars: packet.evidence_chars,
     materializedPacketChars: row.materialized_packet_json.length,
+    plannerTaskSpecCount: isPlannerPacket ? plannerTaskSpecChars.length : null,
+    plannerTaskSpecCharsMax: plannerTaskSpecChars.length > 0 ? Math.max(...plannerTaskSpecChars) : null,
+    plannerTaskSpecCharsTotal: isPlannerPacket
+      ? plannerTaskSpecChars.reduce((sum, chars) => sum + chars, 0)
+      : null,
+    plannerTaskSpecOverRecommendedCount: isPlannerPacket
+      ? plannerTaskSpecChars.filter(
+          (chars) => chars > AGENT_HANDOFF_LIMITS.recommendedPlannerTaskSpecChars,
+        ).length
+      : null,
+    plannerTaskSpecRecommendedChars: isPlannerPacket
+      ? AGENT_HANDOFF_LIMITS.recommendedPlannerTaskSpecChars
+      : null,
   };
 }

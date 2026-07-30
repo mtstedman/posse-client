@@ -12,6 +12,7 @@ import { createChainLedger } from "../../../../shared/tools/functions/chain-ledg
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
 import {
+  recordAgentHandoffRejection,
   rejectAgentHandoffForLaterTool,
   stageAgentHandoff,
 } from "../../../handoff/functions/agent-handoff.js";
@@ -333,24 +334,29 @@ export function createStandardToolHandlerMap({
   const handlers = {
     agent_handoff(args, ctx) {
       const ambient = getObservationContext() || {};
-      assertSubAgentParentReady(ambient.agent_call_id);
-      const preparedSubAgentHandoff = prepareSubAgentHandoff(ambient.agent_call_id, args || {});
-      const receipt = stageAgentHandoff(args || {}, {
-        context: ambient,
-        role: ctx?.role || ctx?.declaredScope?.role || "",
-        maxHandoffs: (ctx?.role || ctx?.declaredScope?.role) === "planner"
-          ? getIntSetting("planner_max_tasks", 50)
-          : 1,
-      });
-      if (preparedSubAgentHandoff) sealSubAgentHandoff(ambient.agent_call_id);
-      return JSON.stringify({
-        ok: true,
-        protocol: "posse.agent_handoff.v1",
-        status: receipt.status,
-        digest: receipt.digest,
-        call_count: receipt.callCount,
-        terminal: true,
-      });
+      try {
+        assertSubAgentParentReady(ambient.agent_call_id);
+        const preparedSubAgentHandoff = prepareSubAgentHandoff(ambient.agent_call_id, args || {});
+        const receipt = stageAgentHandoff(args || {}, {
+          context: ambient,
+          role: ctx?.role || ctx?.declaredScope?.role || "",
+          maxHandoffs: (ctx?.role || ctx?.declaredScope?.role) === "planner"
+            ? getIntSetting("planner_max_tasks", 50)
+            : 1,
+        });
+        if (preparedSubAgentHandoff) sealSubAgentHandoff(ambient.agent_call_id);
+        return JSON.stringify({
+          ok: true,
+          protocol: "posse.agent_handoff.v1",
+          status: receipt.status,
+          digest: receipt.digest,
+          call_count: receipt.callCount,
+          terminal: true,
+        });
+      } catch (error) {
+        recordAgentHandoffRejection(ambient.agent_call_id, error);
+        throw error;
+      }
     },
     async sub_agent(args) {
       const ambient = getObservationContext() || {};
