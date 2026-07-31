@@ -66,10 +66,10 @@ export const TOOL_EDIT_FILE = {
       new_string: { type: "string", description: "Replacement text" },
       replaceLines: {
         type: "object",
-        description: "Replace a 0-based line range [start, end) with content.",
+        description: "Replace a 1-based inclusive line range [start, end] with content. Line numbers match read_file output.",
         properties: {
-          start: { type: "integer", description: "0-based start line, inclusive" },
-          end: { type: "integer", description: "0-based end line, exclusive" },
+          start: { type: "integer", minimum: 1, description: "1-based start line, inclusive" },
+          end: { type: "integer", minimum: 1, description: "1-based end line, inclusive" },
           content: { type: "string", description: "Replacement content" },
         },
         required: ["start", "end", "content"],
@@ -88,9 +88,9 @@ export const TOOL_EDIT_FILE = {
       },
       insertAt: {
         type: "object",
-        description: "Insert content before a 0-based line number.",
+        description: "Insert content before a 1-based line number. Line numbers match read_file output; use line_count + 1 to insert after the last line.",
         properties: {
-          line: { type: "integer", description: "0-based insertion line" },
+          line: { type: "integer", minimum: 1, description: "1-based insertion line" },
           content: { type: "string", description: "Content to insert" },
         },
         required: ["line", "content"],
@@ -364,8 +364,8 @@ export const TOOL_AGENT_HANDOFF = {
                   type: "array",
                   maxItems: 12,
                   description:
-                    'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis without refs"}]]. ' +
-                    "The evidence object is optional. Put hash refs only in proof, support, and decoy selector positions; never put them in claim text or prose. " +
+                    'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
+                    "The evidence object is optional. Hash refs are legal in narrative text and remain compact opaque references there. Only proof, support, and decoy selector positions are deterministically resolved, range-validated, and expanded. " +
                     "Proof accepts only storage-owned tool evidence; agent-created prose refs may appear only in support or decoy. " +
                     "Evidence lanes accept only opaque hash-ref selectors, never file paths or path:line strings.",
                   items: {

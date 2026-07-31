@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import {
+  hasPassiveRepoRequirementIntent,
   hasRepoMutationIntent,
   hasUnnegatedVerbIntent,
 } from "./implementation-intent.js";
@@ -155,13 +156,25 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     String.raw`\b${reportVerb}\b[\s\S]{0,80}\b${reportNoun}\b|\b${reportNoun}\b[\s\S]{0,80}\b${reportVerb}\b`,
   );
 
-  const questionIntent = /\b(why|what|where|how|explain|understand|investigate)\b/.test(lower);
+  const directQuestionIntent = /(?:^|[.!?\r\n]\s*)(?:why|what|where|how|who|when|which)\b/.test(lower)
+    || /(?:^|[.!?\r\n]\s*)(?:can|could|would|will|do|does|is|are|should)\b[^.!?\r\n]*\?/.test(lower);
+  const explicitReadOnlyIntent = hasUnnegatedVerbIntent(lower, [
+    "explain",
+    "investigate",
+    "describe",
+    "analyze",
+    "analyse",
+    "review",
+  ]);
+  const questionIntent = directQuestionIntent || explicitReadOnlyIntent;
   const selfDirectedImplementationQuestion = /\b(?:how|what|where)\s+(?:do|can|should|would)\s+(?:i|we)\b/.test(lower);
-  const implementationIntent = hasRepoMutationIntent(lower, {
+  const passiveRequirementIntent = hasPassiveRepoRequirementIntent(lower);
+  const implementationIntent = passiveRequirementIntent || hasRepoMutationIntent(lower, {
     includeCreate: true,
     includeCompletion: true,
   });
-  const strongImplementationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
+  const strongImplementationIntent = passiveRequirementIntent
+    || hasRepoMutationIntent(lower, { includeCompletion: true });
   const bugfixVerbIntent = hasUnnegatedVerbIntent(lower, ["fix", "correct", "repair"]);
 
   // Mutation language is authoritative for build intake. Requests such as
@@ -178,12 +191,12 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "image";
     hints.output_mode = "auto";
     hints.desired_outputs = ["artifact"];
-  } else if (questionIntent && (selfDirectedImplementationQuestion || !strongImplementationIntent)) {
+  } else if (selfDirectedImplementationQuestion) {
     hints.intent_type = "question";
     hints.deliverable_type = "answer";
     hints.output_mode = "auto";
     hints.desired_outputs = ["question_only"];
-  } else if (bugfixVerbIntent || /\b(bug|broken|regression|error|crash|failing)\b/.test(lower)) {
+  } else if (bugfixVerbIntent || (!questionIntent && /\b(bug|broken|regression|error|crash|failing)\b/.test(lower))) {
     hints.intent_type = "bugfix";
     hints.deliverable_type = "code";
     hints.output_mode = "auto";
@@ -237,22 +250,32 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
   const desiredOutputs = _parseDesiredOutputs(input.desired_outputs || input.output_mode, inferred.desired_outputs || []);
   const inferredOutputMode = String(inferred.output_mode || "auto").toLowerCase();
   const inputOutputMode = String(input.output_mode || "").trim().toLowerCase();
+  const explicitDesiredOutputs = _dedupe(
+    _splitList(input.desired_outputs)
+      .map((item) => String(item || "").trim().toLowerCase())
+      .filter((item) => VALID_DESIRED_OUTPUTS.has(item)),
+  );
+  const neutralAutoOutput = inputOutputMode === "auto" && explicitDesiredOutputs.length === 0;
   const legacyExplicitOutputMode = _hasValue(input, "output_mode")
     && inputOutputMode
     && inputOutputMode !== "auto"
     && inputOutputMode !== inferredOutputMode;
-  const outputModeSource = _normalizeHintSource(
-    input.output_mode_source,
-    legacyExplicitOutputMode ? "explicit" : "inferred",
-  );
+  const outputModeSource = neutralAutoOutput
+    ? "inferred"
+    : _normalizeHintSource(
+      input.output_mode_source,
+      legacyExplicitOutputMode ? "explicit" : "inferred",
+    );
   const deliverableTypeSource = _normalizeHintSource(
     input.deliverable_type_source,
     _hasValue(input, "deliverable_type") ? "explicit" : "inferred",
   );
-  const desiredOutputsSource = _normalizeHintSource(
-    input.desired_outputs_source,
-    (_hasValue(input, "desired_outputs") || legacyExplicitOutputMode) ? "explicit" : "inferred",
-  );
+  const desiredOutputsSource = neutralAutoOutput
+    ? "inferred"
+    : _normalizeHintSource(
+      input.desired_outputs_source,
+      (_hasValue(input, "desired_outputs") || legacyExplicitOutputMode) ? "explicit" : "inferred",
+    );
   const intentTypeSource = inputIntentExplicit || inlineOneshotIntent
     ? "explicit"
     : inputIntentSource;

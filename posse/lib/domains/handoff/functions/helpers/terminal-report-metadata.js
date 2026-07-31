@@ -30,8 +30,6 @@ const RESEARCH_USEFULNESS = new Set(["primary", "supporting", "context", "low"])
 const RESEARCH_EVIDENCE = new Set(["audited_file_read", "atlas", "search", "prior_research", "web"]);
 const CONFIDENCE = new Set(["high", "medium", "low"]);
 const QUESTION_CATEGORIES = new Set(["data-handling", "security", "convention", "config", "unclear-pattern"]);
-const NARRATIVE_HASH_TOKEN_RE = /#[0-9a-z]{4,12}\b/gi;
-
 function fail(code, message) {
   const err = new Error(message);
   err.code = code;
@@ -40,19 +38,6 @@ function fail(code, message) {
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-
-export function containsNarrativeHashRef(value) {
-  const text = String(value || "");
-  for (const match of text.matchAll(NARRATIVE_HASH_TOKEN_RE)) {
-    const body = match[0].slice(1);
-    // Six- and eight-digit hexadecimal values are unambiguous CSS-style color
-    // literals in task prose. Three-digit colors never reach this regex, while
-    // the normal four-character hash-ref aliases remain protected.
-    if ([6, 8].includes(body.length) && /^[0-9a-f]+$/i.test(body)) continue;
-    return true;
-  }
-  return false;
 }
 
 function exactKeys(value, allowed, label) {
@@ -71,9 +56,6 @@ function boundedString(value, label, max, { required = true } = {}) {
   const text = value.trim();
   if (required && !text) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} is required`);
   if (text.length > max) fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${max} characters`);
-  if (containsNarrativeHashRef(text)) {
-    fail("AGENT_HANDOFF_REF_OUTSIDE_SELECTOR", `${label} contains a hash ref outside an evidence selector`);
-  }
   const sensitiveLabel = detectSensitiveAgentHandoffText(text);
   if (sensitiveLabel) fail("AGENT_HANDOFF_SENSITIVE_CONTENT", `${label} contains sensitive content (${sensitiveLabel})`);
   return text;

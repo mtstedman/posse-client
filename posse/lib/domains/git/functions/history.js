@@ -1,5 +1,7 @@
 import path from "path";
-import { runGitNativeMethod } from "./native/invoke.js";
+import { runGitNativeMethodAsync } from "./native/invoke.js";
+
+const SAFE_DIFF_REF_TOKEN_RE = /^(?!-)[A-Za-z0-9][A-Za-z0-9._/@{}~^+-]*$/;
 
 export const TOOL_GIT_HISTORY = {
   type: "function",
@@ -16,7 +18,7 @@ export const TOOL_GIT_HISTORY = {
         description: "Git history operation to run.",
       },
       path: { type: "string", description: "Optional file path filter. Required for blame." },
-      ref: { type: "string", description: "Optional git ref/revision selector (e.g. HEAD~5)." },
+      ref: { type: "string", description: "Optional git ref/revision selector (e.g. HEAD~5). For diff, two safe refs separated by whitespace are normalized to A..B." },
       limit: { type: "integer", description: "log-only result cap. Default: 20, max: 100." },
       since: { type: "string", description: "log-only --since value (e.g. 2025-01-01)." },
       author: { type: "string", description: "log-only --author filter." },
@@ -51,12 +53,19 @@ function scopeListsFromPredicates(scopePredicates) {
   };
 }
 
+function normalizeHistoryRef(op, value) {
+  if (op !== "diff" || typeof value !== "string") return value;
+  const parts = value.trim().split(/\s+/);
+  if (parts.length !== 2 || !parts.every((part) => SAFE_DIFF_REF_TOKEN_RE.test(part))) return value;
+  return `${parts[0]}..${parts[1]}`;
+}
+
 export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
   if (typeof safePath !== "function") {
     throw new Error("createGitHistoryExecutor requires a safePath function");
   }
 
-  return function execGitHistory(args = {}, cwd, scopePredicates) {
+  return async function execGitHistory(args = {}, cwd, scopePredicates) {
     if (!args || typeof args !== "object") return "Error: git_history requires an argument object.";
     const op = String(args.op || "").trim();
 
@@ -75,7 +84,7 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
       cwd,
       op,
       path: relPath || null,
-      ref: args.ref ?? null,
+      ref: normalizeHistoryRef(op, args.ref) ?? null,
       limit: args.limit ?? null,
       since: args.since ?? null,
       author: args.author ?? null,
@@ -85,7 +94,7 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
     };
 
     try {
-      return runGitNativeMethod("git.history", nativePayload, nativeParity);
+      return await runGitNativeMethodAsync("git.history", nativePayload, nativeParity);
     } catch (err) {
       const msg = String(err?.stderr || err?.message || err || "unknown git error").trim();
       return `Error: git_history failed - ${msg || "unknown git error"}`;

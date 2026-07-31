@@ -143,7 +143,7 @@ function repairModelNativeFullFileEditCall(call, targetPath, exactSource) {
     arguments: {
       path: targetPath,
       replaceLines: {
-        start: 0,
+        start: 1,
         end: sourceLineCount,
         content: replacement,
       },

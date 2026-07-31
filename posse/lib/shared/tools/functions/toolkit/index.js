@@ -571,7 +571,7 @@ export function createDeterministicToolkit({
     }
 
     const content = fs.readFileSync(filePath, "utf-8");
-    const lines = content.split("\n");
+    const { lines } = splitEditableLines(content);
     const offset = Math.max(0, toPositiveInt(args.offset, 1) - 1);
     const limit = toPositiveInt(args.limit, READ_FILE_DEFAULT_LIMIT);
     const selected = lines.slice(offset, offset + limit);
@@ -696,14 +696,14 @@ export function createDeterministicToolkit({
       const source = replaceLines && typeof replaceLines === "object" && !Array.isArray(replaceLines) ? replaceLines : {};
       const start = Number(source.start);
       const end = Number(source.end);
-      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) {
-        return "Error: replaceLines requires integer start/end with 0 <= start <= end.";
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
+        return "Error: replaceLines requires a 1-based inclusive integer range with 1 <= start <= end.";
       }
       const { eol, hadFinalEol, lines } = splitEditableLines(content);
-      if (start > lines.length || end > lines.length) {
+      if (end > lines.length) {
         return `Error: replaceLines range ${start}:${end} is outside ${filePath} (${lines.length} lines).`;
       }
-      lines.splice(start, end - start, ...splitReplacementLines(source.content));
+      lines.splice(start - 1, end - start + 1, ...splitReplacementLines(source.content));
       content = joinEditableLines(lines, eol, hadFinalEol);
       if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
       writeTextFileAtomic(filePath, content);
@@ -747,10 +747,10 @@ export function createDeterministicToolkit({
     if (modes[0] === "insertAt") {
       const source = insertAt && typeof insertAt === "object" && !Array.isArray(insertAt) ? insertAt : {};
       const line = Number(source.line);
-      if (!Number.isInteger(line) || line < 0) return "Error: insertAt requires a non-negative integer line.";
+      if (!Number.isInteger(line) || line < 1) return "Error: insertAt requires a positive 1-based integer line.";
       const { eol, hadFinalEol, lines } = splitEditableLines(content);
-      if (line > lines.length) return `Error: insertAt line ${line} is outside ${filePath} (${lines.length} lines).`;
-      lines.splice(line, 0, ...splitReplacementLines(source.content));
+      if (line > lines.length + 1) return `Error: insertAt line ${line} is outside ${filePath} (${lines.length} lines).`;
+      lines.splice(line - 1, 0, ...splitReplacementLines(source.content));
       content = joinEditableLines(lines, eol, hadFinalEol);
       if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
       writeTextFileAtomic(filePath, content);
@@ -920,8 +920,6 @@ export function createDeterministicToolkit({
         "--color=never",
         "--no-messages",
         "--hidden",
-        "--sort",
-        "path",
         "--max-filesize",
         String(SEARCH_MAX_FILE_BYTES),
       ];
@@ -989,15 +987,17 @@ export function createDeterministicToolkit({
         return page.join("\n") || "No matches found.";
       }
 
-      const rows = contentRows.map((entry) => {
-        const out = [`${entry.file}:${entry.line}:${entry.text}`];
-        if (entry.before.length > 0 || entry.after.length > 0) {
-          for (const before of entry.before) out.push(`${entry.file}:${before.line}-${before.text}`);
-          for (const after of entry.after) out.push(`${entry.file}:${after.line}+${after.text}`);
-          out.push("--");
-        }
-        return out.join("\n");
-      });
+      const rows = contentRows
+        .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.text.localeCompare(b.text))
+        .map((entry) => {
+          const out = [`${entry.file}:${entry.line}:${entry.text}`];
+          if (entry.before.length > 0 || entry.after.length > 0) {
+            for (const before of entry.before) out.push(`${entry.file}:${before.line}-${before.text}`);
+            for (const after of entry.after) out.push(`${entry.file}:${after.line}+${after.text}`);
+            out.push("--");
+          }
+          return out.join("\n");
+        });
       const page = rows.slice(offset, offset + headLimit);
       return page.join("\n") || "No matches found.";
     } catch (err) {

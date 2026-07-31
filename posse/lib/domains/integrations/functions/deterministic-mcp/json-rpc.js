@@ -39,7 +39,13 @@ const MCP_TOOL_REJECTION_TEXT_RE = /\b(?:not allowed|not permitted|denied|reject
 function structuredToolOutcome(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.ok !== "boolean") return null;
   if (value.ok) return "succeeded";
-  return STRUCTURED_TOOL_FAILURE_RE.test(JSON.stringify(value)) ? "failed" : "rejected";
+  const status = String(value.status || "").trim().toLowerCase();
+  if (["unavailable", "skipped"].includes(status)) return "succeeded";
+  const serialized = JSON.stringify(value);
+  if (/\b(?:unavailable|skipped)\b/i.test(serialized) && !STRUCTURED_TOOL_FAILURE_RE.test(serialized)) {
+    return "succeeded";
+  }
+  return STRUCTURED_TOOL_FAILURE_RE.test(serialized) ? "failed" : "rejected";
 }
 
 export function classifyNativeToolResult(text) {

@@ -183,8 +183,13 @@ function prepareWriteMode(payload = {}) {
   }
   if (payload.replaceLines !== undefined) {
     const source = payload.replaceLines && typeof payload.replaceLines === "object" ? payload.replaceLines : {};
-    const start = clampInt(source.start, 0, ATLAS_MAX_FILE_LINES, 0);
-    const end = clampInt(source.end, 0, ATLAS_MAX_FILE_LINES, start);
+    const rawStart = Number(source.start);
+    const rawEnd = Number(source.end);
+    if (!Number.isInteger(rawStart) || !Number.isInteger(rawEnd) || rawStart < 1 || rawEnd < 1) {
+      throw new Error("ATLAS file.write replaceLines requires 1-based positive integer start/end values.");
+    }
+    const start = clampInt(rawStart, 1, ATLAS_MAX_FILE_LINES, 1);
+    const end = clampInt(rawEnd, 1, ATLAS_MAX_FILE_LINES, start);
     if (end < start) throw new Error("ATLAS file.write replaceLines end must be >= start.");
     return {
       replaceLines: {
@@ -218,9 +223,13 @@ function prepareWriteMode(payload = {}) {
     return { jsonPath, jsonValue: payload.jsonValue };
   }
   const source = payload.insertAt && typeof payload.insertAt === "object" ? payload.insertAt : {};
+  const rawLine = Number(source.line);
+  if (!Number.isInteger(rawLine) || rawLine < 1) {
+    throw new Error("ATLAS file.write insertAt requires a positive 1-based integer line.");
+  }
   return {
     insertAt: {
-      line: clampInt(source.line, 0, ATLAS_MAX_FILE_LINES, 0),
+      line: clampInt(rawLine, 1, ATLAS_MAX_FILE_LINES + 1, 1),
       content: truncateWriteContent(source.content),
     },
   };

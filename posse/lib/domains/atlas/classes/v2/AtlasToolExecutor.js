@@ -969,14 +969,28 @@ export class AtlasToolExecutor {
     const config = request.config || {};
     const session = request.session || {};
     const boot = session.bootConfig || session || {};
-    const repoRoot = config.repoRoot || config.cwd || boot?.atlas?.repoPath || boot?.cwd || null;
+    const atlas = boot?.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
+    const repoRoot = config.repoRoot || config.cwd || atlas.repoPath || boot?.cwd || null;
     if (!repoRoot) return null;
+    const storageRepoRoot = config.storageRepoPath || atlas.storageRepoPath || repoRoot;
     return {
-      viewPath: mainViewPath(repoRoot),
-      ledgerPath: ledgerDbPath(repoRoot),
-      versionId: String(config.versionId || boot?.atlas?.versionId || "main"),
-      readRoot: String(repoRoot),
-      repoId: config.repoId || boot?.atlas?.repoId || null,
+      viewPath: String(
+        config.graphDbPath
+        || config.requestedGraphDbPath
+        || atlas.graphDbPath
+        || atlas.requestedGraphDbPath
+        || mainViewPath(repoRoot),
+      ),
+      ledgerPath: String(
+        config.ledgerDbPath
+        || config.atlasV2LedgerDbPath
+        || atlas.ledgerDbPath
+        || atlas.atlasV2LedgerDbPath
+        || ledgerDbPath(storageRepoRoot),
+      ),
+      versionId: String(config.versionId || atlas.versionId || "main"),
+      readRoot: String(config.readRoot || config.cwd || boot?.cwd || repoRoot),
+      repoId: config.repoId || atlas.repoId || null,
       config,
     };
   }

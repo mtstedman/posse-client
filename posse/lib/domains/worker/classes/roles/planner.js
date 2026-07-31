@@ -165,7 +165,7 @@ export class PlannerRole extends BaseRole {
             "ATLAS COMPACT HANDOFF ROUTING:",
             "Do not add dev_brief to a compact agent_handoff task. Posse derives the downstream dev brief from the task's scope and claims.",
             "Claims are optional. When evidence materially supports the plan, use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
-            "Put hash refs only in proof, support, or decoy selector objects. Never put refs in narrative fields, task scope, or success criteria.",
+            "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Only proof, support, and decoy selector objects are deterministically resolved, range-validated, and expanded.",
             "",
           ].join("\n")
         : [
@@ -173,7 +173,7 @@ export class PlannerRole extends BaseRole {
           "Add a task-specific dev_brief to every dev code task supported by this ATLAS research packet. Each brief must contain only that task's scoped read guidance and evidence.",
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief or repeat task requirements in summary.",
-          "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane instead of repeating or discarding it. Put refs in dev_brief only: never repeat hash-ref stubs in task_spec or success_criteria. Refs stay as compact durable intake; dev agents fetch exact evidence on demand only when they will rely on it. Decoy refs must include a short why.",
+          "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane when it should be deterministically expanded. Refs may also appear in task_spec or success_criteria as compact opaque references; those narrative occurrences are not expanded. Dev agents fetch exact evidence on demand only when they will rely on it. Decoy refs must include a short why.",
           "",
           ].join("\n")
       : "";

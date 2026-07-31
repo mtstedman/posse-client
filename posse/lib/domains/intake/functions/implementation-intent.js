@@ -14,11 +14,27 @@ const REPO_MUTATION_VERBS = Object.freeze([
   "repair",
   "replace",
   "clean",
+  "surface",
+  "show",
+  "display",
+  "expose",
+  "split",
+  "separate",
+  "move",
+  "rename",
+  "wire",
+  "connect",
+  "enable",
+  "disable",
 ]);
 
 const NEGATED_VERB_PREFIX_RE =
   /\b(?:do\s+not|don't|dont|never|no\s+need\s+to)\b[^.!?\r\n]{0,80}$/iu;
 const CLAUSE_SEPARATOR_RE = /[,;—]|\b(?:but|however|instead)\b/iu;
+const PASSIVE_REQUIREMENT_RE =
+  /\b(?:should|must|needs?\s+to|ought\s+to|has\s+to|have\s+to)\b/iu;
+const SELF_DIRECTED_REQUIREMENT_RE =
+  /\b(?:should|must|can|could|would|will|do|does)\s+(?:i|we)\b/iu;
 
 export function hasUnnegatedVerbIntent(text, verbs) {
   const alternatives = [...new Set((verbs || []).map((verb) => String(verb || "").trim()).filter(Boolean))]
@@ -47,4 +63,14 @@ export function hasRepoMutationIntent(
     ...(includeCompletion ? ["complete", "correct"] : []),
   ];
   return hasUnnegatedVerbIntent(text, verbs);
+}
+
+export function hasPassiveRepoRequirementIntent(text) {
+  const sentences = String(text || "").match(/[^.!?\r\n]+[.!?\r\n]*/gu) || [String(text || "")];
+  return sentences.some((sentence) => {
+    const trimmed = sentence.trim();
+    if (!trimmed || trimmed.endsWith("?")) return false;
+    if (SELF_DIRECTED_REQUIREMENT_RE.test(trimmed)) return false;
+    return PASSIVE_REQUIREMENT_RE.test(trimmed);
+  });
 }

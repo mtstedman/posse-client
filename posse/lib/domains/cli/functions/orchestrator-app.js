@@ -1028,7 +1028,8 @@ const RESPONSE_SHAPE_ALIASES = new Map([
 function normalizeResponseShapeChoice(value, fallback = "auto") {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) return { value: fallback, explicit: false };
-  return { value: RESPONSE_SHAPE_ALIASES.get(raw) || raw, explicit: true };
+  const normalized = RESPONSE_SHAPE_ALIASES.get(raw) || raw;
+  return { value: normalized, explicit: normalized !== "auto" };
 }
 
 async function promptForResponseShapeChoice(defaultOutputMode = "auto") {

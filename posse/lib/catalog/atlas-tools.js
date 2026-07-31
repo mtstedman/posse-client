@@ -1146,9 +1146,10 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         content: { type: "string", description: "Full file content for create/overwrite mode." },
         replaceLines: {
           type: "object",
+          description: "Replace a 1-based inclusive line range. Line numbers match deterministic read_file output.",
           properties: {
-            start: { type: "integer", description: "0-based inclusive start line." },
-            end: { type: "integer", description: "0-based exclusive end line." },
+            start: { type: "integer", minimum: 1, description: "1-based inclusive start line." },
+            end: { type: "integer", minimum: 1, description: "1-based inclusive end line." },
             content: { type: "string", description: "Replacement content." },
           },
           required: ["start", "end", "content"],
@@ -1168,8 +1169,9 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         jsonValue: { description: "Value to write when jsonPath is used." },
         insertAt: {
           type: "object",
+          description: "Insert before a 1-based line; use line_count + 1 to insert after the last line.",
           properties: {
-            line: { type: "integer", description: "0-based line number to insert at." },
+            line: { type: "integer", minimum: 1, description: "1-based line number to insert before." },
             content: { type: "string", description: "Content to insert." },
           },
           required: ["line", "content"],
