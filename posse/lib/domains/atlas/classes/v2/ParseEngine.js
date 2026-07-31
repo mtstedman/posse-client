@@ -2671,6 +2671,12 @@ export class ParseEngine {
             native_elapsed_ms: event?.elapsedMs ?? null,
           });
           this.#emitProgress({ ...event, stage: "embeddings", stream: "system" });
+          // Also hand the native tick to the runner's per-batch callback so
+          // its streaming progress events (atlas.parse.onnx.progress) carry
+          // the live native inference counts for the boot encode bar.
+          if (typeof onProgress === "function") {
+            try { onProgress(event); } catch { /* progress is observational */ }
+          }
         };
         const vectors = supportsStructuredSymbols
           ? await encoder.encodeSymbols(symbols, signal, onNativeProgress)

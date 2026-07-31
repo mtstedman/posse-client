@@ -1,7 +1,14 @@
 // lib/domains/git/functions/workflow-auto-merge.js
 // End-of-run auto-merge orchestration.
 
-import { listCrossWiMergeBlockers, listWorkItems, logEvent, refreshWorkItemStatuses, setMergeState } from "../../queue/functions/index.js";
+import {
+  listCrossWiMergeBlockers,
+  listWorkItems,
+  logEvent,
+  markWorkItemMergeFailed,
+  refreshWorkItemStatuses,
+  setMergeState,
+} from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { gcWorktreesAsync } from "./worktree.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -169,7 +176,7 @@ export function createAutoMergeWorkflowHelpers(context, {
           });
           say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ${result.message}`);
         } else {
-          setMergeState(wi.id, "merge_failed");
+          markWorkItemMergeFailed(wi.id);
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORK_ITEM_MERGE_FAILED,

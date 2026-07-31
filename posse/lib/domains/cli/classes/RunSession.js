@@ -1497,6 +1497,12 @@ export class RunSession {
       let atlasEncodeStarted = false;
       let atlasEncodeStartedAt = null;
       let bootEncodeProgress = null;
+      // True while the streaming ONNX ride-along (the shared tree-sitter ×
+      // SCIP intake's output lane) is encoding documents DURING parse. Its
+      // structured events drive the encode bar with real document counts, but
+      // must not arm the post-view "Enter to background" hold, and the panel
+      // must not read its activity as "ledger inputs landed".
+      let atlasStreamingOnnxActive = false;
       // Tree-derived/compression refresh inside the view build ("tree" stage).
       // Terminal means a status:"ok"/"failed" event already painted the bar —
       // the boot-end sweep must not overwrite a failed tree row with "done".
@@ -1599,13 +1605,19 @@ export class RunSession {
         const remainder = minutes % 60;
         return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
       };
-      const renderEncodeBootActivity = (event = {}) => {
+      const renderEncodeBootActivity = (event = {}, { armHold = true, streaming = false } = {}) => {
         atlasEncodeStarted = true;
         if (atlasEncodeStartedAt == null) atlasEncodeStartedAt = Date.now();
-        const current = Number(event.progress_current ?? event.current ?? bootEncodeProgress?.current);
-        const total = Number(event.progress_total ?? event.total ?? bootEncodeProgress?.total);
+        const eventCurrent = Number(event.progress_current ?? event.current);
+        const eventTotal = Number(event.progress_total ?? event.total);
+        const hasEventCount = Number.isFinite(eventCurrent) && Number.isFinite(eventTotal);
+        const current = hasEventCount ? eventCurrent : Number(bootEncodeProgress?.current);
+        const total = hasEventCount ? eventTotal : Number(bootEncodeProgress?.total);
+        // Inherit the previous unit only when the counts are inherited too — a
+        // reconcile "encoding" event carrying symbol counts with no unit must
+        // not borrow the "documents" unit left behind by the streaming pass.
         const progressUnit = String(
-          event.progress_unit ?? event.unit ?? bootEncodeProgress?.unit ?? "symbols",
+          event.progress_unit ?? event.unit ?? (hasEventCount ? "symbols" : bootEncodeProgress?.unit) ?? "symbols",
         ).trim().toLowerCase() || "symbols";
         const rawPercent = Number(event.percent ?? bootEncodeProgress?.percent);
         const hasCount = Number.isFinite(current) && Number.isFinite(total) && total > 0;
@@ -1651,8 +1663,9 @@ export class RunSession {
           state: "building",
           percent,
           detail,
+          streaming,
         });
-        if (!atlasBootBackgroundRequested) {
+        if (armHold && !atlasBootBackgroundRequested) {
           // Encoding starts only after SCIP intake + view merge have landed, so
           // this is the "SCIP + views ready" point — the embedding/ONNX layer is
           // now warming. Hold boot here so the user can watch it warm, with Enter
@@ -1699,6 +1712,61 @@ export class RunSession {
             const noticeDetail = firstLine(event.noticeDetail || "");
             const noticeLines = [notice, noticeDetail].filter(Boolean);
             if (noticeLines.length > 0) updateBootAtlasNotice(noticeLines);
+          }
+          // ── Streaming ONNX ride-along (shared tree-sitter × SCIP intake) ──
+          // In layer-merge mode the ONNX encoder streams merged documents
+          // WHILE tree-sitter parses and SCIP intakes. Its structured events
+          // drive the encode bar directly with real document counts; they
+          // carry no narrative text, so without this routing the encode bar
+          // only ever saw misattributed heartbeat lines. Streaming activity
+          // does not arm the "views ready" hold (parse is still running) and
+          // is flagged so the panel doesn't read encode-activity as "ledger
+          // inputs landed" — that inference is only valid for the post-view
+          // reconcile encode.
+          const bootEventKind = String(event?.kind || "");
+          if (bootEventKind === "atlas.parse.onnx.started") {
+            if (event.streaming === true) {
+              atlasStreamingOnnxActive = true;
+              renderEncodeBootActivity(event, { armHold: false, streaming: true });
+            }
+            return;
+          }
+          if (bootEventKind === "atlas.parse.onnx.progress") {
+            if (atlasStreamingOnnxActive) {
+              renderEncodeBootActivity(event, { armHold: false, streaming: true });
+            }
+            return;
+          }
+          if (bootEventKind === "atlas.parse.onnx.completed") {
+            if (atlasStreamingOnnxActive) {
+              atlasStreamingOnnxActive = false;
+              // The streaming pass drains only after both intake sides have
+              // finished, so a terminal encode state here IS evidence the
+              // ledger inputs landed — clear the streaming flag with it.
+              const symbols = formatBootCount(event.indexedSymbols);
+              const docs = formatBootCount(event.processedDocuments);
+              const detail = [
+                symbols != null ? `${symbols} symbols` : null,
+                docs != null ? `${docs} documents` : null,
+              ].filter(Boolean).join(" · ") || "encoded";
+              bootPanel.updateEncode({ state: "done", percent: 100, detail, streaming: false });
+            }
+            return;
+          }
+          if (bootEventKind === "atlas.parse.onnx.failed") {
+            if (atlasStreamingOnnxActive) {
+              atlasStreamingOnnxActive = false;
+              // The post-view reconcile pass re-encodes after a streaming
+              // failure; keep the bar open (and still streaming-flagged) so
+              // waiting matrix cells don't resolve off a failed ride-along.
+              bootPanel.updateEncode({
+                state: "building",
+                percent: null,
+                detail: "streamed encode failed — reconciling after view build",
+                streaming: true,
+              });
+            }
+            return;
           }
           // ── Per-language matrix routing (new panel) ──────────────────
           // SCIP emits the indexer id as `language` (for example
@@ -2025,7 +2093,7 @@ export class RunSession {
         if (atlasBootIndexPercent != null) setAtlasBootIndexPercent(100);
         if (atlasZipStarted) bootPanel.updateZip({ state: "done", percent: 100, detail: "merged" });
         if (atlasTreeStarted && !atlasTreeTerminal) bootPanel.updateTree({ state: "done", percent: 100, detail: "tree ready" });
-        if (atlasEncodeStarted) bootPanel.updateEncode({ state: "done", percent: 100, detail: "encoded" });
+        if (atlasEncodeStarted) bootPanel.updateEncode({ state: "done", percent: 100, detail: "encoded", streaming: false });
         if (!atlasBootBackgroundRequested) {
           updateBootFooter("");
           setBootEnterAction(null);

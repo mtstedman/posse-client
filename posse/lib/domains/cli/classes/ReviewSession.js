@@ -155,77 +155,157 @@ export class ReviewSession {
         console.log(`     ${C.red}Approval blocked: ${report.finalAssessment.reason}${C.reset}`);
         continue;
       }
-      const completionOk = updateWorkItemStatus(wi.id, "complete", {
-        allowTerminalFailureBlockers: true,
-        resolvePendingReviews: true,
+      const mergeBlocker = this._approvalMergeBlocker({
+        wi,
+        worktreeStatus: report?.worktreeStatus || null,
       });
-      if (completionOk === false) {
-        console.log(`     ${C.red}Approval blocked: active jobs or dirty review state must be resolved before merge.${C.reset}`);
+      if (mergeBlocker) {
+        console.log(`     ${C.red}${mergeBlocker}${C.reset}`);
         continue;
       }
-      logEvent({
-        work_item_id: wi.id,
-        event_type: EVENT_TYPES.WORK_ITEM_APPROVED,
-        actor_type: EVENT_ACTORS.HUMAN,
-        message: "Approved via text review",
-        event_json: JSON.stringify({ approval_type: "human" }),
-      });
+      const completionBlocker = this._approvalCompletionBlocker(wi.id);
+      if (completionBlocker) {
+        console.log(`     ${C.red}${completionBlocker}${C.reset}`);
+        continue;
+      }
 
-      // Merge branch into target branch
-      if (wi.branch_name) {
-        const mergeFn = gitMergeToTargetAsync || gitMergeToTarget;
-        const mergeOutcome = await withMergeLock(() => mergeFn(wi.branch_name, PROJECT_DIR, {
+      if (!wi.branch_name) {
+        const completionOk = updateWorkItemStatus(wi.id, "complete", {
+          allowTerminalFailureBlockers: true,
+          resolvePendingReviews: true,
+        });
+        if (completionOk === false) {
+          console.log(`     ${C.red}Approval blocked: active jobs or dirty review state must be resolved.${C.reset}`);
+          continue;
+        }
+        logEvent({
+          work_item_id: wi.id,
+          event_type: EVENT_TYPES.WORK_ITEM_APPROVED,
+          actor_type: EVENT_ACTORS.HUMAN,
+          message: "Approved via text review",
+          event_json: JSON.stringify({ approval_type: "human" }),
+        });
+        console.log(`     ${C.green}Approved${C.reset}\n`);
+        continue;
+      }
+
+      // A branch-backed approval becomes terminal only after the merge
+      // succeeds. A deferred or failed merge stays reviewable and retryable.
+      const mergeFn = gitMergeToTargetAsync || gitMergeToTarget;
+      const mergeOutcome = await withMergeLock(async () => {
+        const lockedWi = getWorkItem(wi.id);
+        if (!lockedWi) {
+          return { ok: false, reason: "no_such_wi", message: "Work item no longer exists" };
+        }
+        if (lockedWi.merge_state === "merged") {
+          return {
+            ok: true,
+            alreadyMerged: true,
+            branchName: lockedWi.branch_name || wi.branch_name,
+            settlement: this._finalizeApprovedMerge(wi.id),
+          };
+        }
+        if (!lockedWi.branch_name) {
+          this._markMergeFailed(wi.id);
+          return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
+        }
+        const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
           wiId: wi.id,
           onPhase(event = {}) {
             if (event.phase === "commit") console.log(`     ${C.cyan}Committing....${C.reset}`);
             else if (event.phase === "retry") console.log(`     ${C.yellow}Retrying merge...${C.reset}`);
             else if (event.phase === "merge") console.log(`     ${C.cyan}Merging....${C.reset}`);
           },
-        }));
-        const result = mergeOutcome.result;
-        if (!mergeOutcome.acquired) {
-          console.log(`     ${C.green}Approved${C.reset} ${C.yellow}(merge skipped: another merge is already in progress)${C.reset}\n`);
-        } else if (result.ok) {
-          const targetBranch = result.targetBranch || this.targetBranch();
-          const mergeHash = result.mergeHash || "(unknown)";
+        });
+        if (!result.ok) {
+          if (!result.deferred) this._markMergeFailed(wi.id);
+          return { ...result, branchName: lockedWi.branch_name };
+        }
+        return {
+          ...result,
+          branchName: lockedWi.branch_name,
+          settlement: this._finalizeApprovedMerge(wi.id),
+        };
+      });
+      const result = mergeOutcome.result;
+      if (!mergeOutcome.acquired) {
+        console.log(`     ${C.yellow}Approval not finalized: another merge is already in progress; retry this WI.${C.reset}\n`);
+      } else if (result.alreadyMerged) {
+        if (!result.settlement?.ok) {
+          console.log(`     ${C.red}Branch is merged, but WI/review settlement failed; cleanup was deferred for safe retry.${C.reset}\n`);
+          continue;
+        }
+        const mergedWi = getWorkItem(wi.id) || wi;
+        const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+        const cleanupOk = await cleanupFn(mergedWi);
+        console.log(`     ${C.green}Already approved + merged${C.reset}${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}\n`);
+      } else if (result.ok) {
+        const targetBranch = result.targetBranch || this.targetBranch();
+        const mergeHash = result.mergeHash || "(unknown)";
+        const settlement = result.settlement;
+        const mergedBranch = result.branchName || wi.branch_name;
+        if (!settlement.ok) {
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORK_ITEM_MERGED,
             actor_type: EVENT_ACTORS.HUMAN,
-            message: `Merged ${wi.branch_name} into ${targetBranch} at ${mergeHash}`,
-            event_json: JSON.stringify({ branch: wi.branch_name, merge_hash: mergeHash, target_branch: targetBranch }),
+            message: `Merged ${mergedBranch} into ${targetBranch} at ${mergeHash}, but queue settlement failed`,
+            event_json: JSON.stringify({ branch: mergedBranch, merge_hash: mergeHash, target_branch: targetBranch }),
           });
-          setMergeState(wi.id, "merged");
-          const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-          const cleanupOk = await cleanupFn(wi);
-          console.log(`     ${C.green}Approved + merged${C.reset} (${mergeHash.slice(0, 8)})${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}\n`);
-          mergedCount++;
-        } else if (result.deferred) {
-          console.log(`     ${C.green}Approved${C.reset} ${C.yellow}(${result.message})${C.reset}\n`);
-        } else {
-          setMergeState(wi.id, "merge_failed");
-          console.log(`     ${C.green}Approved${C.reset} ${C.red}(merge failed: ${result.message})${C.reset}\n`);
+          console.log(`     ${C.red}Merge succeeded at ${mergeHash.slice(0, 8)}, but WI/review settlement failed; cleanup was deferred for safe retry.${C.reset}\n`);
+          continue;
         }
+        logEvent({
+          work_item_id: wi.id,
+          event_type: EVENT_TYPES.WORK_ITEM_APPROVED,
+          actor_type: EVENT_ACTORS.HUMAN,
+          message: "Approved via text review",
+          event_json: JSON.stringify({ approval_type: "human" }),
+        });
+        logEvent({
+          work_item_id: wi.id,
+          event_type: EVENT_TYPES.WORK_ITEM_MERGED,
+          actor_type: EVENT_ACTORS.HUMAN,
+          message: `Merged ${mergedBranch} into ${targetBranch} at ${mergeHash}`,
+          event_json: JSON.stringify({ branch: mergedBranch, merge_hash: mergeHash, target_branch: targetBranch }),
+        });
+        const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+        const cleanupOk = await cleanupFn(wi);
+        console.log(`     ${C.green}Approved + merged${C.reset} (${mergeHash.slice(0, 8)})${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}\n`);
+        mergedCount++;
+      } else if (result.deferred) {
+        console.log(`     ${C.yellow}Approval not finalized: ${result.message}; retry this WI.${C.reset}\n`);
       } else {
-        console.log(`     ${C.green}Approved${C.reset}\n`);
+        console.log(`     ${C.red}Approval not finalized; merge failed: ${result.message}${C.reset}\n`);
       }
     } else if (choice.toLowerCase() === "r") {
       const reason = await ask(`     Reason (or enter to skip): `);
-      // Clean up branch/worktree, then re-queue
-      if (wi.branch_name) {
-        const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-        const cleanupOk = await cleanupFn(wi, { clearMergeState: true });
-        if (!cleanupOk) {
-          console.log(`     ${C.red}Rejected, but branch cleanup failed; leaving WI unchanged${C.reset}\n`);
-          continue;
+      const rejectionOutcome = await withMergeLock(async () => {
+        const readiness = this._reviewRejectionReadiness(wi.id);
+        if (!readiness.ok) return readiness;
+        const freshWi = readiness.workItem || getWorkItem(wi.id) || wi;
+        if (freshWi.branch_name) {
+          const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+          const cleanupOk = await cleanupFn(freshWi, { clearMergeState: true });
+          if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
         }
+        const newDesc = this._rejectionDescription(freshWi, reason);
+        const requeued = requeueWorkItemAfterRejection(wi.id, { description: newDesc, feedback: reason });
+        return requeued
+          ? { ok: true }
+          : { ok: false, reason: "requeue_failed" };
+      });
+      if (!rejectionOutcome.acquired) {
+        console.log(`     ${C.yellow}Rejection not applied: another merge is already in progress; retry this WI.${C.reset}\n`);
+        continue;
       }
-      const newDesc = reason
-        ? `${wi.description}\n\n---\nPREVIOUS ATTEMPT REJECTED: ${reason}`
-        : wi.description;
-      const requeued = requeueWorkItemAfterRejection(wi.id, { description: newDesc, feedback: reason });
-      if (!requeued) {
-        console.log(`     ${C.red}Rejected, but active work prevented a safe retry; leaving WI unchanged${C.reset}\n`);
+      if (!rejectionOutcome.result?.ok) {
+        const detail = rejectionOutcome.result?.reason === "already_merged"
+          ? "work is already merged; create a follow-up WI instead"
+          : rejectionOutcome.result?.reason === "branch_cleanup_failed"
+            ? "branch cleanup failed; WI unchanged"
+            : "active work prevented a safe retry; WI unchanged";
+        console.log(`     ${C.red}Rejected, but ${detail}${C.reset}\n`);
         continue;
       }
 
@@ -238,16 +318,26 @@ export class ReviewSession {
 
       console.log(`     ${C.yellow}Rejected → re-queued${C.reset}\n`);
     } else if (choice.toLowerCase() === "d") {
-      // Delete — clean up and cancel
-      if (wi.branch_name) {
-        const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-        const cleanupOk = await cleanupFn(wi, { clearMergeState: true });
-        if (!cleanupOk) {
-          console.log(`     ${C.red}Delete skipped; branch cleanup failed${C.reset}\n`);
-          continue;
+      const deleteOutcome = await withMergeLock(async () => {
+        const readiness = this._reviewRejectionReadiness(wi.id);
+        if (!readiness.ok) return readiness;
+        const freshWi = readiness.workItem || getWorkItem(wi.id) || wi;
+        if (freshWi.branch_name) {
+          const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+          const cleanupOk = await cleanupFn(freshWi, { clearMergeState: true });
+          if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
         }
+        return { ok: updateWorkItemStatus(wi.id, "canceled") !== false };
+      });
+      if (!deleteOutcome.acquired || !deleteOutcome.result?.ok) {
+        const detail = !deleteOutcome.acquired
+          ? "another merge is already in progress"
+          : deleteOutcome.result?.reason === "already_merged"
+            ? "work is already merged; create a follow-up WI instead"
+            : "branch cleanup or cancellation failed";
+        console.log(`     ${C.red}Delete skipped; ${detail}${C.reset}\n`);
+        continue;
       }
-      updateWorkItemStatus(wi.id, "canceled");
       logEvent({
         work_item_id: wi.id,
         event_type: EVENT_TYPES.WORK_ITEM_DELETED,
@@ -694,6 +784,7 @@ export class ReviewSession {
     display.requestRender({ force: true });
     mergeQueue = mergeQueue.then(() => new Promise((resolve) => {
       setTimeout(() => {
+        let shouldAdvance = advanceAfter;
         const phase = (title, event = {}) => {
           item._mergePhase = title;
           setApprovalOverlay(title, item);
@@ -711,7 +802,11 @@ export class ReviewSession {
         };
         Promise.resolve()
           .then(() => run({ phase }))
+          .then((result) => {
+            if (result?.keepFocused) shouldAdvance = false;
+          })
           .catch((err) => {
+            shouldAdvance = false;
             item._mergeResult = `${C.red}\u2717 ${err?.message || String(err)}${C.reset}`;
           })
           .finally(() => {
@@ -720,7 +815,7 @@ export class ReviewSession {
             display._approvalActionBusy = false;
             setApprovalOverlay(null);
             display.requestRender({ force: true });
-            if (advanceAfter && typeof display._advanceApproval === "function") {
+            if (shouldAdvance && typeof display._advanceApproval === "function") {
               display._advanceApproval();
             }
             resolve();
@@ -765,62 +860,131 @@ export class ReviewSession {
         display.requestRender({ force: true });
         return false;
       }
-      const completionOk = updateWorkItemStatus(wiId, "complete", {
-        allowTerminalFailureBlockers: true,
-        resolvePendingReviews: true,
-      });
-      if (completionOk === false) {
-        item._mergeResult = `${C.red}\u2717 Approval blocked: active required jobs remain; resolve them before merging${C.reset}`;
+      const completionBlocker = this._approvalCompletionBlocker(wiId);
+      if (completionBlocker) {
+        item._mergeResult = `${C.red}\u2717 ${completionBlocker}${C.reset}`;
         display.requestRender({ force: true });
         return false;
       }
-      logEvent({
-        work_item_id: wiId,
-        event_type: EVENT_TYPES.WORK_ITEM_APPROVED,
-        actor_type: EVENT_ACTORS.HUMAN,
-        message: "Approved via TUI review",
-        event_json: JSON.stringify({ approval_type: "human" }),
-      });
 
-      if (!freshWi.branch_name) return true;
+      if (!freshWi.branch_name) {
+        const completionOk = updateWorkItemStatus(wiId, "complete", {
+          allowTerminalFailureBlockers: true,
+          resolvePendingReviews: true,
+        });
+        if (completionOk === false) {
+          item._mergeResult = `${C.red}\u2717 Approval blocked: active required jobs remain${C.reset}`;
+          display.requestRender({ force: true });
+          return false;
+        }
+        logEvent({
+          work_item_id: wiId,
+          event_type: EVENT_TYPES.WORK_ITEM_APPROVED,
+          actor_type: EVENT_ACTORS.HUMAN,
+          message: "Approved via TUI review",
+          event_json: JSON.stringify({ approval_type: "human" }),
+        });
+        return true;
+      }
 
       enqueueGitWork(item, async ({ phase }) => {
         const mergeFn = gitMergeToTargetAsync || gitMergeToTarget;
-        const mergeOutcome = await withMergeLock(() => mergeFn(freshWi.branch_name, PROJECT_DIR, {
-          wiId,
-          onPhase(event = {}) {
-            if (event.phase === "commit") phase("Committing....", event);
-            else if (event.phase === "merge") phase("Merging....", event);
-            else if (event.phase === "retry") phase("Retrying Merge....", event);
-          },
-        }));
+        const mergeOutcome = await withMergeLock(async () => {
+          const lockedWi = getWorkItem(wiId);
+          if (!lockedWi) {
+            return { ok: false, reason: "no_such_wi", message: "Work item no longer exists" };
+          }
+          if (lockedWi.merge_state === "merged") {
+            return {
+              ok: true,
+              alreadyMerged: true,
+              branchName: lockedWi.branch_name || freshWi.branch_name,
+              settlement: this._finalizeApprovedMerge(wiId),
+            };
+          }
+          if (!lockedWi.branch_name) {
+            this._markMergeFailed(wiId);
+            return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
+          }
+          const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
+            wiId,
+            onPhase(event = {}) {
+              if (event.phase === "commit") phase("Committing....", event);
+              else if (event.phase === "merge") phase("Merging....", event);
+              else if (event.phase === "retry") phase("Retrying Merge....", event);
+            },
+          });
+          if (!result.ok) {
+            if (!result.deferred) this._markMergeFailed(wiId);
+            return { ...result, branchName: lockedWi.branch_name };
+          }
+          return {
+            ...result,
+            branchName: lockedWi.branch_name,
+            settlement: this._finalizeApprovedMerge(wiId),
+          };
+        });
         if (!mergeOutcome.acquired) {
+          item._decision = undefined;
           item._mergeResult = `${C.yellow}! merge skipped: another merge is already in progress${C.reset}`;
-          return;
+          return { keepFocused: true };
         }
         const result = mergeOutcome.result;
-        if (result.ok) {
+        if (result.alreadyMerged) {
+          if (!result.settlement?.ok) {
+            item._decision = undefined;
+            item._mergeResult = `${C.red}\u2717 Branch is merged, but WI/review settlement failed; cleanup deferred${C.reset}`;
+            return { keepFocused: true };
+          }
+          const mergedWi = getWorkItem(wiId) || freshWi;
+          const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+          const cleanupOk = await cleanupFn(mergedWi);
+          item._mergeResult = `${C.green}\u2713 already approved + merged${C.reset}${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}`;
+        } else if (result.ok) {
           const targetBranch = result.targetBranch || this.targetBranch();
           const mergeHash = result.mergeHash || "(unknown)";
+          const settlement = result.settlement;
+          const mergedBranch = result.branchName || freshWi.branch_name;
+          if (!settlement.ok) {
+            logEvent({
+              work_item_id: wiId,
+              event_type: EVENT_TYPES.WORK_ITEM_MERGED,
+              actor_type: EVENT_ACTORS.HUMAN,
+              message: `Merged ${mergedBranch} into ${targetBranch} at ${mergeHash}, but queue settlement failed`,
+              event_json: JSON.stringify({ branch: mergedBranch, merge_hash: mergeHash, target_branch: targetBranch }),
+            });
+            item._decision = undefined;
+            item._mergeResult = `${C.red}\u2717 Merge succeeded at ${mergeHash.slice(0, 8)}, but WI/review settlement failed; cleanup deferred${C.reset}`;
+            return { keepFocused: true };
+          }
+          logEvent({
+            work_item_id: wiId,
+            event_type: EVENT_TYPES.WORK_ITEM_APPROVED,
+            actor_type: EVENT_ACTORS.HUMAN,
+            message: "Approved via TUI review",
+            event_json: JSON.stringify({ approval_type: "human" }),
+          });
           logEvent({
             work_item_id: wiId,
             event_type: EVENT_TYPES.WORK_ITEM_MERGED,
             actor_type: EVENT_ACTORS.HUMAN,
-            message: `Merged ${freshWi.branch_name} into ${targetBranch} at ${mergeHash}`,
-            event_json: JSON.stringify({ branch: freshWi.branch_name, merge_hash: mergeHash, target_branch: targetBranch }),
+            message: `Merged ${mergedBranch} into ${targetBranch} at ${mergeHash}`,
+            event_json: JSON.stringify({ branch: mergedBranch, merge_hash: mergeHash, target_branch: targetBranch }),
           });
-          setMergeState(wiId, "merged");
           const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-          const cleanupOk = await cleanupFn(freshWi);
+          const cleanupOk = await cleanupFn(getWorkItem(wiId) || freshWi);
           if (typeof display.addEvent === "function") {
-            display.addEvent(`${C.green}[review]${C.reset} WI#${wiId}: merged ${freshWi.branch_name} into ${targetBranch} at ${mergeHash.slice(0, 8)}${cleanupOk ? "; cleaned up branch/worktree" : "; branch cleanup failed"}`);
+            display.addEvent(`${C.green}[review]${C.reset} WI#${wiId}: merged ${mergedBranch} into ${targetBranch} at ${mergeHash.slice(0, 8)}${cleanupOk ? "; cleaned up branch/worktree" : "; branch cleanup failed"}`);
           }
           item._mergeResult = `${C.green}\u2713 ${result.message}${C.reset} (${mergeHash.slice(0, 8)})${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}`;
         } else if (result.deferred) {
+          item._decision = undefined;
           item._mergeResult = `${C.yellow}! ${result.message}${C.reset}`;
+          return { keepFocused: true };
         } else {
-          setMergeState(wiId, "merge_failed");
+          item._decision = undefined;
           item._mergeResult = `${C.red}\u2717 ${result.message}${C.reset}`;
+          return { keepFocused: true };
         }
       }, { overlay: "Merging....", advanceAfter: true });
       return { deferAdvance: true };
@@ -828,16 +992,31 @@ export class ReviewSession {
       const freshWi = refreshApprovalItem(item, "reject");
       if (!freshWi) return false;
       enqueueGitWork(item, async () => {
-        const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-        const cleanupOk = await cleanupFn(freshWi, { clearMergeState: true });
-        if (!cleanupOk) {
-          item._mergeResult = `${C.red}\u2717 branch cleanup failed; WI unchanged${C.reset}`;
-          return;
+        const rejectionOutcome = await withMergeLock(async () => {
+          const readiness = this._reviewRejectionReadiness(wiId);
+          if (!readiness.ok) return readiness;
+          const lockedWi = readiness.workItem || getWorkItem(wiId) || freshWi;
+          if (lockedWi.branch_name) {
+            const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+            const cleanupOk = await cleanupFn(lockedWi, { clearMergeState: true });
+            if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
+          }
+          return requeueWorkItemAfterRejection(wiId)
+            ? { ok: true }
+            : { ok: false, reason: "requeue_failed" };
+        });
+        if (!rejectionOutcome.acquired) {
+          item._mergeResult = `${C.yellow}! rejection skipped: another merge is already in progress${C.reset}`;
+          return { keepFocused: true };
         }
-        const requeued = requeueWorkItemAfterRejection(wiId);
-        if (!requeued) {
-          item._mergeResult = `${C.red}\u2717 active work prevented a safe retry; WI unchanged${C.reset}`;
-          return;
+        if (!rejectionOutcome.result?.ok) {
+          const detail = rejectionOutcome.result?.reason === "already_merged"
+            ? "work is already merged; create a follow-up WI instead"
+            : rejectionOutcome.result?.reason === "branch_cleanup_failed"
+              ? "branch cleanup failed; WI unchanged"
+              : "active work prevented a safe retry; WI unchanged";
+          item._mergeResult = `${C.red}\u2717 ${detail}${C.reset}`;
+          return { keepFocused: true };
         }
         logEvent({
           work_item_id: wiId,
@@ -852,13 +1031,28 @@ export class ReviewSession {
       const freshWi = refreshApprovalItem(item, "delete");
       if (!freshWi) return false;
       enqueueGitWork(item, async () => {
-        const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-        const cleanupOk = await cleanupFn(freshWi, { clearMergeState: true });
-        if (!cleanupOk) {
-          item._mergeResult = `${C.red}\u2717 branch cleanup failed; WI unchanged${C.reset}`;
-          return;
+        const deleteOutcome = await withMergeLock(async () => {
+          const readiness = this._reviewRejectionReadiness(wiId);
+          if (!readiness.ok) return readiness;
+          const lockedWi = readiness.workItem || getWorkItem(wiId) || freshWi;
+          if (lockedWi.branch_name) {
+            const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
+            const cleanupOk = await cleanupFn(lockedWi, { clearMergeState: true });
+            if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
+          }
+          return { ok: updateWorkItemStatus(wiId, "canceled") !== false };
+        });
+        if (!deleteOutcome.acquired) {
+          item._mergeResult = `${C.yellow}! delete skipped: another merge is already in progress${C.reset}`;
+          return { keepFocused: true };
         }
-        updateWorkItemStatus(wiId, "canceled");
+        if (!deleteOutcome.result?.ok) {
+          const detail = deleteOutcome.result?.reason === "already_merged"
+            ? "work is already merged; create a follow-up WI instead"
+            : "branch cleanup or cancellation failed; WI unchanged";
+          item._mergeResult = `${C.red}\u2717 ${detail}${C.reset}`;
+          return { keepFocused: true };
+        }
         logEvent({
           work_item_id: wiId,
           event_type: EVENT_TYPES.WORK_ITEM_DELETED,
@@ -1079,7 +1273,88 @@ export class ReviewSession {
 
   }
 
+  _approvalCompletionBlocker(wiId) {
+    if (typeof this.canCompleteWorkItem !== "function") return null;
+    try {
+      const ready = this.canCompleteWorkItem(wiId, {
+        allowTerminalFailureBlockers: true,
+        resolvePendingReviews: true,
+      });
+      return ready
+        ? null
+        : "Approval blocked: active required jobs remain; resolve them before merging";
+    } catch (err) {
+      const detail = String(err?.message || err || "unknown queue error").slice(0, 160);
+      return `Approval blocked: could not verify completion readiness (${detail})`;
+    }
+  }
+
+  _finalizeApprovedMerge(wiId) {
+    if (typeof this.finalizeApprovedWorkItemMerge === "function") {
+      return this.finalizeApprovedWorkItemMerge(wiId);
+    }
+    this.setMergeState(wiId, "merged");
+    const completed = this.updateWorkItemStatus(wiId, "complete", {
+      allowTerminalFailureBlockers: true,
+      resolvePendingReviews: true,
+    });
+    return { ok: completed !== false };
+  }
+
+  _markMergeFailed(wiId) {
+    if (typeof this.markWorkItemMergeFailed === "function") {
+      return this.markWorkItemMergeFailed(wiId);
+    }
+    const current = typeof this.getWorkItem === "function" ? this.getWorkItem(wiId) : null;
+    if (current?.merge_state === "merged") return false;
+    this.setMergeState(wiId, "merge_failed");
+    return true;
+  }
+
+  _reviewRejectionReadiness(wiId) {
+    if (typeof this.reviewRejectionReadiness === "function") {
+      return this.reviewRejectionReadiness(wiId);
+    }
+    const current = typeof this.getWorkItem === "function" ? this.getWorkItem(wiId) : null;
+    if (!current) return { ok: false, reason: "no_such_wi", workItem: null };
+    if (current.merge_state === "merged") {
+      return { ok: false, reason: "already_merged", workItem: current };
+    }
+    return { ok: true, reason: null, workItem: current };
+  }
+
+  _rejectionDescription(wi, reason) {
+    if (typeof this.appendReviewRejectionDescription === "function") {
+      return this.appendReviewRejectionDescription(wi?.description, reason);
+    }
+    const feedback = String(reason || "").trim();
+    if (!feedback) return wi?.description;
+    return `${wi?.description || ""}\n\n---\nPREVIOUS ATTEMPT REJECTED: ${feedback}`;
+  }
+
   _approvalMergeBlocker(item) {
+    const wi = item?.wi;
+    if (wi?.branch_name && typeof this.sourceWorktreeDirtyState === "function") {
+      let liveDirty = null;
+      try {
+        liveDirty = this.sourceWorktreeDirtyState(wi.id);
+      } catch (err) {
+        const detail = String(err?.message || err || "unknown Git error").slice(0, 160);
+        return `Approval blocked: could not verify the live WI worktree state (${detail})`;
+      }
+      if (liveDirty?.verificationFailed) {
+        const detail = String(liveDirty.error || "unknown Git error").slice(0, 160);
+        return `Approval blocked: could not verify the live WI worktree state (${detail})`;
+      }
+      const trackedFiles = Array.isArray(liveDirty?.trackedFiles)
+        ? liveDirty.trackedFiles
+        : [];
+      if (trackedFiles.length > 0) {
+        const count = trackedFiles.length;
+        return `Approval blocked: WI worktree has ${count} uncommitted tracked file${count === 1 ? "" : "s"}; commit or discard ${count === 1 ? "it" : "them"} before approval and merge`;
+      }
+    }
+
     const ws = item?.worktreeStatus;
     if (!ws) return null;
     const wtFiles = Array.isArray(ws.wtFiles) ? ws.wtFiles : [];

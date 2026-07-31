@@ -2,13 +2,11 @@
 //
 // Classifies an agent-reported BLOCKED reason. Most blocks are genuine
 // ("I need a human to expand scope / make a decision") and should escalate.
-// But a class of blocks are transient *infrastructure* failures — most
-// commonly the agent CLI failing to attach or recognize the Posse MCP gateway
-// (the stdio server that exposes write_file/edit_file/etc.) under concurrent
-// load. When that happens the agent may run a full session believing the
-// gateway tools are absent even though Posse dispatched the config correctly.
-// Those should be auto-requeued (the next attempt usually attaches cleanly),
-// not escalated to a human.
+// But a class of blocks are transient *infrastructure/routing* failures — most
+// commonly the agent CLI failing to attach or recognize the Posse MCP gateway,
+// or Codex selecting its intentionally read-only native patch path instead of
+// the issued scoped write/edit tools. Those should be auto-requeued with the
+// runtime tool guard, not escalated to a human.
 //
 // This is provider-agnostic on purpose: the attach-under-load failure has been
 // observed from both the claude CLI ("No such tool available") and the codex
@@ -39,6 +37,7 @@ const SCOPED_EXECUTABLE_ACCESS_FAILURE = /missing\s+executable\s+access\s+to\s+[
 const HUMAN_FILE_AUTHORITY_REQUIRED = /(?:human|operator)\s+(?:permission|approval)|credentials?|access\s+policy|scope\s+expansion/i;
 const CODEX_WINDOWS_SANDBOX_HELPER = /\b(?:codex-windows-sandbox-setup|codex(?:-windows)?-command-runner)\.exe\b/i;
 const CODEX_WINDOWS_SANDBOX_HELPER_FAILURE = /(?:orchestrator_helper_launch_failed|not found|program not found|failed to launch|could not (?:be )?launch(?:ed)?|unable to launch)/i;
+const CODEX_NATIVE_PATCH_SANDBOX_REJECTION = /(?:workspace is read-only and sandbox policy rejects file writes|writing is blocked by read-only sandbox|apply_patch.{0,120}read-only sandbox)/i;
 
 /**
  * Returns true for a provider runtime/bootstrap failure that cannot be fixed
@@ -55,7 +54,8 @@ export function isPermanentProviderRuntimeBlock(reason) {
 
 /**
  * Returns true when a BLOCKED reason (or attempt error_text) looks like a
- * transient MCP-gateway attach failure rather than a genuine human-needed block.
+ * transient scoped mutation routing failure rather than a genuine
+ * human-needed block.
  * @param {string|null|undefined} reason
  * @returns {boolean}
  */
@@ -102,6 +102,13 @@ export function isTransientMcpInfraBlock(reason) {
   // to the assigned path. Both are retryable only in their full scoped shapes.
   if (REQUIRED_EXECUTION_CAPABILITY_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
   if (SCOPED_EXECUTABLE_ACCESS_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
+
+  // Writable Codex jobs intentionally keep the native apply_patch sandbox
+  // read-only because Posse's issued MCP write/edit tools enforce exact file
+  // scope. If the model selects apply_patch anyway, retry with the runtime
+  // tool-priority guard instead of asking a human to fix an internal routing
+  // mistake.
+  if (CODEX_NATIVE_PATCH_SANDBOX_REJECTION.test(text)) return true;
 
   // Canonical phrasings emitted by the dev agent when the gateway is missing.
   if (/not connected to this execution environment/i.test(text)) return true;

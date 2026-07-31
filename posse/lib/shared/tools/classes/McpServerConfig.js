@@ -596,7 +596,16 @@ function buildDeterministicMcpBootPayload(role, {
         jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
       },
-      ...(coordinationChild === true ? { toolAllowlist: { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] } } : {}),
+      // Remote issuance is authoritative but may only narrow this local role
+      // projection. Persist the local tools lane so a stale remote catalog
+      // cannot reintroduce a tool (notably deprecated code write_file) that
+      // this runtime no longer exposes.
+      toolAllowlist: {
+        tools: coordinationChild === true
+          ? ["sub_agent_next_input", "agent_handoff"]
+          : expectedTools,
+        ...(coordinationChild === true ? { atlas: [] } : {}),
+      },
       remoteCatalog: {
         enabled: remoteCatalogEnabled,
         mode: remoteCatalogMode,
@@ -943,7 +952,9 @@ export class McpServerConfig {
         ? issuedSurface.tool_surface
         : (Array.isArray(issuedSurface?.tools) ? issuedSurface.tools : []);
       bootPayload.toolAllowlist = {
-        tools: issuedToolNamesForSuite(issuedEntries, "tools"),
+        // Keep the local role projection as the upper bound for deterministic
+        // tools. Only the ATLAS lane is being narrowed in this branch.
+        tools: bootPayload.toolAllowlist?.tools || expectedMcpToolNames(role, bootPayload),
         atlas: issuedToolNamesForSuite(issuedEntries, "atlas")
           .filter((name) => !disabledAtlasTools.has(String(name || "").toLowerCase())),
       };

@@ -348,11 +348,11 @@ export async function handlePostExecutionForWorker({
             return;
           }
 
-          // Transient MCP-gateway attach failures are infrastructure, not a real
-          // block: the agent ran without its write tools because the CLI couldn't
-          // attach the stdio gateway under load. Auto-requeue with backoff instead
-          // of escalating to a human (capped, so a persistently broken gateway
-          // still escalates).
+          // Scoped mutation routing failures are infrastructure, not a real
+          // block: either the gateway failed to attach or Codex selected its
+          // intentionally read-only native patch path instead of an issued MCP
+          // write tool. Auto-requeue with backoff instead of escalating to a
+          // human (capped, so a persistent failure still escalates).
           if (isTransientMcpInfraBlock(blockReason)) {
             this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
             const infraRetries = allAttempts.filter(
@@ -363,13 +363,13 @@ export async function handlePostExecutionForWorker({
                 Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
               ];
               const readyAt = new Date(Date.now() + delayMs).toISOString();
-              this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: transient MCP gateway attach failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
+              this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
               this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
               refreshAndExtractInsightsFromModule(job.work_item_id);
               this._cleanupWorktreeIfDone(job.work_item_id);
               return;
             }
-            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: MCP gateway attach failed ${infraRetries} time(s) — escalating to human${C.reset}`);
+            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — escalating to human${C.reset}`);
           }
 
           const blockedPayload = {
@@ -1387,9 +1387,9 @@ export async function handlePostExecutionForWorker({
               return;
             }
 
-            // Transient MCP-gateway attach failures are infrastructure, not a real
-            // block — auto-requeue with backoff instead of escalating to a human
-            // (capped, so a persistently broken gateway still escalates).
+            // Scoped mutation routing failures are infrastructure, not a real
+            // block — auto-requeue with backoff instead of escalating to a
+            // human (capped, so a persistent failure still escalates).
             if (isTransientMcpInfraBlock(blockReason)) {
               this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
               const infraRetries = allAttempts.filter(
@@ -1400,13 +1400,13 @@ export async function handlePostExecutionForWorker({
                   Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
                 ];
                 const readyAt = new Date(Date.now() + delayMs).toISOString();
-                this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: transient MCP gateway attach failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
+                this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
                 this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
                 refreshAndExtractInsightsFromModule(job.work_item_id);
                 this._cleanupWorktreeIfDone(job.work_item_id);
                 return;
               }
-              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: MCP gateway attach failed ${infraRetries} time(s) — escalating to human${C.reset}`);
+              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — escalating to human${C.reset}`);
             }
 
             // Don't consume the attempt — BLOCKED is a correct diagnosis, not a

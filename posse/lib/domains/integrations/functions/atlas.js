@@ -1125,8 +1125,19 @@ async function runAtlasV2BootWarmWithProgress({
   let activeStage = "warming main view";
   let activeDetail = null;
   const emitProgress = (event = {}) => {
-    if (event?.stage) activeStage = String(event.stage);
-    if (event?.detail || event?.text) activeDetail = String(event.detail || event.text || "");
+    // Three producers (tree-sitter walk, SCIP stage/ingest, streaming ONNX)
+    // interleave on this channel, and the heartbeat replays (activeStage,
+    // activeDetail) as one narrative line — so the pair may only move
+    // together. A stage-only counter event (e.g. atlas.parse.onnx.progress)
+    // re-aiming activeStage alone would hand the previous producer's text to
+    // the next heartbeat under the wrong stage.
+    const text = String(event?.detail || event?.text || "");
+    if (event?.stage && text) {
+      activeStage = String(event.stage);
+      activeDetail = text;
+    } else if (text) {
+      activeDetail = text;
+    }
     emitBootProgress(progress, {
       elapsedMs: elapsedMs(),
       repoId,

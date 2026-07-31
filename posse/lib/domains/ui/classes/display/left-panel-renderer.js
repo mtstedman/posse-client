@@ -669,17 +669,30 @@ export class DisplayLeftPanelRenderer {
       if (!Number.isFinite(wiId)) continue;
       const issues = Array.isArray(item?.issues) ? item.issues : [];
       const manualIssues = issues.filter((issue) =>
-        ["dirty", "stash", "orphan", "orphan_ref"].includes(String(issue?.type || "")));
+        [
+          "dirty",
+          "stash",
+          "terminal_unmerged",
+          "cleanup_unverified",
+          "worktree_check_failed",
+          "orphan",
+          "orphan_ref",
+        ].includes(String(issue?.type || "")));
       if (manualIssues.length === 0) continue;
       const dirtyIssue = manualIssues.find((issue) => issue.type === "dirty");
       const dirtyCount = dirtyIssue?.files
         ? String(dirtyIssue.files).split("\n").filter(Boolean).length
         : 0;
       const stashIssue = manualIssues.find((issue) => issue.type === "stash");
+      const terminalUnmergedIssue = manualIssues.find((issue) => issue.type === "terminal_unmerged");
+      const cleanupUnverifiedIssue = manualIssues.find((issue) => issue.type === "cleanup_unverified");
+      const worktreeCheckFailedIssue = manualIssues.find((issue) => issue.type === "worktree_check_failed");
       const orphanIssue = manualIssues.find((issue) => issue.type === "orphan" || issue.type === "orphan_ref");
       const parts = [
         dirtyCount > 0 ? `${dirtyCount} dirty` : dirtyIssue ? "dirty" : null,
         stashIssue ? "stash" : null,
+        terminalUnmergedIssue ? "unmerged terminal" : null,
+        cleanupUnverifiedIssue || worktreeCheckFailedIssue ? "check failed" : null,
         orphanIssue ? "orphan" : null,
       ].filter(Boolean);
       byWi.set(wiId, {

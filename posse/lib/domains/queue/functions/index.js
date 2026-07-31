@@ -379,6 +379,50 @@ export function listWorkItems(statusFilter = null) {
   return db.prepare(`SELECT * FROM work_items ORDER BY created_at`).all();
 }
 
+function completionReadinessForWorkItem(id, current, {
+  allowTerminalFailureBlockers = false,
+  resolvePendingReviews = false,
+} = {}) {
+  if (!current) return { ok: false, reason: "no_such_wi" };
+  const blockers = completionBlockersForWorkItem(id);
+  const jobs = listJobsByWorkItem(id).filter((job) => !isShadowFanoutJob(job));
+  if (missingRequiredBuildExecution(current, jobs)) {
+    return {
+      ok: false,
+      reason: "missing_required_build_execution",
+      blockers,
+      jobs,
+      reviewPlan: null,
+      effectiveBlockers: [],
+    };
+  }
+  const reviewPlan = resolvePendingReviews
+    ? pendingWorkItemReviewSettlement(id)
+    : null;
+  const resolvableReviewJobIds = new Set([
+    ...(reviewPlan?.originals || []).map((job) => job.id),
+    ...(reviewPlan?.gates || []).map((job) => job.id),
+  ]);
+  let effectiveBlockers = allowTerminalFailureBlockers
+    ? blockers.filter((job) => !FAILED_JOB_STATUS_SET.has(job.status))
+    : blockers;
+  if (resolvePendingReviews) {
+    effectiveBlockers = effectiveBlockers.filter((job) => !resolvableReviewJobIds.has(job.id));
+  }
+  return {
+    ok: effectiveBlockers.length === 0,
+    reason: effectiveBlockers.length > 0 ? "unresolved_required_jobs" : null,
+    blockers,
+    jobs,
+    reviewPlan,
+    effectiveBlockers,
+  };
+}
+
+export function canCompleteWorkItem(id, options = {}) {
+  return completionReadinessForWorkItem(id, getWorkItem(id), options).ok;
+}
+
 export function updateWorkItemStatus(id, status, {
   allowTerminalFailureBlockers = false,
   resolvePendingReviews = false,
@@ -407,9 +451,11 @@ export function updateWorkItemStatus(id, status, {
     }
 
     if (status === "complete") {
-      const blockers = completionBlockersForWorkItem(id);
-      const jobs = listJobsByWorkItem(id).filter((job) => !isShadowFanoutJob(job));
-      if (missingRequiredBuildExecution(current, jobs)) {
+      const readiness = completionReadinessForWorkItem(id, current, {
+        allowTerminalFailureBlockers,
+        resolvePendingReviews,
+      });
+      if (readiness.reason === "missing_required_build_execution") {
         logEvent({
           work_item_id: id,
           event_type: EVENT_TYPES.WORK_ITEM_COMPLETION_BLOCKED,
@@ -417,7 +463,7 @@ export function updateWorkItemStatus(id, status, {
           message: "Blocked build completion: research/planning produced no executable job",
           event_json: JSON.stringify({
             reason: "missing_required_build_execution",
-            pipeline_jobs: jobs
+            pipeline_jobs: readiness.jobs
               .filter((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))
               .map((job) => ({
                 job_id: job.id,
@@ -428,41 +474,28 @@ export function updateWorkItemStatus(id, status, {
         });
         return false;
       }
-      const reviewPlan = resolvePendingReviews
-        ? pendingWorkItemReviewSettlement(id)
-        : null;
-      const resolvableReviewJobIds = new Set([
-        ...(reviewPlan?.originals || []).map((job) => job.id),
-        ...(reviewPlan?.gates || []).map((job) => job.id),
-      ]);
-      let effectiveBlockers = allowTerminalFailureBlockers
-        ? blockers.filter((job) => !FAILED_JOB_STATUS_SET.has(job.status))
-        : blockers;
-      if (resolvePendingReviews) {
-        effectiveBlockers = effectiveBlockers.filter((job) => !resolvableReviewJobIds.has(job.id));
-      }
-      if (effectiveBlockers.length > 0) {
+      if (!readiness.ok) {
         logEvent({
           work_item_id: id,
           event_type: EVENT_TYPES.WORK_ITEM_COMPLETION_BLOCKED,
           actor_type: EVENT_ACTORS.SYSTEM,
-          message: `Blocked completion: ${effectiveBlockers.length} unresolved required job(s) remain`,
+          message: `Blocked completion: ${readiness.effectiveBlockers.length} unresolved required job(s) remain`,
           event_json: JSON.stringify({
-            blockers: effectiveBlockers.slice(0, 20).map((job) => ({
+            blockers: readiness.effectiveBlockers.slice(0, 20).map((job) => ({
               job_id: job.id,
               job_type: job.job_type,
               status: job.status,
               title: job.title,
             })),
             ignored_terminal_failure_blockers: allowTerminalFailureBlockers
-              ? blockers.length - effectiveBlockers.length
+              ? readiness.blockers.length - readiness.effectiveBlockers.length
               : 0,
           }),
         });
         return false;
       }
-      if (reviewPlan) {
-        settleWorkItemReviewPlan(id, reviewPlan, { resolution: "work_item_approved" });
+      if (readiness.reviewPlan) {
+        settleWorkItemReviewPlan(id, readiness.reviewPlan, { resolution: "work_item_approved" });
       }
     }
 
@@ -671,20 +704,30 @@ export function reconcileMergedWorkItemReviewStates() {
   // A merge event is durable evidence that Git completed even if the process
   // died before merge_state was written. Flush first so this repair sees both
   // persisted and just-buffered events without nesting event writes inside its
-  // transaction.
+  // transaction. A later explicit reopen supersedes older merge evidence so
+  // legitimate follow-up jobs are not canceled by startup repair.
   flushEventsNow();
   return runInTransaction(() => {
     const db = getDb();
     const merged = db.prepare(`
-      SELECT DISTINCT wi.*
+      SELECT wi.*
       FROM work_items wi
-      LEFT JOIN events event
-        ON event.work_item_id = wi.id
-       AND event.event_type = ?
       WHERE wi.merge_state = 'merged'
-         OR event.id IS NOT NULL
+         OR EXISTS (
+           SELECT 1
+           FROM events merged_event
+           WHERE merged_event.work_item_id = wi.id
+             AND merged_event.event_type = ?
+             AND NOT EXISTS (
+               SELECT 1
+               FROM events reopened_event
+               WHERE reopened_event.work_item_id = wi.id
+                 AND reopened_event.event_type = ?
+                 AND reopened_event.id > merged_event.id
+             )
+         )
       ORDER BY wi.created_at
-    `).all(EVENT_TYPES.WORK_ITEM_MERGED);
+    `).all(EVENT_TYPES.WORK_ITEM_MERGED, EVENT_TYPES.WORK_ITEM_REOPENED);
     let workItems = 0;
     let resolved = 0;
     let canceled = 0;
@@ -732,17 +775,156 @@ export function setMergeState(id, mergeState) {
   else runImmediateTransaction(db, execute);
 }
 
-export function requeueWorkItemAfterRejection(id, { description = null, feedback = null } = {}) {
-  return runInTransaction(() => {
-    const db = getDb();
+export function markWorkItemMergeFailed(id) {
+  const db = getDb();
+  const execute = () => {
+    const result = db.prepare(`
+      UPDATE work_items
+      SET merge_state = 'merge_failed', updated_at = ?
+      WHERE id = ? AND merge_state IS NOT 'merged'
+    `).run(now(), id);
+    if (result.changes === 0) return false;
+    releaseWorkItemLocksForMergeState(id, "merge_failed");
+    return true;
+  };
+  return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+}
+
+/**
+ * A bridge review gate can briefly satisfy every queue job before its
+ * branch-backed approval has actually merged. Keep that transient completion
+ * reviewable until Git and queue settlement succeed as one locked operation.
+ */
+export function holdWorkItemForPendingMerge(id) {
+  const db = getDb();
+  const execute = () => {
     const current = getWorkItem(id);
     if (!current) return false;
+    if (current.merge_state === "merged") return true;
+    if (current.status !== "complete") return true;
+    if (!current.branch_name) return false;
+    const result = db.prepare(`
+      UPDATE work_items
+      SET status = 'waiting_on_review',
+          completed_at = NULL,
+          updated_at = ?
+      WHERE id = ?
+        AND status = 'complete'
+        AND merge_state IS NOT 'merged'
+        AND branch_name IS NOT NULL
+    `).run(now(), id);
+    if (result.changes === 0) return false;
+    logEvent({
+      work_item_id: id,
+      event_type: EVENT_TYPES.WORK_ITEM_STATUS_CHANGED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: "Status -> waiting_on_review (approved merge pending)",
+    });
+    notifyQueueStateChanged({
+      reason: "work_item_merge_pending",
+      workItemId: id,
+    });
+    return true;
+  };
+  return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+}
 
-    const jobs = listJobsByWorkItem(id);
-    const activeRequiredJob = jobs.find((job) => (
-      ACTIVE_LEASE_STATUS_SET.has(job.status) && job.job_type !== "atlas_warm"
-    ));
-    if (activeRequiredJob) return false;
+export function finalizeApprovedWorkItemMerge(id) {
+  const db = getDb();
+  const execute = () => {
+    const current = getWorkItem(id);
+    if (!current) {
+      return { ok: false, reason: "no_such_wi", workItem: null };
+    }
+    setMergeState(id, "merged");
+    const completed = updateWorkItemStatus(id, "complete", {
+      allowTerminalFailureBlockers: true,
+      resolvePendingReviews: true,
+    });
+    const workItem = getWorkItem(id);
+    const ok = completed !== false
+      && workItem?.merge_state === "merged"
+      && workItem?.status === "complete";
+    return {
+      ok,
+      reason: ok ? null : "queue_settlement_failed",
+      workItem,
+    };
+  };
+  return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+}
+
+function effectiveMergedEvidence(db, current) {
+  if (!current) return false;
+  if (current.merge_state === "merged") return true;
+  return !!db.prepare(`
+    SELECT 1
+    FROM events merged_event
+    WHERE merged_event.work_item_id = ?
+      AND merged_event.event_type = ?
+      AND NOT EXISTS (
+        SELECT 1
+        FROM events reopened_event
+        WHERE reopened_event.work_item_id = merged_event.work_item_id
+          AND reopened_event.event_type = ?
+          AND reopened_event.id > merged_event.id
+      )
+    LIMIT 1
+  `).get(current.id, EVENT_TYPES.WORK_ITEM_MERGED, EVENT_TYPES.WORK_ITEM_REOPENED);
+}
+
+function reviewRejectionReadinessInternal(db, id, { ignoreJobIds = [] } = {}) {
+  const current = getWorkItem(id);
+  if (!current) return { ok: false, reason: "no_such_wi", workItem: null };
+  if (effectiveMergedEvidence(db, current)) {
+    return { ok: false, reason: "already_merged", workItem: current };
+  }
+  const jobs = listJobsByWorkItem(id);
+  const ignoredJobIds = new Set(ignoreJobIds.map((jobId) => Number(jobId)));
+  const activeRequiredJob = jobs.find((job) => (
+    ACTIVE_LEASE_STATUS_SET.has(job.status) && job.job_type !== "atlas_warm"
+    && !ignoredJobIds.has(Number(job.id))
+  ));
+  if (activeRequiredJob) {
+    return {
+      ok: false,
+      reason: "active_required_job",
+      workItem: current,
+      activeJob: activeRequiredJob,
+      jobs,
+    };
+  }
+  return { ok: true, reason: null, workItem: current, activeJob: null, jobs };
+}
+
+export function reviewRejectionReadiness(id, options = {}) {
+  flushEventsNow();
+  return reviewRejectionReadinessInternal(getDb(), id, options);
+}
+
+const REVIEW_REJECTION_SEPARATOR = "\n\n---\nPREVIOUS ATTEMPT REJECTED: ";
+const MAX_REVIEW_REJECTION_HISTORY = 3;
+const MAX_REVIEW_REJECTION_CHARS = 2000;
+
+export function appendReviewRejectionDescription(description, reason) {
+  const current = String(description || "");
+  const feedback = String(reason || "").trim().slice(0, MAX_REVIEW_REJECTION_CHARS);
+  if (!feedback) return current;
+  const [base, ...history] = current.split(REVIEW_REJECTION_SEPARATOR);
+  const retained = [...history, feedback]
+    .map((entry) => String(entry || "").trim().slice(0, MAX_REVIEW_REJECTION_CHARS))
+    .filter(Boolean)
+    .slice(-MAX_REVIEW_REJECTION_HISTORY);
+  return [base, ...retained].join(REVIEW_REJECTION_SEPARATOR);
+}
+
+export function requeueWorkItemAfterRejection(id, { description = null, feedback = null } = {}) {
+  flushEventsNow();
+  return runInTransaction(() => {
+    const db = getDb();
+    const readiness = reviewRejectionReadinessInternal(db, id);
+    if (!readiness.ok) return false;
+    const { workItem: current, jobs } = readiness;
 
     const ts = now();
     const nextDescription = description == null ? current.description : description;
@@ -870,6 +1052,17 @@ export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "f
       event_type: EVENT_TYPES.WORK_ITEM_STATUS_CHANGED,
       actor_type: EVENT_ACTORS.SYSTEM,
       message: `Status -> ${status} (${reason || "follow_up"})`,
+    });
+    logEvent({
+      work_item_id: id,
+      event_type: EVENT_TYPES.WORK_ITEM_REOPENED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Reopened work item for ${reason || "follow_up"}`,
+      event_json: JSON.stringify({
+        prior_merge_state: current.merge_state || null,
+        status,
+        reason: reason || "follow_up",
+      }),
     });
     return true;
   };

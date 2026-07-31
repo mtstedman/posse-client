@@ -35,11 +35,24 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       if (wtExists) {
         try {
           const status = gitExec(["status", "--porcelain"], wtDir, { timeoutMs: 5000 }).trim();
-          if (status) {
-            const fileCount = status.split("\n").length;
-            issues.push({ type: "dirty", message: `${fileCount} uncommitted change(s) in worktree`, files: status });
+          const userStatus = status
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .filter((line) => !isRuntimePorcelainLine(line, wtDir));
+          if (userStatus.length > 0) {
+            issues.push({
+              type: "dirty",
+              message: `${userStatus.length} uncommitted change(s) in worktree`,
+              files: userStatus.join("\n"),
+            });
           }
-        } catch { /* worktree may be broken */ }
+        } catch {
+          issues.push({
+            type: "worktree_check_failed",
+            message: "Could not verify worktree cleanliness",
+          });
+        }
 
         // Check for stashes
         try {
@@ -48,7 +61,12 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
             const stashCount = stashList.split("\n").length;
             issues.push({ type: "stash", message: `${stashCount} stash(es) with uncommitted work` });
           }
-        } catch { /* ignore */ }
+        } catch {
+          issues.push({
+            type: "worktree_check_failed",
+            message: "Could not verify worktree stashes",
+          });
+        }
       }
 
       // Check if branch has commits not yet merged into target
@@ -68,13 +86,46 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
         }
       }
 
-      // Worktree dir exists but WI is terminal (should have been cleaned up)
+      // A terminal worktree can mean either preserved, unmerged work or a
+      // harmless cleanup retry after a successful merge. Keep those states
+      // distinct so wrap-up never tells an operator that merged work is at
+      // risk, or that unmerged work is safe to purge.
       if (wtExists && TERMINAL_WORK_ITEM_STATUSES.includes(wi.status)) {
-        issues.push({ type: "orphan", message: `Worktree still exists but WI is ${wi.status}` });
+        const hasUncommittedWork = issues.some((issue) =>
+          issue.type === "dirty" || issue.type === "stash"
+        );
+        const worktreeCheckFailed = issues.some((issue) =>
+          issue.type === "worktree_check_failed"
+        );
+        if (wi.merge_state === "merged" && worktreeCheckFailed) {
+          issues.push({
+            type: "cleanup_unverified",
+            message: "Merge is recorded, but the remaining worktree could not be verified as clean",
+          });
+        } else if (wi.merge_state === "merged" && !hasUncommittedWork) {
+          issues.push({
+            type: "merged_residue",
+            message: `Merge is recorded; only worktree/branch cleanup remains`,
+          });
+        } else {
+          issues.push({
+            type: "terminal_unmerged",
+            message: `WI is ${wi.status}, but its worktree is not confirmed clean and merged`,
+          });
+        }
       }
 
       if (issues.length > 0) {
-        results.push({ wiId: wi.id, title: wi.title, branchName: wi.branch_name, wtDir, wtExists, issues });
+        results.push({
+          wiId: wi.id,
+          title: wi.title,
+          status: wi.status,
+          mergeState: wi.merge_state,
+          branchName: wi.branch_name,
+          wtDir,
+          wtExists,
+          issues,
+        });
       }
     }
 
@@ -111,8 +162,15 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     let status = "";
     try {
       status = gitExec(["status", "--porcelain", "--untracked-files=all"], wtDir, { timeoutMs: 5000 }).trim();
-    } catch {
-      return null;
+    } catch (err) {
+      return {
+        wtDir,
+        dirtyFiles: [],
+        trackedFiles: [],
+        untrackedFiles: [],
+        verificationFailed: true,
+        error: String(err?.message || err || "unknown Git error").slice(0, 500),
+      };
     }
     const dirtyFiles = status
       .split("\n")
@@ -154,9 +212,14 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     if (dirtyItems.length === 0 && !targetDirty) return false;
 
     // Show WI branch issues
-    const unmerged = dirtyItems.filter(d => d.issues.some(i => i.type === "unmerged"));
+    const terminalUnmerged = dirtyItems.filter(d => d.issues.some(i => i.type === "terminal_unmerged"));
+    const cleanupUnverified = dirtyItems.filter(d => d.issues.some(i => i.type === "cleanup_unverified"));
+    const mergedResidue = dirtyItems.filter(d => d.issues.some(i => i.type === "merged_residue"));
+    const unmerged = dirtyItems.filter(d =>
+      d.issues.some(i => i.type === "unmerged")
+      && !d.issues.some(i => i.type === "terminal_unmerged")
+    );
     const dirty = dirtyItems.filter(d => d.issues.some(i => i.type === "dirty"));
-    const orphans = dirtyItems.filter(d => d.issues.some(i => i.type === "orphan"));
 
     if (unmerged.length > 0) {
       console.log(`\n  ${C.yellow}${C.bold}\u26a0 ${unmerged.length} work item branch(es) with unmerged commits:${C.reset}`);
@@ -164,6 +227,16 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
         const issue = item.issues.find(i => i.type === "unmerged");
         console.log(`    ${C.cyan}WI#${item.wiId}${C.reset} ${item.title.slice(0, 50)} ${C.dim}(${item.branchName})${C.reset}`);
         console.log(`      ${issue.message}`);
+      }
+    }
+
+    if (terminalUnmerged.length > 0) {
+      console.log(`\n  ${C.yellow}${C.bold}\u26a0 ${terminalUnmerged.length} terminal worktree(s) with work not confirmed merged:${C.reset}`);
+      for (const item of terminalUnmerged) {
+        const issue = item.issues.find(i => i.type === "terminal_unmerged");
+        const mergeState = item.mergeState || "not merged";
+        console.log(`    ${C.cyan}WI#${item.wiId}${C.reset} ${item.title.slice(0, 50)} ${C.dim}(${item.wtDir})${C.reset}`);
+        console.log(`      ${issue.message}; merge state: ${mergeState}`);
       }
     }
 
@@ -176,15 +249,31 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       }
     }
 
-    if (orphans.length > 0) {
-      console.log(`\n  ${C.yellow}${C.bold}\u26a0 ${orphans.length} orphaned worktree(s) (WI is terminal):${C.reset}`);
-      for (const item of orphans) {
+    if (cleanupUnverified.length > 0) {
+      console.log(`\n  ${C.yellow}${C.bold}\u26a0 ${cleanupUnverified.length} merged worktree(s) requiring cleanup verification:${C.reset}`);
+      for (const item of cleanupUnverified) {
         console.log(`    ${C.cyan}WI#${item.wiId}${C.reset} ${item.title.slice(0, 50)} ${C.dim}(${item.wtDir})${C.reset}`);
+        console.log(`      Merge is recorded, but Posse could not verify that the leftover worktree is clean.`);
+      }
+    }
+
+    if (mergedResidue.length > 0) {
+      console.log(`\n  ${C.cyan}${C.bold}\u2139 ${mergedResidue.length} merged worktree(s) awaiting cleanup:${C.reset}`);
+      for (const item of mergedResidue) {
+        console.log(`    ${C.cyan}WI#${item.wiId}${C.reset} ${item.title.slice(0, 50)} ${C.dim}(${item.wtDir})${C.reset}`);
+        console.log(`      Merge is recorded; the worktree is cleanup residue, not an unmerged change.`);
       }
     }
 
     // Offer cleanup walkthrough if there are actionable issues
-    if (dirty.length > 0 || orphans.length > 0 || unmerged.length > 0 || targetDirty) {
+    if (
+      dirty.length > 0
+      || terminalUnmerged.length > 0
+      || cleanupUnverified.length > 0
+      || mergedResidue.length > 0
+      || unmerged.length > 0
+      || targetDirty
+    ) {
       console.log(`\n  ${C.bold}Cleanup walkthrough:${C.reset}`);
 
       if (unmerged.length > 0) {
@@ -194,6 +283,14 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
         console.log(`    To discard:           ${C.bold}posse purge${C.reset} (interactive, asks per branch)`);
       }
 
+      if (terminalUnmerged.length > 0) {
+        console.log(`\n  ${C.cyan}Terminal but unmerged worktrees${C.reset} \u2014 status is terminal, but work is not confirmed on ${targetBranch}:`);
+        console.log(`    To inspect:  ${C.bold}cd <worktree-path> && git status && git diff${C.reset}`);
+        console.log(`    To preserve: ${C.bold}cd <worktree-path> && git add -A && git commit -m "Preserve work"${C.reset}`);
+        console.log(`    To merge:    ${C.bold}posse merge <WI-ID>${C.reset}`);
+        console.log(`    Do not purge until the work has been inspected or merged.`);
+      }
+
       if (dirty.length > 0) {
         console.log(`\n  ${C.cyan}Dirty worktrees${C.reset} \u2014 uncommitted changes in work branches:`);
         console.log(`    To inspect:  ${C.bold}cd <worktree-path> && git status && git diff${C.reset}`);
@@ -201,9 +298,15 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
         console.log(`    To discard:  ${C.bold}cd <worktree-path> && git checkout -- . && git clean -fd${C.reset}`);
       }
 
-      if (orphans.length > 0) {
-        console.log(`\n  ${C.cyan}Orphaned worktrees${C.reset} \u2014 WI is done but worktree/branch wasn't cleaned up:`);
-        console.log(`    To clean all: ${C.bold}posse purge${C.reset}`);
+      if (mergedResidue.length > 0) {
+        console.log(`\n  ${C.cyan}Merged cleanup residue${C.reset} \u2014 changes are already recorded on the target branch:`);
+        console.log(`    To retry safe cleanup: ${C.bold}posse prune${C.reset}`);
+      }
+
+      if (cleanupUnverified.length > 0) {
+        console.log(`\n  ${C.cyan}Unverified merged cleanup${C.reset} \u2014 the merge is recorded, but inspect the leftover before pruning:`);
+        console.log(`    To inspect: ${C.bold}cd <worktree-path> && git status && git stash list${C.reset}`);
+        console.log(`    When clean: ${C.bold}posse prune${C.reset}`);
       }
 
       if (targetDirty) {

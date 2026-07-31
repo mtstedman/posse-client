@@ -611,7 +611,7 @@ export function createStartupDirtyGuardHelpers(context) {
       .filter((line) => !isRuntimePorcelainLine(line, projectDir));
     if (!dirtyLines.length) {
       if (logWhenClean) {
-        console.log(`  ${C.green}✓${C.reset} Target branch clean (${reason})`);
+        console.log(`  ${C.green}✓${C.reset} Target worktree clean (${reason}); WI merge state is reported separately`);
       }
       return true;
     }

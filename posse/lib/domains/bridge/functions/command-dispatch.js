@@ -14,7 +14,9 @@ import {
   getJob,
   getWorkItem,
   logEvent,
+  reviewRejectionReadiness,
   updateWorkItemStatus,
+  withMergeLock,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import {
@@ -29,6 +31,7 @@ import { answerHumanInput } from "./human-input-answer.js";
 import {
   approveReview,
   finalizeApprovedReview,
+  preflightReviewApproval,
   rejectReview,
   resolveReviewGateJob,
 } from "./review-decision.js";
@@ -300,6 +303,11 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
       if (reviewJobId) {
         const resolved = resolveReviewGateJob(reviewJobId);
         if (!resolved.ok) return resolved;
+        const preflight = preflightReviewApproval(resolved.workItemId, {
+          projectDir: context.projectDir || process.cwd(),
+          reviewWorkflow: context.reviewWorkflow || null,
+        });
+        if (!preflight.ok) return preflight;
         const note = String(args.note || args.response || "").trim();
         const alreadyApproved = reviewPassAlreadyApplied(resolved);
         let reviewResult;
@@ -323,7 +331,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         const finalized = await finalizeApprovedReview(resolved.workItemId, {
           actor: context.actor || "bridge",
           projectDir: context.projectDir || process.cwd(),
-          approvalLogged: alreadyApproved,
+          approvalLogged: false,
           reviewWorkflow: context.reviewWorkflow || null,
         });
         return finalized.ok
@@ -332,12 +340,16 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
       }
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };
-      const approved = approveReview(wiId, { actor: context.actor || "bridge" });
+      const approved = approveReview(wiId, {
+        actor: context.actor || "bridge",
+        projectDir: context.projectDir || process.cwd(),
+        reviewWorkflow: context.reviewWorkflow || null,
+      });
       if (!approved.ok) return approved;
       return finalizeApprovedReview(wiId, {
         actor: context.actor || "bridge",
         projectDir: context.projectDir || process.cwd(),
-        approvalLogged: true,
+        approvalLogged: approved.approval_logged === true,
         reviewWorkflow: context.reviewWorkflow || null,
       });
     }
@@ -349,12 +361,20 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         if (!resolved.ok) return resolved;
         const feedback = String(args.feedback ?? args.reason ?? args.response ?? "").trim();
         if (!feedback) return { ok: false, reason: "missing_feedback" };
-        return answerHumanInput(reviewJobId, {
-          job_id: reviewJobId,
-          lease_seconds: args.lease_seconds,
-          answer: "fail",
-          answer_metadata: { operator_feedback: feedback },
-        }, { ...context, allowReviewGateAnswer: true });
+        const outcome = await withMergeLock(async () => {
+          const readiness = reviewRejectionReadiness(resolved.workItemId, {
+            ignoreJobIds: [reviewJobId],
+          });
+          if (!readiness.ok) return { ok: false, reason: readiness.reason };
+          return answerHumanInput(reviewJobId, {
+            job_id: reviewJobId,
+            lease_seconds: args.lease_seconds,
+            answer: "fail",
+            answer_metadata: { operator_feedback: feedback },
+          }, { ...context, allowReviewGateAnswer: true });
+        });
+        if (!outcome.acquired) return { ok: false, reason: "merge_in_progress" };
+        return outcome.result;
       }
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };

@@ -32,8 +32,11 @@ export const TOOL_WRITE_FILE = {
   type: "function",
   name: "write_file",
   description:
-    "Create a new file or overwrite an existing file with the given content. " +
-    "Set executable=true when the resulting file must be directly executable.",
+    "DEPRECATED for code dev/fix jobs: writing handoff materializes every exact files_to_create path " +
+    "before provider execution, so edit_file can populate the resulting empty file. Retained for " +
+    "compatibility and dynamic artifact creation; do not issue it on the code developer surface. " +
+    "Creates a new file or overwrites an existing file with the given content. Set executable=true " +
+    "when the resulting file must be directly executable.",
   parameters: {
     type: "object",
     properties: {
@@ -482,17 +485,18 @@ const HANDOFF_REF = {
 const HANDOFF_EVIDENCE_SELECTOR = {
   type: "object",
   description:
-    "Select bounded stored evidence. Prefer slices of at most 40 lines and 4000 characters; the runtime hard ceiling is 300 lines and 24000 characters per selector. " +
-    "For larger refs, first create a tighter server-side source_ref slice. Keep total evidence near 12000 characters; 32000 is the non-child hard ceiling. " +
+    "Select bounded stored evidence. Prefer slices of at most 40 lines and 4000 characters; 300 lines and 24000 characters per selector are compactness recommendations, not rejection gates. " +
+    "For larger refs, first create a tighter server-side source_ref slice when practical. Keep total evidence near 12000 characters; 32000 is the recommended non-child packet target. " +
+    "The runtime accepts complete evidence up to hard safety ceilings of 2000 lines and 131072 characters per selector, and 196608 characters total. " +
     "Inline authored create_ref chunks are support/decoy only; direct tool refs and verified source_ref slices may be proof.",
   properties: {
     ref: HANDOFF_REF,
     lines: {
       type: "object",
-      description: "Optional 1-based window. Target at most 40 lines; count cannot exceed the 300-line hard safety ceiling.",
+      description: "Optional 1-based window. Prefer at most 40 lines; 300 is the compactness recommendation and 2000 is the hard safety ceiling.",
       properties: {
         start: { type: "integer", minimum: 1 },
-        count: { type: "integer", minimum: 1, maximum: 300 },
+        count: { type: "integer", minimum: 1, maximum: 2000 },
       },
       required: ["start", "count"],
       additionalProperties: false,

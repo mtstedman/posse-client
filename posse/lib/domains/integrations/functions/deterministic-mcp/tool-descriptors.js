@@ -301,7 +301,9 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   write_file: {
     access: "write",
-    summary: "Create or overwrite allowed files, optionally marking them executable.",
+    deprecated: true,
+    deprecationReason: "Code handoff materializes exact files_to_create paths before provider execution; code dev/fix must populate them with edit_file.",
+    summary: "Deprecated for code dev/fix: handoff materializes exact create paths before provider execution. Retained for dynamic artifact compatibility.",
     observation: { type: "tool.write", label: "Write", format: "file", pathKeys: ["file_path", "path"], requireTarget: true },
   },
   edit_file: {
@@ -478,7 +480,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "runtime.execute": { access: "atlas", summary: "Execute policy-gated runtime commands inside the repository with output artifacts." },
   "runtime.queryOutput": { access: "atlas", summary: "Query persisted runtime output artifacts by keyword." },
   "scip.ingest": { access: "atlas", summary: "Ingest a prebuilt SCIP index into the native ATLAS v2 ledger." },
-  "file.write": { access: "atlas", summary: "Intentionally not exposed in native ATLAS v2. Use scoped write_file/edit_file; those tools push ATLAS live buffers and trigger normal refresh paths." },
+  "file.write": { access: "atlas", summary: "Intentionally not exposed in native ATLAS v2. Use scoped edit_file for code changes; deprecated write_file remains only for dynamic artifact compatibility." },
 });
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
@@ -518,7 +520,11 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
       read: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
-      write: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
+      // Exact files_to_create are materialized as empty files before a code
+      // dev/fix provider starts, then moved into files_to_modify. write_file
+      // remains registered for compatibility/artificer output but must not be
+      // issued on this surface; edit_file can populate the empty file.
+      write: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["get_operator_feedback", "ack_operator_feedback"],
@@ -767,6 +773,8 @@ export const TOOL_CATALOG = Object.freeze({
       gateTier: GATED_NATIVE_TOOLS.has(name) ? "native-atlas-gated" : "native",
       capabilityFlags: capabilityFlagsFor(spec.access),
       budgetExempt: !!spec.budgetExempt,
+      deprecated: spec.deprecated === true,
+      deprecationReason: spec.deprecationReason || null,
     })];
   })),
   ...Object.fromEntries(Object.entries(SURFACED_ATLAS_TOOL_DEFS).map(([name, schema]) => {
@@ -855,7 +863,11 @@ export function getDeterministicMcpToolNames(role, {
   if (!roleUsesDeterministicReadMcp(role)) return [];
   if (role === "preflight" || role === "delegator") return [];
   const tools = [...DETERMINISTIC_READ_TOOLS];
-  if (roleUsesDeterministicWriteMcp(role)) tools.push(...DETERMINISTIC_WRITE_TOOLS);
+  if (roleUsesDeterministicWriteMcp(role)) {
+    tools.push(...DETERMINISTIC_WRITE_TOOLS.filter((name) => (
+      role !== "dev" || name !== "write_file"
+    )));
+  }
   if (roleUsesDeterministicImageHelpers(role)) tools.push(...DETERMINISTIC_IMAGE_HELPER_TOOLS);
   // clean_image mutates an image within scope; keep it artificer-only.
   if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);

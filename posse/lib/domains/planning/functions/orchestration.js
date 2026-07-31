@@ -16,6 +16,7 @@ import {
   listJobsByWorkItem,
   listWorkItems,
   logEvent,
+  markWorkItemMergeFailed,
   refreshWorkItemStatus,
   reopenWorkItemForFollowUp,
   setMergeState,
@@ -297,7 +298,7 @@ export async function processIterativeWrapUp({
         display,
       });
       if (!mergeResult.ok) {
-        setMergeState(wi.id, "merge_failed");
+        markWorkItemMergeFailed(wi.id);
         wi = markIterativeFinished(
           wi,
           `Iteration blocked at ${reason}: pass merge failed before next loop (${mergeResult.message || "unknown merge error"}).`,

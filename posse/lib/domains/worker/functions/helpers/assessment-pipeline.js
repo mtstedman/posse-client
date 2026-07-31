@@ -843,23 +843,18 @@ function _buildLocalAssessmentEvidence({
   assessmentScopedDiff = "",
   assessmentFileSnapshots = "",
   registeredTestRunEvidence = "",
-  truncatedOutput = "",
+  workerStatusOutput = "",
 } = {}) {
+  const primaryChangeEvidence = assessmentScopedDiff
+    || assessmentFileSnapshots
+    || assessmentDiffNarrative;
   return [
     `LOCAL ASSESSMENT EVIDENCE`,
-    `This block was attached by the local client after remote prompt compilation. Treat it as the ground-truth verification context.`,
+    `This block was attached by the local client after remote prompt compilation. Treat deterministic receipts and the single primary change view as ground truth. Worker status is context only, never proof.`,
     fileVerification || null,
-    assessmentDiffNarrative || null,
-    assessmentScopedDiff || null,
-    assessmentFileSnapshots || null,
     registeredTestRunEvidence || null,
-    `WORKER OUTPUT:`,
-    truncatedOutput,
-    ``,
-    `FINAL RESPONSE CONTRACT`,
-    `Return only one fenced \`\`\`json block containing this object shape:`,
-    `{"verdict":"pass|fail|blocked|needs_replan|needs_review","confidence":"high|medium|low|none","reasons":["specific evidence"],"spawn_jobs":[],"human_questions":[],"suggestions":[]}`,
-    `Use verdict "fail" when required fixes remain. Never return a bare PASS, FAIL, or NEEDS_FIX label and never add prose outside the JSON fence.`,
+    primaryChangeEvidence || null,
+    workerStatusOutput ? `WORKER STATUS (context only; never proof):\n${workerStatusOutput}` : null,
   ].filter(Boolean).join("\n");
 }
 
@@ -1014,30 +1009,22 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const assessmentDiffNarrative = assessmentContext?.scoped_diff_narrative
     ? `\nSCOPED DIFF NARRATIVE (compact summary of changed files and hunks):\n${assessmentContext.scoped_diff_narrative}\n`
     : "";
-  const assessmentFileSnapshots = _buildAssessmentFileSnapshots({ cwd, assessmentContext, taskSpec });
+  const assessmentFileSnapshots = assessmentScopedDiff
+    ? ""
+    : _buildAssessmentFileSnapshots({ cwd, assessmentContext, taskSpec });
 
-  // Extract the structured DEV/ARTIFICER result (with legacy log support) as
-  // the primary
-  // assessment input. The assessor reads actual files for verification — it
-  // doesn't need the full tool-call stream. Only include the raw stream as
-  // a fallback if no structured log is found.
+  // Worker output is status context, never assessment proof. Prefer the
+  // structured completion result and preserve it intact even when it exceeds
+  // the 2000-character performance target. Never attach the preceding
+  // tool-call stream. Legacy raw output remains a separately bounded tail
+  // fallback because it has no structured completion boundary.
   const logMatch = output.match(/---\s*(DEV (?:RESULT|LOG)|ARTIFICER (?:RESULT|LOG)) START\s*---\s*([\s\S]*?)---\s*\1 END\s*---/i);
-  let truncatedOutput;
+  let workerStatusOutput;
   if (logMatch) {
-    truncatedOutput = `AGENT COMPLETION RESULT:\n${logMatch[2].trim()}`;
-    // If the log references issues, include a small window of raw output
-    // around the log for context (last 3000 chars before the log)
-    const logStart = output.indexOf(logMatch[0]);
-    if (logStart > 0) {
-      const contextWindow = output.slice(Math.max(0, logStart - 3000), logStart).trim();
-      if (contextWindow.length > 0) {
-        truncatedOutput = `RECENT AGENT OUTPUT (last steps before completion):\n${contextWindow}\n\n${truncatedOutput}`;
-      }
-    }
+    workerStatusOutput = logMatch[2].trim();
   } else {
-    // No structured log — fall back to truncated raw output
     const maxOutputChars = 20000;
-    truncatedOutput = output.length > maxOutputChars
+    workerStatusOutput = output.length > maxOutputChars
       ? output.slice(-maxOutputChars) + `\n\n[... earlier output truncated — showing last ${maxOutputChars} chars ...]`
       : output;
   }
@@ -1258,9 +1245,17 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     assessorAtlasPrefetchStatus = null;
   }
 
+  const localAssessmentEvidence = _buildLocalAssessmentEvidence({
+    fileVerification,
+    assessmentDiffNarrative,
+    assessmentScopedDiff,
+    assessmentFileSnapshots,
+    registeredTestRunEvidence,
+    workerStatusOutput,
+  });
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
-    `Use the SCOPED DIFF NARRATIVE as the quick map of what changed, then use any SCOPED GIT DIFF below as the primary verification view for exact changes. Use SCOPED FILE SNAPSHOTS as fallback/current-state context when the diff alone is insufficient. Do not ask the human to paste repository files or diffs that are already in the workspace; if verification still fails due to environment/tooling limits, return blocked without human_questions requesting repo file contents.`,
+    `Use the deterministic scope and test receipts plus the single attached primary change view. If that bounded evidence cannot resolve a material criterion, use an issued read tool rather than requesting repository contents from the human.`,
     `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
@@ -1274,13 +1269,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     ``,
     `TASK SPECIFICATION:`,
     taskSpec || `Title: ${job.title}`,
-    fileVerification,
-    registeredTestRunEvidence,
-    assessmentDiffNarrative,
-    assessmentScopedDiff,
-    assessmentFileSnapshots,
-    `WORKER OUTPUT:`,
-    truncatedOutput,
+    localAssessmentEvidence,
     ``,
     `═══════════════════════════════════════════════════════════`,
     `YOUR RESPONSE MUST BE ONLY A FENCED \`\`\`json VERDICT BLOCK.`,
@@ -1301,14 +1290,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     atlasBlock,
     priorAssessmentFindings,
     fallbackReads,
-  });
-  const localAssessmentEvidence = _buildLocalAssessmentEvidence({
-    fileVerification,
-    assessmentDiffNarrative,
-    assessmentScopedDiff,
-    assessmentFileSnapshots,
-    registeredTestRunEvidence,
-    truncatedOutput,
   });
   let providerPrompt = prompt;
   if (assessorPacket) {

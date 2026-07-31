@@ -133,7 +133,10 @@ export function __testBuildCodexRoleGuardBlock({
       const labels = [has("write_file") ? "write_file" : null, has("edit_file") ? "edit_file" : null].filter(Boolean).join(" and ");
       rules.push(`- Use the manifest ${has("write_file") && has("edit_file") ? "entries" : "entry"} whose canonical ${has("write_file") && has("edit_file") ? "labels are" : "label is"} ${labels} for file changes. Call the exact provider-prefixed names shown there.`);
       rules.push("- Do NOT use apply_patch — the sandbox is read-only and apply_patch will be rejected.");
-      rules.push("- If writable file scope is listed, try the exact listed manifest write/edit tool names and report their actual errors before claiming mutation is unavailable.");
+      rules.push("- If writable file scope is listed, try the exact listed manifest edit tool name and report its actual error before claiming mutation is unavailable.");
+      if (has("edit_file") && !has("write_file")) {
+        rules.push("- New code files are already materialized as empty files before this run; populate them with edit_file.");
+      }
       if (has("write_file")) rules.push("- For files in create_roots outside the working directory, use the exact listed write_file surface.");
     } else if (allowWrite) {
       rules.push("- The job may describe writable scope, but this run exposes no file-mutation tool. Do not attempt apply_patch, write_file, or edit_file; report the capability mismatch.");

@@ -19,6 +19,8 @@ function freezeEntry(entry = {}) {
     access: String(entry.access || "unknown"),
     summary: String(entry.summary || ""),
     budgetExempt: !!entry.budgetExempt,
+    deprecated: entry.deprecated === true,
+    deprecationReason: entry.deprecationReason ? String(entry.deprecationReason) : null,
     roleAllowlist: entry.roleAllowlist instanceof Set
       ? new Set(entry.roleAllowlist)
       : new Set(Array.isArray(entry.roleAllowlist) ? entry.roleAllowlist : []),
@@ -70,6 +72,8 @@ export class ToolCatalog {
         access: entry.access || "unknown",
         summary: entry.summary || "",
         budgetExempt: !!entry.budgetExempt,
+        deprecated: entry.deprecated === true,
+        deprecationReason: entry.deprecationReason || null,
       };
     }
     const spec = getToolExecutionSpec(name);
@@ -135,6 +139,8 @@ export class ToolCatalog {
       access,
       summary,
       budgetExempt: !!descriptor.budgetExempt,
+      deprecated: descriptor.deprecated === true,
+      deprecationReason: descriptor.deprecationReason || null,
       roleAllowlist,
       gateTier,
       capabilityFlags: descriptor.capabilityFlags || deriveCapabilityFlags(access),

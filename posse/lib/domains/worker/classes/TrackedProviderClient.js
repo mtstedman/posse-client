@@ -1275,6 +1275,17 @@ export class TrackedProviderClient {
             packet_outcome: handoffFinalization.packet?.outcome || null,
             report_calls: handoffFinalization.reportCalls,
             evidence_chars: handoffFinalization.evidenceChars,
+            evidence_recommended_chars: handoffFinalization.evidenceRecommendedChars,
+            evidence_over_recommended: handoffFinalization.evidenceOverRecommended,
+            evidence_selector_count: handoffFinalization.evidenceSelectorCount,
+            evidence_selector_lines_max: handoffFinalization.evidenceSelectorLinesMax,
+            evidence_selector_chars_max: handoffFinalization.evidenceSelectorCharsMax,
+            evidence_selectors_over_recommended_count:
+              handoffFinalization.evidenceSelectorsOverRecommendedCount,
+            evidence_selector_recommended_lines:
+              handoffFinalization.evidenceSelectorRecommendedLines,
+            evidence_selector_recommended_chars:
+              handoffFinalization.evidenceSelectorRecommendedChars,
             materialized_packet_chars: handoffFinalization.materializedPacketChars,
             planner_task_spec_count: handoffFinalization.plannerTaskSpecCount ?? null,
             planner_task_spec_chars_max: handoffFinalization.plannerTaskSpecCharsMax ?? null,

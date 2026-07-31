@@ -9,13 +9,12 @@ import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import {
-  forceUpdateJobStatus,
   getJob,
-  setJobResult,
   withMergeLock,
 } from "../../queue/functions/index.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { closePushOfferGate } from "../../queue/functions/push-offer.js";
 import { redactBridgeValue } from "./redaction.js";
 
 const OPEN_GATE_STATUSES = new Set(["queued", "waiting_on_human"]);
@@ -55,8 +54,16 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   if (!OPEN_GATE_STATUSES.has(job.status)) return { ok: false, reason: "gate_closed" };
 
   if (args.decline === true) {
-    setJobResult(jobId, { declined: true });
-    forceUpdateJobStatus(jobId, "canceled");
+    const declineOutcome = await withMergeLock(
+      () => closePushOfferGate(jobId, "canceled", { declined: true }),
+      { ownerId: `merge-${process.pid}-bridge-git-decline-${jobId}` },
+    );
+    if (!declineOutcome.acquired) {
+      return { ok: false, reason: "merge_in_progress" };
+    }
+    if (!declineOutcome.result) {
+      return { ok: false, reason: "gate_closed" };
+    }
     return { ok: true, declined: true, job_id: jobId };
   }
 
@@ -94,8 +101,9 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   if (aheadCount === 0) {
     // Someone already pushed (terminal, another device). Close the gate as
     // satisfied rather than failing the phone.
-    setJobResult(jobId, { pushed: false, already_up_to_date: true });
-    forceUpdateJobStatus(jobId, "succeeded");
+    if (!closePushOfferGate(jobId, "succeeded", { pushed: false, already_up_to_date: true })) {
+      return { ok: false, reason: "gate_closed" };
+    }
     return { ok: true, pushed: false, already_up_to_date: true, job_id: jobId };
   }
 
@@ -103,30 +111,47 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   const lockOwner = `merge-${process.pid}-bridge-git-push-${jobId}`;
   let pushed;
   try {
-    const pushOutcome = await withMergeLock(() => runPush({
-      effectiveRemote: state.effectiveRemote,
-      pushBranch: state.pushBranch,
-      mergedCount: Number(gatePayload?.merged_count) || 0,
-    }), {
+    const pushOutcome = await withMergeLock(async () => {
+      const liveGate = getJob(jobId);
+      if (!liveGate || !OPEN_GATE_STATUSES.has(liveGate.status)) {
+        return { ok: false, gateClosed: true };
+      }
+      const pushResult = await runPush({
+        effectiveRemote: state.effectiveRemote,
+        pushBranch: state.pushBranch,
+        mergedCount: Number(gatePayload?.merged_count) || 0,
+      });
+      if (!pushResult?.ok) return pushResult;
+      const gateResult = {
+        pushed: true,
+        remote: state.effectiveRemote,
+        branch: state.pushBranch,
+        ahead_count: aheadCount,
+      };
+      return {
+        ...pushResult,
+        gateResult,
+        gateSettled: closePushOfferGate(jobId, "succeeded", gateResult),
+      };
+    }, {
       ownerId: lockOwner,
     });
     if (!pushOutcome.acquired) {
       return { ok: false, reason: "merge_in_progress" };
     }
     pushed = pushOutcome.result;
+    if (pushed?.gateClosed) {
+      return { ok: false, reason: "gate_closed" };
+    }
   } catch (err) {
     pushed = { ok: false, reason: "push_failed", output: err?.message || String(err) };
   }
 
   if (pushed?.ok) {
-    const result = {
-      pushed: true,
-      remote: state.effectiveRemote,
-      branch: state.pushBranch,
-      ahead_count: aheadCount,
-    };
-    setJobResult(jobId, result);
-    forceUpdateJobStatus(jobId, "succeeded");
+    if (!pushed.gateSettled) {
+      return { ok: false, reason: "gate_closed" };
+    }
+    const result = pushed.gateResult;
     return { ok: true, ...result, job_id: jobId };
   }
 

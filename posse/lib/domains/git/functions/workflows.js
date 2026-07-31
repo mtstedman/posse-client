@@ -48,6 +48,7 @@ export function createGitWorkflowHelpers(options = {}) {
     guardStartupDirtyTreeAsync: startup.guardStartupDirtyTreeAsync,
     guardStartupDirtyTreeInWorker: startup.guardStartupDirtyTreeInWorker,
     notifyDirtyState: review.notifyDirtyState,
+    sourceWorktreeDirtyState: review.sourceWorktreeDirtyState,
     offerPush: push.offerPush,
     startupWorktreeCleanup: cleanup.startupWorktreeCleanup,
     gitDiffStat: merge.gitDiffStat,

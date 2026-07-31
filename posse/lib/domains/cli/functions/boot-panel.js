@@ -656,14 +656,20 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     if (st.state === "done" || st.state === "skipped" || st.state === "failed") return 1;
     return Number.isFinite(st.percent) ? clamp(st.percent) / 100 : 0;
   };
-  // Once the view merge or embedding encode phase has started, the
+  // Once the view merge (or the post-view reconcile encode) has started, the
   // per-language ledger inputs have necessarily landed. Cache-hot boot paths
   // may never emit atlas parse progress for a language, so render those waiting
   // cells as resolved instead of making the ledger header look stuck while the
   // independent embedding tail is still encoding.
+  //
+  // The STREAMING encode (`streaming: true`) is the exception: the ONNX
+  // ride-along on the shared tree-sitter × SCIP intake runs DURING parse, so
+  // its activity proves nothing about the ledger inputs — counting it flipped
+  // every waiting cell to ✓ at parse start and made the band % sawtooth.
   const ledgerInputsLanded = () => {
     const activeTail = (st) => st && st.state && st.state !== "idle";
-    return activeTail(zip) || activeTail(tree) || activeTail(encode);
+    const encodeLanded = activeTail(encode) && encode.streaming !== true;
+    return activeTail(zip) || activeTail(tree) || encodeLanded;
   };
   const resolveWaitingAfterLedgerInput = (kind) => {
     if (!ledgerInputsLanded()) return kind;

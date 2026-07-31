@@ -40,6 +40,32 @@ import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSess
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 
+export function __testResolveCodexRuntimeInstructionBlocks({
+  skipRolePrompt = false,
+  platform = process.platform,
+  role = "planner",
+  allowWrite = false,
+  atlasAttachment = null,
+  atlasPrefetchStatus = null,
+  executionContract = null,
+} = {}) {
+  return {
+    shellDiscipline: skipRolePrompt ? null : __testBuildShellDisciplineBlock({
+      platform,
+      role,
+      atlasAttachment,
+      atlasPrefetchStatus,
+      executionContract,
+    }),
+    // Remote composition owns the role prompt, but only this process knows the
+    // provider-visible MCP names issued for the current call. Keep the compact
+    // runtime guard so a writable job cannot mistake Codex's intentionally
+    // read-only native sandbox for an absence of scoped mutation authority.
+    roleGuard: __testBuildCodexRoleGuardBlock({ role, allowWrite, executionContract }),
+    contractBlock: skipRolePrompt ? null : renderExecutionContractBlock(executionContract),
+  };
+}
+
 export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
@@ -266,17 +292,19 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
-    const shellDiscipline = skipRolePrompt ? null : __testBuildShellDisciplineBlock({
+    const {
+      shellDiscipline,
+      roleGuard,
+      contractBlock,
+    } = __testResolveCodexRuntimeInstructionBlocks({
+      skipRolePrompt,
       platform: process.platform,
       role,
+      allowWrite,
       atlasAttachment: promptAtlasAttachment,
       atlasPrefetchStatus,
       executionContract,
     });
-    const roleGuard = skipRolePrompt
-      ? null
-      : __testBuildCodexRoleGuardBlock({ role, allowWrite, executionContract });
-    const contractBlock = skipRolePrompt ? null : renderExecutionContractBlock(executionContract);
     const atlasUnavailableReason = isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)
       ? `preflight status ${String(atlasPrefetchStatus || "failed")}`
       : `transport ${atlasAttachment.transport}`;

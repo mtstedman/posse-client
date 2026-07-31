@@ -41,12 +41,15 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   recommendedSummaryChars: 2000,
   maxSummaryChars: 4000,
   recommendedPlannerTaskSpecChars: 2000,
-  recommendedSelectorLines: 40,
-  maxSelectorLines: 300,
-  recommendedSelectorChars: 4000,
-  maxSelectorChars: 24000,
-  recommendedEvidenceChars: 12000,
-  maxEvidenceChars: 32000,
+  targetSelectorLines: 40,
+  recommendedSelectorLines: 300,
+  maxSelectorLines: 2000,
+  targetSelectorChars: 4000,
+  recommendedSelectorChars: 24000,
+  maxSelectorChars: 128 * 1024,
+  targetEvidenceChars: 12000,
+  recommendedEvidenceChars: 32000,
+  maxEvidenceChars: 192 * 1024,
   maxCitationChildEvidenceChars: 4000,
   recommendedNarrativeChars: 4000,
   maxNarrativeChars: 12000,
@@ -1039,7 +1042,7 @@ function researcherEvidenceSelector(value, context) {
       return null;
     }
     const lineCount = normalizedLines(fetched.entry.payload_text).length;
-    const end = Math.min(Math.max(1, lineCount), AGENT_HANDOFF_LIMITS.recommendedSelectorLines);
+    const end = Math.min(Math.max(1, lineCount), AGENT_HANDOFF_LIMITS.targetSelectorLines);
     return `${parsed.ref}:L1-L${end}`;
   } catch {
     return null;
@@ -2309,6 +2312,25 @@ function packetEvidence(packet) {
   return out;
 }
 
+function packetEvidenceMetrics(packet) {
+  const evidence = packetEvidence(packet);
+  const lineCounts = evidence.map((item) => (
+    Number(item?.lines?.end) - Number(item?.lines?.start) + 1
+  )).filter((count) => Number.isInteger(count) && count > 0);
+  const charCounts = evidence.map((item) => String(item?.excerpt || "").length);
+  return {
+    selectorCount: evidence.length,
+    selectorLinesMax: lineCounts.length > 0 ? Math.max(...lineCounts) : 0,
+    selectorCharsMax: charCounts.length > 0 ? Math.max(...charCounts) : 0,
+    selectorsOverRecommendedCount: evidence.filter((item) => {
+      const lines = Number(item?.lines?.end) - Number(item?.lines?.start) + 1;
+      const chars = String(item?.excerpt || "").length;
+      return lines > AGENT_HANDOFF_LIMITS.recommendedSelectorLines
+        || chars > AGENT_HANDOFF_LIMITS.recommendedSelectorChars;
+    }).length,
+  };
+}
+
 function verifyPacketEvidenceAtCommit(packet) {
   const context = {
     workItemId: positiveInt(packet.work_item_id),
@@ -2533,6 +2555,7 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
   const plannerTaskSpecChars = isPlannerPacket
     ? plannerCompatibilityTasks(packet).map((task) => task.task_spec.length)
     : [];
+  const evidenceMetrics = packetEvidenceMetrics(packet);
   if (row.status === "staged") {
     ensureSchema(db).prepare(`
       UPDATE ${TABLE}
@@ -2548,6 +2571,14 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
     reportCalls: Number(row.stage_count || 1),
     continuationProseChars: continuationChars,
     evidenceChars: packet.evidence_chars,
+    evidenceRecommendedChars: AGENT_HANDOFF_LIMITS.recommendedEvidenceChars,
+    evidenceOverRecommended: packet.evidence_chars > AGENT_HANDOFF_LIMITS.recommendedEvidenceChars,
+    evidenceSelectorCount: evidenceMetrics.selectorCount,
+    evidenceSelectorLinesMax: evidenceMetrics.selectorLinesMax,
+    evidenceSelectorCharsMax: evidenceMetrics.selectorCharsMax,
+    evidenceSelectorsOverRecommendedCount: evidenceMetrics.selectorsOverRecommendedCount,
+    evidenceSelectorRecommendedLines: AGENT_HANDOFF_LIMITS.recommendedSelectorLines,
+    evidenceSelectorRecommendedChars: AGENT_HANDOFF_LIMITS.recommendedSelectorChars,
     materializedPacketChars: row.materialized_packet_json.length,
     plannerTaskSpecCount: isPlannerPacket ? plannerTaskSpecChars.length : null,
     plannerTaskSpecCharsMax: plannerTaskSpecChars.length > 0 ? Math.max(...plannerTaskSpecChars) : null,

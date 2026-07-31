@@ -70,6 +70,7 @@ import {
   updateWorkItemMetadata,
   updateWorkItemResearchSkip,
   setMergeState,
+  markWorkItemMergeFailed,
   listJobs,
   listJobsByWorkItem,
   getJob,
@@ -2048,28 +2049,47 @@ async function cmdMerge() {
     return;
   }
 
-  const mergeOutcome = await withMergeLock(() => helpers.gitMergeToTarget(wi.branch_name, PROJECT_DIR, { wiId: wi.id }));
+  const mergeOutcome = await withMergeLock(async () => {
+    const lockedWi = getWorkItem(wi.id);
+    if (!lockedWi) {
+      return { ok: false, reason: "no_such_wi", message: "Work item no longer exists" };
+    }
+    if (lockedWi.merge_state === "merged") {
+      return { ok: true, alreadyMerged: true, branchName: lockedWi.branch_name || wi.branch_name };
+    }
+    if (!lockedWi.branch_name) {
+      markWorkItemMergeFailed(wi.id);
+      return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
+    }
+    const result = await helpers.gitMergeToTarget(lockedWi.branch_name, PROJECT_DIR, { wiId: wi.id });
+    if (result.ok) setMergeState(wi.id, "merged");
+    else if (!result.deferred) markWorkItemMergeFailed(wi.id);
+    return { ...result, branchName: lockedWi.branch_name };
+  });
   if (!mergeOutcome.acquired) {
     console.log(`\n  ${C.red}merge refused:${C.reset} another merge is already in progress; retry when it finishes.\n`);
     process.exitCode = 1;
     return;
   }
   const result = mergeOutcome.result;
-  if (result.ok) {
+  if (result.alreadyMerged) {
+    const mergedWi = getWorkItem(wi.id) || wi;
+    const cleanupOk = helpers.cleanupWiBranch(mergedWi);
+    console.log(`\n  ${C.green}\u2713 Already merged${C.reset}${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}\n`);
+  } else if (result.ok) {
     // Record the merge
     const mergeHash = result.mergeHash || "(unknown)";
+    const mergedBranch = result.branchName || wi.branch_name;
     logEvent({
       work_item_id: wi.id,
       event_type: EVENT_TYPES.WORK_ITEM_MERGED,
       actor_type: EVENT_ACTORS.HUMAN,
-      message: `Merged ${wi.branch_name} into ${targetBranch} at ${mergeHash}`,
-      event_json: JSON.stringify({ branch: wi.branch_name, merge_hash: mergeHash, target_branch: targetBranch }),
+      message: `Merged ${mergedBranch} into ${targetBranch} at ${mergeHash}`,
+      event_json: JSON.stringify({ branch: mergedBranch, merge_hash: mergeHash, target_branch: targetBranch }),
     });
 
-    setMergeState(wi.id, "merged");
-
     // Clean up worktree + branch
-    const cleanupOk = helpers.cleanupWiBranch(wi);
+    const cleanupOk = helpers.cleanupWiBranch(getWorkItem(wi.id) || wi);
 
     console.log(`\n  ${C.green}\u2713 ${result.message}${C.reset} (${mergeHash.slice(0, 8)})`);
     console.log(cleanupOk
@@ -2079,7 +2099,6 @@ async function cmdMerge() {
     console.log(`\n  ${C.yellow}! ${result.message}${C.reset}`);
     console.log(`  ${C.dim}Merge the upstream work item first, then retry this merge.${C.reset}\n`);
   } else {
-    setMergeState(wi.id, "merge_failed");
     console.log(`\n  ${C.red}\u2717 ${result.message}${C.reset}`);
     console.log(`  ${C.dim}Resolve conflicts manually, then run: git merge --continue${C.reset}\n`);
     process.exitCode = 1;
