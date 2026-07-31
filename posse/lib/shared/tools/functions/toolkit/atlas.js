@@ -149,6 +149,22 @@ function sanitizeKnownCardEtags(value, maxItems = 1000) {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+function sanitizeSymbolRef(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    name: sanitizeString(value.name, 256),
+    ...(value.file && isSafeRelativePath(value.file)
+      ? { file: sanitizeString(value.file, 512) }
+      : {}),
+    ...(value.kind ? { kind: sanitizeString(value.kind, 64) } : {}),
+    ...(value.exportedOnly == null ? {} : { exportedOnly: !!value.exportedOnly }),
+  };
+}
+
+function boundedBatchSymbolRefs(values, maxItems = 100) {
+  return Array.isArray(values) ? values.slice(0, maxItems) : [];
+}
+
 function normalizeAtlasWireFormat(value) {
   if (value == null) return undefined;
   const text = sanitizeString(value, 32);
@@ -525,27 +541,24 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
 
   if (normalizedAction === "symbol.card") {
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.card symbolId");
-    const symbolRef = payload.symbolRef && typeof payload.symbolRef === "object"
-      ? {
-        name: sanitizeString(payload.symbolRef.name, 256),
-        ...(payload.symbolRef.file && isSafeRelativePath(payload.symbolRef.file)
-          ? { file: sanitizeString(payload.symbolRef.file, 512) }
-          : {}),
-        ...(payload.symbolRef.kind ? { kind: sanitizeString(payload.symbolRef.kind, 64) } : {}),
-        ...(payload.symbolRef.exportedOnly == null ? {} : { exportedOnly: !!payload.symbolRef.exportedOnly }),
-      }
-      : null;
-    if (!symbolId && !symbolRef?.name) {
-      throw new Error("ATLAS symbol.card requires symbolId or symbolRef.");
+    const symbolRef = sanitizeSymbolRef(payload.symbolRef);
+    const symbolIds = sanitizeAtlasSymbolIdList(payload.symbolIds, 100, "symbol.card symbolIds");
+    const symbolRefs = boundedBatchSymbolRefs(payload.symbolRefs, 100);
+    if (!symbolId && !symbolRef?.name && symbolIds.length === 0 && symbolRefs.length === 0) {
+      throw new Error("ATLAS symbol.card requires symbolId, symbolRef, symbolIds, or symbolRefs.");
     }
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        ...(symbolId ? { symbolId } : { symbolRef }),
+        ...(symbolId ? { symbolId } : {}),
+        ...(symbolRef?.name ? { symbolRef } : {}),
+        ...(symbolIds.length > 0 ? { symbolIds } : {}),
+        ...(symbolRefs.length > 0 ? { symbolRefs } : {}),
         ...(payload.ifNoneMatch ? { ifNoneMatch: sanitizeString(payload.ifNoneMatch, 256) } : {}),
         ...(payload.minCallConfidence == null ? {} : { minCallConfidence: Number(payload.minCallConfidence) }),
         ...(payload.includeResolutionMetadata == null ? {} : { includeResolutionMetadata: !!payload.includeResolutionMetadata }),
+        ...(payload.sessionId ? { sessionId: sanitizeString(payload.sessionId, 256) } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };

@@ -9,8 +9,8 @@ import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/t
 import { assertAdvertisedHaveExecutors } from "../../../../shared/tools/functions/tool-parity.js";
 import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, compactTreeScopeResult } from "../../../../shared/tools/functions/hash-adder.js";
 import { createChainLedger } from "../../../../shared/tools/functions/chain-ledger.js";
-import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
-import { getObservationContext } from "../../../observability/functions/observations.js";
+import { canonicalAtlasToolUseActionName, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
+import { atlasSummaryHint, getObservationContext } from "../../../observability/functions/observations.js";
 import {
   recordAgentHandoffRejection,
   rejectAgentHandoffForLaterTool,
@@ -216,13 +216,17 @@ function atlasToolTarget(input = {}) {
     input.path,
     input.query,
     input.pattern,
-    input.symbolId,
     input.repoId,
     input.sliceHandle,
     input.taskText,
   ];
   const first = candidates.find((value) => value != null && String(value).trim() !== "");
-  return first ? String(first).split(/\r?\n/)[0].slice(0, 80) : "";
+  if (first) return String(first).split(/\r?\n/)[0].slice(0, 80);
+  if (input.symbolId) return "symbol target";
+  if (Array.isArray(input.symbolIds) && input.symbolIds.length > 0) {
+    return `${input.symbolIds.length} symbol target${input.symbolIds.length === 1 ? "" : "s"}`;
+  }
+  return "";
 }
 
 function observationValueFromKeys(input = {}, keys = []) {
@@ -264,7 +268,8 @@ export function summarizeObservedToolUse(toolName, input = {}) {
   const raw = String(toolName || "");
   const atlasDisplayName = formatAtlasToolUseDisplayName(raw, input);
   if (atlasDisplayName) {
-    const target = atlasToolTarget(input);
+    const action = canonicalAtlasToolUseActionName(raw, input);
+    const target = atlasSummaryHint(input, action) || atlasToolTarget(input);
     return {
       target,
       summary: `${atlasDisplayName}${target ? `: ${target}` : ""}`,

@@ -12,6 +12,7 @@ import {
   ledgerBranchForWi,
   ledgerDbPath,
   mainViewPath,
+  worktreeViewPath,
 } from "../../functions/v2/runtime-paths.js";
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import {
@@ -970,16 +971,26 @@ export class AtlasToolExecutor {
     const session = request.session || {};
     const boot = session.bootConfig || session || {};
     const atlas = boot?.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
-    const repoRoot = config.repoRoot || config.cwd || atlas.repoPath || boot?.cwd || null;
+    const workItemKey = workItemKeyForRequest(request);
+    const projectRoot = config.projectRoot
+      || boot?.projectRoot
+      || config.storageRepoPath
+      || atlas.storageRepoPath
+      || null;
+    const repoRoot = config.repoRoot || config.cwd || atlas.repoPath || projectRoot || boot?.cwd || null;
     if (!repoRoot) return null;
-    const storageRepoRoot = config.storageRepoPath || atlas.storageRepoPath || repoRoot;
+    const readRoot = config.readRoot || config.cwd || boot?.cwd || atlas.repoPath || repoRoot;
+    const storageRepoRoot = config.storageRepoPath || atlas.storageRepoPath || projectRoot || repoRoot;
+    const mountedWorktreeRead = !!workItemKey
+      && !!projectRoot
+      && normalizeRepoKey(readRoot) !== normalizeRepoKey(projectRoot);
     return {
       viewPath: String(
         config.graphDbPath
         || config.requestedGraphDbPath
         || atlas.graphDbPath
         || atlas.requestedGraphDbPath
-        || mainViewPath(repoRoot),
+        || (mountedWorktreeRead ? worktreeViewPath(readRoot) : mainViewPath(projectRoot || repoRoot)),
       ),
       ledgerPath: String(
         config.ledgerDbPath
@@ -989,7 +1000,7 @@ export class AtlasToolExecutor {
         || ledgerDbPath(storageRepoRoot),
       ),
       versionId: String(config.versionId || atlas.versionId || "main"),
-      readRoot: String(config.readRoot || config.cwd || boot?.cwd || repoRoot),
+      readRoot: String(readRoot),
       repoId: config.repoId || atlas.repoId || null,
       config,
     };

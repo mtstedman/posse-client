@@ -449,15 +449,15 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "symbol.card": { access: "atlas", summary: "Fetch compact symbol cards without loading whole files: one card by symbolId/symbolRef, or a batch with per-item errors via symbolIds/symbolRefs." },
   "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
   "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
-  "tree.branch": { access: "atlas", summary: "Walk a code-tree branch: page a focused path/node/symbol subtree with aggregate counts and area labels. Its optional limit defaults from indexed repository size (100-250 nodes). Structure only — for exact file/import/fan-in inventory, follow with code.structure; for content intake, follow with code.survey." },
+  "tree.branch": { access: "atlas", summary: "Expandable tree discovery in the depth direction: page a focused path/node/symbol subtree with aggregate counts and area labels. Revisit only to follow a deeper branch or explicit page; no code content." },
   "tree.scope": { access: "atlas", summary: "Returns the ten highest-ranked candidate files inline. When more exist, nextCandidateFiles is an atlas.fetch_ref value for the already-stored next ranked page. Traverse it without rerunning tree.scope; call tree.scope again only for a materially different query or scope." },
-  "tree.expand": { access: "atlas", summary: "Grow scope from validated seed files/areas: surrounding branches, siblings, tests, entrypoints, risk metrics." },
+  "tree.expand": { access: "atlas", summary: "Expandable tree discovery in the breadth direction: grow validated seeds into surrounding branches, siblings, tests, entrypoints, and risk metrics. Revisit only with a genuinely different frontier." },
   "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
   "slice.refresh": { access: "atlas", summary: "Refresh an ATLAS slice incrementally instead of rebuilding from scratch." },
   "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
-  "code.skeleton": { access: "atlas", summary: "Structural outline for one file or symbol, including signatures and containment without full bodies." },
-  "code.lens": { access: "atlas", summary: "Identifier-focused excerpts for named usages or branches within selected files." },
-  "code.window": { access: "atlas", summary: "Raw code windows for exact guards, ordering, surrounding text, identifiers, or line ranges within selected files." },
+  "code.skeleton": { access: "atlas", summary: "Lowest-fidelity hard-line code evidence for one target. Call once per symbol; escalate a named gap to lens/window instead of recalling skeleton." },
+  "code.lens": { access: "atlas", summary: "Focused hard-line code evidence. Batch known identifiers and call once per symbol/selection; follow tailMatchesRef or escalate a named gap to window instead of recalling lens." },
+  "code.window": { access: "atlas", summary: "Highest-fidelity hard-line code evidence. Call once per symbol/selection; follow contentTailRef when present. Escalation from skeleton/lens is allowed, but changed window arguments are not another escalation." },
   "code.survey": { access: "atlas", summary: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the already-stored next ten. Search/fetch the stored pages with atlas.fetch_ref, then follow each returned next cursor until none remains. Search stored pages for exact task concepts before choosing among parallel versions or implementations; rank is not a version decision. This traverses the completed survey and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope." },
   "code.structure": { access: "atlas", summary: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed." },
   "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
@@ -1120,7 +1120,7 @@ function renderRouteUsageLines(role, tools, opts = {}) {
   const providerLine = renderProviderNamingLine(opts);
   if (providerLine) lines.push(providerLine);
   lines.push(...renderPrefetchGuidance(opts));
-  lines.push(`${label} provides indexed code context for explaining behavior, data flow, and relevant files. Use returned evidence directly when it answers the task, and do not repeat an already successful lookup.`);
+  lines.push(`${label} tree tools are expandable discovery: tree.branch grows depth and tree.expand grows breadth. Code.skeleton, code.lens, and code.window are hard-line evidence rungs; escalation to a higher-fidelity rung is allowed and rungs may be skipped. For each symbol, call each code rung at most once, batch all currently known identifiers into that rung's first request, and follow explicit continuation refs instead of recalling the rung with changed arguments.`);
   if (tools.some((tool) => ["query", "code", "repo", "agent", "workflow"].includes(tool))) {
     lines.push(`${label} gateway/workflow tools may take nested action names; nested actions must also appear in this role route. Do not use a wrapper to bypass routing.`);
   }

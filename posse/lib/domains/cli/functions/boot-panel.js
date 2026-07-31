@@ -81,10 +81,11 @@ const isCascadeDetail = (detail) => CASCADE_DETAIL_RE.test(String(detail || ""))
  * @param {{
  *   C: Record<string, string>,
  *   columns?: () => number,
+ *   rows?: () => number,
  *   onChange?: ((steps: Array<Record<string, unknown>>) => void) | null,
  * }} deps
  */
-export function createBootPanel({ C, columns = () => 100, onChange = null }) {
+export function createBootPanel({ C, columns = () => 100, rows = () => Infinity, onChange = null }) {
   const startedAt = Date.now();
 
   // Serialized step list for the optional onChange mirror (bridge
@@ -331,6 +332,10 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     const target = Math.max(PANEL_MIN_INNER, GRID_W);
     const cols = Number(columns()) || 100;
     return Math.min(Math.max(40, cols - 4), target);
+  };
+  const maxPanelRows = () => {
+    const value = Number(rows());
+    return Number.isFinite(value) ? Math.max(2, Math.floor(value)) : Infinity;
   };
   const line = (content) => {
     const w = innerWidth();
@@ -717,11 +722,20 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     const detail = st.detail ? ` ${col("dim")}${st.detail}${col("reset")}` : "";
     return line(`${prefix}${gaugeBar(st.percent, TAIL_BAR, "green")}  ${pctTxt}${detail}`);
   };
+  const visibleLedgerLanguages = () => langOrder.filter((lang) => {
+    const entry = langs.get(lang);
+    return entry && (entry.atlas || entry.scip);
+  });
+  const renderLanguageRow = (lang) => {
+    const entry = langs.get(lang);
+    const atlas = cell(...effectiveAtlasKind(entry.atlas));
+    const generate = cell(...effectiveScipGenKind(entry.scip));
+    const intake = cell(...effectiveScipParseKind(entry.scip));
+    const labelCell = `${col("dim")}${padVisible(lang, LANG_LABEL_W)}${col("reset")}`;
+    return line(`${" ".repeat(LABEL_INDENT)}${labelCell}  ${atlas}${" ".repeat(COL_GAP)}${generate}${" ".repeat(COL_GAP)}${intake}`);
+  };
   const renderCodeLedger = () => {
-    const visibleLangs = langOrder.filter((l) => {
-      const entry = langs.get(l);
-      return entry && (entry.atlas || entry.scip);
-    });
+    const visibleLangs = visibleLedgerLanguages();
     if (visibleLangs.length === 0) return { rows: [], percent: 0 };
     const rows = [];
     // Super-headers ("atlas ledger" over one stage, "scip" over two), a rule
@@ -730,14 +744,56 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     rows.push(line(`${col("dim")}${placeCols([["─".repeat(CELL_W), ATLAS_OFF], ["─".repeat(CELL_W * 2 + COL_GAP), GEN_OFF]])}${col("reset")}`));
     rows.push(line(`${col("dim")}${placeCols([["parse", ATLAS_OFF], ["generate", GEN_OFF], ["intake", PARSE_OFF]])}${col("reset")}`));
     for (const lang of visibleLangs) {
-      const e = langs.get(lang);
-      const a = cell(...effectiveAtlasKind(e.atlas));
-      const g = cell(...effectiveScipGenKind(e.scip));
-      const p = cell(...effectiveScipParseKind(e.scip));
-      const labelCell = `${col("dim")}${padVisible(lang, LANG_LABEL_W)}${col("reset")}`;
-      rows.push(line(`${" ".repeat(LABEL_INDENT)}${labelCell}  ${a}${" ".repeat(COL_GAP)}${g}${" ".repeat(COL_GAP)}${p}`));
+      rows.push(renderLanguageRow(lang));
     }
     return { rows, percent: codeLedgerPercent(visibleLangs) };
+  };
+
+  // Short terminal panes cannot show the full card at once. Writing a frame
+  // taller than the viewport makes the console scroll while it is being
+  // painted, which strands the title/runtime half above the visible window.
+  // Compact mode removes spacer/rule rows and folds the three-stage header
+  // into one line. If even that is too tall, retain the most operationally
+  // useful rows (errors, active stages, and the Enter action) first.
+  const compactLines = (limit) => {
+    const visibleLangs = visibleLedgerLanguages();
+    const ledgerPercent = codeLedgerPercent(visibleLangs);
+    /** @type {Array<{ row: string, priority: number }>} */
+    const body = [];
+    const add = (row, priority) => body.push({ row, priority });
+
+    add(bandRow("runtime", runtimeStatusText(), "cyan"), 90);
+    for (const row of renderNotes()) add(row, 100);
+    if (visibleLangs.length > 0) {
+      add(bandRow("atlas ledger", `${ledgerPercent}%`, "magenta"), 100);
+      add(line(`${col("dim")}${placeCols([["atlas parse", ATLAS_OFF], ["scip gen", GEN_OFF], ["scip intake", PARSE_OFF]])}${col("reset")}`), 90);
+      for (const lang of visibleLangs) {
+        const entry = langs.get(lang);
+        const resolved = [
+          effectiveAtlasKind(entry.atlas),
+          effectiveScipGenKind(entry.scip),
+          effectiveScipParseKind(entry.scip),
+        ].every(([kind]) => kind !== "active" && kind !== "wait");
+        add(renderLanguageRow(lang), resolved ? 70 : 95);
+      }
+      add(tailRow("merge", zip), zip && zip.state !== "idle" ? 95 : 65);
+      add(tailRow("tree", tree), tree && tree.state !== "idle" ? 95 : 65);
+      add(tailRow("encode", encode), encode && encode.state !== "idle" ? 95 : 65);
+      for (const row of renderAtlasNotice()) add(row, 90);
+    } else {
+      for (const row of renderBootSection()) add(row, 80);
+    }
+    for (const row of renderFooter()) add(row, 100);
+
+    const available = Math.max(0, limit - 2);
+    const selected = body.length <= available
+      ? body
+      : body
+        .map((item, index) => ({ ...item, index }))
+        .sort((a, b) => b.priority - a.priority || a.index - b.index)
+        .slice(0, available)
+        .sort((a, b) => a.index - b.index);
+    return [topBorder(), ...selected.map((item) => item.row), bottomBorder()];
   };
 
   // The notes section — error/warning explanations that can't ride inline
@@ -807,7 +863,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     }
     out.push(blank());
     out.push(bottomBorder());
-    return out;
+    const limit = maxPanelRows();
+    return out.length <= limit ? out : compactLines(limit);
   };
 
   return {

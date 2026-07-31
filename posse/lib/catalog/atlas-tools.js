@@ -598,7 +598,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.branch": {
     type: "function",
     name: "atlas_tree_walk",
-    description: "Walk a code-tree branch. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels. Structure only (paths, counts, labels — no code content); for per-file skeletons plus a call map over an area, follow with one code.survey call.",
+    description: "Expandable tree discovery in the depth direction. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels. Revisit only to follow a deeper branch or explicit page; this returns structure (paths, counts, labels), not code evidence.",
     parameters: {
       type: "object",
       properties: {
@@ -662,7 +662,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.expand": {
     type: "function",
     name: "atlas_tree_grow",
-    description: "Grow scope from validated seeds. Expand files/areas you already know matter into surrounding branches, sibling files, tests, and entrypoints, with deterministic scope/risk metrics. Use symbol.card/symbol.overview for symbol identity; use this for file/area breadth.",
+    description: "Expandable tree discovery in the breadth direction. Grow validated file/area seeds into surrounding branches, sibling files, tests, and entrypoints, with deterministic scope/risk metrics. Revisit only with a genuinely enlarged or different frontier. Use symbol.card/symbol.overview for symbol identity; use this for lateral file/area breadth.",
     parameters: {
       type: "object",
       properties: {
@@ -718,7 +718,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_get_skeleton",
-    description: "Structural outline for one file or symbol, including signatures and containment without full bodies.",
+    description: "Lowest-fidelity hard-line code evidence for one file or symbol: signatures and containment without full bodies. For a given symbol, call code.skeleton at most once. If the outline leaves a named implementation gap, escalate that symbol to code.lens or code.window; do not recall code.skeleton with changed arguments.",
     parameters: {
       type: "object",
       properties: {
@@ -780,7 +780,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_get_hot_path",
-    description: "Identifier-focused excerpts for named usages or branches within selected files.",
+    description: "Focused hard-line code evidence for named identifiers, usages, or branches. Batch every currently known identifier for the target into one request. For a given symbol—or the same file with substantially overlapping identifiers—call code.lens at most once. Follow an explicit tailMatchesRef if returned, or escalate a still-unresolved fact to code.window; do not recall code.lens with a revised identifier list.",
     parameters: {
       type: "object",
       properties: {
@@ -796,16 +796,17 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_need_window",
-    description: "Raw code windows for exact guards, ordering, surrounding text, identifiers, or line ranges within selected files.",
+    description: "Highest-fidelity hard-line code evidence for one selected symbol or file region. For a given symbol—or the same file with substantially overlapping identifiers—call code.window at most once. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file; identifier and line hints do not alter that selection. With file, identifiers center one bounded window, expectedLines sizes it, and granularity has no effect. If contentTailRef is returned, fetch it to continue the frozen result. Otherwise this selection is final; changing granularity, budget, or overlapping identifiers is a recall, not escalation. Escalation into code.window from code.skeleton or code.lens is allowed.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID from symbol.search, symbol.card, slice.build, skeleton, or hot path results. Do not pass a file path, symbol name, or file:symbol pair here." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        reason: { type: "string", description: "Required proof-of-need justification for raw window escalation." },
-        identifiersToFind: { type: "array", items: { type: "string" }, description: "Identifiers expected in the requested window, for example [\"generateMusic\",\"json_decode\"]. Prefer a JSON array; legacy scalar strings are normalized." },
-        expectedLines: { type: "integer", description: "Approximate line count. Prefer a JSON number, for example 40; legacy numeric strings are normalized." },
-        maxTokens: { type: "integer", description: "Max tokens budget for the raw window." },
+        reason: { type: "string", description: "Name the unresolved fact that requires this highest-fidelity selection and, when escalating, what skeleton/lens could not establish. Reformatting prior evidence, changing parameters, or requesting a next page is not a reason." },
+        identifiersToFind: { type: "array", items: { type: "string" }, description: "File-mode only: anchors used to center one bounded file window, for example [\"generateMusic\",\"json_decode\"]. They are ignored when symbolId is supplied, are not separate requested windows, and do not guarantee that every anchor is returned. Batch related anchors once. Prefer a JSON array; legacy scalar strings are normalized." },
+        expectedLines: { type: "integer", description: "File-mode only: approximate size of the identifier-centered window. Ignored when symbolId is supplied. This is not a continuation offset, and increasing it does not page a prior result. Prefer a JSON number, for example 40; legacy numeric strings are normalized." },
+        granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbolId-mode only: choose the resolved symbol, its enclosing block, or its containing file. Ignored when file is supplied. These are alternative selections, not sequential retrieval stages." },
+        maxTokens: { type: "integer", description: "Maximum output budget for this selection. It is not a paging control; follow contentTailRef when one is returned." },
       },
       required: ["reason", "expectedLines", "identifiersToFind"],
       additionalProperties: false,

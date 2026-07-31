@@ -74,6 +74,7 @@ export class RunBootPanelController {
     this.panel = createBootPanel({
       C,
       columns: () => this.renderColumns(),
+      rows: () => this.renderRows(),
       onChange: (steps) => this.queueStatusMirror(steps),
     });
 
@@ -124,6 +125,16 @@ export class RunBootPanelController {
 
   renderColumns() {
     return Math.max(1, this.terminalColumns() - 3);
+  }
+
+  terminalRows() {
+    const rows = Number(process.stdout?.rows);
+    if (Number.isFinite(rows) && rows > 1) return Math.max(1, Math.floor(rows));
+    return 40;
+  }
+
+  renderRows() {
+    return Math.max(2, this.terminalRows() - 1);
   }
 
   queueStatusMirror(steps) {

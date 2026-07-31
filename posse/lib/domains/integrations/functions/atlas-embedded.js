@@ -780,6 +780,7 @@ export function classifyAtlasFailure(message) {
     || lower.includes("unsupported parameter")
     || lower.includes("gateway cannot route action")
     || lower.includes("unknown atlas action")
+    || /^atlas [a-z0-9_.]+ requires (?!an atlas\b)/u.test(lower)
   ) {
     return "ATLAS bad parameters";
   }

@@ -34,8 +34,9 @@ export function validateAtlasPayloadSymbolIds(action, payload = {}) {
   const normalized = normalizeAtlasActionName(action);
   const input = /** @type {Record<string, any>} */ (payload && typeof payload === "object" ? payload : {});
 
-  if (normalized === "symbol.card" && input.symbolId != null) {
-    optionalAtlasSymbolId(input.symbolId, "symbol.card symbolId");
+  if (normalized === "symbol.card") {
+    if (input.symbolId != null) optionalAtlasSymbolId(input.symbolId, "symbol.card symbolId");
+    sanitizeAtlasSymbolIdList(input.symbolIds, 100, "symbol.card symbolIds");
   }
   if (normalized === "context") {
     sanitizeAtlasSymbolIdList(input.focusSymbols, 100, "context focusSymbols");

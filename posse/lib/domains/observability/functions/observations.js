@@ -902,6 +902,29 @@ export function atlasSummaryHint(input = {}, action = null) {
     return head ? `${head}${tail}` : null;
   };
 
+  const identifierEntry = (value, max = 3) => {
+    let items = [];
+    if (Array.isArray(value)) {
+      items = value;
+    } else if (typeof value === "string" && value.trim()) {
+      const text = value.trim();
+      if (text.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed)) items = parsed;
+        } catch {
+          // Legacy scalar form falls through to comma/semicolon splitting.
+        }
+      }
+      if (items.length === 0) items = text.split(/[,;]+/u);
+    }
+    const normalized = items.map((item) => String(item || "").trim()).filter(Boolean);
+    if (normalized.length === 0) return null;
+    const head = normalized.slice(0, max).join(", ");
+    const tail = normalized.length > max ? ` +${normalized.length - max}` : "";
+    return `${head}${tail}`;
+  };
+
   if (a === "symbol.search") {
     const q = args.query || args.pattern;
     if (q) return _truncate(q, 80);
@@ -911,14 +934,13 @@ export function atlasSummaryHint(input = {}, action = null) {
     const ids = Array.isArray(args.symbolIds) ? args.symbolIds
       : (args.symbolId ? [args.symbolId] : []);
     if (ids.length > 0) {
-      const tail = ids.length > 1 ? ` +${ids.length - 1}` : "";
-      return `${String(ids[0]).slice(0, 12)}${tail}`;
+      return `${ids.length} symbol target${ids.length === 1 ? "" : "s"}`;
     }
     const refs = Array.isArray(args.symbolRefs) ? args.symbolRefs
       : (args.symbolRef ? [args.symbolRef] : []);
     if (refs.length > 0) {
       const first = refs[0] || {};
-      const label = first.name || first.file || first.symbolId || "";
+      const label = first.name || first.file || (first.symbolId ? "symbol target" : "");
       const tail = refs.length > 1 ? ` +${refs.length - 1}` : "";
       return label ? `${_truncate(label, 60)}${tail}` : "";
     }
@@ -944,21 +966,30 @@ export function atlasSummaryHint(input = {}, action = null) {
     const seeds = firstArrayEntry(args.paths && args.paths.length ? args.paths : args.editedFiles, 1);
     if (seeds) return `seeds: ${_truncate(seeds, 60)}`;
     const symbols = firstArrayEntry(args.symbolIds, 1);
-    if (symbols) return `seeds: ${_truncate(symbols, 24)}`;
+    if (symbols) {
+      const count = Array.isArray(args.symbolIds) ? args.symbolIds.length : 1;
+      return `seeds: ${count} symbol target${count === 1 ? "" : "s"}`;
+    }
     if (args.taskText) return "task-text only (no seeds)";
     return "";
   }
 
   if (a === "tree.branch") {
-    const focus = args.path || args.nodeId || (args.symbolId ? `sym:${String(args.symbolId).slice(0, 8)}` : null);
+    const focus = args.path || args.nodeId || (args.symbolId ? "symbol target" : null);
     if (focus) return _truncate(String(focus), 80);
   }
 
   if (a === "code.skeleton" || a === "code.lens" || a === "code.window") {
-    const loc = args.file || (args.symbolId ? `sym:${String(args.symbolId).slice(0, 8)}` : null);
-    const ids = firstArrayEntry(args.identifiersToFind, 3);
-    const parts = [loc, ids].filter(Boolean);
-    if (parts.length > 0) return _truncate(parts.join(" → "), 80);
+    const loc = args.file || (args.symbolId ? "symbol target" : null);
+    const ids = identifierEntry(args.identifiersToFind, 3);
+    const selection = ids && loc ? `${ids} @ ${loc}` : (ids || loc || "");
+    const shape = a === "code.window"
+      ? (args.symbolId
+          ? String(args.granularity || "symbol")
+          : `file window${args.expectedLines ? ` ${args.expectedLines}L` : ""}`)
+      : (a === "code.lens" && args.contextLines != null ? `±${args.contextLines}L` : "");
+    const parts = [selection, shape].filter(Boolean);
+    if (parts.length > 0) return _truncate(parts.join(" · "), 140);
   }
 
   if (a === "context" || a === "agent.context") {
@@ -1017,7 +1048,6 @@ export function atlasSummaryHint(input = {}, action = null) {
   const candidates = [
     args.query,
     args.pattern,
-    args.symbolId,
     args.file,
     args.filePath,
     args.taskText,
@@ -1026,7 +1056,12 @@ export function atlasSummaryHint(input = {}, action = null) {
     args.fromVersion && args.toVersion ? `${args.fromVersion}->${args.toVersion}` : null,
   ];
   const first = candidates.find((value) => value != null && String(value).trim() !== "");
-  return first ? _truncate(String(first).split(/\r?\n/)[0], 80) : "";
+  if (first) return _truncate(String(first).split(/\r?\n/)[0], 80);
+  if (args.symbolId) return "symbol target";
+  if (Array.isArray(args.symbolIds) && args.symbolIds.length > 0) {
+    return `${args.symbolIds.length} symbol target${args.symbolIds.length === 1 ? "" : "s"}`;
+  }
+  return "";
 }
 
 // Internal alias preserves the existing call sites.

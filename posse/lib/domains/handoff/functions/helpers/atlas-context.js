@@ -2601,34 +2601,35 @@ export function classifyAtlasPrefetchRelevance(packet, recipient = packet?.recip
 function renderRequiredRetrievalOrderLine(packet) {
   const label = atlasBackendLabel(packet?.atlas);
   const available = new Set(displayableAtlasTools(packet?.atlas?.tools, packet?.atlas));
+  const resultSemantics = `RESULT SEMANTICS: tree tools are expandable discovery—tree.branch grows depth and tree.expand grows breadth. Code.skeleton, code.lens, and code.window are hard-line evidence rungs. Escalation to a higher-fidelity rung is allowed and rungs may be skipped, but each rung may be called at most once per symbol. Batch all currently known identifiers into that rung's first request and use explicit continuation refs instead of recalling it with changed arguments.`;
   const gateEnabled = packet?.atlas?.gateEnabled != null
     ? !!packet.atlas.gateEnabled
     : resolveAtlasToolGateEnabled();
   const prefetchStatus = String(packet?.atlas?.prefetchStatus || "").toLowerCase();
   if (!gateEnabled) {
     if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use it directly when it answers the question; do not repeat the same lookup or re-read that evidence natively. Use standard tools when ${label} is unavailable or insufficient, for non-indexed config/data/docs where the raw text is the object, for exact current worktree state after mutations, or for git/test/build/shell operations.`;
+      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use it directly when it answers the question; do not repeat the same lookup or re-read that evidence natively. Use standard tools when ${label} is unavailable or insufficient, for non-indexed config/data/docs where the raw text is the object, for exact current worktree state after mutations, or for git/test/build/shell operations. ${resultSemantics}`;
     }
     if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-      return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools for whatever ${label} could not answer, stating the gap.`;
+      return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools for whatever ${label} could not answer, stating the gap. ${resultSemantics}`;
     }
     const firstTools = selectFirstRetrievalTools(packet?.atlas?.tools, packet?.atlas);
     const examples = firstTools.length > 0
       ? ` (start with ${firstTools.join(" / ")})`
       : "";
-    return `${label} RETRIEVAL POLICY: use ${label} tools when possible for repository discovery and codebase understanding${examples}. Use returned evidence directly when it answers the task. Use standard tools when ${label} is unavailable or insufficient, the target is non-indexed config/data/docs, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation.`;
+    return `${label} RETRIEVAL POLICY: use ${label} tools when possible for repository discovery and codebase understanding${examples}. Use returned evidence directly when it answers the task. Use standard tools when ${label} is unavailable or insufficient, the target is non-indexed config/data/docs, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation. ${resultSemantics}`;
   }
   if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context (prefetch does not count as active ${label} use). Use it directly when it answers the task, and do not repeat the same lookup. Native read/search/list tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or git/test/build/shell operations.`;
+    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context (prefetch does not count as active ${label} use). Use it directly when it answers the task, and do not repeat the same lookup. Native read/search/list tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or git/test/build/shell operations. ${resultSemantics}`;
   }
   if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-    return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files; if a focused attempt still cannot answer, use native tools for that named gap and state what ${label} left unanswered.`;
+    return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files; if a focused attempt still cannot answer, use native tools for that named gap and state what ${label} left unanswered. ${resultSemantics}`;
   }
   const firstTools = selectFirstRetrievalTools(packet?.atlas?.tools, packet?.atlas);
   const examples = firstTools.length > 0
     ? ` (start with ${firstTools.join(" / ")})`
     : "";
-  return `REQUIRED RETRIEVAL POLICY: ${label} is the inspection path${examples}. Prefetch and internal bookkeeping calls do not count as retrieval. Use ${label} evidence directly when it answers the task and do not repeat the same lookup. Native list/search/read tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or operations ${label} does not expose (git/test/build/shell).`;
+  return `REQUIRED RETRIEVAL POLICY: ${label} is the inspection path${examples}. Prefetch and internal bookkeeping calls do not count as retrieval. Use ${label} evidence directly when it answers the task and do not repeat the same lookup. Native list/search/read tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or operations ${label} does not expose (git/test/build/shell). ${resultSemantics}`;
 }
 
 function renderAtlasContextSection(packet) {

@@ -73,12 +73,10 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
         }
       }
 
-      // A terminal worktree can mean either preserved, unmerged work or a
-      // harmless cleanup retry after a successful merge. Keep those states
-      // distinct so wrap-up never tells an operator that merged work is at
-      // risk, or that unmerged work is safe to purge.
+      // A terminal worktree only belongs in the review audit when it needs
+      // operator attention. A verified-clean worktree left after a recorded
+      // merge is routine cleanup state and stays silent.
       if (wtExists && TERMINAL_WORK_ITEM_STATUSES.includes(wi.status)) {
-        const hasUncommittedWork = issues.some((issue) => issue.type === "dirty");
         const worktreeCheckFailed = issues.some((issue) =>
           issue.type === "worktree_check_failed"
         );
@@ -87,12 +85,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
             type: "cleanup_unverified",
             message: "Merge is recorded, but the remaining worktree could not be verified as clean",
           });
-        } else if (wi.merge_state === "merged" && !hasUncommittedWork) {
-          issues.push({
-            type: "merged_residue",
-            message: `Merge is recorded; only worktree/branch cleanup remains`,
-          });
-        } else {
+        } else if (wi.merge_state !== "merged") {
           issues.push({
             type: "terminal_unmerged",
             message: `WI is ${wi.status}, but its worktree is not confirmed clean and merged`,
@@ -199,7 +192,6 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     // Show WI branch issues
     const terminalUnmerged = dirtyItems.filter(d => d.issues.some(i => i.type === "terminal_unmerged"));
     const cleanupUnverified = dirtyItems.filter(d => d.issues.some(i => i.type === "cleanup_unverified"));
-    const mergedResidue = dirtyItems.filter(d => d.issues.some(i => i.type === "merged_residue"));
     const unmerged = dirtyItems.filter(d =>
       d.issues.some(i => i.type === "unmerged")
       && !d.issues.some(i => i.type === "terminal_unmerged")
@@ -242,20 +234,11 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       }
     }
 
-    if (mergedResidue.length > 0) {
-      console.log(`\n  ${C.cyan}${C.bold}\u2139 ${mergedResidue.length} merged worktree(s) awaiting cleanup:${C.reset}`);
-      for (const item of mergedResidue) {
-        console.log(`    ${C.cyan}WI#${item.wiId}${C.reset} ${item.title.slice(0, 50)} ${C.dim}(${item.wtDir})${C.reset}`);
-        console.log(`      Merge is recorded; the worktree is cleanup residue, not an unmerged change.`);
-      }
-    }
-
     // Offer cleanup walkthrough if there are actionable issues
     if (
       dirty.length > 0
       || terminalUnmerged.length > 0
       || cleanupUnverified.length > 0
-      || mergedResidue.length > 0
       || unmerged.length > 0
       || targetDirty
     ) {
@@ -281,11 +264,6 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
         console.log(`    To inspect:  ${C.bold}cd <worktree-path> && git status && git diff${C.reset}`);
         console.log(`    To commit:   ${C.bold}cd <worktree-path> && git add -A && git commit -m "WIP"${C.reset}`);
         console.log(`    To discard:  ${C.bold}cd <worktree-path> && git checkout -- . && git clean -fd${C.reset}`);
-      }
-
-      if (mergedResidue.length > 0) {
-        console.log(`\n  ${C.cyan}Merged cleanup residue${C.reset} \u2014 changes are already recorded on the target branch:`);
-        console.log(`    To retry safe cleanup: ${C.bold}posse prune${C.reset}`);
       }
 
       if (cleanupUnverified.length > 0) {
