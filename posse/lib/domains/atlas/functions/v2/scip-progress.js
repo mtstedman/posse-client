@@ -68,6 +68,7 @@ export function scipBasenameSourceLanguages(scipPath) {
   if (base === "php") return ["php"];
   if (base === "go") return ["go"];
   if (base === "rust") return ["rs"];
+  if (base === "clang") return ["c", "cpp"];
   if (["ts", "js", "py", "php", "go", "rs"].includes(base)) return [base];
   return [];
 }

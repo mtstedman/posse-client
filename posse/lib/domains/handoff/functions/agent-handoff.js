@@ -631,7 +631,9 @@ function validatePlannerPacketSemantics(packet) {
     } else if (writablePaths.length === 0) {
       fail(
         "AGENT_HANDOFF_SEMANTIC_INVALID",
-        `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope`,
+        `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope; `
+          + "add at least one exact repository path to scope.files_to_modify, scope.files_to_create, "
+          + "scope.files_to_delete, or scope.create_roots, then retry agent_handoff",
       );
     }
   }

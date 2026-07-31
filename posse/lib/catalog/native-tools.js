@@ -567,7 +567,8 @@ const HANDOFF_STRING_LIST = {
 const PLANNER_SCOPE = {
   type: "object",
   description:
-    "Exact execution scope. db requires target dev and empty file arrays; other agent tasks require writable file or create-root scope. " +
+    "Exact execution scope. db requires target dev and empty file arrays; other agent tasks require at least one exact writable path. " +
+    "Never submit scope:{} or a non-db scope containing only task_mode. " +
     "system/promote requires exact destination files in files_to_create or files_to_modify.",
   properties: {
     task_mode: {
@@ -575,12 +576,34 @@ const PLANNER_SCOPE = {
       enum: ["code", "report", "content", "image", "intake_processing", "db"],
       default: "code",
     },
-    files_to_modify: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
-    files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
-    files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
-    create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+    files_to_modify: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+    files_to_create: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+    files_to_delete: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+    create_roots: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
     output_root: { type: "string", maxLength: 500 },
   },
+  anyOf: [
+    {
+      required: ["task_mode"],
+      properties: { task_mode: { enum: ["db"] } },
+    },
+    {
+      required: ["files_to_modify"],
+      properties: { files_to_modify: { minItems: 1 } },
+    },
+    {
+      required: ["files_to_create"],
+      properties: { files_to_create: { minItems: 1 } },
+    },
+    {
+      required: ["files_to_delete"],
+      properties: { files_to_delete: { minItems: 1 } },
+    },
+    {
+      required: ["create_roots"],
+      properties: { create_roots: { minItems: 1 } },
+    },
+  ],
   additionalProperties: false,
 };
 
@@ -866,6 +889,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; promote is a system role. " +
+    "Every non-db task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; never submit scope:{}. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
@@ -1006,6 +1030,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; promote is a system role. " +
+    "Every non-db task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; never submit scope:{}. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +

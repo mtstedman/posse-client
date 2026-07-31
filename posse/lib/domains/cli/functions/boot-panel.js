@@ -417,7 +417,8 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
 
   // Per-language stage "kinds" — the grid shows three columns derived from the
   // two stored sides. SCIP is stored as one side that walks
-  // idle → indexing (generate) → intaking (parse) → done; split it back out.
+  // idle → indexing (generate) → intaking (ledger intake) → done; split it
+  // back out.
   // Active cells whose progress hasn't advanced lately carry a pulse flag so
   // the bar can blink instead of reading as frozen.
   const STALE_PULSE_MS = 3000;
@@ -721,7 +722,7 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
     // beneath each, then the per-stage labels.
     rows.push(line(`${col("bold")}${col("dim")}${placeCols([["atlas", ATLAS_OFF], ["scip", GEN_OFF]])}${col("reset")}`));
     rows.push(line(`${col("dim")}${placeCols([["─".repeat(CELL_W), ATLAS_OFF], ["─".repeat(CELL_W * 2 + COL_GAP), GEN_OFF]])}${col("reset")}`));
-    rows.push(line(`${col("dim")}${placeCols([["parse", ATLAS_OFF], ["generate", GEN_OFF], ["parse", PARSE_OFF]])}${col("reset")}`));
+    rows.push(line(`${col("dim")}${placeCols([["parse", ATLAS_OFF], ["generate", GEN_OFF], ["intake", PARSE_OFF]])}${col("reset")}`));
     for (const lang of visibleLangs) {
       const e = langs.get(lang);
       const a = cell(...effectiveAtlasKind(e.atlas));

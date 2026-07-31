@@ -77,6 +77,10 @@ import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js"
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
 import { ensureScipStaged, stageScipBatches } from "../../functions/v2/scip/stager.js";
 import {
+  scipCoverageForIntake,
+  scopePathsForScipSourceLanguages,
+} from "../../functions/v2/scip/source-scope.js";
+import {
   normalizeAtlasScipMode,
   shouldRunScipPhase,
 } from "../../../integrations/functions/atlas-v2-mode.js";
@@ -551,13 +555,18 @@ export class ParseEngine {
     if (existingFiles.length > 0) {
       for (const [batchOrdinal, file] of existingFiles.entries()) {
         if (typeof opts.onBatchReady === "function") {
+          const sourceLanguages = scipBasenameSourceLanguages(file);
           await opts.onBatchReady(file, {
             session_id: null,
             batch_ordinal: batchOrdinal,
             batch_count: existingFiles.length,
-            repo_rel_paths: Array.isArray(paths) ? paths : [],
-            source_languages: scipBasenameSourceLanguages(file),
+            repo_rel_paths: scopePathsForScipSourceLanguages(paths, sourceLanguages),
+            source_languages: sourceLanguages,
             source: "staged",
+            // This startup snapshot is provisional: current-path batches or a
+            // configured restage still follow. Its present documents are safe
+            // to commit, but an omission cannot terminalize intake yet.
+            terminalize_absent: false,
           });
         }
       }
@@ -569,17 +578,20 @@ export class ParseEngine {
     // Without this fallback boot reported that missing staging would be
     // retried, then produced zero batches forever.
     if (String(this.#runtimeConfig?.scipIndexCommand || "").trim()) {
-      const files = await this.#stageScipFiles(base, purpose);
+      const stagedFiles = await this.#stageScipFiles(base, purpose);
+      const configuredOutput = normalizedScipPath(path.join(this.#scipDir, "configured.scip"));
+      const files = stagedFiles.filter((file) => normalizedScipPath(file) === configuredOutput);
       for (const [batchOrdinal, file] of files.entries()) {
         if (typeof opts.onBatchReady === "function") {
+          const sourceLanguages = Array.isArray(this.#runtimeConfig?.scipLanguages)
+            ? this.#runtimeConfig.scipLanguages
+            : [];
           await opts.onBatchReady(file, {
             session_id: null,
             batch_ordinal: batchOrdinal,
             batch_count: files.length,
-            repo_rel_paths: Array.isArray(paths) ? paths : [],
-            source_languages: Array.isArray(this.#runtimeConfig?.scipLanguages)
-              ? this.#runtimeConfig.scipLanguages
-              : [],
+            repo_rel_paths: scopePathsForScipSourceLanguages(paths, sourceLanguages),
+            source_languages: sourceLanguages,
             source: "configured",
           });
         }
@@ -755,17 +767,15 @@ export class ParseEngine {
    * }} [opts]
    */
   #createScipIngestQueue(base, opts = {}) {
-    /** @type {Set<string>} */
-    const seen = new Set();
     let tail = Promise.resolve();
     const add = (scipPath, info = {}) => {
       const key = normalizedScipPath(scipPath);
-      if (!key || seen.has(key)) return tail;
-      seen.add(key);
+      if (!key) return tail;
       const file = String(scipPath);
       const scopePaths = (Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths : [])
         .map((repoRelPath) => String(repoRelPath || ""))
         .filter(Boolean);
+      const terminalizeAbsent = info?.terminalize_absent !== false;
       const expectedContentHashes = info?.content_hashes && typeof info.content_hashes === "object"
         ? info.content_hashes
         : null;
@@ -798,10 +808,10 @@ export class ParseEngine {
           return this.#ingestScipFiles(base, [file], {
             ...opts,
             onDocumentsPrepared: typeof opts.onDocumentsPrepared === "function"
-              ? (coverage) => opts.onDocumentsPrepared({
-                  ...coverage,
-                  ...(scopePaths.length > 0 ? { scope_paths: scopePaths } : {}),
-                })
+              ? (coverage) => opts.onDocumentsPrepared(scipCoverageForIntake(coverage, {
+                  scopePaths,
+                  terminalizeAbsent,
+                }))
               : null,
             expectedContentHashes,
             preparedFiles: new Map([[key, ready]]),
@@ -938,8 +948,9 @@ export class ParseEngine {
           try {
             // Overlap: deterministic path-preserving SCIP batches are staged
             // while tree-sitter parses. Each ready batch enters the serialized
-            // intake lane immediately and its acknowledgement backpressures the
-            // producer before more than the configured batch window can build.
+            // intake lane immediately. Its acknowledgement covers durable
+            // ledger intake only; waiting for an out-of-order ONNX document
+            // here can block the later SCIP producer needed by the ordered head.
             const scipQueue = this.#createScipIngestQueue(base, {
               onDocumentsPrepared: (coverage) => embeddingIntake?.documents.declareScipCoverage(coverage),
               onDocumentCommitted: (document) => embeddingIntake?.documents.markScip(document),
@@ -948,11 +959,7 @@ export class ParseEngine {
               try {
                 if (useBatchedScipStaging()) {
                   await this.#stageScipBatches(base, "main-incremental", paths, {
-                    onBatchReady: async (file, info) => {
-                      await scipQueue.add(file, info);
-                      const lastPath = Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths.at(-1) : null;
-                      if (lastPath) await embeddingIntake?.documents.waitUntilProcessed(lastPath);
-                    },
+                    onBatchReady: (file, info) => scipQueue.add(file, info),
                     onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
                       documents: [], source_languages: [],
                       scope_paths: [String(info?.repo_rel_path || "")].filter(Boolean),
@@ -998,11 +1005,7 @@ export class ParseEngine {
               try {
                 if (useBatchedScipStaging()) {
                   await this.#stageScipBatches(base, "main-full", paths, {
-                    onBatchReady: async (file, info) => {
-                      await scipQueue.add(file, info);
-                      const lastPath = Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths.at(-1) : null;
-                      if (lastPath) await embeddingIntake?.documents.waitUntilProcessed(lastPath);
-                    },
+                    onBatchReady: (file, info) => scipQueue.add(file, info),
                     onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
                       documents: [], source_languages: [],
                       scope_paths: [String(info?.repo_rel_path || "")].filter(Boolean),

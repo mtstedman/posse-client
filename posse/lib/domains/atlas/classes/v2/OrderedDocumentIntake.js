@@ -197,13 +197,6 @@ export class OrderedDocumentIntake {
   }
 
   /** @param {string} repoRelPath */
-  async waitUntilProcessed(repoRelPath) {
-    const record = this.#byPath.get(String(repoRelPath || ""));
-    if (!record || record.ordinal < this.#processed) return;
-    await record.processed.promise;
-  }
-
-  /** @param {string} repoRelPath */
   skip(repoRelPath) {
     const record = this.#byPath.get(String(repoRelPath || ""));
     if (!record || record.treeSitter) return;
