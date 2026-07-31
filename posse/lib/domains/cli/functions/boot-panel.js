@@ -273,12 +273,12 @@ export function createBootPanel({ C, columns = () => 100, onChange = null }) {
    * merge (zip), encoding the merged view's symbols into vectors. Rendered as
    * its own bottom bar next to zip so the real pipeline order reads clearly:
    * atlas parse (rows) → merge (zip bar) → encode (this bar).
-   * @type {{ state: string, percent: number | null, detail: string, startedAt: number, finishedAt: number | null } | null}
+   * @type {{ state: string, percent: number | null, detail: string, startedAt: number, finishedAt: number | null, streaming: boolean } | null}
    */
   let encode = null;
   const updateEncode = (patch = {}) => {
     const previous = encode || {
-      state: "idle", percent: null, detail: "", startedAt: Date.now(), finishedAt: null,
+      state: "idle", percent: null, detail: "", startedAt: Date.now(), finishedAt: null, streaming: false,
     };
     const merged = { ...previous, ...patch };
     if (previous.state === "idle" && patch.state && patch.state !== "idle" && !patch.startedAt) {

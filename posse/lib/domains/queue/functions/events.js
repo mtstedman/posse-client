@@ -141,6 +141,30 @@ function insertEventRow(stmt, row) {
   return { ...row, id: Number(info.lastInsertRowid), created_at: createdAt };
 }
 
+function eventRow({
+  work_item_id = null,
+  job_id = null,
+  attempt_id = null,
+  event_type,
+  actor_type,
+  actor_id = null,
+  message = null,
+  event_json = null,
+} = {}) {
+  warnOnceForInvalidEventType(event_type);
+  return {
+    work_item_id,
+    job_id,
+    attempt_id,
+    event_type,
+    actor_type,
+    actor_id,
+    message,
+    event_json: normalizeJsonText(event_json),
+    created_at: nowIso(),
+  };
+}
+
 // ── Event insert batching ────────────────────────────────────────────────
 //
 // During active runs every job emits 8-20 events (start, attempt, finish,
@@ -261,11 +285,7 @@ export function logEvent({
   message = null,
   event_json = null,
 } = {}) {
-  // Light-touch advisory: warn once per process for event_type values that
-  // fall outside the registered namespaces. The write still proceeds so
-  // existing freeform callers are not broken. See observability/event-types.js.
-  warnOnceForInvalidEventType(event_type);
-  _pendingEvents.push({
+  _pendingEvents.push(eventRow({
     work_item_id,
     job_id,
     attempt_id,
@@ -273,9 +293,8 @@ export function logEvent({
     actor_type,
     actor_id,
     message,
-    event_json: normalizeJsonText(event_json),
-    created_at: nowIso(),
-  });
+    event_json,
+  }));
   if (_pendingEvents.length >= EVENT_BATCH_FLUSH_AT) {
     // Install the exit hook even on the threshold-flush path so a burst
     // of events at startup can't bypass durable-on-exit semantics.
@@ -288,6 +307,33 @@ export function logEvent({
   } else {
     _scheduleEventFlush();
   }
+}
+
+/**
+ * Persist an event synchronously. Use this only when a queue transition relies
+ * on the event for crash recovery; routine observability stays batched through
+ * logEvent(). When called inside a larger transaction, the relational event
+ * commits atomically with that transition and the DB-tail archiver handles its
+ * eventual JSONL mirror.
+ */
+export function logDurableEvent(args = {}) {
+  const db = getDb();
+  const stmt = db.prepare(`
+    INSERT INTO events (work_item_id, job_id, attempt_id, event_type, actor_type, actor_id, message, event_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const inserted = insertEventRow(stmt, eventRow(args));
+  if (!db.inTransaction) {
+    try {
+      if (appendEventFileRow(inserted)) {
+        markTelemetryRowsMirrored("events", [inserted.id]);
+        pruneTelemetryTableToTail(db, "events");
+      }
+    } catch {
+      // The DB event is the recovery authority; telemetry mirroring is best effort.
+    }
+  }
+  return inserted;
 }
 
 /**

@@ -20,6 +20,7 @@ import {
 } from "./index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { PUSH_OFFER_SUBTYPE, TERMINAL_WORK_ITEM_STATUSES, runImmediateTransaction } from "./common.js";
+import { withMergeLockSync } from "./locks.js";
 
 const OPEN_GATE_STATUSES = ["queued", "waiting_on_human"];
 const OPEN_GATE_STATUSES_SQL = `(${OPEN_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
@@ -53,6 +54,25 @@ export function findOpenPushOfferJob() {
   return row ? getJob(row.id) : null;
 }
 
+function cancelOpenPushOfferGatesInTransaction(reason) {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE job_type = 'human_input'
+         AND status IN ${OPEN_GATE_STATUSES_SQL}
+         AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
+    )
+    .all();
+  let canceled = 0;
+  for (const row of rows) {
+    if (closePushOfferGate(row.id, "canceled", { declined: false, superseded: true, reason })) {
+      canceled += 1;
+    }
+  }
+  return canceled;
+}
+
 /**
  * Cancel every open push-offer gate (normally at most one). Used when a new
  * run boots (the offer's ahead-count is about to go stale) and when a fresh
@@ -60,25 +80,14 @@ export function findOpenPushOfferJob() {
  */
 export function cancelOpenPushOfferGates(reason = "superseded") {
   const db = getDb();
-  const execute = () => {
-    const rows = db
-      .prepare(
-        `SELECT id FROM jobs
-         WHERE job_type = 'human_input'
-           AND status IN ${OPEN_GATE_STATUSES_SQL}
-           AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
-      )
-      .all();
-    let canceled = 0;
-    for (const row of rows) {
-      if (closePushOfferGate(row.id, "canceled", { declined: false, superseded: true, reason })) {
-        canceled += 1;
-      }
-    }
-    return canceled;
-  };
-  if (db.inTransaction) return execute();
-  return runImmediateTransaction(db, execute);
+  const outcome = withMergeLockSync(
+    () => runImmediateTransaction(db, () => cancelOpenPushOfferGatesInTransaction(reason)),
+    { ownerId: `merge-${process.pid}-push-offer-cancel` },
+  );
+  // An in-flight push owns the same lock through remote mutation and durable
+  // gate settlement. Leave the gate untouched so cancellation cannot report a
+  // superseded offer after that push has already changed the remote.
+  return outcome.acquired ? outcome.result : 0;
 }
 
 /**
@@ -134,42 +143,50 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
   const workItemId = pickAnchorWorkItemId();
   if (!workItemId) return { ok: false, reason: "no_work_item" };
 
-  cancelOpenPushOfferGates("superseded_by_new_offer");
+  const db = getDb();
+  const outcome = withMergeLockSync(() => runImmediateTransaction(db, () => {
+    cancelOpenPushOfferGatesInTransaction("superseded_by_new_offer");
 
-  const remote = String(state.effectiveRemote || "origin");
-  const branch = String(state.pushBranch);
-  const countText = aheadCount != null ? `${aheadCount} commit(s)` : "pending commits";
-  const payload = {
-    subtype: PUSH_OFFER_SUBTYPE,
-    remote,
-    push_branch: branch,
-    target_branch: String(state.targetBranch || branch),
-    ahead_count: aheadCount,
-    merged_count: mergedCount,
-    working_tree_dirty: Boolean(String(state.workingTreeStatus || "").trim()),
-    unmerged_wis: (Array.isArray(state.unmergedWIs) ? state.unmergedWIs : [])
-      .slice(0, 10)
-      .map((item) => ({
-        wi_id: item.wiId ?? item.wi_id ?? null,
-        title: String(item.title || "").slice(0, 120),
-        branch: String(item.branchName || item.branch || "").slice(0, 120),
-      })),
-    prompt: `Push ${countText} on ${branch} to ${remote}?`,
-    created_by: createdBy,
-  };
+    const remote = String(state.effectiveRemote || "origin");
+    const branch = String(state.pushBranch);
+    const countText = aheadCount != null ? `${aheadCount} commit(s)` : "pending commits";
+    const payload = {
+      subtype: PUSH_OFFER_SUBTYPE,
+      remote,
+      push_branch: branch,
+      target_branch: String(state.targetBranch || branch),
+      ahead_count: aheadCount,
+      merged_count: mergedCount,
+      working_tree_dirty: Boolean(String(state.workingTreeStatus || "").trim()),
+      unmerged_wis: (Array.isArray(state.unmergedWIs) ? state.unmergedWIs : [])
+        .slice(0, 10)
+        .map((item) => ({
+          wi_id: item.wiId ?? item.wi_id ?? null,
+          title: String(item.title || "").slice(0, 120),
+          branch: String(item.branchName || item.branch || "").slice(0, 120),
+        })),
+      prompt: `Push ${countText} on ${branch} to ${remote}?`,
+      created_by: createdBy,
+    };
 
-  const job = createJob({
-    work_item_id: workItemId,
-    job_type: "human_input",
-    title: `Push ${countText} to ${remote}/${branch}`,
-    payload_json: JSON.stringify(payload),
+    const job = createJob({
+      work_item_id: workItemId,
+      job_type: "human_input",
+      title: `Push ${countText} to ${remote}/${branch}`,
+      payload_json: JSON.stringify(payload),
+    });
+    const jobId = Number(job?.id ?? job?.lastInsertRowid ?? job);
+    if (!Number.isInteger(jobId) || jobId <= 0) {
+      return { ok: false, reason: "job_create_failed" };
+    }
+    // Straight to waiting_on_human: the scheduler must never lease this into
+    // a terminal prompt — the gate is answered out-of-band (phone/CLI).
+    forceUpdateJobStatus(jobId, "waiting_on_human");
+    return { ok: true, jobId, workItemId };
+  }), {
+    ownerId: `merge-${process.pid}-push-offer-upsert`,
   });
-  const jobId = Number(job?.id ?? job?.lastInsertRowid ?? job);
-  if (!Number.isInteger(jobId) || jobId <= 0) {
-    return { ok: false, reason: "job_create_failed" };
-  }
-  // Straight to waiting_on_human: the scheduler must never lease this into
-  // a terminal prompt — the gate is answered out-of-band (phone/CLI).
-  forceUpdateJobStatus(jobId, "waiting_on_human");
-  return { ok: true, jobId, workItemId };
+  return outcome.acquired
+    ? outcome.result
+    : { ok: false, reason: "merge_in_progress" };
 }

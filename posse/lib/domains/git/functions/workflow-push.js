@@ -1,7 +1,7 @@
 // lib/domains/git/functions/workflow-push.js
 // Push-offer gate and push execution workflow helpers.
 
-import { listWorkItems, logEvent } from "../../queue/functions/index.js";
+import { listWorkItems, logEvent, withMergeLock } from "../../queue/functions/index.js";
 import { markOpenPushOfferGatePushed, upsertPushOfferGate } from "../../queue/functions/push-offer.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -302,16 +302,26 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     console.log(`  ${C.dim}Pushing ${pushBranch} to ${effectiveRemote}...${C.reset}`);
-    const pushed = await executePushAsync({ effectiveRemote, pushBranch, mergedCount }).catch((err) => ({
-      ok: false,
-      reason: "push_failed",
-      output: err?.message || String(err),
-    }));
+    const pushOutcome = await withMergeLock(async () => {
+      const result = await executePushAsync({ effectiveRemote, pushBranch, mergedCount }).catch((err) => ({
+        ok: false,
+        reason: "push_failed",
+        output: err?.message || String(err),
+      }));
+      if (result.ok) {
+        try {
+          markOpenPushOfferGatePushed({ remote: effectiveRemote, branch: pushBranch, via: "terminal" });
+        } catch { /* gate close is best-effort; supersede covers stragglers */ }
+      }
+      return result;
+    }, {
+      ownerId: `merge-${process.pid}-terminal-git-push`,
+    });
+    const pushed = pushOutcome.acquired
+      ? pushOutcome.result
+      : { ok: false, reason: "merge_in_progress", output: "A merge or push is already in progress" };
     if (pushed.ok) {
       console.log(`  ${C.green}\u2713 Pushed to ${effectiveRemote}${C.reset}`);
-      try {
-        markOpenPushOfferGatePushed({ remote: effectiveRemote, branch: pushBranch, via: "terminal" });
-      } catch { /* gate close is best-effort; supersede covers stragglers */ }
     } else if (pushed.reason === "work_item_push_target") {
       console.log(`  ${C.red}\u2717 Refusing to push work-item branch ${pushBranch}; merge WI#${pushed.wiId ?? "?"} into ${targetBranch} first.${C.reset}`);
     } else if (pushed.reason === "conflict_markers") {

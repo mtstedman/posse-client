@@ -112,7 +112,11 @@ export function buildLocalPlannerToolInstructions(
         ? "When asked to create a new file or replace an entire file, call write_file directly with path and string content; do not read a missing destination first."
         : null,
       availableNames.has("edit_file") && !availableNames.has("write_file")
-        ? "write_file is unavailable for this existing-file job. Preserve the file and use edit_file with exact old_string/new_string or another listed text-edit mode."
+        ? (
+            Array.isArray(writeScope?.createFiles) && writeScope.createFiles.length > 0
+              ? "New-file destinations are materialized as empty files before this run. write_file is unavailable; populate the authorized file with edit_file append or another listed text-edit mode."
+              : "write_file is unavailable for this existing-file job. Preserve the file and use edit_file with exact old_string/new_string or another listed text-edit mode."
+          )
         : null,
       availableNames.has("edit_file")
         ? "For an exact text replacement, use this call shape with literal task values: {\"name\":\"edit_file\",\"arguments\":{\"path\":\"file.txt\",\"old_string\":\"old text\",\"new_string\":\"new text\"}}"

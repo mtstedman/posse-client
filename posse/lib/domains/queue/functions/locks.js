@@ -159,6 +159,18 @@ export function releaseMergeLock(ownerId) {
 const MERGE_LOCK_LEASE_SEC = 600;
 const MERGE_LOCK_OWNER = `merge-${process.pid}`;
 
+export function withMergeLockSync(fn, {
+  ownerId = MERGE_LOCK_OWNER,
+  durationSec = MERGE_LOCK_LEASE_SEC,
+} = {}) {
+  if (!acquireMergeLock(ownerId, durationSec)) return { acquired: false, result: undefined };
+  try {
+    return { acquired: true, result: fn() };
+  } finally {
+    releaseMergeLock(ownerId);
+  }
+}
+
 export async function withMergeLock(fn, { ownerId = MERGE_LOCK_OWNER, durationSec = MERGE_LOCK_LEASE_SEC } = {}) {
   if (!acquireMergeLock(ownerId, durationSec)) return { acquired: false, result: undefined };
   const renewEveryMs = Math.max(25, Math.floor(durationSec * 1000 / 3));

@@ -24,7 +24,7 @@ import {
   now,
   runImmediateTransaction,
 } from "./common.js";
-import { flushEventsNow, logEvent } from "./events.js";
+import { flushEventsNow, logDurableEvent, logEvent } from "./events.js";
 import { getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
@@ -258,6 +258,7 @@ export {
   releaseSchedulerLock,
   renewSchedulerLock,
   withMergeLock,
+  withMergeLockSync,
 } from "./locks.js";
 
 export {
@@ -1027,6 +1028,11 @@ export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "f
   ]);
   if (!allowedStatuses.has(status)) return false;
 
+  // Preserve event ordering before writing the recovery marker below. In
+  // particular, a buffered merge event must receive an earlier durable id
+  // than the reopen that supersedes it.
+  flushEventsNow();
+
   const execute = () => {
     const current = getWorkItem(id);
     if (!current || current.status === "canceled") return false;
@@ -1047,13 +1053,10 @@ export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "f
     releaseWorkItemFileLocks(id, releaseReason);
     clearCrossWiMergeDependenciesForWorkItem(id, releaseReason);
     invalidateSessionLanesForWorkItemInternal(id, releaseReason);
-    logEvent({
-      work_item_id: id,
-      event_type: EVENT_TYPES.WORK_ITEM_STATUS_CHANGED,
-      actor_type: EVENT_ACTORS.SYSTEM,
-      message: `Status -> ${status} (${reason || "follow_up"})`,
-    });
-    logEvent({
+    // Startup reconciliation treats this event as queue state, not optional
+    // telemetry. Persist it in the same transaction that clears merge_state
+    // so a crash cannot replay older merge evidence over the follow-up.
+    logDurableEvent({
       work_item_id: id,
       event_type: EVENT_TYPES.WORK_ITEM_REOPENED,
       actor_type: EVENT_ACTORS.SYSTEM,
@@ -1063,6 +1066,12 @@ export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "f
         status,
         reason: reason || "follow_up",
       }),
+    });
+    logEvent({
+      work_item_id: id,
+      event_type: EVENT_TYPES.WORK_ITEM_STATUS_CHANGED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Status -> ${status} (${reason || "follow_up"})`,
     });
     return true;
   };

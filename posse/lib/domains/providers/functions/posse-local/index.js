@@ -624,14 +624,20 @@ export async function callProvider(promptText, opts = {}) {
     && String(stableContext || "").includes("PRELOADED EDITABLE FILE CONTEXT:")
     && String(stableContext || "").includes(`=== ${exactWriteTarget}`)
   );
-  const toolDefinitions = (executionContract
+  const embeddedToolDefinitions = executionContract
     ? buildEmbeddedToolDefinitions(executionContract)
-    : [])
+    : [];
+  const embeddedToolNames = new Set(embeddedToolDefinitions.map((tool) => String(tool?.name || "")));
+  const toolDefinitions = embeddedToolDefinitions
     .filter((tool) => {
       const entry = ToolCatalog.get(tool?.name);
       if (entry?.capabilityFlags?.shell) return false;
       if (entry?.capabilityFlags?.write) {
-        if (exactCreateTarget && String(tool?.name || "") === "edit_file") return false;
+        if (
+          exactCreateTarget
+          && String(tool?.name || "") === "edit_file"
+          && embeddedToolNames.has("write_file")
+        ) return false;
         if (exactWriteTarget && !exactCreateTarget && String(tool?.name || "") === "write_file") return false;
         return fileWriteAuthorized && LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || ""));
       }
