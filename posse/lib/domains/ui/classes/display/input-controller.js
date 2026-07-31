@@ -45,6 +45,7 @@ import {
   _taskProviderBudgetLines,
   _buildQueueProviderUsageLines,
 } from "../../functions/display/helpers/provider-usage.js";
+import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
 import { estimateCallCost } from "../../../billing/functions/pricing.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
@@ -74,15 +75,6 @@ function resolvedCallCostUsd(call) {
     knownCostUsd: call?.cost_estimate_usd,
   });
   return Number.isFinite(est.costUsd) ? est.costUsd : 0;
-}
-
-function reviewDiscardCandidates(worktreeStatus = {}) {
-  const targetFiles = Array.isArray(worktreeStatus?.targetFiles) ? worktreeStatus.targetFiles : [];
-  const wtFiles = Array.isArray(worktreeStatus?.wtFiles) ? worktreeStatus.wtFiles : [];
-  return [
-    ...targetFiles.map((entry) => ({ ...entry, location: "target" })),
-    ...wtFiles.filter((entry) => !entry.inScope).map((entry) => ({ ...entry, location: "worktree" })),
-  ];
 }
 
 function keyName(key) {
@@ -944,6 +936,14 @@ export class DisplayInputController {
     } else if (matchesHotkey(str, key, "a")) {
       const current = this._approvalData[this._approvalIdx];
       if (!current._decision && !current._isInfo) {
+        if (!getReviewDirtyState(current.worktreeStatus).canDecide) {
+          this._approvalFlash = {
+            text: "Resolve dirty files before approval",
+            at: Date.now(),
+          };
+          this.requestRender({ force: true });
+          return;
+        }
         const applied = this.onApprovalAction ? this.onApprovalAction(current.wi.id, "approve") : true;
         if (applied === false) return;
         current._decision = "approved";
@@ -953,6 +953,14 @@ export class DisplayInputController {
     } else if (matchesHotkey(str, key, "r")) {
       const current = this._approvalData[this._approvalIdx];
       if (!current._decision && !current._isInfo) {
+        if (!getReviewDirtyState(current.worktreeStatus).canDecide) {
+          this._approvalFlash = {
+            text: "Resolve dirty files before re-queue",
+            at: Date.now(),
+          };
+          this.requestRender({ force: true });
+          return;
+        }
         const applied = this.onApprovalAction ? this.onApprovalAction(current.wi.id, "reject") : true;
         if (applied === false) return;
         current._decision = "rejected";
@@ -976,12 +984,12 @@ export class DisplayInputController {
       }
     } else if (matchesHotkey(str, key, "c")) {
       const current = this._approvalData[this._approvalIdx];
-      if (current && !current._decision && this.onApprovalAction) {
+      if (current && !current._decision && getReviewDirtyState(current.worktreeStatus).canCommit && this.onApprovalAction) {
         this.onApprovalAction(current.wi.id, "commit_dirty");
       }
     } else if (matchesHotkey(str, key, "t")) {
       const current = this._approvalData[this._approvalIdx];
-      if (current && !current._decision && this.onApprovalAction) {
+      if (current && !current._decision && getReviewDirtyState(current.worktreeStatus).canStashTarget && this.onApprovalAction) {
         this.onApprovalAction(current.wi.id, "stash_target");
       }
     } else if (matchesHotkey(str, key, "m")) {
@@ -989,12 +997,9 @@ export class DisplayInputController {
       if (current) this._startMemoryPicker(current);
     } else if (matchesHotkey(str, key, "x")) {
       const current = this._approvalData[this._approvalIdx];
-      const ws = current?.worktreeStatus;
-      const candidates = reviewDiscardCandidates(ws);
+      const candidates = getReviewDirtyState(current?.worktreeStatus).discardCandidates;
       if (current && !current._decision && candidates.length > 0) {
         this._startDiscardPicker(current, candidates);
-      } else if (current && !current._decision && this.onApprovalAction) {
-        this.onApprovalAction(current.wi.id, "discard_dirty");
       }
     } else if (isEnterKey(str, key) || isEscapeKey(str, key)) {
       // Finish review (Enter is the deliberate finisher; Esc backs out too,

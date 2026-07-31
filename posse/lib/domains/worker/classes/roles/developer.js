@@ -10,7 +10,7 @@ import { getArtifacts, getAttempts, getIntSetting, getSetting, getWorkItem, stor
 import {
   applyDeterministicDeletes,
   buildPromptAsync,
-  buildRoutingPacket,
+  buildHandoffPacket,
   handoff,
   packetToDynamicContextString,
   parseMissingContext,
@@ -102,7 +102,7 @@ export class DeveloperRole extends BaseRole {
       ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
       : null;
 
-    const packet = buildRoutingPacket(job, {
+    const packet = buildHandoffPacket(job, {
       workItem,
       payload,
       role: this.getRole(),
@@ -115,7 +115,7 @@ export class DeveloperRole extends BaseRole {
       disableAtlas: !!job._atlasDisabledForWorkItem,
     });
 
-    await handoff(packet);
+    await handoff(packet, { providerName: ctx.providerName });
     files = dbOnlyTask ? [] : uniqueScopeFiles(packet.files_to_modify || []);
     createFiles = dbOnlyTask ? [] : (packet.files_to_create || []);
     createRoots = dbOnlyTask ? [] : (packet.create_roots || []);
@@ -371,8 +371,10 @@ export class DeveloperRole extends BaseRole {
       });
 
       ctx.packet.related_files = [...new Set([...(ctx.packet.related_files || []), ...filesForStep])];
-      await handoff(ctx.packet);
-      const expandedPrompt = await buildPromptAsync(ctx.packet, ctx.promptState?.taskInstructions || "")
+      await handoff(ctx.packet, { providerName: ctx.providerName });
+      const expandedPrompt = await buildPromptAsync(ctx.packet, ctx.promptState?.taskInstructions || "", {
+        providerName: ctx.providerName,
+      })
         + `\n\nADDITIONAL CONTEXT (requested by previous attempt):\n${packetToDynamicContextString(ctx.packet)}\n\nYou now have additional context. Continue implementation.`;
 
       const retry = await this.providerClient.call(expandedPrompt, {

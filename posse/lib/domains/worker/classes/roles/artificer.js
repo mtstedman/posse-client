@@ -21,7 +21,7 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
   buildPromptAsync,
-  buildRoutingPacket,
+  buildHandoffPacket,
   extractResearcherFiles as defaultExtractResearcherFiles,
   handoff,
   packetToDynamicContextString,
@@ -29,7 +29,7 @@ import {
 } from "../../../handoff/functions/index.js";
 import { getAvailableProviders, getProviderName } from "../../../providers/functions/provider.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
-import { BaseRole } from "../BaseRole.js";
+import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { hasStructuredArtificerLog as defaultHasStructuredArtificerLog } from "../../functions/helpers/artifact-output.js";
 import { maxTurnsOverrideFromPayload } from "../../../../shared/policies/functions/role-utils.js";
@@ -161,7 +161,7 @@ export class ArtificerRole extends BaseRole {
       emit(worker, job.id, `${C.green}[new]${C.reset} WI#${job.work_item_id} job #${job.id}: first attempt`);
     }
 
-    const packet = buildRoutingPacket(job, {
+    const packet = buildHandoffPacket(job, {
       workItem,
       payload,
       role: this.getRole(),
@@ -176,7 +176,7 @@ export class ArtificerRole extends BaseRole {
       disableAtlas: true,
       disableAtlasReason: "artifact route",
     });
-    await handoff(packet);
+    await handoff(packet, { providerName: ctx.providerName });
 
     const taskMode = payload.task_mode || "content";
     const needsImageGeneration = !!(payload.needs_image_generation || taskMode === "image");
@@ -196,8 +196,9 @@ export class ArtificerRole extends BaseRole {
       "",
       ...extraSections,
     ].filter(Boolean).join("\n");
-    const buildArtificerPrompt = async (extraSections = [], providerName = ctx.providerName) => buildPromptAsync(
-      packet,
+    const modelProviderName = ctx.providerName;
+    const buildArtificerPrompt = async (extraSections = [], providerName = modelProviderName) => buildPromptAsync(
+      projectPromptPacketForProvider(packet, providerName, modelProviderName),
       buildArtificerInstructions(extraSections),
       { providerName },
     );
@@ -366,7 +367,7 @@ export class ArtificerRole extends BaseRole {
       });
 
       ctx.packet.related_files = [...new Set([...(ctx.packet.related_files || []), ...filesForStep])];
-      await handoff(ctx.packet);
+      await handoff(ctx.packet, { providerName: ctx.providerName });
       const expandedSections = [
         "ADDITIONAL CONTEXT (requested by previous attempt):",
         packetToDynamicContextString(ctx.packet),

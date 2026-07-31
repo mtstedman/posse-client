@@ -54,19 +54,6 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
           });
         }
 
-        // Check for stashes
-        try {
-          const stashList = gitExec(["stash", "list"], wtDir, { timeoutMs: 5000 }).trim();
-          if (stashList) {
-            const stashCount = stashList.split("\n").length;
-            issues.push({ type: "stash", message: `${stashCount} stash(es) with uncommitted work` });
-          }
-        } catch {
-          issues.push({
-            type: "worktree_check_failed",
-            message: "Could not verify worktree stashes",
-          });
-        }
       }
 
       // Check if branch has commits not yet merged into target
@@ -91,9 +78,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       // distinct so wrap-up never tells an operator that merged work is at
       // risk, or that unmerged work is safe to purge.
       if (wtExists && TERMINAL_WORK_ITEM_STATUSES.includes(wi.status)) {
-        const hasUncommittedWork = issues.some((issue) =>
-          issue.type === "dirty" || issue.type === "stash"
-        );
+        const hasUncommittedWork = issues.some((issue) => issue.type === "dirty");
         const worktreeCheckFailed = issues.some((issue) =>
           issue.type === "worktree_check_failed"
         );
@@ -305,7 +290,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
 
       if (cleanupUnverified.length > 0) {
         console.log(`\n  ${C.cyan}Unverified merged cleanup${C.reset} \u2014 the merge is recorded, but inspect the leftover before pruning:`);
-        console.log(`    To inspect: ${C.bold}cd <worktree-path> && git status && git stash list${C.reset}`);
+        console.log(`    To inspect: ${C.bold}cd <worktree-path> && git status${C.reset}`);
         console.log(`    When clean: ${C.bold}posse prune${C.reset}`);
       }
 

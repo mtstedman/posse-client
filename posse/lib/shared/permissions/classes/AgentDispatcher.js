@@ -1,7 +1,6 @@
 // @ts-check
 
 import { resolveAgentRoleContract } from "../functions/agent-role-contracts.js";
-import { isRegisteredRemoteToolSurface } from "../../tools/functions/issued-tool-policy.js";
 
 function dispatchError(code, message, { name = "Error", reason = null } = {}) {
   const error = /** @type {Error & { code: string, reason?: unknown }} */ (new Error(message));
@@ -50,6 +49,9 @@ export class AgentDispatcher {
     gateFactory = null,
     agentFactory = null,
     roleContractResolver = resolveAgentRoleContract,
+    providerListResolver = null,
+    providerSelector = null,
+    providerFactory = null,
   } = /** @type {any} */ ({})) {
     if (gateFactory != null && typeof gateFactory !== "function") {
       throw new TypeError("AgentDispatcher gateFactory must be a function");
@@ -60,9 +62,21 @@ export class AgentDispatcher {
     if (typeof roleContractResolver !== "function") {
       throw new TypeError("AgentDispatcher roleContractResolver must be a function");
     }
+    if (providerListResolver != null && typeof providerListResolver !== "function") {
+      throw new TypeError("AgentDispatcher providerListResolver must be a function");
+    }
+    if (providerSelector != null && typeof providerSelector !== "function") {
+      throw new TypeError("AgentDispatcher providerSelector must be a function");
+    }
+    if (providerFactory != null && typeof providerFactory !== "function") {
+      throw new TypeError("AgentDispatcher providerFactory must be a function");
+    }
     this.gateFactory = gateFactory;
     this.agentFactory = agentFactory;
     this.roleContractResolver = roleContractResolver;
+    this.providerListResolver = providerListResolver;
+    this.providerSelector = providerSelector;
+    this.providerFactory = providerFactory;
     this.agents = new Map();
     this.pending = new Map();
     this.agentKeyByLogicalKey = new Map();
@@ -72,6 +86,273 @@ export class AgentDispatcher {
     this.reservationsByAgentKey = new Map();
     this.reservationClosers = new Set();
     this.releasedLeases = new WeakSet();
+    this.preparationSpecs = new WeakMap();
+  }
+
+  providersForRole(role) {
+    const normalizedRole = String(role || "").trim().toLowerCase();
+    if (!normalizedRole) throw new TypeError("AgentDispatcher.providersForRole requires a role");
+    const configured = this.providerListResolver?.(normalizedRole);
+    return Object.freeze([
+      ...new Set(
+        (Array.isArray(configured) ? configured : [])
+          .map((provider) => String(provider || "").trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    ]);
+  }
+
+  async selectProvider({ role, providerName = null, excludeProviders = [] } = /** @type {any} */ ({})) {
+    const normalizedRole = String(role || "").trim().toLowerCase();
+    if (!normalizedRole) throw new TypeError("AgentDispatcher.selectProvider requires a role");
+    const requested = String(providerName || "").trim().toLowerCase();
+    const excluded = new Set(
+      (Array.isArray(excludeProviders) ? excludeProviders : [])
+        .map((provider) => String(provider || "").trim().toLowerCase())
+        .filter(Boolean),
+    );
+    const configured = this.providersForRole(normalizedRole);
+    const eligible = configured.filter((provider) => !excluded.has(provider));
+    if (requested && configured.length > 0 && !configured.includes(requested)) {
+      throw dispatchError(
+        "POSSE_AGENT_PROVIDER_NOT_ALLOWED",
+        `Provider ${requested} is not configured for Agent role ${normalizedRole}`,
+      );
+    }
+    if (requested && !excluded.has(requested)) return requested;
+    const selected = String(
+      await this.providerSelector?.(normalizedRole, {
+        eligibleProviders: eligible,
+        excludeProviders: [...excluded],
+      }) || eligible[0] || "",
+    ).trim().toLowerCase();
+    if (!selected) {
+      throw dispatchError(
+        "POSSE_AGENT_PROVIDER_UNAVAILABLE",
+        `No Provider is configured for Agent role ${normalizedRole}`,
+      );
+    }
+    if (excluded.has(selected)) {
+      throw dispatchError(
+        "POSSE_AGENT_PROVIDER_UNAVAILABLE",
+        `Agent Provider selector returned excluded Provider ${selected}`,
+      );
+    }
+    return selected;
+  }
+
+  async providerFor({ role, providerName = null, excludeProviders = [] } = /** @type {any} */ ({})) {
+    const selected = await this.selectProvider({ role, providerName, excludeProviders });
+    const provider = this.providerFactory
+      ? await this.providerFactory(String(role || "").trim().toLowerCase(), selected)
+      : null;
+    return Object.freeze({ providerName: selected, provider });
+  }
+
+  toolContractFor(identity = {}) {
+    const normalizedRole = String(identity?.role || "").trim().toLowerCase();
+    const normalizedProvider = String(identity?.providerName || "").trim().toLowerCase();
+    return this.roleContractResolver({
+      ...identity,
+      role: normalizedRole,
+      providerName: normalizedProvider,
+    });
+  }
+
+  listAgents() {
+    return [...this.agents.values()].map((agent) => (
+      typeof agent?.status === "function"
+        ? agent.status()
+        : {
+            id: agent?.id || null,
+            key: agent?.key || null,
+            role: agent?.role || null,
+            providerName: agent?.providerName || null,
+            state: agent?.disposed ? "disposed" : "unknown",
+          }
+    ));
+  }
+
+  getAgentStatus(agentOrKey) {
+    const key = typeof agentOrKey === "string" ? agentOrKey : agentOrKey?.key;
+    const agent = key ? this.agents.get(key) : null;
+    return typeof agent?.status === "function" ? agent.status() : null;
+  }
+
+  describeAgent(agentOrKey) {
+    const key = typeof agentOrKey === "string" ? agentOrKey : agentOrKey?.key;
+    const agent = key ? this.agents.get(key) : null;
+    if (!agent) return null;
+    const preparation = this.preparationSpecs.get(agent) || {};
+    const gateContract = agent.mcpGate?.contractBootConfig || null;
+    return Object.freeze({
+      ...agent.status(),
+      eligibleProviders: this.providersForRole(agent.role),
+      provider: {
+        name: agent.providerName || null,
+        linked: !!agent.provider,
+      },
+      handoff: {
+        requested: agent.handoffRequest != null,
+        resolved: agent.status().readiness?.handoff === "ready",
+      },
+      toolGate: {
+        issued: !!agent.mcpGate,
+        id: agent.mcpGate?.id || null,
+        role: agent.mcpGate?.role || agent.role,
+        providerName: agent.mcpGate?.providerName || agent.providerName || null,
+        toolAllowlist: gateContract?.toolAllowlist
+          ? {
+              tools: [...(gateContract.toolAllowlist.tools || [])],
+              atlas: [...(gateContract.toolAllowlist.atlas || [])],
+            }
+          : null,
+      },
+      requestedPolicy: this.toolContractFor({
+        role: agent.role,
+        providerName: agent.providerName || preparation.providerName || null,
+        agentHandoff: preparation.agentHandoff === true,
+        subAgent: preparation.subAgent === true,
+        coordinationChild: preparation.coordinationChild === true,
+      }),
+    });
+  }
+
+  createAgent({
+    key,
+    logicalKey = key,
+    role,
+    providerName = null,
+    reusable = false,
+    agentHandoff = false,
+    subAgent = false,
+    coordinationChild = false,
+    coordinationChildPermitId = null,
+    remoteToolSurface = null,
+    handoffRequest = null,
+    handoffFactory = null,
+    excludeProviders = [],
+  } = /** @type {any} */ ({})) {
+    const normalizedRole = String(role || "").trim().toLowerCase();
+    const agentKey = String(key || "").trim();
+    const lineageKey = String(logicalKey || agentKey).trim();
+    const effectiveReusable = coordinationChild === true ? false : reusable === true;
+    if (!agentKey) throw new TypeError("AgentDispatcher.createAgent requires a key");
+    if (!normalizedRole) throw new TypeError("AgentDispatcher.createAgent requires a role");
+    if (handoffFactory != null && typeof handoffFactory !== "function") {
+      throw new TypeError("AgentDispatcher handoffFactory must be a function");
+    }
+    if (this.closed) {
+      throw dispatchError("POSSE_AGENT_DISPATCHER_CLOSED", "AgentDispatcher is closed");
+    }
+    if (!this.gateFactory || !this.agentFactory) {
+      throw new TypeError("AgentDispatcher requires gateFactory and agentFactory to mint Agents");
+    }
+    if (this.agents.has(agentKey)) {
+      throw dispatchError(
+        coordinationChild === true ? "POSSE_AGENT_CHILD_IDENTITY_REUSED" : "POSSE_AGENT_IDENTITY_REUSED",
+        `Agent identity ${agentKey} is already registered`,
+      );
+    }
+
+    const agent = this.agentFactory({
+      id: agentKey,
+      key: agentKey,
+      role: normalizedRole,
+      reusable: effectiveReusable,
+      handoffRequest,
+    });
+    if (!agent || typeof agent.beginPreparation !== "function" || typeof agent.whenReady !== "function") {
+      throw new Error("AgentDispatcher agent factory must return an Agent that owns readiness");
+    }
+    this.agents.set(agentKey, agent);
+    this.agentKeyByLogicalKey.set(lineageKey, agentKey);
+    const preparation = {
+      key: agentKey,
+      logicalKey: lineageKey,
+      role: normalizedRole,
+      providerName,
+      agentHandoff: agentHandoff === true,
+      subAgent: subAgent === true,
+      coordinationChild: coordinationChild === true,
+      coordinationChildPermitId,
+      remoteToolSurface,
+      handoffRequest,
+      handoffFactory,
+      retainHandoff: false,
+      excludeProviders,
+    };
+    this.preparationSpecs.set(agent, preparation);
+    this.#beginAgentPreparation(agent, preparation);
+    return agent;
+  }
+
+  async rebindAgent(agentOrKey, {
+    providerName = null,
+    handoffFactory = null,
+    excludeProviders = [],
+    reason = "provider_rebound",
+  } = {}) {
+    const key = typeof agentOrKey === "string" ? agentOrKey : agentOrKey?.key;
+    const agent = key ? this.agents.get(key) : null;
+    if (!agent || (typeof agentOrKey !== "string" && agent !== agentOrKey)) {
+      throw dispatchError("POSSE_AGENT_NOT_FOUND", "Cannot rebind an Agent that is not in the dispatch pool");
+    }
+    const prior = this.preparationSpecs.get(agent);
+    if (!prior) {
+      throw dispatchError("POSSE_AGENT_PREPARATION_MISSING", "Agent has no dispatcher preparation contract");
+    }
+    const priorProvider = agent.providerName || null;
+    agent.evictProvider({ reason });
+    const preparation = {
+      ...prior,
+      providerName,
+      handoffFactory: handoffFactory || prior.handoffFactory || null,
+      retainHandoff: !handoffFactory && !prior.handoffFactory,
+      excludeProviders: [
+        ...new Set([
+          ...(Array.isArray(excludeProviders) ? excludeProviders : []),
+          ...(providerName ? [] : [priorProvider]),
+        ].filter(Boolean)),
+      ],
+    };
+    this.preparationSpecs.set(agent, preparation);
+    this.#beginAgentPreparation(agent, preparation);
+    return await agent.whenReady();
+  }
+
+  async evictProvider(agentOrKey, { reason = "provider_evicted" } = {}) {
+    const key = typeof agentOrKey === "string" ? agentOrKey : agentOrKey?.key;
+    const agent = key ? this.agents.get(key) : null;
+    if (!agent || (typeof agentOrKey !== "string" && agent !== agentOrKey)) {
+      return { evicted: false, reason: "not_found" };
+    }
+    return agent.evictProvider({ reason });
+  }
+
+  async dispatchAgent({ agent, attachment = {}, signal = null } = /** @type {any} */ ({})) {
+    if (!agent) throw new TypeError("AgentDispatcher.dispatchAgent requires an Agent");
+    const registered = this.agents.get(agent.key);
+    if (registered !== agent) {
+      throw dispatchError("POSSE_AGENT_NOT_FOUND", "Agent is not registered in this dispatch pool");
+    }
+    const reservation = await this.#reserveDispatchIdentity({
+      key: agent.key,
+      logicalKey: this.#logicalKeyForAgent(agent),
+    }, signal);
+    try {
+      await agent.whenReady();
+      if (signal?.aborted) throw dispatchAbortError(signal);
+      const lease = agent.attachJob(attachment);
+      reservation.agent = agent;
+      reservation.leaseId = lease.id;
+      this.reservationsByLeaseId.set(lease.id, reservation);
+      this.reservationsByAgentKey.set(agent.key, reservation);
+      return Object.freeze({ agent, lease });
+    } catch (error) {
+      reservation.release();
+      throw error;
+    }
   }
 
   async acquireAgent({
@@ -85,12 +366,13 @@ export class AgentDispatcher {
     coordinationChild = false,
     coordinationChildPermitId = null,
     remoteToolSurface = null,
+    handoffRequest = null,
+    handoffFactory = null,
+    excludeProviders = [],
   } = /** @type {any} */ ({})) {
     const agentKey = String(key || "").trim();
     const lineageKey = String(logicalKey || agentKey).trim();
     const normalizedRole = String(role || "").trim().toLowerCase();
-    const normalizedProvider = String(providerName || "").trim().toLowerCase();
-    const effectiveReusable = coordinationChild === true ? false : reusable === true;
     if (!agentKey) throw new TypeError("AgentDispatcher.acquireAgent requires a key");
     if (!normalizedRole) throw new TypeError("AgentDispatcher.acquireAgent requires a role");
     if (this.closed) {
@@ -100,9 +382,10 @@ export class AgentDispatcher {
       throw new TypeError("AgentDispatcher requires gateFactory and agentFactory to mint agents");
     }
 
-    const existing = this.agents.get(agentKey);
-    if (existing?.tainted) {
+    let existing = this.agents.get(agentKey);
+    if (existing?.tainted || existing?.readinessState === "failed") {
       await this.destroyAgent(existing, { reason: "agent_scope_release_failed" });
+      existing = null;
     } else if (existing && !existing.disposed) {
       if (coordinationChild === true) {
         throw dispatchError(
@@ -110,96 +393,35 @@ export class AgentDispatcher {
           "Citation-child Agent identities are single-use",
         );
       }
-      existing.mcpGate.assertCompatible?.({
+      await existing.whenReady();
+      existing.mcpGate?.assertCompatible?.({
         role: normalizedRole,
-        providerName: normalizedProvider,
+        providerName,
         coordinationChild: coordinationChild === true,
       });
       return existing;
     }
-    if (this.pending.has(agentKey)) {
-      if (coordinationChild === true) {
-        throw dispatchError(
-          "POSSE_AGENT_CHILD_IDENTITY_REUSED",
-          "Citation-child Agent identities cannot share a pending gate mint",
-        );
-      }
-      const pendingAgent = await this.pending.get(agentKey);
-      pendingAgent.mcpGate.assertCompatible?.({
-        role: normalizedRole,
-        providerName: normalizedProvider,
-        coordinationChild: coordinationChild === true,
-      });
-      return pendingAgent;
-    }
 
-    const creation = (async () => {
-      const previousKey = this.agentKeyByLogicalKey.get(lineageKey);
-      if (previousKey && previousKey !== agentKey) {
-        await this.destroyAgent(previousKey, { reason: "agent_lineage_replaced" });
-      }
-
-      const roleContract = this.roleContractResolver({
-        role: normalizedRole,
-        providerName: normalizedProvider,
-        agentHandoff: agentHandoff === true,
-        subAgent: subAgent === true,
-        coordinationChild: coordinationChild === true,
-      });
-      const mcpGate = await this.gateFactory({
-        key: agentKey,
-        logicalKey: lineageKey,
-        ...roleContract,
-        // Citation children carry the parent's single-use child permit. Gate
-        // minting verifies that permit before intersecting it with the fixed
-        // two-tool child allowlist.
-        ...(remoteToolSurface && typeof remoteToolSurface === "object"
-          && (coordinationChild === true || isRegisteredRemoteToolSurface(remoteToolSurface))
-          ? { remoteToolSurface, coordinationChildPermitId }
-          : {}),
-      });
-      if (!mcpGate || !mcpGate.token) {
-        throw new Error("AgentDispatcher gate factory did not return an immutable MCP gate");
-      }
-      if (this.closed) {
-        try { mcpGate.dispose?.({ reason: "dispatcher_closed_during_gate_mint" }); } catch { /* best effort */ }
-        throw dispatchError(
-          "POSSE_AGENT_DISPATCHER_CLOSED",
-          "AgentDispatcher closed while minting an MCP gate",
-        );
-      }
-      if (mcpGate.id && String(mcpGate.id) !== agentKey) {
-        try { mcpGate.dispose?.({ reason: "agent_gate_identity_mismatch" }); } catch { /* best effort */ }
-        throw new Error("AgentDispatcher gate identity must match the dispatcher agent key");
-      }
-      let agent = null;
-      try {
-        agent = this.agentFactory({
-          id: agentKey,
-          key: agentKey,
-          role: normalizedRole,
-          providerName: normalizedProvider,
-          mcpGate,
-          reusable: effectiveReusable,
-        });
-      } catch (error) {
-        try { mcpGate.dispose?.({ reason: "agent_constructor_failed" }); } catch { /* best effort */ }
-        throw error;
-      }
-      if (!agent || agent.mcpGate !== mcpGate) {
-        try { mcpGate.dispose?.({ reason: "agent_factory_invalid" }); } catch { /* best effort */ }
-        throw new Error("AgentDispatcher agent factory must attach the minted MCP gate");
-      }
-      this.agents.set(agentKey, agent);
-      this.agentKeyByLogicalKey.set(lineageKey, agentKey);
-      return agent;
-    })();
-    this.pending.set(agentKey, creation);
-    try {
-      return await creation;
-    } finally {
-      this.pending.delete(agentKey);
+    const previousKey = this.agentKeyByLogicalKey.get(lineageKey);
+    if (previousKey && previousKey !== agentKey) {
+      await this.destroyAgent(previousKey, { reason: "agent_lineage_replaced" });
     }
+    const agent = this.createAgent({
+      key: agentKey,
+      logicalKey: lineageKey,
+      role: normalizedRole,
+      providerName,
+      reusable,
+      agentHandoff,
+      subAgent,
+      coordinationChild,
+      coordinationChildPermitId,
+      remoteToolSurface,
+      handoffRequest,
+      handoffFactory,
+      excludeProviders,
+    });
+    return await agent.whenReady();
   }
 
   async dispatch({ attachment = {}, signal = null, ...identity } = /** @type {any} */ ({})) {
@@ -284,6 +506,69 @@ export class AgentDispatcher {
     }
   }
 
+  #beginAgentPreparation(agent, preparation) {
+    const providerPromise = this.providerFor({
+      role: preparation.role,
+      providerName: preparation.providerName,
+      excludeProviders: preparation.excludeProviders,
+    });
+    const handoffPromise = preparation.retainHandoff === true
+      ? undefined
+      : providerPromise.then((binding) => (
+          preparation.handoffFactory
+            ? preparation.handoffFactory({
+                agent,
+                request: preparation.handoffRequest,
+                role: preparation.role,
+                providerName: binding.providerName,
+                provider: binding.provider,
+              })
+            : preparation.handoffRequest
+        ));
+    const mcpGatePromise = providerPromise.then(async (binding) => {
+      const roleContract = this.toolContractFor({
+        role: preparation.role,
+        providerName: binding.providerName,
+        agentHandoff: preparation.agentHandoff === true,
+        subAgent: preparation.subAgent === true,
+        coordinationChild: preparation.coordinationChild === true,
+      });
+      const gate = await this.gateFactory({
+        key: preparation.key,
+        logicalKey: preparation.logicalKey,
+        ...roleContract,
+        ...(preparation.remoteToolSurface && typeof preparation.remoteToolSurface === "object"
+          && preparation.coordinationChild === true
+          ? {
+              remoteToolSurface: preparation.remoteToolSurface,
+              coordinationChildPermitId: preparation.coordinationChildPermitId,
+            }
+          : {}),
+      });
+      if (this.closed) {
+        try { gate?.dispose?.({ reason: "dispatcher_closed_during_gate_mint" }); } catch { /* best effort */ }
+        throw dispatchError(
+          "POSSE_AGENT_DISPATCHER_CLOSED",
+          "AgentDispatcher closed while minting an MCP gate",
+        );
+      }
+      return gate;
+    });
+    agent.beginPreparation({ providerPromise, handoffPromise, mcpGatePromise });
+    const ready = agent.whenReady();
+    this.pending.set(agent.key, ready);
+    ready.finally(() => {
+      if (this.pending.get(agent.key) === ready) this.pending.delete(agent.key);
+    }).catch(() => {});
+  }
+
+  #logicalKeyForAgent(agent) {
+    for (const [logicalKey, agentKey] of this.agentKeyByLogicalKey.entries()) {
+      if (agentKey === agent.key) return logicalKey;
+    }
+    return agent.key;
+  }
+
   async #reserveDispatchIdentity(identity = {}, signal = null) {
     const agentKey = String(identity?.key || "").trim();
     const logicalKey = String(identity?.logicalKey || agentKey).trim();
@@ -340,7 +625,7 @@ export class AgentDispatcher {
     }
   }
 
-  async destroyAgent(agentOrKey, { reason = "agent_disposed" } = {}) {
+  async destroyAgent(agentOrKey, { reason = "agent_disposed", preparationError = null } = {}) {
     const key = typeof agentOrKey === "string" ? agentOrKey : agentOrKey?.key;
     const registered = key ? this.agents.get(key) : null;
     if (typeof agentOrKey !== "string" && registered && registered !== agentOrKey) {
@@ -354,11 +639,13 @@ export class AgentDispatcher {
     reservation?.release();
     if (ownsRegistration) {
       this.agents.delete(agent.key);
+      this.pending.delete(agent.key);
+      this.preparationSpecs.delete(agent);
       for (const [logicalKey, mappedKey] of this.agentKeyByLogicalKey.entries()) {
         if (mappedKey === agent.key) this.agentKeyByLogicalKey.delete(logicalKey);
       }
     }
-    return await agent.dispose?.({ reason });
+    return await agent.dispose?.({ reason, preparationError });
   }
 
   async disposeAll({ reason = "dispatcher_disposed" } = {}) {
@@ -369,16 +656,18 @@ export class AgentDispatcher {
     this.reservationTails.clear();
     this.reservationsByLeaseId.clear();
     this.reservationsByAgentKey.clear();
-    // Gate creation is asynchronous. Wait for every in-flight creation to
-    // observe `closed` and dispose its newly minted gate before sweeping the
-    // completed registry.
-    while (this.pending.size > 0) {
-      await Promise.allSettled([...this.pending.values()]);
-    }
+    // Readiness sources are external and may never settle. Disposing the Agent
+    // cancels its readiness wait immediately; each source remains observed so
+    // a gate that resolves after shutdown is still disposed by its preparation
+    // observer instead of leaking authority.
     const agents = [...this.agents.values()];
     const results = [];
+    const preparationError = dispatchError(
+      "POSSE_AGENT_DISPATCHER_CLOSED",
+      "AgentDispatcher closed while preparing an Agent",
+    );
     for (const agent of agents) {
-      results.push(await this.destroyAgent(agent, { reason }));
+      results.push(await this.destroyAgent(agent, { reason, preparationError }));
     }
     return { disposed: agents.length, results };
   }

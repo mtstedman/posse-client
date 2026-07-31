@@ -50,7 +50,7 @@ import {
   sessionLeaseTtlSec,
 } from "../../queue/functions/index.js";
 
-import { getProvider, getProviderName, getAvailableProviders, isProviderReady, tierModelName } from "../../providers/functions/provider.js";
+import { getProvider, getProviderName, getAvailableProviders, isProviderReady, selectProviderName, tierModelName } from "../../providers/functions/provider.js";
 import { workerRoleForJobType } from "../../providers/functions/roles.js";
 import { Job } from "../../queue/classes/job/Job.js";
 import { AssessmentSession } from "../../assessment/classes/AssessmentSession.js";
@@ -67,7 +67,7 @@ import { WorkerExecutionCoordinator } from "./execution/WorkerExecutionCoordinat
 import { PartialWorkCoordinator } from "./execution/PartialWorkCoordinator.js";
 import { runHumanInputHandler } from "../functions/helpers/human-input.js";
 import { ROLE_CLASSES_BY_JOB_TYPE } from "./role-classes.js";
-import { buildRoutingPacket, handoff, parseMissingContext, parseFileRequest, splitFileRequestsByRisk, parseResearcherStructuredOutput, researcherOutputNeedsHuman, _parseFunctions, applyDeterministicDeletes, attachAssessmentDiffContextAsync, hasWritableScope, renderAtlasHandoffSections } from "../../handoff/functions/index.js";
+import { handoff, parseMissingContext, parseFileRequest, splitFileRequestsByRisk, parseResearcherStructuredOutput, researcherOutputNeedsHuman, _parseFunctions, applyDeterministicDeletes, attachAssessmentDiffContextAsync, hasWritableScope, renderAtlasHandoffSections } from "../../handoff/functions/index.js";
 import { injectArtifactScope, normalizeArtifactCreateFiles, isArtifactMode, isValidTaskMode, buildManifest, wiScopeId, artifactsDir, workspaceDir, inputsDir, contextDir, getWiModeConfig, validateManifestAgainstContract, getArtifactProtocol, getResolvedImageProtocol, getConfiguredImageProviders, getConfiguredImageModel } from "../../artifacts/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
@@ -458,6 +458,9 @@ export class Worker {
         });
       },
       agentFactory: (agentOptions) => new Agent(agentOptions),
+      providerListResolver: (role) => getAvailableProviders(role),
+      providerSelector: (role) => selectProviderName(role),
+      providerFactory: (role, providerName) => getProvider(role, providerName),
     });
     this.providerClient = opts.providerClient || new TrackedProviderClient({
       worker: this,
@@ -802,6 +805,18 @@ export class Worker {
 
   async disposeAgents(reason = "worker_disposed") {
     return await this.agentDispatcher?.disposeAll?.({ reason });
+  }
+
+  listAgents() {
+    return this.agentDispatcher?.listAgents?.() || [];
+  }
+
+  getAgentStatus(agentOrKey) {
+    return this.agentDispatcher?.getAgentStatus?.(agentOrKey) || null;
+  }
+
+  describeAgent(agentOrKey) {
+    return this.agentDispatcher?.describeAgent?.(agentOrKey) || null;
   }
 
   async _handlePartialWorkFailure(args = {}) {

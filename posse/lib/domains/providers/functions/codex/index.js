@@ -43,6 +43,7 @@ export {
   __testExtractCodexToolUse,
   __testAppendCodexToolUseEvent,
   codexAgentMessageText as __testCodexAgentMessageText,
+  summarizeJsonEvent as __testSummarizeCodexJsonEvent,
   extractUsageFromEvent as __testExtractCodexUsageFromEvent,
   extractTurnCountFromEvent as __testExtractCodexTurnCountFromEvent,
   isTurnCompletedEvent as __testIsCodexTurnCompletedEvent,

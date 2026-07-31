@@ -90,7 +90,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
       sub_agent_v1: packet?.agent_coordination?.sub_agent_v1 === true,
     },
   };
-  const provider = String(providerName || packet?.execution_provider || packet?.provider || "")
+  const provider = String(providerName || "")
     .trim()
     .toLowerCase()
     .replaceAll("_", "-");
@@ -549,17 +549,19 @@ export function buildRemoteCompileRequest(packet, instructions, {
 } = {}) {
   const memoryEnabled = atlasMemoryEnabled() && packet?.memory_mode !== "off";
   const role = packet?.recipient || "dev";
-  const provider = providerName || packet?.execution_provider || packet?.provider || "claude";
+  const provider = String(providerName || "").trim().toLowerCase();
+  if (!provider) {
+    const error = new Error("Remote compile request requires a provider selected by the AgentDispatcher");
+    error.code = "POSSE_AGENT_PROVIDER_ROUTE_REQUIRED";
+    throw error;
+  }
   const normalizedProvider = String(provider).trim().toLowerCase().replaceAll("_", "-");
-  const normalizedPacketProvider = String(packet?.execution_provider || packet?.provider || "")
-    .trim()
-    .toLowerCase()
-    .replaceAll("_", "-");
   const localProfile = normalizedProvider === "posse-local"
     ? localModelProfile(packet?.model_name || null, packet?.model_tier || "standard")
     : null;
   const projectedModelName = localProfile?.modelId
-    || (normalizedProvider === normalizedPacketProvider ? packet?.model_name || null : null);
+    || packet?.model_name
+    || null;
   const boundedMaxPromptChars = localProfile && Number(maxPromptChars) > 0
     ? Math.min(Number(maxPromptChars), localProfile.remoteMaxPromptChars)
     : (localProfile ? localProfile.remoteMaxPromptChars : maxPromptChars);

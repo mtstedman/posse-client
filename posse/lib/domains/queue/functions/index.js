@@ -2696,6 +2696,19 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
         AND jd.dependency_kind = 'hard'
         AND dep.status != 'succeeded'
     )`);
+  // Research/commit evidence warms are soft pipeline fences rather than hard
+  // dependencies: a failed or missing warm must still reach the worker so its
+  // required/degraded policy can run. While the referenced warm is active,
+  // however, keep the consumer out of the lease pool entirely. Leasing it only
+  // to have the worker release and requeue it creates avoidable queue churn.
+  conditions.push(`NOT EXISTS (
+      SELECT 1 FROM jobs evidence_warm
+      WHERE j.payload_json IS NOT NULL
+        AND json_valid(j.payload_json)
+        AND evidence_warm.id = CAST(json_extract(j.payload_json, '$._atlas_evidence_warm_job_id') AS INTEGER)
+        AND evidence_warm.job_type = 'atlas_warm'
+        AND evidence_warm.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+    )`);
 
   const safeLimit = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 1);
   params.push(safeLimit);

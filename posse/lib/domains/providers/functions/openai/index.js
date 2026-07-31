@@ -310,7 +310,7 @@ export async function callProvider(promptText, {
   cwd = null,
   abortSignal = null,
   stallTimeout = null,  // stall detection timeout in seconds
-  fallbackReads = null, // max fallback read_file calls (from routing packet budgets)
+  fallbackReads = null, // max fallback read_file calls (from handoff context budgets)
   taskMode = "code",    // task mode - informational (not used for tool gating)
   needsImageGeneration = false, // explicit flag - enables generate_image tool
   skipRolePrompt = false,

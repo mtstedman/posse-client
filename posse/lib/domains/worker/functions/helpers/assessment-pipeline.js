@@ -29,10 +29,10 @@ import { promptLiteral } from "../../../../shared/format/functions/prompt-litera
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { isArtifactMode, buildManifest, validateManifestAgainstContract } from "../../../artifacts/functions/index.js";
-import { getProviderBackoff, getProviderName } from "../../../providers/functions/provider.js";
+import { getProviderBackoff } from "../../../providers/functions/provider.js";
 import {
   attachAssessmentDiffContextAsync,
-  buildRoutingPacket,
+  buildHandoffPacket,
   composePromptRemoteAware,
   buildSmartPreload,
   extractResearcherFiles,
@@ -980,7 +980,17 @@ export function __testBuildAssessmentProviderScope(options) {
  * @param {boolean} opts.autoApprove - Pass through to callProvider
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
-export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, providerOverride = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null } = {}) {
+export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null } = {}) {
+  const assessorProvider = String(
+    routedProviderName
+    || await agentDispatcher?.selectProvider?.({ role: "assessor" })
+    || "",
+  ).trim();
+  if (!assessorProvider) {
+    const error = new Error("Assessment requires an assessor Provider route from the AgentDispatcher");
+    error.code = "POSSE_AGENT_PROVIDER_ROUTE_REQUIRED";
+    throw error;
+  }
   // Gather context: the task spec (from payload or artifact)
   let taskSpec = "";
   let parsedJobPayload = parseJobPayload(job);
@@ -1217,7 +1227,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       files_to_delete: providerScope.deleteFiles.length > 0 ? providerScope.deleteFiles : (parsedJobPayload.files_to_delete || []),
       create_roots: providerScope.createRoots.length > 0 ? providerScope.createRoots : (parsedJobPayload.create_roots || []),
     };
-    assessorPacket = buildRoutingPacket(job, {
+    assessorPacket = buildHandoffPacket(job, {
       workItem,
       payload: packetPayload,
       role: "assessor",
@@ -1226,7 +1236,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       maxAttempts: job.max_attempts || 3,
       lastError: null,
       cwd,
-      jobProvider: providerOverride || job.provider || null,
+      reasoningEffort,
       disableAtlas: artifactAssessmentRoute || !!job._atlasDisabledForWorkItem,
       disableAtlasReason: artifactAssessmentRoute
         ? "artifact route"
@@ -1235,7 +1245,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         ? { allow_fallback_reads: Math.max(0, Number(fallbackReads)) }
         : {},
     });
-    await handoff(assessorPacket);
+    await handoff(assessorPacket, { providerName: assessorProvider });
     if (!artifactAssessmentRoute) {
       atlasBlock = renderAtlasHandoffSections(assessorPacket) || "";
       assessorAtlasPrefetchStatus = assessorPacket?.atlas?.prefetchStatus || null;
@@ -1298,7 +1308,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       remoteAssessmentInstructions,
       {
         ...(remoteComposer ? { composer: remoteComposer } : {}),
-        providerName: providerOverride || job.provider || null,
+        providerName: assessorProvider,
       },
     );
     if (assessorPacket.remote_prompt_composed) {
@@ -1339,8 +1349,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       job_id: job.id,
       work_item_id: job.work_item_id,
       cwd,
-      jobProvider: providerOverride || null,
-      jobModelName: job.model_name || null,
+      jobProvider: assessorProvider,
+      jobModelName: null,
     });
     response = result.output;
   } catch (err) {
@@ -1884,6 +1894,7 @@ export async function runPostExecutionAssessment(worker, {
 
     let taskAbAssessmentEvidence = "";
     let deterministicTestRun = null;
+    let assessorProvider = "";
     try {
       deterministicTestRun = await ensurePostChangeTestReceipt({
         job,
@@ -2255,6 +2266,15 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const jobAc = worker._abortControllers.get(job.id);
+      assessorProvider = String(
+        await worker.agentDispatcher?.selectProvider?.({ role: "assessor" })
+        || "",
+      ).trim().toLowerCase();
+      if (!assessorProvider) {
+        const routeError = new Error("Assessment requires an assessor Provider route from the AgentDispatcher");
+        routeError.code = "POSSE_AGENT_PROVIDER_ROUTE_REQUIRED";
+        throw routeError;
+      }
       const assessmentContext = await attachAssessmentDiffContextAsync({
         task_mode: taskMode,
         manifest,
@@ -2289,6 +2309,8 @@ export async function runPostExecutionAssessment(worker, {
       const assessOpts = {
         silent: worker.silent,
         autoApprove: worker.autoApprove,
+        agentDispatcher: worker.agentDispatcher,
+        routedProviderName: assessorProvider,
         abortSignal: jobAc?.signal || null,
         cwd: (isArtifactMode(taskMode) && jobPayloadForAssess.output_root)
           ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
@@ -2596,14 +2618,15 @@ export async function runPostExecutionAssessment(worker, {
           message: `${retryLabel} - routing through the independent assessment budget: ${assessErr.message?.split("\n")[0]}`,
         });
 
-        const assessProvider = job.provider || getProviderName("assessor");
         const assessBackoff = terminalHandoffMissing
           ? 2
           : assessErr?.assessmentRetryable
           ? 5
           : (turnBudgetExhausted || stallKilled
             ? 2
-            : getProviderBackoff(assessProvider, assessErr).backoffSec);
+            : (assessorProvider
+              ? getProviderBackoff(assessorProvider, assessErr).backoffSec
+              : 2));
         const readyAt = new Date(Date.now() + assessBackoff * 1000).toISOString();
         try {
           markAssessmentRetryAssessOnly(job, pendingFileRequests);

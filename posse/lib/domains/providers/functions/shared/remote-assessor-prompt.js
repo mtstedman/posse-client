@@ -22,13 +22,12 @@ export async function composeRemoteAssessorPromptForProvider(promptText, {
     recipient: "assessor",
     data: {
       cwd: workingDir,
-      execution_provider: providerName,
       title: activity || null,
       project_context: promptText,
       files_to_modify: Array.isArray(scopedFiles) ? scopedFiles : [],
       atlasConfig,
     },
-  });
+  }, { providerName });
 
   const atlasSummary = String(renderAtlasHandoffSectionsFn(packet) || "").trim();
   if (atlasSummary) {

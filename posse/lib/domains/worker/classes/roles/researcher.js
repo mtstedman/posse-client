@@ -612,7 +612,6 @@ export class ResearcherRole extends BaseRole {
           }
         : null,
       governance_tier: workItem?.governance_tier || "mvp",
-      execution_provider: researcherExecProvider,
       attempt: {
         count: researcherAttempts.length + 1,
         max: job.max_attempts || 3,
@@ -639,12 +638,11 @@ export class ResearcherRole extends BaseRole {
           // request compiler keeps these fields out of researcher prompts.
           ...packetFields,
           cwd: projectDir,
-          execution_provider: researcherExecProvider,
           title: workItem.title || "",
           project_context: projectContext,
           files_to_modify: [],
         },
-      });
+      }, { providerName: researcherExecProvider });
     } else {
       researcherPacket = {
         recipient: this.getRole(),

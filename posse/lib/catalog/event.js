@@ -308,6 +308,7 @@ export const EVENT_TYPES = Object.freeze({
   SCHEDULER_RUN_LOOP_NOT_BOOTED: "scheduler.run_loop_not_booted",
   SCHEDULER_SCOPE_WOULD_HAVE_CONFLICTED: "scheduler.scope_would_have_conflicted",
   SCHEDULER_STARTED: "scheduler.started",
+  SCHEDULER_STOP_REQUESTED: "scheduler.stop_requested",
   SCHEDULER_STOPPED: "scheduler.stopped",
   SCHEDULER_WORKER_ERROR: "scheduler.worker_error",
   SCHEDULER_WORKER_WEDGED: "scheduler.worker_wedged",

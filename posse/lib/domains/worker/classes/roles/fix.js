@@ -11,7 +11,7 @@ import { getArtifacts, getAttempts, getWorkItem, storeArtifact, updateJobPayload
 import {
   applyDeterministicDeletes,
   buildPromptAsync,
-  buildRoutingPacket,
+  buildHandoffPacket,
   handoff,
 } from "../../../handoff/functions/index.js";
 import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
@@ -225,7 +225,7 @@ export class FixRole extends BaseRole {
       ? (job.last_error || previousFixAttempts[previousFixAttempts.length - 1].error_text || null)
       : null;
 
-    const packet = buildRoutingPacket(job, {
+    const packet = buildHandoffPacket(job, {
       workItem,
       payload,
       role: this.getRole(),
@@ -238,7 +238,7 @@ export class FixRole extends BaseRole {
       disableAtlas: !!job._atlasDisabledForWorkItem,
     });
 
-    await handoff(packet);
+    await handoff(packet, { providerName: ctx.providerName });
     if (Array.isArray(packet.fix_scope_guard_added) && packet.fix_scope_guard_added.length > 0) {
       worker.emit(job.id, `${C.cyan}[handoff]${C.reset} WI#${job.work_item_id} job #${job.id}: added ${packet.fix_scope_guard_added.length} fix target(s) to writable scope`);
     }

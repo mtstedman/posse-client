@@ -12,7 +12,6 @@ import {
   updateJobPayload,
 } from "../../../queue/functions/index.js";
 import {
-  getProvider,
   tierModelName,
 } from "../../../providers/functions/provider.js";
 import { AssessmentSession } from "../../../assessment/classes/AssessmentSession.js";
@@ -110,13 +109,20 @@ export function preserveAssessmentOnlyRetryPayload(worker, job) {
   return retryPayload;
 }
 
-export function resolveAssessmentOnlyProvider(job = {}) {
+export async function resolveAssessmentOnlyProvider(agentDispatcher) {
   const role = "assessor";
-  const provider = getProvider(role, job.provider || undefined);
+  if (!agentDispatcher || typeof agentDispatcher.providerFor !== "function") {
+    throw new Error("Assessment routing requires the worker AgentDispatcher");
+  }
+  const binding = await agentDispatcher.providerFor({ role });
+  const provider = binding?.provider;
+  if (!provider) {
+    throw new Error("AgentDispatcher did not bind a Provider for assessor");
+  }
   return {
     role,
     provider,
-    providerName: String(job.provider || provider?.name || "").trim() || null,
+    providerName: String(binding.providerName || "").trim() || null,
   };
 }
 
@@ -198,6 +204,7 @@ export class AssessmentHandoffAdapter {
     const assessReasoningEffortOverride = typeof cleanPayload?._assess_reasoning_effort === "string"
       ? cleanPayload._assess_reasoning_effort
       : null;
+    const assessmentReasoningEffort = assessReasoningEffortOverride || "medium";
     // Retrieve the previous attempt's stored output.
     const prevAttempts = getAttempts(job.id);
     const lastWithCommit = [...prevAttempts].reverse().find(a => a.commit_hash);
@@ -246,7 +253,7 @@ export class AssessmentHandoffAdapter {
       job.id,
       leaseToken,
       null,
-      job.reasoning_effort,
+      assessmentReasoningEffort,
     );
     if (!assessAttempt) {
       _logAttemptSkippedStaleLease(job, "assessor", "Skipped assess-only attempt because the lease was stale or expired");
@@ -272,16 +279,20 @@ export class AssessmentHandoffAdapter {
     }
 
     // Re-run assessment with the stored output (reuse the existing attempt).
-    const { role, provider, providerName } = resolveAssessmentOnlyProvider(job);
+    const { role, provider, providerName } = await resolveAssessmentOnlyProvider(worker.agentDispatcher);
     const assessAttemptCount = assessAttempt.attemptCount || (prevAttempts.length + 1);
     const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
-    const effectiveTier = assessModelTierOverride || provider.escalateTier(job.model_tier, assessAttemptCount, { resolveModel: resolveAssessModel });
+    const effectiveTier = provider.escalateTier(
+      assessModelTierOverride || "cheap",
+      assessAttemptCount,
+      { resolveModel: resolveAssessModel },
+    );
     const internalAssessRetries = countInternalAssessmentRetries(job.id);
     const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
     await wrappedJob.setStatus("awaiting_assessment", { leaseToken });
     _syncAssessorWorkerDisplay(worker.display, job, {
       tier: effectiveTier,
-      effort: job.reasoning_effort || "medium",
+      effort: assessmentReasoningEffort,
       attempt: assessAttemptCount,
     });
     try {
@@ -353,10 +364,10 @@ export class AssessmentHandoffAdapter {
           autoApprove: worker.autoApprove,
           abortSignal: assessAc?.signal || null,
           modelTier: effectiveTier,
-          reasoningEffort: assessReasoningEffortOverride || job.reasoning_effort || "medium",
+          reasoningEffort: assessmentReasoningEffort,
           fallbackReads: _assessmentRetryFallbackReads(effectiveTier, internalAssessRetries),
           priorAssessmentFindings,
-          providerOverride: providerName,
+          routedProviderName: providerName,
           cwd: assessmentCwd,
           assessmentContext,
         },

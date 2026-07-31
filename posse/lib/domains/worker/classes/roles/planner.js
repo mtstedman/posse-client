@@ -503,7 +503,6 @@ export class PlannerRole extends BaseRole {
       recipient: "planner",
       data: {
         cwd: worker.projectDir,
-        execution_provider: plannerExecProvider,
         disableAtlas: payload.disableAtlas === true,
         disableAtlasReason: payload.disableAtlasReason || null,
         title: workItem.title || "",
@@ -514,7 +513,7 @@ export class PlannerRole extends BaseRole {
           atlas_seed_symbols: keySymbols,
         },
       },
-    });
+    }, { providerName: plannerExecProvider });
     applyPlannerRoleModePolicy(plannerPacket, { planningMode, roleMode: plannerRoleMode });
     const plannerAttempts = getAttempts(job.id);
     Object.assign(plannerPacket, {
@@ -526,7 +525,6 @@ export class PlannerRole extends BaseRole {
       model_name: job._executionModelName || job.model_name || null,
       reasoning_effort: job.reasoning_effort || "medium",
       governance_tier: workItem?.governance_tier || "mvp",
-      execution_provider: plannerExecProvider,
       attempt: {
         count: plannerAttempts.length + 1,
         max: job.max_attempts || 3,

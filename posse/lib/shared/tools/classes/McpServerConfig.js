@@ -31,6 +31,7 @@ import {
   issuedToolNamesForSuite,
   isRegisteredRemoteToolSurface,
   narrowBootConfigToRemoteSurface,
+  normalizeRemoteIssuedPolicy,
   normalizeProjectDbCapability,
 } from "../functions/issued-tool-policy.js";
 import { persistentMcpOwner } from "./PersistentMcpOwner.js";
@@ -590,6 +591,8 @@ function buildDeterministicMcpBootPayload(role, {
         repoPath: resolvedAtlasConfig?.requestedRepoPath || "",
         repoId: resolvedAtlasConfig?.requestedRepoId || "",
         graphDbPath: resolvedAtlasConfig?.requestedGraphDbPath || "",
+        ledgerDbPath: resolvedAtlasConfig?.atlasV2LedgerDbPath || resolvedAtlasConfig?.ledgerDbPath || "",
+        storageRepoPath: resolvedAtlasConfig?.storageRepoPath || "",
         liveBuffers: resolvedAtlasConfig?.liveBuffersEnabled === false ? "off" : "deterministic-writes",
         viewWaitMs: resolvedAtlasConfig?.viewWaitMs ?? null,
         jobCacheEnabled: resolvedAtlasConfig?.jobCacheEnabled === true,
@@ -917,7 +920,12 @@ export class McpServerConfig {
     let remoteResolution = null;
     let remoteResolutionError = null;
     try {
-      remoteResolution = opts.coordinationChild === true || isRegisteredRemoteToolSurface(opts.remoteToolSurface)
+      const suppliedSurfaceMatchesAgent = isRegisteredRemoteToolSurface(opts.remoteToolSurface)
+        && normalizeRemoteIssuedPolicy(opts.remoteToolSurface, {
+          expectedRole: role,
+          expectedProvider: opts.providerName || null,
+        }).valid;
+      remoteResolution = opts.coordinationChild === true || suppliedSurfaceMatchesAgent
         ? {
             surface: opts.remoteToolSurface,
             mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),

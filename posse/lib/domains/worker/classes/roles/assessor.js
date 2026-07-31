@@ -8,7 +8,7 @@ import {
   getAttempts,
 } from "../../../queue/functions/index.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
-import { buildRoutingPacket, composePromptRemoteAware, handoff, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
+import { buildHandoffPacket, composePromptRemoteAware, handoff, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
 import {
   buildIntakeHintsBlock,
   getWorkItemIntakeHints,
@@ -82,7 +82,7 @@ export class AssessorRole extends BaseRole {
       : (payload.disableAtlasReason || null);
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
     const intakeHintsBlock = buildIntakeHintsBlock(intakeHints);
-    const packet = buildRoutingPacket(job, {
+    const packet = buildHandoffPacket(job, {
       workItem,
       payload,
       role: this.getRole(),
@@ -94,7 +94,7 @@ export class AssessorRole extends BaseRole {
       disableAtlas,
       disableAtlasReason,
     });
-    await handoff(packet);
+    await handoff(packet, { providerName: ctx.providerName });
 
     const atlasBlock = renderAtlasHandoffSections(packet);
     Object.assign(ctx, {

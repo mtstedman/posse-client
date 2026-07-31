@@ -8,6 +8,37 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 const SLOW_ROLE_PHASE_MS = 1000;
 const SLOW_PROVIDER_CALL_MS = 45000;
 
+function dispatchPacketFromContext(ctx = {}) {
+  return ctx.packet
+    || ctx.researcherPacket
+    || ctx.plannerPacket
+    || null;
+}
+
+function normalizedProviderName(value) {
+  return String(value || "").trim().toLowerCase().replaceAll("_", "-");
+}
+
+export function projectPromptPacketForProvider(packet, providerName, modelProviderName) {
+  const selectedProvider = normalizedProviderName(providerName);
+  const sourceProvider = normalizedProviderName(modelProviderName);
+  const keepModel = selectedProvider && selectedProvider === sourceProvider;
+  if (!packet || typeof packet !== "object" || keepModel || packet.model_name == null) {
+    return packet;
+  }
+  return { ...packet, model_name: null };
+}
+
+function providerPromptContext(ctx, providerName, modelProviderName) {
+  return {
+    ...ctx,
+    providerName,
+    packet: projectPromptPacketForProvider(ctx.packet, providerName, modelProviderName),
+    researcherPacket: projectPromptPacketForProvider(ctx.researcherPacket, providerName, modelProviderName),
+    plannerPacket: projectPromptPacketForProvider(ctx.plannerPacket, providerName, modelProviderName),
+  };
+}
+
 async function timeRolePhase(role, label, job, fn, { warnMs = SLOW_ROLE_PHASE_MS } = {}) {
   const startedAt = Date.now();
   try {
@@ -62,7 +93,9 @@ export class BaseRole {
       role: attemptCtx.role || this.getRole(),
     };
     ctx.providerName = this.getProviderName(job, ctx);
+    const modelProviderName = ctx.providerName;
 
+    let preparedAgent = null;
     try {
       const role = ctx.role || this.getRole();
       const contextText = await timeRolePhase(role, "assembleContext", job, () => this.assembleContext(job, ctx));
@@ -74,12 +107,41 @@ export class BaseRole {
         return await this.processOutput(output, stats, job, ctx);
       }
       const buildPromptForProvider = async (providerName) => {
-        const providerCtx = { ...ctx, providerName };
+        const providerCtx = providerPromptContext(ctx, providerName, modelProviderName);
         const contract = await timeRolePhase(role, "buildContract", job, () => this.buildContract({ providerName, job, ctx: providerCtx }));
         return await timeRolePhase(role, "composePrompt", job, () => this.composePrompt({ contextText, contract, job, ctx: providerCtx }));
       };
-      const prompt = await buildPromptForProvider(ctx.providerName);
-      const providerOpts = this.buildOpts(job, ctx);
+      let prompt = null;
+      const dispatcher = this.context?.agentDispatcher;
+      if (dispatcher && typeof dispatcher.createAgent === "function") {
+        const packet = dispatchPacketFromContext(ctx);
+        const attemptIdentity = ctx.attemptId ?? job?.attempt_id ?? job?.attempt_count ?? "pending";
+        const agentKey = `job:${job?.id ?? "none"}:attempt:${attemptIdentity}:role:${role}`;
+        preparedAgent = dispatcher.createAgent({
+          key: agentKey,
+          logicalKey: agentKey,
+          role,
+          providerName: ctx.providerName,
+          reusable: true,
+          agentHandoff: packet?.agent_coordination?.agent_handoff_v1 === true,
+          subAgent: packet?.agent_coordination?.sub_agent_v1 === true,
+          handoffRequest: packet || {
+            job_id: job?.id ?? null,
+            work_item_id: job?.work_item_id ?? null,
+            role,
+          },
+          handoffFactory: ({ providerName }) => buildPromptForProvider(providerName),
+        });
+        await preparedAgent.whenReady();
+        ctx.providerName = preparedAgent.providerName;
+        prompt = preparedAgent.handoff;
+      } else {
+        prompt = await buildPromptForProvider(ctx.providerName);
+      }
+      const providerOpts = {
+        ...this.buildOpts(job, ctx),
+        ...(preparedAgent ? { _preparedAgent: preparedAgent } : {}),
+      };
       if (
         providerOpts?.role === "dev"
         && ((providerOpts.createFiles?.length || 0) > 0 || (providerOpts.createRoots?.length || 0) > 0)
@@ -98,13 +160,24 @@ export class BaseRole {
             ...providerOpts,
             buildFallbackPrompt: ({ providerName }) => buildPromptForProvider(providerName),
           },
-          this.buildMeta(job, ctx),
+          {
+            ...this.buildMeta(job, ctx),
+            ...(preparedAgent ? { jobProvider: preparedAgent.providerName } : {}),
+          },
         ),
         { warnMs: SLOW_PROVIDER_CALL_MS },
       );
       return await this.processOutput(output, stats, job, ctx);
     } finally {
-      await this.teardown(job, ctx);
+      try {
+        await this.teardown(job, ctx);
+      } finally {
+        if (preparedAgent && this.context?.agentDispatcher) {
+          await this.context.agentDispatcher.destroyAgent(preparedAgent, {
+            reason: "role_launch_complete",
+          });
+        }
+      }
     }
   }
 

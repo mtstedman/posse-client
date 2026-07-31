@@ -731,6 +731,20 @@ export function normalizeAtlasToolCall(call) {
   if (!schema) return call;
   const params = { .../** @type {Record<string, unknown>} */ (call) };
   delete params.action;
+  if (action === "code.window" && isPlainObject(params.sliceContext)) {
+    const sliceContext = { .../** @type {Record<string, unknown>} */ (params.sliceContext) };
+    if (Array.isArray(sliceContext.entrySymbols)) {
+      const symbolPattern = schema.properties?.sliceContext?.properties?.entrySymbols?.items?.pattern;
+      const validEntrySymbols = symbolPattern
+        ? sliceContext.entrySymbols.filter(
+            (value) => typeof value === "string" && cachedPatternRegExp(symbolPattern).test(value),
+          )
+        : sliceContext.entrySymbols;
+      if (validEntrySymbols.length > 0) sliceContext.entrySymbols = validEntrySymbols;
+      else delete sliceContext.entrySymbols;
+    }
+    params.sliceContext = sliceContext;
+  }
   const normalized = normalizeObjectParams(params, schema, "$");
   return /** @type {import("./tool-params.js").ToolCall} */ ({
     action: /** @type {any} */ (call).action,

@@ -29,6 +29,8 @@
  * @param {object} deps.eventActors - EVENT_ACTORS catalog
  * @param {string[]} deps.terminalJobStatuses - TERMINAL_JOB_STATUSES
  * @param {() => number} deps.readHeadlessHumanTimeoutSec
+ * @param {() => boolean} [deps.isRemoteOperatorPresent] - true when a bridge
+ *   heartbeat is fresh, i.e. a phone/SPA can answer gates remotely
  * @param {object} deps.queue - queue function bag (see destructure below)
  */
 export function recoverHeadlessHumanTimeouts({
@@ -40,6 +42,7 @@ export function recoverHeadlessHumanTimeouts({
   eventActors: EVENT_ACTORS,
   terminalJobStatuses: TERMINAL_JOB_STATUSES,
   readHeadlessHumanTimeoutSec,
+  isRemoteOperatorPresent = null,
   queue: {
     hasJobs,
     listJobs,
@@ -57,6 +60,13 @@ export function recoverHeadlessHumanTimeouts({
   // Headless human_input timeout: if no display is available, waiting_on_human
   // jobs will sit forever. After the configured headless human timeout, fail them and
   // recover the chain so dependents don't get deadlock-canceled.
+  //
+  // Exception: while `posse serve` is heartbeating, "headless" does not mean
+  // "unanswerable" — a paired phone can answer any gate. Timing gates out
+  // under a live bridge silently destroys the remote workflow (the operator
+  // answers 11 minutes later and gets gate_closed), so the whole sweep waits
+  // as long as the bridge is present.
+  if (!hasDisplay && isRemoteOperatorPresent?.()) return;
   if (!hasDisplay && hasJobs(["waiting_on_human"])) {
     const stuckHuman = listJobs(["waiting_on_human"]);
     for (const hj of stuckHuman) {
@@ -80,6 +90,18 @@ export function recoverHeadlessHumanTimeouts({
       }
       const age = (Date.now() - new Date(hj.updated_at).getTime()) / 1000;
       if (age > readHeadlessHumanTimeoutSec()) {
+        // A live lease means a bridge answer is resolving this gate right
+        // now. Superseding mid-resolution would yank the gate out from under
+        // completeHumanGateResolution and discard the operator's answer —
+        // leave it for the next sweep, which sees the settled outcome.
+        const freshHj = getJob(hj.id);
+        if (
+          freshHj?.lease_token
+          && freshHj.lease_expires_at
+          && Date.parse(freshHj.lease_expires_at) > Date.now()
+        ) {
+          continue;
+        }
         log(`WI#${hj.work_item_id} job #${hj.id} stuck in waiting_on_human for ${Math.ceil(age)}s — recovering (headless timeout)`, "yellow");
         let humanPayload = {};
 

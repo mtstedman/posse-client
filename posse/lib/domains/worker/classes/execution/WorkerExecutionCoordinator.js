@@ -174,7 +174,7 @@ export class WorkerExecutionCoordinator {
       if (assessOnly.handled) return;
 
       // Freeze and execute the explicit test plan before DEV sees the task.
-      // The receipt is persisted outside the routing packet, so baseline output
+      // The receipt is persisted outside the handoff context packet, so baseline output
       // cannot become implementation feedback or leak between benchmark arms.
       const baselinePayload = worker.parsePayload(job);
       const baselineReceipt = await ensurePreDevelopmentTestBaseline({

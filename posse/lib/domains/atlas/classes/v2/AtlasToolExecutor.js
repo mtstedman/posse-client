@@ -8,7 +8,11 @@ import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncG
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
-import { ledgerDbPath, mainViewPath } from "../../functions/v2/runtime-paths.js";
+import {
+  ledgerBranchForWi,
+  ledgerDbPath,
+  mainViewPath,
+} from "../../functions/v2/runtime-paths.js";
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import {
   ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
@@ -610,8 +614,6 @@ export class AtlasToolExecutor {
     const cwd = String(boot.cwd || request.config?.cwd || process.cwd());
     const repoRoot = String(request.config?.repoRoot || atlas.repoPath || cwd);
     const absPath = path.resolve(cwd, String(args.path));
-    const relPath = path.relative(cwd, absPath).replace(/\\/g, "/");
-    if (!relPath || relPath.startsWith("..") || path.isAbsolute(relPath)) return null;
     const repoKey = normalizeRepoKey(repoRoot);
     const requestRepoKey = this.#repoKeyFor({
       ...request,
@@ -621,21 +623,53 @@ export class AtlasToolExecutor {
         repoRoot,
       },
     });
-    this.#clearRecentDedupeForRepo(repoKey);
-    if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
-    const branch = await this.#branchForRepo(repoRoot);
+    const workItemKey = workItemKeyForRequest(request);
+    const workItemId = workItemKey ? workItemKey.replace(/^wi-/, "") : null;
+    const readContext = workItemKey ? this.#readContexts.get(workItemKey) : null;
+    const readContextMatchesCwd = !!readContext?.readRoot
+      && normalizeRepoKey(readContext.readRoot) === normalizeRepoKey(cwd);
     const config = {
       ...(atlas && typeof atlas === "object" ? atlas : {}),
       ...(request.config && typeof request.config === "object" ? request.config : {}),
     };
+    // A WI owns a delta branch in the repository's shared ledger plus a
+    // disposable mounted view in its worktree. Never derive ledger/main-view
+    // paths from the worktree root: doing so creates a second full ATLAS
+    // database and refreshes the target branch instead of the WI branch.
+    const refreshRoot = workItemKey ? cwd : repoRoot;
+    const refreshLedgerPath = workItemKey
+      ? String(
+          (readContextMatchesCwd ? readContext?.ledgerPath : "")
+          || config.ledgerDbPath
+          || config.atlasV2LedgerDbPath
+          || "",
+        )
+      : ledgerDbPath(repoRoot);
+    const refreshViewPath = workItemKey
+      ? String(
+          (readContextMatchesCwd ? readContext?.viewPath : "")
+          || config.graphDbPath
+          || config.requestedGraphDbPath
+          || "",
+        )
+      : mainViewPath(repoRoot);
+    if (!refreshLedgerPath || !refreshViewPath) return null;
+    const relPath = path.relative(refreshRoot, absPath).replace(/\\/g, "/");
+    if (!relPath || relPath.startsWith("..") || path.isAbsolute(relPath)) return null;
+    const gateKey = workItemKey || repoKey;
+    this.#clearRecentDedupeForRepo(repoKey);
+    if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
+    const branch = workItemId != null
+      ? ledgerBranchForWi(workItemId)
+      : await this.#branchForRepo(repoRoot);
     return this.#gate.write(
-      repoKey,
+      gateKey,
       async (queueInfo) => {
         const conductor = this.#conductorFactory();
         const result = await conductor.warm({
-          ledgerPath: ledgerDbPath(repoRoot),
-          dbPath: mainViewPath(repoRoot),
-          repoRoot,
+          ledgerPath: refreshLedgerPath,
+          dbPath: refreshViewPath,
+          repoRoot: refreshRoot,
           branch,
           config,
           job: {
@@ -643,7 +677,7 @@ export class AtlasToolExecutor {
             branch,
             paths: [relPath],
             trigger_event: "atlas.executor.deterministic_write",
-            out_view_path: mainViewPath(repoRoot),
+            out_view_path: refreshViewPath,
           },
         }, { timeoutMs: request.waitMs || this.#waitMs });
         this.#clearRecentDedupeForRepo(repoKey);

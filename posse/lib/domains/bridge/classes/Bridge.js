@@ -9,6 +9,13 @@ import {
   setBridgePort,
 } from "../functions/auth.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
+import {
+  RUNTIME_STATUS_KEYS,
+  clearRuntimeStatus,
+  writeRuntimeStatus,
+} from "../../queue/functions/runtime-status.js";
+
+const BRIDGE_PRESENCE_HEARTBEAT_MS = 30_000;
 
 export class Bridge {
   constructor({
@@ -23,6 +30,35 @@ export class Bridge {
     this.changeStream = null;
     this.relayClient = null;
     this.runLauncher = new PosseRunLauncher({ projectDir: this.projectDir });
+    this.presenceTimer = null;
+  }
+
+  /**
+   * Heartbeat "a remote operator can reach this repo" into runtime_status.
+   * The detached run reads it (isBridgePresenceFresh) to keep human gates
+   * open for the phone instead of applying the headless timeout. Writes are
+   * best-effort — presence telemetry must never take the bridge down.
+   */
+  startPresenceHeartbeat() {
+    if (this.presenceTimer) return;
+    const beat = () => {
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE, {
+        present: true,
+        at: new Date().toISOString(),
+        instance_id: this.config.instanceId,
+      });
+    };
+    beat();
+    this.presenceTimer = setInterval(beat, BRIDGE_PRESENCE_HEARTBEAT_MS);
+    this.presenceTimer.unref?.();
+  }
+
+  stopPresenceHeartbeat() {
+    if (this.presenceTimer) {
+      clearInterval(this.presenceTimer);
+      this.presenceTimer = null;
+    }
+    clearRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
   }
 
   async start() {
@@ -59,6 +95,7 @@ export class Bridge {
         this.localServer?.broadcast(frame);
         this.relayClient?.send(frame);
       });
+      this.startPresenceHeartbeat();
       return this.info(address);
     } catch (err) {
       await this.stop();
@@ -153,6 +190,7 @@ export class Bridge {
   }
 
   async stop() {
+    this.stopPresenceHeartbeat();
     this.relayClient?.stop();
     this.relayClient = null;
     this.changeStream?.close();

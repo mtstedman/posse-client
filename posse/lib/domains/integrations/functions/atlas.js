@@ -1230,12 +1230,17 @@ function v2WorkItemContext({
   const scopedConfig = buildWorkItemScopedConfig({ projectDir, worktreePath, workItemId, config }) || config;
   const storage = repoStorageFor({ cwd: projectDir, config });
   const viewDbPath = workItemViewPath(worktreePath);
+  const runtimeConfig = withAtlasConfigOverrides(scopedConfig, {
+    requestedGraphDbPath: viewDbPath,
+    atlasV2LedgerDbPath: storage.ledgerDbPath,
+    storageRepoPath: storage.repoRoot,
+  });
   return {
     ok: true,
     skipped: null,
-    config: scopedConfig,
+    config: runtimeConfig,
     repoRoot: storage.repoRoot,
-    repo: resolveAtlasRepoTarget({ cwd: worktreePath || projectDir, config: scopedConfig }),
+    repo: resolveAtlasRepoTarget({ cwd: worktreePath || projectDir, config: runtimeConfig }),
     graphDbPath: viewDbPath,
     primaryGraphDbPath: storage.mainViewDbPath,
     viewDbPath,

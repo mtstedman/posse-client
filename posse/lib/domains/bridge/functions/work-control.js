@@ -8,7 +8,19 @@ import {
   createWorkItem,
   getJob,
   getLiveSchedulerBlockMessage,
+  getSchedulerLockInfo,
+  getWorkItem,
+  runInTransaction,
+  updateWorkItemStatus,
 } from "../../queue/functions/index.js";
+import {
+  RUNTIME_STATUS_KEYS,
+  writeRuntimeStatus,
+} from "../../queue/functions/runtime-status.js";
+import {
+  classifyResearchForRouting,
+  createInitialResearchOrPlanJob,
+} from "../../research/functions/intake-routing.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { projectBridgeWorkItem } from "./state-snapshot.js";
 
@@ -27,15 +39,35 @@ export function addBridgeWorkItem(args = {}, context = {}) {
       .map((line) => line.trim())
       .find(Boolean) || description
   ).slice(0, 100);
-  const item = createWorkItem(title, description, "normal", {
-    source: "bridge",
-    requested_by: String(context.actor || "bridge"),
-    mode: "build",
-  });
+  return runInTransaction(() => {
+    const item = createWorkItem(title, description, "normal", {
+      source: "bridge",
+      requested_by: String(context.actor || "bridge"),
+      mode: "build",
+    });
 
-  return {
-    work_item: projectBridgeWorkItem(item),
-  };
+    if (getLiveSchedulerBlockMessage("main")) {
+      const projectDir = context.projectDir || process.cwd();
+      const deepthinkBudget = "normal";
+      updateWorkItemStatus(item.id, "planning");
+      createInitialResearchOrPlanJob(item, {
+        deepthinkBudget,
+        source: "bridge_inject",
+        projectDir,
+        routing: classifyResearchForRouting({
+          projectDir,
+          workItem: item,
+          mode: item.mode,
+          source: "bridge_inject",
+          live: true,
+        }),
+      });
+    }
+
+    return {
+      work_item: projectBridgeWorkItem(getWorkItem(item.id) || item),
+    };
+  });
 }
 
 export async function startBridgeRun(args = {}, context = {}) {
@@ -45,8 +77,36 @@ export async function startBridgeRun(args = {}, context = {}) {
   return context.startPosse(args);
 }
 
+/**
+ * Ask the live run to wind down gracefully. The bridge only shares the
+ * SQLite DB with the detached run process, so the request travels as a
+ * runtime_status row the scheduler loop polls (~2s). Owner-stamped so a
+ * request can never outlive its target and stop a later run; the ack means
+ * "stop requested", not "stopped" — clients watch instance_status for the
+ * wind-down.
+ */
+export function stopBridgeRun(args = {}, context = {}) {
+  if (!getLiveSchedulerBlockMessage("main")) {
+    return { stopping: false, not_running: true };
+  }
+  const lock = getSchedulerLockInfo("main");
+  const written = writeRuntimeStatus(RUNTIME_STATUS_KEYS.STOP_REQUEST, {
+    requested_at: new Date().toISOString(),
+    owner_id: lock?.owner_id || null,
+    source: "bridge",
+    actor: String(context.actor || "remote-operator"),
+  });
+  if (!written) return { ok: false, reason: "stop_request_write_failed" };
+  return { stopping: true };
+}
+
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const NUDGE_BODY_MAX_CHARS = 4000;
+// Job types that never run a provider agent, so they never call
+// get_operator_feedback. A nudge written against one is accepted, sits
+// unread forever, and is silently expired at finalize — worse than an
+// honest refusal.
+const NUDGE_INELIGIBLE_JOB_TYPES = new Set(["human_input", "atlas_warm"]);
 
 /**
  * Deliver operator guidance to a live job. Running agents pick the nudge up
@@ -65,6 +125,13 @@ export function nudgeBridgeJob(args = {}, context = {}) {
   if (!job) return { ok: false, reason: "no_such_job" };
   if (TERMINAL_JOB_STATUS_SET.has(job.status)) {
     return { ok: false, reason: "job_not_active" };
+  }
+  if (NUDGE_INELIGIBLE_JOB_TYPES.has(job.job_type)) {
+    return {
+      ok: false,
+      reason: "job_not_nudgeable",
+      message: `${job.job_type} jobs never read operator feedback; answer the gate instead`,
+    };
   }
   const row = createOperatorNudge({
     job_id: jobId,

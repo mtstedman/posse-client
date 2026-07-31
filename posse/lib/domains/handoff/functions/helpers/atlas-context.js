@@ -88,7 +88,7 @@ function _isPrefetchCwdUsable(cwd) {
   try { return fs.statSync(cwd).isDirectory(); } catch { return false; }
 }
 
-export function resolveAtlasHandoffState(recipient, packet) {
+export function resolveAtlasHandoffState(recipient, packet, { providerName = null } = {}) {
   if (
     packet?.atlas_disabled ||
     packet?.disableAtlas ||
@@ -100,10 +100,11 @@ export function resolveAtlasHandoffState(recipient, packet) {
   ) {
     return null;
   }
-  const providerName = packet.execution_provider || packet.job_provider || "claude";
+  const routedProviderName = String(providerName || "").trim().toLowerCase();
+  if (!routedProviderName) return null;
   const resolved = resolveAtlasExecutionAttachment({
     role: recipient,
-    providerName,
+    providerName: routedProviderName,
     cwd: packet.cwd,
     workItemId: packet.work_item_id ?? null,
     config: packet.atlas_config || undefined,

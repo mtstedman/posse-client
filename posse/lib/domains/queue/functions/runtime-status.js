@@ -11,7 +11,38 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   BOOT: "boot",
   SCHEDULER: "scheduler",
   SHUTDOWN: "shutdown",
+  // Written by the bridge (run.stop), consumed by the live scheduler loop.
+  STOP_REQUEST: "stop_request",
+  // Heartbeat from `posse serve`: a remote operator can reach this repo.
+  BRIDGE: "bridge",
 });
+
+/** How stale the bridge heartbeat may be and still count as "present".
+ *  The bridge writes every 30s; 120s tolerates a couple of missed beats. */
+export const BRIDGE_PRESENCE_FRESH_MS = 120_000;
+
+/**
+ * True when `posse serve` has heartbeaten recently, meaning a phone/SPA can
+ * answer human gates remotely. Consumed by headless recovery so a served
+ * repo's gates wait for the operator instead of timing out.
+ */
+export function isBridgePresenceFresh({ maxAgeMs = BRIDGE_PRESENCE_FRESH_MS } = {}) {
+  const row = readRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
+  const at = Date.parse(row?.at || "");
+  return Number.isFinite(at) && Date.now() - at < maxAgeMs;
+}
+
+export function readRuntimeStatus(key) {
+  try {
+    const row = getDb()
+      .prepare(`SELECT value_json FROM runtime_status WHERE key = ?`)
+      .get(String(key));
+    if (!row) return null;
+    return JSON.parse(row.value_json || "{}");
+  } catch {
+    return null;
+  }
+}
 
 export function writeRuntimeStatus(key, value) {
   try {

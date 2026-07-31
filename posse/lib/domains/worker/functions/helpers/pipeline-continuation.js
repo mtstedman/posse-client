@@ -56,6 +56,10 @@ import {
 } from "../../../research/functions/intake-routing.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { workItemArtifactRoot } from "../../../artifacts/functions/index.js";
+import {
+  PROVIDER_AFFINITY_ROUTES,
+  providerForAffinityRoute,
+} from "../../../../shared/policies/functions/provider-affinity.js";
 
 const ALLOWED_BARE_DOTFILES = new Set([
   ".env",
@@ -177,6 +181,11 @@ export function parsePreflightRoutingDecision(output, { fallbackBudget = "normal
 
 export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, attemptId) {
   const originRole = worker?.roleRegistry?.get?.(originJob?.job_type);
+  const continuationProvider = providerForAffinityRoute(
+    originJob,
+    "dev",
+    PROVIDER_AFFINITY_ROUTES.FILE_REQUEST_CONTINUATION,
+  );
   const sanitizeRequests = (requests) => requests.filter((request) => {
     const candidate = String(request?.path || "").replace(/\\/g, "/").trim();
     const basename = path.posix.basename(candidate).toLowerCase();
@@ -313,7 +322,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
       work_item_id: originJob.work_item_id,
       title: `Create files (auto): ${filePaths.slice(0, 3).join(", ")}${filePaths.length > 3 ? ` (+${filePaths.length - 3})` : ""}`,
       parent_job_id: originJob.id,
-      provider: originJob.provider || null,
+      provider: continuationProvider,
       priority: originJob.priority || "normal",
       model_tier: originJob.model_tier || "standard",
       reasoning_effort: originJob.reasoning_effort || "medium",
@@ -380,7 +389,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
       work_item_id: originJob.work_item_id,
       title: `Create files (approved): ${approvalPaths.slice(0, 3).join(", ")}${approvalPaths.length > 3 ? ` (+${approvalPaths.length - 3})` : ""}`,
       parent_job_id: originJob.id,
-      provider: originJob.provider || null,
+      provider: continuationProvider,
       priority: originJob.priority || "normal",
       model_tier: originJob.model_tier || "standard",
       reasoning_effort: originJob.reasoning_effort || "medium",

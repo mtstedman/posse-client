@@ -53,6 +53,7 @@ import {
   providerBrandColor,
   roleBrandColor,
 } from "../../functions/display/helpers/brand.js";
+import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
 import { estimateBillableInputTokens, estimateCallCost } from "../../../billing/functions/pricing.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
@@ -101,19 +102,6 @@ function dirtyDiffLabel(entry = {}) {
   return "changed";
 }
 
-function dirtyTreeBlockers(worktreeStatus = {}) {
-  const targetFiles = Array.isArray(worktreeStatus?.targetFiles) ? worktreeStatus.targetFiles : [];
-  const wtFiles = Array.isArray(worktreeStatus?.wtFiles) ? worktreeStatus.wtFiles : [];
-  const blockers = [
-    ...targetFiles.map((entry) => ({ ...entry, location: "target" })),
-    ...wtFiles.map((entry) => ({ ...entry, location: "worktree" })),
-  ];
-  if (blockers.length === 0 && worktreeStatus?.targetDirty) {
-    blockers.push({ status: "??", path: "(unknown target change)", location: "target" });
-  }
-  return blockers;
-}
-
 function dirtyBlockerTag(entry = {}) {
   if (entry.location === "target") {
     return entry.untracked ? "target untracked" : "target";
@@ -123,7 +111,7 @@ function dirtyBlockerTag(entry = {}) {
 }
 
 function effectiveReviewAssessment(data = {}) {
-  const blockers = dirtyTreeBlockers(data.worktreeStatus);
+  const blockers = getReviewDirtyState(data.worktreeStatus).blockers;
   if (blockers.length > 0) {
     return {
       status: "BLOCKED",
@@ -289,7 +277,17 @@ export class DisplayApprovalRenderer {
     } else if (current._isInfo) {
       navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     } else {
-      navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${C.red}[d]${C.reset} Delete  ${C.green}[c]${C.reset} Commit  ${C.yellow}[t]${C.reset} Stash tgt  ${C.red}[x]${C.reset} Discard\u2026  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
+      const dirtyState = getReviewDirtyState(current.worktreeStatus);
+      const sharedActions = `${C.red}[d]${C.reset} Delete  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`;
+      if (dirtyState.canDecide) {
+        navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${sharedActions}`);
+      } else {
+        const resolutionActions = [];
+        if (dirtyState.canCommit) resolutionActions.push(`${C.green}[c]${C.reset} Commit`);
+        if (dirtyState.canStashTarget) resolutionActions.push(`${C.yellow}[t]${C.reset} Stash tgt`);
+        if (dirtyState.canDiscard) resolutionActions.push(`${C.red}[x]${C.reset} Discard\u2026`);
+        navLines.push(` ${C.yellow}${C.bold}Resolve dirty files before approval or re-queue:${C.reset} ${resolutionActions.join("  ")}  ${sharedActions}`);
+      }
     }
 
     // Always-visible action feedback: the in-flight/most-recent git action and
@@ -558,7 +556,7 @@ export class DisplayApprovalRenderer {
     const statusColor = paletteStatusColor(displayStatus, C);
     lines.push(` ${C.bold}WI#${wi.id}:${C.reset} ${wi.title}`);
     lines.push(` ${C.dim}Status:${C.reset} ${statusColor}${displayStatus.toUpperCase()}${C.reset}  ${C.dim}Priority:${C.reset} ${wi.priority}  ${C.dim}Branch:${C.reset} ${wi.branch_name || "(none)"}`);
-    if (data.finalAssessment || dirtyTreeBlockers(data.worktreeStatus).length > 0) {
+    if (data.finalAssessment || getReviewDirtyState(data.worktreeStatus).dirty) {
       const assessment = effectiveReviewAssessment(data);
       const color = assessment.status === "PASS" ? C.green : assessment.status === "FAIL" ? C.red : C.yellow;
       lines.push(` ${C.bold}Final Assessment:${C.reset} ${color}${assessment.status}${C.reset} ${C.dim}${String(assessment.reason || "").slice(0, inner - 28)}${C.reset}`);
@@ -694,10 +692,11 @@ export class DisplayApprovalRenderer {
     // Worktree Status \u2014 surfaces merge blockers before the user approves.
     const ws = data.worktreeStatus;
     if (ws) {
-      const targetCount = (ws.targetFiles || []).length;
-      const wtCount = (ws.wtFiles || []).length;
-      const outOfScope = (ws.wtFiles || []).filter((f) => !f.inScope).length;
-      const stashes = ws.wtStashes || 0;
+      const dirtyState = getReviewDirtyState(ws);
+      const targetCount = dirtyState.targetFiles.length;
+      const targetDirty = dirtyState.canStashTarget;
+      const wtCount = dirtyState.worktreeFiles.length;
+      const outOfScope = dirtyState.discardableWorktreeFiles.length;
 
       const targetName = ws.targetBranch || "target";
       const targetDir = ws.targetDir || "";
@@ -708,8 +707,8 @@ export class DisplayApprovalRenderer {
         ? ` ${C.dim}${sourceBranch}${sourceDir ? ` @ ${sourceDir}` : ""}${C.reset}`
         : ` ${C.dim}no WI branch${sourceDir ? ` @ ${sourceDir}` : ""}${C.reset}`;
 
-      const targetLabel = targetCount > 0
-        ? `${C.red}${C.bold}\u26a0 ${targetName} dirty (${targetCount})${C.reset} ${C.dim}\u2014 blocks merge${C.reset}`
+      const targetLabel = targetDirty
+        ? `${C.red}${C.bold}\u26a0 ${targetName} dirty (${targetCount || "unlisted"})${C.reset} ${C.dim}\u2014 blocks merge${C.reset}`
         : `${C.green}\u2713 ${targetName} clean${C.reset}`;
 
       let wtLabel;
@@ -718,11 +717,10 @@ export class DisplayApprovalRenderer {
       } else if (!ws.wtExists) {
         wtLabel = `${C.dim}worktree missing${C.reset}`;
       } else if (wtCount === 0) {
-        wtLabel = `${C.green}\u2713 worktree clean${C.reset}${stashes > 0 ? `  ${C.yellow}${stashes} stash(es)${C.reset}` : ""}`;
+        wtLabel = `${C.green}\u2713 worktree clean${C.reset}`;
       } else {
         const oosTag = outOfScope > 0 ? `  ${C.yellow}${outOfScope} out-of-scope${C.reset}` : "";
-        const stashTag = stashes > 0 ? `  ${C.yellow}${stashes} stash(es)${C.reset}` : "";
-        wtLabel = `${C.yellow}\u26a0 worktree dirty (${wtCount})${C.reset}${oosTag}${stashTag}`;
+        wtLabel = `${C.yellow}\u26a0 worktree dirty (${wtCount})${C.reset}${oosTag}`;
       }
 
       lines.push(` ${C.bold}Worktree:${C.reset} ${wtLabel}${sourceSuffix}`);
@@ -743,7 +741,7 @@ export class DisplayApprovalRenderer {
         }
       };
 
-      pushBlockingFiles(dirtyTreeBlockers(ws), 8);
+      pushBlockingFiles(dirtyState.blockers, 8);
       if (targetCount > 0 && targetDir) {
         lines.push(`   ${C.dim}diff target: git -C "${targetDir}" diff HEAD -- <file>${C.reset}`);
       }
@@ -752,9 +750,9 @@ export class DisplayApprovalRenderer {
       }
 
       const hints = [];
-      if (wtCount > 0) hints.push(`${C.green}[c]${C.reset} commit in-scope`);
-      if (outOfScope > 0 || (ws.wtFiles || []).some((f) => f.untracked)) hints.push(`${C.red}[x]${C.reset} discard files`);
-      if (targetCount > 0) hints.push(`${C.yellow}[t]${C.reset} stash target`);
+      if (dirtyState.canCommit) hints.push(`${C.green}[c]${C.reset} commit in-scope`);
+      if (dirtyState.canDiscard) hints.push(`${C.red}[x]${C.reset} discard files`);
+      if (dirtyState.canStashTarget) hints.push(`${C.yellow}[t]${C.reset} stash target`);
       if (hints.length > 0) {
         lines.push(` ${C.dim}${hints.join("  ")}${C.reset}`);
       }
@@ -1098,7 +1096,6 @@ export class DisplayApprovalRenderer {
         lines.push(`  ${C.dim}Worktree directory missing or already cleaned up (${ws.wtDir})${C.reset}`);
       } else if (ws.wtFiles.length === 0) {
         lines.push(`  ${C.green}✓ WI worktree clean${C.reset} ${C.dim}(${ws.wtDir})${C.reset}`);
-        if (ws.wtStashes > 0) lines.push(`  ${C.yellow}${ws.wtStashes} stash(es) present — review with 'git stash list' in the worktree${C.reset}`);
       } else {
         const inScope = ws.wtFiles.filter((f) => f.inScope);
         const untracked = ws.wtFiles.filter((f) => !f.inScope && f.untracked);
@@ -1133,16 +1130,12 @@ export class DisplayApprovalRenderer {
           if (untracked.length > 12) lines.push(`    ${C.dim}… ${untracked.length - 12} more${C.reset}`);
           lines.push("");
         }
-        if (ws.wtStashes > 0) {
-          lines.push(`  ${C.yellow}${ws.wtStashes} stash(es) present in worktree${C.reset}`);
-          lines.push("");
-        }
       }
       lines.push("");
     }
 
     // ── Final Assessment ──
-    if (data.finalAssessment || dirtyTreeBlockers(data.worktreeStatus).length > 0) {
+    if (data.finalAssessment || getReviewDirtyState(data.worktreeStatus).dirty) {
       const assessment = effectiveReviewAssessment(data);
       const color = assessment.status === "PASS" ? C.green : assessment.status === "FAIL" ? C.red : C.yellow;
       lines.push(` ${C.bold}Final Assessment${C.reset}`);

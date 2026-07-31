@@ -12,6 +12,7 @@ import {
   getJob,
   getSetting,
   getWorkItem,
+  logAgentActivity,
   setAttemptSession,
   updateJobProvider,
 } from "../../queue/functions/index.js";
@@ -53,7 +54,6 @@ import {
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import {
   issuedToolSurfaceForProviderPolicy,
-  isRegisteredRemoteToolSurface,
   narrowProviderOptionsToRemoteIssuance,
 } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
@@ -61,6 +61,7 @@ import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTermin
 import {
   getAgentHandoffToolSchemaForRole,
 } from "../../../catalog/native-tools.js";
+import { AGENT_ACTIVITY_LIMITS } from "../../../catalog/event.js";
 import {
   buildCitationChildPrompt,
   subAgentRuntime,
@@ -275,6 +276,7 @@ const DEFAULT_DEPS = {
   getJob,
   getSetting,
   getWorkItem,
+  logAgentActivity,
   updateJobProvider,
   setAttemptSession,
   getAvailableProviders,
@@ -309,6 +311,19 @@ const DEFAULT_DEPS = {
 function nonNegativeTokenCount(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : null;
+}
+
+function agentCommentaryFields(value) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  const summary = text.slice(0, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS).trim();
+  const detail = text.length > summary.length
+    ? text.slice(
+        summary.length,
+        summary.length + AGENT_ACTIVITY_LIMITS.DETAIL_CHARS,
+      ).trim()
+    : null;
+  return { text, summary, detail: detail || null };
 }
 
 function contextPressureMetrics({ stats = {}, promptChars = 0 } = {}) {
@@ -395,7 +410,6 @@ function providerAgentIdentity(opts = {}, {
   const decision = opts?._sessionRecycle?.decision || null;
   const laneId = decision?.lane?.id || decision?.session?.lane_id || null;
   const lane = String(decision?.key?.lane || role || "agent").trim().toLowerCase();
-  const provider = String(providerName || "").trim().toLowerCase();
   const skillKey = String(decision?.key?.skillKey || "");
   const agentHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.agent_handoff");
@@ -405,8 +419,8 @@ function providerAgentIdentity(opts = {}, {
   const coordinationKey = coordinationChild ? "child" : (subAgent ? "subagents" : (agentHandoff ? "handoff" : "off"));
   if (laneId != null) {
     return {
-      key: `session-lane:${laneId}:${provider}:${lane}:coord-${coordinationKey}`,
-      logicalKey: `wi:${workItemId ?? "none"}:${provider}:${lane}:${skillKey}`,
+      key: `session-lane:${laneId}:${lane}:coord-${coordinationKey}`,
+      logicalKey: `wi:${workItemId ?? "none"}:${lane}:${skillKey}`,
       reusable: true,
       agentHandoff,
       subAgent,
@@ -416,14 +430,12 @@ function providerAgentIdentity(opts = {}, {
         : {}),
       ...(coordinationChild && opts._coordinationChildRemoteToolSurface
         ? { remoteToolSurface: opts._coordinationChildRemoteToolSurface }
-        : (!coordinationChild && isRegisteredRemoteToolSurface(opts._remoteToolSurface)
-          ? { remoteToolSurface: opts._remoteToolSurface }
-          : {})),
+        : {}),
     };
   }
   return {
-    key: `agent-call:${agentCallId}:${provider}:${lane}`,
-    logicalKey: `agent-call:${agentCallId}:${provider}:${lane}`,
+    key: `agent-call:${agentCallId}:${lane}`,
+    logicalKey: `agent-call:${agentCallId}:${lane}`,
     reusable: false,
     agentHandoff,
     subAgent,
@@ -433,9 +445,7 @@ function providerAgentIdentity(opts = {}, {
       : {}),
     ...(coordinationChild && opts._coordinationChildRemoteToolSurface
       ? { remoteToolSurface: opts._coordinationChildRemoteToolSurface }
-      : (!coordinationChild && isRegisteredRemoteToolSurface(opts._remoteToolSurface)
-        ? { remoteToolSurface: opts._remoteToolSurface }
-        : {})),
+      : {}),
   };
 }
 
@@ -474,6 +484,8 @@ function agentJobAttachment(opts = {}, context = {}) {
       repoPath: atlasConfig.requestedRepoPath || atlasConfig.repoPath || "",
       repoId: atlasConfig.requestedRepoId || atlasConfig.repoId || "",
       graphDbPath: atlasConfig.requestedGraphDbPath || atlasConfig.graphDbPath || "",
+      ledgerDbPath: atlasConfig.atlasV2LedgerDbPath || atlasConfig.ledgerDbPath || "",
+      storageRepoPath: atlasConfig.storageRepoPath || "",
       liveBuffers: atlasConfig.liveBuffersEnabled === false ? "off" : "deterministic-writes",
       viewWaitMs: atlasConfig.viewWaitMs ?? null,
       jobCacheEnabled: atlasConfig.jobCacheEnabled === true,
@@ -898,6 +910,7 @@ export class TrackedProviderClient {
       recordOutput,
       recordPrompt,
       recordRecoveryCheckpoint,
+      logAgentActivity,
       recordToolUseObservations,
       retainReplayOutput,
       retainReplayPrompt,
@@ -990,6 +1003,10 @@ export class TrackedProviderClient {
           terminalAbortController.abort(terminalHandoffAbortReason(event));
         })
       : null;
+    const upstreamAgentCommentary = typeof effectiveCapabilityOpts.onAgentCommentary === "function"
+      ? effectiveCapabilityOpts.onAgentCommentary
+      : null;
+    const seenAgentCommentary = new Set();
     const attemptOpts = {
       ...effectiveCapabilityOpts,
       maxOutputTokens: resolvedMaxOutputTokens,
@@ -997,6 +1014,31 @@ export class TrackedProviderClient {
       agentCallId,
       promptChars: prompt.length,
       abortSignal: providerAbortSignal,
+      onAgentCommentary: (value) => {
+        try { upstreamAgentCommentary?.(value); } catch { /* caller telemetry is best effort */ }
+        const commentary = agentCommentaryFields(value);
+        if (!commentary || seenAgentCommentary.has(commentary.text)) return;
+        seenAgentCommentary.add(commentary.text);
+        try {
+          logAgentActivity({
+            work_item_id,
+            job_id,
+            attempt_id: observationContext?.attempt_id ?? null,
+            role: opts.role,
+            actor_id: String(agentCallId),
+            kind: "progress",
+            status: "running",
+            phase: "commentary",
+            summary: commentary.summary,
+            detail: commentary.detail,
+            agent_call_id: agentCallId,
+            provider: providerName,
+            model: modelName,
+          });
+        } catch {
+          // Commentary is observational; persistence failure must not fail work.
+        }
+      },
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
         const promptText = typeof finalPrompt === "string" ? finalPrompt : String(finalPrompt ?? "");
         retainReplayPrompt?.(agentCallId, {
@@ -1059,12 +1101,22 @@ export class TrackedProviderClient {
     };
 
     const dispatcher = this.worker?.agentDispatcher;
-    const identity = providerAgentIdentity(effectiveCapabilityOpts, {
-      providerName,
-      role: opts.role,
-      workItemId: work_item_id,
-      agentCallId,
-    });
+    const preparedAgent = effectiveCapabilityOpts?._preparedAgent || null;
+    const identity = preparedAgent
+      ? {
+          key: preparedAgent.key,
+          logicalKey: preparedAgent.key,
+          reusable: true,
+          agentHandoff: preparedAgent.mcpGate?.contractBootConfig?.agentHandoff === true,
+          subAgent: preparedAgent.mcpGate?.contractBootConfig?.subAgent === true,
+          coordinationChild: false,
+        }
+      : providerAgentIdentity(effectiveCapabilityOpts, {
+          providerName,
+          role: opts.role,
+          workItemId: work_item_id,
+          agentCallId,
+        });
     let agent = null;
     let agentLease = null;
     let retainReusableAgent = false;
@@ -1084,12 +1136,7 @@ export class TrackedProviderClient {
         error.code = "POSSE_AGENT_DISPATCHER_REQUIRED";
         throw error;
       }
-      const dispatched = await dispatcher.dispatch({
-        ...identity,
-        role: opts.role,
-        providerName,
-        signal: abortSignal,
-        attachment: agentJobAttachment(attemptOpts, {
+      const attachment = agentJobAttachment(attemptOpts, {
           providerName,
           cwd,
           projectDir: this.worker.projectDir,
@@ -1097,8 +1144,21 @@ export class TrackedProviderClient {
           workItemId: work_item_id,
           attemptId: observationContext?.attempt_id ?? null,
           agentCallId,
-        }),
-      });
+        });
+      const dispatched = preparedAgent
+        ? await dispatcher.dispatchAgent({
+            agent: preparedAgent,
+            signal: abortSignal,
+            attachment,
+          })
+        : await dispatcher.dispatch({
+            ...identity,
+            role: opts.role,
+            providerName,
+            handoffRequest: effectiveCapabilityOpts?.sessionPacket || prompt,
+            signal: abortSignal,
+            attachment,
+          });
       agent = dispatched.agent;
       agentLease = dispatched.lease;
       Object.defineProperties(attemptOpts, {
@@ -1658,7 +1718,7 @@ export class TrackedProviderClient {
           if (agent && agentLease) await dispatcher.release({
             agent,
             lease: agentLease,
-            retain: identity.reusable && retainReusableAgent,
+            retain: preparedAgent ? true : (identity.reusable && retainReusableAgent),
             reason: "provider_attempt_complete",
           });
         } catch {
@@ -1667,7 +1727,7 @@ export class TrackedProviderClient {
           // provider attempt must be dispatched with a newly minted gate.
           retainReusableAgent = false;
         }
-        if (agent && !agentLease && (!identity.reusable || !retainReusableAgent)) {
+        if (agent && !agentLease && !preparedAgent && (!identity.reusable || !retainReusableAgent)) {
           await dispatcher.destroyAgent(agent, { reason: "provider_agent_complete" });
         }
       } finally {
@@ -1719,12 +1779,18 @@ export class TrackedProviderClient {
       job_id,
       work_item_id,
     }, () => sanitizeExecutionHintsForRole(opts.role, opts));
+    const dispatcher = this.worker?.agentDispatcher;
+    const preparedAgent = opts?._preparedAgent || null;
     let providerName = await timeProviderSetupPhase("provider.select", {
       role: opts.role,
       provider: jobProvider || null,
       job_id,
       work_item_id,
-    }, () => jobProvider || selectProviderName(opts.role));
+    }, () => preparedAgent?.providerName || jobProvider || (
+      typeof dispatcher?.selectProvider === "function"
+        ? dispatcher.selectProvider({ role: opts.role })
+        : selectProviderName(opts.role)
+    ));
     const initialProviderName = providerName;
     const configuredPool = await timeProviderSetupPhase("provider.pool", {
       role: opts.role,
@@ -1733,7 +1799,11 @@ export class TrackedProviderClient {
       work_item_id,
     }, () => Array.isArray(opts.allowedProviders) && opts.allowedProviders.length > 0
       ? [...new Set(opts.allowedProviders.filter(Boolean))]
-      : (opts.role === "artificer" && jobProvider ? [jobProvider] : getAvailableProviders(opts.role)));
+      : (opts.role === "artificer" && jobProvider
+          ? [jobProvider]
+          : (typeof dispatcher?.providersForRole === "function"
+              ? dispatcher.providersForRole(opts.role)
+              : getAvailableProviders(opts.role))));
     const attemptedProviders = normalizeAttemptedProviders(opts._fallbackAttemptedProviders);
     if (opts._fallbackAttempted) recordAttemptedProvider(attemptedProviders, providerName);
     let preflightFallback = null;
@@ -1758,16 +1828,29 @@ export class TrackedProviderClient {
         });
         if (fallbackName) {
           const previousProviderName = providerName;
-          prompt = await timeProviderSetupPhase("provider.fallback_prompt", {
-            role: opts.role,
-            provider: fallbackName,
-            job_id,
-            work_item_id,
-          }, () => buildFallbackPrompt({
-            providerName: fallbackName,
-            previousProviderName,
-            role: opts.role,
-          }));
+          if (preparedAgent && typeof dispatcher?.rebindAgent === "function") {
+            await dispatcher.rebindAgent(preparedAgent, {
+              providerName: fallbackName,
+              reason: "provider_rate_limit_preflight",
+              handoffFactory: ({ providerName: reboundProvider }) => buildFallbackPrompt({
+                providerName: reboundProvider,
+                previousProviderName,
+                role: opts.role,
+              }),
+            });
+            prompt = preparedAgent.handoff;
+          } else {
+            prompt = await timeProviderSetupPhase("provider.fallback_prompt", {
+              role: opts.role,
+              provider: fallbackName,
+              job_id,
+              work_item_id,
+            }, () => buildFallbackPrompt({
+              providerName: fallbackName,
+              previousProviderName,
+              role: opts.role,
+            }));
+          }
           providerName = fallbackName;
           preflightFallback = { from: previousProviderName, to: fallbackName };
           opts = {
@@ -1805,7 +1888,16 @@ export class TrackedProviderClient {
       provider: providerName,
       job_id,
       work_item_id,
-    }, () => getProvider(opts.role, providerName));
+    }, async () => {
+      if (preparedAgent?.providerName === providerName && preparedAgent?.provider) {
+        return preparedAgent.provider;
+      }
+      if (typeof dispatcher?.providerFor === "function") {
+        const binding = await dispatcher.providerFor({ role: opts.role, providerName });
+        if (binding?.provider) return binding.provider;
+      }
+      return getProvider(opts.role, providerName);
+    });
     const tier = opts.modelTier || "standard";
     const tierConfig = await timeProviderSetupPhase("provider.tier_config", {
       role: opts.role,
@@ -2031,7 +2123,29 @@ export class TrackedProviderClient {
 
         if (fallbackName) {
           try {
-            const fbProvider = getProvider(opts.role, fallbackName);
+            if (preparedAgent && typeof dispatcher?.rebindAgent === "function") {
+              await dispatcher.rebindAgent(preparedAgent, {
+                providerName: fallbackName,
+                reason: "provider_runtime_fallback",
+                handoffFactory: buildFallbackPrompt
+                  ? ({ providerName: reboundProvider }) => buildFallbackPrompt({
+                      providerName: reboundProvider,
+                      previousProviderName: providerName,
+                      role: opts.role,
+                    })
+                  : null,
+              });
+            }
+            let fbProvider = preparedAgent?.providerName === fallbackName
+              ? preparedAgent?.provider
+              : null;
+            if (!fbProvider && typeof dispatcher?.providerFor === "function") {
+              fbProvider = (await dispatcher.providerFor({
+                role: opts.role,
+                providerName: fallbackName,
+              })).provider;
+            }
+            if (!fbProvider) fbProvider = getProvider(opts.role, fallbackName);
             let fbAtlasMethod = null;
             if (!opts.disableAtlas) {
               try {
@@ -2102,13 +2216,15 @@ export class TrackedProviderClient {
               allowedProviders: configuredPool,
               atlasMethod: fbAtlasMethod,
             };
-            const fallbackPrompt = buildFallbackPrompt
-              ? await buildFallbackPrompt({
-                providerName: fallbackName,
-                previousProviderName: providerName,
-                role: opts.role,
-              })
-              : prompt;
+            const fallbackPrompt = preparedAgent
+              ? preparedAgent.handoff
+              : buildFallbackPrompt
+                ? await buildFallbackPrompt({
+                    providerName: fallbackName,
+                    previousProviderName: providerName,
+                    role: opts.role,
+                  })
+                : prompt;
             const { output: fbOutput, stats: fbStats } = await this._executeOneAttempt(fallbackPrompt, fbOpts, {
               providerName: fallbackName,
               provider: fbProvider,

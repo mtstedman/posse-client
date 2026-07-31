@@ -34,6 +34,10 @@ import {
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../../catalog/human-input.js";
+import {
+  PROVIDER_AFFINITY_ROUTES,
+  providerForAffinityRoute,
+} from "../../../../../shared/policies/functions/provider-affinity.js";
 
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();
@@ -733,7 +737,11 @@ function _spawnRecoveryJobsForVerdict({
       title: _normalizeFixTitle(spec.title || job.title),
       parent_job_id: job.id,
       priority: job.priority,
-      provider: (job.job_type === "dev" || job.job_type === "fix") ? (job.provider || null) : null,
+      provider: providerForAffinityRoute(
+        job,
+        "fix",
+        PROVIDER_AFFINITY_ROUTES.REPAIR_CONTINUATION,
+      ),
       model_tier: job.model_tier,
       reasoning_effort: job.reasoning_effort,
       skills: job.skills || null,
@@ -810,7 +818,11 @@ function _spawnRecoveryJobsForVerdict({
       title: proposedFix.title,
       parent_job_id: job.id,
       priority: job.priority,
-      provider: (job.job_type === "dev" || job.job_type === "fix") ? (job.provider || null) : null,
+      provider: providerForAffinityRoute(
+        job,
+        "fix",
+        PROVIDER_AFFINITY_ROUTES.REPAIR_CONTINUATION,
+      ),
       model_tier: job.model_tier,
       reasoning_effort: job.reasoning_effort,
       skills: job.skills || null,

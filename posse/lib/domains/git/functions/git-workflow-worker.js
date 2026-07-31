@@ -52,7 +52,10 @@ async function main() {
     });
   }
   if (task === "cleanupWiBranch") {
-    return helpers.cleanupWiBranch(args.wi, { clearMergeState: !!args.clearMergeState });
+    return helpers.cleanupWiBranch(args.wi, {
+      clearMergeState: !!args.clearMergeState,
+      requireCleanWorktree: !!args.requireCleanWorktree,
+    });
   }
   if (task === "snapshotAndRemoveWorktreeOnly") {
     return helpers._snapshotAndRemoveWorktreeOnly(args.wi, args.reason || "merge-failed");

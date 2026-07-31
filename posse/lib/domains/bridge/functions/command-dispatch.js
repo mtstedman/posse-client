@@ -12,6 +12,7 @@ import {
 import {
   getHumanGate,
   getJob,
+  getLiveSchedulerBlockMessage,
   getWorkItem,
   logEvent,
   reviewRejectionReadiness,
@@ -41,13 +42,26 @@ import {
   addBridgeWorkItem,
   nudgeBridgeJob,
   startBridgeRun,
+  stopBridgeRun,
   warmBridgeAtlas,
 } from "./work-control.js";
 
 const ALLOWED_COMMAND_SET = new Set(BRIDGE_ALLOWED_COMMANDS);
+// Commands whose success typically requeues follow-up work. `posse serve`
+// hosts no scheduler, so without a kick the requeued jobs sit in `queued`
+// until someone runs `posse go` by hand — the phone shows success while the
+// repo does nothing.
+const GATE_RESOLUTION_COMMAND_SET = new Set([
+  BRIDGE_COMMANDS.ASK,
+  BRIDGE_COMMANDS.PLAN_APPROVE,
+  BRIDGE_COMMANDS.PLAN_REJECT,
+  BRIDGE_COMMANDS.REVIEW_APPROVE,
+  BRIDGE_COMMANDS.REVIEW_REJECT,
+]);
 const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.QUEUE_ADD,
   BRIDGE_COMMANDS.RUN_START,
+  BRIDGE_COMMANDS.RUN_STOP,
   BRIDGE_COMMANDS.ATLAS_WARM,
   BRIDGE_COMMANDS.JOB_NUDGE,
   BRIDGE_COMMANDS.ASK,
@@ -168,6 +182,7 @@ function auditMutatingCommand(name, args = {}, context = {}, result = {}) {
         command: name,
         ok,
         reason: ok ? null : (result.reason || result.error?.code || result.error || "command_failed"),
+        message: ok ? null : (result.message || null),
         actor: String(context.actor || "bridge"),
         work_item_id: wiId || null,
         job_id: jobId || null,
@@ -250,6 +265,9 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.RUN_START:
       return startBridgeRun(args, context);
+
+    case BRIDGE_COMMANDS.RUN_STOP:
+      return stopBridgeRun(args, context);
 
     case BRIDGE_COMMANDS.ATLAS_WARM:
       return warmBridgeAtlas(args, context);
@@ -392,6 +410,25 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
   }
 }
 
+/**
+ * After a gate resolves, the unblocked work usually lands back in `queued`.
+ * Mirror atlas.warm: when no run is live, launch the detached run so that
+ * work actually executes. The launch outcome rides on the ack as an
+ * additive `run` field (minor protocol revision; clients tolerate it).
+ */
+async function maybeKickRunAfterGateResolution(result, context = {}) {
+  if (!result || result.ok === false) return result;
+  if (typeof context.startPosse !== "function") return result;
+  if (getLiveSchedulerBlockMessage("main")) return result;
+  try {
+    return { ...result, run: await context.startPosse({}) };
+  } catch (err) {
+    // The gate resolution itself succeeded; report the launch failure
+    // without turning the whole ack into an error.
+    return { ...result, run: { started: false, error: String(err?.message || err) } };
+  }
+}
+
 export async function dispatchBridgeCommandFrame(frame, context = {}) {
   const { commandId, name, args } = normalizeCommandFrame(frame);
   if (Number(frame?.v) !== BRIDGE_PROTOCOL_VERSION) {
@@ -400,11 +437,26 @@ export async function dispatchBridgeCommandFrame(frame, context = {}) {
   if (!name) return createErrorAck(commandId, "missing_command_name");
   if (!ALLOWED_COMMAND_SET.has(name)) return createErrorAck(commandId, "command_not_allowed");
   try {
-    const result = await executeAllowedCommand(name, args, context);
+    let result = await executeAllowedCommand(name, args, context);
+    if (GATE_RESOLUTION_COMMAND_SET.has(name)) {
+      result = await maybeKickRunAfterGateResolution(result, context);
+    }
     auditMutatingCommand(name, args, context, result);
     return createAckFrame(commandId, result);
   } catch (err) {
-    auditMutatingCommand(name, args, context, { ok: false, reason: "internal" });
+    // Keep the wire ack opaque (protocol: internal messages SHOULD not leak
+    // detail to clients) but never swallow the cause: log it in the serve
+    // console and carry it in the audit event so failures are diagnosable.
+    auditMutatingCommand(name, args, context, {
+      ok: false,
+      reason: "internal",
+      message: String(err?.message || err),
+    });
+    try {
+      console.error(`[posse][bridge] command ${name} failed: ${err?.stack || err}`);
+    } catch {
+      // Logging is best-effort.
+    }
     return createErrorAck(commandId, "internal");
   }
 }

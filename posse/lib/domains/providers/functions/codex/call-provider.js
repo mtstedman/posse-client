@@ -93,6 +93,7 @@ export async function callProvider(promptText, {
   deepthink = false,
   jobDir = null,
   onLine = null,
+  onAgentCommentary = null,
   cwd = null,          // real repo / worktree — codex sandbox root + MCP workspace
   loaderCwd = null,    // optional empty dir to spawn codex in (suppresses AGENTS.md parent-walk). Falls back to cwd.
   mcpCwd = null,       // optional override for MCP workspace root. Falls back to cwd.
@@ -578,7 +579,7 @@ export async function callProvider(promptText, {
           });
         }
         _appendCodexToolUse(toolUses, extracted);
-        const summary = summarizeJsonEvent(msg);
+        const summary = summarizeJsonEvent(msg, { onAgentCommentary });
         if (extractedEntries.length > 0 || summary) lastMeaningfulActivity = Date.now();
         if (summary) emit(`${C.dim}${summary}${C.reset}`);
       } catch {

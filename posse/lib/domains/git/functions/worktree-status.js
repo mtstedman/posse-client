@@ -122,11 +122,6 @@ function diffStatByPath(cwd) {
   return byPath;
 }
 
-function stashCount(cwd) {
-  const out = gitFile(["stash", "list"], cwd);
-  return String(out || "").trim().split("\n").filter(Boolean).length;
-}
-
 function isRuntimePath(p) {
   return p === ".posse"
     || p.startsWith(".posse/")
@@ -213,7 +208,6 @@ export function computeWorktreeStatus({ wi, jobs = [], projectDir, targetBranch 
   const scope = collectScopePaths(jobs);
 
   let wtFiles = [];
-  let wtStashes = 0;
   if (wtExists) {
     const wtDiffStats = diffStatByPath(wtDir);
     wtFiles = porcelainLines(wtDir)
@@ -223,7 +217,6 @@ export function computeWorktreeStatus({ wi, jobs = [], projectDir, targetBranch 
         inScope: pathInScope(entry.path, scope),
         diff: wtDiffStats.get(entry.path) || null,
       }));
-    wtStashes = stashCount(wtDir);
   }
 
   const targetDiffStats = diffStatByPath(projectDir);
@@ -235,7 +228,7 @@ export function computeWorktreeStatus({ wi, jobs = [], projectDir, targetBranch 
     wtDir,
     wtExists,
     wtFiles,
-    wtStashes,
+    wtStashes: 0,
     sourceBranch: wi.branch_name || null,
     sourceDir: wtDir,
     workItemId: wi.id ?? null,

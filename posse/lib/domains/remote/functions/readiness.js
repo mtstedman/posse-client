@@ -27,7 +27,6 @@ function probePacket({ cwd = process.cwd(), providerName = "claude" } = {}) {
     model_tier: "standard",
     reasoning_effort: "medium",
     governance_tier: "production",
-    execution_provider: providerName,
     attempt: {
       count: 2,
       max: 3,

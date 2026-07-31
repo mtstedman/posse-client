@@ -389,10 +389,15 @@ export function codexAgentMessageText(msg) {
   );
 }
 
-export function summarizeJsonEvent(msg) {
+export function summarizeJsonEvent(msg, { onAgentCommentary = null } = {}) {
   if (!msg || typeof msg !== "object") return null;
   const agentMessage = codexAgentMessageText(msg);
-  if (agentMessage) return agentMessage;
+  if (agentMessage) {
+    if (typeof onAgentCommentary === "function") {
+      try { onAgentCommentary(agentMessage); } catch { /* live telemetry must not break the provider */ }
+    }
+    return agentMessage;
+  }
   if (typeof msg.msg === "string") return msg.msg;
   if (typeof msg.message === "string") return msg.message;
   if (typeof msg.text === "string") return msg.text;

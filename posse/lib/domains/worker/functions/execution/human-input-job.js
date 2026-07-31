@@ -97,6 +97,10 @@ import {
   latestArtifactText,
 } from "./job-helpers.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import {
+  PROVIDER_AFFINITY_ROUTES,
+  providerForAffinityRoute,
+} from "../../../../shared/policies/functions/provider-affinity.js";
 
 function isOneshotScopeSelectionPayload(payload) {
   return payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
@@ -786,7 +790,11 @@ export async function runHumanInputJob(worker, job, {
           priority: "urgent",
           model_tier: origJob.model_tier || "standard",
           reasoning_effort: origJob.reasoning_effort || "medium",
-          provider: decision.provider || origJob.provider || null,
+          provider: decision.provider || providerForAffinityRoute(
+            origJob,
+            origJob.job_type,
+            PROVIDER_AFFINITY_ROUTES.REPLACEMENT_RETRY,
+          ),
           token_budget_input: origJob.token_budget_input || null,
           token_budget_output: origJob.token_budget_output || null,
           context_budget_chars: origJob.context_budget_chars || null,

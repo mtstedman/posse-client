@@ -72,6 +72,9 @@ import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-r
 import { describeModelCatalogWarning } from "../../providers/functions/model-catalog-validate.js";
 import {
   RUNTIME_STATUS_KEYS,
+  clearRuntimeStatus,
+  isBridgePresenceFresh,
+  readRuntimeStatus,
   writeRuntimeStatus,
 } from "../../queue/functions/runtime-status.js";
 import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.js";
@@ -1545,6 +1548,12 @@ export class Scheduler {
     let lastHumanGateMaintenanceSweep = 0;
     const HUMAN_GATE_MAINTENANCE_SWEEP_MS = 60_000;
 
+    // Remote stop (bridge run.stop): a stop_request row that predates this
+    // loop targeted an earlier run — drop it so it cannot kill this one.
+    clearRuntimeStatus(RUNTIME_STATUS_KEYS.STOP_REQUEST);
+    let lastStopRequestCheck = 0;
+    const STOP_REQUEST_CHECK_MS = 2_000;
+
     try {
       let idleCount = 0;
       let lastProgressTime = Date.now(); // progress watchdog
@@ -1555,6 +1564,35 @@ export class Scheduler {
         try {
         const lapStartQueueGeneration = getQueueWakeGeneration();
         this._refreshRuntimeSettings();
+
+        // Honor a bridge-issued run.stop. Owner-gated so a request written
+        // for another scheduler cannot stop this one; consumed either way so
+        // a mismatched row cannot linger and poison a later run. SIGINT
+        // routes through RunShutdownController's full graceful path (worker
+        // kill, wrap-up, clean-shutdown marker); requestStop is the fallback
+        // for embedded/test schedulers with no signal handler installed.
+        if (Date.now() - lastStopRequestCheck > STOP_REQUEST_CHECK_MS) {
+          lastStopRequestCheck = Date.now();
+          const stopRequest = readRuntimeStatus(RUNTIME_STATUS_KEYS.STOP_REQUEST);
+          if (stopRequest) {
+            clearRuntimeStatus(RUNTIME_STATUS_KEYS.STOP_REQUEST);
+            if (!stopRequest.owner_id || stopRequest.owner_id === this.ownerId) {
+              const requestedBy = stopRequest.actor ? ` by ${stopRequest.actor}` : "";
+              this._log(`Remote stop requested${requestedBy} - winding the run down`, "yellow");
+              logEvent({
+                event_type: EVENT_TYPES.SCHEDULER_STOP_REQUESTED,
+                actor_type: EVENT_ACTORS.SCHEDULER,
+                actor_id: this.ownerId,
+                message: `Remote stop requested${requestedBy}; shutting down gracefully`,
+              });
+              if (process.listenerCount("SIGINT") > 0) {
+                process.emit("SIGINT");
+              } else {
+                this.requestStop();
+              }
+            }
+          }
+        }
         // Read once per tick: the candidate scan below can touch ~100 jobs
         // per lap, and each readBoolSetting call is a synchronous DB read.
         const shadowConflictMetricsEnabled = readBoolSetting("scheduler_shadow_conflict_metrics", true);
@@ -1655,6 +1693,7 @@ export class Scheduler {
             eventActors: EVENT_ACTORS,
             terminalJobStatuses: TERMINAL_JOB_STATUSES,
             readHeadlessHumanTimeoutSec,
+            isRemoteOperatorPresent: isBridgePresenceFresh,
             queue: {
               hasJobs,
               listJobs,

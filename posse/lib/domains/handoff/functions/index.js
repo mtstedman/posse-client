@@ -1,16 +1,16 @@
-// lib/handoff.js — Routing packet builder + context enrichment
+// Handoff context builder + deterministic context enrichment.
 //
 // Two entry points:
 //
-//   buildRoutingPacket(job, opts) → routing packet
-//     Assembles the full routing packet from job + queue state.
-//     Deterministic. No AI. This is THE contract between scheduler → worker → provider.
+//   buildHandoffPacket(job, opts) → handoff context packet
+//     Assembles prompt/scope context from job + queue state.
+//     Deterministic. No AI. Provider routing is deliberately out of band.
 //
 //   handoff({ recipient, data }) → enriched packet
-//     Attaches filesystem context to a routing packet or raw data.
+//     Attaches filesystem context to a handoff packet or raw data.
 //     Reads files, builds trees. Still deterministic, still no AI.
 //
-// The routing packet IS the context packet. No nesting.
+// This packet never selects a provider. AgentDispatcher owns provider routing.
 //
 // Internal steps (explicit, not magic):
 //   1. normalizePayload    — validate, set defaults
@@ -119,6 +119,7 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { getDefaultRemoteComposer } from "../../remote/classes/RemoteComposer.js";
 import { getPosseRemoteMode, getPosseRemoteTimeoutMs } from "../../remote/functions/mode.js";
+import { providerRoleForJobType } from "../../providers/functions/roles.js";
 
 const SLOW_HANDOFF_STEP_MS = 1000;
 const HANDOFF_TIMEOUT_GRACE_MS = 2000;
@@ -775,8 +776,8 @@ function _attachAtlasFallbackSmartContext(packet) {
     candidateFiles: _collectAtlasFallbackCandidateFiles(packet),
   };
 }
-function _resolveAtlasHandoffState(recipient, packet) {
-  return resolveAtlasHandoffStateFromModule(recipient, packet);
+function _resolveAtlasHandoffState(recipient, packet, { providerName = null } = {}) {
+  return resolveAtlasHandoffStateFromModule(recipient, packet, { providerName });
 }
 
 // Test-only seam: the real planner-slice prefetch requires a warm ATLAS index
@@ -858,11 +859,11 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// buildRoutingPacket — assembles the full routing packet from job + queue state
+// buildHandoffPacket — assembles prompt/scope context from job + queue state
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Build the routing packet for a job. This is the formal contract.
+ * Build the handoff context packet for a job.
  *
  * @param {object} job — the job row from the database
  * @param {object} opts
@@ -878,7 +879,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
  * @param {string}   opts.projectContext — research summary
  * @param {string}   opts.mode           — "build" | "question"
  *
- * @returns {object} The routing packet — flat, no nesting:
+ * @returns {object} The handoff context packet — flat, no nesting:
  *
  *   ── Identity ──
  *   recipient            "researcher" | "planner" | "dev" | "assessor"
@@ -931,7 +932,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
  *   ── Prompt (assembled last) ──
  *   prompt               string — the fully assembled prompt for the provider
  */
-export function buildRoutingPacket(job, opts) {
+export function buildHandoffPacket(job, opts) {
   const {
     workItem,
     payload = {},
@@ -956,6 +957,11 @@ export function buildRoutingPacket(job, opts) {
     contextHints.disable_atlas
   );
   const resolvedRole = role;
+  const sourceProviderRole = providerRoleForJobType(job.job_type);
+  const recipientProviderRole = providerRoleForJobType(resolvedRole);
+  const usesJobExecutionContext = sourceProviderRole === recipientProviderRole;
+  const sourceModelTier = usesJobExecutionContext ? (job.model_tier || "standard") : null;
+  const resolvedModelTier = effectiveTier || sourceModelTier || "standard";
   const devMode = normalizeDevMode(
     sanitizedPayload.dev_mode,
     { fallback: job.job_type === "fix" ? DEFAULT_FIX_DEV_MODE : DEFAULT_DEV_MODE },
@@ -971,9 +977,13 @@ export function buildRoutingPacket(job, opts) {
     mode,
 
     // ── Model ──
-    model_tier: effectiveTier || job.model_tier || "standard",
-    model_name: opts.modelName || job?._executionModelName || job?.model_name || null,
-    reasoning_effort: job.reasoning_effort || "medium",
+    model_tier: resolvedModelTier,
+    model_name: opts.modelName || (usesJobExecutionContext
+      ? (job?._executionModelName || job?.model_name || null)
+      : null),
+    reasoning_effort: opts.reasoningEffort || (usesJobExecutionContext
+      ? (job.reasoning_effort || "medium")
+      : "medium"),
     dev_mode: devMode,
     dev_mode_contract: renderSelectedDevModeContract(devMode),
     planner_complexity_score: _normalizePlannerScore(job.planner_complexity_score ?? sanitizedPayload.planner_complexity_score ?? sanitizedPayload.complexity),
@@ -981,14 +991,13 @@ export function buildRoutingPacket(job, opts) {
 
     // ── Governance ──
     governance_tier: workItem?.governance_tier || "mvp",
-    execution_provider: opts.jobProvider || job?._executionProvider || job?.provider || null,
 
     // ── Attempt ──
     attempt: {
       count: attemptCount,
       max: maxAttempts,
       last_error: lastError,
-      escalated: effectiveTier !== job.model_tier,
+      escalated: sourceModelTier != null && resolvedModelTier !== sourceModelTier,
     },
 
     // ── Scope ──
@@ -1053,6 +1062,10 @@ export function buildRoutingPacket(job, opts) {
     prior_artifacts: {},
   };
 }
+
+// Compatibility export for callers migrating from the old, misleading name.
+// Routing behavior must never be added back to this packet builder.
+export const buildRoutingPacket = buildHandoffPacket;
 
 /**
  * Load relevant insights from past runs for injection into agent context.
@@ -1285,21 +1298,21 @@ function _attachSkills(packet) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// handoff — enrich a routing packet with filesystem context
+// handoff — enrich a handoff context packet with filesystem context
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Enrich a routing packet (or raw data) with deterministic filesystem context.
- * Accepts either a packet from buildRoutingPacket or a raw { recipient, data } call.
+ * Enrich a handoff context packet (or raw data) with deterministic filesystem context.
+ * Accepts either a packet from buildHandoffPacket or a raw { recipient, data } call.
  *
- * @param {object} input — either a routing packet (has .recipient) or { recipient, data }
+ * @param {object} input — either a handoff packet (has .recipient) or { recipient, data }
  * @returns {object} The same packet, enriched in-place
  */
-export async function handoff(input) {
+export async function handoff(input, { providerName = null } = {}) {
   // Accept both styles: handoff(packet) or handoff({ recipient, data })
   let packet;
   if (input.recipient && input.job_type) {
-    // Already a routing packet
+    // Already a handoff context packet
     packet = input;
     packet.files_to_modify = Array.isArray(packet.files_to_modify) ? packet.files_to_modify : [];
     packet.files_to_create = Array.isArray(packet.files_to_create) ? packet.files_to_create : [];
@@ -1408,11 +1421,10 @@ export async function handoff(input) {
       prompt: null,
       context_hints: input.data.context_hints || {},
       prior_artifacts: input.data.prior_artifacts || {},
-      execution_provider: input.data.execution_provider || input.data.job_provider || null,
       _raw_payload: input.data,
     };
   } else {
-    throw new Error("handoff: expected a routing packet or { recipient, data }");
+    throw new Error("handoff: expected a handoff context packet or { recipient, data }");
   }
 
   const recipient = packet.recipient;
@@ -1480,7 +1492,9 @@ export async function handoff(input) {
   // before local preloads so ATLAS prefetch and smart/editable prefetch stay
   // mutually exclusive. Pending merge handoffs are the exception because ATLAS
   // cannot see uncommitted conflict markers; those force local context.
-  packet.atlas = await timeHandoffStep(packet, "atlas.resolve", () => _resolveAtlasHandoffState(recipient, packet));
+  packet.atlas = await timeHandoffStep(packet, "atlas.resolve", () => (
+    _resolveAtlasHandoffState(recipient, packet, { providerName })
+  ));
   if (packet.atlas?.providerFallback) {
     try {
       recordObservation({
@@ -1808,7 +1822,6 @@ function _applyTraversalCompletionCheck(packet) {
         task_text_chars: check.task_text_chars,
         recipient: packet.recipient || null,
         job_type: packet.job_type || null,
-        provider: packet.execution_provider || null,
         atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
       },
     });
@@ -1845,7 +1858,6 @@ function _applyAtlasShadowGuardrails(packet) {
         task_text_chars: guardrails.task_text_chars,
         recipient: packet.recipient || null,
         job_type: packet.job_type || null,
-        provider: packet.execution_provider || null,
         atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
       },
     });
@@ -1989,14 +2001,20 @@ export async function buildPromptAsync(packet, instructions, opts = {}) {
 export async function composePromptRemoteAware(packet, instructions, opts = {}) {
   const mode = getPosseRemoteMode();
   if (!packet) {
-    const err = new Error("Remote prompt composition requires a routing packet");
+    const err = new Error("Remote prompt composition requires a handoff context packet");
     err.code = "POSSE_REMOTE_REQUIRED";
     throw err;
   }
 
+  const providerName = String(opts.providerName || "").trim().toLowerCase();
+  if (!providerName) {
+    const err = new Error("Remote prompt composition requires a provider selected by the AgentDispatcher");
+    err.code = "POSSE_AGENT_PROVIDER_ROUTE_REQUIRED";
+    throw err;
+  }
   const composer = await timeHandoffStep(packet, "prompt.remote_composer_init", () => opts.composer || getDefaultRemoteComposer());
   const remoteOpts = {
-    providerName: opts.providerName || packet?.execution_provider || null,
+    providerName,
     maxPromptChars: Number(opts.maxPromptChars) > 0 ? Number(opts.maxPromptChars) : _maxPromptChars(),
     maxContextChars: Number(opts.maxContextChars) > 0 ? Number(opts.maxContextChars) : _maxContextChars(),
   };

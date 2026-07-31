@@ -50,6 +50,31 @@ function latestAnswerText(answers = []) {
   return "";
 }
 
+/**
+ * Undo a bridge claim that never reached a settled outcome. Guarded on our
+ * own token and the still-parked status so the normal resolution paths
+ * (which release the lease themselves with a terminal status) are never
+ * clobbered. Without this, a throw between claim and resolution leaves the
+ * gate lease held for the full 300s and every retry acks job_not_claimable.
+ */
+function releaseBridgeClaim(jobId, leaseToken) {
+  try {
+    getDb().prepare(`
+      UPDATE jobs
+      SET lease_owner = NULL,
+          lease_token = NULL,
+          lease_expires_at = NULL,
+          updated_at = ?,
+          state_version = state_version + 1
+      WHERE id = ?
+        AND lease_token = ?
+        AND status = 'waiting_on_human'
+    `).run(now(), jobId, leaseToken);
+  } catch {
+    // Best-effort: the lease self-expires in 300s either way.
+  }
+}
+
 function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS } = {}) {
   const db = getDb();
   const leaseToken = crypto.randomUUID();
@@ -131,18 +156,27 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
     requestRender: () => {},
     setRunPhase: () => {},
   };
-  const worker = new Worker({
-    projectDir,
-    display,
-    silent: true,
-    autoApprove: false,
-  });
-  await runHumanInputJob(worker, claim.job, { leaseToken: claim.leaseToken });
+  try {
+    const worker = new Worker({
+      projectDir,
+      display,
+      silent: true,
+      autoApprove: false,
+    });
+    await runHumanInputJob(worker, claim.job, { leaseToken: claim.leaseToken });
+  } catch (err) {
+    releaseBridgeClaim(id, claim.leaseToken);
+    throw err;
+  }
 
   const fresh = getJob(id);
   const freshContract = getHumanGate(id);
   const resolved = fresh?.status === "succeeded" && freshContract?.gate_state === "resolved";
   if (!resolved) {
+    // If the job is still parked with our claim (attempt refused, answer not
+    // applied), free the lease so the operator's retry isn't locked out for
+    // the remaining lease window.
+    releaseBridgeClaim(id, claim.leaseToken);
     const status = fresh?.status || "unknown";
     const reason = status === "canceled"
       ? "gate_no_longer_applicable"

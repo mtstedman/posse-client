@@ -3,6 +3,7 @@
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
+import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-dirty-state.js";
 import { finalAssessmentFor } from "../functions/review-report.js";
 import { applyMemoryReviewAction } from "../functions/memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -286,7 +287,10 @@ export class ReviewSession {
         const freshWi = readiness.workItem || getWorkItem(wi.id) || wi;
         if (freshWi.branch_name) {
           const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-          const cleanupOk = await cleanupFn(freshWi, { clearMergeState: true });
+          const cleanupOk = await cleanupFn(freshWi, {
+            clearMergeState: true,
+            requireCleanWorktree: true,
+          });
           if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
         }
         const newDesc = this._rejectionDescription(freshWi, reason);
@@ -324,7 +328,10 @@ export class ReviewSession {
         const freshWi = readiness.workItem || getWorkItem(wi.id) || wi;
         if (freshWi.branch_name) {
           const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-          const cleanupOk = await cleanupFn(freshWi, { clearMergeState: true });
+          const cleanupOk = await cleanupFn(freshWi, {
+            clearMergeState: true,
+            requireCleanWorktree: true,
+          });
           if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
         }
         return { ok: updateWorkItemStatus(wi.id, "canceled") !== false };
@@ -991,6 +998,12 @@ export class ReviewSession {
     } else if (action === "reject") {
       const freshWi = refreshApprovalItem(item, "reject");
       if (!freshWi) return false;
+      const dirtyState = getReviewDirtyState(item.worktreeStatus);
+      if (!dirtyState.canDecide) {
+        item._mergeResult = `${C.red}\u2717 Re-queue blocked: resolve ${dirtyState.blockers.length} dirty file${dirtyState.blockers.length === 1 ? "" : "s"} first${C.reset}`;
+        display.requestRender({ force: true });
+        return false;
+      }
       enqueueGitWork(item, async () => {
         const rejectionOutcome = await withMergeLock(async () => {
           const readiness = this._reviewRejectionReadiness(wiId);
@@ -998,7 +1011,10 @@ export class ReviewSession {
           const lockedWi = readiness.workItem || getWorkItem(wiId) || freshWi;
           if (lockedWi.branch_name) {
             const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-            const cleanupOk = await cleanupFn(lockedWi, { clearMergeState: true });
+            const cleanupOk = await cleanupFn(lockedWi, {
+              clearMergeState: true,
+              requireCleanWorktree: true,
+            });
             if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
           }
           return requeueWorkItemAfterRejection(wiId)
@@ -1037,7 +1053,10 @@ export class ReviewSession {
           const lockedWi = readiness.workItem || getWorkItem(wiId) || freshWi;
           if (lockedWi.branch_name) {
             const cleanupFn = cleanupWiBranchAsync || cleanupWiBranch;
-            const cleanupOk = await cleanupFn(lockedWi, { clearMergeState: true });
+            const cleanupOk = await cleanupFn(lockedWi, {
+              clearMergeState: true,
+              requireCleanWorktree: true,
+            });
             if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
           }
           return { ok: updateWorkItemStatus(wiId, "canceled") !== false };
