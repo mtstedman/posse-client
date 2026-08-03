@@ -65,6 +65,7 @@ import {
   isInternalAtlasAction,
   narrowBootConfigToSignedClaims,
 } from "../functions/issued-tool-policy.js";
+import { toolSchemaTelemetry } from "../functions/tool-schema-telemetry.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
@@ -503,6 +504,13 @@ function filterToolsListMessage(message, policy) {
 function toolsListCount(message) {
   const tools = message?.result?.tools;
   return Array.isArray(tools) ? tools.length : null;
+}
+
+function agentHandoffSchemaTelemetry(message) {
+  const tools = message?.result?.tools;
+  if (!Array.isArray(tools)) return null;
+  const schema = tools.find((tool) => stripToolsPrefix(tool?.name) === "agent_handoff");
+  return schema ? toolSchemaTelemetry(schema) : null;
 }
 
 function attachTelemetryContext(session, ownerBootId) {
@@ -999,6 +1007,9 @@ class PersistentMcpSession {
       initializeSeenAt: null,
       toolsListSeenAt: null,
       toolsListCount: null,
+      agentHandoffToolSchemaName: null,
+      agentHandoffToolSchemaSha256: null,
+      agentHandoffToolSchemaChars: null,
       firstToolCallSeenAt: null,
       firstToolName: null,
       requestCount: 0,
@@ -1050,6 +1061,9 @@ class PersistentMcpSession {
       initializeSeenAt: this.attachProof.initializeSeenAt || null,
       toolsListSeenAt: this.attachProof.toolsListSeenAt || null,
       toolsListCount: this.attachProof.toolsListCount ?? null,
+      agentHandoffToolSchemaName: this.attachProof.agentHandoffToolSchemaName || null,
+      agentHandoffToolSchemaSha256: this.attachProof.agentHandoffToolSchemaSha256 || null,
+      agentHandoffToolSchemaChars: this.attachProof.agentHandoffToolSchemaChars ?? null,
       firstToolCallSeenAt: this.attachProof.firstToolCallSeenAt || null,
       firstToolName: this.attachProof.firstToolName || null,
       requestCount: this.attachProof.requestCount || 0,
@@ -1078,8 +1092,12 @@ class PersistentMcpSession {
 
   noteToolsList(response = null, now = Date.now()) {
     const count = toolsListCount(response);
+    const handoffSchema = agentHandoffSchemaTelemetry(response);
     this.attachProof.toolsListSeenAt = this.attachProof.toolsListSeenAt || now;
     this.attachProof.toolsListCount = count;
+    this.attachProof.agentHandoffToolSchemaName = handoffSchema?.name || null;
+    this.attachProof.agentHandoffToolSchemaSha256 = handoffSchema?.sha256 || null;
+    this.attachProof.agentHandoffToolSchemaChars = handoffSchema?.chars ?? null;
     return count;
   }
 
@@ -2341,6 +2359,9 @@ export class PersistentMcpOwner {
         this._logAttachProof(session, "mcp.attach.tools_list_seen", {
           method,
           tool_count: count,
+          agent_handoff_schema_name: session.attachProof.agentHandoffToolSchemaName,
+          agent_handoff_schema_sha256: session.attachProof.agentHandoffToolSchemaSha256,
+          agent_handoff_schema_chars: session.attachProof.agentHandoffToolSchemaChars,
           request_count: session.attachProof.requestCount,
         });
       }

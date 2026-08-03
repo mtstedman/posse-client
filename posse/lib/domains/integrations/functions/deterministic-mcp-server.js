@@ -1200,12 +1200,18 @@ function addToolSchema(schema) {
 }
 
 function compactAgentHandoffIssued() {
-  return remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v1 === true;
+  return bootConfig?.agentHandoffContract?.compactV1 === true
+    || remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v1 === true;
+}
+
+function compactAgentHandoffV3Issued() {
+  return bootConfig?.agentHandoffContract?.compactV3 === true
+    || remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v3 === true;
 }
 
 addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   compactCompletion: compactAgentHandoffIssued(),
-  compactV3: remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v3 === true,
+  compactV3: compactAgentHandoffV3Issued(),
 }));
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
@@ -2312,7 +2318,7 @@ function rebuildNativeToolSchemas() {
   TOOL_SCHEMAS = [];
   addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
     compactCompletion: compactAgentHandoffIssued(),
-    compactV3: remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v3 === true,
+    compactV3: compactAgentHandoffV3Issued(),
   }));
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);

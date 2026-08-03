@@ -66,7 +66,10 @@ sdl-mcp/
 logs/
 
 # Private docs + dev-only benchmark scratch (kept locally, out of the repo)
-posse/docs/
+# Keep private working notes local, but track the public control wire contract
+# whose drift checker requires an identical copy in all three repositories.
+posse/docs/*
+!posse/docs/control-protocol.md
 posse/benchmarks/
 
 # Agent guidance — private, kept local, out of the (public) repo

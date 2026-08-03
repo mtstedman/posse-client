@@ -136,6 +136,7 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       promptChars,
       disableSystemTools: bootConfig.disableSystemTools === true,
       coordinationChild: bootConfig.coordinationChild === true,
+      agentHandoffContract: agentHandoffContractFromBootConfig(bootConfig),
       scopedFiles: stringArray(bootConfig.scopedFiles),
       createFiles: stringArray(bootConfig.createFiles),
       deleteFiles: stringArray(bootConfig.deleteFiles),
@@ -224,6 +225,7 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     promptChars: numberOrNull(capabilities.promptChars) || 0,
     disableSystemTools: capabilities.disableSystemTools === true,
     coordinationChild: capabilities.coordinationChild === true,
+    agentHandoffContract: normalizeAgentHandoffContract(capabilities.agentHandoffContract),
     scopedFiles: stringArray(capabilities.scopedFiles),
     createFiles: stringArray(capabilities.createFiles),
     deleteFiles: stringArray(capabilities.deleteFiles),
@@ -248,6 +250,23 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     issuedWebAccess: plainObjectOrNull(capabilities.webAccess || capabilities.web_access) || {},
     nativeAuth: plainObjectOrNull(capabilities.nativeAuth) || null,
   };
+}
+
+function normalizeAgentHandoffContract(value) {
+  const source = plainObjectOrNull(value) || {};
+  const compactV1 = source.compactV1 === true || source.agent_handoff_compact_v1 === true;
+  const compactV2 = compactV1
+    && (source.compactV2 === true || source.agent_handoff_compact_v2 === true);
+  const compactV3 = compactV2
+    && (source.compactV3 === true || source.agent_handoff_compact_v3 === true);
+  return { compactV1, compactV2, compactV3 };
+}
+
+function agentHandoffContractFromBootConfig(bootConfig = {}) {
+  const explicit = plainObjectOrNull(bootConfig.agentHandoffContract);
+  const remoteSurface = plainObjectOrNull(bootConfig.remoteToolSurface);
+  const coordination = plainObjectOrNull(remoteSurface?.coordination);
+  return normalizeAgentHandoffContract(explicit || coordination);
 }
 
 function resolveSigningSecret(secret, opts = {}) {

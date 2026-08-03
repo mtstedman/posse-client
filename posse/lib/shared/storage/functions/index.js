@@ -1156,6 +1156,7 @@ export function getDb() {
       lane TEXT NOT NULL,
       provider TEXT NOT NULL,
       skill_key TEXT NOT NULL DEFAULT '',
+      contract_fingerprint TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invalidated','expired','failed')),
       reset_generation INTEGER NOT NULL DEFAULT 0,
       lock_reason TEXT,
@@ -1233,6 +1234,11 @@ export function getDb() {
     CREATE INDEX IF NOT EXISTS idx_session_recycle_savings_provider
       ON session_recycle_savings(provider, role, recorded_at);
   `);
+
+  const sessionLaneColumns = new Set(_db.pragma("table_info(session_lanes)").map((col) => col.name));
+  if (!sessionLaneColumns.has("contract_fingerprint")) {
+    _db.exec(`ALTER TABLE session_lanes ADD COLUMN contract_fingerprint TEXT NOT NULL DEFAULT ''`);
+  }
 
   _db.exec(`
     CREATE TABLE IF NOT EXISTS work_item_file_locks (

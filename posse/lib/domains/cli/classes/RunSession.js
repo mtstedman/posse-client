@@ -1619,7 +1619,12 @@ export class RunSession {
         const progressUnit = String(
           event.progress_unit ?? event.unit ?? (hasEventCount ? "symbols" : bootEncodeProgress?.unit) ?? "symbols",
         ).trim().toLowerCase() || "symbols";
-        const rawPercent = Number(event.percent ?? bootEncodeProgress?.percent);
+        // Counts on a new event define their own denominator. Do not inherit a
+        // percent from the previous streaming/reconcile phase when the new
+        // event omitted percent but supplied fresh counts.
+        const rawPercent = event.percent != null
+          ? Number(event.percent)
+          : (hasEventCount ? Number.NaN : Number(bootEncodeProgress?.percent));
         const hasCount = Number.isFinite(current) && Number.isFinite(total) && total > 0;
         const percent = Number.isFinite(rawPercent)
           ? Math.max(0, Math.min(100, rawPercent))
@@ -1716,7 +1721,7 @@ export class RunSession {
           // ── Streaming ONNX ride-along (shared tree-sitter × SCIP intake) ──
           // In layer-merge mode the ONNX encoder streams merged documents
           // WHILE tree-sitter parses and SCIP intakes. Its structured events
-          // drive the encode bar directly with real document counts; they
+          // drive the streaming tail directly with real document counts; they
           // carry no narrative text, so without this routing the encode bar
           // only ever saw misattributed heartbeat lines. Streaming activity
           // does not arm the "views ready" hold (parse is still running) and
@@ -1727,7 +1732,10 @@ export class RunSession {
           if (bootEventKind === "atlas.parse.onnx.started") {
             if (event.streaming === true) {
               atlasStreamingOnnxActive = true;
-              renderEncodeBootActivity(event, { armHold: false, streaming: true });
+              // Opening the ride-along lane is not encoding progress. Leave
+              // the tail waiting until the first document/native progress
+              // event so a blocked intake does not read as "encoding" for the
+              // entire boot while merge/tree have not started.
             }
             return;
           }

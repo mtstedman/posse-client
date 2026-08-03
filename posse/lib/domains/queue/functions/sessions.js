@@ -19,6 +19,10 @@ function normalizeSkillKey(value) {
   return String(value || "");
 }
 
+function normalizeContractFingerprint(value) {
+  return String(value || "").trim();
+}
+
 function isSqliteConstraintError(err) {
   const code = String(err?.code || "");
   return code.startsWith("SQLITE_CONSTRAINT");
@@ -53,21 +57,32 @@ export function ensureSessionLane({
   lane,
   provider,
   skillKey = "",
+  contractFingerprint = "",
   lockReason = "session_recycle",
 } = {}) {
   const db = getDb();
   const providerName = normalizeProvider(provider);
   const normalizedSkillKey = normalizeSkillKey(skillKey);
+  const normalizedContractFingerprint = normalizeContractFingerprint(contractFingerprint);
   if (!Number.isFinite(Number(workItemId)) || !lane || !providerName) {
     throw new Error("ensureSessionLane requires workItemId, lane, and provider");
   }
 
   const execute = () => {
-    const existing = getActiveSessionLane({ workItemId, lane, skillKey: normalizedSkillKey });
+    let existing = getActiveSessionLane({ workItemId, lane, skillKey: normalizedSkillKey });
+    let contractChanged = false;
+    if (existing
+      && normalizedContractFingerprint
+      && normalizeContractFingerprint(existing.contract_fingerprint) !== normalizedContractFingerprint) {
+      invalidateSessionLane(existing.id, "contract_changed");
+      existing = null;
+      contractChanged = true;
+    }
     if (existing) {
       return {
         lane: existing,
         created: false,
+        contractChanged: false,
         providerLocked: existing.provider !== providerName,
         lockedProvider: existing.provider,
       };
@@ -78,10 +93,10 @@ export function ensureSessionLane({
     try {
       const info = db.prepare(`
         INSERT INTO session_lanes (
-          work_item_id, lane, provider, skill_key, status,
+          work_item_id, lane, provider, skill_key, contract_fingerprint, status,
           reset_generation, lock_reason, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?)
-      `).run(Number(workItemId), String(lane), providerName, normalizedSkillKey, lockReason, ts, ts);
+        ) VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
+      `).run(Number(workItemId), String(lane), providerName, normalizedSkillKey, normalizedContractFingerprint, lockReason, ts, ts);
       created = db.prepare(`SELECT * FROM session_lanes WHERE id = ?`).get(info.lastInsertRowid);
     } catch (err) {
       const raced = isSqliteConstraintError(err)
@@ -91,6 +106,7 @@ export function ensureSessionLane({
       return {
         lane: raced,
         created: false,
+        contractChanged,
         providerLocked: raced.provider !== providerName,
         lockedProvider: raced.provider,
       };
@@ -105,6 +121,7 @@ export function ensureSessionLane({
     return {
       lane: created,
       created: true,
+      contractChanged,
       providerLocked: false,
       lockedProvider: providerName,
     };

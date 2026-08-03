@@ -61,6 +61,7 @@ import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTermin
 import {
   getAgentHandoffToolSchemaForRole,
 } from "../../../catalog/native-tools.js";
+import { toolSchemaTelemetry } from "../../../shared/tools/functions/tool-schema-telemetry.js";
 import { AGENT_ACTIVITY_LIMITS } from "../../../catalog/event.js";
 import {
   buildCitationChildPrompt,
@@ -70,12 +71,37 @@ import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.j
 
 function agentHandoffToolSchemaTelemetry(role, compactCompletion = false, compactV3 = false) {
   const schema = getAgentHandoffToolSchemaForRole(role, { compactCompletion, compactV3 });
-  const serialized = JSON.stringify(schema);
-  return {
-    name: schema.name || "agent_handoff",
-    sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
-    chars: serialized.length,
-  };
+  return toolSchemaTelemetry(schema);
+}
+
+function sessionContractFingerprint(options = {}, providerName = "") {
+  const effective = narrowProviderOptionsToRemoteIssuance(options);
+  const coordination = effective?._remoteIssuedPolicy?.coordination || {};
+  const schema = agentHandoffToolSchemaTelemetry(
+    effective.role,
+    coordination.agentHandoffCompactV1 === true,
+    coordination.agentHandoffCompactV3 === true,
+  );
+  const packet = effective.sessionPacket || {};
+  const remoteSystemPrompt = String(effective.remoteSystemPrompt || "");
+  const promptVersion = String(
+    packet?.remote_prompt_metadata?.prompt_version
+    || packet?.remote_prompt_response?.prompt_version
+    || packet?.posse_remote?.metadata?.prompt_version
+    || "",
+  );
+  return crypto.createHash("sha256").update(JSON.stringify({
+    provider: String(providerName || "").trim().toLowerCase(),
+    role: String(effective.role || "").trim().toLowerCase(),
+    promptVersion,
+    remoteSystemPromptSha256: remoteSystemPrompt
+      ? crypto.createHash("sha256").update(remoteSystemPrompt).digest("hex")
+      : "",
+    agentHandoffSchemaSha256: schema.sha256,
+    compactV1: coordination.agentHandoffCompactV1 === true,
+    compactV2: coordination.agentHandoffCompactV2 === true,
+    compactV3: coordination.agentHandoffCompactV3 === true,
+  })).digest("hex");
 }
 
 function terminalHandoffContractChars(options = {}) {
@@ -808,9 +834,11 @@ export class TrackedProviderClient {
 
     const recycleMode = resolveSessionRecycleModeForWorkItem(job.work_item_id);
     const manager = getSessionManager({ recycleMode });
+    const contractFingerprint = sessionContractFingerprint(opts, providerName);
     const decision = manager.acquireForJob(job, {
       provider: providerName,
       jobId: job_id,
+      contractFingerprint,
     });
     // The decision and its reason are otherwise invisible: a session_recycle
     // setting that never engages (skill gate, coverage gap) looks identical
@@ -826,7 +854,7 @@ export class TrackedProviderClient {
       decision,
     });
 
-    const freshLineageReasons = new Set(["no_available_session", "transition_reset"]);
+    const freshLineageReasons = new Set(["no_available_session", "transition_reset", "contract_changed"]);
     if (decision?.recyclingMode !== "resume" && !freshLineageReasons.has(decision?.reason)) {
       return { prompt, opts, decision: null };
     }
@@ -845,6 +873,7 @@ export class TrackedProviderClient {
       providerName,
       role: opts.role,
       fullPromptEstimateTokens: estimateTokensFromChars(prompt),
+      contractFingerprint,
     };
 
     if (decision?.session?.id && attempt_id != null) {
@@ -1401,6 +1430,12 @@ export class TrackedProviderClient {
             mcp_attach_proof: stats.mcpAttachProof ? {
               initialize_seen_at: stats.mcpAttachProof.initializeSeenAt ?? null,
               tools_list_seen_at: stats.mcpAttachProof.toolsListSeenAt ?? null,
+              agent_handoff_schema_name: stats.mcpAttachProof.agentHandoffToolSchemaName || null,
+              agent_handoff_schema_sha256: stats.mcpAttachProof.agentHandoffToolSchemaSha256 || null,
+              agent_handoff_schema_chars: stats.mcpAttachProof.agentHandoffToolSchemaChars ?? null,
+              agent_handoff_schema_matches_expected: stats.mcpAttachProof.agentHandoffToolSchemaSha256
+                ? stats.mcpAttachProof.agentHandoffToolSchemaSha256 === handoffToolSchema.sha256
+                : null,
               last_method: stats.mcpAttachProof.lastMethod || null,
               last_request_at: stats.mcpAttachProof.lastRequestAt ?? null,
             } : null,

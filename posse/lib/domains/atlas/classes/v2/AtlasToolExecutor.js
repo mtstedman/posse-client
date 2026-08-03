@@ -541,6 +541,8 @@ export class AtlasToolExecutor {
     const baseAction = resolveAtlasAction(toolName);
     const action = gatewayEffectiveAction(baseAction, args);
     const repoKey = this.#repoKeyFor(request);
+    this.#invalidateMismatchedReadContext(request, repoKey);
+    const dedupeRepoKey = this.#dedupeRepoKeyForRequest(request, repoKey);
     const dispatchCachePolicy = dispatchCachePolicyFor(action);
     const dispatchKeyParts = this.#dispatchCacheKeyParts({ policy: dispatchCachePolicy });
     const dispatchCacheKey = dispatchCacheEnabledFor(request) && dispatchKeyParts
@@ -559,7 +561,7 @@ export class AtlasToolExecutor {
       const result = await this.#dispatchCache.getOrRun(dispatchCacheKey, async () => {
         const value = await run();
         const dedupeEligible = ATLAS_READONLY_DEDUPE_ACTIONS.has(String(action).toLowerCase());
-        const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey }) : null;
+        const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey: dedupeRepoKey }) : null;
         if (dedupeKey) this.#rememberDedupe(dedupeKey, value);
         return value;
       }, { ttlMs: dispatchCacheTtlMs, cacheReady: dispatchCacheReady, repoKey });
@@ -568,7 +570,7 @@ export class AtlasToolExecutor {
       return result.value;
     }
     const dedupeEligible = ATLAS_READONLY_DEDUPE_ACTIONS.has(String(action).toLowerCase());
-    const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey }) : null;
+    const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey: dedupeRepoKey }) : null;
     if (dedupeKey) {
       const cached = this.#recentDedupe.get(dedupeKey);
       if (cached && this.#now() - cached.atMs <= this.#dedupeWindowMs) {
@@ -936,16 +938,30 @@ export class AtlasToolExecutor {
     return `${repoKey}|${String(toolName || "")}|${stableStringify(args || {})}`;
   }
 
+  #dedupeRepoKeyForRequest(request, repoKey) {
+    const readRoot = this.#requestReadContext(request)?.readRoot;
+    return readRoot ? `${repoKey}|readRoot=${normalizeRepoKey(readRoot)}` : repoKey;
+  }
+
+  #invalidateMismatchedReadContext(request, repoKey) {
+    const context = this.#readContexts.get(repoKey);
+    if (!context) return;
+    const requested = this.#requestReadContext(request);
+    if (!requested?.readRoot) return;
+    if (normalizeRepoKey(context.readRoot) === normalizeRepoKey(requested.readRoot)) return;
+    this.clearReadContext(repoKey);
+  }
+
   async #readContextFor(request, conductor = null) {
     let context = this.#readContexts.get(request.repoKey);
     const wiKey = workItemKeyForRequest(request);
+    const requested = this.#requestReadContext(request);
     if (context) return context;
     if (!wiKey && !ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS.has(request.action)) return null;
     if (!wiKey) {
-      const resolved = this.#requestReadContext(request);
-      if (!resolved) return null;
-      this.setReadContext(request.repoKey, resolved);
-      return resolved;
+      if (!requested) return null;
+      this.setReadContext(request.repoKey, requested);
+      return requested;
     }
     const resolved = typeof conductor?.resolveReadContext === "function"
       ? await conductor.resolveReadContext({
@@ -957,9 +973,12 @@ export class AtlasToolExecutor {
         source: request.source || null,
       })
       : null;
-    const effective = resolved && typeof resolved === "object"
-      ? resolved
-      : this.#requestReadContext(request);
+    const resolvedMatchesRequest = resolved && typeof resolved === "object"
+      && (
+        !requested?.readRoot
+        || normalizeRepoKey(resolved.readRoot) === normalizeRepoKey(requested.readRoot)
+      );
+    const effective = resolvedMatchesRequest ? resolved : requested;
     if (!effective) return null;
     this.setReadContext({ workItemId: wiKey }, effective);
     context = this.#readContexts.get(wiKey);

@@ -81,7 +81,7 @@ export class SessionManager {
     return true;
   }
 
-  canRecycleJob(job, { provider = null } = {}) {
+  canRecycleJob(job, { provider = null, contractFingerprint = "" } = {}) {
     if (this.recycleMode === "off") {
       return { ok: false, reason: "disabled" };
     }
@@ -95,11 +95,16 @@ export class SessionManager {
     if (!skillPolicy.ok) {
       return { ok: false, reason: "skill_recycle_not_allowed", key, skillPolicy };
     }
-    const activeLane = getActiveSessionLane({
+    let activeLane = getActiveSessionLane({
       workItemId: key.workItemId,
       lane: key.lane,
       skillKey: key.skillKey,
     });
+    if (activeLane
+      && contractFingerprint
+      && String(activeLane.contract_fingerprint || "") !== String(contractFingerprint)) {
+      activeLane = null;
+    }
     const effectiveProvider = normalizeProvider(activeLane?.provider || key.provider);
     const providerLocked = Boolean(activeLane && normalizeProvider(activeLane.provider) !== key.provider);
     if (providerLocked && sessionStrictProviderLockEnabled()) {
@@ -142,13 +147,14 @@ export class SessionManager {
     };
   }
 
-  ensureLaneForJob(job, { provider = null, lockReason = "session_recycle" } = {}) {
+  ensureLaneForJob(job, { provider = null, contractFingerprint = "", lockReason = "session_recycle" } = {}) {
     const key = this.keyForJob(job, { provider });
     const result = ensureSessionLane({
       workItemId: key.workItemId,
       lane: key.lane,
       provider: key.provider,
       skillKey: key.skillKey,
+      contractFingerprint,
       lockReason,
     });
     return { ...result, key: { ...key, provider: result.lockedProvider || key.provider } };
@@ -158,9 +164,10 @@ export class SessionManager {
     provider = null,
     jobId = job?.id,
     leaseTtlSec = undefined,
+    contractFingerprint = "",
     lockReason = "session_recycle",
   } = {}) {
-    const eligibility = this.canRecycleJob(job, { provider });
+    const eligibility = this.canRecycleJob(job, { provider, contractFingerprint });
     if (!eligibility.ok) {
       return {
         recyclingMode: "fresh",
@@ -204,6 +211,7 @@ export class SessionManager {
       }
       const resetLane = this.ensureLaneForJob(job, {
         provider: requestedProvider,
+        contractFingerprint,
         lockReason: "session_recycle_provider_switch",
       });
       return {
@@ -219,7 +227,11 @@ export class SessionManager {
       };
     }
 
-    const laneResult = this.ensureLaneForJob(job, { provider: eligibility.key.provider, lockReason });
+    const laneResult = this.ensureLaneForJob(job, {
+      provider: eligibility.key.provider,
+      contractFingerprint,
+      lockReason,
+    });
     const effectiveProvider = normalizeProvider(laneResult.lockedProvider || laneResult.key.provider);
     const session = acquireSessionHandle({
       laneId: laneResult.lane.id,
@@ -234,6 +246,7 @@ export class SessionManager {
         invalidateSessionLane(laneResult.lane.id, "transition_not_allowed");
         const resetLane = this.ensureLaneForJob(job, {
           provider: effectiveProvider,
+          contractFingerprint,
           lockReason: "session_recycle_transition_reset",
         });
         return {
@@ -256,7 +269,7 @@ export class SessionManager {
 
     return {
       recyclingMode: session ? "resume" : "fresh",
-      reason: session ? "session_acquired" : "no_available_session",
+      reason: session ? "session_acquired" : (laneResult.contractChanged ? "contract_changed" : "no_available_session"),
       provider: effectiveProvider,
       requestedProvider: eligibility.requestedProvider || normalizeProvider(provider || job?.provider),
       providerLocked: Boolean(eligibility.providerLocked || laneResult.providerLocked),
@@ -273,9 +286,10 @@ export class SessionManager {
     parentJobId = job?.id,
     expiresAt = null,
     lastAgentCallId = null,
+    contractFingerprint = "",
     lockReason = "session_recycle",
   } = {}) {
-    const laneResult = this.ensureLaneForJob(job, { provider, lockReason });
+    const laneResult = this.ensureLaneForJob(job, { provider, contractFingerprint, lockReason });
     const session = recordInitialSessionHandle({
       laneId: laneResult.lane.id,
       handle,

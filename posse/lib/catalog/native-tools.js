@@ -347,7 +347,7 @@ export const TOOL_AGENT_HANDOFF = {
                 "citation_synthesis.v1 uses parent/$parent. For system/promote, put each exact repository destination file in report.scope.files_to_create or files_to_modify; Posse derives deterministic mappings.",
               properties: {
                 kind: { type: "string", enum: ["agent", "system", "pipeline", "result", "parent"] },
-                role: { type: "string", enum: ["dev", "artificer", "promote", "$pipeline", "$result", "$parent"] },
+                role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result", "$parent"] },
               },
               required: ["kind"],
               additionalProperties: false,
@@ -572,8 +572,8 @@ const PLANNER_SCOPE = {
   type: "object",
   description:
     "Exact execution scope. db requires target dev and empty file arrays; other agent tasks require at least one exact writable path. " +
-    "Never submit scope:{} or a non-db scope containing only task_mode. " +
-    "system/promote requires exact destination files in files_to_create or files_to_modify.",
+    "Never submit scope:{} for an agent/promote task or a non-db scope containing only task_mode. " +
+    "system/human_input uses scope:{}; system/promote requires exact destination files in files_to_create or files_to_modify.",
   properties: {
     task_mode: {
       type: "string",
@@ -587,6 +587,10 @@ const PLANNER_SCOPE = {
     output_root: { type: "string", maxLength: 500 },
   },
   anyOf: [
+    {
+      maxProperties: 0,
+      description: "Only a human_input task may use an empty scope.",
+    },
     {
       required: ["task_mode"],
       properties: { task_mode: { enum: ["db"] } },
@@ -699,8 +703,8 @@ const PLANNER_COMPACT_TASK_V3 = {
   properties: {
     id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates task-N when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
     depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
-    role: { type: "string", enum: ["dev", "artificer", "promote"] },
-    job_type: { type: "string", enum: ["dev", "artificer", "promote"], description: "Deprecated migration alias for role." },
+    role: { type: "string", enum: ["dev", "artificer", "human_input", "promote"] },
+    job_type: { type: "string", enum: ["dev", "artificer", "human_input", "promote"], description: "Deprecated migration alias for role." },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
     summary: {
       type: "string",
@@ -892,8 +896,8 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   name: "agent_handoff",
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
-    "Use role dev or artificer for executable work; promote is a system role. " +
-    "Every non-db task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; never submit scope:{}. " +
+    "Use role dev or artificer for executable work; human_input and promote are system roles. " +
+    "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
@@ -1024,6 +1028,16 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
       },
     },
     required: ["profile", "outcome", "summary"],
+    allOf: [{
+      if: {
+        properties: { profile: { const: "researcher.report.v1" } },
+        required: ["profile"],
+      },
+      then: {
+        properties: { claims: { ...RESEARCHER_HANDOFF_CLAIMS, minItems: 1 } },
+        required: ["claims"],
+      },
+    }],
     additionalProperties: false,
   },
 };
@@ -1033,8 +1047,8 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   name: "agent_handoff",
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
-    "Use role dev or artificer for executable work; promote is a system role. " +
-    "Every non-db task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; never submit scope:{}. " +
+    "Use role dev or artificer for executable work; human_input and promote are system roles. " +
+    "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +

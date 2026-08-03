@@ -444,6 +444,7 @@ CREATE TABLE IF NOT EXISTS session_lanes (
   lane TEXT NOT NULL,
   provider TEXT NOT NULL,
   skill_key TEXT NOT NULL DEFAULT '',
+  contract_fingerprint TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invalidated','expired','failed')),
   reset_generation INTEGER NOT NULL DEFAULT 0,
   lock_reason TEXT,

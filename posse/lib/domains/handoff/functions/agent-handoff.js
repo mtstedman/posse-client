@@ -530,7 +530,7 @@ function validateTarget(target, policy, profile, label) {
   if (!policy.targetKinds.includes(kind)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} does not allow target kind ${kind}`);
   const role = out.role == null ? null : boundedString(out.role, `${label}.role`, 40);
   if (profile === "planner.plan.v1") {
-    const allowed = kind === "agent" ? ["dev", "artificer"] : ["promote"];
+    const allowed = kind === "agent" ? ["dev", "artificer"] : ["human_input", "promote"];
     if (!allowed.includes(role)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} target ${kind} requires one of: ${allowed.join(", ")}`);
   } else if (kind === "pipeline" && role != null && role !== "$pipeline") {
     fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} pipeline target role must be $pipeline when present`);

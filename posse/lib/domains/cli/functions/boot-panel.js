@@ -146,6 +146,20 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     return langs.get(lang);
   };
 
+  const langPhaseRank = (side, state) => {
+    const value = String(state || "");
+    if (value === "idle" || value === "waiting") return 0;
+    if (side === "scip") {
+      if (value === "indexing") return 1;
+      if (value === "intaking" || value === "parsing" || value === "encoding") return 2;
+      if (value === "done") return 3;
+      return null;
+    }
+    if (value === "indexing" || value === "intaking" || value === "parsing" || value === "encoding") return 1;
+    if (value === "done") return 2;
+    return null;
+  };
+
   /**
    * @param {string} label
    * @param {{ section?: string, status?: string, detail?: string, percent?: number | null, startedAt?: number, finishedAt?: number | null, [k: string]: any }} [patch]
@@ -196,6 +210,14 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       startedAt: Date.now(),
       finishedAt: null,
     };
+    // The tree-sitter, SCIP, and streaming-embedding producers overlap, so a
+    // late event from an older phase can arrive after intake has advanced or
+    // completed. The matrix columns represent one forward-only boot pipeline:
+    // waiting -> generate -> intake -> done. Never let an older phase replace
+    // a newer one; same-phase counters remain monotonic below.
+    const previousRank = langPhaseRank(side, previous.state);
+    const nextRank = langPhaseRank(side, patch.state ?? previous.state);
+    if (previousRank != null && nextRank != null && nextRank < previousRank) return;
     const merged = { ...previous, ...patch };
     // Monotonic progress WITHIN a state: at phase edges the indexer can emit a
     // late "0/N" event (e.g. an encoding row that already hit 100% gets a fresh
@@ -270,13 +292,15 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   };
 
   /**
-   * The embedding-encode pass — a single global step that runs AFTER the view
-   * merge (zip), encoding the merged view's symbols into vectors. Rendered as
-   * its own bottom bar next to zip so the real pipeline order reads clearly:
-   * atlas parse (rows) → merge (zip bar) → encode (this bar).
+   * The embedding tail. During shared intake, `streaming` is a concurrent
+   * document ride-along and renders as "stream"; after view merge, the
+   * reconciliation pass renders as "encode".
    * @type {{ state: string, percent: number | null, detail: string, startedAt: number, finishedAt: number | null, streaming: boolean } | null}
    */
   let encode = null;
+  // Completion inferred from a tail phase is a fact about the boot run, not a
+  // property that a later/out-of-order progress event can revoke.
+  let ledgerInputsLandedOnce = false;
   const updateEncode = (patch = {}) => {
     const previous = encode || {
       state: "idle", percent: null, detail: "", startedAt: Date.now(), finishedAt: null, streaming: false,
@@ -672,9 +696,11 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   // its activity proves nothing about the ledger inputs — counting it flipped
   // every waiting cell to ✓ at parse start and made the band % sawtooth.
   const ledgerInputsLanded = () => {
+    if (ledgerInputsLandedOnce) return true;
     const activeTail = (st) => st && st.state && st.state !== "idle";
     const encodeLanded = activeTail(encode) && encode.streaming !== true;
-    return activeTail(zip) || activeTail(tree) || encodeLanded;
+    ledgerInputsLandedOnce = !!(activeTail(zip) || activeTail(tree) || encodeLanded);
+    return ledgerInputsLandedOnce;
   };
   const resolveWaitingAfterLedgerInput = (kind) => {
     if (!ledgerInputsLanded()) return kind;
@@ -722,6 +748,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     const detail = st.detail ? ` ${col("dim")}${st.detail}${col("reset")}` : "";
     return line(`${prefix}${gaugeBar(st.percent, TAIL_BAR, "green")}  ${pctTxt}${detail}`);
   };
+  const encodeTailLabel = () => encode?.streaming === true ? "stream" : "encode";
   const visibleLedgerLanguages = () => langOrder.filter((lang) => {
     const entry = langs.get(lang);
     return entry && (entry.atlas || entry.scip);
@@ -778,7 +805,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       }
       add(tailRow("merge", zip), zip && zip.state !== "idle" ? 95 : 65);
       add(tailRow("tree", tree), tree && tree.state !== "idle" ? 95 : 65);
-      add(tailRow("encode", encode), encode && encode.state !== "idle" ? 95 : 65);
+      add(tailRow(encodeTailLabel(), encode), encode && encode.state !== "idle" ? 95 : 65);
       for (const row of renderAtlasNotice()) add(row, 90);
     } else {
       for (const row of renderBootSection()) add(row, 80);
@@ -849,7 +876,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       out.push(blank());
       out.push(tailRow("merge", zip));
       out.push(tailRow("tree", tree));
-      out.push(tailRow("encode", encode));
+      out.push(tailRow(encodeTailLabel(), encode));
       const atlasNoticeRows = renderAtlasNotice();
       if (atlasNoticeRows.length > 0) {
         out.push(blank());

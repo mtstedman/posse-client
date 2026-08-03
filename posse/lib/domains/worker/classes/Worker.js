@@ -780,6 +780,7 @@ export class Worker {
           handle: pending.newHandle,
           parentJobId: job.id,
           lastAgentCallId: pending.agentCallId || null,
+          contractFingerprint: pending.contractFingerprint || "",
         });
         session = recorded?.session || null;
       }
