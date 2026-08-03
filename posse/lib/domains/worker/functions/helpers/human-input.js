@@ -60,8 +60,10 @@ export function unattendedHarnessAnswerForPayload(payload = {}, {
   }
 
   const choices = humanInputChoicesForPayload(payload);
-  if (payload.review_type === "scope_expansion_request") {
-    return autoApprove ? "approve" : "deny";
+  if (["scope_expansion_request", "scope_expansion_required"].includes(payload.review_type)) {
+    return autoApprove
+      ? "approve"
+      : payload.review_type === "scope_expansion_required" ? "reject" : "deny";
   }
   if (
     payload.review_type !== "blocked_recovery"
@@ -73,7 +75,10 @@ export function unattendedHarnessAnswerForPayload(payload = {}, {
 
   const preferred = HARNESS_REVIEW_ANSWERS[payload.review_type];
   if (preferred && choices.includes(preferred)) return preferred;
-  if (choices.length > 0) return choices[0];
+  // Unknown choice contracts must fail closed. Selecting the first value made
+  // a newly-added ["approve", "reject"] or ["delete", "cancel"] contract
+  // silently perform the unsafe action before the harness learned its policy.
+  if (choices.length > 0) return null;
   if (payload.review_type) return "fail";
   if (!isSecuritySensitivePrompt(payload)) return HUMAN_INPUT_BEST_JUDGMENT_ANSWER;
   return null;

@@ -169,6 +169,7 @@ export class LocalServer {
     tailBridgeEvents = null,
     getRelayStatus = null,
     startPosse = null,
+    onOperatorActivity = null,
     maxWsFrameBytes = DEFAULT_MAX_WS_FRAME_BYTES,
     maxWsBufferedBytes = DEFAULT_MAX_WS_BUFFERED_BYTES,
     wsHelloTimeoutMs = DEFAULT_WS_HELLO_TIMEOUT_MS,
@@ -184,6 +185,7 @@ export class LocalServer {
     this.tailBridgeEvents = tailBridgeEvents;
     this.getRelayStatus = getRelayStatus;
     this.startPosse = startPosse;
+    this.onOperatorActivity = onOperatorActivity;
     this.maxWsFrameBytes = Math.max(1024, Number(maxWsFrameBytes) || DEFAULT_MAX_WS_FRAME_BYTES);
     this.maxWsBufferedBytes = Math.max(
       this.maxWsFrameBytes,
@@ -468,6 +470,7 @@ export class LocalServer {
       this.handleHelloFrame(client, frame);
       return;
     }
+    this.onOperatorActivity?.();
     if (frame.type === BRIDGE_FRAME_TYPES.PING) {
       this.sendWs(client, { v: BRIDGE_PROTOCOL_VERSION, type: BRIDGE_FRAME_TYPES.PONG });
       return;
@@ -497,6 +500,7 @@ export class LocalServer {
       return;
     }
     client.authenticated = true;
+    this.onOperatorActivity?.();
     if (client.helloTimer) {
       clearTimeout(client.helloTimer);
       client.helloTimer = null;
@@ -509,6 +513,10 @@ export class LocalServer {
       label: this.label,
     });
     this.sendSnapshot(client);
+  }
+
+  authenticatedClientCount() {
+    return [...this.clients].filter((client) => client.authenticated && !client.closing).length;
   }
 
   sendSnapshot(client) {

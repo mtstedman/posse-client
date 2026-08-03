@@ -335,6 +335,22 @@ export function enqueueHumanGateEffect({
   ).get(String(operationKey));
 }
 
+export function completeHumanGateEffect({ operationKey, payload = null } = {}) {
+  const db = getDb();
+  const result = db.prepare(`
+    UPDATE human_gate_outbox
+    SET state = 'completed', payload_json = ?, completed_at = ?, updated_at = ?,
+        attempt_count = attempt_count + 1, last_error = NULL
+    WHERE operation_key = ?
+  `).run(
+    payload == null ? null : JSON.stringify(payload),
+    now(),
+    now(),
+    String(operationKey),
+  );
+  return result.changes === 1;
+}
+
 export function reconcileHumanGates() {
   // Reconciliation uses durable timeout events to distinguish an abandoned
   // gate that should reopen from a headless timeout that must stay terminal.

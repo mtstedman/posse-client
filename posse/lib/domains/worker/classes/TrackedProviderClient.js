@@ -1421,6 +1421,8 @@ export class TrackedProviderClient {
             graceful_termination_attempted: stats.gracefulTerminationAttempted === true,
             force_kill_timer_fired: stats.forceKillTimerFired === true,
             force_kill_used: stats.forceKillUsed === true,
+            force_kill_fallback_used: stats.forceKillFallbackUsed === true,
+            force_kill_by_platform_policy: stats.forceKillByPlatformPolicy === true,
             terminal_usage_flush_attempted: stats.terminalUsageFlushAttempted === true,
             terminal_usage_flush_completed: stats.terminalUsageFlushCompleted === true,
             terminal_usage_flush_timed_out: stats.terminalUsageFlushTimedOut === true,

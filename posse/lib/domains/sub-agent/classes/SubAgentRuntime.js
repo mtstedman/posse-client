@@ -233,17 +233,19 @@ function deterministicToolEvidence(raw, tool, args = {}) {
     };
   }
 
-  const lines = String(rawText ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const lines = structuredText.replace(/\r\n?/g, "\n").split("\n");
   const truncated = /^\.\.\. \(\d+ more lines\)$/.test(lines.at(-1) || "");
   if (truncated) lines.pop();
-  const numbered = lines.map((line) => /^\s*(\d+)\t(.*)$/.exec(line));
+  // Native read gutters are space-padded. Requiring that padding avoids
+  // treating real TSV rows such as `1\tvalue` as fabricated line provenance.
+  const numbered = lines.map((line) => /^\s+(\d+)\t(.*)$/.exec(line));
   const startLine = Number(numbered[0]?.[1]);
   const sequential = numbered.length > 0
     && numbered.every((match, index) => (
       match != null
       && Number(match[1]) === startLine + index
     ));
-  if (!sequential) return { text: rawText, provenance };
+  if (!sequential) return { text: structuredText, provenance };
   return {
     text: numbered.map((match) => match[2]).join("\n"),
     provenance: {

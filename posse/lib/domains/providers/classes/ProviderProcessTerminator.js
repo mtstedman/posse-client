@@ -36,6 +36,8 @@ export class ProviderProcessTerminator {
       gracefulTerminationAttempted: false,
       forceKillTimerFired: false,
       forceKillUsed: false,
+      forceKillFallbackUsed: false,
+      forceKillByPlatformPolicy: false,
       forceKillIssuedAt: null,
       providerCloseAt: null,
     };
@@ -58,6 +60,7 @@ export class ProviderProcessTerminator {
       const forceImmediately = this.platform === "win32";
       this.state.gracefulTerminationAttempted = !forceImmediately;
       this.state.forceKillUsed = forceImmediately;
+      this.state.forceKillByPlatformPolicy = forceImmediately;
       if (forceImmediately) this.state.forceKillIssuedAt = this.state.terminationRequestedAt;
       this.terminate(this.proc, { force: forceImmediately, platform: this.platform });
       if (!forceImmediately) this.#scheduleForceKill();
@@ -72,6 +75,7 @@ export class ProviderProcessTerminator {
       if (this.state.providerCloseAt != null || this.proc?.exitCode != null) return;
       this.state.forceKillTimerFired = true;
       this.state.forceKillUsed = true;
+      this.state.forceKillFallbackUsed = true;
       this.state.forceKillIssuedAt = this.now();
       this.terminate(this.proc, { force: true, platform: this.platform });
     }, this.forceKillDelayMs);

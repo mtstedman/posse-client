@@ -6,9 +6,11 @@ import {
   beginHumanGateResolution,
   cancelPendingReviewGatesForOriginal,
   clearStallResume,
+  completeHumanGateEffect,
   completeAttempt,
   completeHumanGateResolution,
   createJob,
+  enqueueHumanGateEffect,
   extendAssessmentMaxAttempts,
   getDependents,
   getJob,
@@ -28,6 +30,7 @@ import {
   updateJobPayload,
   updateWorkItemStatus,
 } from "../../../queue/functions/index.js";
+import { getDb } from "../../../../shared/storage/functions/index.js";
 import { withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
 import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
 import { dropStashByHashAsync, findStallStashEntryAsync } from "../../../git/functions/utils.js";
@@ -106,6 +109,61 @@ function isOneshotScopeSelectionPayload(payload) {
   return payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
     || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
 }
+
+function payloadObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return { ...value };
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function existingHumanGateEffectJob(operationKey) {
+  return getDb().prepare(`
+    SELECT * FROM jobs
+    WHERE CASE WHEN json_valid(payload_json)
+      THEN json_extract(payload_json, '$._human_gate_effect.operation_key')
+      ELSE NULL END = ?
+    ORDER BY id LIMIT 1
+  `).get(String(operationKey)) || null;
+}
+
+function createHumanGateEffectJob({
+  gateJobId,
+  resolutionClaim,
+  operationType,
+  job,
+}) {
+  const operationKey = `${resolutionClaim.idempotency_key}:${operationType}`;
+  enqueueHumanGateEffect({
+    gateJobId,
+    operationKey,
+    operationType,
+    payload: { gate_job_id: gateJobId },
+  });
+  let effectJob = existingHumanGateEffectJob(operationKey);
+  let reused = true;
+  if (!effectJob) {
+    reused = false;
+    const effectPayload = payloadObject(job.payload_json);
+    effectPayload._human_gate_effect = {
+      operation_key: operationKey,
+      operation_type: operationType,
+      gate_job_id: gateJobId,
+      gate_generation: resolutionClaim.gate?.generation || 1,
+    };
+    effectJob = createJob({ ...job, payload_json: effectPayload });
+  }
+  completeHumanGateEffect({
+    operationKey,
+    payload: { gate_job_id: gateJobId, effect_job_id: effectJob.id, reused },
+  });
+  return { job: effectJob, reused };
+}
+
+export const __testCreateHumanGateEffectJob = createHumanGateEffectJob;
 
 async function dropPartialWorkStashAsync(worker, origJob, wtPath) {
   return await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
@@ -507,17 +565,22 @@ export async function runHumanInputJob(worker, job, {
           if (proposed.job_type !== "fix" || Number(proposed.work_item_id) !== Number(job.work_item_id)) {
             throw new Error("Scope gate proposed_fix contract is invalid");
           }
-          const fixJob = createJob({
-            work_item_id: job.work_item_id,
-            job_type: "fix",
-            title: String(proposed.title || "Approved fix").slice(0, 180),
-            parent_job_id: Number(proposed.parent_job_id) || Number(payload.original_job_id) || null,
-            priority: proposed.priority || "high",
-            provider: proposed.provider || null,
-            model_tier: proposed.model_tier || "standard",
-            reasoning_effort: proposed.reasoning_effort || "medium",
-            skills: proposed.skills || null,
-            payload_json: proposed.payload_json || {},
+          const { job: fixJob, reused: reusedFixJob } = createHumanGateEffectJob({
+            gateJobId: job.id,
+            resolutionClaim,
+            operationType: "scope_expansion_fix",
+            job: {
+              work_item_id: job.work_item_id,
+              job_type: "fix",
+              title: String(proposed.title || "Approved fix").slice(0, 180),
+              parent_job_id: Number(proposed.parent_job_id) || Number(payload.original_job_id) || null,
+              priority: proposed.priority || "high",
+              provider: proposed.provider || null,
+              model_tier: proposed.model_tier || "standard",
+              reasoning_effort: proposed.reasoning_effort || "medium",
+              skills: proposed.skills || null,
+              payload_json: proposed.payload_json || {},
+            },
           });
           for (const dependency of Array.isArray(proposed.dependencies) ? proposed.dependencies : []) {
             const dependencyId = Number(dependency?.job_id);
@@ -528,7 +591,7 @@ export async function runHumanInputJob(worker, job, {
           for (const dependent of dependents) {
             rewireDependency(dependent.job_id, job.id, fixJob.id, dependent.dependency_kind);
           }
-          worker.emit(job.id, `${C.cyan}[human] Approved scope expansion and created fix job #${fixJob.id}${C.reset}`);
+          worker.emit(job.id, `${C.cyan}[human] Approved scope expansion and ${reusedFixJob ? "reused" : "created"} fix job #${fixJob.id}${C.reset}`);
         }
         worker.emit(job.id, `${C.green}[human] Scope request approved - ${dependents.length} gated dependent(s) can proceed${C.reset}`);
         logEvent({
@@ -782,28 +845,33 @@ export async function runHumanInputJob(worker, job, {
         const retryPayload = buildDeadLetterRetryPayload(origJob, origPayload, lastAnswer, job.id, worker.projectDir, {
           recoveryType: payload.review_type,
         });
-        const retryJob = createJob({
-          work_item_id: job.work_item_id,
-          job_type: origJob.job_type,
-          title: `Retry: ${origJob.title.slice(0, 80)}`,
-          parent_job_id: origJob.id,
-          priority: "urgent",
-          model_tier: origJob.model_tier || "standard",
-          reasoning_effort: origJob.reasoning_effort || "medium",
-          provider: decision.provider || providerForAffinityRoute(
-            origJob,
-            origJob.job_type,
-            PROVIDER_AFFINITY_ROUTES.REPLACEMENT_RETRY,
-          ),
-          token_budget_input: origJob.token_budget_input || null,
-          token_budget_output: origJob.token_budget_output || null,
-          context_budget_chars: origJob.context_budget_chars || null,
-          max_attempts: origJob.max_attempts || null,
-          payload_json: JSON.stringify(retryPayload),
-          planner_complexity_score: origJob.planner_complexity_score ?? null,
-          planner_risk_score: origJob.planner_risk_score ?? null,
-          planner_context_score: origJob.planner_context_score ?? null,
-          planner_failure_cost_score: origJob.planner_failure_cost_score ?? null,
+        const { job: retryJob, reused: reusedRetryJob } = createHumanGateEffectJob({
+          gateJobId: job.id,
+          resolutionClaim,
+          operationType: "dead_letter_retry",
+          job: {
+            work_item_id: job.work_item_id,
+            job_type: origJob.job_type,
+            title: `Retry: ${origJob.title.slice(0, 80)}`,
+            parent_job_id: origJob.id,
+            priority: "urgent",
+            model_tier: origJob.model_tier || "standard",
+            reasoning_effort: origJob.reasoning_effort || "medium",
+            provider: decision.provider || providerForAffinityRoute(
+              origJob,
+              origJob.job_type,
+              PROVIDER_AFFINITY_ROUTES.REPLACEMENT_RETRY,
+            ),
+            token_budget_input: origJob.token_budget_input || null,
+            token_budget_output: origJob.token_budget_output || null,
+            context_budget_chars: origJob.context_budget_chars || null,
+            max_attempts: origJob.max_attempts || null,
+            payload_json: JSON.stringify(retryPayload),
+            planner_complexity_score: origJob.planner_complexity_score ?? null,
+            planner_risk_score: origJob.planner_risk_score ?? null,
+            planner_context_score: origJob.planner_context_score ?? null,
+            planner_failure_cost_score: origJob.planner_failure_cost_score ?? null,
+          },
         });
         for (const dep of incomingDependenciesForRecoveryRetry(origJob, origPayload)) {
           addDependency(retryJob.id, dep.depends_on_job_id, dep.dependency_kind || "hard");
@@ -812,7 +880,7 @@ export async function runHumanInputJob(worker, job, {
         for (const dep of dependents) {
           rewireDependency(dep.job_id, job.id, retryJob.id, dep.dependency_kind);
         }
-        worker.emit(job.id, `${C.cyan}[human] Dead-letter recovery spawned retry job #${retryJob.id}${decision.provider ? ` on ${decision.provider}` : ""}; rewired ${dependents.length} dependent(s)${C.reset}`);
+        worker.emit(job.id, `${C.cyan}[human] Dead-letter recovery ${reusedRetryJob ? "reused" : "spawned"} retry job #${retryJob.id}${decision.provider ? ` on ${decision.provider}` : ""}; rewired ${dependents.length} dependent(s)${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,
           job_id: origJob.id,

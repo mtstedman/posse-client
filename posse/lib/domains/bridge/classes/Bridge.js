@@ -16,6 +16,7 @@ import {
 } from "../../queue/functions/runtime-status.js";
 
 const BRIDGE_PRESENCE_HEARTBEAT_MS = 30_000;
+const OPERATOR_ACTIVITY_FRESH_MS = 120_000;
 
 export class Bridge {
   constructor({
@@ -31,6 +32,29 @@ export class Bridge {
     this.relayClient = null;
     this.runLauncher = new PosseRunLauncher({ projectDir: this.projectDir });
     this.presenceTimer = null;
+    this.lastOperatorActivityAt = 0;
+  }
+
+  noteOperatorActivity() {
+    this.lastOperatorActivityAt = Date.now();
+    this.writeOperatorPresence();
+  }
+
+  operatorPresent() {
+    if ((this.localServer?.authenticatedClientCount?.() || 0) > 0) return true;
+    return Date.now() - this.lastOperatorActivityAt < OPERATOR_ACTIVITY_FRESH_MS;
+  }
+
+  writeOperatorPresence() {
+    try {
+      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE, {
+        present: this.operatorPresent(),
+        at: new Date().toISOString(),
+        instance_id: this.config.instanceId,
+      });
+    } catch {
+      // Presence is advisory; a transient DB failure must not crash serve.
+    }
   }
 
   /**
@@ -41,13 +65,7 @@ export class Bridge {
    */
   startPresenceHeartbeat() {
     if (this.presenceTimer) return;
-    const beat = () => {
-      writeRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE, {
-        present: true,
-        at: new Date().toISOString(),
-        instance_id: this.config.instanceId,
-      });
-    };
+    const beat = () => this.writeOperatorPresence();
     beat();
     this.presenceTimer = setInterval(beat, BRIDGE_PRESENCE_HEARTBEAT_MS);
     this.presenceTimer.unref?.();
@@ -82,6 +100,7 @@ export class Bridge {
           getHeadEventId: () => this.changeStream?.headEventId() || 0,
           startPosse: () => this.runLauncher.start(),
         });
+        this.relayClient.on("operator_activity", () => this.noteOperatorActivity());
         this.relayClient.on("error", (err) => {
           try {
             console.warn(`[posse][bridge] relay error: ${err?.message || err}`);
@@ -137,6 +156,7 @@ export class Bridge {
           authenticated_at: null,
         },
         startPosse: () => this.runLauncher.start(),
+        onOperatorActivity: () => this.noteOperatorActivity(),
       });
       try {
         const address = await server.start();

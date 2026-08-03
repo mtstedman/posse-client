@@ -27,14 +27,19 @@ function settingValue(key) {
 export function getAgentFlowRemoteUrl(env = process.env) {
   if (String(env?.[AGENT_FLOW_REMOTE_FLAG] || "").trim() !== "1") return "";
   const raw = String(env?.[AGENT_FLOW_REMOTE_URL] || "").trim();
-  if (!raw) return "";
+  if (!raw) {
+    throw new Error(`${AGENT_FLOW_REMOTE_URL} is required when ${AGENT_FLOW_REMOTE_FLAG}=1`);
+  }
   try {
     const parsed = new URL(raw);
     const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname);
-    if (parsed.protocol !== "http:" || !loopback || parsed.username || parsed.password) return "";
+    if (parsed.protocol !== "http:" || !loopback || parsed.username || parsed.password) {
+      throw new Error(`${AGENT_FLOW_REMOTE_URL} must be an unauthenticated http:// loopback URL`);
+    }
     return parsed.href.replace(/\/+$/, "");
-  } catch {
-    return "";
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith(`${AGENT_FLOW_REMOTE_URL} `)) throw error;
+    throw new Error(`${AGENT_FLOW_REMOTE_URL} is invalid`, { cause: error });
   }
 }
 

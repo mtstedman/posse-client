@@ -190,6 +190,7 @@ export function humanGateContractForPayload(payload = {}, {
 
 export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "scope_expansion_request",
+  "scope_expansion_required",
   "partial_work_recovery",
   "blocked_recovery",
   "dead_letter_recovery",

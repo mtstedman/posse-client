@@ -190,6 +190,7 @@ export {
 
 export {
   beginHumanGateResolution,
+  completeHumanGateEffect,
   completeHumanGateResolution,
   enqueueHumanGateEffect,
   getHumanGate,

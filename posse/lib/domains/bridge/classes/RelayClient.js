@@ -178,6 +178,7 @@ export class RelayClient extends EventEmitter {
     if (frame.type === BRIDGE_FRAME_TYPES.HELLO) return;
     if (frame.type !== BRIDGE_FRAME_TYPES.COMMAND) return;
     this.markAuthenticated();
+    this.emit("operator_activity");
     try {
       const ack = await this.dispatch(frame, {
         projectDir: this.projectDir,

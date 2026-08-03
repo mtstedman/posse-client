@@ -129,7 +129,9 @@ function repairModelNativeFullFileEditCall(call, targetPath, exactSource) {
     .replace(/(^|[\s(=,:;])\\"/gm, '$1"')
     .replace(/\\"(?=[\s),.;}\]])/g, '"');
   const sourceExtension = path.extname(targetPath).toLowerCase();
-  const sourceContent = new Set([".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx"]).has(sourceExtension)
+  const decodedEscapedLines = lineDecodedContent !== args.content;
+  const sourceContent = decodedEscapedLines
+    && new Set([".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx"]).has(sourceExtension)
     ? decodedContent.replace(
       /\/((?:\\.|[^/\r\n])+)\/([dgimsuvy]*)/g,
       (_literal, body, flags) => `/${String(body).replace(/\\\\(?=[bBdDsSwW])/g, "\\")}/${flags}`,
@@ -151,7 +153,7 @@ function repairModelNativeFullFileEditCall(call, targetPath, exactSource) {
   };
 }
 
-function normalizeJavascriptRegexEscapes(value, targetPath) {
+function normalizeJavascriptRegexEscapes(value, targetPath, allowedEscapes = null) {
   if (typeof value !== "string") return value;
   const sourceExtension = path.extname(targetPath).toLowerCase();
   if (!new Set([".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx"]).has(sourceExtension)) {
@@ -159,7 +161,9 @@ function normalizeJavascriptRegexEscapes(value, targetPath) {
   }
   return value.replace(
     /\/((?:\\.|[^/\r\n])+)\/([dgimsuvy]*)/g,
-    (_literal, body, flags) => `/${String(body).replace(/\\\\(?=[bBdDsSwW])/g, "\\")}/${flags}`,
+    (_literal, body, flags) => `/${String(body).replace(/\\\\([bBdDsSwW])/g, (match, escape) => (
+      allowedEscapes == null || allowedEscapes.has(escape) ? `\\${escape}` : match
+    ))}/${flags}`,
   );
 }
 
@@ -168,17 +172,25 @@ function repairModelNativeExactEditCall(call, targetPath, exactSource) {
   const args = call?.arguments;
   if (!args || typeof args.old_string !== "string" || typeof args.new_string !== "string") return call;
   if (args.path != null && normalizedScopedPath(args.path) !== targetPath) return call;
+  const originalCandidates = [args.old_string, args.old_string.trim()].filter(Boolean);
+  const originalOld = originalCandidates.find((candidate) => exactSource.includes(candidate));
+  if (originalOld) {
+    return {
+      ...call,
+      arguments: { ...args, old_string: originalOld },
+    };
+  }
   const normalizedOld = normalizeJavascriptRegexEscapes(args.old_string, targetPath);
-  const normalizedNew = normalizeJavascriptRegexEscapes(args.new_string, targetPath);
   const candidates = [...new Set([
     normalizedOld,
     normalizedOld.trim(),
   ].filter(Boolean))];
   const exactOld = candidates.find((candidate) => exactSource.includes(candidate));
-  if (!exactOld) return {
-    ...call,
-    arguments: { ...args, new_string: normalizedNew },
-  };
+  if (!exactOld) return call;
+  const repairedEscapes = new Set(
+    [...args.old_string.matchAll(/\\\\([bBdDsSwW])/g)].map((match) => match[1]),
+  );
+  const normalizedNew = normalizeJavascriptRegexEscapes(args.new_string, targetPath, repairedEscapes);
   return {
     ...call,
     arguments: {

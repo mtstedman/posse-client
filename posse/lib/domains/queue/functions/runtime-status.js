@@ -29,7 +29,7 @@ export const BRIDGE_PRESENCE_FRESH_MS = 120_000;
 export function isBridgePresenceFresh({ maxAgeMs = BRIDGE_PRESENCE_FRESH_MS } = {}) {
   const row = readRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
   const at = Date.parse(row?.at || "");
-  return Number.isFinite(at) && Date.now() - at < maxAgeMs;
+  return row?.present === true && Number.isFinite(at) && Date.now() - at < maxAgeMs;
 }
 
 export function readRuntimeStatus(key) {
