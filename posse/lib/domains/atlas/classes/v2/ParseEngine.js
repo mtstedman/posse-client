@@ -29,6 +29,7 @@ import {
   importTreeCompressionMlSnapshot,
 } from "../../functions/v2/tree-compression.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
+import { iterateViewSymbolPages } from "../../functions/v2/view-symbol-pages.js";
 import {
   ledgerBranchForWi,
   mainViewPath,
@@ -60,6 +61,7 @@ import {
   staleEmbeddingHashes,
   pruneStaleEmbeddingHashes,
   pruneEmbeddingIndexToCurrentView,
+  PRUNE_KEEP_SCAN_LIMIT,
 } from "../../functions/v2/embeddings/stale-tracking.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
@@ -3130,15 +3132,18 @@ export class ParseEngine {
       let sibling = null;
       try {
         sibling = View.mount({ dbPath: candidate, mode: "readonly" });
-        const symbols = await sibling.query.allSymbols({ limit: 100_000 });
-        if (symbols.length >= 100_000) {
-          // A truncated sibling keep-set would prune that view's tail — same
-          // sliding-window churn the keep-cap guard prevents for the current
-          // view. Abort the prune for this pass.
-          return { ok: false, reason: `${path.basename(candidate)}: keep-set truncated at scan cap` };
-        }
-        for (const symbol of symbols) {
-          keys.push(...embeddingKeysForSymbol(symbol));
+        let symbolCount = 0;
+        for await (const symbols of iterateViewSymbolPages({
+          view: sibling,
+          limit: PRUNE_KEEP_SCAN_LIMIT + 1,
+        })) {
+          symbolCount += symbols.length;
+          if (symbolCount > PRUNE_KEEP_SCAN_LIMIT) {
+            return { ok: false, reason: `${path.basename(candidate)}: keep-set exceeds ${PRUNE_KEEP_SCAN_LIMIT} symbols` };
+          }
+          for (const symbol of symbols) {
+            keys.push(...embeddingKeysForSymbol(symbol));
+          }
         }
       } catch (err) {
         return { ok: false, reason: `${path.basename(candidate)}: ${/** @type {any} */ (err)?.message || err}` };

@@ -7,6 +7,7 @@
 // are all threaded in by the caller.
 
 import { embeddingKeysForSymbol } from "./documentation-channel.js";
+import { iterateViewSymbolPages } from "../view-symbol-pages.js";
 
 /** @typedef {import("../contracts/jobs.js").AtlasWarmJobResult} AtlasWarmJobResult */
 /** @typedef {import("../../../classes/v2/View.js").View} View */
@@ -75,17 +76,21 @@ export const PRUNE_KEEP_SCAN_LIMIT = 100_000;
 
 export async function pruneEmbeddingIndexToCurrentView({ base, view, index, extraKeepKeys = [] }) {
   if (!view || typeof index?.pruneToKeys !== "function") return;
-  const symbols = await view.query.allSymbols({ limit: PRUNE_KEEP_SCAN_LIMIT });
-  if (symbols.length >= PRUNE_KEEP_SCAN_LIMIT) {
-    // The keep-set is TRUNCATED: global_id assignment shifts across full view
-    // rebuilds, so pruning against a moving 100k window deletes the displaced
-    // tail every rebuild and re-encodes it on the next warm, forever. Skip
-    // the prune instead — unbounded growth is bounded by real symbol churn;
-    // churn from a sliding window is not.
-    /** @type {any} */ (base).embeddings_prune_skipped_keep_cap = symbols.length;
-    return;
+  const keep = [];
+  let symbolCount = 0;
+  for await (const symbols of iterateViewSymbolPages({
+    view,
+    limit: PRUNE_KEEP_SCAN_LIMIT + 1,
+  })) {
+    symbolCount += symbols.length;
+    if (symbolCount > PRUNE_KEEP_SCAN_LIMIT) {
+      // Preserve the pre-existing memory guard, but use pagination metadata to
+      // distinguish an actually complete keep-set from the old native 10k cap.
+      /** @type {any} */ (base).embeddings_prune_skipped_keep_cap = symbolCount;
+      return;
+    }
+    for (const symbol of symbols) keep.push(...embeddingKeysForSymbol(symbol));
   }
-  const keep = symbols.flatMap((symbol) => embeddingKeysForSymbol(symbol));
   for (const key of extraKeepKeys) {
     if (key && key.content_hash != null) keep.push({ content_hash: key.content_hash, local_id: key.local_id });
   }

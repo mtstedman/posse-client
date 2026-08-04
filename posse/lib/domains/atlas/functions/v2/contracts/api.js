@@ -282,11 +282,12 @@
  *   Name and path filters are applied in storage before the result limit.
  *
  * @property {(opts?: { limit?: number, pathPrefix?: string }) => Promise<ViewSymbol[]>} allSymbols
- *   Enumerate every symbol in the view. Used by stats, overview, and
- *   delta computation where FTS-based search cannot guarantee full
- *   coverage. Callers should pass a `limit` for large views; consumers
- *   that need streaming should add a paging variant rather than abusing
- *   this one.
+ *   Read one bounded symbol page. Native Atlas clamps a page to 10,000 rows.
+ * @property {(opts?: { limit?: number, pathPrefix?: string, afterGlobalId?: number }) => Promise<{ symbols: ViewSymbol[], truncated: boolean, nextAfterGlobalId: number | null }>} allSymbolsPage
+ *   Read one keyset page and preserve native truncation metadata.
+ * @property {(opts?: { limit?: number, pageSize?: number, pathPrefix?: string, afterGlobalId?: number }) => AsyncGenerator<ViewSymbol[], void, void>} allSymbolPages
+ *   Enumerate a complete view as bounded keyset pages. `limit` is an optional
+ *   total cap; `pageSize` is bounded to the native 10,000-row safety limit.
  */
 
 /**

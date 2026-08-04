@@ -12,6 +12,7 @@ import {
   recordEmbeddingForensics,
   summarizeSymbols,
 } from "./forensics.js";
+import { iterateViewSymbolPages } from "../view-symbol-pages.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -27,7 +28,7 @@ const IN_FLIGHT_BY_VIEW = new Map();
  *   index: EmbeddingIndex,
  *   encoder: EmbeddingEncoder,
  *   repoRoot?: string,
- *   limit?: number,
+ *   limit?: number | null,
  *   timeoutMs?: number,
  * }} args
  * @returns {Promise<{ skipped: boolean, reason?: string, missing?: number, encoded?: number | null, incomplete?: boolean }>}
@@ -47,34 +48,32 @@ export async function ensureEmbeddingsForView({
     return { skipped: true, reason: "dim_mismatch" };
   }
 
-  const symbolsLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100_000) : 5000;
-  const symbols = await view.query.allSymbols({ limit: symbolsLimit });
-  // The scan limit is part of the identity: a full reconcile (100k) joining a
+  const symbolsLimit = limit === null ? null : positiveSafeInteger(limit) ?? 5000;
+  // The scan limit is part of the identity: a full reconcile joining a
   // lazy 5k run would inherit a result that scanned a fraction of its scope
   // and clear the inflight breadcrumb as if parity had been checked.
-  const guardKey = `${inFlightKey({ view, index, encoder })}\0limit:${symbolsLimit}`;
+  const guardKey = `${inFlightKey({ view, index, encoder })}\0limit:${symbolsLimit ?? "all"}`;
   const existing = IN_FLIGHT_BY_VIEW.get(guardKey);
   if (existing) {
     recordEmbeddingForensics("on_demand.join_existing", {
       guard_key_hash: hashString(guardKey),
-      symbols_limit: symbolsLimit,
+      symbols_limit: symbolsLimit ?? "all",
     });
     return existing;
   }
   recordEmbeddingForensics("on_demand.start", {
     guard_key_hash: hashString(guardKey),
-    symbols_limit: symbolsLimit,
-    symbol_count: symbols.length,
+    symbols_limit: symbolsLimit ?? "all",
     encoder: encoderTelemetry(encoder),
     index: indexTelemetry(index),
   });
 
-  const run = ensureMissingSymbolsEncoded({
+  const run = encodeViewSymbols({
     view,
     index,
     encoder,
     repoRoot,
-    symbols,
+    limit: symbolsLimit,
     timeoutMs,
   }).finally(() => {
     if (IN_FLIGHT_BY_VIEW.get(guardKey) === run) IN_FLIGHT_BY_VIEW.delete(guardKey);
@@ -91,18 +90,18 @@ export async function ensureEmbeddingsForView({
  * keys.db short. It reuses the same missing-symbols fill, but:
  *   - reads the breadcrumb first, so an interrupted encode is a KNOWN signal
  *     (not inferred), surfaced in the result + forensics;
- *   - defaults to the full symbol limit (not the 5k on-demand cap);
+ *   - defaults to the complete paginated view (not the 5k on-demand cap);
  *   - clears the breadcrumb once the gap is filled.
  * The ANN (index.usearch) rebuilds from keys.db on load, so this only needs to
  * make keys.db whole — a subsequent rebuild is then complete, not silently gappy.
  *
  * @param {{
  *   view: View, index: EmbeddingIndex, encoder: EmbeddingEncoder,
- *   repoRoot?: string, limit?: number, timeoutMs?: number,
+ *   repoRoot?: string, limit?: number | null, timeoutMs?: number,
  * }} args
  * @returns {Promise<{ skipped: boolean, reason?: string, missing?: number, encoded?: number | null, incomplete?: boolean, hadInterruptedBatch: boolean, interruptedKeys: number }>}
  */
-export async function reconcileEmbeddings({ view, index, encoder, repoRoot, limit = 100_000, timeoutMs = 120_000 }) {
+export async function reconcileEmbeddings({ view, index, encoder, repoRoot, limit = null, timeoutMs = 120_000 }) {
   // Awaited because the production (child-process) index returns promises;
   // the in-process index returns plain values and awaits through unchanged.
   const inflight = typeof index?.readInflight === "function" ? await index.readInflight() : null;
@@ -139,7 +138,7 @@ export async function reconcileEmbeddings({ view, index, encoder, repoRoot, limi
  *
  * @param {{
  *   view: View, index: EmbeddingIndex, encoder: EmbeddingEncoder,
- *   repoRoot?: string, maxEncode?: number, limit?: number, timeoutMs?: number,
+ *   repoRoot?: string, maxEncode?: number, limit?: number | null, timeoutMs?: number,
  * }} args
  * @returns {Promise<{
  *   skipped: boolean, reason?: string, candidates: number, missing: number,
@@ -153,7 +152,7 @@ export async function resumeEmbeddingsSlice({
   encoder,
   repoRoot,
   maxEncode = 4000,
-  limit = 100_000,
+  limit = null,
   timeoutMs = 120_000,
 }) {
   const empty = { candidates: 0, missing: 0, encoded: 0, remaining: 0, complete: false, hadInterruptedBatch: false, interruptedKeys: 0 };
@@ -167,13 +166,17 @@ export async function resumeEmbeddingsSlice({
   const hadInterruptedBatch = !!inflight;
   const interruptedKeys = Array.isArray(inflight?.keys) ? inflight.keys.length : 0;
 
-  const symbolsLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100_000) : 100_000;
-  const symbols = await view.query.allSymbols({ limit: symbolsLimit });
-  const missing = await missingSymbols({ index, symbols });
-  if (missing.length === 0) {
+  const sliceBudget = positiveSafeInteger(maxEncode) ?? 4000;
+  const scan = await scanMissingSymbols({
+    view,
+    index,
+    limit: positiveSafeInteger(limit),
+    maxCollect: sliceBudget,
+  });
+  if (scan.missing === 0) {
     if (typeof index?.clearEncoding === "function") await index.clearEncoding();
     recordEmbeddingForensics("resume_slice.parity", {
-      candidates: symbols.length,
+      candidates: scan.candidates,
       had_interrupted_batch: hadInterruptedBatch,
       encoder: encoderTelemetry(encoder),
       index: indexTelemetry(index),
@@ -181,7 +184,7 @@ export async function resumeEmbeddingsSlice({
     return {
       skipped: true,
       reason: "fully_indexed",
-      candidates: symbols.length,
+      candidates: scan.candidates,
       missing: 0,
       encoded: 0,
       remaining: 0,
@@ -190,11 +193,10 @@ export async function resumeEmbeddingsSlice({
       interruptedKeys,
     };
   }
-  const sliceBudget = Number.isInteger(maxEncode) && maxEncode > 0 ? maxEncode : 4000;
-  const slice = missing.slice(0, sliceBudget);
+  const slice = scan.collected;
   recordEmbeddingForensics("resume_slice.start", {
-    candidates: symbols.length,
-    missing_count: missing.length,
+    candidates: scan.candidates,
+    missing_count: scan.missing,
     slice: slice.length,
     had_interrupted_batch: hadInterruptedBatch,
     interrupted_keys: interruptedKeys,
@@ -207,8 +209,8 @@ export async function resumeEmbeddingsSlice({
   // symbols are permanently ineligible, not remaining work); an interrupted
   // slice only retires what actually landed.
   const remaining = res.incomplete
-    ? Math.max(0, missing.length - encoded)
-    : missing.length - slice.length;
+    ? Math.max(0, scan.missing - encoded)
+    : scan.missing - slice.length;
   const complete = !res.incomplete && remaining === 0;
   if (complete && typeof index?.clearEncoding === "function") {
     await index.clearEncoding();
@@ -223,8 +225,8 @@ export async function resumeEmbeddingsSlice({
   return {
     skipped: false,
     reason: res.reason,
-    candidates: symbols.length,
-    missing: missing.length,
+    candidates: scan.candidates,
+    missing: scan.missing,
     encoded,
     remaining,
     complete,
@@ -239,29 +241,57 @@ export async function resumeEmbeddingsSlice({
  *   index: EmbeddingIndex,
  *   encoder: EmbeddingEncoder,
  *   repoRoot?: string,
- *   symbols: ViewSymbol[],
+ *   limit?: number | null,
  *   timeoutMs?: number,
  * }} args
  * @returns {Promise<{ skipped: boolean, reason?: string, missing?: number, encoded?: number | null, incomplete?: boolean }>}
  */
-async function ensureMissingSymbolsEncoded({ view, index, encoder, repoRoot, symbols, timeoutMs }) {
-  const missing = await missingSymbols({ index, symbols });
-  if (missing.length === 0) {
-    recordEmbeddingForensics("on_demand.fully_indexed", {
-      symbol_count: symbols.length,
+async function encodeViewSymbols({ view, index, encoder, repoRoot, limit, timeoutMs }) {
+  const controller = new AbortController();
+  const timeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Math.max(1, Math.floor(Number(timeoutMs)))
+    : 30000;
+  const timer = setTimeout(() => controller.abort(new Error("on_demand_timeout")), timeout);
+  try {
+    const report = await ingestView({
+      view,
+      index,
+      encoder,
+      repoRoot,
+      signal: controller.signal,
+      ...(positiveSafeInteger(limit) != null ? { limit: positiveSafeInteger(limit) } : {}),
+    });
+    const missing = Math.max(0, report.candidates - report.alreadyIndexed);
+    if (missing === 0) {
+      recordEmbeddingForensics("on_demand.fully_indexed", {
+        symbol_count: report.candidates,
+        encoder: encoderTelemetry(encoder),
+        index: indexTelemetry(index),
+      });
+      return { skipped: true, reason: "fully_indexed", missing: 0 };
+    }
+    recordEmbeddingForensics("on_demand.missing", {
+      symbol_count: report.candidates,
+      missing_count: missing,
       encoder: encoderTelemetry(encoder),
       index: indexTelemetry(index),
     });
-    return { skipped: true, reason: "fully_indexed", missing: 0 };
+    return { skipped: false, missing, encoded: report.indexedSymbols };
+  } catch (err) {
+    const aborted = controller.signal.aborted;
+    const reason = aborted
+      ? "on_demand_timeout"
+      : String(err?.code || err?.message || err || "encode_error");
+    recordEmbeddingForensics("on_demand.encode.error", {
+      timeout_ms: timeout,
+      aborted,
+      reason,
+      error: errorForTelemetry(err),
+    });
+    return { skipped: false, reason, missing: null, encoded: null, incomplete: true };
+  } finally {
+    clearTimeout(timer);
   }
-  recordEmbeddingForensics("on_demand.missing", {
-    symbol_count: symbols.length,
-    missing_count: missing.length,
-    missing: summarizeSymbols(missing.slice(0, 128)),
-    encoder: encoderTelemetry(encoder),
-    index: indexTelemetry(index),
-  });
-  return encodeMissingSymbols({ view, index, encoder, repoRoot, missing, timeoutMs });
 }
 
 /**
@@ -358,6 +388,28 @@ function fallbackViewKey(view) {
 }
 
 /**
+ * Count the complete missing set while retaining at most `maxCollect` symbols
+ * for the next bounded encode slice.
+ *
+ * @param {{ view: View, index: EmbeddingIndex, limit?: number | null, maxCollect: number }} args
+ * @returns {Promise<{ candidates: number, missing: number, collected: ViewSymbol[] }>}
+ */
+async function scanMissingSymbols({ view, index, limit = null, maxCollect }) {
+  let candidates = 0;
+  let missing = 0;
+  /** @type {ViewSymbol[]} */
+  const collected = [];
+  for await (const symbols of iterateViewSymbolPages({ view, limit })) {
+    candidates += symbols.length;
+    const pageMissing = await missingSymbols({ index, symbols });
+    missing += pageMissing.length;
+    const available = Math.max(0, maxCollect - collected.length);
+    if (available > 0) collected.push(...pageMissing.slice(0, available));
+  }
+  return { candidates, missing, collected };
+}
+
+/**
  * The missing set is "eligible view symbols not yet in keys.db". Eligibility
  * must mirror ingestView's filter (ingest.js): symbols whose language has no
  * semantics adapter are NEVER written to keys.db, so counting them as missing
@@ -423,6 +475,12 @@ async function missingSymbols({ index, symbols: rawSymbols }) {
 
 function embeddingKeyString(key) {
   return `${key.content_hash}\0${key.local_id}`;
+}
+
+function positiveSafeInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
 }
 
 function encoderTelemetry(encoder) {

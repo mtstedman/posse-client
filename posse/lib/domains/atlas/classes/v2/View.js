@@ -226,7 +226,42 @@ export class View {
    * @returns {ViewQuery}
    */
   #buildQueryApi() {
-    const read = async (query, params = {}) => (await runNativeViewRead(this.#dbPath, query, params)).value;
+    const readResponse = async (query, params = {}) => runNativeViewRead(this.#dbPath, query, params);
+    const read = async (query, params = {}) => (await readResponse(query, params)).value;
+
+    const allSymbolsPage = async (opts = {}) => {
+      if (opts.pathPrefix) {
+        assertPathPrefix("allSymbolsPage", opts.pathPrefix);
+      }
+      const afterGlobalId = optionalNonNegativeInteger("allSymbolsPage.afterGlobalId", opts.afterGlobalId);
+      const response = await readResponse("all_symbols", {
+        options: {
+          ...(positiveInteger(opts.limit) != null ? { limit: positiveInteger(opts.limit) } : {}),
+          ...(opts.pathPrefix ? { path_prefix: opts.pathPrefix } : {}),
+          ...(afterGlobalId != null ? { after_global_id: afterGlobalId } : {}),
+        },
+      });
+      if (!Array.isArray(response.value)) {
+        throw new Error("ATLAS allSymbolsPage returned a non-array symbol page");
+      }
+      const symbols = response.value;
+      const lastGlobalId = symbols.length > 0
+        ? optionalNonNegativeInteger("allSymbolsPage.global_id", symbols[symbols.length - 1]?.global_id)
+        : null;
+      if (afterGlobalId != null && symbols.some((symbol) => !Number.isInteger(symbol?.global_id) || symbol.global_id <= afterGlobalId)) {
+        throw new Error(
+          `ATLAS allSymbolsPage cursor did not advance beyond global_id ${afterGlobalId}; native pagination is unavailable or invalid`,
+        );
+      }
+      if (response.truncated && lastGlobalId == null) {
+        throw new Error("ATLAS allSymbolsPage reported truncation without a usable continuation cursor");
+      }
+      return Object.freeze({
+        symbols,
+        truncated: response.truncated,
+        nextAfterGlobalId: response.truncated ? lastGlobalId : null,
+      });
+    };
 
     /** @type {ViewQuery} */
     const api = {
@@ -332,6 +367,10 @@ export class View {
           },
         });
       },
+
+      allSymbolsPage,
+
+      allSymbolPages: (opts = {}) => paginateAllSymbols(allSymbolsPage, opts),
     };
     return Object.freeze(api);
   }
@@ -358,6 +397,52 @@ function positiveInteger(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : null;
+}
+
+function optionalNonNegativeInteger(operation, value) {
+  if (value == null) return null;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  throw new RangeError(`${operation}: expected a non-negative safe integer`);
+}
+
+/**
+ * Iterate a stable view in bounded keyset pages. `limit`, when present, is a
+ * total scan cap; `pageSize` is the maximum resident symbol page.
+ *
+ * @param {(opts?: { limit?: number, pathPrefix?: string, afterGlobalId?: number }) => Promise<{ symbols: any[], truncated: boolean, nextAfterGlobalId: number | null }>} readPage
+ * @param {{ limit?: number, pageSize?: number, pathPrefix?: string, afterGlobalId?: number }} opts
+ */
+async function* paginateAllSymbols(readPage, opts = {}) {
+  const totalLimit = positiveInteger(opts.limit);
+  const pageSize = Math.min(10_000, positiveInteger(opts.pageSize) ?? 1_024);
+  let remaining = totalLimit;
+  let afterGlobalId = optionalNonNegativeInteger("allSymbolPages.afterGlobalId", opts.afterGlobalId);
+
+  while (remaining == null || remaining > 0) {
+    const pageLimit = remaining == null ? pageSize : Math.min(pageSize, remaining);
+    const page = await readPage({
+      limit: pageLimit,
+      ...(opts.pathPrefix ? { pathPrefix: opts.pathPrefix } : {}),
+      ...(afterGlobalId != null ? { afterGlobalId } : {}),
+    });
+    if (page.symbols.length === 0) {
+      if (page.truncated) {
+        throw new Error("ATLAS allSymbolPages received an empty truncated page");
+      }
+      return;
+    }
+    yield page.symbols;
+    if (remaining != null) {
+      remaining -= page.symbols.length;
+      if (remaining <= 0) return;
+    }
+    if (!page.truncated) return;
+    const next = page.nextAfterGlobalId;
+    if (!Number.isSafeInteger(next) || next < 0 || (afterGlobalId != null && next <= afterGlobalId)) {
+      throw new Error("ATLAS allSymbolPages received a non-advancing continuation cursor");
+    }
+    afterGlobalId = next;
+  }
 }
 
 /** @param {string | undefined} value */
