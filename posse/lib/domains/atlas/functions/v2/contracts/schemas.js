@@ -122,8 +122,12 @@
  */
 
 /**
+ * The storable edge kinds — mirrors posse_catalog::kinds::EDGE_KINDS, which
+ * posse-atlas >= 0.1.43 enforces fail-closed at ledger write time. The
+ * read-side query filters additionally accept "uses_type" for backwards
+ * compatibility, but nothing produces it and it is not storable.
  * @typedef {"calls" | "references" | "extends" | "implements"
- *   | "uses_type" | "imports" | "throws" | "reads" | "writes"} EdgeKind
+ *   | "imports" | "reads" | "writes"} EdgeKind
  */
 
 /**

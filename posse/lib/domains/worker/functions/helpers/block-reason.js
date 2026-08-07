@@ -13,8 +13,8 @@
 // CLI, so we match on the gateway/MCP-unavailable shape rather than any one
 // CLI's wording.
 
-// How many automatic requeues before we give up and escalate a persistent
-// gateway-attach failure to a human (a truly stuck gateway is a real problem).
+// How many automatic requeues before we terminate a persistent gateway-attach
+// failure as infrastructure. Operator task guidance cannot repair this surface.
 export const MAX_MCP_INFRA_BLOCK_RETRIES = 3;
 
 // Backoff between automatic requeues (ms), indexed by prior retry count. Gives
@@ -38,6 +38,8 @@ const HUMAN_FILE_AUTHORITY_REQUIRED = /(?:human|operator)\s+(?:permission|approv
 const CODEX_WINDOWS_SANDBOX_HELPER = /\b(?:codex-windows-sandbox-setup|codex(?:-windows)?-command-runner)\.exe\b/i;
 const CODEX_WINDOWS_SANDBOX_HELPER_FAILURE = /(?:orchestrator_helper_launch_failed|not found|program not found|failed to launch|could not (?:be )?launch(?:ed)?|unable to launch)/i;
 const CODEX_NATIVE_PATCH_SANDBOX_REJECTION = /(?:workspace is read-only and sandbox policy rejects file writes|writing is blocked by read-only sandbox|apply_patch.{0,120}read-only sandbox)/i;
+const ISSUED_FILE_TOOL_INVOCATION_FAILURE = /(?:(?:write|read|file|repository)(?:\s*\/\s*(?:write|read|file|repository))*\s+(?:path|tools?|surface)|(?:scoped|issued|required)\s+(?:repository\s+)?(?:file\s+)?(?:read|write|mutation)\s+(?:path|tools?|surface)).{0,180}(?:not successfully callable|could not (?:successfully )?(?:invoke|call|reach)|failed to (?:invoke|call|reach)|unavailable|not callable)/i;
+const FEEDBACK_TOOL_DISPLACED_FILE_TOOLS = /(?:operator[-\s]?feedback|feedback[-\s]?(?:coordination|poll)|request_user_input).{0,240}(?:could not|unable|failed).{0,120}(?:repository|scoped|issued|required).{0,80}(?:read|write|file|mutation)\s+tools?/i;
 
 /**
  * Returns true for a provider runtime/bootstrap failure that cannot be fixed
@@ -109,6 +111,13 @@ export function isTransientMcpInfraBlock(reason) {
   // tool-priority guard instead of asking a human to fix an internal routing
   // mistake.
   if (CODEX_NATIVE_PATCH_SANDBOX_REJECTION.test(text)) return true;
+
+  // Codex occasionally routes toward its native feedback surface while the
+  // required Posse file surface is detached. These are the production smoke
+  // failure shapes that previously escaped the narrower gateway-name regexes
+  // and created durable blocked_recovery questions for the operator.
+  if (ISSUED_FILE_TOOL_INVOCATION_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
+  if (FEEDBACK_TOOL_DISPLACED_FILE_TOOLS.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
 
   // Canonical phrasings emitted by the dev agent when the gateway is missing.
   if (/not connected to this execution environment/i.test(text)) return true;

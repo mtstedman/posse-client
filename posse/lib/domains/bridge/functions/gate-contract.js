@@ -21,14 +21,36 @@ export function bridgeGateKindForJob(job, payload = {}) {
 
 export function bridgeGateAnswerContract(payload = {}) {
   const choices = humanInputChoicesForPayload(payload);
-  if (choices.length === 0) return {};
+  if (choices.length > 0) {
+    return {
+      answer_mode: "enum",
+      choices,
+      answer_command: BRIDGE_COMMANDS.ASK,
+      answer_schema: {
+        type: "string",
+        enum: choices,
+      },
+    };
+  }
+
+  // Plan and push gates resolve through their dedicated commands. A typed
+  // review with no registered choices is an invalid/legacy closed contract,
+  // not a free-form question, so do not advertise `ask` for it either.
+  if (
+    payload?.subtype === "plan_approval"
+    || payload?.subtype === "push_offer"
+    || String(payload?.review_type || "").trim()
+  ) return {};
+
+  // Untyped human-input gates are agent/operator clarifications. Make their
+  // text capability explicit so bridge clients do not have to infer it from
+  // the absence of enum choices.
   return {
-    answer_mode: "enum",
-    choices,
+    answer_mode: "text",
     answer_command: BRIDGE_COMMANDS.ASK,
     answer_schema: {
       type: "string",
-      enum: choices,
+      minLength: 1,
     },
   };
 }

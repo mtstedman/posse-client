@@ -573,7 +573,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     const { dependents, isRecoveryJob } = recovery;
     const deadLetterPayload = parseJobPayload(job);
     const isOneshotLeaf = job.job_type === "dev" && (deadLetterPayload.oneshot === true || deadLetterPayload.oneshot_origin === true);
-    if (!recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf)) {
+    if (!suppressHumanRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf)) {
       if (recoveryIsUnattended(worker)) {
         emitUnattendedRecoverySkipped(worker, job, isOneshotLeaf ? "One-shot" : "Research", {
           recovery_kind: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
@@ -606,7 +606,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           message: `${isOneshotLeaf ? "One-shot" : "Research"} dead-letter recovery: spawned human_input #${recoveryJob.id}`,
         });
       }
-    } else if (dependents.length === 0 && !isRecoveryJob && stallExhausted) {
+    } else if (!suppressHumanRecovery && dependents.length === 0 && !isRecoveryJob && stallExhausted) {
       const stallRecoveryCount = stallRecoveryRetryCount(job);
       if (stallRecoveryCount >= MAX_STALL_EXHAUSTED_RECOVERY_RETRIES) {
         worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} stall recovery cap reached for job #${job.id}; leaving dead-lettered${C.reset}`);

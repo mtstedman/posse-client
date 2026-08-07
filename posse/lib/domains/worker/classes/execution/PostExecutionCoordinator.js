@@ -350,9 +350,9 @@ export async function handlePostExecutionForWorker({
 
           // Scoped mutation routing failures are infrastructure, not a real
           // block: either the gateway failed to attach or Codex selected its
-          // intentionally read-only native patch path instead of an issued MCP
-          // write tool. Auto-requeue with backoff instead of escalating to a
-          // human (capped, so a persistent failure still escalates).
+          // native feedback/read-only path instead of an issued MCP write
+          // tool. Retry them internally, then terminate as an infrastructure
+          // failure. Human guidance cannot repair the provider surface.
           if (isTransientMcpInfraBlock(blockReason)) {
             this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
             const infraRetries = allAttempts.filter(
@@ -369,7 +369,10 @@ export async function handlePostExecutionForWorker({
               this._cleanupWorktreeIfDone(job.work_item_id);
               return;
             }
-            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — escalating to human${C.reset}`);
+            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
+            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+            await this._cleanupWorktreeIfDone(job.work_item_id);
+            return;
           }
 
           const blockedPayload = {
@@ -1387,9 +1390,9 @@ export async function handlePostExecutionForWorker({
               return;
             }
 
-            // Scoped mutation routing failures are infrastructure, not a real
-            // block — auto-requeue with backoff instead of escalating to a
-            // human (capped, so a persistent failure still escalates).
+            // This legacy no-write branch is retained for older completion
+            // shapes. Apply the same policy as the primary BLOCKED path:
+            // provider routing failures never become operator questions.
             if (isTransientMcpInfraBlock(blockReason)) {
               this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
               const infraRetries = allAttempts.filter(
@@ -1406,7 +1409,10 @@ export async function handlePostExecutionForWorker({
                 this._cleanupWorktreeIfDone(job.work_item_id);
                 return;
               }
-              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — escalating to human${C.reset}`);
+              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
+              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+              await this._cleanupWorktreeIfDone(job.work_item_id);
+              return;
             }
 
             // Don't consume the attempt — BLOCKED is a correct diagnosis, not a

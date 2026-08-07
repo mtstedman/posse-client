@@ -771,23 +771,6 @@ export function spawnPlanAfterResearch(worker, researchJob, output, options = {}
     // human answers before we can call this "answered".
     if (hasQuestions) {
       const questions = extractedQuestions;
-      const humanJob = createJob({
-        work_item_id: researchJob.work_item_id,
-        job_type: "human_input",
-        title: `Researcher questions: ${wi.title.slice(0, 60)}`,
-        parent_job_id: researchJob.id,
-        priority: "high",
-        model_tier: "cheap",
-        payload_json: JSON.stringify({
-          original_job_id: researchJob.id,
-          questions,
-          context: "The researcher needs clarification before the answer is complete.",
-          allow_best_judgment: true,
-        }),
-      });
-      worker.emit(researchJob.id,
-        `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: researcher has ${questions.length} question(s) — spawned human_input #${humanJob.id}`);
-
       // Spawn a follow-up research job that depends on the human answers.
       // Cap clarification rounds to prevent infinite research->human->research loops.
       const nextRound = clarificationRound + 1;
@@ -796,6 +779,23 @@ export function spawnPlanAfterResearch(worker, researchJob, output, options = {}
           `${C.red}[pipeline]${C.reset} WI#${researchJob.work_item_id}: clarification limit (${MAX_CLARIFICATION_ROUNDS}) reached — completing with current research`);
         // Fall through to complete without further research
       } else {
+        const humanJob = createJob({
+          work_item_id: researchJob.work_item_id,
+          job_type: "human_input",
+          title: `Researcher questions: ${wi.title.slice(0, 60)}`,
+          parent_job_id: researchJob.id,
+          priority: "high",
+          model_tier: "cheap",
+          payload_json: JSON.stringify({
+            original_job_id: researchJob.id,
+            questions,
+            context: "The researcher needs clarification before the answer is complete.",
+            allow_best_judgment: true,
+          }),
+        });
+        worker.emit(researchJob.id,
+          `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: researcher has ${questions.length} question(s) — spawned human_input #${humanJob.id}`);
+
         const followUp = createJob({
           work_item_id: researchJob.work_item_id,
           job_type: "research",

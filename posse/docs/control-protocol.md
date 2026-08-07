@@ -397,7 +397,7 @@ job is terminal.
 // args
 {
   "job_id": 9821,                               // job that opened the gate
-  "response": "retry_assessment"                // exact enum when answer_mode=enum
+  "response": "retry_assessment"                // exact enum, or free-form text when answer_mode=text
 }
 
 // result
@@ -535,7 +535,9 @@ Fires on every job state transition.
   "prompt": "...",                              // nullable
   "opened_at": "2026-05-26T14:23:01.234Z",
   "choices": ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
-  "answer_mode": "enum",
+  "answer_mode": "enum",                       // "enum" or "text"
+  "answer_command": "ask",
+  "answer_schema": { "type": "string", "enum": ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"] },
   "identity": {                                 // human_input/review gates
     "work_item_id": 141,
     "original_job_id": 9800,
@@ -556,6 +558,12 @@ Typed gate choices use canonical action names. Legacy prose aliases may be
 accepted by the local TUI, but bridge clients must send the advertised enum.
 Submitting the same decision again is idempotent; a conflicting decision after
 resolution is rejected as stale.
+
+Agent-authored clarification gates advertise `answer_mode: "text"` with a
+non-empty string schema. `choices` are reserved for registered automated
+review/recovery contracts and deterministic selectors; bridge clients must
+submit one exact advertised choice for those gates. An unknown typed gate is
+not downgraded to free-form text.
 
 For `push` gates, `payload` carries the structured push offer:
 
