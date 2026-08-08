@@ -8,6 +8,7 @@ import {
   safePath,
 } from "../functions/toolkit/index.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../domains/runtime/functions/protected-paths.js";
+import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../format/functions/display-paths.js";
 import { guardToolWriteLock } from "../../../domains/queue/functions/write-lock-guard.js";
 import { agentHiddenReadablePathReason } from "../../scope/functions/agent-hidden-paths.js";
 
@@ -57,7 +58,7 @@ export class ToolExecutor {
     try {
       return fn(args || {});
     } catch (err) {
-      return `Error executing ${name}: ${err?.message || String(err)}`;
+      return `Error executing ${name}: ${sanitizeAbsolutePathsInText(err?.message || String(err), this.cwd)}`;
     }
   }
 
@@ -221,7 +222,7 @@ export class ToolExecutor {
         return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
       }
       return this._requestScope({
-        path: relativePathFromCwd(ctx.cwd, writePath),
+        path: toRepoRelativePath(ctx.cwd, writePath) ?? "",
         access: exists ? "modify" : "create",
         operation: "write_file",
         reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
@@ -243,7 +244,7 @@ export class ToolExecutor {
         return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
       }
       return this._requestScope({
-        path: relativePathFromCwd(ctx.cwd, editPath),
+        path: toRepoRelativePath(ctx.cwd, editPath) ?? "",
         access: "modify",
         operation: "edit_file",
         reason: "edit_file requires this existing file to complete the active job",
@@ -311,7 +312,7 @@ export class ToolExecutor {
       fs.renameSync(sourcePath, destinationPath);
     } catch (err) {
       if (String(err?.code) !== "EXDEV") {
-        return `Error: move_file failed - ${err?.message || String(err)}`;
+        return `Error: move_file failed - ${sanitizeAbsolutePathsInText(err?.message || String(err), ctx.cwd)}`;
       }
       fs.copyFileSync(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
       fs.rmSync(sourcePath, { force: true });

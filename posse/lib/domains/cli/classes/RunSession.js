@@ -1069,7 +1069,6 @@ export class RunSession {
       await startupWorktreeCleanup({
         signal: bootAbortController.signal,
         skipDirtyTreeGuard: true,
-        deferRecoveryPrune: true,
         onMsg: (msg) => updateBootStep("worktree cleanup", {
           section: "workspace",
           status: "running",

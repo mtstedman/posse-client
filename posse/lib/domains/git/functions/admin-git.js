@@ -1,8 +1,8 @@
-// Direct system-Git adapter for operator/admin CLI commands.
+// Direct system-Git adapter for operator/admin commands and local Git hooks.
 //
-// Agent work remains behind the native daemon/MCP toolchain. Bossy and other
-// operator surfaces are not agent dispatch, so their status/merge workflow
-// must not depend on native heartbeat availability.
+// Agent work remains behind the native daemon/MCP toolchain. Bossy, other
+// operator surfaces, and fresh hook processes are not agent dispatch, so their
+// Git probes/workflows must not depend on native heartbeat availability.
 
 import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -52,6 +52,11 @@ export function adminGitExec(args, cwd, {
       maxBuffer,
       timeout: timeout ?? timeoutMs,
       windowsHide: true,
+      // execFileSync passes child stderr through to the parent's terminal
+      // unless stdio is explicit. Callers include git hooks running during a
+      // user's commit; failure detail stays available via commandFailure's
+      // captured stderr, matching adminGitExecAsync.
+      stdio: ["pipe", "pipe", "pipe"],
     });
     if (Buffer.isBuffer(output)) return output;
     const text = String(output ?? "");

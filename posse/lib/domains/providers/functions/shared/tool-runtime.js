@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../runtime/functions/protected-paths.js";
+import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../../shared/format/functions/display-paths.js";
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-gateway.js";
 import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
@@ -473,7 +474,7 @@ export function createStandardToolHandlerMap({
           return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
         }
         return handlers.request_scope({
-          path: relativePathFromCwd(ctx.cwd, writePath),
+          path: toRepoRelativePath(ctx.cwd, writePath) ?? "",
           access: exists ? "modify" : "create",
           operation: "write_file",
           reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
@@ -492,7 +493,7 @@ export function createStandardToolHandlerMap({
           return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
         }
         return handlers.request_scope({
-          path: relativePathFromCwd(ctx.cwd, editPath),
+          path: toRepoRelativePath(ctx.cwd, editPath) ?? "",
           access: "modify",
           operation: "edit_file",
           reason: "edit_file requires this existing file to complete the active job",
@@ -688,6 +689,6 @@ export async function executeToolWithMap(name, argsStr, context, {
     return `Error: Unknown tool "${name}"`;
   } catch (err) {
     if (isAsyncGateError(err)) throw err;
-    return `Error executing ${name}: ${err?.message || String(err)}`;
+    return `Error executing ${name}: ${sanitizeAbsolutePathsInText(err?.message || String(err), context?.cwd)}`;
   }
 }

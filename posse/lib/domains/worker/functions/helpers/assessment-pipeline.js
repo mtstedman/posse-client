@@ -2331,7 +2331,16 @@ export async function runPostExecutionAssessment(worker, {
       const assessmentReasoningEffort = ["low", "medium", "high"].includes(String(jobPayloadForAssess._assess_reasoning_effort || "").trim().toLowerCase())
         ? String(jobPayloadForAssess._assess_reasoning_effort).trim().toLowerCase()
         : "medium";
-      const initialAssessmentTier = normalizeAssessmentTier(jobPayloadForAssess._assess_model_tier, "cheap");
+      // A/B harnesses compare execution routes, not assessor strength. Allow
+      // the harness supervisor to hold the in-job assessor tier constant even
+      // when a planner independently adjusts the developer job tier.
+      const harnessAssessmentTier = process.env.POSSE_AB_HARNESS
+        ? process.env.POSSE_AB_ASSESSOR_TIER
+        : null;
+      const initialAssessmentTier = normalizeAssessmentTier(
+        harnessAssessmentTier || jobPayloadForAssess._assess_model_tier,
+        "cheap",
+      );
       let lastAssessmentTier = initialAssessmentTier;
       let verdict = await assessResult(job, output, {
         ...assessOpts,

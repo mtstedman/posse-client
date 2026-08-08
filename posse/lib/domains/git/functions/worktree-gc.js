@@ -173,8 +173,6 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
   timingSlowMs = null,
   timingNow = null,
   recoveryPruneMinIntervalMs = DEFAULT_RECOVERY_SNAPSHOT_PRUNE_MIN_INTERVAL_MS,
-  forceRecoveryPrune = false,
-  deferRecoveryPrune = false,
 } = {}) {
   const timing = createGcTiming(onMsg, { slowMs: timingSlowMs, now: timingNow });
   try {
@@ -182,22 +180,12 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
     const minIntervalMs = Math.max(0, Number(recoveryPruneMinIntervalMs) || 0);
     const lastPrunedAt = lastRecoverySnapshotPruneAtByProject.get(projectKey) || 0;
     const now = gcNowMs(timingNow);
-    if (forceRecoveryPrune || minIntervalMs === 0 || now - lastPrunedAt >= minIntervalMs) {
-      if (deferRecoveryPrune && !forceRecoveryPrune) {
-        // Snapshot retention is housekeeping, not a prerequisite for safely
-        // recovering/removing the worktrees below. Keep it off run boot's
-        // critical path while retaining the same bounded retention pass.
-        lastRecoverySnapshotPruneAtByProject.set(projectKey, now);
-        setImmediate(() => {
-          void pruneRecoveredWorktreeSnapshotsAsync(projectDir, () => {}, { signal: null })
-            .catch(() => {
-              // Best effort; the interval guard permits a later retry.
-            });
-        });
-      } else {
-        await timing.step("recovery snapshot prune", () => pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg, { signal }), { gitCwd: projectDir });
-        lastRecoverySnapshotPruneAtByProject.set(projectKey, gcNowMs(timingNow));
-      }
+    if (minIntervalMs === 0 || now - lastPrunedAt >= minIntervalMs) {
+      // Retention must finish before this pass starts creating/reusing recovery
+      // refs and deleting their source branches. Running both lanes together
+      // lets pruning remove a ref while branch cleanup still trusts it.
+      await timing.step("recovery snapshot prune", () => pruneRecoveredWorktreeSnapshotsAsync(projectDir, onMsg, { signal }), { gitCwd: projectDir });
+      lastRecoverySnapshotPruneAtByProject.set(projectKey, gcNowMs(timingNow));
     }
     throwIfAborted(signal);
 

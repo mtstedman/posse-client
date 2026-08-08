@@ -15,6 +15,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
+import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
@@ -563,13 +564,18 @@ function deniedToolCallMessage(message, toolName, policy) {
   };
 }
 
-function mcpToolErrorPayload(message, error = null) {
-  const text = String(message || "ATLAS tool execution failed");
+function mcpToolErrorPayload(message, error = null, { cwd = null } = {}) {
+  // Scrub here, not at call sites: the structured/_meta channels re-embed the
+  // raw error, so a caller-side scrub of the message alone still leaks.
+  const scrub = (value) => (cwd ? sanitizeAbsolutePathsInText(String(value), cwd) : String(value));
+  const text = scrub(message || "ATLAS tool execution failed");
   const structured = error && typeof error === "object"
     ? {
         code: error.code ? String(error.code) : "atlas_tool_error",
-        message: error.message ? String(error.message) : text,
-        ...(error.details === undefined ? {} : { details: error.details }),
+        message: error.message ? scrub(error.message) : text,
+        ...(error.details === undefined ? {} : {
+          details: typeof error.details === "string" ? scrub(error.details) : error.details,
+        }),
       }
     : null;
   return {
@@ -2576,7 +2582,11 @@ export class PersistentMcpOwner {
         error: ownerErrorSummary(err),
       });
       recordOwnerToolObservation({ session, toolName, toolArgs, error: err });
-      let result = mcpToolErrorPayload(String(err?.message || err || "ATLAS tool execution failed"), err);
+      let result = mcpToolErrorPayload(
+        String(err?.message || err || "ATLAS tool execution failed"),
+        err,
+        { cwd: session?.bootConfig?.cwd },
+      );
       if (memoryAction) {
         this._terminalMemoryToolSessions.add(session);
         result = appendTerminalMemoryToolNotice(result);

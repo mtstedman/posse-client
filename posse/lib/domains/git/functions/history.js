@@ -1,5 +1,6 @@
 import path from "path";
 import { runGitNativeMethodAsync } from "./native/invoke.js";
+import { normalizeDisplaySlashes } from "../../../shared/format/functions/display-paths.js";
 
 const SAFE_DIFF_REF_TOKEN_RE = /^(?!-)[A-Za-z0-9][A-Za-z0-9._/@{}~^+-]*$/;
 
@@ -28,11 +29,6 @@ export const TOOL_GIT_HISTORY = {
     additionalProperties: false,
   },
 };
-
-function normalizeRelativePath(cwd, safeAbsPath) {
-  const rel = path.relative(cwd, safeAbsPath);
-  return rel.replace(/\\/g, "/");
-}
 
 function scopeListsFromPredicates(scopePredicates) {
   const scope = scopePredicates?.policy?.scope;
@@ -73,7 +69,7 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
     if (args.path != null) {
       if (typeof args.path !== "string" || !args.path.trim()) return "Error: path must be a non-empty string.";
       try {
-        relPath = normalizeRelativePath(cwd, safePath(cwd, args.path, scopePredicates));
+        relPath = normalizeDisplaySlashes(path.relative(cwd, safePath(cwd, args.path, scopePredicates)));
       } catch (err) {
         return `Error: ${err.message}`;
       }

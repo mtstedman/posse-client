@@ -297,6 +297,30 @@ export function handleDeterministicInterruption(worker, job, attemptId, startTim
     return true;
   }
 
+  if (err._killReason === "post_merge_closeout_budget") {
+    // The closeout drain's budget expired mid-warm. The warm itself is fine —
+    // requeue it (slightly deferred so this closeout does not re-pick it) for
+    // the next scheduler run instead of burning the single warm attempt.
+    completeAttempt(attemptId, {
+      status: "interrupted",
+      duration_ms: Date.now() - startTime,
+      error_text: "Post-merge closeout budget exhausted",
+    });
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attemptId,
+      event_type: EVENT_TYPES.JOB_RUNTIME_EXCEEDED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: "Post-merge closeout budget exhausted — requeuing",
+    });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+      readyAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} closeout budget exhausted — requeuing${C.reset}`);
+    return true;
+  }
+
   if (err._killReason === "user_canceled" || err._killReason === "work_item_canceled") {
     const cancelMsg = err._killReason === "work_item_canceled" ? "Canceled with work item" : "Canceled by user";
     completeAttempt(attemptId, {

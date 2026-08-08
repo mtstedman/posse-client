@@ -39,8 +39,6 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     onMsg = null,
     skipDirtyTreeGuard = false,
     recoveryPruneMinIntervalMs = undefined,
-    forceRecoveryPrune = false,
-    deferRecoveryPrune = false,
   } = {}) {
     if (!skipDirtyTreeGuard) {
       await guardStartupDirtyTreeAsync({
@@ -54,8 +52,6 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     }
     const gcOptions = { signal };
     if (recoveryPruneMinIntervalMs !== undefined) gcOptions.recoveryPruneMinIntervalMs = recoveryPruneMinIntervalMs;
-    if (forceRecoveryPrune) gcOptions.forceRecoveryPrune = true;
-    if (deferRecoveryPrune) gcOptions.deferRecoveryPrune = true;
     await gcWorktreesAsync(projectDir, (msg) => {
       if (typeof onMsg === "function") {
         onMsg(msg);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ATLAS_INDEXABLE_SOURCE_EXTENSIONS } from "../../../../catalog/files.js";
+import { hasWindowsPathRoot, toRepoRelativePath } from "../../../../shared/format/functions/display-paths.js";
 
 export { ATLAS_INDEXABLE_SOURCE_EXTENSIONS };
 
@@ -17,33 +18,13 @@ const ARRAY_FILE_KEYS = [
   "changedFiles",
 ];
 
-function hasWindowsDrive(value) {
-  return /^[A-Za-z]:[\\/]/u.test(String(value || ""));
-}
-
-function normalizeAbsolutePath(value, cwd = null) {
-  if (!cwd) return null;
-  const raw = String(value || "").trim();
-  const rootRaw = String(cwd || "").trim();
-  if (!raw || !rootRaw) return null;
-
-  const winMode = hasWindowsDrive(raw) || hasWindowsDrive(rootRaw);
-  const api = winMode ? path.win32 : path;
-  const root = api.resolve(rootRaw);
-  const absolute = api.resolve(raw);
-  const rel = api.relative(root, absolute).replace(/\\/g, "/");
-  if (!rel || rel === ".") return null;
-  if (rel.startsWith("../") || rel === ".." || api.isAbsolute(rel)) return null;
-  return rel;
-}
-
 export function normalizeRepoPathForGate(value, { cwd = null } = {}) {
   let raw = String(value ?? "").trim();
   if (!raw || raw.includes("\0")) return null;
   raw = raw.replace(/^file:\/\/\/?/iu, "");
 
-  const absolute = path.isAbsolute(raw) || hasWindowsDrive(raw);
-  if (absolute) raw = normalizeAbsolutePath(raw, cwd);
+  const absolute = path.isAbsolute(raw) || hasWindowsPathRoot(raw);
+  if (absolute) raw = toRepoRelativePath(cwd, raw);
   if (!raw) return null;
 
   let text = raw.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+/g, "/").replace(/\/+$/g, "");

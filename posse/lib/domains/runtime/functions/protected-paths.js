@@ -1,9 +1,22 @@
 // lib/runtime/protected-paths.js
 //
-import path from "path";
-
 // Central policy for repo-relative paths that agents must not mutate even when
 // a planner, assessor, or file-request block puts them in nominal write scope.
+
+import path from "node:path";
+
+// Guard-side relativization: preserves "../" escapes so segment checks still
+// see paths under authorized external scope roots (e.g. ../ext/node_modules/x
+// keeps its node_modules part). Display code uses display-paths.js instead —
+// its strict helper nulls out-of-root paths, which would blind these guards.
+export function relativePathFromCwd(cwd, fullPath) {
+  if (!cwd || !fullPath) return "";
+  try {
+    return normalizeRepoRelativePath(path.relative(cwd, fullPath));
+  } catch {
+    return "";
+  }
+}
 
 export function normalizeRepoRelativePath(value) {
   const normalized = String(value || "")
@@ -64,13 +77,4 @@ export function isProtectedMutablePath(value, opts = {}) {
 export function validateMutableRepoPath(value, label = "path", opts = {}) {
   const reason = protectedMutablePathReason(value, opts);
   return reason ? `${label} is protected: ${reason}` : null;
-}
-
-export function relativePathFromCwd(cwd, fullPath) {
-  if (!cwd || !fullPath) return "";
-  try {
-    return normalizeRepoRelativePath(path.relative(cwd, fullPath));
-  } catch {
-    return "";
-  }
 }

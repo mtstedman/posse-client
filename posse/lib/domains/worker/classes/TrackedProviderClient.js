@@ -1532,6 +1532,10 @@ export class TrackedProviderClient {
         modelTier: tier,
         modelName: stats.modelName || modelName,
         promptChars: prompt.length,
+        // Raw stats, not accountingStats: the pressure lane detects context
+        // overflow and self-labels estimated vs measured. Nulling partially
+        // reported tokens here would blind it on exactly the overflow-shaped
+        // calls; the no-invented-usage invariant governs cost accounting only.
         stats,
         status: "succeeded",
         opts,
@@ -1569,6 +1573,7 @@ export class TrackedProviderClient {
         status: "succeeded",
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
+        providerUsageStatus,
         durationMs: stats.durationMs,
         exitCode: terminalProviderError == null ? stats.exitCode : null,
         output,
@@ -1597,10 +1602,12 @@ export class TrackedProviderClient {
           output_chars: recordedOutputChars,
           input_tokens: accountingInputTokens,
           output_tokens: accountingOutputTokens,
+          provider_usage_status: providerUsageStatus,
           turns_used: stats.numTurns ?? null,
           max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
           output_truncated: stats.outputTruncated === true,
           duration_ms: stats.durationMs ?? null,
+          exit_code: terminalProviderError == null ? stats.exitCode ?? null : null,
           tool_uses: toolUsesForReplay.length,
           agent_handoff: handoffFinalization.applied ? {
             digest: handoffFinalization.digest,
@@ -1642,9 +1649,11 @@ export class TrackedProviderClient {
         : Object.prototype.hasOwnProperty.call(stats, "outputChars")
           && Number.isFinite(Number(stats.outputChars))
           ? Number(stats.outputChars)
-          : typeof err.output === "string"
-            ? err.output.length
-            : null;
+          : typeof stats.output === "string" && stats.output
+            ? stats.output.length
+            : typeof err.output === "string"
+              ? err.output.length
+              : null;
       const recordedExitCode = terminalUsageUnavailable ? null : (stats.exitCode ?? null);
       const recordedDurationMs = Number.isFinite(Number(stats.durationMs))
         ? Number(stats.durationMs)
@@ -1720,6 +1729,7 @@ export class TrackedProviderClient {
         modelTier: tier,
         modelName: stats.modelName || modelName,
         promptChars: prompt.length,
+        // Raw stats for the same reason as the success-path pressure call.
         stats,
         status: "failed",
         opts,
@@ -1770,10 +1780,11 @@ export class TrackedProviderClient {
         activity: opts.activity,
         modelTier: tier,
         status: "failed",
-        inputTokens: stats.inputTokens ?? null,
-        outputTokens: stats.outputTokens ?? null,
-        durationMs: stats.durationMs || 0,
-        exitCode: stats.exitCode,
+        inputTokens: accountingInputTokens,
+        outputTokens: accountingOutputTokens,
+        providerUsageStatus,
+        durationMs: recordedDurationMs,
+        exitCode: recordedExitCode,
         errorText: err.message?.slice(0, 2000) || null,
         output: failureOutput,
       });
@@ -1799,13 +1810,15 @@ export class TrackedProviderClient {
         status: "failed",
         extra: {
           error_text: err.message?.slice(0, 2000) || null,
-          output_chars: stats.outputChars || failureOutput.length || 0,
-          input_tokens: stats.inputTokens ?? null,
-          output_tokens: stats.outputTokens ?? null,
+          output_chars: recordedOutputChars,
+          input_tokens: accountingInputTokens,
+          output_tokens: accountingOutputTokens,
+          provider_usage_status: providerUsageStatus,
           turns_used: stats.numTurns ?? null,
           max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
           output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
-          duration_ms: stats.durationMs || 0,
+          duration_ms: recordedDurationMs,
+          exit_code: recordedExitCode,
           tool_uses: failureToolUsesForReplay.length,
         },
       });

@@ -122,6 +122,7 @@ import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../runtime/functions/protected-paths.js";
+import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../shared/format/functions/display-paths.js";
 import {
   parseEnvBool,
   parseBoolOverride,
@@ -1364,7 +1365,7 @@ function writeFileWithinScope(args = {}) {
       return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
     }
     const scopeResult = requestScopeExpansionWithinJob({
-      path: relativePathFromCwd(workspaceCwd, resolved.path),
+      path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
       access: exists ? "modify" : "create",
       operation: "write_file",
       reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
@@ -1388,7 +1389,7 @@ function editFileWithinScope(args = {}) {
       return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
     }
     const scopeResult = requestScopeExpansionWithinJob({
-      path: relativePathFromCwd(workspaceCwd, resolved.path),
+      path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
       access: "modify",
       operation: "edit_file",
       reason: "edit_file requires this existing file to complete the active job",
@@ -3142,7 +3143,7 @@ async function handleRequest(msg) {
           error: safeError,
         });
         sendMessage(jsonRpcSuccess(id, {
-          content: [{ type: "text", text: `Error executing ${requestedToolName}: ${safeError}` }],
+          content: [{ type: "text", text: `Error executing ${requestedToolName}: ${sanitizeAbsolutePathsInText(safeError, workspaceCwd)}` }],
           isError: true,
         }));
       }
@@ -3299,10 +3300,13 @@ async function handleRequest(msg) {
       const handoffIssues = toolName === "agent_handoff" && Array.isArray(err?.issues)
         ? err.issues.slice(0, 24).map((issue) => ({
             code: String(issue?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
-            message: capString(issue?.message || "Invalid agent_handoff arguments", 500),
+            message: sanitizeAbsolutePathsInText(capString(issue?.message || "Invalid agent_handoff arguments", 500), workspaceCwd),
           }))
         : [];
       const safeError = capString(err?.message || String(err), toolName === "agent_handoff" ? 2400 : 300);
+      // Everything the agent sees — text block and structured channel alike —
+      // gets the scrub; the raw form stays in local telemetry below.
+      const displayError = sanitizeAbsolutePathsInText(safeError, workspaceCwd);
       finishToolInvocation(toolInvocation, {
         tool: toolName,
         input: recordInput,
@@ -3321,13 +3325,13 @@ async function handleRequest(msg) {
         error: safeError,
       });
       sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: `Error executing ${requestedToolName}: ${safeError}` }],
+        content: [{ type: "text", text: `Error executing ${requestedToolName}: ${displayError}` }],
         isError: true,
         ...(toolName === "agent_handoff" ? {
           structuredContent: {
             error: {
               code: String(err?.code || "AGENT_HANDOFF_REJECTED").slice(0, 120),
-              message: safeError,
+              message: displayError,
               ...(handoffIssues.length > 0 ? { issues: handoffIssues } : {}),
             },
           },
@@ -3383,7 +3387,7 @@ function dispatchParsed(parsed) {
     });
     if (id == null) return;
     try {
-      sendMessage(jsonRpcError(id, -32603, safeError || "Internal error"));
+      sendMessage(jsonRpcError(id, -32603, sanitizeAbsolutePathsInText(safeError, workspaceCwd) || "Internal error"));
     } catch {
       // If stdout is already closed (for example EPIPE), there is no
       // protocol response channel left. Keep the process from crashing.

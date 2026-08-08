@@ -351,10 +351,17 @@ export function recordAgentActivity({
   const bodyText = normalizeText(body) || [phaseText, actionText].filter(Boolean).join(": ");
   if (!bodyText) throw new Error("recordAgentActivity requires phase, action, or body");
   const activityBody = bodyText.slice(0, 500);
+  const activityMetadata = {
+    ...(metadata_json && typeof metadata_json === "object" ? metadata_json : {}),
+    phase: phaseText || null,
+    action: actionText || null,
+    role: normalizeText(role) || normalizeText(metadataObject(metadata_json).role) || null,
+  };
 
   // Coalesce a chatty agent re-sending the same update: a repeated identical
-  // body within the window returns the existing row instead of spending another
-  // insert + event + scheduler wakeup.
+  // protocol event within the window returns the existing row instead of
+  // spending another insert + event + scheduler wakeup. Body text alone is not
+  // enough: a terminal result may intentionally reuse its progress summary.
   const activityJobId = normalizePositiveInt(job_id);
   if (activityJobId) {
     const recent = normalizeRow(getDb().prepare(`
@@ -364,7 +371,27 @@ export function recordAgentActivity({
       ORDER BY created_at DESC, id DESC
       LIMIT 1
     `).get(activityJobId));
-    if (recent && recent.body === activityBody) {
+    const recentMetadata = metadataObject(recent?.metadata_json);
+    const recentProtocolState = activityProtocolState(recentMetadata);
+    const nextProtocolState = activityProtocolState(activityMetadata);
+    const sameProtocolEvent = recent
+      && recent.body === activityBody
+      && normalizePositiveInt(recent.attempt_id) === normalizePositiveInt(attempt_id)
+      && normalizePositiveInt(recent.agent_call_id) === normalizePositiveInt(agent_call_id)
+      && normalizeText(recent.source) === normalizeText(source)
+      && normalizeText(recentMetadata.phase) === normalizeText(activityMetadata.phase)
+      && normalizeText(recentMetadata.role) === normalizeText(activityMetadata.role)
+      && normalizeText(recentMetadata.detail) === normalizeText(activityMetadata.detail)
+      && normalizeText(recentMetadata.provider) === normalizeText(activityMetadata.provider)
+      && normalizeText(recentMetadata.model) === normalizeText(activityMetadata.model)
+      // Raw action/status too, not just the bucketed protocol state: distinct
+      // transitions inside one bucket (e.g. running -> verifying) are real
+      // protocol events and must not coalesce.
+      && normalizeText(recentMetadata.action) === normalizeText(activityMetadata.action)
+      && normalizeText(recentMetadata.status) === normalizeText(activityMetadata.status)
+      && recentProtocolState.kind === nextProtocolState.kind
+      && recentProtocolState.status === nextProtocolState.status;
+    if (sameProtocolEvent) {
       const ageMs = Date.now() - Date.parse(recent.created_at || "");
       if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < ACTIVITY_COALESCE_WINDOW_MS) {
         return recent;
@@ -384,12 +411,7 @@ export function recordAgentActivity({
     source,
     author: "agent",
     body: activityBody,
-    metadata_json: {
-      ...(metadata_json && typeof metadata_json === "object" ? metadata_json : {}),
-      phase: phaseText || null,
-      action: actionText || null,
-      role: normalizeText(role) || normalizeText(metadataObject(metadata_json).role) || null,
-    },
+    metadata_json: activityMetadata,
     ack_state: "not_applicable",
   });
 }

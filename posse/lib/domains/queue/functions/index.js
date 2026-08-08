@@ -8,7 +8,7 @@ import { MUTATING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../ca
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
-import { isLeaseValid } from "./attempts.js";
+import { hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
 import {
   ACTIVE_LEASE_STATUSES,
   ACTIVE_LEASE_STATUSES_SQL,
@@ -635,13 +635,23 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
 
   for (const job of plan.originals || []) {
     let changed = false;
+    let waived = false;
     if (REVIEW_SETTLEMENT_ORIGINAL_STATUSES.has(job.status)) {
       changed = forceUpdateJobStatus(job.id, "succeeded", {
         expectedStatuses: [job.status],
       }) || changed;
     }
     if (job.assessor_verdict === "needs_review") {
-      changed = setAssessorVerdict(job.id, "pass", "high", { force: true }) || changed;
+      if (hasImplementationAttempts(job.id)) {
+        changed = setAssessorVerdict(job.id, "pass", "high", { force: true }) || changed;
+      } else {
+        // Work-item approval unblocks the graph, but unexecuted work is never
+        // recorded as assessor-passed — same invariant as the job-level review
+        // waiver in human-input-job.js.
+        waived = true;
+        changed = setAssessorVerdict(job.id, "not_assessed", null, { force: true }) || changed;
+        setAssessmentLifecycle(job.id, "assessment_waived", { completed: true });
+      }
     }
     if (!changed) continue;
     logEvent({
@@ -652,7 +662,7 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
       message: resolution === "work_item_merged"
         ? "Pending job review resolved by approved work-item merge"
         : "Pending job review resolved by explicit work-item approval",
-      event_json: JSON.stringify({ resolution }),
+      event_json: JSON.stringify(waived ? { resolution, assessment_waived: true } : { resolution }),
     });
     resolved += 1;
   }

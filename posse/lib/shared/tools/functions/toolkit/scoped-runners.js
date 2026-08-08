@@ -7,6 +7,7 @@ import {
   packageManagerRun,
   verificationReadinessManifest,
 } from "./verification-readiness.js";
+import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format/functions/display-paths.js";
 
 const JS_SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
 const PHP_SOURCE_EXTENSIONS = new Set([".php"]);
@@ -32,20 +33,11 @@ const MAX_SCOPE_ROOT_FILES = 250;
 const MAX_FAILURES = 60;
 const MAX_OUTPUT_CHARS = 6000;
 
-function relPath(cwd, value) {
-  const raw = String(value || "").replace(/\\/g, "/").trim();
-  if (!raw) return "";
-  const resolved = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
-  const rel = path.relative(cwd, resolved).replace(/\\/g, "/");
-  if (!rel || rel.startsWith("../") || rel === "..") return "";
-  return rel.replace(/^\.\//, "");
-}
-
 function normalizePathList(cwd, values = []) {
   const out = [];
   const seen = new Set();
   for (const value of Array.isArray(values) ? values : []) {
-    const rel = relPath(cwd, value);
+    const rel = toRepoRelativePath(cwd, value);
     if (!rel || seen.has(rel)) continue;
     seen.add(rel);
     out.push(rel);
@@ -87,7 +79,7 @@ export function declaredScopeFiles(cwd, scope = {}) {
     if (root === "*") continue;
     const abs = path.resolve(cwd, root);
     for (const full of walkFiles(abs)) {
-      const rel = relPath(cwd, full);
+      const rel = toRepoRelativePath(cwd, full);
       if (rel && !seen.has(rel)) {
         seen.add(rel);
         files.push(rel);
@@ -283,7 +275,7 @@ function parseEslintFindings(stdout, stderr, cwd) {
   }
   const findings = [];
   for (const fileResult of parsed) {
-    const rel = fileResult.filePath ? relPath(cwd, fileResult.filePath) || fileResult.filePath.replace(/\\/g, "/") : null;
+    const rel = fileResult.filePath ? toRepoRelativePath(cwd, fileResult.filePath) || fileResult.filePath.replace(/\\/g, "/") : null;
     for (const msg of fileResult.messages || []) {
       if (findings.length >= MAX_FAILURES) break;
       findings.push({
@@ -365,7 +357,7 @@ function parsePythonLintFinding(result, cwd, file) {
   const lineMatch = text.match(/\bFile\s+"[^"]+",\s+line\s+(\d+)\b/i);
   const errorMatch = text.match(/\b(?:SyntaxError|IndentationError|TabError):\s*([^\n]+)/i);
   return {
-    file: relPath(cwd, file) || file,
+    file: toRepoRelativePath(cwd, file) || file,
     line: lineMatch ? Number(lineMatch[1]) : null,
     column: null,
     rule: "python ast.parse",
@@ -433,7 +425,7 @@ function parseGenericLintFinding({ result, cwd, file, rule, fallback }) {
   const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `${rule} exited ${result.exitCode}`;
   const lineMatch = text.match(/(?:^|\b)(?:line\s+)?(\d+)(?::\d+)?(?::|\b)/i);
   return {
-    file: relPath(cwd, file) || file,
+    file: toRepoRelativePath(cwd, file) || file,
     line: lineMatch ? Number(lineMatch[1]) : null,
     column: null,
     rule,
@@ -630,7 +622,7 @@ function parsePhpLintFinding(result, cwd, file) {
   const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `php -l exited ${result.exitCode}`;
   const lineMatch = text.match(/\bon\s+line\s+(\d+)\b/i);
   return {
-    file: relPath(cwd, file) || file,
+    file: toRepoRelativePath(cwd, file) || file,
     line: lineMatch ? Number(lineMatch[1]) : null,
     column: null,
     rule: "php -l",
@@ -847,7 +839,7 @@ function runTypecheck(cwd, {
 function projectFailurePath(projectCwd, group, file) {
   if (!file) return file;
   const full = path.resolve(group.root, file);
-  return relPath(projectCwd, full) || file;
+  return toRepoRelativePath(projectCwd, full) || file;
 }
 
 function combineRootChecks(name, projectCwd, entries) {
@@ -953,7 +945,7 @@ export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
     .map((check) => ({ check: check.name, message: check.output }));
   const ok = failed.length === 0 && unavailable.length === 0;
   const status = failed.length > 0 ? "failed" : (unavailable.length > 0 ? "unavailable" : "passed");
-  return {
+  const result = {
     ok,
     status,
     summary: status === "passed"
@@ -974,4 +966,8 @@ export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
     })),
     failures: [...failures, ...outputFailures].slice(0, MAX_FAILURES),
   };
+  // Commands, subchecks, and tool output embed workspace-absolute paths
+  // (eslint/tsc binaries, linter failure text); scrub them all at the one
+  // boundary the model-facing result passes through.
+  return JSON.parse(sanitizeAbsolutePathsInText(JSON.stringify(result), cwd));
 }

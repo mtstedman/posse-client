@@ -6,16 +6,13 @@
 import fs from "fs";
 import path from "path";
 import { gitExec } from "../../../../domains/git/functions/utils.js";
+import { normalizeDisplaySlashes } from "../../../format/functions/display-paths.js";
 
 export const SEARCH_MAX_FILE_BYTES = 5 * 1024 * 1024;
 export const SEARCH_BINARY_SNIFF_BYTES = 8 * 1024;
 
 export function escapeRegexLiteral(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-export function normalizeRelPath(filePath) {
-  return String(filePath || "").replace(/\\/g, "/");
 }
 
 function findBraceClose(pattern, startIdx) {
@@ -146,7 +143,7 @@ export function compactRipgrepStderr(stderr) {
 }
 
 export function normalizedGlob(value) {
-  return normalizeRelPath(String(value || "").trim());
+  return normalizeDisplaySlashes(String(value || "").trim());
 }
 
 const GIT_IGNORE_SESSION_CACHE_MAX_ENTRIES = 64;
@@ -181,7 +178,7 @@ function isWorkspaceRootIgnoredByGitUncached(cwd) {
   try {
     const repoRoot = String(gitExec(["rev-parse", "--show-toplevel"], cwd) || "").trim();
     if (!repoRoot) return false;
-    const rel = normalizeRelPath(path.relative(repoRoot, path.resolve(cwd)));
+    const rel = normalizeDisplaySlashes(path.relative(repoRoot, path.resolve(cwd)));
     if (!rel || rel === ".") return false;
     try {
       gitExec(["check-ignore", "-q", "--", rel], repoRoot);
@@ -195,7 +192,7 @@ function isWorkspaceRootIgnoredByGitUncached(cwd) {
 }
 
 function normalizeGitIgnoredRel(value) {
-  return normalizeRelPath(String(value || ""))
+  return normalizeDisplaySlashes(String(value || ""))
     .replace(/^\.\/+/, "")
     .replace(/\/+/g, "/")
     .replace(/\/+$/, "");
@@ -246,7 +243,7 @@ export function makeGitIgnoreChecker(cwd) {
   }
   const snapshot = buildGitIgnoredPathSnapshot(cwd);
   const checker = function isGitIgnored(absPath) {
-    const rel = normalizeRelPath(path.relative(cwd, absPath));
+    const rel = normalizeDisplaySlashes(path.relative(cwd, absPath));
     if (!rel || rel === ".") return false;
     return ignoredSnapshotMatches(snapshot, rel);
   };
@@ -319,12 +316,13 @@ export function shouldSkipRipgrepMatchedFile(filePath, cache) {
   return skip;
 }
 
-export function parseRipgrepJsonMatches(stdout, rootPath, outputMode, beforeContext, afterContext, { isSensitivePath = () => false } = {}) {
+export function parseRipgrepJsonMatches(stdout, rootPath, outputMode, beforeContext, afterContext, { isSensitivePath = () => false, toDisplay = (filePath) => filePath } = {}) {
   const filesWithMatches = new Set();
   const fileMatchCounts = new Map();
   const contentRows = [];
   const lineCache = new Map();
   const skipCache = new Map();
+  const displayCache = new Map();
   const needsContext = beforeContext > 0 || afterContext > 0;
 
   for (const line of String(stdout || "").split(/\r?\n/)) {
@@ -348,8 +346,16 @@ export function parseRipgrepJsonMatches(stdout, rootPath, outputMode, beforeCont
     const submatches = Array.isArray(data.submatches) ? data.submatches : [];
     const matchCount = Math.max(1, submatches.length);
 
-    filesWithMatches.add(filePath);
-    fileMatchCounts.set(filePath, (fileMatchCounts.get(filePath) || 0) + matchCount);
+    // The absolute filePath stays internal (sensitive/skip checks, context
+    // reads); only the display form reaches result rows. Cached per file:
+    // content mode revisits the same file once per matching line.
+    let displayPath = displayCache.get(filePath);
+    if (displayPath === undefined) {
+      displayPath = toDisplay(filePath);
+      displayCache.set(filePath, displayPath);
+    }
+    filesWithMatches.add(displayPath);
+    fileMatchCounts.set(displayPath, (fileMatchCounts.get(displayPath) || 0) + matchCount);
 
     if (outputMode !== "content") continue;
 
@@ -369,7 +375,7 @@ export function parseRipgrepJsonMatches(stdout, rootPath, outputMode, beforeCont
     }
 
     contentRows.push({
-      file: filePath,
+      file: displayPath,
       line: lineNo,
       text: firstMatchedLine(data.lines?.text),
       before,

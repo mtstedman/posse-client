@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import path from "path";
-import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import { closeDb, getDb } from "../../../shared/storage/functions/index.js";
 import { closeLog, writeRuntimeLogAtDir } from "../../../shared/telemetry/functions/logging/logger.js";
 import { logEvent } from "../../queue/functions/events.js";
+import { adminGitExec } from "../../git/functions/admin-git.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import {
@@ -32,13 +32,7 @@ const HEAD_FACTS_FORMAT = "%h%x00%H%x00%P%x00%s";
 // classifies every squash merge as `not_merge_commit`.
 function hookGitExecSafe(args, cwd) {
   try {
-    return String(execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 10000,
-      windowsHide: true,
-    }) || "").trim();
+    return String(adminGitExec(args, cwd, { timeoutMs: 10000 }) || "").trim();
   } catch {
     return "";
   }

@@ -36,6 +36,7 @@ export async function drainPostMergeAtlasWarmJobs({
   budgetMs = DEFAULT_BUDGET_MS,
   maxJobs = DEFAULT_MAX_JOBS,
   onStatus = null,
+  workerFactory = (options) => new Worker(options),
 } = {}) {
   const liveScheduler = getLiveSchedulerBlockMessage("main");
   if (liveScheduler) {
@@ -61,7 +62,7 @@ export async function drainPostMergeAtlasWarmJobs({
     while (ran < limit && Date.now() < deadline) {
       const job = queuedPostMergeAtlasJobs({ readyOnly: true })[0];
       if (!job) break;
-      worker ||= new Worker({
+      worker ||= workerFactory({
         projectDir,
         silent: true,
         nonInteractive: true,
@@ -74,7 +75,16 @@ export async function drainPostMergeAtlasWarmJobs({
       // Use the same entry point as the scheduler. Calling the deterministic
       // executor directly leaves the row in `leased`, never sets started_at,
       // and skips lease renewal while a real warm can run for minutes.
-      await worker.execute({ ...job, _leaseToken: lease.leaseToken });
+      const remainingBudgetMs = Math.max(1, deadline - Date.now());
+      const budgetTimer = setTimeout(() => {
+        worker.killJob?.(job.id, "post_merge_closeout_budget");
+      }, remainingBudgetMs);
+      budgetTimer.unref?.();
+      try {
+        await worker.execute({ ...job, _leaseToken: lease.leaseToken });
+      } finally {
+        clearTimeout(budgetTimer);
+      }
       ran += 1;
       const settled = getJob(job.id);
       const elapsedSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));

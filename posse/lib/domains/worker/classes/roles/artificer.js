@@ -6,6 +6,7 @@
 import fs from "fs";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
+import { normalizeDisplaySlashes } from "../../../../shared/format/functions/display-paths.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import {
   getArtifactsByWorkItem,
@@ -65,10 +66,6 @@ function emit(context, jobId, message) {
   if (typeof context?.emit === "function") context.emit(jobId, message);
 }
 
-function normalizeDisplayPath(value) {
-  return String(value || "").replace(/\\/g, "/");
-}
-
 function normalizePathForCompare(value) {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -97,7 +94,7 @@ function resolveContainedArtifactRoots(projectDir, values, label) {
   const seen = new Set();
   for (const [idx, value] of values.entries()) {
     const resolved = resolveContainedArtifactRoot(projectDir, value, `${label}[${idx}]`);
-    const display = normalizeDisplayPath(resolved);
+    const display = normalizeDisplaySlashes(resolved);
     if (seen.has(display)) continue;
     seen.add(display);
     roots.push(display);
@@ -130,7 +127,7 @@ export class ArtificerRole extends BaseRole {
     const payload = parsePayload(worker, job);
     const rawOutputRoot = payload.output_root || artifactsDir(wiScopeId(job.work_item_id), projectDir);
     const artCwd = rawOutputRoot ? resolveContainedArtifactRoot(projectDir, rawOutputRoot, "output_root") : projectDir;
-    const outputRoot = rawOutputRoot ? normalizeDisplayPath(artCwd) : null;
+    const outputRoot = rawOutputRoot ? normalizeDisplaySlashes(artCwd) : null;
     if (rawOutputRoot) fs.mkdirSync(artCwd, { recursive: true });
     if (!payload.output_root) {
       emit(worker, job.id, `${C.yellow}[artificer]${C.reset} WI#${job.work_item_id} job #${job.id}: missing output_root - defaulting to ${outputRoot}`);

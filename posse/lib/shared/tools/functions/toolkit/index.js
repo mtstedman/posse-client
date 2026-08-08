@@ -33,7 +33,6 @@ import {
   globToRegex,
   isWorkspaceRootIgnoredByGit,
   makeGitIgnoreChecker,
-  normalizeRelPath,
   normalizedGlob,
   parseRipgrepJsonMatches,
   resolveRipgrepCommand,
@@ -42,6 +41,7 @@ import {
   declaredScopeFiles,
   runScopedChecks,
 } from "./scoped-runners.js";
+import { normalizeDisplaySlashes, sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
 import {
   createRegisteredTest,
   createRegisteredTestSuite,
@@ -461,7 +461,7 @@ export function safePath(cwd, filePath, scopePredicates = null) {
 }
 
 function isPrivateWorkspacePath(realCwd, resolvedPath) {
-  const rel = normalizeRelPath(path.relative(realCwd, resolvedPath));
+  const rel = normalizeDisplaySlashes(path.relative(realCwd, resolvedPath));
   if (!rel || rel === ".") return false;
   const parts = rel.split("/").filter(Boolean);
   const first = parts[0];
@@ -477,7 +477,7 @@ function isPrivateWorkspacePath(realCwd, resolvedPath) {
 }
 
 function agentHiddenPathReasonForAbsolute(cwd, resolvedPath) {
-  const rel = normalizeRelPath(path.relative(cwd, resolvedPath));
+  const rel = normalizeDisplaySlashes(path.relative(cwd, resolvedPath));
   return agentHiddenReadablePathReason(rel);
 }
 
@@ -559,13 +559,13 @@ export function createDeterministicToolkit({
     }
     const hiddenErr = agentHiddenPathError(cwd, filePath, args.path);
     if (hiddenErr) return `Error: ${hiddenErr}`;
-    if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
+    if (!fs.existsSync(filePath)) return `Error: File not found: ${toDisplayPath(cwd, filePath)}`;
     if (isSensitiveEnvFileOrTargetPath(filePath)) {
       return "Error: Access to .env files is blocked. Use documented config examples or code paths instead.";
     }
 
     const stat = fs.statSync(filePath);
-    if (stat.isDirectory()) return `Error: Path is a directory, not a file: ${filePath}`;
+    if (stat.isDirectory()) return `Error: Path is a directory, not a file: ${toDisplayPath(cwd, filePath)}`;
     if (stat.size > READ_FILE_MAX_SIZE_BYTES) {
       return `Error: File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use offset/limit to read a portion.`;
     }
@@ -641,7 +641,7 @@ export function createDeterministicToolkit({
     if (args.executable !== undefined) {
       setFileExecutable(filePath, Boolean(args.executable));
     }
-    return `File written: ${filePath} (${args.content.length} chars${args.executable === undefined ? "" : `, executable=${Boolean(args.executable)}`})`;
+    return `File written: ${toDisplayPath(cwd, filePath)} (${args.content.length} chars${args.executable === undefined ? "" : `, executable=${Boolean(args.executable)}`})`;
   }
 
   function execEditFile(args, cwd, scopePredicates) {
@@ -651,7 +651,8 @@ export function createDeterministicToolkit({
     } catch (err) {
       return `Error: ${err.message}`;
     }
-    if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
+    const displayPath = toDisplayPath(cwd, filePath);
+    if (!fs.existsSync(filePath)) return `Error: File not found: ${displayPath}`;
     if (isSensitiveEnvFileOrTargetPath(filePath)) {
       return "Error: Editing .env files is blocked. Use documented config examples or code paths instead.";
     }
@@ -689,7 +690,7 @@ export function createDeterministicToolkit({
 
     if (modes[0] === "executable") {
       setFileExecutable(filePath, Boolean(args.executable));
-      return `File mode updated: ${filePath} (executable=${Boolean(args.executable)})`;
+      return `File mode updated: ${displayPath} (executable=${Boolean(args.executable)})`;
     }
 
     if (modes[0] === "replaceLines") {
@@ -701,13 +702,13 @@ export function createDeterministicToolkit({
       }
       const { eol, hadFinalEol, lines } = splitEditableLines(content);
       if (end > lines.length) {
-        return `Error: replaceLines range ${start}:${end} is outside ${filePath} (${lines.length} lines).`;
+        return `Error: replaceLines range ${start}:${end} is outside ${displayPath} (${lines.length} lines).`;
       }
       lines.splice(start - 1, end - start + 1, ...splitReplacementLines(source.content));
       content = joinEditableLines(lines, eol, hadFinalEol);
-      if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
+      if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${filePath} (replaceLines ${start}:${end})`;
+      return `File edited: ${displayPath} (replaceLines ${start}:${end})`;
     }
 
     if (modes[0] === "replacePattern") {
@@ -734,14 +735,14 @@ export function createDeterministicToolkit({
       });
       if (!replaced.ok) return `Error: ${replaced.message}`;
       const matchCount = replaced.matchCount;
-      if (matchCount === 0) return `Error: replacePattern did not match ${filePath}.`;
+      if (matchCount === 0) return `Error: replacePattern did not match ${displayPath}.`;
       if (replaced.ambiguous) {
-        return `Error: replacePattern matched ${matchCount} times in ${filePath}. Set global=true or make the pattern unique.`;
+        return `Error: replacePattern matched ${matchCount} times in ${displayPath}. Set global=true or make the pattern unique.`;
       }
       content = replaced.content;
-      if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
+      if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${filePath} (replacePattern ${matchCount} match${matchCount === 1 ? "" : "es"})`;
+      return `File edited: ${displayPath} (replacePattern ${matchCount} match${matchCount === 1 ? "" : "es"})`;
     }
 
     if (modes[0] === "insertAt") {
@@ -749,19 +750,19 @@ export function createDeterministicToolkit({
       const line = Number(source.line);
       if (!Number.isInteger(line) || line < 1) return "Error: insertAt requires a positive 1-based integer line.";
       const { eol, hadFinalEol, lines } = splitEditableLines(content);
-      if (line > lines.length + 1) return `Error: insertAt line ${line} is outside ${filePath} (${lines.length} lines).`;
+      if (line > lines.length + 1) return `Error: insertAt line ${line} is outside ${displayPath} (${lines.length} lines).`;
       lines.splice(line - 1, 0, ...splitReplacementLines(source.content));
       content = joinEditableLines(lines, eol, hadFinalEol);
-      if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
+      if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${filePath} (insertAt ${line})`;
+      return `File edited: ${displayPath} (insertAt ${line})`;
     }
 
     if (modes[0] === "append") {
       content += String(append ?? "");
-      if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
+      if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${filePath} (append)`;
+      return `File edited: ${displayPath} (append)`;
     }
 
     if (modes[0] === "jsonPath/jsonValue") {
@@ -780,9 +781,9 @@ export function createDeterministicToolkit({
       const eol = content.includes("\r\n") ? "\r\n" : "\n";
       const trailing = content.endsWith("\n") ? eol : "";
       content = JSON.stringify(parsed, null, detectJsonIndent(content)).replace(/\n/g, eol) + trailing;
-      if (content === originalContent) return `Error: edit_file made no changes in ${filePath}.`;
+      if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${filePath} (jsonPath ${String(jsonPath)})`;
+      return `File edited: ${displayPath} (jsonPath ${String(jsonPath)})`;
     }
 
     if (typeof args.old_string !== "string" || typeof args.new_string !== "string") {
@@ -790,15 +791,15 @@ export function createDeterministicToolkit({
     }
     const exactCount = content.split(args.old_string).length - 1;
     if (exactCount > 1) {
-      return `Error: old_string found ${exactCount} times in ${filePath}. It must be unique - provide more surrounding context.`;
+      return `Error: old_string found ${exactCount} times in ${displayPath}. It must be unique - provide more surrounding context.`;
     }
     if (exactCount === 1) {
       content = content.replace(args.old_string, args.new_string);
       if (content === originalContent) {
-        return `Error: edit_file made no changes in ${filePath}. old_string/new_string resolved to identical content.`;
+        return `Error: edit_file made no changes in ${displayPath}. old_string/new_string resolved to identical content.`;
       }
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${filePath}`;
+      return `File edited: ${displayPath}`;
     }
 
     const fileEol = content.includes("\r\n") ? "\r\n" : "\n";
@@ -807,18 +808,18 @@ export function createDeterministicToolkit({
     const newWithFileEol = normalizeEol(args.new_string).replace(/\n/g, fileEol);
     const normalizedCount = content.split(oldWithFileEol).length - 1;
     if (normalizedCount === 0) {
-      return `Error: old_string not found in ${filePath}. Make sure it matches exactly (including whitespace/indentation); line-ending mismatch may be the cause.`;
+      return `Error: old_string not found in ${displayPath}. Make sure it matches exactly (including whitespace/indentation); line-ending mismatch may be the cause.`;
     }
     if (normalizedCount > 1) {
-      return `Error: old_string found ${normalizedCount} times in ${filePath} after normalizing line endings. It must be unique - provide more surrounding context.`;
+      return `Error: old_string found ${normalizedCount} times in ${displayPath} after normalizing line endings. It must be unique - provide more surrounding context.`;
     }
 
     content = content.replace(oldWithFileEol, newWithFileEol);
     if (content === originalContent) {
-      return `Error: edit_file made no changes in ${filePath}. old_string/new_string resolved to identical content after line-ending normalization.`;
+      return `Error: edit_file made no changes in ${displayPath}. old_string/new_string resolved to identical content after line-ending normalization.`;
     }
     writeTextFileAtomic(filePath, content);
-    return `File edited: ${filePath}`;
+    return `File edited: ${displayPath}`;
   }
 
   function execListFiles(args, cwd, scopePredicates) {
@@ -831,7 +832,7 @@ export function createDeterministicToolkit({
     } catch (err) {
       return `Error: ${err.message}`;
     }
-    if (!fs.existsSync(dir)) return `Error: Directory not found: ${dir}`;
+    if (!fs.existsSync(dir)) return `Error: Directory not found: ${toDisplayPath(cwd, dir)}`;
     const recursive = args.recursive !== false;
     const pattern = args.pattern || null;
     const globRegex = pattern ? new RegExp("^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$") : null;
@@ -852,7 +853,7 @@ export function createDeterministicToolkit({
         if (entry.isDirectory()) {
           if (recursive) walk(full);
         } else if (entry.isFile() && (!globRegex || globRegex.test(entry.name))) {
-          results.push(full);
+          results.push(toDisplayPath(cwd, full));
         }
       }
     }
@@ -869,13 +870,13 @@ export function createDeterministicToolkit({
           if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
           if (isGitIgnored(full)) continue;
           if (entry.isFile() && (!globRegex || globRegex.test(entry.name))) {
-            results.push(full);
+            results.push(toDisplayPath(cwd, full));
           }
         }
       }
       return results.join("\n") || "No files found.";
     } catch (err) {
-      return `Error listing files: ${err.message}`;
+      return `Error listing files: ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
@@ -952,7 +953,7 @@ export function createDeterministicToolkit({
         if (["ENOENT", "EACCES", "EPERM"].includes(result.error.code)) {
           return formatRipgrepRequirementError(ripgrepCommand, result.error);
         }
-        return `Error: search_files ripgrep failed - ${result.error.message}`;
+        return `Error: search_files ripgrep failed - ${sanitizeAbsolutePathsInText(result.error.message, cwd)}`;
       }
 
       if (result.status === 1) return "No matches found.";
@@ -961,7 +962,7 @@ export function createDeterministicToolkit({
         if (/regex parse error|error parsing regex|PCRE2|invalid regex/i.test(stderr)) {
           return `Error: Invalid ripgrep pattern - ${stderr || "unknown parse error"}`;
         }
-        return `Error: search_files ripgrep failed (${result.status ?? "unknown"}) - ${stderr || "unknown error"}`;
+        return `Error: search_files ripgrep failed (${result.status ?? "unknown"}) - ${sanitizeAbsolutePathsInText(stderr, cwd) || "unknown error"}`;
       }
 
       const { filesWithMatches, fileMatchCounts, contentRows } = parseRipgrepJsonMatches(
@@ -970,7 +971,10 @@ export function createDeterministicToolkit({
         outputMode,
         beforeContext,
         afterContext,
-        { isSensitivePath: (filePath) => isSensitiveEnvFileOrTargetPath(filePath) || !!agentHiddenPathReasonForAbsolute(cwd, filePath) },
+        {
+          isSensitivePath: (filePath) => isSensitiveEnvFileOrTargetPath(filePath) || !!agentHiddenPathReasonForAbsolute(cwd, filePath),
+          toDisplay: (filePath) => toDisplayPath(cwd, filePath),
+        },
       );
 
       if (outputMode === "files_with_matches") {
@@ -1001,7 +1005,7 @@ export function createDeterministicToolkit({
       const page = rows.slice(offset, offset + headLimit);
       return page.join("\n") || "No matches found.";
     } catch (err) {
-      return `Error: search_files failed - ${err.message}`;
+      return `Error: search_files failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
@@ -1011,25 +1015,25 @@ export function createDeterministicToolkit({
       const hiddenErr = agentHiddenPathError(cwd, filePath, args.path);
       if (hiddenErr) {
         return JSON.stringify({
-          path: filePath,
+          path: toDisplayPath(cwd, filePath),
           exists: fs.existsSync(filePath),
           error: hiddenErr,
         }, null, 2);
       }
       if (isSensitiveEnvFileOrTargetPath(filePath)) {
         return JSON.stringify({
-          path: filePath,
+          path: toDisplayPath(cwd, filePath),
           exists: fs.existsSync(filePath),
           error: "Access to .env files is blocked. Use documented config examples or code paths instead.",
         }, null, 2);
       }
       if (!fs.existsSync(filePath)) {
-        return JSON.stringify({ path: filePath, exists: false }, null, 2);
+        return JSON.stringify({ path: toDisplayPath(cwd, filePath), exists: false }, null, 2);
       }
       const stat = fs.statSync(filePath);
       if (!stat.isFile()) {
         return JSON.stringify({
-          path: filePath,
+          path: toDisplayPath(cwd, filePath),
           exists: true,
           isFile: false,
           isDirectory: stat.isDirectory(),
@@ -1038,7 +1042,7 @@ export function createDeterministicToolkit({
       const algorithm = args.algorithm || "sha256";
       const hash = crypto.createHash(algorithm).update(fs.readFileSync(filePath)).digest("hex");
       return JSON.stringify({
-        path: filePath,
+        path: toDisplayPath(cwd, filePath),
         exists: true,
         isFile: true,
         algorithm,
@@ -1046,7 +1050,7 @@ export function createDeterministicToolkit({
         hash,
       }, null, 2);
     } catch (err) {
-      return `Error: ${err.message}`;
+      return `Error: ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
@@ -1145,8 +1149,8 @@ export function createDeterministicToolkit({
   function execValidateArtifactOutput(args, cwd, scopePredicates) {
     const rootArg = args.output_root || ".";
     const rootPath = safePathImpl(cwd, rootArg, scopePredicates);
-    if (!fs.existsSync(rootPath)) return `Error: Artifact output root not found: ${rootPath}`;
-    if (!fs.statSync(rootPath).isDirectory()) return `Error: Artifact output root is not a directory: ${rootPath}`;
+    if (!fs.existsSync(rootPath)) return `Error: Artifact output root not found: ${toDisplayPath(cwd, rootPath)}`;
+    if (!fs.statSync(rootPath).isDirectory()) return `Error: Artifact output root is not a directory: ${toDisplayPath(cwd, rootPath)}`;
     if (scopePredicates?.hasScope && !isWritableArtifactRoot(rootPath, scopePredicates)) {
       return `Error: validate_artifact_output blocked - ${rootArg} is outside the allowed artifact scope.`;
     }
@@ -1211,7 +1215,7 @@ export function createDeterministicToolkit({
       try {
         facts = readImageFacts(imagePath);
       } catch (err) {
-        violations.push(`Could not inspect expected image ${rel}: ${err.message}`);
+        violations.push(`Could not inspect expected image ${rel}: ${sanitizeAbsolutePathsInText(err.message, cwd)}`);
         continue;
       }
       imageChecks.push({ path: rel, ...facts });
@@ -1240,7 +1244,7 @@ export function createDeterministicToolkit({
 
     return JSON.stringify({
       ok: violations.length === 0,
-      output_root: rootPath,
+      output_root: toDisplayPath(cwd, rootPath),
       task_mode: taskMode,
       manifest,
       image_checks: imageChecks,
@@ -1252,8 +1256,8 @@ export function createDeterministicToolkit({
   function execPruneArtifactOutput(args, cwd, scopePredicates) {
     const rootArg = args.output_root || ".";
     const rootPath = safePathImpl(cwd, rootArg, scopePredicates);
-    if (!fs.existsSync(rootPath)) return `Error: Artifact output root not found: ${rootPath}`;
-    if (!fs.statSync(rootPath).isDirectory()) return `Error: Artifact output root is not a directory: ${rootPath}`;
+    if (!fs.existsSync(rootPath)) return `Error: Artifact output root not found: ${toDisplayPath(cwd, rootPath)}`;
+    if (!fs.statSync(rootPath).isDirectory()) return `Error: Artifact output root is not a directory: ${toDisplayPath(cwd, rootPath)}`;
     if (!isWritableArtifactRoot(rootPath, scopePredicates)) {
       return `Error: prune_artifact_output blocked - ${rootArg} is outside the allowed artifact scope.`;
     }
@@ -1306,7 +1310,7 @@ export function createDeterministicToolkit({
     try {
       walk(rootPath);
     } catch (err) {
-      return `Error: prune_artifact_output scan failed - ${err.message}`;
+      return `Error: prune_artifact_output scan failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
     if (blocked.length > 0) {
       return `Error: prune_artifact_output blocked ${blocked.length} out-of-scope file(s): ${blocked.slice(0, 8).join(", ")}`;
@@ -1334,7 +1338,7 @@ export function createDeterministicToolkit({
     return JSON.stringify({
       ok: true,
       dry_run: dryRun,
-      output_root: rootPath,
+      output_root: toDisplayPath(cwd, rootPath),
       task_mode: taskMode,
       allowed_extensions: [...allowedExtensions],
       kept_count: kept.length,
@@ -1434,9 +1438,9 @@ export function createDeterministicToolkit({
 
   function execResizeImage(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
     const stat = fs.statSync(srcPath);
-    if (!stat.isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!stat.isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
     if (path.extname(srcPath).toLowerCase() !== ".png") {
       return "Error: resize_image currently supports PNG files only.";
     }
@@ -1471,8 +1475,8 @@ export function createDeterministicToolkit({
       if (!written.ok) return written.error;
       return JSON.stringify({
         ok: true,
-        input: srcPath,
-        output: destPath,
+        input: toDisplayPath(cwd, srcPath),
+        output: toDisplayPath(cwd, destPath),
         output_format: outputFormat,
         converter: written.converter || null,
         mode,
@@ -1480,15 +1484,15 @@ export function createDeterministicToolkit({
         resized: { width, height },
       }, null, 2);
     } catch (err) {
-      return `Error: resize_image failed - ${err.message}`;
+      return `Error: resize_image failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
   function execReadImageMetadata(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
     const stat = fs.statSync(srcPath);
-    if (!stat.isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!stat.isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
     const buffer = fs.readFileSync(srcPath);
     const format = detectImageFormat(buffer);
     let width = null;
@@ -1521,8 +1525,8 @@ export function createDeterministicToolkit({
 
   function execOptimizeImage(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
-    if (!fs.statSync(srcPath).isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
+    if (!fs.statSync(srcPath).isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
     if (path.extname(srcPath).toLowerCase() !== ".png") return "Error: optimize_image currently supports PNG files only.";
 
     const destArg = args.output_path || args.path;
@@ -1547,22 +1551,22 @@ export function createDeterministicToolkit({
       fs.writeFileSync(destPath, encodeRgbaToPng(parsed.width, parsed.height, parsed.data));
       return JSON.stringify({
         ok: true,
-        input: srcPath,
-        output: destPath,
+        input: toDisplayPath(cwd, srcPath),
+        output: toDisplayPath(cwd, destPath),
         format: "png",
         original: { width: parsed.width, height: parsed.height },
         reason: "reencoded_png_without_metadata",
       }, null, 2);
     } catch (err) {
-      return `Error: optimize_image failed - ${err.message}`;
+      return `Error: optimize_image failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
   function execReencodeImage(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
     const stat = fs.statSync(srcPath);
-    if (!stat.isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!stat.isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
     if (stat.size > 50 * 1024 * 1024) {
       return `Error: reencode_image input too large (${(stat.size / 1024 / 1024).toFixed(1)} MB, max 50 MB).`;
     }
@@ -1595,13 +1599,13 @@ export function createDeterministicToolkit({
         const tempJpegPath = tempSiblingPath(destPath, ".jpg");
         try {
           const converted = convertImageToJpeg(inputBuffer, srcPath, tempJpegPath, { quality: jpegQuality(args) });
-          if (!converted.ok) return converted.error;
+          if (!converted.ok) return sanitizeAbsolutePathsInText(converted.error, cwd);
           const dimensions = readValidatedJpegDimensions(tempJpegPath, "reencode_image");
           replaceFileWithTemp(tempJpegPath, destPath);
           return JSON.stringify({
             ok: true,
-            input: srcPath,
-            output: destPath,
+            input: toDisplayPath(cwd, srcPath),
+            output: toDisplayPath(cwd, destPath),
             input_format: inputFormat,
             output_format: "jpeg",
             converter: converted.converter,
@@ -1617,8 +1621,8 @@ export function createDeterministicToolkit({
         fs.writeFileSync(destPath, encodeRgbaToPng(parsed.width, parsed.height, parsed.data));
         return JSON.stringify({
           ok: true,
-          input: srcPath,
-          output: destPath,
+          input: toDisplayPath(cwd, srcPath),
+          output: toDisplayPath(cwd, destPath),
           input_format: inputFormat,
           output_format: "png",
           dimensions: { width: parsed.width, height: parsed.height },
@@ -1626,7 +1630,7 @@ export function createDeterministicToolkit({
       }
 
       const converted = convertImageToPng(inputBuffer, srcPath, destPath);
-      if (!converted.ok) return converted.error;
+      if (!converted.ok) return sanitizeAbsolutePathsInText(converted.error, cwd);
       const outputBuffer = fs.readFileSync(destPath);
       if (!outputBuffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
         return "Error: reencode_image converter produced a non-PNG output.";
@@ -1638,23 +1642,23 @@ export function createDeterministicToolkit({
       } catch {}
       return JSON.stringify({
         ok: true,
-        input: srcPath,
-        output: destPath,
+        input: toDisplayPath(cwd, srcPath),
+        output: toDisplayPath(cwd, destPath),
         input_format: inputFormat,
         output_format: "png",
         converter: converted.converter,
         dimensions,
       }, null, 2);
     } catch (err) {
-      return `Error: reencode_image failed - ${err.message}`;
+      return `Error: reencode_image failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
   function execExtractImageText(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
     const stat = fs.statSync(srcPath);
-    if (!stat.isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!stat.isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
     if (stat.size > 25 * 1024 * 1024) {
       return `Error: extract_image_text input too large (${(stat.size / 1024 / 1024).toFixed(1)} MB, max 25 MB).`;
     }
@@ -1685,7 +1689,7 @@ export function createDeterministicToolkit({
         windowsHide: true,
       });
     } catch (err) {
-      return `Error: extract_image_text failed - ${err.message}`;
+      return `Error: extract_image_text failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
 
     if (result.error) {
@@ -1693,12 +1697,12 @@ export function createDeterministicToolkit({
       if (code === "ENOENT") {
         return "Error: tesseract not found on PATH. Install Tesseract OCR (https://tesseract-ocr.github.io/tessdoc/Installation.html) so this tool can read image text.";
       }
-      return `Error: extract_image_text failed - ${result.error.message}`;
+      return `Error: extract_image_text failed - ${sanitizeAbsolutePathsInText(result.error.message, cwd)}`;
     }
 
     if (result.status !== 0) {
       const stderr = String(result.stderr || "").trim();
-      return `Error: tesseract exited ${result.status}${stderr ? ` - ${stderr.slice(0, 500)}` : ""}`;
+      return `Error: tesseract exited ${result.status}${stderr ? ` - ${sanitizeAbsolutePathsInText(stderr.slice(0, 500), cwd)}` : ""}`;
     }
 
     const text = String(result.stdout || "").replace(/\r\n/g, "\n");
@@ -1865,9 +1869,9 @@ export function createDeterministicToolkit({
 
   function execAlphaKeyImage(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
     const stat = fs.statSync(srcPath);
-    if (!stat.isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!stat.isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
 
     const destArg = args.output_path || args.path;
     const destPath = safePathImpl(cwd, destArg, scopePredicates);
@@ -1901,8 +1905,8 @@ export function createDeterministicToolkit({
       return JSON.stringify({
         ok: true,
         mode: "alpha_key",
-        input: srcPath,
-        output: destPath,
+        input: toDisplayPath(cwd, srcPath),
+        output: toDisplayPath(cwd, destPath),
         target_color: { r: targetColor[0], g: targetColor[1], b: targetColor[2] },
         tolerance,
         edge_only: edgeOnly !== false,
@@ -1910,7 +1914,7 @@ export function createDeterministicToolkit({
         metadata,
       }, null, 2);
     } catch (err) {
-      return `Error: clean_image alpha_key failed - ${err.message}`;
+      return `Error: clean_image alpha_key failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
   }
 
@@ -1939,9 +1943,9 @@ export function createDeterministicToolkit({
     }
 
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
-    if (!fs.existsSync(srcPath)) return `Error: File not found: ${srcPath}`;
+    if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
     const stat = fs.statSync(srcPath);
-    if (!stat.isFile()) return `Error: Path is not a file: ${srcPath}`;
+    if (!stat.isFile()) return `Error: Path is not a file: ${toDisplayPath(cwd, srcPath)}`;
 
     const inputBuffer = fs.readFileSync(srcPath);
     const inputFormat = detectImageFormat(inputBuffer);
@@ -1995,8 +1999,8 @@ export function createDeterministicToolkit({
       return JSON.stringify({
         ok: true,
         mode: "clean",
-        input: srcPath,
-        output: destPath,
+        input: toDisplayPath(cwd, srcPath),
+        output: toDisplayPath(cwd, destPath),
         input_format: inputFormat,
         output_format: outputFormat,
         steps,
@@ -2041,8 +2045,8 @@ export function createDeterministicToolkit({
     return JSON.stringify({
       ok: true,
       mode: "clean",
-      input: srcPath,
-      output: safePathImpl(cwd, destArg, scopePredicates),
+      input: toDisplayPath(cwd, srcPath),
+      output: toDisplayPath(cwd, safePathImpl(cwd, destArg, scopePredicates)),
       input_format: inputFormat,
       steps,
       metadata,

@@ -3,6 +3,7 @@ import path from "path";
 
 import { isSensitiveEnvFileOrTargetPath } from "../../../runtime/functions/sensitive-paths.js";
 import { agentHiddenReadablePathReason } from "../../../../shared/scope/functions/agent-hidden-paths.js";
+import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../../shared/format/functions/display-paths.js";
 
 export const TOOL_INSPECT_FILE = {
   type: "function",
@@ -125,14 +126,14 @@ function inspectOne(inputLoc, cwd, scopePredicates, safePath, { includeLoc }) {
     return payload;
   }
   if (!fs.existsSync(filePath)) {
-    const payload = { path: filePath, exists: false };
+    const payload = { path: toDisplayPath(cwd, filePath), exists: false };
     if (includeLoc) payload.loc = inputLoc;
     return payload;
   }
   const stat = fs.statSync(filePath);
   const ext = path.extname(filePath).toLowerCase();
   const payload = {
-    path: filePath,
+    path: toDisplayPath(cwd, filePath),
     exists: true,
     isFile: stat.isFile(),
     isDirectory: stat.isDirectory(),
@@ -147,7 +148,7 @@ function inspectOne(inputLoc, cwd, scopePredicates, safePath, { includeLoc }) {
       const image = inspectImageMetadata(filePath, ext);
       if (image) Object.assign(payload, image);
     } catch (err) {
-      payload.inspect_error = err.message;
+      payload.inspect_error = sanitizeAbsolutePathsInText(err.message, cwd);
     }
   }
   return payload;

@@ -1,4 +1,5 @@
 import { appendExecutionTools } from "../../../../shared/tools/functions/contract.js";
+import { sanitizeAbsolutePathsInText } from "../../../../shared/format/functions/display-paths.js";
 import {
   TOOL_BASH,
   safePath as sharedSafePath,
@@ -124,7 +125,7 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
       try {
         return await mcpGate.callTool(canonicalName, gateArgs);
       } catch (error) {
-        return `Error: ${error?.message || String(error)}`;
+        return `Error: ${sanitizeAbsolutePathsInText(error?.message || String(error), cwd)}`;
       }
     }
     if (isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(name)) {
