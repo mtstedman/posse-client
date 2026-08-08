@@ -101,6 +101,19 @@ function readSettingBool(key, fallback = false) {
   return fallback;
 }
 
+export function taskAbAssessorTier(workItem) {
+  let metadata = workItem?.metadata_json;
+  if (typeof metadata === "string") {
+    try { metadata = JSON.parse(metadata); }
+    catch { return null; }
+  }
+  if (!metadata || typeof metadata !== "object" || metadata.ab_harness !== "task-ab") {
+    return null;
+  }
+  const tier = String(metadata.ab_assessor_tier || "").trim().toLowerCase();
+  return ["cheap", "standard", "strong"].includes(tier) ? tier : null;
+}
+
 function markAssessmentRetryAssessOnly(job, pendingFileRequests = null) {
   if (!job || !ASSESSABLE_JOB_TYPES.has(job.job_type)) return false;
   const payload = parseJobPayload(job);
@@ -997,6 +1010,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
   const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload);
   const workItem = getWorkItem(job.work_item_id);
+  // Assessment retries can re-enter through an assess-only path with the
+  // developer tier in their payload. Re-apply the task A/B pin at the final
+  // assessor call boundary so every observed grader remains identical.
+  modelTier = taskAbAssessorTier(workItem) || modelTier;
   const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), "assessor");
   if (Object.keys(visibleJobPayload).length > 0) {
     taskSpec = visibleJobPayload.task_spec || visibleJobPayload.instructions || JSON.stringify(visibleJobPayload, null, 2);
@@ -2334,9 +2351,8 @@ export async function runPostExecutionAssessment(worker, {
       // A/B harnesses compare execution routes, not assessor strength. Allow
       // the harness supervisor to hold the in-job assessor tier constant even
       // when a planner independently adjusts the developer job tier.
-      const harnessAssessmentTier = process.env.POSSE_AB_HARNESS
-        ? process.env.POSSE_AB_ASSESSOR_TIER
-        : null;
+      const harnessAssessmentTier = taskAbAssessorTier(getWorkItem(job.work_item_id))
+        || (process.env.POSSE_AB_HARNESS ? process.env.POSSE_AB_ASSESSOR_TIER : null);
       const initialAssessmentTier = normalizeAssessmentTier(
         harnessAssessmentTier || jobPayloadForAssess._assess_model_tier,
         "cheap",
