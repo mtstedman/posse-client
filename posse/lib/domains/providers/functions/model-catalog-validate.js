@@ -31,6 +31,11 @@ export { MODEL_CATALOG_ENFORCEMENT_VALUES };
 
 let _lastWarnings = [];
 const _warnedOnce = new Set();
+let _emitRuntimeWarnings = true;
+
+export function configureModelCatalogRuntimeWarnings({ enabled = true } = {}) {
+  _emitRuntimeWarnings = enabled !== false;
+}
 
 function getEnforcementMode() {
   try {
@@ -51,6 +56,7 @@ function readConfiguredModel(key) {
 }
 
 function warnOnce(key, configured, status, message) {
+  if (!_emitRuntimeWarnings) return;
   const dedupeKey = `${key}:${configured}:${status}`;
   if (_warnedOnce.has(dedupeKey)) return;
   _warnedOnce.add(dedupeKey);
@@ -198,4 +204,5 @@ export function resolveEffectiveImageModel(provider, candidate) {
 export function __resetModelCatalogValidationForTests() {
   _lastWarnings = [];
   _warnedOnce.clear();
+  _emitRuntimeWarnings = true;
 }

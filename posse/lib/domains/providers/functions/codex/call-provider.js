@@ -250,7 +250,10 @@ export async function callProvider(promptText, {
     // Disable AGENTS.md auto-discovery (parent-walk + fallback filenames).
     // Agents access the real repo via the deterministic MCP, not via auto-loaded project docs.
     const memorySuppressionOverrides = ["project_doc_max_bytes=0"];
-    const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({ disableSystemTools });
+    const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({
+      disableSystemTools,
+      disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
+    });
     const webTools = buildCodexWebToolsOverrides({
       role,
       roleMode,

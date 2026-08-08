@@ -195,8 +195,8 @@ async function timeHandoffStep(packet, label, fn, {
         role: packet?.recipient || null,
         label,
         durationMs,
-        job_id: packet?.job_id ?? null,
-        work_item_id: packet?.work_item_id ?? null,
+        job_id: packet?.job_id ?? packet?.jobId ?? null,
+        work_item_id: packet?.work_item_id ?? packet?.workItemId ?? null,
       });
     }
   }
@@ -1426,6 +1426,17 @@ export async function handoff(input, { providerName = null } = {}) {
   } else {
     throw new Error("handoff: expected a handoff context packet or { recipient, data }");
   }
+
+  // Normalize identity once so every phase timer and observation sees the
+  // same durable keys regardless of which caller-style constructed the packet.
+  packet.job_id ??= packet.jobId
+    ?? packet._raw_payload?.job_id
+    ?? packet._raw_payload?.jobId
+    ?? null;
+  packet.work_item_id ??= packet.workItemId
+    ?? packet._raw_payload?.work_item_id
+    ?? packet._raw_payload?.workItemId
+    ?? null;
 
   const recipient = packet.recipient;
 

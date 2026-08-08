@@ -406,9 +406,11 @@ export function createStandardToolHandlerMap({
         work_item_id: ambient.work_item_id ?? null,
         job_id: ambient.job_id,
         attempt_id: ambient.attempt_id ?? null,
+        agent_call_id: ambient.agent_call_id ?? null,
         phase: args.phase,
         action: args.status,
         body: args.summary,
+        role: ambient.role ?? null,
         source: "embedded_tool",
         metadata_json: { status: args.status || null },
       });

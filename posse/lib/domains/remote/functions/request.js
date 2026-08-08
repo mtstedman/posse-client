@@ -70,7 +70,13 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
   const projectDbCapability = (projectDbRanks[assertedProjectDbCapability] ?? 0) < projectDbRanks[localProjectDbCapability]
     ? assertedProjectDbCapability
     : localProjectDbCapability;
-  const imageGenerationAvailable = !!(packet?.needs_image_generation || packet?.needsImageGeneration);
+  const imageGenerationAvailable = !!(
+    packet?.needs_image_generation
+    || packet?.needsImageGeneration
+    || packet?._raw_payload?.needs_image_generation
+    || packet?._raw_payload?.needsImageGeneration
+    || taskMode === "image"
+  );
 
   const capabilities = {
     tools: {

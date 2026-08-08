@@ -13,6 +13,7 @@ import {
 } from "../../../catalog/job.js";
 import {
   AGENT_ACTIVITY_KINDS,
+  AGENT_ACTIVITY_LIMITS,
   AGENT_ACTIVITY_PROTOCOL,
   AGENT_ACTIVITY_STATUSES,
   EVENT_TYPES,
@@ -136,33 +137,49 @@ function payloadForDbEvent(row) {
   const event = parseJsonField(row.event_json);
   const kind = eventKindForEventType(row.event_type);
   if (kind === BRIDGE_EVENT_KINDS.AGENT_ACTIVITY) {
-    if (
+    const isCanonical = (
       event?.protocol !== AGENT_ACTIVITY_PROTOCOL ||
       !AGENT_ACTIVITY_KIND_SET.has(event?.kind) ||
       !AGENT_ACTIVITY_STATUS_SET.has(event?.status) ||
       typeof event?.summary !== "string" ||
       !event.summary.trim() ||
       row.work_item_id == null
-    ) return null;
+    ) === false;
+    // Before agent_feedback emitted the versioned activity envelope, its
+    // durable interaction event used `{ kind: "activity", interaction_id }`.
+    // Bossy could join/read that row directly, but the bridge rejected it and
+    // the phone app showed an empty Agent feedback panel. Project that exact
+    // legacy shape from its durable message so tail replay repairs old runs too.
+    const isLegacyAgentFeedback = !isCanonical
+      && event?.kind === "activity"
+      && event?.direction === "agent_to_user"
+      && Number(event?.interaction_id) > 0
+      && typeof row.message === "string"
+      && row.message.trim()
+      && row.work_item_id != null;
+    if (!isCanonical && !isLegacyAgentFeedback) return null;
+    const summary = isCanonical
+      ? event.summary
+      : row.message.trim().replace(/\s+/g, " ").slice(0, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS);
     return {
-      protocol: event.protocol,
-      kind: event.kind,
-      status: event.status,
-      phase: event.phase ?? null,
-      summary: event.summary,
-      detail: event.detail ?? null,
-      agent_call_id: event.agent_call_id ?? null,
-      provider: event.provider ?? null,
-      model: event.model ?? null,
-      input_tokens: event.input_tokens ?? null,
-      output_tokens: event.output_tokens ?? null,
-      duration_ms: event.duration_ms ?? null,
-      cost_usd: event.cost_usd ?? null,
+      protocol: isCanonical ? event.protocol : AGENT_ACTIVITY_PROTOCOL,
+      kind: isCanonical ? event.kind : "progress",
+      status: isCanonical ? event.status : "running",
+      phase: isCanonical ? event.phase ?? null : null,
+      summary,
+      detail: isCanonical ? event.detail ?? null : null,
+      agent_call_id: isCanonical ? event.agent_call_id ?? null : null,
+      provider: isCanonical ? event.provider ?? null : null,
+      model: isCanonical ? event.model ?? null : null,
+      input_tokens: isCanonical ? event.input_tokens ?? null : null,
+      output_tokens: isCanonical ? event.output_tokens ?? null : null,
+      duration_ms: isCanonical ? event.duration_ms ?? null : null,
+      cost_usd: isCanonical ? event.cost_usd ?? null : null,
       work_item_id: row.work_item_id == null ? null : Number(row.work_item_id),
       job_id: row.job_id == null ? null : Number(row.job_id),
       attempt_id: row.attempt_id == null ? null : Number(row.attempt_id),
       role: row.actor_type || null,
-      actor_id: row.actor_id ?? null,
+      actor_id: row.actor_id ?? (isLegacyAgentFeedback ? String(event.interaction_id) : null),
       at: row.created_at || null,
     };
   }

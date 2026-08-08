@@ -21,7 +21,7 @@ import { getRemotePricingMap } from "../../providers/functions/model-catalog-sto
 // tokens, so this premium is a no-op for other providers.
 const CACHE_CREATION_MULTIPLIER = 1.25;
 
-// Defaults as of May 2026. Rates in USD per million input/output tokens.
+// Defaults as of August 2026. Rates in USD per million input/output tokens.
 // Operators can override any row via the provider_pricing table (admin CLI).
 // These are best-effort — keep them conservative so we don't under-report.
 const DEFAULT_PRICING = Object.freeze({
@@ -31,6 +31,8 @@ const DEFAULT_PRICING = Object.freeze({
   "claude:haiku":             { tier: "cheap",    input: 1.00,  output: 5.00,  cachedInput: 0.10 },
   "claude:sonnet":            { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
   "claude:opus":              { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "claude:claude-opus-5":     { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "claude:claude-sonnet-5":   { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
   "claude:claude-opus-4-8":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
   "claude:claude-opus-4-7":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
   "claude:claude-opus-4-6":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
@@ -59,11 +61,13 @@ const DEFAULT_PRICING = Object.freeze({
   "codex:gpt-5.5":       { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
   "codex:gpt-5.6":       { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
 
-  // xAI Grok (approximate; adjust via admin when verified)
+  // xAI Grok (short-context rates; long-context pricing is not represented here)
   "grok:grok-3-mini":                   { tier: "cheap",    input: 0.30, output: 0.50 },
   "grok:grok-code-fast-1":              { tier: "standard", input: 0.20, output: 1.50 },
+  "grok:grok-build-0.1":                 { tier: "standard", input: 1.00, output: 2.00, cachedInput: 0.20 },
   "grok:grok-4":                        { tier: "strong",   input: 1.25, output: 2.50 },
-  "grok:grok-4.3":                      { tier: "strong",   input: 1.25, output: 2.50 },
+  "grok:grok-4.5":                      { tier: "strong",   input: 2.00, output: 6.00, cachedInput: 0.30 },
+  "grok:grok-4.3":                      { tier: "strong",   input: 1.25, output: 2.50, cachedInput: 0.20 },
   "grok:grok-4.20-multi-agent-0309":    { tier: "strong",   input: 1.25, output: 2.50 },
   "grok:grok-4.20-0309-reasoning":      { tier: "strong",   input: 1.25, output: 2.50 },
   "grok:grok-4.20-0309-non-reasoning":  { tier: "strong",   input: 1.25, output: 2.50 },
@@ -89,9 +93,9 @@ const TIER_DEFAULTS = Object.freeze({
   "codex:cheap":      { input: 1.75,  output: 14.00, cachedInput: 0.175 },
   "codex:standard":   { input: 2.50,  output: 15.00, cachedInput: 0.25 },
   "codex:strong":     { input: 2.50,  output: 15.00, cachedInput: 0.25 },
-  "grok:cheap":       { input: 0.30,  output: 0.50 },
-  "grok:standard":    { input: 0.20,  output: 1.50 },
-  "grok:strong":      { input: 1.25,  output: 2.50 },
+  "grok:cheap":       { input: 1.00,  output: 2.00, cachedInput: 0.20 },
+  "grok:standard":    { input: 1.00,  output: 2.00, cachedInput: 0.20 },
+  "grok:strong":      { input: 2.00,  output: 6.00, cachedInput: 0.30 },
   "copilot:cheap":    { input: 3.00,  output: 15.00, cachedInput: 0.30 },
   "copilot:standard": { input: 2.50,  output: 15.00, cachedInput: 0.25 },
   "copilot:strong":   { input: 2.50,  output: 15.00, cachedInput: 0.25 },

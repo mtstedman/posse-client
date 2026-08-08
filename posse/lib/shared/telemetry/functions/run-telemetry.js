@@ -6,6 +6,7 @@ import { isMainThread, threadId } from "node:worker_threads";
 import { getRuntimeLogDir, getRuntimeResourcesDir, safeProcessCwd } from "../../../domains/runtime/functions/paths.js";
 
 const GENERATED_RUN_STARTED_AT = new Date().toISOString();
+const PROCESS_STARTED_AT = GENERATED_RUN_STARTED_AT;
 const RUN_STARTED_AT = String(process.env.POSSE_RUN_STARTED_AT || GENERATED_RUN_STARTED_AT);
 const GENERATED_RUN_ID = `${RUN_STARTED_AT.replace(/[:.]/g, "-")}-pid${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
 const RUN_ID = String(process.env.POSSE_RUN_ID || GENERATED_RUN_ID).replace(/[^A-Za-z0-9_.-]/g, "_");
@@ -36,6 +37,8 @@ const _streams = new Map();
 const _manifestDirs = new Set();
 let _exitHookInstalled = false;
 let _telemetryEpoch = 0;
+let _telemetryEnabled = true;
+let _activeLifecycleOwnerToken = null;
 
 function safeStringify(value) {
   const seen = new WeakSet();
@@ -77,6 +80,15 @@ export function getRunTelemetryEpoch() {
   return _telemetryEpoch;
 }
 
+export function configureRunTelemetry({ enabled = true } = {}) {
+  _telemetryEnabled = enabled !== false;
+  return _telemetryEnabled;
+}
+
+export function isRunTelemetryEnabled() {
+  return _telemetryEnabled;
+}
+
 export function bumpRunTelemetryEpoch() {
   _telemetryEpoch += 1;
   return _telemetryEpoch;
@@ -87,6 +99,7 @@ export function getRunTelemetryDir() {
 }
 
 function ensureManifest(runDir) {
+  if (!_telemetryEnabled) return;
   fs.mkdirSync(runDir, { recursive: true });
   // Worker threads may append their own telemetry streams, but the process
   // main thread exclusively owns run lifecycle metadata. Otherwise a worker
@@ -110,36 +123,77 @@ function ensureManifest(runDir) {
   _manifestDirs.add(runDir);
 }
 
-function updateManifest(runDir, patch = {}) {
-  const manifestPath = path.join(runDir, "manifest.json");
-  let manifest = {};
+function readManifest(runDir) {
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    return JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"));
   } catch {
-    manifest = {
-      schema_version: 1,
-      run_id: RUN_ID,
-      started_at: RUN_STARTED_AT,
-      pid: process.pid,
-      thread_id: threadId,
-      is_main_thread: isMainThread,
-      cwd: safeProcessCwd(),
-      streams: STREAM_FILES,
-    };
-  }
-  try {
-    fs.writeFileSync(manifestPath, `${safeStringify({ ...manifest, ...patch })}\n`, "utf8");
-  } catch {
-    // Best effort only.
+    return null;
   }
 }
 
-export function updateRunTelemetryManifest(patch = {}) {
-  if (!isMainThread) return false;
+function updateManifest(runDir, patch = {}, { expectedLifecycleOwnerToken = undefined } = {}) {
+  const manifestPath = path.join(runDir, "manifest.json");
+  const manifest = readManifest(runDir) || {
+    schema_version: 1,
+    run_id: RUN_ID,
+    started_at: RUN_STARTED_AT,
+    pid: process.pid,
+    thread_id: threadId,
+    is_main_thread: isMainThread,
+    cwd: safeProcessCwd(),
+    streams: STREAM_FILES,
+  };
+  if (expectedLifecycleOwnerToken !== undefined
+    && manifest.lifecycle_owner_token !== expectedLifecycleOwnerToken) {
+    return false;
+  }
+  try {
+    fs.writeFileSync(manifestPath, `${safeStringify({ ...manifest, ...patch })}\n`, "utf8");
+    return true;
+  } catch {
+    // Best effort only.
+    return false;
+  }
+}
+
+export function beginRunTelemetryLifecycle({ ownerId = null } = {}) {
+  if (!isMainThread || !_telemetryEnabled) return null;
   const runDir = getRunTelemetryDir();
   ensureManifest(runDir);
-  updateManifest(runDir, patch);
-  return true;
+  const previousManifest = readManifest(runDir);
+  const iteration = Math.max(0, Number(previousManifest?.lifecycle_iteration) || 0) + 1;
+  const lifecycleOwnerToken = `${process.pid}-${crypto.randomUUID()}`;
+  const beganAt = nowIso();
+  _activeLifecycleOwnerToken = lifecycleOwnerToken;
+  updateManifest(runDir, {
+    pid: process.pid,
+    thread_id: threadId,
+    is_main_thread: true,
+    cwd: safeProcessCwd(),
+    process_started_at: PROCESS_STARTED_AT,
+    lifecycle_iteration: iteration,
+    lifecycle_owner_token: lifecycleOwnerToken,
+    lifecycle_owner_id: ownerId || null,
+    lifecycle_began_at: beganAt,
+    ended_at: null,
+    clean_exit: false,
+    scheduler_clean_shutdown_at: null,
+    scheduler_shutdown_reason: null,
+    last_heartbeat_at: null,
+    last_heartbeat_reason: null,
+    last_active_worker_count: null,
+    last_db_active_job_count: null,
+  });
+  return { lifecycleOwnerToken, iteration, beganAt, previousManifest };
+}
+
+export function updateRunTelemetryManifest(patch = {}) {
+  if (!isMainThread || !_telemetryEnabled) return false;
+  const runDir = getRunTelemetryDir();
+  ensureManifest(runDir);
+  return updateManifest(runDir, patch, _activeLifecycleOwnerToken
+    ? { expectedLifecycleOwnerToken: _activeLifecycleOwnerToken }
+    : {});
 }
 
 export function listRunTelemetryManifests({ includeCurrent = true } = {}) {
@@ -163,6 +217,7 @@ export function listRunTelemetryManifests({ includeCurrent = true } = {}) {
 }
 
 function openStream(stream) {
+  if (!_telemetryEnabled) return null;
   const runDir = getRunTelemetryDir();
   const filePath = path.join(runDir, streamFileName(stream));
   const existing = _streams.get(stream);
@@ -181,8 +236,10 @@ function openStream(stream) {
 }
 
 export function appendRunTelemetry(stream, entry = {}) {
+  if (!_telemetryEnabled) return false;
   try {
     const target = openStream(stream);
+    if (!target) return false;
     const line = safeStringify({
       t: entry?.created_at || entry?.t || nowIso(),
       run_id: RUN_ID,
@@ -208,11 +265,20 @@ export function closeRunTelemetry({ cleanExit = true } = {}) {
   _manifestDirs.clear();
   if (isMainThread) {
     for (const runDir of dirs) {
+      const manifest = readManifest(runDir);
+      if (_activeLifecycleOwnerToken) {
+        if (manifest?.lifecycle_owner_token !== _activeLifecycleOwnerToken) continue;
+      } else if (manifest?.lifecycle_owner_token) {
+        continue;
+      }
       updateManifest(runDir, {
         ended_at: nowIso(),
         clean_exit: !!cleanExit,
-      });
+      }, _activeLifecycleOwnerToken
+        ? { expectedLifecycleOwnerToken: _activeLifecycleOwnerToken }
+        : {});
     }
+    _activeLifecycleOwnerToken = null;
   }
 }
 
@@ -335,4 +401,6 @@ export function readRunArtifactPayload(filePath) {
 export function __resetRunTelemetryForTests() {
   closeRunTelemetry({ cleanExit: false });
   _manifestDirs.clear();
+  _telemetryEnabled = true;
+  _activeLifecycleOwnerToken = null;
 }

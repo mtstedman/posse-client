@@ -1151,6 +1151,7 @@ export class TrackedProviderClient {
     let retainReusableAgent = false;
     let unregisterSubAgentParent = null;
     let unregisterSubAgentChild = null;
+    const agentCallStartedAt = Date.now();
 
     try {
       if (effectiveCapabilityOpts?._subAgentCursor) {
@@ -1481,6 +1482,9 @@ export class TrackedProviderClient {
         ...stats,
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
+        cachedInputTokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
+        cacheCreationInputTokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
+        reasoningOutputTokens: providerUsageMeasured ? (stats.reasoningOutputTokens ?? null) : null,
         outputChars: recordedOutputChars,
         exitCode: terminalProviderError == null ? stats.exitCode : null,
         providerUsageStatus,
@@ -1618,6 +1622,33 @@ export class TrackedProviderClient {
         err._killReason = this.worker._killReasons.get(job_id);
       }
       const stats = err.stats || {};
+      const terminalStopOwnsFailure = stats.terminalHandoffStopped === true
+        || (terminalHandoffStop != null && abortSignal?.aborted !== true);
+      const terminalUsageUnavailable = terminalStopOwnsFailure
+        && stats.terminalUsageFlushCompleted !== true
+        && stats.usageFinalized !== true;
+      const providerUsageMeasured = !terminalUsageUnavailable
+        && stats.inputTokens != null
+        && stats.outputTokens != null;
+      const providerUsageStatus = terminalUsageUnavailable
+        ? "unavailable_after_terminal_stop"
+        : providerUsageMeasured
+          ? "measured"
+          : "unavailable";
+      const accountingInputTokens = providerUsageMeasured ? stats.inputTokens : null;
+      const accountingOutputTokens = providerUsageMeasured ? stats.outputTokens : null;
+      const recordedOutputChars = terminalUsageUnavailable
+        ? null
+        : Object.prototype.hasOwnProperty.call(stats, "outputChars")
+          && Number.isFinite(Number(stats.outputChars))
+          ? Number(stats.outputChars)
+          : typeof err.output === "string"
+            ? err.output.length
+            : null;
+      const recordedExitCode = terminalUsageUnavailable ? null : (stats.exitCode ?? null);
+      const recordedDurationMs = Number.isFinite(Number(stats.durationMs))
+        ? Number(stats.durationMs)
+        : Math.max(0, Date.now() - agentCallStartedAt);
       recordMemorySample("provider.call.after_error", {
         agent_call_id: agentCallId,
         work_item_id,
@@ -1626,9 +1657,9 @@ export class TrackedProviderClient {
         provider: providerName,
         model_tier: tier,
         model_name: stats.modelName || modelName,
-        duration_ms: stats.durationMs ?? null,
-        input_tokens: stats.inputTokens ?? null,
-        output_tokens: stats.outputTokens ?? null,
+        duration_ms: recordedDurationMs,
+        input_tokens: accountingInputTokens,
+        output_tokens: accountingOutputTokens,
         error_name: err?.name || null,
         error_message: String(err?.message || err).slice(0, 1000),
         turns_used: stats.numTurns ?? null,
@@ -1638,6 +1669,15 @@ export class TrackedProviderClient {
       });
       const accountingStats = {
         ...stats,
+        inputTokens: accountingInputTokens,
+        outputTokens: accountingOutputTokens,
+        cachedInputTokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
+        cacheCreationInputTokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
+        reasoningOutputTokens: providerUsageMeasured ? (stats.reasoningOutputTokens ?? null) : null,
+        outputChars: recordedOutputChars,
+        durationMs: recordedDurationMs,
+        exitCode: recordedExitCode,
+        providerUsageStatus,
         provider: providerName,
         modelTier: tier,
         modelName: stats.modelName || modelName,
@@ -1647,22 +1687,25 @@ export class TrackedProviderClient {
       };
       completeAgentCall(agentCallId, {
         status: "failed",
-        output_chars: stats.outputChars || 0,
-        input_tokens: stats.inputTokens ?? null,
-        output_tokens: stats.outputTokens ?? null,
-        cached_input_tokens: stats.cachedInputTokens ?? null,
-        cache_creation_input_tokens: stats.cacheCreationInputTokens ?? null,
+        output_chars: recordedOutputChars,
+        input_tokens: accountingInputTokens,
+        output_tokens: accountingOutputTokens,
+        cached_input_tokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
+        cache_creation_input_tokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
         turns_used: stats.numTurns ?? null,
         max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
         max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
         output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
         output_limit_reason: stats.outputLimitReason || err.outputLimitReason || null,
-        duration_ms: stats.durationMs || 0,
-        exit_code: stats.exitCode,
+        duration_ms: recordedDurationMs,
+        exit_code: recordedExitCode,
         error_text: err.message?.slice(0, 2000),
         atlas_method: opts.disableAtlas ? null : (stats.atlasMethod || opts.atlasMethod || null),
         atlas_prefetch_status: opts.disableAtlas ? null : (opts.atlasPrefetchStatus || null),
-        cost_estimate_usd: this.resolveCallCostEstimate(accountingStats),
+        cost_estimate_usd: providerUsageMeasured
+          ? this.resolveCallCostEstimate(accountingStats)
+          : null,
+        provider_usage_status: providerUsageStatus,
         skills: opts.skillsAttached || null,
         session_handle: stats.sessionHandle || stats.responseId || null,
       });

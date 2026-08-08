@@ -10,6 +10,7 @@ import {
   EVENT_ACTORS,
   EVENT_ACTOR_TYPES,
   EVENT_TYPES,
+  normalizeAgentActivitySummary,
 } from "../../../catalog/event.js";
 
 const AGENT_ACTIVITY_KIND_SET = new Set(AGENT_ACTIVITY_KINDS);
@@ -21,6 +22,23 @@ function boundedActivityText(value, limit) {
   const text = String(value).replace(/\s+/g, " ").trim();
   if (!text) return null;
   return text.slice(0, limit);
+}
+
+function parseAgentActivityEnvelope(value) {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (parsed.protocol !== AGENT_ACTIVITY_PROTOCOL) return null;
+  if (!AGENT_ACTIVITY_KIND_SET.has(parsed.kind)) return null;
+  if (!AGENT_ACTIVITY_STATUS_SET.has(parsed.status)) return null;
+  if (typeof parsed.summary !== "string" || !parsed.summary.trim()) return null;
+  return parsed;
 }
 
 function nonNegativeActivityNumber(value) {
@@ -364,7 +382,7 @@ export function logAgentActivity({
   if (!AGENT_ACTIVITY_KIND_SET.has(kind)) return null;
   if (!AGENT_ACTIVITY_STATUS_SET.has(status)) return null;
 
-  const safeSummary = boundedActivityText(summary, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS);
+  const safeSummary = normalizeAgentActivitySummary(summary);
   if (!safeSummary) return null;
   const safeRole = EVENT_ACTOR_TYPE_SET.has(role) ? role : EVENT_ACTORS.WORKER;
   const envelope = {
@@ -421,6 +439,32 @@ export function getEvents(jobId = null, limit = 100) {
     dbRows = db.prepare(`SELECT * FROM events ORDER BY created_at DESC, id DESC LIMIT ?`).all(cappedLimit);
   }
   return mergeEventRows([...fileRows, ...dbRows], "desc", cappedLimit);
+}
+
+// Read the canonical activity stream from both the live DB tail and its JSONL
+// archive. Monitor consumers need both: routine telemetry pruning keeps only a
+// small global tail, so a quiet agent's latest update may already be archived.
+export function getAgentActivityEvents(jobId, limit = 60) {
+  flushEventsNow();
+  const normalizedJobId = Number(jobId);
+  if (!Number.isFinite(normalizedJobId) || normalizedJobId <= 0) return [];
+  const cappedLimit = Math.min(500, Math.max(0, Number(limit) || 0));
+  const fileRows = readEventFileRows({
+    jobId: normalizedJobId,
+    eventType: EVENT_TYPES.AGENT_ACTIVITY,
+    limit: cappedLimit,
+    order: "desc",
+  });
+  const dbRows = getDb().prepare(`
+    SELECT *
+    FROM events
+    WHERE job_id = ? AND event_type = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `).all(normalizedJobId, EVENT_TYPES.AGENT_ACTIVITY, cappedLimit);
+  return mergeEventRows([...fileRows, ...dbRows], "desc", cappedLimit)
+    .map((row) => ({ ...row, activity: parseAgentActivityEnvelope(row.event_json) }))
+    .filter((row) => row.activity != null);
 }
 
 export function getEventsByWorkItem(workItemId, limit = 100) {

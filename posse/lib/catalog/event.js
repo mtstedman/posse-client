@@ -57,6 +57,17 @@ export const AGENT_ACTIVITY_LIMITS = Object.freeze({
   MODEL_CHARS: 120,
 });
 
+// Canonical transform applied to an activity summary when it is written to the
+// event stream. Consumers that compare a raw interaction body against a stored
+// event summary (e.g. Monitor's duplicate suppression) must run the body
+// through this same transform, or long/multiline bodies will never match.
+export function normalizeAgentActivitySummary(value) {
+  if (value == null) return null;
+  const text = String(value).replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  return text.slice(0, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS);
+}
+
 // Namespaced alias used at logEvent call sites. Same typo-safety story as
 // EVENT_TYPES — schema does CHECK actor_type, but failing at INSERT time
 // is still later than failing at import.

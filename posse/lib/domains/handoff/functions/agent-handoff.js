@@ -351,7 +351,8 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   const lines = normalizedLines(entry.payload_text);
   const start = selector.start ?? 1;
   const end = selector.end ?? Math.max(1, lines.length);
-  const sourceSlice = selector.start == null
+  const materializedRangeFits = start <= lines.length && end <= lines.length;
+  const sourceSlice = selector.start == null || materializedRangeFits
     ? null
     : materializedSourceLineSlice(entry, start, end);
   const useSourceLines = sourceSlice?.matched === true;
@@ -2370,7 +2371,8 @@ function verifyPacketEvidenceAtCommit(packet) {
     const verified = materializeAgentHandoffEvidenceSelector({ ref: evidence.ref, lines: evidence.lines }, context);
     if (verified.source_content_sha256 !== evidence.source_content_sha256
       || verified.excerpt_sha256 !== evidence.excerpt_sha256
-      || verified.excerpt !== evidence.excerpt) {
+      || verified.excerpt !== evidence.excerpt
+      || verified.line_semantics !== evidence.line_semantics) {
       fail("AGENT_HANDOFF_EVIDENCE_CHANGED", `Evidence ${evidence.selector} changed after the report was staged`);
     }
   }

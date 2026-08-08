@@ -17,9 +17,8 @@ export { PROVIDER_OPTIONS, PROVIDER_LABELS, MODEL_TIERS };
 const MODEL_TIER_DEFAULTS = Object.freeze({
   claude: Object.freeze({
     cheap: Object.freeze({ model: "haiku" }),
-    // null means "provider default" (Claude's default maps to Sonnet).
-    standard: Object.freeze({ model: null }),
-    strong: Object.freeze({ model: "opus" }),
+    standard: Object.freeze({ model: "claude-sonnet-5" }),
+    strong: Object.freeze({ model: "claude-opus-5" }),
   }),
   openai: Object.freeze({
     cheap: Object.freeze({ model: "gpt-5.4-mini" }),
@@ -36,7 +35,7 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
   grok: Object.freeze({
     cheap: Object.freeze({ model: "grok-build-0.1" }),
     standard: Object.freeze({ model: "grok-build-0.1" }),
-    strong: Object.freeze({ model: "grok-4.3" }),
+    strong: Object.freeze({ model: "grok-4.5" }),
   }),
   // GitHub Copilot CLI. Tier-to-model mapping follows the same shape as
   // other providers, but pricing is subscription quota (premium requests),
@@ -56,8 +55,8 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
 const DEFAULT_TIER_MODEL_FALLBACK = Object.freeze({
   claude: Object.freeze({
     cheap: "haiku",
-    standard: "sonnet",
-    strong: "opus",
+    standard: "claude-sonnet-5",
+    strong: "claude-opus-5",
   }),
 });
 
@@ -96,6 +95,8 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "sonnet[1m]",
     "opus[1m]",
     "claude-fable-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-8[1m]",
     "claude-opus-4-7",
@@ -165,6 +166,7 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "grok-4.20-reasoning",
     "grok-4.20-0309-non-reasoning",
     "grok-4.20-0309-reasoning",
+    "grok-4.5",
     "grok-4.3",
   ]),
   // Models the Copilot CLI accepts via `--model`. Verify against

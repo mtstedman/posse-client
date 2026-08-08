@@ -160,7 +160,6 @@ async function _isProviderReady(provider, capability) {
 export async function execGenerateImageInternal(args = {}, {
   cwd = process.cwd(),
   scopePredicates,
-  safePathImpl,
   buildImageClient = _buildImageClient,
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
   enforceProviderAvailability = buildImageClient === _buildImageClient,
@@ -168,20 +167,34 @@ export async function execGenerateImageInternal(args = {}, {
   if (!args.prompt || typeof args.prompt !== "string") {
     return "Error: prompt is required and must be a string.";
   }
-  if (!args.path || typeof args.path !== "string") {
-    return "Error: path is required (for example: images/hero.png).";
+  if (!args.filename || typeof args.filename !== "string") {
+    return "Error: filename is required (for example: hero.png).";
+  }
+
+  const filename = args.filename.trim();
+  if (
+    !filename
+    || filename === "."
+    || filename === ".."
+    || /[\\/]/.test(filename)
+    || /[\u0000-\u001f<>:"|?*]/.test(filename)
+    || path.isAbsolute(filename)
+    || path.win32.parse(filename).dir
+    || path.posix.parse(filename).dir
+  ) {
+    return `Error: filename must be a file name only, without a directory path - got "${args.filename}".`;
   }
 
   const protocol = getArtifactProtocol("image");
   const allowedFormats = protocol?.allowed_formats || [".png"];
-  const ext = path.extname(args.path).toLowerCase();
+  const ext = path.extname(filename).toLowerCase();
   if (!allowedFormats.includes(ext)) {
-    return `Error: path must end in one of ${allowedFormats.join(", ")} - got "${ext}".`;
+    return `Error: filename must end in one of ${allowedFormats.join(", ")} - got "${ext}".`;
   }
 
-  const outputPath = safePathImpl(cwd, args.path, scopePredicates);
+  const outputPath = path.join(path.resolve(cwd), filename);
   if (!scopePredicates?.canCreate(outputPath)) {
-    return `Error: generate_image blocked - ${args.path} is outside the allowed creation scope.`;
+    return `Error: generate_image blocked - ${filename} is outside the allowed creation scope.`;
   }
 
   const providerOverride = args.provider ? String(args.provider).trim().toLowerCase() : null;
@@ -195,6 +208,7 @@ export async function execGenerateImageInternal(args = {}, {
     return await _executeGenerateImageWithRoute({
       args,
       ext,
+      filename,
       outputPath,
       provider,
       model,
@@ -218,6 +232,7 @@ export async function execGenerateImageInternal(args = {}, {
   return await _executeGenerateImageWithRoute({
     args,
     ext,
+    filename,
     outputPath,
     provider,
     model,
@@ -229,6 +244,7 @@ export async function execGenerateImageInternal(args = {}, {
 async function _executeGenerateImageWithRoute({
   args,
   ext,
+  filename,
   outputPath,
   provider,
   model,
@@ -253,7 +269,7 @@ async function _executeGenerateImageWithRoute({
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, Buffer.from(imageData, "base64"));
     const sizeKB = (fs.statSync(outputPath).size / 1024).toFixed(1);
-    return `Image saved to ${args.path} (${sizeKB} KB, provider=${provider}, model=${model}, quality=${quality || "default"}).`;
+    return `Image saved to ${filename} (${sizeKB} KB, provider=${provider}, model=${model}, quality=${quality || "default"}).`;
   } catch (err) {
     if (err?.imageGenerationTimeout) {
       return `Error generating image: ${err.message}.`;

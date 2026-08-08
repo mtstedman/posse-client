@@ -163,6 +163,7 @@ export {
   _discardPendingEventsForTests,
   countEventsByType,
   flushEventsNow,
+  getAgentActivityEvents,
   getEvents,
   getEventsByWorkItem,
   getEventsByWorkItemSinceId,

@@ -18,6 +18,26 @@ const PRESSURE_WINDOW_THRESHOLD = 2;
 const _gates = new Map();
 const _pressure = new Map();
 
+export function buildAtlasGateScopeKey({
+  tokenId = null,
+  jobId = null,
+  attemptId = null,
+  agentCallId = null,
+  fallback = null,
+} = {}) {
+  const token = String(tokenId || "").trim();
+  const numericJobId = Number(jobId) || null;
+  const numericAttemptId = Number(attemptId) || null;
+  const numericAgentCallId = Number(agentCallId) || null;
+  const context = [
+    numericJobId != null ? `job:${numericJobId}` : "",
+    numericAttemptId != null ? `attempt:${numericAttemptId}` : "",
+    numericAgentCallId != null ? `call:${numericAgentCallId}` : "",
+  ].filter(Boolean).join("|");
+  if (token) return [`mcp:${token}`, context].filter(Boolean).join("|");
+  return context || (fallback == null ? null : String(fallback));
+}
+
 function _resolveScope(explicit) {
   if (explicit) return String(explicit);
   try {
@@ -63,7 +83,12 @@ export function configureGate({ role = null, atlasAvailable = false, scopeKey = 
 }
 
 export function releaseGate({ scopeKey = null } = {}) {
-  _gates.delete(_resolveScope(scopeKey));
+  const scope = _resolveScope(scopeKey);
+  _gates.delete(scope);
+  const pressurePrefix = `${scope}\0`;
+  for (const key of _pressure.keys()) {
+    if (key.startsWith(pressurePrefix)) _pressure.delete(key);
+  }
 }
 
 export function isGateActive({ scopeKey = null } = {}) {
@@ -110,9 +135,18 @@ export function getRequiredMeaningfulAtlasCalls() {
   return REQUIRED_MEANINGFUL_ATLAS_CALLS;
 }
 
-export function noteAtlasCall({ action = "", ok = false, empty = false, args = {}, artifacts = null, cwd = null, scopeKey = null } = {}) {
+export function noteAtlasCall({
+  action = "",
+  ok = false,
+  empty = false,
+  args = {},
+  artifacts = null,
+  cwd = null,
+  scopeKey = null,
+  telemetryContext = null,
+} = {}) {
   _getGate(scopeKey).noteAtlasCall({ action, ok, empty, args, artifacts, cwd });
-  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey });
+  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey, telemetryContext });
 }
 
 /* L3a (TOKEN-LEVERS-PLAN): pressure counting + in-band nudge WITHOUT the
@@ -121,8 +155,14 @@ export function noteAtlasCall({ action = "", ok = false, empty = false, args = {
  * instance is unrelated but ladder pressure should still be counted and — when
  * atlas_gate_nudge is on — steered in-band. Returns the nudge text to append
  * to the triggering tool result, or null. */
-export function noteAtlasPressureAndGetNudge({ action = "", args = {}, artifacts = null, scopeKey = null } = {}) {
-  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey });
+export function noteAtlasPressureAndGetNudge({
+  action = "",
+  args = {},
+  artifacts = null,
+  scopeKey = null,
+  telemetryContext = null,
+} = {}) {
+  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey, telemetryContext });
 }
 
 export function unlockForAtlasUnavailable({ reason = "atlas_unavailable", scopeKey = null } = {}) {
@@ -255,7 +295,13 @@ export function __peekGateKeys() {
   return [..._gates.keys()];
 }
 
-function maybeRecordAtlasShadowTokenPressure({ action = "", args = {}, artifacts = null, scopeKey = null } = {}) {
+function maybeRecordAtlasShadowTokenPressure({
+  action = "",
+  args = {},
+  artifacts = null,
+  scopeKey = null,
+  telemetryContext = null,
+} = {}) {
   const effectiveAction = normalizeAtlasActionForPressure(action, args);
   if (effectiveAction !== "code.lens" && effectiveAction !== "code.window") return;
 
@@ -290,7 +336,9 @@ function maybeRecordAtlasShadowTokenPressure({ action = "", args = {}, artifacts
   const nudgeEnabled = resolveAtlasGateNudgeEnabled();
   const recommendation = "Summarize the remaining evidence gap, use one area survey/structure call, or switch to a single targeted native-read exception instead of continuing per-file ladder loops.";
   try {
-    const ctx = getObservationContext() || {};
+    const ctx = telemetryContext && typeof telemetryContext === "object"
+      ? telemetryContext
+      : getObservationContext() || {};
     recordObservation({
       work_item_id: ctx.work_item_id ?? null,
       job_id: ctx.job_id ?? null,

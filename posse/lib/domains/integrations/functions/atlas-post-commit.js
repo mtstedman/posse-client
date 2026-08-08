@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import path from "path";
+import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import { closeDb, getDb } from "../../../shared/storage/functions/index.js";
 import { closeLog, writeRuntimeLogAtDir } from "../../../shared/telemetry/functions/logging/logger.js";
 import { logEvent } from "../../queue/functions/events.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
-import { gitExecSafe } from "../../git/functions/utils.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import {
   getAtlasIntegrationConfig,
@@ -26,8 +26,26 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 // threaded through the run.
 const HEAD_FACTS_FORMAT = "%h%x00%H%x00%P%x00%s";
 
+// Git hooks run in a fresh process before Posse's native pulse-token cache is
+// warm. These read-only probes must therefore use git itself: routing them
+// through posse-git turns a cold auth cache into an empty HEAD and falsely
+// classifies every squash merge as `not_merge_commit`.
+function hookGitExecSafe(args, cwd) {
+  try {
+    return String(execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+      windowsHide: true,
+    }) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
 function headCommitFacts(cwd) {
-  const raw = gitExecSafe(["show", "-s", `--format=${HEAD_FACTS_FORMAT}`, "HEAD"], cwd, { timeoutMs: 10000 });
+  const raw = hookGitExecSafe(["show", "-s", `--format=${HEAD_FACTS_FORMAT}`, "HEAD"], cwd);
   if (!raw) return { shortHead: "", fullHead: "", parents: [], subject: "" };
   const [shortHead = "", fullHead = "", parentsRaw = "", subject = ""] = raw.split("\0");
   return {
@@ -40,7 +58,7 @@ function headCommitFacts(cwd) {
 
 function commitRangePaths(cwd, fromSha, toSha) {
   if (!fromSha || !toSha) return [];
-  const raw = gitExecSafe(["diff", "--name-only", fromSha, toSha], cwd, { timeoutMs: 10000 });
+  const raw = hookGitExecSafe(["diff", "--name-only", fromSha, toSha], cwd);
   return raw.split("\n").map((line) => String(line || "").replace(/\\/g, "/").trim()).filter(Boolean);
 }
 
@@ -99,6 +117,7 @@ function parseHookArgs(argv = process.argv.slice(2)) {
 function skippedStatusIsSuccess(skipped) {
   return [
     "not_merge_commit",
+    "head_unavailable",
     "atlas_disabled",
     "phase_not_enabled",
     "up_to_date",
@@ -246,6 +265,16 @@ export async function runAtlasPostCommitHook({
     }, { visible: false });
     return { ok: true, attempted: false, skipped: "commit_hook_disabled", exitCode: 0 };
   }
+  if (!head.fullHead) {
+    out.write("[atlas] post-commit skipped (HEAD unavailable)\n");
+    writePostCommitStatus(cwd, "warn", "ATLAS post-commit reindex skipped", {
+      head: null,
+      skipped: "head_unavailable",
+      mergeOnly,
+      exitCode: 0,
+    }, { visible: false });
+    return { ok: true, attempted: false, skipped: "head_unavailable", exitCode: 0 };
+  }
   const mergeDetails = mergeCommitDetails(head);
   const mergeReason = mergeDetails.reason;
   if (mergeOnly && !mergeReason) {
@@ -273,7 +302,9 @@ export async function runAtlasPostCommitHook({
       const headFull = head.fullHead;
       if (!headFull) throw new Error("HEAD commit facts unavailable");
       const { fromSha, paths } = postCommitDiffScope(cwd, head, mergeReason);
-      const targetBranch = mergeDetails.target || await resolveTargetBranchAsync(cwd);
+      const targetBranch = mergeDetails.target
+        || hookGitExecSafe(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+        || await resolveTargetBranchAsync(cwd);
       emitAtlasV2MainAdvanced({
         payload: {
           from_sha: String(fromSha || ""),

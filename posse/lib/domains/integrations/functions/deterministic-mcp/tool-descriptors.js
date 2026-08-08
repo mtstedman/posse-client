@@ -369,7 +369,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   generate_image: {
     access: "write",
     summary: "Generate new image artifacts inside allowed output scope.",
-    observation: { type: "tool.generate_image", label: "Generate image", format: "generate_image", pathKeys: ["path", "file_path", "output_path"] },
+    observation: { type: "tool.generate_image", label: "Generate image", format: "generate_image", pathKeys: ["filename"] },
   },
   extract_image_text: {
     access: "read",

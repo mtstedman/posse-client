@@ -24,6 +24,43 @@ export class ReviewSession {
     return this.TARGET_BRANCH;
   }
 
+  async finalizeMergeOffers(mergedCount, offerPush, {
+    display = null,
+    beforePush = null,
+  } = {}) {
+    const showProgress = !!display && typeof display.setWrapUpOverlay === "function";
+    const closeout = showProgress
+      ? createTuiWrapUpTracker(display, {
+          title: "Post-merge closeout",
+          subtitle: "Finishing the target branch index before terminal prompts.",
+          steps: [{ id: "atlas", label: "Finish ATLAS main view" }],
+        })
+      : null;
+    try {
+      closeout?.start("atlas");
+      display?.setRunPhase?.("ATLAS post-merge closeout");
+      const result = await this.drainPostMergeAtlasWarmJobs?.({
+        onStatus: (message) => {
+          closeout?.start("atlas", message);
+          display?.requestRender?.({ force: true });
+        },
+      });
+      closeout?.done(
+        "atlas",
+        result?.remaining > 0
+          ? `${result.remaining} queued`
+          : result?.ran > 0
+            ? `${result.ran} finished`
+            : "current",
+      );
+    } finally {
+      closeout?.clear();
+      if (display) display.stop?.();
+    }
+    if (typeof beforePush === "function") await beforePush();
+    return offerPush(mergedCount);
+  }
+
   async cmdReview() {
     const {
       autoMergeCompletedWorkItems,
@@ -95,6 +132,7 @@ export class ReviewSession {
     } else {
       console.log(`\n  No work items to review.\n`);
     }
+    await this.finalizeMergeOffers(reviewAutoMerge.acquired ? reviewAutoMerge.result : 0, offerPush);
     return;
   }
 
@@ -364,7 +402,7 @@ export class ReviewSession {
 
   // Offer to push merged work (self-gated: also fires when the target branch
   // has unpushed commits from merges earlier in the session).
-  await offerPush(mergedCount);
+  await this.finalizeMergeOffers(mergedCount, offerPush);
 
   await (this.ensureCleanTargetBranchAsync || ensureCleanTargetBranch)("review wrap-up", { logWhenClean: true });
 
@@ -491,7 +529,7 @@ export class ReviewSession {
   // self-gates: it prompts when this pass merged something OR the target
   // branch has unpushed commits (e.g. WIs auto-merged mid-run), and stays
   // silent otherwise.
-  await offerPush(autoMergedNow);
+  await this.finalizeMergeOffers(autoMergedNow, offerPush);
 
   // ── Review assessor suggestions (always, even if WI review was skipped) ──
   await this.reviewSuggestions();
@@ -2110,11 +2148,12 @@ export class ReviewSession {
     }
     await new Promise(r => setTimeout(r, 1500));
     wrapUp.clear();
-    display.stop();
-    await notifyDirtyState();
     // Even with zero merges this pass, WIs auto-merged mid-run may have left
     // the target branch ahead of the remote; offerPush self-gates on that.
-    await offerPush(autoMergedNow);
+    await this.finalizeMergeOffers(autoMergedNow, offerPush, {
+      display,
+      beforePush: notifyDirtyState,
+    });
     return;
   }
 
@@ -2189,14 +2228,12 @@ export class ReviewSession {
   const totalMerged = approved + autoMergedNow;
 
   // Ensure TUI is off before interactive prompts (idempotent — stop() is a no-op if already stopped)
-  display.stop();
-
-  // Notify about dirty worktrees/branches before push decisions
-  await notifyDirtyState();
-
   // Self-gated: prompts on merges from this pass OR unpushed commits left by
   // mid-run auto-merges; silent when there is nothing to push.
-  await offerPush(totalMerged);
+  await this.finalizeMergeOffers(totalMerged, offerPush, {
+    display,
+    beforePush: notifyDirtyState,
+  });
 
   // ── Review assessor suggestions ──
   await this.reviewSuggestions();

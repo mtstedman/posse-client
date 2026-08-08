@@ -1,5 +1,6 @@
 import {
   appendRunTelemetry,
+  beginRunTelemetryLifecycle,
   listRunTelemetryManifests,
   updateRunTelemetryManifest,
 } from "./run-telemetry.js";
@@ -115,18 +116,25 @@ export function getPreviousRunManifest() {
 }
 
 export function recordBootCrashResumeMarker(data = {}) {
+  const ownerId = data.ownerId || data.owner_id || null;
+  const lifecycle = beginRunTelemetryLifecycle({ ownerId });
   const previous = getPreviousRunManifest();
-  const previousManifest = previous?.manifest || null;
+  const previousManifest = lifecycle?.previousManifest?.lifecycle_began_at
+    ? lifecycle.previousManifest
+    : previous?.manifest || null;
   const entry = recordRunDiagnostic("boot.start", {
-    owner_id: data.ownerId || data.owner_id || null,
+    owner_id: ownerId,
     previous_run: previousManifest ? {
-      run_id: previousManifest.run_id || previous.run_id,
+      run_id: previousManifest.run_id || previous?.run_id || null,
       started_at: previousManifest.started_at || null,
       ended_at: previousManifest.ended_at || null,
-      clean_exit: previousManifest.clean_exit === true,
+      clean_exit: previousManifest.clean_exit === true
+        || Boolean(previousManifest.scheduler_clean_shutdown_at),
       last_heartbeat_at: previousManifest.last_heartbeat_at || null,
       scheduler_clean_shutdown_at: previousManifest.scheduler_clean_shutdown_at || null,
+      lifecycle_iteration: previousManifest.lifecycle_iteration ?? null,
     } : null,
+    lifecycle_iteration: lifecycle?.iteration ?? null,
     memory: collectMemorySnapshot().memory,
     ...data,
   });
@@ -134,6 +142,7 @@ export function recordBootCrashResumeMarker(data = {}) {
     boot_owner_id: entry.owner_id || null,
     previous_run_id: entry.previous_run?.run_id || null,
     previous_run_clean_exit: entry.previous_run?.clean_exit ?? null,
+    lifecycle_iteration: lifecycle?.iteration ?? null,
   });
   return entry;
 }

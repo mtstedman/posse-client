@@ -5,7 +5,8 @@ import { roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/b
 import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp-surface.js";
-import { listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
+import { normalizeAgentActivitySummary } from "../../../../catalog/event.js";
+import { getAgentActivityEvents, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
 
@@ -51,6 +52,7 @@ const LIVE_CHANNEL_TOOL_TYPES = new Set([
   "tool.get_operator_feedback",
   "tool.ack_operator_feedback",
 ]);
+const MONITOR_ACTIVE_JOB_STATUSES = new Set(["leased", "running", "awaiting_assessment"]);
 
 
 
@@ -182,6 +184,55 @@ function latestStamp(rows) {
     if (t > max) max = t;
   }
   return max;
+}
+
+// The stored event summary is the normalized form of the interaction body
+// (whitespace collapsed, capped at SUMMARY_CHARS), so both sides of the key
+// must go through the same transform or long/multiline bodies never match.
+function monitorActivityEventDedupKey({ actorId = null, interactionId = null, agentCallId = null, body = "" } = {}) {
+  return `${actorId ?? interactionId ?? ""}\u001f${agentCallId ?? ""}\u001f${normalizeAgentActivitySummary(body) || ""}`;
+}
+
+// Bossy consumes the versioned agent.activity event stream, while explicit
+// agent_feedback calls also create interaction rows for local coordination.
+// Merge both sources so Posse shows provider-native commentary too, and use the
+// interaction id carried as the event actor id to suppress the explicit-tool
+// duplicate.
+function mergeMonitorAgentActivityEvents(jobId, interactionRows = []) {
+  const represented = new Set(
+    interactionRows
+      .filter((row) => row.direction === "agent_to_user" && row.kind === "activity")
+      .map((row) => monitorActivityEventDedupKey({
+        interactionId: row.id,
+        agentCallId: row.agent_call_id,
+        body: row.body,
+      })),
+  );
+  const eventRows = getAgentActivityEvents(jobId, 60)
+    .filter((event) => !represented.has(monitorActivityEventDedupKey({
+      actorId: event.actor_id,
+      agentCallId: event.activity.agent_call_id,
+      body: event.activity.summary,
+    })))
+    .map((event) => ({
+      id: `agent-activity:${event.id ?? `${event.created_at || ""}:${event.activity.summary}`}`,
+      _kind: "agent_activity",
+      direction: "agent_to_user",
+      kind: "activity",
+      status: event.activity.status,
+      source: "agent_activity",
+      author: event.actor_type || "agent",
+      body: event.activity.summary,
+      activity_kind: event.activity.kind,
+      activity_phase: event.activity.phase || null,
+      agent_call_id: event.activity.agent_call_id ?? null,
+      created_at: event.created_at,
+    }));
+  return [...interactionRows, ...eventRows].sort((a, b) => {
+    const timeDelta = (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0);
+    if (timeDelta !== 0) return timeDelta;
+    return String(b.id ?? "").localeCompare(String(a.id ?? ""));
+  });
 }
 
 // What an OCCUPIED slot's agent is doing right now, for the fleet rail tag.
@@ -683,6 +734,7 @@ export class DisplayRightPanelRenderer {
       }
       try {
         interactionRows = listAgentInteractions({ job_id: numericJobId, limit: 14 });
+        interactionRows = mergeMonitorAgentActivityEvents(numericJobId, interactionRows);
         activityRows = interactionRows
           .filter((row) => row.direction === "agent_to_user" && row.kind === "activity");
       } catch {
@@ -727,17 +779,22 @@ export class DisplayRightPanelRenderer {
       const status = String(job.status || "").toLowerCase();
       const isHumanWait = status === "waiting_on_human"
         || (job.job_type === "human_input" && status !== "succeeded" && status !== "canceled");
-      if (!isHumanWait) continue;
+      const isDurablyActive = MONITOR_ACTIVE_JOB_STATUSES.has(status);
+      if (!isHumanWait && !isDurablyActive) continue;
       let guidance = [];
       let interactionRows = [];
       try {
         guidance = listActiveAgentGuidanceForJob(numericJobId, { limit: 3 });
         interactionRows = listAgentInteractions({ job_id: numericJobId, limit: 14 });
+        interactionRows = mergeMonitorAgentActivityEvents(numericJobId, interactionRows);
       } catch {
         guidance = [];
         interactionRows = [];
       }
+      const activityRows = interactionRows.filter((row) => row.direction === "agent_to_user" && row.kind === "activity");
+      const pendingGuidance = guidance.filter((row) => row.ack_state !== "acknowledged");
       const wiRow = wiById.get(Number(job.work_item_id)) || {};
+      const fallbackActivityAt = Date.parse(job.started_at || job.updated_at || job.created_at || "") || Date.now();
       agents.push({
         index: agents.length + 1,
         jobId: numericJobId,
@@ -747,20 +804,22 @@ export class DisplayRightPanelRenderer {
         wiStatus: wiRow.status || null,
         wiMergeState: wiRow.merge_state || null,
         role: roleLabel(job.job_type || "human"),
-        state: "ask",
-        activity: _sanitizeDisplayLine(job.title || "waiting on human input"),
+        state: isHumanWait
+          ? "ask"
+          : (questionJobIds.has(numericJobId) ? "ask" : (pendingGuidance.length > 0 ? "nudge" : "live")),
+        activity: _sanitizeDisplayLine(activityRows[0]?.body || job.title || (isHumanWait ? "waiting on human input" : "running")),
         attempt: job.attempt_count || 1,
-        provider: null,
-        modelName: null,
+        provider: job.provider || null,
+        modelName: job.model_name || null,
         tier: job.model_tier || "standard",
         effort: job.reasoning_effort || "medium",
-        elapsed: formatElapsed(Date.parse(job.updated_at || job.created_at || "") || Date.now()),
+        elapsed: formatElapsed(fallbackActivityAt),
         interactionRows,
-        activityRows: [],
+        activityRows,
         guidance,
-        pendingGuidance: guidance.filter((row) => row.ack_state !== "acknowledged"),
-        status: job.status || "waiting_on_human",
-        ...liveness(numericJobId, [], interactionRows, Date.parse(job.updated_at || job.created_at || "") || 0),
+        pendingGuidance,
+        status: job.status || (isHumanWait ? "waiting_on_human" : "running"),
+        ...liveness(numericJobId, activityRows, interactionRows, fallbackActivityAt),
       });
       seen.add(numericJobId);
     }

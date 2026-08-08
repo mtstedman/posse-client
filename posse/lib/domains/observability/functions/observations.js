@@ -792,13 +792,12 @@ function _summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = (value
   }
 
   if (spec.format === "generate_image") {
-    const rawPath = _pathTarget(input, spec);
-    const filePath = rel(rawPath);
+    const filename = _pathTarget(input, spec);
     const size = _truncate(input.size || "", 20);
     return {
       observation_type: spec.type,
-      summary: `${spec.label}: ${_truncate(filePath || ".", 120)}${size ? ` (${size})` : ""}`,
-      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { path: _normalizePath(rawPath), size: input.size || null, quality: input.quality || null } }),
+      summary: `${spec.label}: ${_truncate(filename || ".", 120)}${size ? ` (${size})` : ""}`,
+      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { filename: String(filename || ""), size: input.size || null, quality: input.quality || null } }),
     };
   }
 

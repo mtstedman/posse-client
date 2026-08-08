@@ -60,10 +60,6 @@ import {
 } from "../../../git/functions/utils.js";
 import { isAbortError, yieldNow } from "../../../runtime/functions/yield.js";
 import {
-  branchStalenessCheck,
-  formatBranchStalenessCheck,
-} from "../../../system/functions/preflight-probes.js";
-import {
   finalizePrepTrace,
   startPrepTrace,
   withPhase,
@@ -102,6 +98,43 @@ export {
   readActiveWorktreeSentinel,
   writeActiveWorktreeSentinel,
 } from "./worktree-sentinel.js";
+
+async function branchTargetMergeNeedAsync(projectDir, branchName, targetBranch, { signal = null } = {}) {
+  try {
+    // One ancestry probe replaces the former four-process staleness report.
+    // The native merge remains the authoritative mutation/result contract.
+    await gitExecAsync(["merge-base", "--is-ancestor", targetBranch, branchName], projectDir, { signal });
+    return {
+      ok: true,
+      status: "fresh",
+      branch: branchName,
+      target_branch: targetBranch,
+      needs_rebase: false,
+      message: `${branchName} is fresh against ${targetBranch}`,
+    };
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    const status = Number.isInteger(err?.status) ? err.status : err?.code;
+    if (status === 1) {
+      return {
+        ok: true,
+        status: "stale",
+        branch: branchName,
+        target_branch: targetBranch,
+        needs_rebase: true,
+        message: `${branchName} is behind ${targetBranch}; target merge needed before dev`,
+      };
+    }
+    return {
+      ok: false,
+      status: "unknown",
+      branch: branchName,
+      target_branch: targetBranch,
+      needs_rebase: null,
+      message: `branch staleness unknown (${err?.message?.split?.("\n")?.[0] || err})`,
+    };
+  }
+}
 
 function logTerminalCleanupFailure(worker, wi, wtDir, message, extra = {}) {
   logEvent({
@@ -712,20 +745,23 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         }
       }
 
-      wtPath = await withPhase("worktree_add", prepTrace, () => configureWorktreeScopeAsync(wtDir, worker.projectDir, { signal }));
+      wtPath = await withPhase("worktree_scope", prepTrace, () => configureWorktreeScopeAsync(wtDir, worker.projectDir, { signal }));
     }
 
     await yieldNow({ signal });
     let dirtyState = { dirtyPost: "", ignoredDirty: false, ignoredPost: "", mergeInProgress: false };
     await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
       dirtyState = await withPhase("dirty_detect", prepTrace, async () => {
-        const dirtyPost = await gitExecAsync(["status", "--porcelain", "--untracked-files=all"], wtPath, { signal });
-        const ignoredPost = await gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all"], wtPath, { signal });
+        const [dirtyPost, ignoredPost, mergeInProgress] = await Promise.all([
+          gitExecAsync(["status", "--porcelain", "--untracked-files=all"], wtPath, { signal }),
+          gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all"], wtPath, { signal }),
+          isMergeInProgressAsync(wtPath, { signal }),
+        ]);
         return {
           dirtyPost,
           ignoredPost,
           ignoredDirty: parsePorcelainEntries(ignoredPost).some((entry) => entry.status === "!!"),
-          mergeInProgress: await isMergeInProgressAsync(wtPath, { signal }),
+          mergeInProgress,
         };
       });
       if ((dirtyState.dirtyPost || dirtyState.ignoredDirty) && !dirtyState.mergeInProgress) {
@@ -847,20 +883,21 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
           try {
             const targetBranch = await resolveTargetBranchAsync(worker.projectDir, { signal });
-            const staleness = branchStalenessCheck({
-              projectDir: worker.projectDir,
+            const staleness = await branchTargetMergeNeedAsync(
+              worker.projectDir,
               branchName,
               targetBranch,
-            });
+              { signal },
+            );
             if (staleness.status === "stale") {
-              worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} ${formatBranchStalenessCheck(staleness)}${C.reset}`);
+              worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} ${staleness.message}${C.reset}`);
             }
             logEvent({
               work_item_id: job.work_item_id,
               job_id: job.id,
               event_type: EVENT_TYPES.JOB_BRANCH_STALENESS_CHECK,
               actor_type: EVENT_ACTORS.WORKER,
-              message: formatBranchStalenessCheck(staleness),
+              message: staleness.message,
               event_json: JSON.stringify(staleness),
             });
             const siblingLocks = activeLiveSiblingWriteLocks(job);

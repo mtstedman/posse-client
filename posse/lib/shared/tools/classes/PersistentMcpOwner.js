@@ -39,7 +39,10 @@ import {
   sealSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
-import { noteAtlasPressureAndGetNudge } from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
+import {
+  buildAtlasGateScopeKey,
+  noteAtlasPressureAndGetNudge,
+} from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import {
   recordObservation,
@@ -821,11 +824,26 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
 function appendOwnerAtlasPressureNudge(result, session, toolName, toolArgs) {
   try {
     if (result?.isError === true) return result;
-    const jobId = session?.bootConfig?.jobId ?? null;
+    const boot = session?.bootConfig || {};
+    const jobId = boot.jobId ?? null;
+    const attemptId = boot.attemptId ?? null;
+    const agentCallId = boot.agentCallId ?? null;
+    const scopeKey = buildAtlasGateScopeKey({
+      jobId,
+      attemptId,
+      agentCallId,
+      fallback: session?.id || null,
+    });
     const nudge = noteAtlasPressureAndGetNudge({
       action: toolName,
       args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
-      scopeKey: jobId != null ? `job:${jobId}` : (session?.id || null),
+      scopeKey,
+      telemetryContext: {
+        work_item_id: boot.workItemId ?? null,
+        job_id: jobId,
+        attempt_id: attemptId,
+        agent_call_id: agentCallId,
+      },
     });
     if (!nudge) return result;
     const first = result?.content?.[0];

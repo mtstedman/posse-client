@@ -16,6 +16,7 @@ import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/function
 import { issuedToolSurfaceForProviderPolicy, narrowProviderOptionsToRemoteIssuance } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildDisabledAtlasAttachment, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import {
+  buildAtlasGateScopeKey,
   configureGate,
   releaseGate,
   unlockForAtlasUnavailable,
@@ -234,7 +235,7 @@ function buildImageTool() {
       `Generate an image using ${imageModel}. EXPENSIVE - only use for ` +
       "high-value images that are central to the task. For decorative or " +
       "placeholder images, describe what should go there and note it in your " +
-      "output instead. Returns the file path of the saved image.",
+      "output instead. Returns the filename of the saved image.",
     parameters: {
       type: "object",
       properties: {
@@ -242,9 +243,11 @@ function buildImageTool() {
           type: "string",
           description: "Detailed description of the image to generate. Be specific about style, composition, colors, and content.",
         },
-        path: {
+        filename: {
           type: "string",
-          description: "File path to save the image. Relative to working directory. Allowed extensions: see artifact protocol config (default: .png, .jpg, .jpeg, .webp).",
+          minLength: 1,
+          pattern: "^[^/\\\\]+$",
+          description: "Output image filename only, such as image.png. Directory paths are not accepted. Saved in the current output directory. Allowed extensions: see artifact protocol config (default: .png, .jpg, .jpeg, .webp).",
         },
         size: {
           type: "string",
@@ -263,7 +266,7 @@ function buildImageTool() {
             : "Image quality. Default: standard. Use 'hd' for hero/banner images.",
         },
       },
-      required: ["prompt", "path"],
+      required: ["prompt", "filename"],
       additionalProperties: false,
     },
   };
@@ -319,6 +322,8 @@ export async function callProvider(promptText, {
   recordFinalPrompt = null, // (finalPrompt, { systemPrompt?, systemPromptFiles? }) => void
   jobId = null,
   workItemId = null,
+  attemptId = null,
+  agentCallId = null,
   atlasPrefetchStatus = null,
   disableAtlas = false,
   atlasConfig = null,
@@ -561,7 +566,7 @@ export async function callProvider(promptText, {
     role,
     atlasAvailable: !disableAtlas && !!atlasAttachment?.active,
     enabled: atlasToolGateEnabled,
-    scopeKey: jobId != null ? `job:${jobId}` : null,
+    scopeKey: buildAtlasGateScopeKey({ jobId, attemptId, agentCallId }),
   });
   const normalizedAtlasPrefetchStatus = String(atlasPrefetchStatus || "").trim().toLowerCase();
   if (

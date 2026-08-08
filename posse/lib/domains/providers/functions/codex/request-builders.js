@@ -388,12 +388,21 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
   return buildCodexDeterministicMcpAttachment(serverConfig);
 }
 
-export function buildCodexSystemToolLockdownOverrides({ disableSystemTools = false } = {}) {
-  if (!disableSystemTools) return [];
-  return [
-    "features.shell_tool=false",
-    "features.unified_exec=false",
-  ];
+export function buildCodexSystemToolLockdownOverrides({
+  disableSystemTools = false,
+  disableNativeImageGeneration = false,
+} = {}) {
+  const overrides = [];
+  if (disableSystemTools) {
+    overrides.push(
+      "features.shell_tool=false",
+      "features.unified_exec=false",
+    );
+  }
+  if (disableNativeImageGeneration) {
+    overrides.push("features.image_generation=false");
+  }
+  return overrides;
 }
 
 export function __testBuildCodexSystemToolLockdownOverrides(options = {}) {

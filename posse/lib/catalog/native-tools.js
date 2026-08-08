@@ -2053,7 +2053,7 @@ export const TOOL_GENERATE_IMAGE = {
   type: "function",
   name: "generate_image",
   description:
-    "Generate an image using the configured image provider/model and save it to path.",
+    "Generate an image using the configured image provider/model and save it in the current output directory.",
   parameters: {
     type: "object",
     properties: {
@@ -2061,9 +2061,11 @@ export const TOOL_GENERATE_IMAGE = {
         type: "string",
         description: "Detailed description of the image to generate.",
       },
-      path: {
+      filename: {
         type: "string",
-        description: "Output image path relative to working directory.",
+        minLength: 1,
+        pattern: "^[^/\\\\]+$",
+        description: "Output image filename only, such as image.png. Directory paths are not accepted.",
       },
       size: {
         type: "string",
@@ -2079,7 +2081,7 @@ export const TOOL_GENERATE_IMAGE = {
         description: "Optional provider override. Defaults to configured image provider.",
       },
     },
-    required: ["prompt", "path"],
+    required: ["prompt", "filename"],
     additionalProperties: false,
   },
 };

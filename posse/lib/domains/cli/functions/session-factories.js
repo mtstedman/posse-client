@@ -72,6 +72,7 @@ import {
   checkRemotePromptBundleReadiness,
   checkRemotePromptCompilerReadiness,
 } from "../../remote/functions/readiness.js";
+import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 
 export async function createReviewSessionDeps(bootDeps) {
   const {
@@ -124,6 +125,10 @@ export async function createReviewSessionDeps(bootDeps) {
     cleanupWiBranchAsync: helpers.cleanupWiBranchAsync,
     requeueWorkItemAfterRejection,
     offerPush: helpers.offerPush,
+    drainPostMergeAtlasWarmJobs: (options = {}) => drainPostMergeAtlasWarmJobs({
+      projectDir,
+      ...options,
+    }),
     ensureCleanTargetBranch: helpers.ensureCleanTargetBranch,
     ensureCleanTargetBranchAsync: helpers.ensureCleanTargetBranchAsync,
     cleanupRunningAgentCalls,

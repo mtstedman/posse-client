@@ -2,7 +2,11 @@
 // Push-offer gate and push execution workflow helpers.
 
 import { listWorkItems, logEvent, withMergeLock } from "../../queue/functions/index.js";
-import { markOpenPushOfferGatePushed, upsertPushOfferGate } from "../../queue/functions/push-offer.js";
+import {
+  cancelOpenPushOfferGates,
+  markOpenPushOfferGatePushed,
+  upsertPushOfferGate,
+} from "../../queue/functions/push-offer.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { runHook } from "./hooks.js";
@@ -124,6 +128,17 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
   function collectPushOfferStateAsync(mergedCount, workerOptions = {}) {
     return runGitWorkflowTaskOffMainThread("collectPushOfferState", { mergedCount }, workerOptions);
+  }
+
+  async function refreshPushOfferGate(mergedCount = 0, { createdBy = "post_merge_closeout" } = {}) {
+    const state = await collectPushOfferStateAsync(mergedCount);
+    const aheadCount = Number.isFinite(state?.aheadCount) ? state.aheadCount : 0;
+    if (!state?.hasRemote || !state?.pushBranch || state.pushBranchWorkItem
+      || (Number(mergedCount) <= 0 && aheadCount <= 0)) {
+      cancelOpenPushOfferGates("post_merge_state_has_no_push_offer");
+      return { ok: false, reason: "nothing_to_push", state };
+    }
+    return { ...upsertPushOfferGate(state, { createdBy }), state };
   }
 
   function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
@@ -357,6 +372,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
   return {
     collectPushOfferState,
     collectPushOfferStateAsync,
+    refreshPushOfferGate,
     executePush,
     executePushAsync,
     offerPush,

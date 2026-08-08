@@ -11,6 +11,11 @@ import { gitExecAsync } from "./utils.js";
 import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 import { logSuppressedGitFailure } from "./worktree-internal.js";
 
+// Repo topology is stable for the lifetime of one orchestrator process. This
+// narrow cache avoids a rev-parse subprocess every time a WI worktree is
+// configured, while custom-manager test calls retain uncached behavior.
+const nestedProjectSubpathCache = new Map();
+
 export function gitBranchExists(branchName, cwd) {
   return new Repo(cwd).branchExists(branchName);
 }
@@ -34,11 +39,22 @@ export async function gitTopLevelAsync(cwd, options = {}) {
 
 export async function nestedProjectSubpathAsync(projectDir, options = {}) {
   const projectRoot = path.resolve(projectDir);
+  const cacheable = options?.manager == null;
+  if (cacheable && nestedProjectSubpathCache.has(projectRoot)) {
+    return nestedProjectSubpathCache.get(projectRoot);
+  }
   const repoRoot = await gitTopLevelAsync(projectDir, options);
   const rel = path.relative(repoRoot, projectRoot);
-  if (!rel || rel === "") return null;
-  if (!isInsideRoot(projectRoot, repoRoot, { allowEqual: false, followSymlinks: false })) return null;
-  return rel.replace(/\\/g, "/");
+  const result = !rel || rel === ""
+    || !isInsideRoot(projectRoot, repoRoot, { allowEqual: false, followSymlinks: false })
+    ? null
+    : rel.replace(/\\/g, "/");
+  if (cacheable) nestedProjectSubpathCache.set(projectRoot, result);
+  return result;
+}
+
+export function __resetNestedProjectSubpathCacheForTests() {
+  nestedProjectSubpathCache.clear();
 }
 
 export function worktreeRoot(projectDir, nativeParity = {}) {

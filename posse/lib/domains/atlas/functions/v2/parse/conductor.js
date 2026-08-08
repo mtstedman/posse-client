@@ -606,6 +606,10 @@ export function isConductorIndexingInFlight() {
   return _indexingInflight > 0;
 }
 
+export function hasSharedConductor() {
+  return _sharedConductor != null;
+}
+
 /**
  * Get the process-global Atlas-Conductor daemon, creating it on first use. The
  * returned client's request ops are idle-tracked (see SHARED_IDLE_MS).

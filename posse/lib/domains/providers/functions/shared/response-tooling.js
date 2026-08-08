@@ -37,7 +37,6 @@ async function execGenerateImage(args, cwd, scopePredicates) {
   return execGenerateImageInternal(args, {
     cwd,
     scopePredicates,
-    safePathImpl: sharedSafePath,
   });
 }
 

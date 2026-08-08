@@ -112,7 +112,9 @@ import { computeJobProgressStats } from "../../ui/functions/display/helpers/job-
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
 import { C } from "../../../shared/format/functions/colors.js";
+import { configureRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
+import { configureModelCatalogRuntimeWarnings } from "../../providers/functions/model-catalog-validate.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
 import {
@@ -157,6 +159,7 @@ import {
   createReviewSessionDeps as createReviewSessionDepsImpl,
   createRunSessionDeps as createRunSessionDepsImpl,
 } from "./session-factories.js";
+import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 import {
   classifyResearchForRouting as classifyResearchForRoutingImpl,
   createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl,
@@ -1481,7 +1484,7 @@ async function cmdImage() {
         `Use quality "high" for best results.`,
         ``,
         `Example tool call:`,
-        `  generate_image({ "prompt": "a beautiful mermaid in the ocean", "path": "image.png", "quality": "high", "size": "1024x1024" })`,
+        `  generate_image({ "prompt": "a beautiful mermaid in the ocean", "filename": "image.png", "quality": "high", "size": "1024x1024" })`,
       ].join("\n"),
       task_mode: "image",
       needs_image_generation: true,
@@ -1784,6 +1787,7 @@ async function cmdGo() {
       return;
     }
     if (autoMergedNow > 0) {
+      await drainPostMergeAtlasWarmJobs({ projectDir: PROJECT_DIR });
       await helpers.offerPush(autoMergedNow);
       return;
     }
@@ -2073,9 +2077,11 @@ async function cmdMerge() {
     return;
   }
   const result = mergeOutcome.result;
+  let mergedOrPreviouslyMerged = false;
   if (result.alreadyMerged) {
     const mergedWi = getWorkItem(wi.id) || wi;
     const cleanupOk = helpers.cleanupWiBranch(mergedWi);
+    mergedOrPreviouslyMerged = true;
     console.log(`\n  ${C.green}\u2713 Already merged${C.reset}${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}\n`);
   } else if (result.ok) {
     // Record the merge
@@ -2091,6 +2097,7 @@ async function cmdMerge() {
 
     // Clean up worktree + branch
     const cleanupOk = helpers.cleanupWiBranch(getWorkItem(wi.id) || wi);
+    mergedOrPreviouslyMerged = true;
 
     console.log(`\n  ${C.green}\u2713 ${result.message}${C.reset} (${mergeHash.slice(0, 8)})`);
     console.log(cleanupOk
@@ -2103,6 +2110,21 @@ async function cmdMerge() {
     console.log(`\n  ${C.red}\u2717 ${result.message}${C.reset}`);
     console.log(`  ${C.dim}Resolve conflicts manually, then run: git merge --continue${C.reset}\n`);
     process.exitCode = 1;
+  }
+
+  if (mergedOrPreviouslyMerged) {
+    const atlasCloseout = await drainPostMergeAtlasWarmJobs({
+      projectDir: PROJECT_DIR,
+      onStatus: (message) => console.log(`  ${C.dim}${message}${C.reset}`),
+    });
+    if (atlasCloseout.remaining > 0) {
+      console.log(`  ${C.yellow}${atlasCloseout.remaining} post-merge ATLAS job(s) remain queued for the next scheduler run.${C.reset}`);
+    }
+    try {
+      await helpers.refreshPushOfferGate(1, { createdBy: "manual_merge" });
+    } catch (err) {
+      console.log(`  ${C.yellow}Push offer refresh failed: ${err?.message || err}${C.reset}`);
+    }
   }
 }
 
@@ -2501,6 +2523,11 @@ export async function main() {
   const command = normalizeCommandName((!COMMAND && ITERATE_FLAG) ? "add" : COMMAND);
   if (rejectUnknownFlags()) return;
   const commandPolicy = getCommandBootstrapPolicy(command);
+  const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
+  // Report and polling commands may write the dated operational log, but they
+  // do not own a scheduler lifecycle and must not create logs/runs sessions.
+  configureRunTelemetry({ enabled: !informationalOnly });
+  configureModelCatalogRuntimeWarnings({ enabled: !informationalOnly });
   if (!isHelpCommand(command) && commandPolicy.known && helpFlagRequested()) {
     await printCommandHelp(command);
     return;

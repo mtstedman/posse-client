@@ -6,7 +6,7 @@
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { logEvent } from "./events.js";
+import { logAgentActivity, logEvent } from "./events.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 
@@ -43,6 +43,28 @@ function normalizeJsonText(value) {
   return JSON.stringify(value);
 }
 
+function metadataObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function activityProtocolState(metadata = {}) {
+  const raw = String(metadata.status || metadata.action || "running").trim().toLowerCase();
+  if (["done", "complete", "completed", "succeeded", "success"].includes(raw)) {
+    return { kind: "result", status: "succeeded" };
+  }
+  if (["failed", "failure", "error"].includes(raw)) return { kind: "error", status: "failed" };
+  if (["canceled", "cancelled"].includes(raw)) return { kind: "result", status: "canceled" };
+  if (["blocked", "waiting"].includes(raw)) return { kind: "progress", status: "waiting" };
+  return { kind: "progress", status: "running" };
+}
+
 function normalizeRow(row) {
   if (!row) return null;
   return {
@@ -60,7 +82,6 @@ function guidanceEventType(kind) {
   if (kind === "nudge") return EVENT_TYPES.OPERATOR_NUDGE_CREATED;
   if (kind === "question") return EVENT_TYPES.AGENT_QUESTION_CREATED;
   if (kind === "answer") return EVENT_TYPES.AGENT_QUESTION_ANSWERED;
-  if (kind === "activity") return EVENT_TYPES.AGENT_ACTIVITY;
   return EVENT_TYPES.AGENT_INTERACTION_CREATED;
 }
 
@@ -161,23 +182,43 @@ export function createAgentInteraction({
   );
   const row = normalizeRow(db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(info.lastInsertRowid));
 
-  logEvent({
-    work_item_id: row.work_item_id,
-    job_id: row.job_id,
-    attempt_id: row.attempt_id,
-    event_type: guidanceEventType(kind),
-    actor_type: direction === AGENT_TO_USER ? EVENT_ACTORS.WORKER : EVENT_ACTORS.HUMAN,
-    message: kind === "activity" ? normalizedBody : `${kind} #${row.id}: ${normalizedBody.slice(0, 200)}`,
-    event_json: {
-      interaction_id: row.id,
-      direction,
-      kind,
-      blocking_policy,
-      status,
-      source,
-      parent_id: row.parent_id,
-    },
-  });
+  if (kind === "activity" && direction === AGENT_TO_USER) {
+    const metadata = metadataObject(metadata_json);
+    const protocolState = activityProtocolState(metadata);
+    logAgentActivity({
+      work_item_id: row.work_item_id,
+      job_id: row.job_id,
+      attempt_id: row.attempt_id,
+      role: metadata.role || EVENT_ACTORS.WORKER,
+      actor_id: String(row.id),
+      kind: protocolState.kind,
+      status: protocolState.status,
+      phase: metadata.phase || null,
+      summary: normalizedBody,
+      detail: metadata.detail || null,
+      agent_call_id: row.agent_call_id,
+      provider: metadata.provider || null,
+      model: metadata.model || null,
+    });
+  } else {
+    logEvent({
+      work_item_id: row.work_item_id,
+      job_id: row.job_id,
+      attempt_id: row.attempt_id,
+      event_type: guidanceEventType(kind),
+      actor_type: direction === AGENT_TO_USER ? EVENT_ACTORS.WORKER : EVENT_ACTORS.HUMAN,
+      message: `${kind} #${row.id}: ${normalizedBody.slice(0, 200)}`,
+      event_json: {
+        interaction_id: row.id,
+        direction,
+        kind,
+        blocking_policy,
+        status,
+        source,
+        parent_id: row.parent_id,
+      },
+    });
+  }
   notifyQueueStateChanged({ reason: "agent_interaction_created", jobId: row.job_id, workItemId: row.work_item_id });
   return row;
 }
@@ -301,6 +342,7 @@ export function recordAgentActivity({
   phase = null,
   action = null,
   body = null,
+  role = null,
   source = "agent",
   metadata_json = null,
 } = {}) {
@@ -346,6 +388,7 @@ export function recordAgentActivity({
       ...(metadata_json && typeof metadata_json === "object" ? metadata_json : {}),
       phase: phaseText || null,
       action: actionText || null,
+      role: normalizeText(role) || normalizeText(metadataObject(metadata_json).role) || null,
     },
     ack_state: "not_applicable",
   });

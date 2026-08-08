@@ -81,6 +81,7 @@ import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { PulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { ParentPulseTokenManager } from "../../../shared/native/classes/ParentPulseTokenManager.js";
 import {
+  buildAtlasGateScopeKey,
   configureGate,
   isGateActive,
   isGatedTool,
@@ -88,6 +89,7 @@ import {
   checkNativeToolAllowed,
   buildLockedToolError,
   noteAtlasCall,
+  releaseGate,
   unlockForAtlasUnavailable,
   isFallbackAtlasPrefetchStatus,
 } from "./deterministic-mcp/gate.js";
@@ -1979,9 +1981,12 @@ function agentFeedback(args = {}) {
   recordAgentActivity({
     work_item_id: mcpWorkItemId,
     job_id: mcpJobId,
+    attempt_id: mcpAttemptId,
+    agent_call_id: mcpAgentCallId,
     phase: args.phase,
     action: args.status,
     body: args.summary,
+    role: roleName,
     source: "mcp_tool",
     metadata_json: { status: args.status || null, role: roleName || null },
   });
@@ -2224,7 +2229,6 @@ if (allowImageGeneration) {
     const result = await execGenerateImageInternal(args || {}, {
       cwd: workspaceCwd,
       scopePredicates: effectiveScopePredicates,
-      safePathImpl: safePath,
     });
     if (typeof result === "string" && result.startsWith("Error:")) {
       imageGenerationCallCount = Math.max(0, imageGenerationCallCount - 1);
@@ -2264,16 +2268,20 @@ function runtimeSessionKey(config = bootConfig) {
   const token = String(config?.mcpOAuth?.tokenId || "").trim();
   const job = config?.jobId != null && config.jobId !== "" ? `job:${config.jobId}` : "";
   const workItem = config?.workItemId != null && config.workItemId !== "" ? `wi:${config.workItemId}` : "";
+  const attempt = config?.attemptId != null && config.attemptId !== "" ? `attempt:${config.attemptId}` : "";
+  const agentCall = config?.agentCallId != null && config.agentCallId !== "" ? `call:${config.agentCallId}` : "";
   const role = String(config?.role || "").trim();
   const cwd = String(config?.cwd || "").trim();
-  return [token ? `mcp:${token}` : "", job, workItem, role, cwd].filter(Boolean).join("|") || "owner-hot";
+  return [token ? `mcp:${token}` : "", job, workItem, attempt, agentCall, role, cwd].filter(Boolean).join("|") || "owner-hot";
 }
 
 function gateScopeKeyForBootConfig(config = bootConfig) {
-  const token = String(config?.mcpOAuth?.tokenId || "").trim();
-  const jobId = Number(config?.jobId) || null;
-  if (token) return `mcp:${token}${jobId != null ? `|job:${jobId}` : ""}`;
-  return jobId != null ? `job:${jobId}` : null;
+  return buildAtlasGateScopeKey({
+    tokenId: config?.mcpOAuth?.tokenId,
+    jobId: config?.jobId,
+    attemptId: config?.attemptId,
+    agentCallId: config?.agentCallId,
+  });
 }
 
 function applyOwnerAtlasGateEvents(config = bootConfig, scopeKey = gateScopeKey) {
@@ -2290,6 +2298,12 @@ function applyOwnerAtlasGateEvents(config = bootConfig, scopeKey = gateScopeKey)
       empty: event?.empty === true,
       cwd: workspaceCwd,
       scopeKey,
+      telemetryContext: {
+        work_item_id: Number(config?.workItemId) || null,
+        job_id: Number(config?.jobId) || null,
+        attempt_id: Number(config?.attemptId) || null,
+        agent_call_id: Number(config?.agentCallId) || null,
+      },
     });
     seenSeq = seq;
   }
@@ -2419,7 +2433,6 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
       const result = await execGenerateImageInternal(args || {}, {
         cwd: workspaceCwd,
         scopePredicates: effectiveScopePredicates,
-        safePathImpl: safePath,
       });
       if (typeof result === "string" && result.startsWith("Error:")) {
         imageGenerationCallCount = Math.max(0, imageGenerationCallCount - 1);
@@ -2518,6 +2531,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     attempt_id: mcpAttemptId,
     agent_call_id: mcpAgentCallId,
   };
+  if (sessionChanged && gateScopeKey) releaseGate({ scopeKey: gateScopeKey });
   bootConfig = parsedConfig;
   ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
   const ownerHotUnscoped = ownerHotGateway && !mcpMessageSessionScoped;

@@ -503,6 +503,9 @@ export class PlannerRole extends BaseRole {
       recipient: "planner",
       data: {
         cwd: worker.projectDir,
+        job_id: job.id,
+        work_item_id: job.work_item_id,
+        job_type: job.job_type,
         disableAtlas: payload.disableAtlas === true,
         disableAtlasReason: payload.disableAtlasReason || null,
         title: workItem.title || "",
