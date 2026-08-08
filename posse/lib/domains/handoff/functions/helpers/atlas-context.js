@@ -285,17 +285,22 @@ function _collectAtlasSeedSymbols(packet, maxItems = 24) {
 export function resolveAtlasPrefetchPlan(packet, atlasConfig = packet?.atlas_config || getAtlasIntegrationConfig()) {
   const role = String(packet?.recipient || "").trim().toLowerCase();
   const validatedSeeds = _collectValidatedAtlasSeedFiles(packet);
-  if (role === "dev" && validatedSeeds.length > 0) {
-    return { mode: "dev-grow", action: "tree.expand", seedFiles: validatedSeeds, useTaskText: false };
+  // The compressed ATLAS tree indexes source code, not arbitrary deployment
+  // config. Keep config files in exact-file prefetch, but do not send them as
+  // tree seeds where they produce a misleading "missing" diagnostic.
+  const indexedSeeds = validatedSeeds.filter((file) => _isIndexedSourcePath(file));
+  if (role === "dev" && indexedSeeds.length > 0) {
+    return { mode: "dev-grow", action: "tree.expand", seedFiles: indexedSeeds, useTaskText: false };
   }
-  if (role === "planner" && validatedSeeds.length > 0) {
-    return { mode: "planner-seeded", action: "tree.scope", seedFiles: validatedSeeds, useTaskText: true };
+  if (role === "planner" && indexedSeeds.length > 0) {
+    return { mode: "planner-seeded", action: "tree.scope", seedFiles: indexedSeeds, useTaskText: true };
   }
   const entrypointRank = atlasConfig?.prefetchEntrypointRank === true;
   return {
     mode: "broad",
     action: "tree.scope",
-    seedFiles: entrypointRank ? validatedSeeds : _collectAtlasSeedFiles(packet),
+    seedFiles: (entrypointRank ? indexedSeeds : _collectAtlasSeedFiles(packet))
+      .filter((file) => _isIndexedSourcePath(file)),
     useTaskText: true,
   };
 }

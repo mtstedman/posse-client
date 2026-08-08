@@ -388,6 +388,18 @@ export async function callProvider(promptText, {
       () => cleanupRunTemps(null, { syncConfigCleanup: true }),
     );
     const forceReadOnlySandbox = !!(deterministicReadMcp.active && allowWrite);
+    const args = buildCodexExecArgs({
+      codexArgs,
+      outputFile: temp.file,
+      workingDir,
+      allowWrite,
+      modelToUse,
+      reasoningEffort,
+      configOverrides: configRoute.configOverrides,
+      forceReadOnlySandbox,
+      sandboxModeOverride,
+      priorSessionHandle: resumeSessionHandle,
+    });
     logProviderMcpSurfaceTelemetry({
       providerName: "codex",
       role,
@@ -401,20 +413,9 @@ export async function callProvider(promptText, {
         deterministicReadMcp.active ? deterministicReadMcp.serverKey : null,
         (!atlasServedByGateway && atlasReadyForMcp) ? atlasMcpServerKey : null,
       ].filter(Boolean),
+      emittedCliArgs: args,
       configOverrideCount: combinedConfigOverrides.length,
       forceReadOnlySandbox,
-    });
-    const args = buildCodexExecArgs({
-      codexArgs,
-      outputFile: temp.file,
-      workingDir,
-      allowWrite,
-      modelToUse,
-      reasoningEffort,
-      configOverrides: configRoute.configOverrides,
-      forceReadOnlySandbox,
-      sandboxModeOverride,
-      priorSessionHandle: resumeSessionHandle,
     });
 
     const extraDirs = collectCodexExtraDirs({ workingDir, scopedFiles, createFiles, createRoots, readRoots });

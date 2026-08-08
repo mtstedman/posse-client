@@ -58,7 +58,7 @@ function nowIso() {
 }
 
 function ensureExitHook() {
-  if (_exitHookInstalled) return;
+  if (!isMainThread || _exitHookInstalled) return;
   _exitHookInstalled = true;
   process.on("exit", () => {
     try { closeRunTelemetry({ cleanExit: true }); } catch { /* best effort */ }
@@ -87,8 +87,11 @@ export function getRunTelemetryDir() {
 }
 
 function ensureManifest(runDir) {
-  if (_manifestDirs.has(runDir)) return;
   fs.mkdirSync(runDir, { recursive: true });
+  // Worker threads may append their own telemetry streams, but the process
+  // main thread exclusively owns run lifecycle metadata. Otherwise a worker
+  // exit can mark the shared run clean while the scheduler is still alive.
+  if (!isMainThread || _manifestDirs.has(runDir)) return;
   const manifestPath = path.join(runDir, "manifest.json");
   if (!fs.existsSync(manifestPath)) {
     const manifest = {
@@ -132,9 +135,11 @@ function updateManifest(runDir, patch = {}) {
 }
 
 export function updateRunTelemetryManifest(patch = {}) {
+  if (!isMainThread) return false;
   const runDir = getRunTelemetryDir();
   ensureManifest(runDir);
   updateManifest(runDir, patch);
+  return true;
 }
 
 export function listRunTelemetryManifests({ includeCurrent = true } = {}) {
@@ -201,11 +206,13 @@ export function closeRunTelemetry({ cleanExit = true } = {}) {
   }
   _streams.clear();
   _manifestDirs.clear();
-  for (const runDir of dirs) {
-    updateManifest(runDir, {
-      ended_at: nowIso(),
-      clean_exit: !!cleanExit,
-    });
+  if (isMainThread) {
+    for (const runDir of dirs) {
+      updateManifest(runDir, {
+        ended_at: nowIso(),
+        clean_exit: !!cleanExit,
+      });
+    }
   }
 }
 

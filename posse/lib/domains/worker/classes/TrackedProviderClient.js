@@ -1345,6 +1345,23 @@ export class TrackedProviderClient {
         throw error;
       }
       const output = handoffFinalization.output;
+      // Usage survives a terminal stop only when the provider confirmed its
+      // accounting was complete: codex via the terminal usage flush, claude via
+      // the parsed final result message (stats.usageFinalized).
+      const terminalUsageUnavailable = terminalProviderError != null
+        && stats.terminalUsageFlushCompleted !== true
+        && stats.usageFinalized !== true;
+      const providerUsageMeasured = !terminalUsageUnavailable
+        && stats.inputTokens != null
+        && stats.outputTokens != null;
+      const providerUsageStatus = terminalUsageUnavailable
+        ? "unavailable_after_terminal_stop"
+        : providerUsageMeasured
+          ? "measured"
+          : "unavailable";
+      const accountingInputTokens = providerUsageMeasured ? stats.inputTokens : null;
+      const accountingOutputTokens = providerUsageMeasured ? stats.outputTokens : null;
+      const recordedOutputChars = typeof output === "string" ? output.length : null;
       if (handoffFinalization.applied) {
         const materializedOutput = String(output ?? "");
         const receiptAt = Number(terminalHandoffStop?.acknowledgedAt) || null;
@@ -1395,13 +1412,9 @@ export class TrackedProviderClient {
             local_capability: localHandoffCapability,
             remote_capability: remoteHandoffCapability,
             required: handoffRequired,
-            provider_input_tokens: stats.inputTokens ?? null,
-            provider_output_tokens: stats.outputTokens ?? null,
-            provider_usage_status: stats.inputTokens != null && stats.outputTokens != null
-              ? "measured"
-              : terminalProviderError != null
-                ? "unavailable_after_terminal_stop"
-                : "unavailable",
+            provider_input_tokens: accountingInputTokens,
+            provider_output_tokens: accountingOutputTokens,
+            provider_usage_status: providerUsageStatus,
             provider_output_discarded: handoffFinalization.continuationProseChars > 0,
             provider_short_circuited: terminalHandoffStop != null,
             provider_stop_code: terminalProviderError?.code || null,
@@ -1456,9 +1469,9 @@ export class TrackedProviderClient {
         model_tier: tier,
         model_name: stats.modelName || modelName,
         duration_ms: stats.durationMs ?? null,
-        input_tokens: stats.inputTokens ?? null,
-        output_tokens: stats.outputTokens ?? null,
-        output_chars: stats.outputChars ?? (typeof providerOutput === "string" ? providerOutput.length : null),
+        input_tokens: accountingInputTokens,
+        output_tokens: accountingOutputTokens,
+        output_chars: recordedOutputChars,
         turns_used: stats.numTurns ?? null,
         max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
         output_truncated: stats.outputTruncated === true,
@@ -1466,6 +1479,12 @@ export class TrackedProviderClient {
       });
       const accountingStats = {
         ...stats,
+        inputTokens: accountingInputTokens,
+        outputTokens: accountingOutputTokens,
+        outputChars: recordedOutputChars,
+        exitCode: terminalProviderError == null ? stats.exitCode : null,
+        providerUsageStatus,
+        providerStopCode: terminalProviderError?.code || null,
         provider: providerName,
         modelTier: tier,
         modelName: stats.modelName || modelName,
@@ -1476,11 +1495,11 @@ export class TrackedProviderClient {
 
       completeAgentCall(agentCallId, {
         status: "succeeded",
-        output_chars: stats.outputChars,
-        input_tokens: stats.inputTokens ?? null,
-        output_tokens: stats.outputTokens ?? null,
-        cached_input_tokens: stats.cachedInputTokens ?? null,
-        cache_creation_input_tokens: stats.cacheCreationInputTokens ?? null,
+        output_chars: recordedOutputChars,
+        input_tokens: accountingInputTokens,
+        output_tokens: accountingOutputTokens,
+        cached_input_tokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
+        cache_creation_input_tokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
         turns_used: stats.numTurns ?? null,
         max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
         max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
@@ -1488,10 +1507,13 @@ export class TrackedProviderClient {
         output_limit_reason: stats.outputLimitReason || null,
         model_name: stats.modelName || null,
         duration_ms: stats.durationMs,
-        exit_code: stats.exitCode,
+        exit_code: terminalProviderError == null ? stats.exitCode : null,
         atlas_method: opts.disableAtlas ? null : (stats.atlasMethod || opts.atlasMethod || null),
         atlas_prefetch_status: opts.disableAtlas ? null : (opts.atlasPrefetchStatus || null),
-        cost_estimate_usd: this.resolveCallCostEstimate(accountingStats),
+        cost_estimate_usd: providerUsageMeasured
+          ? this.resolveCallCostEstimate(accountingStats)
+          : null,
+        provider_usage_status: providerUsageStatus,
         skills: opts.skillsAttached || null,
         session_handle: stats.sessionHandle || stats.responseId || null,
       });
@@ -1541,10 +1563,10 @@ export class TrackedProviderClient {
         activity: opts.activity,
         modelTier: tier,
         status: "succeeded",
-        inputTokens: stats.inputTokens ?? null,
-        outputTokens: stats.outputTokens ?? null,
+        inputTokens: accountingInputTokens,
+        outputTokens: accountingOutputTokens,
         durationMs: stats.durationMs,
-        exitCode: stats.exitCode,
+        exitCode: terminalProviderError == null ? stats.exitCode : null,
         output,
       });
 
@@ -1568,9 +1590,9 @@ export class TrackedProviderClient {
         reason: "provider_attempt_finished",
         status: "succeeded",
         extra: {
-          output_chars: stats.outputChars ?? (typeof output === "string" ? output.length : null),
-          input_tokens: stats.inputTokens ?? null,
-          output_tokens: stats.outputTokens ?? null,
+          output_chars: recordedOutputChars,
+          input_tokens: accountingInputTokens,
+          output_tokens: accountingOutputTokens,
           turns_used: stats.numTurns ?? null,
           max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
           output_truncated: stats.outputTruncated === true,
@@ -1590,7 +1612,7 @@ export class TrackedProviderClient {
         },
       });
 
-      return { output, stats, agentCallId, opts: attemptOpts };
+      return { output, stats: accountingStats, agentCallId, opts: attemptOpts };
     } catch (err) {
       if (abortSignal?.aborted && job_id != null && this.worker?._killReasons?.has?.(job_id)) {
         err._killReason = this.worker._killReasons.get(job_id);

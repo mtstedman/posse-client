@@ -1316,9 +1316,12 @@ export class Scheduler {
       if (typeof onBootEvent !== "function") return;
       try { onBootEvent({ label, ...patch }); } catch { /* observational */ }
     };
-    this._log("Boot: complete — entering main loop");
-    emitBootEvent("boot complete", { section: "scheduler", status: "ok", detail: "entering main loop" });
-    log.info("scheduler", "Boot complete", { concurrency: this.concurrency, pollMs: this.pollMs, leaseSec: this.leaseSec });
+    // RunSession still owns post-scheduler readiness (notably the ATLAS/SCIP
+    // warm gate). Calling this "boot complete" made logs and remote status
+    // claim readiness while dispatch was intentionally still blocked.
+    this._log("Boot: scheduler initialized — post-boot readiness pending");
+    emitBootEvent("scheduler initialized", { section: "scheduler", status: "ok", detail: "post-boot readiness pending" });
+    log.info("scheduler", "Scheduler initialized", { concurrency: this.concurrency, pollMs: this.pollMs, leaseSec: this.leaseSec });
   }
 
   async boot({ onBeforeLoop, onBeforeLoopFatal = false, onBootEvent = null, onBootAbort = null } = {}) {

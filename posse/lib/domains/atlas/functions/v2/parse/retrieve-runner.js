@@ -620,7 +620,11 @@ function resolveToolConfig(payload = {}) {
     cwd,
     repoRoot,
     repoId: config.repoId || config.requestedRepoId || atlas.repoId || deriveRepoIdFromPath(repoRoot),
-    ledgerDbPath: config.ledgerDbPath || config.atlasV2LedgerDbPath || atlas.graphDbPath || null,
+    ledgerDbPath: config.ledgerDbPath
+      || config.atlasV2LedgerDbPath
+      || atlas.ledgerDbPath
+      || atlas.atlasV2LedgerDbPath
+      || null,
     viewDbPath: config.viewDbPath || config.atlasV2ViewDbPath || null,
     semanticEnabled: config.semanticEnabled === true || atlas.semanticEnabled === true,
     vectorBackend: config.vectorBackend || atlas.vectorBackend || "auto",

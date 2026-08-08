@@ -109,6 +109,7 @@ export async function ingestScipFile({
   const effectiveConfigHash = scipRowsConfigHash(configHash, rowsSpecVersion);
 
   const ingestStartedAtMs = Date.now();
+  /** @type {Buffer | undefined} */
   let buf = bytes ? Buffer.from(bytes) : undefined;
   let effectiveProducedAt = producedAt;
   if (!buf) {

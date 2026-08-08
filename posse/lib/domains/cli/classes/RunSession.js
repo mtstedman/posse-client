@@ -2609,6 +2609,10 @@ export class RunSession {
       atlas_backgrounded: !!atlasBootBackgroundRequested,
     });
   } catch { /* observational */ }
+  log?.info?.("run", "Boot complete — entering main loop", {
+    atlas_backgrounded: !!atlasBootBackgroundRequested,
+    use_tui: !!useTui,
+  });
 
   stopBootMonitor({ final: true, preserve: useTui });
   if (useTui) {

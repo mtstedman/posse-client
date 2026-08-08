@@ -16,6 +16,7 @@ import {
   getJob,
   getWorkItem,
   getAttempts,
+  hasImplementationAttempts,
   extendJobMaxAttempts,
   incrementAndCreateAttempt,
   logEvent,
@@ -75,6 +76,8 @@ const ASSESSMENT_REVIEW_TYPES = new Set([
   "unknown_verdict",
   "assessment_transport_error",
   "assessment_retry_limit",
+  "replan_limit",
+  "unexecuted_replan_limit",
 ]);
 const TERMINAL_HUMAN_GATE_CLAIM_FAILURES = new Set([
   "gate_already_resolved",
@@ -925,7 +928,33 @@ export async function runHumanInputJob(worker, job, {
         cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
         worker.emit(job.id, `${C.yellow}[human] Ignored stale review gate #${job.id}; original job #${origJob.id} is already ${origJob.status}${C.reset}`);
       } else if (origJob) {
-        if (reviewDecision === "pass") {
+        if (reviewDecision === "pass" && !hasImplementationAttempts(origJob.id)) {
+          // Older persisted gates may still advertise "pass" for an implementation
+          // that failed before creating an attempt. Preserve the operator's ability
+          // to unblock the graph, but record it as an explicit execution waiver --
+          // never as evidence that unexecuted work passed assessment. Attempt
+          // rows are checked (not attempt_count, which scope-parking decrements)
+          // so a job that genuinely executed keeps its ordinary pass path.
+          handledReviewDecision = true;
+          const settled = await worker._setJobRowStatus(origJob, "succeeded", {
+            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            force: true,
+          });
+          if (settled !== false) {
+            setAssessorVerdict(origJob.id, "not_assessed", null, { force: true });
+            setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
+            cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
+            worker.emit(job.id, `${C.yellow}[human] Unexecuted job #${origJob.id} was explicitly waived; it was not marked passed${C.reset}`);
+            logEvent({
+              work_item_id: job.work_item_id,
+              job_id: origJob.id,
+              attempt_id: attempt.attempt.id,
+              event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
+              actor_type: EVENT_ACTORS.WORKER,
+              message: `Legacy pass action on unexecuted job was recorded as an explicit waiver via job #${job.id}`,
+            });
+          }
+        } else if (reviewDecision === "pass") {
           handledReviewDecision = true;
           const settled = await worker._setJobRowStatus(origJob, "succeeded", {
             expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],

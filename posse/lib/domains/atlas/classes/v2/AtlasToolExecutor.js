@@ -360,10 +360,13 @@ function gatewaySelectorKeysFor(action, args = {}) {
 
 function directReadEligible(action, args = {}) {
   if (ATLAS_GATEWAY_ACTIONS.has(action)) return false;
-  if (ATLAS_BLOCKING_ACTIONS.has(action)) return false;
+  // memory.feedback writes memory.db, not the ledger/view. It still needs the
+  // resolved read context so the reader lane can locate the repository-owned
+  // memory store; the outer write gate serializes it with other ATLAS work.
+  if (ATLAS_BLOCKING_ACTIONS.has(action) && action !== "memory.feedback") return false;
   if (gatewayEffectiveAction(action, args) !== action) return false;
   if (String(action || "").startsWith("buffer.") || String(action || "").startsWith("runtime.")) return false;
-  if (action === "memory.store" || action === "memory.feedback") return false;
+  if (action === "memory.store") return false;
   if (action === "policy.set" || action === "agent.feedback") return false;
   return true;
 }

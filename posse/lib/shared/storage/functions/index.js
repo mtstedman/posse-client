@@ -1577,6 +1577,20 @@ export function getDb() {
     _db.exec(`ALTER TABLE agent_calls ADD COLUMN session_handle TEXT`);
   }
 
+  // ── Migration: provider_usage_status on agent_calls ──────────────────────
+  // Distinguishes why token columns are null. Values:
+  //   'measured'                        — provider reported complete usage
+  //   'unavailable_after_terminal_stop' — terminal handoff stop before the
+  //                                       provider confirmed final accounting
+  //   'unavailable'                     — provider reported no usage
+  //   NULL                              — legacy rows / failed calls
+  const hasAgentCallUsageStatus = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='provider_usage_status'`
+  ).get();
+  if (hasAgentCallUsageStatus.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN provider_usage_status TEXT`);
+  }
+
   const hasAgentCallCachedInputTokens = _db.prepare(
     `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='cached_input_tokens'`
   ).get();

@@ -5,6 +5,7 @@ import { TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
 import {
   getWorkItem,
   getAttempts,
+  hasImplementationAttempts,
   forceUpdateJobStatus,
   invalidateSessionLanesForWorkItem,
   listJobsByWorkItem,
@@ -21,7 +22,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 function isLoopbackReplanResearchJob(job) {
   if (job?.job_type !== "research") return false;
   const payload = parseJobPayload(job);
-  if (payload?._is_loopback === true) return true;
+  if (payload?._assessment_replan === true) return true;
   return /^Research \(replan\):/.test(job?.title || "");
 }
 
@@ -63,6 +64,7 @@ export function handle(job, verdict, ctx) {
         : updateJobStatus(job.id, "waiting_on_review");
       if (!changed) return;
       invalidateSessionLanesForWorkItem(job.work_item_id, "assessor_needs_replan");
+      const originalNeverExecuted = !hasImplementationAttempts(job.id);
       const escJob = spawnFromAssessor("failed", "human_input", {
         work_item_id: job.work_item_id,
         title: `Replan limit reached: ${job.title.slice(0, 60)}`,
@@ -74,10 +76,12 @@ export function handle(job, verdict, ctx) {
           questions: [
             `WI#${job.work_item_id} has been replanned ${replanCount} times and the assessor wants another replan.\n` +
             `Reasons: ${verdict.reasons.join("; ")}\n` +
-            "The task may be fundamentally blocked or poorly scoped. How should we proceed?",
+            originalNeverExecuted
+              ? "The implementation never executed. Replan, fail it, or explicitly waive execution; it cannot be passed as completed."
+              : "The task may be fundamentally blocked or poorly scoped. How should we proceed?",
           ],
           context: "Replan depth limit hit. Previous approaches keep failing assessment.",
-          review_type: "replan_limit",
+          review_type: originalNeverExecuted ? "unexecuted_replan_limit" : "replan_limit",
         }),
       });
       spawnedJobs.push(escJob);

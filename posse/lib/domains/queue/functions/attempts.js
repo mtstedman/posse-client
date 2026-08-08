@@ -252,6 +252,20 @@ export function getAttempts(jobId) {
   return db.prepare(`SELECT * FROM job_attempts WHERE job_id = ? ORDER BY attempt_number`).all(jobId);
 }
 
+/**
+ * True when the job has at least one implementation attempt row. Use this —
+ * not jobs.attempt_count — to decide whether work ever executed: the counter
+ * is decremented when a job parks for scope approval, so it can read 0 after
+ * real execution, while attempt rows are never deleted.
+ */
+export function hasImplementationAttempts(jobId) {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT 1 FROM job_attempts WHERE job_id = ? AND attempt_kind = 'implementation' LIMIT 1`
+  ).get(jobId);
+  return row != null;
+}
+
 export function getLatestAttempt(jobId) {
   const db = getDb();
   return db.prepare(`SELECT * FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`).get(jobId);

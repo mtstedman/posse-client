@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getDb } from "../../../../shared/storage/functions/index.js";
+import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { gitExec } from "../../../git/functions/utils.js";
 import {
   normalizeRepoRelativePath,
@@ -140,7 +141,8 @@ function isWritingCodePacket(packet) {
 
 /**
  * Consume planner-owned files_to_create before a writing provider sees the
- * packet. Exact files are materialized with exclusive creation, recorded in
+ * packet. Missing files_to_modify targets are treated as exact creation scope
+ * too. Exact files are materialized with exclusive creation, recorded in
  * private provenance, then exposed only as files_to_modify.
  */
 export function materializeWritingScope(packet) {
@@ -181,7 +183,19 @@ export function materializeWritingScope(packet) {
     const absPath = assertSafeRelativePath(cwd, relPath, "files_to_modify");
     let stat;
     try { stat = fs.lstatSync(absPath); } catch { stat = null; }
-    if (!stat || !stat.isFile() || stat.isSymbolicLink()) {
+    if (!stat) {
+      // A missing modify target is either a planner misclassification (should
+      // have been files_to_create) or a typo'd path that will silently become
+      // an empty file. Surface it so operators can tell the two apart.
+      log.warn("handoff", "files_to_modify target missing; promoted to exact creation scope", {
+        job_id: packet.job_id == null ? null : Number(packet.job_id),
+        work_item_id: packet.work_item_id == null ? null : Number(packet.work_item_id),
+        path: relPath,
+      });
+      if (!create.includes(relPath)) create.push(relPath);
+      continue;
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
       throw materializationError(
         `files_to_modify target must already be a regular file: ${relPath}`,
         { path: relPath },

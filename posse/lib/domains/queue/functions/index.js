@@ -109,6 +109,7 @@ export {
   extendAssessmentMaxAttempts,
   getAttempts,
   getLatestAttempt,
+  hasImplementationAttempts,
   incrementAndCreateAttempt,
   incrementAndCreateAssessmentAttempt,
   setAssessmentLifecycle,

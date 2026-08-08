@@ -609,6 +609,7 @@ export async function callProvider(promptText, {
         atlasContractTools,
         mcpServerNames: Object.keys(mergedMcpServers),
         cliToolConfig,
+        emittedCliArgs: args,
       });
       if (Object.keys(mergedMcpServers).length > 0) {
         const mcpConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-atlas-v2-"));
@@ -820,6 +821,7 @@ export async function callProvider(promptText, {
             sessionExpired: false,
             executionMode: CLAUDE_EXECUTION_MODE_INTERACTIVE,
             usageEstimated: !hasInteractiveUsage,
+            usageFinalized: hasInteractiveUsage === true,
             interactiveCompletedBy: result.completedBy || null,
             mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
             mcpAttachMissingProof: enforceMcpAttachProof && mcpCleanup.attachProofResult?.missingProof === true,
@@ -1317,6 +1319,10 @@ export async function callProvider(promptText, {
         cacheReadInputTokens: normalizedUsage.cacheReadInputTokens,
         cachedInputTokens: normalizedUsage.cachedInputTokens,
         reasoningOutputTokens: normalizedUsage.reasoningOutputTokens,
+        // The CLI's final "result" message is its completed accounting. When it
+        // arrived before a terminal stop killed the process, usage is complete
+        // and trustworthy; stderr-parsed fallback tokens are not.
+        usageFinalized: resultData != null,
         costUsd: apiEquivalentCostUsd ?? resultData?.cost_usd ?? null,
         totalCostUsd: resultData?.total_cost_usd || null,
         numTurns: resultData?.num_turns || null,

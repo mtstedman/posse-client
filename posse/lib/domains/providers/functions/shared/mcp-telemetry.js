@@ -1,5 +1,13 @@
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 
+// Flags that disable per-tool permission enforcement in the provider CLIs
+// (claude and codex respectively). No posse code path emits either today;
+// deriving from argv keeps this telemetry truthful if that ever changes.
+const PERMISSION_BYPASS_CLI_FLAGS = Object.freeze([
+  "--dangerously-skip-permissions",
+  "--dangerously-bypass-approvals-and-sandbox",
+]);
+
 function toNameList(values = []) {
   if (!Array.isArray(values)) return [];
   return values
@@ -107,6 +115,7 @@ export function logProviderMcpSurfaceTelemetry({
   atlasContractTools = [],
   mcpServerNames = [],
   cliToolConfig = null,
+  emittedCliArgs = null,
   configOverrideCount = null,
   forceReadOnlySandbox = null,
   extra = {},
@@ -143,7 +152,15 @@ export function logProviderMcpSurfaceTelemetry({
     cli_allowed_tools_sample: allowedTools.slice(0, 60),
     cli_tools_flag_present: cliToolConfig?.tools != null,
     cli_disallowed_tools_present: !!cliToolConfig?.disallowedTools,
-    cli_dangerously_skip_permissions: cliToolConfig?.dangerouslySkipPermissions === true,
+    // This field reports the command line that was actually emitted, derived
+    // from the built argv so it cannot drift from reality. Provider policy may
+    // request bypass-like behavior while implementing it with a bounded
+    // allowlist instead of the unsafe CLI flag. Null means the callsite did
+    // not supply the argv — unknown, never a false claim of safety.
+    cli_dangerously_skip_permissions: Array.isArray(emittedCliArgs)
+      ? PERMISSION_BYPASS_CLI_FLAGS.some((flag) => emittedCliArgs.includes(flag))
+      : null,
+    cli_permission_bypass_requested: cliToolConfig?.dangerouslySkipPermissions === true,
     config_override_count: configOverrideCount == null ? null : Number(configOverrideCount) || 0,
     force_read_only_sandbox: forceReadOnlySandbox == null ? null : forceReadOnlySandbox === true,
     ...extra,

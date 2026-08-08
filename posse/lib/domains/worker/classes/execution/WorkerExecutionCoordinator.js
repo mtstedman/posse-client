@@ -1,9 +1,11 @@
 import path from "path";
 import {
+  isLeaseValid,
   logEvent,
   storeArtifact,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
+import { logAttemptSkippedStaleLease } from "../../functions/execution/attempt-logging.js";
 import {
   getProviderName,
 } from "../../../providers/functions/provider.js";
@@ -106,6 +108,21 @@ export class WorkerExecutionCoordinator {
           detail: result,
         });
         worker.emit(job.id, `${C.cyan}[dry-run]${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.job_type} auto-passed without execution`);
+        return;
+      }
+
+      const started = await worker._setJobRowStatus(job, "running", {
+        expectedStatuses: ["leased"],
+        leaseToken,
+      });
+      if (started === false) {
+        // The CAS failed: either the lease is no longer ours or the status
+        // moved concurrently. Stale leases used to be reported from inside job
+        // execution before this transition ran ahead of it — keep them visible.
+        if (!isLeaseValid(job.id, leaseToken)) {
+          logAttemptSkippedStaleLease(job, job.job_type, `Skipped ${job.job_type} attempt because the lease was stale or expired`);
+          worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before execution started${C.reset}`);
+        }
         return;
       }
 

@@ -32,6 +32,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   assessment_transport_error: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
   assessment_retry_limit: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
   replan_limit: freezeChoices(["replan", "pass", "fail", "explicit_waiver"]),
+  unexecuted_replan_limit: freezeChoices(["replan", "fail", "explicit_waiver"]),
   artifact_routing_admin: freezeChoices(["acknowledge"]),
 });
 
@@ -127,6 +128,11 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   replan_limit: {
     gate_kind: "fix_chain_exhausted",
     allowed_actions: ["replan", "pass", "fail", "explicit_waiver"],
+    allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
+  },
+  unexecuted_replan_limit: {
+    gate_kind: "fix_chain_exhausted",
+    allowed_actions: ["replan", "fail", "explicit_waiver"],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
   artifact_routing_admin: {

@@ -12,6 +12,7 @@ import {
   storeArtifact,
 } from "../../../queue/functions/index.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
+import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
 const RECEIPT_SCHEMA_VERSION = 1;
@@ -131,11 +132,13 @@ async function runCommand(command, {
         });
       } else {
         const [executable, ...args] = parseCommandArguments(command);
-        child = spawn(executable, args, {
+        const invocation = buildWindowsSpawn(executable, args);
+        child = spawn(invocation.command, invocation.args, {
           cwd,
           detached: process.platform !== "win32",
           shell: false,
           windowsHide: true,
+          windowsVerbatimArguments: invocation.windowsVerbatimArguments,
           stdio: ["ignore", "pipe", "pipe"],
         });
       }
@@ -171,12 +174,14 @@ async function runCommand(command, {
       clearTimeout(timer);
       const status = timedOut
         ? "timed_out"
-        : code === 0 && !error
-          ? "passed"
-          : "failed";
+        : error
+          ? "infrastructure_error"
+          : code === 0 && !error
+            ? "passed"
+            : "failed";
       resolve({
         status,
-        ok: status === "passed",
+        ok: status === "passed" ? true : (status === "infrastructure_error" ? null : false),
         code,
         signal,
         timed_out: timedOut,
@@ -187,6 +192,7 @@ async function runCommand(command, {
           : stderr,
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
+        reason: error ? `test_runner_spawn_failed:${error.code || "unknown"}` : null,
       });
     };
 
@@ -251,6 +257,22 @@ function commandExecutable(command) {
   return raw.replace(/\\/g, "/").split("/").pop().toLowerCase();
 }
 
+function packageManagerTaskArgs(args = []) {
+  const remaining = [...args];
+  // args arrive lowercased (the whole command is normalized before splitting),
+  // so "-f" here matches pnpm's -F/--filter and "-c" matches -C/--dir. Both
+  // take a value that must be skipped along with the flag.
+  const optionsWithValues = new Set([
+    "--filter", "-f", "--dir", "-c", "--config-dir", "--store-dir",
+    "--virtual-store-dir", "--workspace-dir",
+  ]);
+  while (remaining.length > 0 && remaining[0].startsWith("-")) {
+    const option = remaining.shift();
+    if (!option.includes("=") && optionsWithValues.has(option)) remaining.shift();
+  }
+  return remaining;
+}
+
 export function validatePlannerTestCommand(command) {
   const value = String(command || "").trim();
   if (!value) return { ok: false, reason: "test_command_is_empty" };
@@ -258,21 +280,25 @@ export function validatePlannerTestCommand(command) {
   if (/&&|\|\||[;|<>`]|\$\(/.test(value)) {
     return { ok: false, reason: "test_command_contains_shell_composition" };
   }
+  if (/%/.test(value)) {
+    return { ok: false, reason: "test_command_contains_shell_expansion" };
+  }
 
   const executable = commandExecutable(value);
   const normalized = value.toLowerCase();
   const words = normalized.match(/(?:"[^"]*"|'[^']*'|[^\s]+)/g) || [];
   const args = words.slice(1).map((word) => word.replace(/^['"]|['"]$/g, ""));
   const hasArg = (expected) => args.includes(expected);
-  const hasTestTask = args.some((arg) => /^(?:test|tests|check|spec)(?::|$)/.test(arg));
+  const safeTaskPattern = /^(?:test|tests|check|typecheck|lint|verify|spec)(?::|$)/;
 
   let ok = false;
   if (["npm", "npm.cmd"].includes(executable)) {
-    ok = args[0] === "test" || (args[0] === "run" && /^(?:test|check)(?::|$)/.test(args[1] || ""));
+    ok = safeTaskPattern.test(args[0] || "")
+      || (args[0] === "run" && safeTaskPattern.test(args[1] || ""));
   } else if (["pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
-    ok = args[0] === "test"
-      || (args[0] === "run" && /^(?:test|check)(?::|$)/.test(args[1] || ""))
-      || hasTestTask;
+    const taskArgs = executable.startsWith("pnpm") ? packageManagerTaskArgs(args) : args;
+    ok = safeTaskPattern.test(taskArgs[0] || "")
+      || (taskArgs[0] === "run" && safeTaskPattern.test(taskArgs[1] || ""));
   } else if (["node", "node.exe"].includes(executable)) {
     ok = hasArg("--test") || args.some((arg) => arg.startsWith("--test="));
   } else if (/^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/.test(executable)) {
@@ -550,7 +576,7 @@ async function executeReceipt({
     timed_out: result.timed_out,
     duration_ms: result.duration_ms,
     failure_fingerprint: compactFailureFingerprint(result),
-    reason: cleanupError,
+    reason: cleanupError || result.reason || null,
     cleanup_status: cleanupStatus,
     stdout: result.stdout,
     stderr: result.stderr,

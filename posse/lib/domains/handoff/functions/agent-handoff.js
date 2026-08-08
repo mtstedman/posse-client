@@ -218,6 +218,30 @@ function normalizedLines(payload) {
   return lines;
 }
 
+function materializedSourceLineSlice(entry, start, end) {
+  const tool = String(entry?.descriptor?.tool || entry?.metadata?.tool || "").toLowerCase();
+  const objectType = String(entry?.object_type || "").toLowerCase();
+  if (tool !== "code.window" && !objectType.startsWith("code.window")) return null;
+  let parsed;
+  try { parsed = JSON.parse(String(entry?.payload_text || "")); }
+  catch { return null; }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  if (typeof data?.content !== "string") return null;
+  const sourceStart = Number(data.startLine);
+  if (!Number.isInteger(sourceStart) || sourceStart < 1) return null;
+  const contentLines = normalizedLines(data.content);
+  const sourceEnd = sourceStart + Math.max(0, contentLines.length - 1);
+  if (start < sourceStart || end > sourceEnd) {
+    return { matched: false, sourceStart, sourceEnd };
+  }
+  return {
+    matched: true,
+    sourceStart,
+    sourceEnd,
+    excerpt: contentLines.slice(start - sourceStart, end - sourceStart + 1).join("\n"),
+  };
+}
+
 function directProvenance(entry) {
   const objectType = String(entry?.object_type || "").trim().toLowerCase();
   const source = String(entry?.source || "").trim().toLowerCase();
@@ -327,14 +351,23 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   const lines = normalizedLines(entry.payload_text);
   const start = selector.start ?? 1;
   const end = selector.end ?? Math.max(1, lines.length);
-  if (end > lines.length || start > lines.length) {
-    fail("AGENT_HANDOFF_EVIDENCE_RANGE_INVALID", `Evidence ${selector.ref} has ${lines.length} lines; requested ${start}-${end}`);
+  const sourceSlice = selector.start == null
+    ? null
+    : materializedSourceLineSlice(entry, start, end);
+  const useSourceLines = sourceSlice?.matched === true;
+  if (!useSourceLines && (end > lines.length || start > lines.length)) {
+    const sourceRange = sourceSlice
+      ? `; embedded source lines are ${sourceSlice.sourceStart}-${sourceSlice.sourceEnd}`
+      : "";
+    fail("AGENT_HANDOFF_EVIDENCE_RANGE_INVALID", `Evidence ${selector.ref} has ${lines.length} materialized lines${sourceRange}; requested ${start}-${end}`);
   }
   const lineCount = end - start + 1;
   if (lineCount > AGENT_HANDOFF_LIMITS.maxSelectorLines) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Evidence ${selector.ref}:${start}-${end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorLines} lines`);
   }
-  const excerpt = lines.slice(start - 1, end).join("\n");
+  const excerpt = useSourceLines
+    ? sourceSlice.excerpt
+    : lines.slice(start - 1, end).join("\n");
   if (!excerpt) {
     fail("AGENT_HANDOFF_EVIDENCE_EMPTY", `Evidence ${selector.ref}:${start}-${end} resolved to an empty excerpt`);
   }
@@ -350,6 +383,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
     excerpt_sha256: crypto.createHash("sha256").update(excerpt).digest("hex"),
     source_content_sha256: entry.content_hash,
     provenance,
+    line_semantics: useSourceLines ? "source" : "materialized",
   };
 }
 

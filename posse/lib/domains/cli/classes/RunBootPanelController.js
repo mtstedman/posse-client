@@ -36,6 +36,7 @@ const TERMINAL_BOOT_LANG_STATES = new Set(["done", "skipped", "deferred", "faile
 // after the loop unwedges logs how long the loop was gone.
 const STALL_HEARTBEAT_MS = 250;
 const STALL_WARN_MS = 1000;
+const SLOW_TERMINAL_WRITE_MS = 1000;
 
 export class RunBootPanelController {
   constructor({
@@ -51,6 +52,8 @@ export class RunBootPanelController {
     this.monitorDisposed = false;
     this.renderedRows = 0;
     this.lastRenderAt = 0;
+    this.lastRenderDurationMs = 0;
+    this.liveRenderingDisabled = false;
     this.steps = new Map();
     this.providerSteps = new Map();
     this.matrixLanguages = new Set();
@@ -178,6 +181,7 @@ export class RunBootPanelController {
   render({ final = false, force = false } = {}) {
     if (this.getDisplay() || this.steps.size === 0) return;
     if (this.monitorDisposed && !final) return;
+    if (this.liveRenderingDisabled) return;
     if (!process.stdout.isTTY) return;
     const now = Date.now();
     if (!final && !force && this.renderedRows > 0 && now - this.lastRenderAt < 90) return;
@@ -201,9 +205,30 @@ export class RunBootPanelController {
     const clearedRows = rowsToWrite - rows.length;
     if (clearedRows > 0 && rows.length > 0) buf += `\x1b[${clearedRows}A`;
     if (final) buf += "\n";
+    const writeStartedAt = Date.now();
     this.terminalOutputIntercept.writeStdout(buf);
+    const writeCompletedAt = Date.now();
+    this.lastRenderDurationMs = Math.max(0, writeCompletedAt - writeStartedAt);
     this.renderedRows = final ? 0 : rows.length;
-    this.lastRenderAt = now;
+    this.lastRenderAt = writeCompletedAt;
+    if (!final && this.lastRenderDurationMs >= SLOW_TERMINAL_WRITE_MS) {
+      // Windows console/ConPTY writes can block synchronously when the
+      // terminal stops draining. Repainting the panel every 120ms after one
+      // such write turns a transient pause into a boot-wide freeze. Keep the
+      // completed frame on screen, restore ordinary output, and let boot
+      // continue without further live repaints.
+      this.liveRenderingDisabled = true;
+      this.renderedRows = 0;
+      if (this.monitorTimer) {
+        clearInterval(this.monitorTimer);
+        this.monitorTimer = null;
+      }
+      this.lastStallTickAt = writeCompletedAt;
+      this.terminalOutputIntercept.release();
+      this.log?.warn?.("run", "Boot live panel disabled after slow terminal write", {
+        write_duration_ms: this.lastRenderDurationMs,
+      });
+    }
   }
 
   clearRenderedPanel() {
@@ -216,7 +241,7 @@ export class RunBootPanelController {
   }
 
   ensureMonitor() {
-    if (this.getDisplay() || this.monitorTimer || this.monitorDisposed) return;
+    if (this.getDisplay() || this.monitorTimer || this.monitorDisposed || this.liveRenderingDisabled) return;
     this.monitorTimer = setInterval(() => this.render({ force: true }), 120);
     this.monitorTimer.unref?.();
   }
@@ -249,10 +274,18 @@ export class RunBootPanelController {
     this.lastStallTickAt = now;
     const stallMs = now - previous - STALL_HEARTBEAT_MS;
     if (!Number.isFinite(stallMs) || stallMs < STALL_WARN_MS) return 0;
+    const activeSteps = [...this.steps.entries()]
+      .filter(([, step]) => step?.status === "running")
+      .map(([label]) => label)
+      .slice(0, 8);
     this.log?.warn?.("run", "Boot event loop stalled", {
       stall_ms: Math.round(stallMs),
       last_render_age_ms: this.lastRenderAt > 0 ? Math.max(0, Math.round(now - this.lastRenderAt)) : null,
-      likely: "blocked console write or long synchronous call",
+      last_render_duration_ms: this.lastRenderDurationMs,
+      active_steps: activeSteps,
+      likely: this.lastRenderDurationMs >= SLOW_TERMINAL_WRITE_MS
+        ? "slow terminal write"
+        : "long synchronous call, process suspension, or scheduler starvation",
     });
     return stallMs;
   }

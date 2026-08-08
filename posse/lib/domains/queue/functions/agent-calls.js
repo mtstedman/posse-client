@@ -104,6 +104,7 @@ export function completeAgentCall(id, {
   atlas_method = null,
   atlas_prefetch_status = null,
   cost_estimate_usd = null,
+  provider_usage_status = null,
   skills = null,
   session_handle = null,
 } = {}) {
@@ -124,7 +125,8 @@ export function completeAgentCall(id, {
         atlas_prefetch_status = COALESCE(?, atlas_prefetch_status),
         skills = COALESCE(?, skills),
         session_handle = COALESCE(?, session_handle),
-        cost_estimate_usd = COALESCE(?, cost_estimate_usd)
+        cost_estimate_usd = COALESCE(?, cost_estimate_usd),
+        provider_usage_status = COALESCE(?, provider_usage_status)
     WHERE id = ?
   `).run(
     status, now(), duration_ms,
@@ -142,6 +144,7 @@ export function completeAgentCall(id, {
     normalizeSkillsColumn(skills),
     session_handle == null ? null : String(session_handle),
     cost_estimate_usd,
+    provider_usage_status == null ? null : String(provider_usage_status),
     id,
   );
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(id);
