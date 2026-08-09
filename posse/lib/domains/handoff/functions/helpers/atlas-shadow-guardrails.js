@@ -43,7 +43,7 @@ export function buildAtlasShadowGuardrails(packet = {}, opts = {}) {
   if (EXACT_COUNT_RE.test(taskText)) {
     lanes.push({
       id: "exact_count_inventory",
-      reason: "Task asks for exact counts or exhaustive inventory, where per-file laddering has over/under-counted.",
+      reason: "Task asks for exact counts or exhaustive inventory, where repeated per-file retrieval has over/under-counted.",
       recommended_first_tools: ["code.structure", "code.survey"],
       native_exception: "Escalate only specific unresolved count gaps to targeted native reads.",
     });
@@ -63,7 +63,7 @@ export function buildAtlasShadowGuardrails(packet = {}, opts = {}) {
       id: "token_pressure",
       reason: "Task shape is prone to repeated lens/window loops and cache-read accumulation.",
       recommended_first_tools: ["code.structure", "code.survey"],
-      native_exception: "After repeated ladder calls on one target, summarize the remaining gap or switch to one targeted fallback read.",
+      native_exception: "After repeated targeted calls on one target, summarize the remaining gap or switch to one targeted fallback read.",
     });
   }
 

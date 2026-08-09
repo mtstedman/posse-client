@@ -1366,6 +1366,91 @@ export function filterProviderToolUseReplay(toolUses = [], { skipToolkitDetermin
   return toolUses.filter((toolUse) => !CATALOG_DETERMINISTIC_TOOL_NAMES.has(_normalizeCatalogToolName(toolUse?.tool)));
 }
 
+export function recordProviderToolBatchObservations({
+  work_item_id = null,
+  job_id = null,
+  attempt_id = null,
+  provider = null,
+  tool_uses = [],
+} = {}) {
+  if (!Array.isArray(tool_uses) || tool_uses.length === 0) return;
+  const context = getObservationContext() || {};
+  const resolvedWorkItemId = work_item_id ?? context.work_item_id ?? null;
+  const resolvedJobId = job_id ?? context.job_id ?? null;
+  const resolvedAttemptId = attempt_id ?? context.attempt_id ?? null;
+  const resolvedAgentCallId = context.agent_call_id ?? null;
+  const providerName = String(provider || "provider").trim().toLowerCase() || "provider";
+  const batches = new Map();
+
+  for (const toolUse of tool_uses) {
+    const providerTurnId = typeof toolUse?.providerTurnId === "string"
+      && toolUse.providerTurnId.trim()
+      ? toolUse.providerTurnId.trim()
+      : null;
+    const providerTurnIndex = Number.isFinite(Number(toolUse?.providerTurnIndex))
+      && Number(toolUse.providerTurnIndex) > 0
+      ? Math.floor(Number(toolUse.providerTurnIndex))
+      : null;
+    if (!providerTurnId && providerTurnIndex == null) continue;
+    const groupKey = providerTurnId
+      ? `id:${providerTurnId}`
+      : `index:${providerTurnIndex}`;
+    let batch = batches.get(groupKey);
+    if (!batch) {
+      batch = {
+        providerTurnId,
+        providerTurnIndex,
+        reportedWidth: 0,
+        toolNames: [],
+        toolUseIds: [],
+        seenTools: new Set(),
+      };
+      batches.set(groupKey, batch);
+    }
+    const toolUseId = typeof toolUse?.id === "string" && toolUse.id.trim()
+      ? toolUse.id.trim()
+      : null;
+    const toolName = typeof toolUse?.tool === "string" && toolUse.tool.trim()
+      ? toolUse.tool.trim()
+      : null;
+    const toolKey = toolUseId || `${toolName || "unknown"}|${JSON.stringify(toolUse?.input ?? null)}`;
+    if (batch.seenTools.has(toolKey)) continue;
+    batch.seenTools.add(toolKey);
+    if (toolName) batch.toolNames.push(toolName);
+    if (toolUseId) batch.toolUseIds.push(toolUseId);
+    const reportedWidth = Number(toolUse?.providerBatchSize);
+    if (Number.isFinite(reportedWidth) && reportedWidth > batch.reportedWidth) {
+      batch.reportedWidth = Math.floor(reportedWidth);
+    }
+  }
+
+  for (const batch of batches.values()) {
+    const capturedWidth = batch.seenTools.size;
+    const batchWidth = Math.max(capturedWidth, batch.reportedWidth);
+    if (batchWidth <= 0) continue;
+    const turnLabel = batch.providerTurnId
+      || (batch.providerTurnIndex != null ? `#${batch.providerTurnIndex}` : "unknown");
+    recordObservation({
+      work_item_id: resolvedWorkItemId,
+      job_id: resolvedJobId,
+      attempt_id: resolvedAttemptId,
+      observation_type: "provider.tool_batch",
+      summary: `${providerName} assistant turn ${turnLabel}: ${batchWidth} tool call${batchWidth === 1 ? "" : "s"}`,
+      detail: {
+        kind: "provider_tool_batch",
+        provider: providerName,
+        ...(batch.providerTurnId ? { provider_turn_id: batch.providerTurnId } : {}),
+        ...(batch.providerTurnIndex != null ? { provider_turn_index: batch.providerTurnIndex } : {}),
+        batch_width: batchWidth,
+        captured_tool_uses: capturedWidth,
+        tool_names: batch.toolNames,
+        tool_use_ids: batch.toolUseIds,
+        ...(resolvedAgentCallId != null ? { agent_call_id: resolvedAgentCallId } : {}),
+      },
+    });
+  }
+}
+
 export function recordToolUseObservations({
   work_item_id = null,
   job_id = null,

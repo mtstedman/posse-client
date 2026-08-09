@@ -42,5 +42,4 @@ export { semanticSearch } from "../embeddings/search.js";
 export { __resetRetrievalCacheForTests } from "../../../classes/v2/RetrievalCache.js";
 export { __resetPrefetchStatsForTests } from "./prefetch.js";
 export { __resetLiveReconciliationForTests } from "../live-reconciliation.js";
-export { __resetCodeLadderForTests } from "./code-ladder.js";
 export { __resetDbSymbolAccessForTests } from "./db-symbol-access.js";

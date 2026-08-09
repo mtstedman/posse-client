@@ -195,7 +195,14 @@ export function buildCodexWebToolsOverrides({ role, roleMode = null, webToolsEna
   const active = !!webToolsEnabled && webToolsAllowedForRoleMode && WEB_TOOL_ROLES.has(role);
   return {
     active,
-    configOverrides: active ? ["tools.web_search=true"] : [],
+    // Codex defaults top-level web_search to cached, so omitting an enable
+    // override does not remove the native tool. Explicitly disable both the
+    // current mode and the legacy tool toggle whenever Posse has not issued
+    // web access. This matters especially for detached/native controls, which
+    // do not have an MCP gate to reject a model-issued web call.
+    configOverrides: active
+      ? ["tools.web_search=true"]
+      : ['web_search="disabled"', "tools.web_search=false"],
   };
 }
 

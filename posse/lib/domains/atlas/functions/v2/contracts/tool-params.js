@@ -401,7 +401,7 @@
  * @property {number} [maxFiles]              Optional. Default 64.
  * @property {number} [maxSymbolsPerFile]     Internal cap override. Default 48.
  * @property {number} [maxEdges]              Internal cap override. Default 200.
- * @property {string} [sessionId]             Optional ladder-credit namespace (matches code.* actions).
+ * @property {string} [sessionId]             Optional session namespace for live-buffer overlays.
  */
 
 /**
@@ -412,7 +412,7 @@
  * @property {number} [maxFiles]              Optional. Default 64, max 128.
  * @property {boolean} [includeSymbols]       Include per-file symbol summaries. Default true.
  * @property {boolean} [includeEdges]         Include exact internal/inbound/outbound edges. Default true.
- * @property {string} [sessionId]             Optional ladder-credit namespace (matches code.* actions).
+ * @property {string} [sessionId]             Optional session namespace for live-buffer overlays.
  */
 
 /**

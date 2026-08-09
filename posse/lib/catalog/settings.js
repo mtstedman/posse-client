@@ -72,6 +72,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_MEMORY_SURFACE: "atlas_memory_surface",
   ATLAS_SHADOW_GUARDRAILS: "atlas_shadow_guardrails",
   ATLAS_V2_BOOT_TIMEOUT_MS: "atlas_v2_boot_timeout_ms",
+  ATLAS_HANDOFF_PREFETCH: "atlas_handoff_prefetch",
   ATLAS_HANDOFF_PREFETCH_TIMEOUT_MS: "atlas_handoff_prefetch_timeout_ms",
   ATLAS_EMBEDDED_TIMEOUT_MS: "atlas_embedded_timeout_ms",
   ATLAS_EMBEDDED_QUEUE_WAIT_MS: "atlas_embedded_queue_wait_ms",
@@ -92,6 +93,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_RESULT_REF_PAGING: "atlas_result_ref_paging",
   ATLAS_RESULT_REF_PAGING_MIN_CHARS: "atlas_result_ref_paging_min_chars",
   ATLAS_PREFETCH_ENTRYPOINT_RANK: "atlas_prefetch_entrypoint_rank",
+  ATLAS_TREE_IDENTIFIER_ROUTING_SHADOW: "atlas_tree_identifier_routing_shadow",
   ATLAS_SURVEY_BRIEF_EDGE_COUNT: "atlas_survey_brief_edge_count",
   ATLAS_SURVEY_EDGE_CAP: "atlas_survey_edge_cap",
   ATLAS_TOOLS_DISABLED: "atlas_tools_disabled",
@@ -153,6 +155,7 @@ export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "war
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const ATLAS_SHADOW_GUARDRAILS_MODE_VALUES = Object.freeze(["off", "shadow"]);
+export const ATLAS_HANDOFF_PREFETCH_MODE_VALUES = Object.freeze(["on", "off"]);
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);

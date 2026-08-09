@@ -25,7 +25,7 @@ import {
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { resolveEffectiveTierModel } from "../../providers/functions/model-catalog-validate.js";
 import { C } from "../../../shared/format/functions/colors.js";
-import { filterProviderToolUseReplay, getObservationContext, recordObservation, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
+import { filterProviderToolUseReplay, getObservationContext, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordOutput } from "../../../shared/telemetry/functions/logging/output-log.js";
 import { resolveAtlasExecutionAttachment } from "../../integrations/functions/atlas.js";
@@ -312,6 +312,7 @@ const DEFAULT_DEPS = {
   filterProviderToolUseReplay,
   getObservationContext,
   recordObservation,
+  recordProviderToolBatchObservations,
   recordToolUseObservations,
   runWithObservationContext,
   recordPrompt,
@@ -940,6 +941,7 @@ export class TrackedProviderClient {
       recordPrompt,
       recordRecoveryCheckpoint,
       logAgentActivity,
+      recordProviderToolBatchObservations,
       recordToolUseObservations,
       retainReplayOutput,
       retainReplayPrompt,
@@ -1579,6 +1581,13 @@ export class TrackedProviderClient {
         output,
       });
 
+      recordProviderToolBatchObservations({
+        work_item_id,
+        job_id,
+        attempt_id: null,
+        provider: providerName,
+        tool_uses: stats.toolUses || [],
+      });
       const toolUsesForReplay = filterProviderToolUseReplay(stats.toolUses || [], {
         skipToolkitDeterministic: !!stats.toolUsesLoggedByToolkit,
       });
@@ -1789,6 +1798,13 @@ export class TrackedProviderClient {
         output: failureOutput,
       });
 
+      recordProviderToolBatchObservations({
+        work_item_id,
+        job_id,
+        attempt_id: null,
+        provider: providerName,
+        tool_uses: err.toolUses || [],
+      });
       const failureToolUsesForReplay = filterProviderToolUseReplay(err.toolUses || [], {
         skipToolkitDeterministic: !!stats.toolUsesLoggedByToolkit,
       });

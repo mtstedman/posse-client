@@ -439,6 +439,7 @@ export class AccountSettings {
   _seedDefaults() {
     this._migrateAtlasToolGateDefault();
     this._migrateAtlasResultRefPagingDefault();
+    this._migrateAtlasSearchResultPagingDefault();
     this._migrateAtlasPrefetchEntrypointRankDefault();
     this._migrateAtlasGatewayDedupAdvertiseDefault();
     this._migrateAtlasProseDedupDefault();
@@ -468,6 +469,30 @@ export class AccountSettings {
            SET setting_value = 'on',
                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          WHERE setting_key = 'atlas_result_ref_paging'
+           AND lower(trim(setting_value)) = 'off'`,
+      )
+      .run();
+    this._db
+      .prepare(`INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .run(markerKey);
+  }
+
+  // symbol.search bounding is now a transport invariant: promote stored 'off'
+  // rows (the old experiment default) to 'on' once, keeping any later explicit
+  // operator opt-out.
+  _migrateAtlasSearchResultPagingDefault() {
+    const markerKey = "atlas_search_result_paging_default_migrated_at";
+    const marker = this._db
+      .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
+      .get(markerKey);
+    if (marker) return;
+
+    this._db
+      .prepare(
+        `UPDATE account_settings
+           SET setting_value = 'on',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE setting_key = 'atlas_search_result_paging'
            AND lower(trim(setting_value)) = 'off'`,
       )
       .run();

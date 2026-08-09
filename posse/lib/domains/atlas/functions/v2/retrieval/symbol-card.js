@@ -10,7 +10,6 @@ import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { findOverlaySymbol, findOverlaySymbolByRef, getOverlaySymbols } from "./buffer.js";
 import { getEffectivePolicy } from "./policy.js";
 import { recordPrefetchAccess } from "./prefetch.js";
-import { recordCodeLadderStep } from "./code-ladder.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -96,12 +95,6 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
       includeResolutionMetadata: !!params.includeResolutionMetadata,
     });
     const etag = etagOf(overlayTarget.symbol);
-    recordCodeLadderStep({
-      action: "symbol.card",
-      sessionId,
-      symbolId: symbolIdOf(overlayTarget.symbol),
-      file: overlayTarget.symbol.repo_rel_path,
-    });
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
       return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
     }
@@ -118,12 +111,6 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
   const includeResolutionMetadata = !!params.includeResolutionMetadata;
   const targetSymbol = /** @type {ViewSymbol} */ (target);
   const etag = etagOf(targetSymbol);
-  recordCodeLadderStep({
-    action: "symbol.card",
-    sessionId,
-    symbolId: symbolIdOf(targetSymbol),
-    file: targetSymbol.repo_rel_path,
-  });
   const cache = getRetrievalCache();
   const cacheKey = cache.cardKey({
     versionId,

@@ -797,7 +797,16 @@
  * @property {number} startLine
  * @property {number} endLine
  * @property {number} estimatedTokens
- * @property {boolean} truncated
+ * @property {boolean} truncated             Legacy bounded-or-truncated compatibility flag.
+ * @property {boolean} selectionBounded      True when the returned code is an intentional subset of the file.
+ * @property {boolean} outputTruncated       True only when requested evidence was omitted by a hard output budget.
+ * @property {string[]} identifiersFound
+ * @property {string[]} identifiersReturned
+ * @property {string[]} identifiersMissing
+ * @property {string[]} identifiersOmitted
+ * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [additionalWindows]
+ * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [_continuationWindows] Private owner transport; never model-visible.
+ * @property {string} [continuationRef]       Stored requested regions omitted from the inline budget.
  */
 
 /**

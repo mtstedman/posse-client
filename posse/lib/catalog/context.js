@@ -30,10 +30,10 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     digest: "list_files",
   }),
   // symbol.search returns the largest per-call payloads in the research lane
-  // (~29KB observed in run28/29). Enrollment is gated by the
-  // atlas_search_result_paging setting in boundingPolicyFor so in-flight
-  // experiments keep a stable baseline; the full result stays one fetch_ref
-  // page away.
+  // (~29KB observed in run28/29). Bounding is a transport invariant
+  // (atlas_search_result_paging defaults on; explicit "off" is an operator
+  // escape hatch checked in boundingPolicyFor); the full result stays one
+  // fetch_ref page away.
   "symbol.search": Object.freeze({
     capChars: 10000,
     headChars: 7600,
@@ -114,6 +114,34 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     capChars: 18000,
     headChars: 13000,
     tailChars: 1000,
+    digest: "generic",
+  }),
+  // Hard-line evidence bodies. Ref-paging (compactCodeWindowLensResult) is the
+  // primary mechanism and runs first; this is the unconditional transport-safety
+  // net behind it, sized well under the ~48K downstream client clip so an
+  // oversized result that dodges paging is never silently truncated client-side.
+  "code.window": Object.freeze({
+    capChars: 24000,
+    headChars: 18000,
+    tailChars: 1200,
+    digest: "generic",
+  }),
+  "atlas.code.window": Object.freeze({
+    capChars: 24000,
+    headChars: 18000,
+    tailChars: 1200,
+    digest: "generic",
+  }),
+  "code.lens": Object.freeze({
+    capChars: 24000,
+    headChars: 18000,
+    tailChars: 1200,
+    digest: "generic",
+  }),
+  "atlas.code.lens": Object.freeze({
+    capChars: 24000,
+    headChars: 18000,
+    tailChars: 1200,
     digest: "generic",
   }),
 });

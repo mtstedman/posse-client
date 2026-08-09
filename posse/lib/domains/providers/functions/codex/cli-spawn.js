@@ -159,6 +159,12 @@ export function buildCodexExecArgs({
     // `codex exec` has no --ask-for-approval flag; use the config override.
     "-c", 'approval_policy="never"',
     "-c", `sandbox_mode=${_toTomlLiteral(sandboxMode)}`,
+    // Headless Posse sessions never use Codex plugins, but the client still
+    // syncs the remote plugin catalog at startup and injects the
+    // recommended-plugin inventory and plugin instructions into the first
+    // request (tens of KB of irrelevant boot payload per session, replayed on
+    // every subsequent request).
+    "-c", "features.plugins=false",
   ];
 
   if (!resumeHandle) {

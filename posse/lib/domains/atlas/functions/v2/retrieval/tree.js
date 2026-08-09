@@ -9,6 +9,7 @@ import { readTreeBuildResult } from "../tree-derived.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { isCanonicalRepoPath, normalizeRepoPath } from "../paths.js";
+import { collectTreeIdentifierShadowEvidence } from "./tree-identifier-shadow.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const TREE_TABLES = Object.freeze(["atlas_tree_nodes", "atlas_tree_refs", "derived_state_runs"]);
@@ -145,10 +146,12 @@ function renamePublicActionsInWarnings(result) {
  *   view: import("../contracts/api.js").View,
  *   versionId: string,
  *   params?: import("../contracts/tool-params.js").TreeScopeParams,
+ *   config?: Record<string, unknown>,
+ *   planner?: ((input: string) => import("./orchestrator/query-planner-types.js").QueryPlan | Promise<import("./orchestrator/query-planner-types.js").QueryPlan>),
  * }} args
  */
-export async function treeScope({ view, versionId, params = {} }) {
-  return runTreeScope({ view, versionId, params, action: "tree.scope" });
+export async function treeScope({ view, versionId, params = {}, config = {}, planner = undefined }) {
+  return runTreeScope({ view, versionId, params, action: "tree.scope", config, planner });
 }
 
 function treeGrowSeedsRequested(params = {}) {
@@ -185,9 +188,11 @@ export async function treeGrow({ view, versionId, params = {} }) {
  *   versionId: string,
  *   params?: import("../contracts/tool-params.js").TreeScopeParams,
  *   action: "tree.scope" | "tree.expand",
+ *   config?: Record<string, unknown>,
+ *   planner?: ((input: string) => import("./orchestrator/query-planner-types.js").QueryPlan | Promise<import("./orchestrator/query-planner-types.js").QueryPlan>),
  * }} args
  */
-async function runTreeScope({ view, versionId, params = {}, action }) {
+async function runTreeScope({ view, versionId, params = {}, action, config = {}, planner = undefined }) {
   const db = unsafeDb(view);
   if (!db) return viewUnavailable(action, versionId);
   const missing = missingTreeTables(db);
@@ -216,6 +221,11 @@ async function runTreeScope({ view, versionId, params = {}, action }) {
   }
   const widened = action === "tree.scope" ? await collectScopeWidenedPaths({ view, params }) : [];
   const widenedPaths = widened.map((w) => w.path);
+  const identifierRoutingShadow = action === "tree.scope"
+    && config?.identifierRoutingShadowCapture === true;
+  const identifierEvidence = identifierRoutingShadow
+    ? await collectTreeIdentifierShadowEvidence({ db, taskText: params.taskText, planner })
+    : {};
   const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("tree-scope", {
     tree: readTreeBuildResult(db, { for: "scope" }),
     taskText: params.taskText,
@@ -233,6 +243,8 @@ async function runTreeScope({ view, versionId, params = {}, action }) {
     refMatchLimit: params.refMatchLimit,
     siblingNumericFamilyCap: params.siblingNumericFamilyCap,
     taskType: params.taskType,
+    identifierRoutingShadow,
+    ...identifierEvidence,
     compressionSnapshot: readOptionalCompressionSnapshot(db),
   }));
   if (widenedPaths.length > 0) {

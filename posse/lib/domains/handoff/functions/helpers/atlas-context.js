@@ -1613,7 +1613,11 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
     }, {
       cwd: packet.cwd,
       config: effectiveAtlasConfig
-        ? { ...effectiveAtlasConfig, prefetchEntrypointRank: entrypointRank }
+        ? {
+          ...effectiveAtlasConfig,
+          prefetchEntrypointRank: entrypointRank,
+          identifierRoutingShadowCapture: effectiveAtlasConfig.treeIdentifierRoutingShadow === true,
+        }
         : undefined,
       origin: "prefetch",
     });
@@ -1634,6 +1638,29 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       entrypointRank,
       taskText,
     });
+    const rawIdentifierShadow = data?.identifierRoutingShadow;
+    let identifierRoutingShadow = rawIdentifierShadow && typeof rawIdentifierShadow === "object"
+      ? { ...rawIdentifierShadow }
+      : null;
+    if (identifierRoutingShadow?.available && Array.isArray(identifierRoutingShadow.shadowCandidates)) {
+      const liveByPath = new Map((Array.isArray(rawCandidates) ? rawCandidates : [])
+        .filter((entry) => entry && typeof entry.path === "string")
+        .map((entry) => [entry.path, entry]));
+      const shadowRankPool = identifierRoutingShadow.shadowCandidates.map((entry) => ({
+        ...(liveByPath.get(entry.path) || {}),
+        ...entry,
+      }));
+      const handoffShadow = rankAtlasTreeScopeCandidates(shadowRankPool, {
+        prefetchMode,
+        entrypointRank,
+        taskText,
+      });
+      identifierRoutingShadow = {
+        ...identifierRoutingShadow,
+        handoffCandidatePaths: handoffShadow.map((entry) => entry.path),
+        handoffTopChanged: candidates[0]?.path !== handoffShadow[0]?.path,
+      };
+    }
     const candidateFiles = _uniqueAtlasPaths(
       candidates.map((entry) => entry.path),
       ATLAS_TREE_SCOPE_MAX_FILES,
@@ -1668,6 +1695,7 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       compressionSeeds: Array.isArray(compression?.matchedSeeds) ? compression.matchedSeeds.slice(0, 6) : [],
       areaMap: Array.isArray(compression?.areaMap) ? compression.areaMap.slice(0, 16) : [],
       scopeWidening,
+      identifierRoutingShadow,
     };
   } catch (err) {
     return { ok: false, action, error: String(err?.message || err).slice(0, 300) };
@@ -2410,50 +2438,6 @@ function displayAtlasToolName(toolName, atlas = {}) {
   return `atlas.${raw}`;
 }
 
-function displayAtlasToolList(tools = [], atlas = {}) {
-  return displayableAtlasTools(tools, atlas)
-    .map((toolName) => displayAtlasToolName(toolName, atlas))
-    .filter(Boolean)
-    .join(", ");
-}
-
-function selectFirstRetrievalTools(tools = [], atlas = {}) {
-  const available = new Set(displayableAtlasTools(tools, atlas));
-  const reviewOrder = [
-    "repo.status",
-    "review.risk",
-    "review.delta",
-    "review.analyze",
-    "symbol.card",
-    "code.skeleton",
-    "code.lens",
-    "code.window",
-  ];
-  // Start with discovery, then prefer one area-level structure/content call
-  // before any named residual per-file gap. tree.scope is prefetch-only and
-  // never advertised here.
-  const discoveryOrder = [
-    "symbol.search",
-    "tree.expand",
-    "code.structure",
-    "code.survey",
-    "context.summary",
-    "code.skeleton",
-    "code.lens",
-    "code.window",
-    "slice.build",
-    "context",
-    "symbol.card",
-  ];
-  const order = available.has("review.risk") || available.has("review.delta") || available.has("review.analyze")
-    ? reviewOrder
-    : discoveryOrder;
-  return order
-    .filter((toolName) => available.has(toolName))
-    .slice(0, 4)
-    .map((toolName) => displayAtlasToolName(toolName, atlas));
-}
-
 function displayableAtlasTools(tools = [], atlas = {}) {
   return externallyRoutedAtlasTools(tools)
     .filter((toolName) => !(toolName === "memory.surface" && atlasMemoryStoreEmpty(atlas)));
@@ -2605,36 +2589,14 @@ export function classifyAtlasPrefetchRelevance(packet, recipient = packet?.recip
 
 function renderRequiredRetrievalOrderLine(packet) {
   const label = atlasBackendLabel(packet?.atlas);
-  const available = new Set(displayableAtlasTools(packet?.atlas?.tools, packet?.atlas));
-  const resultSemantics = `RESULT SEMANTICS: tree tools are expandable discovery—tree.branch grows depth and tree.expand grows breadth. Code.skeleton, code.lens, and code.window are hard-line evidence rungs. Escalation to a higher-fidelity rung is allowed and rungs may be skipped, but each rung may be called at most once per symbol. Batch all currently known identifiers into that rung's first request and use explicit continuation refs instead of recalling it with changed arguments.`;
-  const gateEnabled = packet?.atlas?.gateEnabled != null
-    ? !!packet.atlas.gateEnabled
-    : resolveAtlasToolGateEnabled();
   const prefetchStatus = String(packet?.atlas?.prefetchStatus || "").toLowerCase();
-  if (!gateEnabled) {
-    if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-      return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context. Use it directly when it answers the question; do not repeat the same lookup or re-read that evidence natively. Use standard tools when ${label} is unavailable or insufficient, for non-indexed config/data/docs where the raw text is the object, for exact current worktree state after mutations, or for git/test/build/shell operations. ${resultSemantics}`;
-    }
-    if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-      return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Try a task-relevant ${label} retrieval first when possible, then use standard tools for whatever ${label} could not answer, stating the gap. ${resultSemantics}`;
-    }
-    const firstTools = selectFirstRetrievalTools(packet?.atlas?.tools, packet?.atlas);
-    const examples = firstTools.length > 0
-      ? ` (start with ${firstTools.join(" / ")})`
-      : "";
-    return `${label} RETRIEVAL POLICY: use ${label} tools when possible for repository discovery and codebase understanding${examples}. Use returned evidence directly when it answers the task. Use standard tools when ${label} is unavailable or insufficient, the target is non-indexed config/data/docs, you have mutated files and need exact current worktree state, git/test/build/shell operations are required, or ${label} does not expose the needed operation. ${resultSemantics}`;
-  }
   if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-    return `${label} PREFETCH RELEVANT: initial ${label} retrieval supplied task-relevant context (prefetch does not count as active ${label} use). Use it directly when it answers the task, and do not repeat the same lookup. Native read/search/list tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or git/test/build/shell operations. ${resultSemantics}`;
+    return `${label} PREFETCH RELEVANT: task-relevant repository context is supplied below.`;
   }
   if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-    return `${label} PREFETCH UNHELPFUL: initial ${label} retrieval completed but did not match the requested scope. Make focused ${label} retrieval calls for the exact task or scoped files; if a focused attempt still cannot answer, use native tools for that named gap and state what ${label} left unanswered. ${resultSemantics}`;
+    return `${label} PREFETCH UNHELPFUL: the supplied repository context did not match the requested scope.`;
   }
-  const firstTools = selectFirstRetrievalTools(packet?.atlas?.tools, packet?.atlas);
-  const examples = firstTools.length > 0
-    ? ` (start with ${firstTools.join(" / ")})`
-    : "";
-  return `REQUIRED RETRIEVAL POLICY: ${label} is the inspection path${examples}. Prefetch and internal bookkeeping calls do not count as retrieval. Use ${label} evidence directly when it answers the task and do not repeat the same lookup. Native list/search/read tools are for information ${label} cannot supply, non-indexed config/data/docs where raw text is the object, exact current worktree state after mutations, or operations ${label} does not expose (git/test/build/shell). ${resultSemantics}`;
+  return null;
 }
 
 function renderAtlasContextSection(packet) {
@@ -2668,11 +2630,6 @@ function renderAtlasContextSection(packet) {
       : `${label} context prefetch is active for this handoff. Use the prefetched context and its backed cursor pages as the initial code map.`,
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
-    hasCallableTools ? atlasField(`Preferred ${label} tools`, displayAtlasToolList(packet.atlas.tools, packet.atlas)) : null,
-    "STORED RESULT TRAVERSAL: pagination.cursor, *Ref fields, and [bounded_result traversal] point into the already-returned stored dataset. atlas.fetch_ref follows them; it is not a fresh retrieval and does not rerun the originating tool. Traverse them when missing material is likely in that result. Call the original tool again only for a materially different path, symbol, query, or scope.",
-    // Explicit priority framing keeps the loaded ATLAS backend as the default
-    // discovery path while
-    // preserving deterministic tools for exact worktree state and edits.
     hasCallableTools ? renderRequiredRetrievalOrderLine(packet) : null,
   ].filter(Boolean).join("\n");
 }
@@ -2809,15 +2766,11 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   const refStub = _surveyRefStub(sc?.evidenceRef);
   if (refStub) {
     lines.push(`  survey page 1: ${refStub}`);
-    lines.push(`  page 1: atlas.fetch_ref {"ref":"${sc.evidenceRef.ref}"}`);
     const cursor = sc?.evidenceRef?.cursor || sc?.evidenceRef?.nextPage;
     const cursorRef = cursor?.args?.ref || cursor?.ref;
     if (cursorRef) {
-      lines.push(`  next 10: atlas.fetch_ref {"ref":"${cursorRef}"}`);
+      lines.push(`  next survey page: ${cursorRef}`);
     }
-    lines.push(`  This survey has already run. atlas.fetch_ref opens its stored full-symbol pages; it does not rerun ${label}.`);
-    lines.push(`  The inline symbols are only a ranked preview. If a needed declaration is likely covered by this survey, search/fetch page 1 or follow next 10 before making a new retrieval call. Run ${label} only for a materially different path or symbol scope.`);
-    lines.push("  When parallel versions or implementations exist, search the stored survey pages for the task's exact named concepts before choosing the governing path; rank is candidate order, not a version decision.");
   }
   const fileCount = Number.isFinite(Number(sc.fileCount))
     ? Number(sc.fileCount)
@@ -2834,11 +2787,6 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     Number.isFinite(Number(counts.unresolved)) ? `unresolved=${counts.unresolved}` : null,
   ].filter(Boolean);
   if (countParts.length > 0) lines.push(`  edge counts: ${countParts.join(", ")}`);
-  if ((Array.isArray(summary?.topEdges) && summary.topEdges.length > 0)
-    || (Array.isArray(summary?.topSymbols) && summary.topSymbols.length > 0)) {
-    lines.push("  ranked relationship preview (navigation signal, not proof): `path#symbol` identifies an endpoint; `from -> to` is a static call/reference direction, not runtime order. `[inbound]` enters this survey scope, `[outbound]` leaves it, and an untagged edge stays inside it; `xN` counts indexed sites, not executions.");
-    lines.push("  Use these candidates to choose likely entrypoints, ownership handoffs, and scope boundaries, then open the retained survey page for exact sites and branch evidence.");
-  }
   const topSymbols = Array.isArray(summary?.topSymbols) ? summary.topSymbols : [];
   if (topSymbols.length > 0) {
     lines.push(`  top edge symbols: ${topSymbols.map((entry) => `${entry.symbol}${entry.count > 1 ? ` (${entry.count})` : ""}`).join(", ")}`);
@@ -2918,9 +2866,7 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     ? slice.areaMap
     : (Array.isArray(slice.treeScope?.areaMap) ? slice.treeScope.areaMap : []);
   if (trim < 2 && renderedAreaMap.length > 0) {
-    const walkTool = displayAtlasToolName("tree.branch", packet.atlas);
     lines.push("This is the compressed file-system tree.");
-    lines.push(`A branch can be drilled into with ${walkTool} {path, maxDepth}; omit limit to use the repo-sized default (100-250 nodes).`);
     for (const area of renderedAreaMap) {
       lines.push(`- ${area.path} — ${area.label}${area.labelStale ? " (label predates recent changes here)" : ""}`);
     }

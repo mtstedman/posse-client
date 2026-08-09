@@ -961,6 +961,10 @@ export async function callProvider(promptText, {
     const LINE_BUF_MAX = 16 * 1024 * 1024; // 16 MiB
     const toolUses = [];       // track tool calls: [{ tool, input }, ...]
     const seenToolUseKeys = new Set();
+    const providerToolBatches = new Map();
+    const providerTurnIndexesById = new Map();
+    let _providerTurnSequence = 0;
+    let _activeProviderTurn = null;
     let _pendingToolUse = null;  // current tool_use block from content_block_start
     let _pendingToolInput = "";  // accumulate input_json_delta for current tool
     let _lastChainReadPath = null; // remember so chain_verdict live log shows the file
@@ -981,17 +985,116 @@ export async function callProvider(promptText, {
       return `${toolUse?.tool || ""}\0${JSON.stringify(toolUse?.input ?? null)}`;
     }
 
+    function providerMessageId(msg) {
+      const candidates = [
+        msg?.message?.id,
+        msg?.message_id,
+        msg?.messageId,
+        msg?.type === "assistant" ? msg?.id : null,
+      ];
+      for (const candidate of candidates) {
+        if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+      }
+      return null;
+    }
+
+    function allocateProviderTurn(providerTurnId = null, { activate = false } = {}) {
+      let providerTurnIndex = providerTurnId
+        ? providerTurnIndexesById.get(providerTurnId) || null
+        : null;
+      if (providerTurnIndex == null) {
+        providerTurnIndex = ++_providerTurnSequence;
+        if (providerTurnId) providerTurnIndexesById.set(providerTurnId, providerTurnIndex);
+      }
+      const turn = { providerTurnId, providerTurnIndex };
+      if (activate) _activeProviderTurn = turn;
+      return turn;
+    }
+
+    function prepareIncrementalProviderTurn(msg) {
+      if (msg?.type === "message_start") {
+        return allocateProviderTurn(providerMessageId(msg), { activate: true });
+      }
+      if (msg?.type === "content_block_start" && !_activeProviderTurn) {
+        return allocateProviderTurn(providerMessageId(msg), { activate: true });
+      }
+      return _activeProviderTurn;
+    }
+
+    function recordStreamMessageToolUses(msg) {
+      let turn = _activeProviderTurn;
+      if (msg?.type === "assistant") {
+        turn = allocateProviderTurn(providerMessageId(msg));
+      }
+      const extracted = _extractClaudeToolUsesFromStreamMessage(msg, {
+        providerTurnIndex: turn?.providerTurnIndex ?? null,
+      });
+      if (extracted.length > 0 && !turn) {
+        turn = allocateProviderTurn(providerMessageId(msg), { activate: true });
+      }
+      for (const toolUse of extracted) {
+        recordCompletedToolUse({
+          ...toolUse,
+          ...(toolUse.providerTurnId || !turn?.providerTurnId
+            ? {}
+            : { providerTurnId: turn.providerTurnId }),
+          ...(toolUse.providerTurnIndex || !turn?.providerTurnIndex
+            ? {}
+            : { providerTurnIndex: turn.providerTurnIndex }),
+        });
+      }
+    }
+
+    function updateProviderBatch(normalized) {
+      const providerTurnId = typeof normalized.providerTurnId === "string"
+        && normalized.providerTurnId.trim()
+        ? normalized.providerTurnId.trim()
+        : null;
+      const providerTurnIndex = Number.isFinite(Number(normalized.providerTurnIndex))
+        && Number(normalized.providerTurnIndex) > 0
+        ? Math.floor(Number(normalized.providerTurnIndex))
+        : null;
+      if (!providerTurnId && providerTurnIndex == null) return;
+      const groupKey = providerTurnId
+        ? `id:${providerTurnId}`
+        : `index:${providerTurnIndex}`;
+      const batch = providerToolBatches.get(groupKey) || [];
+      batch.push(normalized);
+      providerToolBatches.set(groupKey, batch);
+      const expectedSize = Math.max(
+        batch.length,
+        ...batch.map((entry) => Number(entry.providerBatchSize) || 0),
+      );
+      batch.forEach((entry, providerBatchIndex) => {
+        entry.providerBatchIndex = providerBatchIndex;
+        entry.providerBatchSize = expectedSize;
+      });
+    }
+
     function recordCompletedToolUse(toolUse) {
       if (!toolUse?.tool) return;
       const normalized = {
         id: typeof toolUse.id === "string" && toolUse.id.trim() ? toolUse.id.trim() : null,
         tool: toolUse.tool,
         input: toolUse.input && typeof toolUse.input === "object" ? toolUse.input : null,
+        ...(typeof toolUse.providerTurnId === "string" && toolUse.providerTurnId.trim()
+          ? { providerTurnId: toolUse.providerTurnId.trim() }
+          : {}),
+        ...(Number.isFinite(Number(toolUse.providerTurnIndex)) && Number(toolUse.providerTurnIndex) > 0
+          ? { providerTurnIndex: Math.floor(Number(toolUse.providerTurnIndex)) }
+          : {}),
+        ...(Number.isFinite(Number(toolUse.providerBatchIndex)) && Number(toolUse.providerBatchIndex) >= 0
+          ? { providerBatchIndex: Math.floor(Number(toolUse.providerBatchIndex)) }
+          : {}),
+        ...(Number.isFinite(Number(toolUse.providerBatchSize)) && Number(toolUse.providerBatchSize) > 0
+          ? { providerBatchSize: Math.floor(Number(toolUse.providerBatchSize)) }
+          : {}),
       };
       const key = toolUseReplayKey(normalized);
       if (seenToolUseKeys.has(key)) return;
       seenToolUseKeys.add(key);
       toolUses.push(normalized);
+      updateProviderBatch(normalized);
 
       if (onLine && normalized.tool) {
         // Strip MCP server prefixes so the live log shows the bare tool
@@ -1148,11 +1251,20 @@ export async function callProvider(promptText, {
 
           // Track tool use — capture tool name on block start, accumulate
           // input JSON from deltas, finalize on block stop.
+          const incrementalProviderTurn = prepareIncrementalProviderTurn(msg);
           const startedToolUse = msg.type === "content_block_start"
             ? _normalizeClaudeToolUseBlock(msg.content_block)
             : null;
           if (startedToolUse) {
-            _pendingToolUse = startedToolUse;
+            _pendingToolUse = {
+              ...startedToolUse,
+              ...(incrementalProviderTurn?.providerTurnId
+                ? { providerTurnId: incrementalProviderTurn.providerTurnId }
+                : {}),
+              ...(incrementalProviderTurn?.providerTurnIndex
+                ? { providerTurnIndex: incrementalProviderTurn.providerTurnIndex }
+                : {}),
+            };
             _pendingToolInput = "";
           }
           if (_pendingToolUse && msg.type === "content_block_delta" && msg.delta?.type === "input_json_delta") {
@@ -1168,8 +1280,10 @@ export async function callProvider(promptText, {
           // Newer Claude Code stream-json sessions may emit complete
           // assistant messages with content[] tool_use blocks instead of
           // Anthropic-style content_block_start/content_block_delta events.
-          for (const toolUse of _extractClaudeToolUsesFromStreamMessage(msg)) {
-            recordCompletedToolUse(toolUse);
+          recordStreamMessageToolUses(msg);
+
+          if (msg.type === "message_stop" || msg.type === "result") {
+            _activeProviderTurn = null;
           }
 
           // Final result — contains usage stats and possibly full output
@@ -1241,11 +1355,20 @@ export async function callProvider(promptText, {
             fullOutput += msg.delta.text;
             emitTextLines(msg.delta.text);
           }
+          const incrementalProviderTurn = prepareIncrementalProviderTurn(msg);
           const startedToolUse = msg.type === "content_block_start"
             ? _normalizeClaudeToolUseBlock(msg.content_block)
             : null;
           if (startedToolUse) {
-            _pendingToolUse = startedToolUse;
+            _pendingToolUse = {
+              ...startedToolUse,
+              ...(incrementalProviderTurn?.providerTurnId
+                ? { providerTurnId: incrementalProviderTurn.providerTurnId }
+                : {}),
+              ...(incrementalProviderTurn?.providerTurnIndex
+                ? { providerTurnIndex: incrementalProviderTurn.providerTurnIndex }
+                : {}),
+            };
             _pendingToolInput = "";
           }
           if (_pendingToolUse && msg.type === "content_block_delta" && msg.delta?.type === "input_json_delta") {
@@ -1257,8 +1380,9 @@ export async function callProvider(promptText, {
             _pendingToolUse = null;
             _pendingToolInput = "";
           }
-          for (const toolUse of _extractClaudeToolUsesFromStreamMessage(msg)) {
-            recordCompletedToolUse(toolUse);
+          recordStreamMessageToolUses(msg);
+          if (msg.type === "message_stop" || msg.type === "result") {
+            _activeProviderTurn = null;
           }
           if (msg.type === "result") {
             resultData = msg;

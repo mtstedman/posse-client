@@ -65,7 +65,6 @@ import { registeredTestToolResultObservation } from "../../observability/functio
 import {
   acknowledgeOperatorFeedback,
   countPendingOperatorFeedbackForJob,
-  getWorkItem,
   getIntSetting,
   getOperatorFeedbackForJob,
   recordAgentActivity,
@@ -138,6 +137,7 @@ import {
   RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
+  buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
@@ -1857,36 +1857,80 @@ function buildResearchSynthesisRequiredMessage() {
     explorationSteps: status.exploration_steps || 0,
     staleSteps: status.stale_steps || 0,
     absoluteCeilingReached,
-    taskText: researchTaskText(),
   });
 }
 
-function researchTaskText() {
-  if (!isResearcherRole || mcpWorkItemId == null) return "";
+// Parity with the owner path's recordOwnerModelControlNotice: every
+// runtime-appended, model-visible control notice must be recorded with its
+// exact text, or run telemetry under-represents what steered the next turn.
+function recordEmbeddedModelControlNotice(toolName, notice = {}) {
   try {
-    return String(getWorkItem(mcpWorkItemId)?.description || "");
+    _recordObservation({
+      work_item_id: mcpWorkItemId ?? null,
+      job_id: mcpJobId ?? null,
+      attempt_id: mcpAttemptId ?? null,
+      observation_type: "tool.response_control",
+      summary: `Model-visible ${notice.kind || "runtime"} notice appended to ${toolName || "tool result"}`,
+      detail: {
+        kind: notice.kind || "runtime_control",
+        tool: toolName || null,
+        text: String(notice.text || ""),
+        chars: String(notice.text || "").length,
+        trigger: notice.trigger || null,
+        exploration_step: notice.explorationStep ?? null,
+        source: "mcp_embedded",
+      },
+    });
   } catch {
-    return "";
+    // Response-control telemetry is advisory and must not break a tool result.
   }
 }
+
+// One-shot notice progress. Exploration steps sync from the shared ledger and
+// can skip numbers (owner-side ATLAS work advances the count between native
+// calls), so equality triggers can silently skip the midpoint/curtain
+// warnings; threshold-crossing flags cannot. In-memory: a gateway restart
+// re-emits at most one already-shown notice.
+const researchNoticeFlags = { midpoint: false, curtain: false, lastSlot: false };
 
 function appendResearchExplorationNotice(text, toolName) {
   if (!isResearcherRole || !isResearchExplorationTool(toolName)) return text;
   const explorationSteps = Number(researchState.explorationSteps || 0);
+  const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+    - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
   let notice = null;
+  let noticeKind = null;
   if (researchState.synthesisRequiredAt) {
+    researchNoticeFlags.midpoint = true;
+    researchNoticeFlags.curtain = true;
+    researchNoticeFlags.lastSlot = true;
     notice = buildResearchSynthesisRequiredMessage(toolName);
+    noticeKind = "research_closeout";
   } else if (
-    explorationSteps
-    >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
-      - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
+    (explorationSteps >= curtainStart && !researchNoticeFlags.curtain)
+    || (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1 && !researchNoticeFlags.lastSlot)
   ) {
-    notice = buildResearchCurtainCallText({
-      explorationSteps,
-      taskText: researchTaskText(),
-    });
+    researchNoticeFlags.midpoint = true;
+    researchNoticeFlags.curtain = true;
+    if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1) researchNoticeFlags.lastSlot = true;
+    notice = buildResearchCurtainCallText({ explorationSteps });
+    noticeKind = "research_curtain";
+  } else if (
+    explorationSteps >= Math.floor(RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS / 2)
+    && !researchNoticeFlags.midpoint
+  ) {
+    researchNoticeFlags.midpoint = true;
+    notice = buildResearchMidpointAuditText();
+    noticeKind = "research_midpoint";
   }
-  return notice ? `${text}\n\n${notice}` : text;
+  if (!notice) return text;
+  recordEmbeddedModelControlNotice(toolName, {
+    kind: noticeKind,
+    text: `\n\n${notice}`,
+    trigger: noticeKind,
+    explorationStep: explorationSteps,
+  });
+  return `${text}\n\n${notice}`;
 }
 
 function chainRead(args) {
@@ -2013,7 +2057,13 @@ function operatorFeedbackSignalText(toolName) {
 
 function appendOperatorFeedbackSignal(text, toolName) {
   const signal = operatorFeedbackSignalText(toolName);
-  return signal ? `${text}${signal}` : text;
+  if (!signal) return text;
+  recordEmbeddedModelControlNotice(toolName, {
+    kind: "operator_feedback",
+    text: signal,
+    trigger: "operator_feedback_pending",
+  });
+  return `${text}${signal}`;
 }
 
 function operatorFeedbackPollKey() {
@@ -3013,8 +3063,14 @@ async function handleRequest(msg) {
         reason: citationFetchGate.reason,
         citationFetches: citationFetchGate.citationFetches,
       });
+      const citationGateText = buildResearchCitationFetchGateText({ reason: citationFetchGate.reason });
+      recordEmbeddedModelControlNotice(toolName, {
+        kind: "citation_fetch_gate",
+        text: citationGateText,
+        trigger: citationFetchGate.reason || "citation_fetch_gate",
+      });
       sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: buildResearchCitationFetchGateText({ reason: citationFetchGate.reason }) }],
+        content: [{ type: "text", text: citationGateText }],
         isError: true,
       }));
       return;
@@ -3029,6 +3085,12 @@ async function handleRequest(msg) {
         canonicalTool: toolName,
         explorationSteps: researchState.explorationSteps,
         staleSteps: researchSynthesisStaleStepCount(),
+      });
+      recordEmbeddedModelControlNotice(toolName, {
+        kind: "research_closeout_gate",
+        text: errorText,
+        trigger: "research_synthesis_gate",
+        explorationStep: Number(researchState.explorationSteps || 0),
       });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: errorText }],
@@ -3178,6 +3240,12 @@ async function handleRequest(msg) {
         canonicalTool: toolName,
         explorationSteps: researchState.explorationSteps,
         staleSteps: researchSynthesisStaleStepCount(),
+      });
+      recordEmbeddedModelControlNotice(toolName, {
+        kind: "research_closeout_gate",
+        text: errorText,
+        trigger: "research_synthesis_gate",
+        explorationStep: Number(researchState.explorationSteps || 0),
       });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: errorText }],

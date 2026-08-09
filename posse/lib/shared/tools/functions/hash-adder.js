@@ -114,19 +114,21 @@ function normalizedLinesForHandoff(value) {
   return lines.length;
 }
 
-// symbol.search enrollment is flag-gated (atlas_search_result_paging, default
-// off) so mid-experiment baselines stay stable; search_files/list_files keep
-// their long-standing unconditional policies.
+// symbol.search bounding is a transport invariant (atlas_search_result_paging,
+// default on — an explicit "off" is an operator escape hatch, not a baseline):
+// unbounded search results were a primary retained-input regression while the
+// flag defaulted off. search_files/list_files keep their long-standing
+// unconditional policies.
 const SEARCH_PAGING_POLICY_KEYS = new Set(["symbol.search", "atlas.symbol.search"]);
 
 function searchResultPagingEnabled() {
   try {
     const stored = getSetting(SETTING_KEYS.ATLAS_SEARCH_RESULT_PAGING);
-    if (stored == null) return false;
+    if (stored == null) return true;
     const normalized = String(stored).trim().toLowerCase();
-    return normalized === "on" || normalized === "true" || normalized === "1" || normalized === "yes";
+    return !(normalized === "off" || normalized === "false" || normalized === "0" || normalized === "no");
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -285,8 +287,8 @@ function renderBoundedResult(text, {
   const lines = [
     `[bounded_result ${objectLabel}: full payload ${sizeChars} chars; showing ${head.length}${tail ? `+${tail.length}` : ""} chars; omitted ${omitted} chars]`,
     materialized
-      ? `[bounded_result traversal: atlas.fetch_ref {"ref":"${entry?.ref || ""}","offset":<char_offset>,"limit":<chars>} opens this stored result; it is not a fresh ${toolName || "tool"} call. Continue with page.next_offset or use search=<literal>]`
-      : `[bounded_result recovery: payload exceeded retention cap; digest+fingerprints kept; re-run ${toolName || "the tool"} with narrower args]`,
+      ? `[bounded_result_ref ${entry?.ref || ""}]`
+      : "[bounded_result_unretained]",
     "[overflow_digest]",
     digestText,
     "[/overflow_digest]",
@@ -496,7 +498,6 @@ export function compactTreeScopeResult(toolName, result, {
         ranks: { start: rankStart, end: rankEnd },
         candidateFiles: pageCandidates,
         ...(nextPage ? { nextCandidateFiles: nextPage } : {}),
-        traversalNote: "This is a stored tree.scope page. atlas.fetch_ref follows nextCandidateFiles without rerunning tree.scope. Call tree.scope again only for a materially different query or scope.",
       }, null, 2);
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",
@@ -536,7 +537,6 @@ export function compactTreeScopeResult(toolName, result, {
   envelope.data.candidateFiles = candidates.slice(0, TREE_SCOPE_INLINE_CANDIDATES);
   envelope.data.nextCandidateFiles = nextPage;
   envelope.data.candidateFilesTotal = candidates.length;
-  envelope.data.traversalNote = "nextCandidateFiles points to the next stored page. atlas.fetch_ref traverses it without rerunning tree.scope. Follow nextCandidateFiles until absent; call tree.scope again only for a materially different query or scope.";
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
@@ -618,7 +618,6 @@ export function materializeCodeSurveyPages(data, {
         },
         ...(start === 0 ? { survey: surveyMetadata } : {}),
         files: pageFiles,
-        traversalNote: "This is a stored code.survey page. atlas.fetch_ref follows pagination.cursor without rerunning code.survey. Follow cursors until absent; call code.survey again only for a materially different path or symbol scope.",
       }, null, 2);
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",
@@ -662,7 +661,7 @@ export function materializeCodeSurveyPages(data, {
           ...currentPage,
           objectType,
           sizeChars: payloadText.length,
-          note: "survey page 1; next 10 is already cached",
+          note: "survey page 1",
           cursor,
         };
       }
@@ -736,9 +735,6 @@ export function compactCodeSurveyResult(toolName, result, {
     objectType: snapshot.objectType,
     sizeChars: snapshot.sizeChars,
   };
-  data.surveyNote = snapshot.cursor
-    ? `This survey has already run. atlas.fetch_ref traverses a stored ${SURVEY_PAGE_FILES}-file survey page containing the full surveyed symbol inventory; it is not a fresh retrieval and does not rerun code.survey. Follow pagination.cursor while missing material is likely in this result; call code.survey again only for a materially different path or symbol scope.`
-    : "This survey has already run. atlas.fetch_ref opens its stored full-symbol snapshot; it is not a fresh retrieval and does not rerun code.survey. Call code.survey again only for a materially different path or symbol scope.";
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
@@ -782,11 +778,8 @@ export function compactCodeWindowLensResult(toolName, result, {
   if ((tool !== "code.window" && tool !== "code.lens") || typeof result !== "string") {
     return { result, compacted: false };
   }
-  if (!(enabled ?? resultRefPagingEnabled())) return { result, compacted: false };
   const min = minChars ?? resultRefPagingMinChars();
-  if (result.length <= min) return { result, compacted: false };
   const hashContext = contextForHashRefs(context);
-  if (!hasHashRefScope(hashContext)) return { result, compacted: false };
 
   let envelope;
   try {
@@ -794,9 +787,106 @@ export function compactCodeWindowLensResult(toolName, result, {
   } catch {
     return { result, compacted: false };
   }
-  const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : null;
+  // Like code.survey above: the MCP owner stamps the BARE payload (top-level
+  // matches[]/content), dispatch envelopes nest it under .data. Accept both —
+  // the .data-only assumption silently no-ops the production owner/embedded paths.
+  const bare = envelope && typeof envelope === "object"
+    && (Array.isArray(envelope.matches) || typeof envelope.content === "string")
+    ? envelope
+    : null;
+  const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : bare;
   if (!data) return { result, compacted: false };
   const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
+  let compacted = false;
+
+  // Native code.window can return several distant requested regions inline.
+  // Only regions that a hard output/coverage budget actually omitted travel
+  // in this private field. Materialize those exact slices; never interpret the
+  // legacy `truncated` bit as permission to page the rest of the file because
+  // that bit also describes an ordinary bounded selection.
+  if (tool === "code.window" && Array.isArray(data._continuationWindows)) {
+    const continuation = data._continuationWindows.filter((entry) => (
+      entry && typeof entry === "object" && typeof entry.content === "string" && entry.content.length > 0
+    ));
+    delete data._continuationWindows;
+    if (continuation.length > 0 && hasHashRefScope(hashContext)) {
+      const continuationPayload = JSON.stringify({
+        tool: "code.window",
+        repo_rel_path: data.repo_rel_path,
+        requestedWindows: continuation,
+      }, null, 1);
+      let surfaced;
+      try {
+        surfaced = surfaceHashRefForContext(hashContext, {
+          entryKind: "materialized",
+          payloadText: continuationPayload,
+          descriptor: { kind: "tool_result", tool: "code.window", args, source: "tool:code.window" },
+          objectType: "code.window.continuation",
+          source: "tool:code.window",
+          note: `${continuation.length} requested code.window region(s) omitted from the inline budget`,
+          sizeChars: continuationPayload.length,
+          recomputable: true,
+          metadata: {
+            surfaced_by: "requested_region_continuation",
+            tool: "code.window",
+            windows: continuation.length,
+          },
+        }, scope);
+      } catch (err) {
+        recordHashSurfaceFailure(hashContext, tool, continuationPayload.length, err?.message || err);
+      }
+      if (surfaced?.ok && surfaced?.entry?.ref) {
+        data.continuationRef = surfaced.entry.ref;
+        data.continuationWindows = continuation.length;
+      } else {
+        // A context without a hash owner must not silently discard requested
+        // evidence. Fall back to inline slices instead of leaking the private
+        // transport field or pretending the identifiers were not found.
+        data.additionalWindows = [
+          ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
+          ...continuation,
+        ];
+        const nowInline = [...new Set(continuation.flatMap((entry) => (
+          Array.isArray(entry.identifiers) ? entry.identifiers.map(String) : []
+        )))];
+        data.identifiersReturned = [...new Set([
+          ...(Array.isArray(data.identifiersReturned) ? data.identifiersReturned.map(String) : []),
+          ...nowInline,
+        ])];
+        data.identifiersOmitted = (Array.isArray(data.identifiersOmitted) ? data.identifiersOmitted : [])
+          .filter((identifier) => !nowInline.includes(String(identifier)));
+        data.outputTruncated = false;
+        data.continuationInline = true;
+      }
+      compacted = true;
+    } else if (continuation.length > 0) {
+      data.additionalWindows = [
+        ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
+        ...continuation,
+      ];
+      const nowInline = [...new Set(continuation.flatMap((entry) => (
+        Array.isArray(entry.identifiers) ? entry.identifiers.map(String) : []
+      )))];
+      data.identifiersReturned = [...new Set([
+        ...(Array.isArray(data.identifiersReturned) ? data.identifiersReturned.map(String) : []),
+        ...nowInline,
+      ])];
+      data.identifiersOmitted = (Array.isArray(data.identifiersOmitted) ? data.identifiersOmitted : [])
+        .filter((identifier) => !nowInline.includes(String(identifier)));
+      data.outputTruncated = false;
+      data.continuationInline = true;
+      compacted = true;
+    } else {
+      compacted = true;
+    }
+  }
+
+  const pagingEnabled = enabled ?? resultRefPagingEnabled();
+  if (!pagingEnabled || result.length <= min || !hasHashRefScope(hashContext)) {
+    return compacted
+      ? { result: JSON.stringify(envelope, null, 2), compacted: true }
+      : { result, compacted: false };
+  }
 
   // code.lens: page the lower-ranked matches[] tail.
   if (tool === "code.lens" && Array.isArray(data.matches) && data.matches.length > LENS_INLINE_MATCHES) {
@@ -823,7 +913,6 @@ export function compactCodeWindowLensResult(toolName, result, {
     data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
     data.tailMatchesRef = surfaced.entry.ref;
     data.tailMatchesTotal = LENS_INLINE_MATCHES + tail.length;
-    data.tailNote = `COVERED: ${tail.length} lower-ranked matches are stored at ${surfaced.entry.ref}. atlas.fetch_ref traverses this stored code.lens tail; it is not a fresh code.lens call. Fetch it when the missing match is likely among the lower-ranked results.`;
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
 
@@ -869,11 +958,12 @@ export function compactCodeWindowLensResult(toolName, result, {
     data.content = headContent;
     data.contentTailRef = surfaced.entry.ref;
     data.contentTailLines = `${tailStartLine}-${data.endLine}`;
-    data.tailNote = `COVERED: lines ${tailStartLine}-${data.endLine} of ${data.repo_rel_path} are stored at ${surfaced.entry.ref}. atlas.fetch_ref traverses this stored code.window tail; it is not a fresh code.window call. Fetch it when the missing lines are likely in this window.`;
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
 
-  return { result, compacted: false };
+  return compacted
+    ? { result: JSON.stringify(envelope, null, 2), compacted: true }
+    : { result, compacted: false };
 }
 
 function shouldSurfaceHashRef(toolName, result, {
@@ -1048,8 +1138,8 @@ export function appendHashRefIfMajor(toolName, result, {
     note,
     boundedIngress
       ? (materialized
-        ? `bounded stored result; atlas.fetch_ref traverses the rest without rerunning ${toolName || "the source tool"}`
-        : `bounded view; payload exceeded retention cap; re-run ${toolName || "the tool"} with narrower args`)
+        ? "bounded stored result"
+        : "bounded result exceeded retention cap")
       : "",
   ].filter(Boolean).join(" | ") || null;
   try {
@@ -1143,9 +1233,6 @@ function fetchResultText(result, args = {}) {
         ...paged.page,
         full_size_chars: fullText.length,
       },
-      notice: paged.page.has_more
-        ? "atlas.fetch_ref returned a bounded page from the same stored dataset; this is not a fresh originating-tool call. Continue with page.next_offset as offset, or use search for a focused slice."
-        : undefined,
     }, null, 2);
   }
   return JSON.stringify({
@@ -1160,8 +1247,8 @@ function fetchResultText(result, args = {}) {
     descriptor: entry.descriptor,
     fingerprint_map: entry.fingerprint_map,
     notice: entry.metadata?.retention_exceeded
-      ? `Payload exceeded the bounded retention cap. Digest and fingerprints were kept; re-run ${entry.descriptor?.tool || "the source tool"} with narrower args.`
-      : "This ref is descriptor-backed. Recompute fetch is not wired for this descriptor in the current runtime, so the original payload is not being claimed verbatim.",
+      ? "Payload unavailable: bounded retention cap exceeded."
+      : "Payload unavailable: descriptor-backed ref cannot be recomputed in this runtime.",
   }, null, 2);
 }
 

@@ -1,12 +1,11 @@
 // @ts-check
 //
 // code.structure orchestration. Node materializes view rows and attaches
-// evidence/ladder metadata; Rust owns path traversal, visibility, edge
+// evidence metadata; Rust owns path traversal, visibility, edge
 // classification, aggregation, metrics, caps, warnings, and ordering.
 
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { nativePathEvidence } from "./native-evidence.js";
-import { recordCodeLadderAreaCoverage } from "./code-ladder.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 
 const MAX_STRUCTURE_FILES = 128;
@@ -67,7 +66,6 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
   if (pathAmbiguity) data.pathAmbiguity = pathAmbiguity;
   if (negativeEvidence) data.negativeEvidence = negativeEvidence;
 
-  recordCodeLadderAreaCoverage({ sessionId: params.sessionId, files: paths });
   return okEnvelope({ action, versionId, data });
 }
 

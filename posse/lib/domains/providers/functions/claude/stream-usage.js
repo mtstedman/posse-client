@@ -107,13 +107,31 @@ function _extractClaudeToolUsesFromContent(content) {
   return toolUses;
 }
 
-export function _extractClaudeToolUsesFromStreamMessage(msg) {
+export function _extractClaudeToolUsesFromStreamMessage(msg, { providerTurnIndex = null } = {}) {
   if (!msg || typeof msg !== "object") return [];
-  return [
+  const toolUses = [
     _normalizeClaudeToolUseBlock(msg),
     ..._extractClaudeToolUsesFromContent(msg.content),
     ..._extractClaudeToolUsesFromContent(msg.message?.content),
   ].filter(Boolean);
+  if (toolUses.length === 0) return [];
+  const providerTurnId = _pickFirstString(
+    msg.message?.id,
+    msg.message_id,
+    msg.messageId,
+    msg.type === "assistant" ? msg.id : null,
+  );
+  const normalizedTurnIndex = Number.isFinite(Number(providerTurnIndex))
+    && Number(providerTurnIndex) > 0
+    ? Math.floor(Number(providerTurnIndex))
+    : null;
+  return toolUses.map((toolUse, providerBatchIndex) => ({
+    ...toolUse,
+    ...(providerTurnId ? { providerTurnId } : {}),
+    ...(normalizedTurnIndex != null ? { providerTurnIndex: normalizedTurnIndex } : {}),
+    providerBatchIndex,
+    providerBatchSize: toolUses.length,
+  }));
 }
 
 export function __testExtractClaudeToolUsesFromStreamMessage(msg) {

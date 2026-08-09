@@ -103,23 +103,6 @@ function renderedNameForCanonicalTool(contract = {}, toolName = "") {
   return tool ? renderedToolName(tool, contract) : null;
 }
 
-function renderedToolListLabel(tool = {}, contract = {}) {
-  const renderedName = renderedToolName(tool, contract);
-  const canonicalName = canonicalToolName(tool);
-  if (canonicalName && renderedName && canonicalName !== renderedName) {
-    return `${renderedName} (canonical: ${canonicalName})`;
-  }
-  return renderedName;
-}
-
-function renderedToolAccessLabel(tool = {}) {
-  const access = String(tool?.access || "unknown").trim() || "unknown";
-  const suite = String(tool?.suite || "").trim();
-  if (!suite) return access;
-  if (suite === "atlas") return "atlas";
-  return `${suite}/${access}`;
-}
-
 function normalizeToolAppendSpec(toolLike, catalog = ToolCatalog) {
   const toolName = typeof toolLike === "object" && toolLike
     ? String(toolLike.name || "").trim()
@@ -250,18 +233,7 @@ export class ToolContract {
       lines.push("- Runtime tools: none. Work only from provided prompt context.");
       return lines.join("\n");
     }
-    const hasRenderedAliases = (contract.tools || []).some((tool) => {
-      const renderedName = renderedToolName(tool, contract);
-      const canonicalName = canonicalToolName(tool);
-      return canonicalName && renderedName && canonicalName !== renderedName;
-    });
-    if (hasRenderedAliases) {
-      lines.push("- Tool name rule: call the exact Available tools name. Canonical names in parentheses are labels only, not callable names.");
-    }
-    lines.push("- Available tools:");
-    for (const tool of contract.tools) {
-      lines.push(`  - ${renderedToolListLabel(tool, contract)} [${renderedToolAccessLabel(tool)}] - ${tool.summary}`);
-    }
+    lines.push("- Tool interface: the provider-exposed tool schemas are exhaustive; call their exact exposed names.");
     if (contract.role === "researcher") {
       const chainRead = renderedNameForCanonicalTool(contract, "chain_read");
       const chainVerdict = renderedNameForCanonicalTool(contract, "chain_verdict");
@@ -285,14 +257,6 @@ export class ToolContract {
       if (bash && scopedChecks) {
         lines.push(`- Lint/typecheck path: use ${scopedChecks} first, including PHP syntax checks. Do not run php -l or php --syntax-check through ${bash}.`);
       }
-    }
-    const hasAtlasTools = (contract.tools || []).some((tool) => (tool?.access || "") === "atlas");
-    if (hasAtlasTools) {
-      lines.push(
-        "- Use ATLAS retrieval tools first for repo context. Use deterministic tools for scoped writes, exact current worktree state after mutations, git/test/build/shell operations, or fallback when ATLAS is unavailable or insufficient.",
-      );
-    } else {
-      lines.push("- Use deterministic tools first. Shell is exception-only and must stay within the allowed policy.");
     }
     return lines.join("\n");
   }

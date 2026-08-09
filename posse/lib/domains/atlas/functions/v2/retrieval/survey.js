@@ -14,7 +14,6 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 import { nativePathEvidence } from "./native-evidence.js";
-import { recordCodeLadderAreaCoverage } from "./code-ladder.js";
 
 const MAX_SURVEY_FILES = 64;
 const MAX_RAW_EDGES = 20_000;
@@ -138,7 +137,6 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     if (Array.isArray(evidence.warnings)) warnings.push(.../** @type {string[]} */ (evidence.warnings));
     result.warnings = warnings;
   }
-  recordCodeLadderAreaCoverage({ sessionId: params.sessionId, files: paths });
   return okEnvelope({ action, versionId, data: result });
 }
 

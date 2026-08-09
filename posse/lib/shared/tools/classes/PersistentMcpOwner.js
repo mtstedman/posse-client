@@ -25,7 +25,6 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
-import { getWorkItem } from "../../../domains/queue/functions/index.js";
 import {
   getAgentHandoffRecord,
   recordAgentHandoffRejection,
@@ -40,10 +39,6 @@ import {
   sealSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
-import {
-  buildAtlasGateScopeKey,
-  noteAtlasPressureAndGetNudge,
-} from "../../../domains/integrations/functions/deterministic-mcp/gate.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import {
   recordObservation,
@@ -54,7 +49,6 @@ import {
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
-  buildResearchCoverageStartText,
   buildResearchCurtainCallText,
   buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
@@ -87,6 +81,36 @@ const MAX_CONSECUTIVE_REQUEST_TIMEOUTS = 2;
 const GATEWAY_RESTART_BACKOFF_MS = 2000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
+const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
+const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set([
+  "action.search",
+  "repo.status",
+  "repo.overview",
+  "repo.quality",
+  "buffer.status",
+  "symbol.search",
+  "symbol.card",
+  "symbol.overview",
+  "tree.overview",
+  "tree.branch",
+  "tree.scope",
+  "tree.expand",
+  "slice.build",
+  "edit.plan",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
+  "code.survey",
+  "code.structure",
+  "code.db",
+  "context.summary",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
+  "file.read",
+  "policy.get",
+  "usage.stats",
+]);
 const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 1;
 const SUB_AGENT_ROUTING_MIN_TARGETS = 2;
 const SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS = 3000;
@@ -236,13 +260,10 @@ function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null) 
   return "";
 }
 
-function appendToolResultText(response, suffix) {
+function appendToolResultText(response, suffix, { kind = "runtime_control", trigger = null } = {}) {
   if (!suffix || !response || response?.result?.isError === true) return response;
-  const content = response?.result?.content;
-  if (!Array.isArray(content)) return response;
-  const textPart = content.find((part) => part?.type === "text" && typeof part.text === "string");
-  if (textPart) textPart.text += suffix;
-  return response;
+  const result = appendOwnerModelControlNotice(response.result, suffix, { kind, trigger });
+  return result === response.result ? response : { ...response, result };
 }
 
 export function __testSubAgentRoutingSequence(calls = []) {
@@ -280,6 +301,41 @@ const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
 const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
+
+// Research admission/classification must see the REAL action: gateway wrappers
+// (atlas_query/atlas_code/atlas_repo/...) carry it nested in args.action, and
+// classifying by the wrapper name would serialize concurrent-eligible reads
+// and let a wrapped fetch.ref bypass the citation gate.
+function effectiveAtlasResearchAction(requested) {
+  if (!requested || requested.suite !== "atlas") return requested?.name || "";
+  return ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name) && requested.nested
+    ? requested.nested
+    : requested.name;
+}
+
+function researchBudgetKey(boot = {}) {
+  return [boot.jobId ?? "no-job", boot.attemptId ?? "no-attempt"].join(":");
+}
+
+// One-shot notice progress per job/attempt. Owner-assigned exploration steps
+// can skip numbers (native/chain exploration recorded between owner calls also
+// advances the durable count), so equality triggers can silently skip the
+// midpoint/curtain warnings; threshold-crossing flags cannot. In-memory only:
+// an owner restart re-emits at most one already-shown notice.
+const RESEARCH_NOTICE_FLAG_LIMIT = 2000;
+const researchNoticeFlagState = new Map();
+function researchNoticeFlagsFor(session) {
+  const key = researchBudgetKey(session?.bootConfig || {});
+  let flags = researchNoticeFlagState.get(key);
+  if (!flags) {
+    flags = { midpoint: false, curtain: false, lastSlot: false };
+    researchNoticeFlagState.set(key, flags);
+    while (researchNoticeFlagState.size > RESEARCH_NOTICE_FLAG_LIMIT) {
+      researchNoticeFlagState.delete(researchNoticeFlagState.keys().next().value);
+    }
+  }
+  return flags;
+}
 
 function randomToken() {
   return crypto.randomBytes(32).toString("base64url");
@@ -593,12 +649,110 @@ function mcpToolTextPayload(text) {
   };
 }
 
+// Final pre-transport model-visible size. The downstream Codex client clips
+// oversized tool results to roughly this many characters (head/tail with the
+// middle discarded) without telling Posse, so anything above the clip is
+// recorded here as the closest observable proxy for what the model saw.
+const CLIENT_RESULT_CLIP_CHARS = 48000;
+function mcpResultTextChars(result) {
+  const content = result?.content;
+  if (!Array.isArray(content)) return 0;
+  let total = 0;
+  for (const part of content) {
+    if (part?.type === "text" && typeof part.text === "string") total += part.text.length;
+  }
+  return total;
+}
+
 function isMemoryToolAction(action) {
   return String(action || "").startsWith("memory.");
 }
 
-function terminalMemoryToolRejection(action) {
+function ownerControlNoticePublicMetadata(notice = {}) {
   return {
+    kind: String(notice.kind || "runtime_control"),
+    chars: String(notice.text || "").length,
+    sha256: crypto.createHash("sha256").update(String(notice.text || ""), "utf8").digest("hex"),
+    ...(notice.trigger ? { trigger: String(notice.trigger) } : {}),
+    ...(notice.explorationStep != null && Number.isFinite(Number(notice.explorationStep))
+      ? { exploration_step: Number(notice.explorationStep) }
+      : {}),
+  };
+}
+
+function appendOwnerModelControlNotice(result, suffix, detail = {}) {
+  const content = result?.content;
+  if (!Array.isArray(content) || !suffix) return result;
+  const textIndex = content.findIndex((part) => part?.type === "text" && typeof part.text === "string");
+  if (textIndex < 0) return result;
+  const textPart = content[textIndex];
+  const notice = {
+    kind: detail.kind || "runtime_control",
+    text: String(suffix),
+    trigger: detail.trigger || null,
+    explorationStep: detail.explorationStep ?? null,
+  };
+  const publicNotice = ownerControlNoticePublicMetadata(notice);
+  const priorPublic = Array.isArray(result?._meta?.posseControlNotices)
+    ? result._meta.posseControlNotices
+    : [];
+  const next = {
+    ...result,
+    content: content.map((part, index) => (
+      index === textIndex ? { ...textPart, text: `${textPart.text}${notice.text}` } : part
+    )),
+    _meta: {
+      ...(result?._meta && typeof result._meta === "object" ? result._meta : {}),
+      posseControlNotices: [...priorPublic, publicNotice],
+    },
+  };
+  Object.defineProperty(next, OWNER_MODEL_CONTROL_NOTICES, {
+    value: [...(result?.[OWNER_MODEL_CONTROL_NOTICES] || []), notice],
+    enumerable: false,
+  });
+  return next;
+}
+
+function tagOwnerModelControlNotice(result, text, detail = {}) {
+  if (!result || !text) return result;
+  const notice = {
+    kind: detail.kind || "runtime_control",
+    text: String(text),
+    trigger: detail.trigger || null,
+    explorationStep: detail.explorationStep ?? null,
+  };
+  const priorPublic = Array.isArray(result?._meta?.posseControlNotices)
+    ? result._meta.posseControlNotices
+    : [];
+  const next = {
+    ...result,
+    _meta: {
+      ...(result?._meta && typeof result._meta === "object" ? result._meta : {}),
+      posseControlNotices: [...priorPublic, ownerControlNoticePublicMetadata(notice)],
+    },
+  };
+  Object.defineProperty(next, OWNER_MODEL_CONTROL_NOTICES, {
+    value: [...(result?.[OWNER_MODEL_CONTROL_NOTICES] || []), notice],
+    enumerable: false,
+  });
+  return next;
+}
+
+function annotateOwnerResultTransform(result, detail = {}) {
+  const prior = Array.isArray(result?._meta?.posseResultTransforms)
+    ? result._meta.posseResultTransforms
+    : [];
+  return {
+    ...result,
+    _meta: {
+      ...(result?._meta && typeof result._meta === "object" ? result._meta : {}),
+      posseResultTransforms: [...prior, detail],
+    },
+  };
+}
+
+function terminalMemoryToolRejection(action) {
+  const result = {
     content: [{
       type: "text",
       text: JSON.stringify({
@@ -615,16 +769,18 @@ function terminalMemoryToolRejection(action) {
     // the structured text still classifies as rejected in Posse telemetry.
     isError: false,
   };
+  return tagOwnerModelControlNotice(result, result.content[0].text, {
+    kind: "memory_tool_terminal_rejection",
+    trigger: "earlier_memory_tool_error",
+  });
 }
 
 function appendTerminalMemoryToolNotice(result) {
-  const first = result?.content?.[0];
-  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   const notice = "MEMORY_TOOL_TERMINAL: Memory is optional. Do not retry this call, invent or substitute a memory ID, or call another memory tool to report this error. Continue the assigned task without memory tools.";
-  return {
-    ...result,
-    content: [{ ...first, text: `${first.text}\n\n${notice}` }, ...result.content.slice(1)],
-  };
+  return appendOwnerModelControlNotice(result, `\n\n${notice}`, {
+    kind: "memory_tool_terminal",
+    trigger: "memory_tool_error",
+  });
 }
 
 function mcpToolResultMessage(message, result) {
@@ -637,12 +793,12 @@ function mcpToolResultMessage(message, result) {
   };
 }
 
-function ownerResearchSynthesisAdmission(session, requestedAction) {
+function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExplorationStep = null } = {}) {
   const boot = session?.bootConfig || {};
   const citationFetch = isResearchAtlasCitationFetchAction(requestedAction);
   const exploration = isResearchAtlasExplorationAction(requestedAction);
   if (String(boot.role || "") !== "researcher" || (!exploration && !citationFetch)) {
-    return { tracked: false, blocked: false, explorationSteps: 0 };
+    return { tracked: false, blocked: false, explorationSteps: 0, assignedExplorationStep: null };
   }
   const status = researchExplorationObservationStatus({
     jobId: boot.jobId ?? null,
@@ -658,16 +814,22 @@ function ownerResearchSynthesisAdmission(session, requestedAction) {
       citationFetch: true,
       citationFetches,
       explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
+      assignedExplorationStep: null,
       synthesisRequired,
     };
   }
+  const observedExplorationSteps = Math.max(0, Number(status.exploration_steps || 0));
+  const assignedStep = Number.isSafeInteger(assignedExplorationStep)
+    ? assignedExplorationStep
+    : observedExplorationSteps + 1;
   return {
     tracked: true,
-    blocked: Number(status.exploration_steps || 0) >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+    blocked: assignedStep > RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
     blockReason: "exploration_ceiling",
     citationFetch: false,
     citationFetches,
-    explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
+    explorationSteps: Math.max(observedExplorationSteps, assignedStep - 1),
+    assignedExplorationStep: assignedStep,
     synthesisRequired: status.synthesis_required === true,
   };
 }
@@ -699,65 +861,48 @@ function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolNam
   });
 }
 
-function ownerResearchTaskText(session) {
-  const workItemId = session?.bootConfig?.workItemId ?? null;
-  if (workItemId == null) return "";
-  try {
-    return String(getWorkItem(workItemId)?.description || "");
-  } catch {
-    return "";
-  }
-}
-
-function ownerResearchExplorationRequests(session) {
-  try {
-    return session?.atlasGateEventsSnapshot?.() || [];
-  } catch {
-    return [];
-  }
-}
-
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.tracked || admission.citationFetch) return result;
-  const explorationSteps = admission.explorationSteps + 1;
-  const explorationRequests = ownerResearchExplorationRequests(session);
+  const explorationSteps = admission.assignedExplorationStep
+    ?? admission.explorationSteps + 1;
+  const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+    - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
+  const flags = researchNoticeFlagsFor(session);
   let notice = null;
-  if (explorationSteps === 1) {
-    notice = buildResearchCoverageStartText({
-      taskText: ownerResearchTaskText(session),
-    });
-  } else if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+  let noticeKind = null;
+  if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+    flags.midpoint = true;
+    flags.curtain = true;
+    flags.lastSlot = true;
     recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
       absoluteCeilingReached: true,
-      taskText: ownerResearchTaskText(session),
     });
+    noticeKind = "research_closeout";
   } else if (
-    explorationSteps
-    >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
-      - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS
+    (explorationSteps >= curtainStart && !flags.curtain)
+    || (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1 && !flags.lastSlot)
   ) {
-    notice = buildResearchCurtainCallText({
-      explorationSteps,
-      taskText: ownerResearchTaskText(session),
-      explorationRequests,
-    });
+    flags.midpoint = true;
+    flags.curtain = true;
+    if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1) flags.lastSlot = true;
+    notice = buildResearchCurtainCallText({ explorationSteps });
+    noticeKind = "research_curtain";
   } else if (
-    explorationSteps === Math.floor(RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS / 2)
+    explorationSteps >= Math.floor(RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS / 2)
+    && !flags.midpoint
   ) {
-    notice = buildResearchMidpointAuditText({
-      taskText: ownerResearchTaskText(session),
-      explorationRequests,
-    });
+    flags.midpoint = true;
+    notice = buildResearchMidpointAuditText();
+    noticeKind = "research_midpoint";
   }
   if (!notice) return result;
-  const first = result?.content?.[0];
-  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
-  return {
-    ...result,
-    content: [{ ...first, text: `${first.text}\n\n${notice}` }, ...result.content.slice(1)],
-  };
+  return appendOwnerModelControlNotice(result, `\n\n${notice}`, {
+    kind: noticeKind,
+    trigger: noticeKind,
+    explorationStep: explorationSteps,
+  });
 }
 
 function atlasExecutorSessionContext(session) {
@@ -811,10 +956,18 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
         objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
       });
   if (stamped === first.text) return result;
-  return {
+  const transformed = {
     ...result,
     content: [{ ...first, text: stamped }, ...result.content.slice(1)],
   };
+  return annotateOwnerResultTransform(transformed, {
+    kind: compacted.compacted
+      ? "code_survey_compaction"
+      : (refPaged.compacted ? "code_window_lens_compaction" : "hash_ref_surface"),
+    action: requested.name || toolName,
+    before_chars: first.text.length,
+    after_chars: stamped.length,
+  });
 }
 
 /**
@@ -822,57 +975,16 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
  * text. Advisory: any failure (or a non-text result) leaves the result
  * untouched — a signal lookup must never break a successful ATLAS call.
  */
-/* L3a (atlas_gate_nudge): count lens/window ladder pressure on the owner
- * ATLAS lane (the claude/MCP transport, where the embedded tool loop's gate
- * hooks never run) and append the in-band steering nudge to the triggering
- * result when the flag is on. Shadow-mode (flag off) still records the
- * observation; this helper then appends nothing. */
-function appendOwnerAtlasPressureNudge(result, session, toolName, toolArgs) {
-  try {
-    if (result?.isError === true) return result;
-    const boot = session?.bootConfig || {};
-    const jobId = boot.jobId ?? null;
-    const attemptId = boot.attemptId ?? null;
-    const agentCallId = boot.agentCallId ?? null;
-    const scopeKey = buildAtlasGateScopeKey({
-      jobId,
-      attemptId,
-      agentCallId,
-      fallback: session?.id || null,
-    });
-    const nudge = noteAtlasPressureAndGetNudge({
-      action: toolName,
-      args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
-      scopeKey,
-      telemetryContext: {
-        work_item_id: boot.workItemId ?? null,
-        job_id: jobId,
-        attempt_id: attemptId,
-        agent_call_id: agentCallId,
-      },
-    });
-    if (!nudge) return result;
-    const first = result?.content?.[0];
-    if (!first || first.type !== "text" || typeof first.text !== "string") return result;
-    return {
-      ...result,
-      content: [{ ...first, text: `${first.text}\n\n${nudge}` }, ...result.content.slice(1)],
-    };
-  } catch {
-    return result;
-  }
-}
-
 function appendOwnerOperatorFeedbackSignal(result, session) {
   try {
     const signal = operatorFeedbackSignalTextForJob(session?.bootConfig?.jobId ?? null);
     if (!signal) return result;
     const first = result?.content?.[0];
     if (!first || first.type !== "text" || typeof first.text !== "string") return result;
-    return {
-      ...result,
-      content: [{ ...first, text: `${first.text}${signal}` }, ...result.content.slice(1)],
-    };
+    return appendOwnerModelControlNotice(result, signal, {
+      kind: "operator_feedback_signal",
+      trigger: "pending_operator_feedback",
+    });
   } catch {
     return result;
   }
@@ -905,6 +1017,40 @@ function mcpToolResultErrorText(result = null) {
     : "";
   const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
   return capString(contentText || structured || "ATLAS tool returned an error", 700);
+}
+
+function recordOwnerModelControlNotice(session, toolName, notice = {}) {
+  const boot = session?.bootConfig || {};
+  try {
+    recordObservation({
+      work_item_id: boot.workItemId ?? null,
+      job_id: boot.jobId ?? null,
+      attempt_id: boot.attemptId ?? null,
+      observation_type: "tool.response_control",
+      summary: `Model-visible ${notice.kind || "runtime"} notice appended to ${toolName || "tool result"}`,
+      detail: {
+        kind: notice.kind || "runtime_control",
+        tool: toolName || null,
+        text: String(notice.text || ""),
+        chars: String(notice.text || "").length,
+        trigger: notice.trigger || null,
+        exploration_step: notice.explorationStep ?? null,
+        source: "mcp_owner",
+      },
+    });
+  } catch (error) {
+    try {
+      appendRunTelemetry("diagnostics", {
+        kind: "mcp.owner.response_control_observation_failed",
+        ...attachTelemetryContext(session, null),
+        tool_name: toolName || null,
+        control_kind: notice.kind || "runtime_control",
+        error: ownerErrorSummary(error),
+      });
+    } catch {
+      // Response-control telemetry is advisory and must not break a tool result.
+    }
+  }
 }
 
 /**
@@ -940,6 +1086,23 @@ function recordOwnerToolObservation({ session, toolName, toolArgs, result = null
         ...(outcome === "rejected" && errorText ? { status: "rejected", rejection: errorText } : {}),
       }],
     });
+    for (const notice of result?.[OWNER_MODEL_CONTROL_NOTICES] || []) {
+      recordOwnerModelControlNotice(session, toolName, notice);
+    }
+    for (const transform of result?._meta?.posseResultTransforms || []) {
+      recordObservation({
+        work_item_id: boot.workItemId ?? null,
+        job_id: boot.jobId ?? null,
+        attempt_id: boot.attemptId ?? null,
+        observation_type: "tool.response_transform",
+        summary: `Model-visible ${transform.kind || "result"} transform applied to ${toolName || "ATLAS result"}`,
+        detail: {
+          ...transform,
+          tool: toolName || null,
+          source: "mcp_owner",
+        },
+      });
+    }
   } catch (recordErr) {
     appendRunTelemetry("diagnostics", {
       kind: "mcp.owner.tool_observation_failed",
@@ -1463,11 +1626,13 @@ export class PersistentMcpOwner {
     this._sessionIdsByTokenHash = new Map();
     this._gatewaySession = null;
     this._gatewayRetirements = new Set();
-    // Provider clients may issue multiple MCP tool calls concurrently. Keep
-    // research admission, execution, and observation recording ordered per
-    // attempt so parallel calls cannot consume a terminal evidence slot
-    // without appearing in the aggregate exploration count.
+    // Stateful ATLAS actions remain ordered per attempt. Read-only researcher
+    // calls reserve absolute exploration slots synchronously and bypass this
+    // queue, so provider-emitted batches can execute concurrently without
+    // racing the deterministic closeout ceiling.
     this._atlasToolCallQueues = new Map();
+    this._activeResearchAtlasReads = new Map();
+    this._researchAdmissionReservations = new Map();
     // A memory failure is terminal only for the agent session that observed
     // it. Weak keys avoid extending the lifetime of detached MCP sessions.
     this._terminalMemoryToolSessions = new WeakSet();
@@ -1688,6 +1853,17 @@ export class PersistentMcpOwner {
     const attachProof = session.snapshotAttachProof();
     this._sessions.delete(id);
     this._sessionIdsByTokenHash.delete(tokenHash(session.token));
+    // Reservations are keyed per job/attempt (the exploration budget is an
+    // attempt-level invariant); drop the entry only when no other live session
+    // still shares that attempt, or a reconnect could re-race the ceiling.
+    const reservationKey = researchBudgetKey(session.bootConfig || {});
+    const reservationShared = [...this._sessions.values()].some((other) => (
+      researchBudgetKey(other?.bootConfig || {}) === reservationKey
+    ));
+    if (!reservationShared) this._researchAdmissionReservations.delete(reservationKey);
+    for (const key of this._activeResearchAtlasReads.keys()) {
+      if (key.endsWith(`:${id}`)) this._activeResearchAtlasReads.delete(key);
+    }
     let gatewayReleased = false;
     let gatewayStopped = false;
     if (this._sessions.size === 0 && this._gatewaySession) {
@@ -1859,6 +2035,8 @@ export class PersistentMcpOwner {
     this._gatewaySession = null;
     this._gatewayRetirements.clear();
     this._atlasToolCallQueues.clear();
+    this._activeResearchAtlasReads.clear();
+    this._researchAdmissionReservations.clear();
     this._sessions.clear();
     this._sessionIdsByTokenHash.clear();
     const server = this._server;
@@ -2322,11 +2500,22 @@ export class PersistentMcpOwner {
           const reminder = mcpToolCallSuccess(response) && !delegatedEvidence
             ? noteSubAgentRoutingSuccess(routingState, requested, toolArgs, response)
             : "";
+          const finalizedResponse = appendToolResultText(response, reminder, {
+            kind: "sub_agent_routing_checkpoint",
+            trigger: "parent_evidence_threshold",
+          });
+          if (finalizedResponse !== response) {
+            recordOwnerModelControlNotice(session, requested.name || toolName, {
+              kind: "sub_agent_routing_checkpoint",
+              text: reminder,
+              trigger: "parent_evidence_threshold",
+            });
+          }
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
-            message: appendToolResultText(response, reminder),
+            message: finalizedResponse,
           });
           return;
         }
@@ -2351,8 +2540,18 @@ export class PersistentMcpOwner {
         );
         const content = response?.result?.content;
         if (signal && Array.isArray(content)) {
-          const textPart = content.find((part) => part?.type === "text" && typeof part.text === "string");
-          if (textPart) textPart.text += signal;
+          const priorResponse = response;
+          response = appendToolResultText(priorResponse, signal, {
+            kind: "sub_agent_completion_signal",
+            trigger: "completed_child_work",
+          });
+          if (response !== priorResponse) {
+            recordOwnerModelControlNotice(session, requested.name, {
+              kind: "sub_agent_completion_signal",
+              text: signal,
+              trigger: "completed_child_work",
+            });
+          }
         }
         if (mcpToolCallSuccess(response) && !delegatedEvidence) {
           const reminder = noteSubAgentRoutingSuccess(
@@ -2363,7 +2562,18 @@ export class PersistentMcpOwner {
             message?.params?.arguments || {},
             response,
           );
-          response = appendToolResultText(response, reminder);
+          const priorResponse = response;
+          response = appendToolResultText(priorResponse, reminder, {
+            kind: "sub_agent_routing_checkpoint",
+            trigger: "parent_evidence_threshold",
+          });
+          if (response !== priorResponse) {
+            recordOwnerModelControlNotice(session, requested.name, {
+              kind: "sub_agent_routing_checkpoint",
+              text: reminder,
+              trigger: "parent_evidence_threshold",
+            });
+          }
         }
       }
       if (message.method === "tools/call" && mcpToolCallSuccess(response)) {
@@ -2421,6 +2631,42 @@ export class PersistentMcpOwner {
     }
   }
 
+  // Synchronous budget reservation shared by the concurrent and serial paths.
+  // Reads durable observed steps, ratchets against the per-ATTEMPT reservation
+  // map (two live sessions for one attempt must not each claim the same
+  // terminal slot), and assigns the next dense step in one event-loop turn so
+  // parallel admissions cannot race the exploration ceiling. Consulting the
+  // reservation map on the serial path also keeps a swallowed observation
+  // write from re-admitting an already-consumed step number.
+  _admitResearchExploration(session, effectiveAction) {
+    const boot = session?.bootConfig || {};
+    if (
+      String(boot.role || "") !== "researcher"
+      || !isResearchAtlasExplorationAction(effectiveAction)
+    ) {
+      return ownerResearchSynthesisAdmission(session, effectiveAction);
+    }
+    const reservationKey = researchBudgetKey(boot);
+    const observed = researchExplorationObservationStatus({
+      jobId: boot.jobId ?? null,
+      attemptId: boot.attemptId ?? null,
+    });
+    const observedSteps = Math.max(0, Number(observed.exploration_steps || 0));
+    const highestReserved = Math.max(
+      observedSteps,
+      Number(this._researchAdmissionReservations.get(reservationKey) || 0),
+    );
+    const assignedExplorationStep = highestReserved + 1;
+    if (assignedExplorationStep <= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+      this._researchAdmissionReservations.set(reservationKey, assignedExplorationStep);
+    }
+    return ownerResearchSynthesisAdmission(
+      session,
+      effectiveAction,
+      { assignedExplorationStep },
+    );
+  }
+
   async _executeAtlasToolCall(args) {
     const boot = args?.session?.bootConfig || {};
     const queueKey = [
@@ -2428,10 +2674,36 @@ export class PersistentMcpOwner {
       boot.attemptId ?? "no-attempt",
       args?.session?.id || "no-session",
     ].join(":");
+    const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
+    const effectiveAction = effectiveAtlasResearchAction(requested);
+    const enqueuedAt = Date.now();
+    const concurrentResearchRead = String(boot.role || "") === "researcher"
+      && isResearchAtlasExplorationAction(effectiveAction)
+      && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
+      && !this._atlasToolCallQueues.has(queueKey);
+    if (concurrentResearchRead) {
+      const synthesisAdmission = this._admitResearchExploration(args?.session, effectiveAction);
+      const current = this._executeAtlasToolCallNow({ ...args, synthesisAdmission, enqueuedAt });
+      const active = this._activeResearchAtlasReads.get(queueKey) || new Set();
+      active.add(current);
+      this._activeResearchAtlasReads.set(queueKey, active);
+      const release = () => {
+        active.delete(current);
+        if (active.size === 0 && this._activeResearchAtlasReads.get(queueKey) === active) {
+          this._activeResearchAtlasReads.delete(queueKey);
+        }
+      };
+      void current.then(release, release);
+      return current;
+    }
     const prior = this._atlasToolCallQueues.get(queueKey) || Promise.resolve();
     const current = prior
       .catch(() => {})
-      .then(() => this._executeAtlasToolCallSerial(args));
+      .then(async () => {
+        const activeReads = [...(this._activeResearchAtlasReads.get(queueKey) || [])];
+        if (activeReads.length > 0) await Promise.allSettled(activeReads);
+        return this._executeAtlasToolCallNow({ ...args, enqueuedAt });
+      });
     const tail = current.catch(() => {});
     this._atlasToolCallQueues.set(queueKey, tail);
     void tail.finally(() => {
@@ -2442,8 +2714,18 @@ export class PersistentMcpOwner {
     return current;
   }
 
-  async _executeAtlasToolCallSerial({ message, session, toolName, toolArgs }) {
+  async _executeAtlasToolCallNow({
+    message,
+    session,
+    toolName,
+    toolArgs,
+    synthesisAdmission: reservedSynthesisAdmission = null,
+    enqueuedAt = null,
+  }) {
     const startedAt = Date.now();
+    // Serial calls can sit behind the per-session promise queue; duration_ms
+    // alone hides that wall-clock cost, so surface the wait separately.
+    const queueWaitMs = enqueuedAt != null ? Math.max(0, startedAt - enqueuedAt) : 0;
     const context = attachTelemetryContext(session, this.bootId);
     const requested = requestedToolPolicyName(toolName, toolArgs);
     const memoryAction = isMemoryToolAction(requested.name);
@@ -2456,11 +2738,13 @@ export class PersistentMcpOwner {
         outcome: "rejected",
         tool_name: toolName,
         duration_ms: Date.now() - startedAt,
+        queue_wait_ms: queueWaitMs,
         reason: "memory_tools_disabled_for_run",
       });
       return mcpToolResultMessage(message, result);
     }
-    const synthesisAdmission = ownerResearchSynthesisAdmission(session, requested.name);
+    const synthesisAdmission = reservedSynthesisAdmission
+      || this._admitResearchExploration(session, effectiveAtlasResearchAction(requested));
     if (synthesisAdmission.blocked) {
       if (!synthesisAdmission.citationFetch) {
         recordOwnerResearchSynthesisRequired(
@@ -2469,19 +2753,28 @@ export class PersistentMcpOwner {
           toolName,
         );
       }
-      const result = {
+      const gateText = synthesisAdmission.citationFetch
+        ? buildResearchCitationFetchGateText({ reason: synthesisAdmission.blockReason })
+        : buildResearchSynthesisRequiredText({
+          explorationSteps: synthesisAdmission.explorationSteps,
+          absoluteCeilingReached: true,
+        });
+      const result = tagOwnerModelControlNotice({
         content: [{
           type: "text",
-          text: synthesisAdmission.citationFetch
-            ? buildResearchCitationFetchGateText({ reason: synthesisAdmission.blockReason })
-            : buildResearchSynthesisRequiredText({
-              explorationSteps: synthesisAdmission.explorationSteps,
-              absoluteCeilingReached: true,
-              taskText: ownerResearchTaskText(session),
-            }),
+          text: gateText,
         }],
         isError: true,
-      };
+      }, gateText, {
+        kind: synthesisAdmission.citationFetch
+          ? "research_citation_fetch_gate"
+          : "research_closeout_gate",
+        trigger: synthesisAdmission.blockReason,
+        explorationStep: synthesisAdmission.assignedExplorationStep,
+      });
+      for (const notice of result?.[OWNER_MODEL_CONTROL_NOTICES] || []) {
+        recordOwnerModelControlNotice(session, toolName, notice);
+      }
       appendRunTelemetry("diagnostics", {
         kind: synthesisAdmission.citationFetch
           ? "mcp.owner.research_citation_fetch_gate"
@@ -2503,19 +2796,21 @@ export class PersistentMcpOwner {
           context: hashRefToolContext(session),
         }));
         result = appendOwnerOperatorFeedbackSignal(result, session);
-        recordOwnerToolObservation({ session, toolName, toolArgs, result });
         result = appendOwnerResearchSynthesisNotice(
           result,
           session,
           toolName,
           synthesisAdmission,
         );
+        recordOwnerToolObservation({ session, toolName, toolArgs, result });
         appendRunTelemetry("diagnostics", {
           kind: "mcp.owner.atlas_tool_call",
           ...context,
           outcome: result?.isError ? "tool_error" : "ok",
           tool_name: toolName,
           duration_ms: Date.now() - startedAt,
+          queue_wait_ms: queueWaitMs,
+          result_chars: mcpResultTextChars(result),
           executor: { via: "hash_ref_store" },
         });
         return mcpToolResultMessage(message, result);
@@ -2539,36 +2834,39 @@ export class PersistentMcpOwner {
         result = appendTerminalMemoryToolNotice(result);
       }
       session.noteAtlasGateEvent?.({
-        action: requested.name || toolName,
+        action: effectiveAtlasResearchAction(requested) || toolName,
         args: toolArgs,
         ...atlasGateResultState(result),
       });
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
-      result = appendOwnerAtlasPressureNudge(result, session, toolName, toolArgs);
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
       // without the signal here (the gateway only appends it to native
       // tools), an MCP-transport agent deep in an ATLAS-only phase learns
       // about pending operator feedback late or never.
       result = appendOwnerOperatorFeedbackSignal(result, session);
-      recordOwnerToolObservation({ session, toolName, toolArgs, result });
       result = appendOwnerResearchSynthesisNotice(
         result,
         session,
         toolName,
         synthesisAdmission,
       );
+      recordOwnerToolObservation({ session, toolName, toolArgs, result });
+      const resultChars = mcpResultTextChars(result);
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
         outcome: result?.isError ? "tool_error" : "ok",
         tool_name: toolName,
         duration_ms: Date.now() - startedAt,
+        queue_wait_ms: queueWaitMs,
+        result_chars: resultChars,
+        over_client_clip: resultChars > CLIENT_RESULT_CLIP_CHARS,
         executor: executed?.executor || null,
       });
       return mcpToolResultMessage(message, result);
     } catch (err) {
       session.noteAtlasGateEvent?.({
-        action: requested.name || toolName,
+        action: effectiveAtlasResearchAction(requested) || toolName,
         args: toolArgs,
         ok: false,
         empty: false,
@@ -2579,9 +2877,9 @@ export class PersistentMcpOwner {
         outcome: "error",
         tool_name: toolName,
         duration_ms: Date.now() - startedAt,
+        queue_wait_ms: queueWaitMs,
         error: ownerErrorSummary(err),
       });
-      recordOwnerToolObservation({ session, toolName, toolArgs, error: err });
       let result = mcpToolErrorPayload(
         String(err?.message || err || "ATLAS tool execution failed"),
         err,
@@ -2597,6 +2895,7 @@ export class PersistentMcpOwner {
         toolName,
         synthesisAdmission,
       );
+      recordOwnerToolObservation({ session, toolName, toolArgs, result, error: err });
       return mcpToolResultMessage(
         message,
         result,

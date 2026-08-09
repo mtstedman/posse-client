@@ -17,7 +17,6 @@ import {
   codeSkeletonNative,
   codeWindowNative,
 } from "../native/code-context.js";
-import { annotateCodeLadder, validateCodeLadder } from "./code-ladder.js";
 import { calledFromBreadcrumbs } from "./usages.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
@@ -46,12 +45,6 @@ export async function codeGetSkeleton({ view, versionId, params, readFile, repoR
 
 async function codeGetSkeletonWithNative({ view, versionId, params, readFile, repoRoot }, buildSkeleton) {
   const sessionId = /** @type {any} */ (params).sessionId;
-  const ladder = validateCodeLadder({
-    action: "code.skeleton",
-    sessionId,
-    symbolId: params.symbolId || null,
-    file: params.file || null,
-  });
   /** @type {string | null} */
   let targetPath = null;
   let explicitFileRequest = false;
@@ -153,12 +146,12 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,
   };
-  return annotateCodeLadder(okEnvelope({
+  return okEnvelope({
     action: "code.skeleton",
     versionId,
     data,
     meta: { etag },
-  }), ladder, { action: "code.skeleton", sessionId, symbolId: params.symbolId || null, file: targetPath });
+  });
 }
 
 /**
@@ -178,13 +171,6 @@ async function codeGetHotPathWithNative({ view, versionId, params, readFile, rep
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
   if (!resolved.ok) return errorEnvelope({ action: "code.lens", versionId, code: resolved.code, message: resolved.message });
   const { source, targetPath, symbolId } = resolved;
-  const sessionId = /** @type {any} */ (params).sessionId;
-  const ladder = validateCodeLadder({
-    action: "code.lens",
-    sessionId,
-    symbolId: symbolId || null,
-    file: targetPath,
-  });
   const idents = normalizeIdentifiers(params.identifiersToFind);
   const contextLines = typeof params.contextLines === "number" ? params.contextLines : 2;
   // Breadcrumbs for the definitions the agent is actually looking at: the
@@ -211,14 +197,12 @@ async function codeGetHotPathWithNative({ view, versionId, params, readFile, rep
     params,
     targetPath,
     symbolId,
-    sessionId,
-    ladder,
     hotPath: resolvedHotPath,
     calledFrom,
   });
 }
 
-function finishCodeHotPath({ versionId, params, targetPath, symbolId, sessionId, ladder, hotPath, calledFrom = [] }) {
+function finishCodeHotPath({ versionId, params, targetPath, symbolId, hotPath, calledFrom = [] }) {
   const etag = String(hotPath.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
     return notModifiedEnvelope({ action: "code.lens", versionId, etag });
@@ -241,12 +225,12 @@ function finishCodeHotPath({ versionId, params, targetPath, symbolId, sessionId,
     ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,
   };
-  return annotateCodeLadder(okEnvelope({
+  return okEnvelope({
     action: "code.lens",
     versionId,
     data,
     meta: { etag },
-  }), ladder, { action: "code.lens", sessionId, symbolId: symbolId || null, file: targetPath });
+  });
 }
 
 /**
@@ -267,13 +251,6 @@ export async function codeNeedWindow({ view, versionId, params, readFile, repoRo
 async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
   if (!resolved.ok) return errorEnvelope({ action: "code.window", versionId, code: resolved.code, message: resolved.message });
-  const sessionId = /** @type {any} */ (params).sessionId;
-  const ladder = validateCodeLadder({
-    action: "code.window",
-    sessionId,
-    symbolId: resolved.symbolId || null,
-    file: resolved.targetPath,
-  });
   if (!params.reason || params.reason.trim().length < 3) {
     return errorEnvelope({
       action: "code.window",
@@ -308,6 +285,8 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     maxWindowLines: policy.maxWindowLines,
     maxTokens,
   });
+  const additionalWindows = normalizeCodeWindowSlices(result.additionalWindows);
+  const continuationWindows = normalizeCodeWindowSlices(result._continuationWindows);
   /** @type {CodeWindowData} */
   const data = {
     ...(symbolId ? { symbolId } : {}),
@@ -317,12 +296,39 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     endLine: Number(result.endLine || 1),
     estimatedTokens: Number(result.estimatedTokens || 0),
     truncated: result.truncated === true,
+    selectionBounded: result.selectionBounded == null
+      ? result.truncated === true
+      : result.selectionBounded === true,
+    outputTruncated: result.outputTruncated === true,
+    identifiersFound: stringArray(result.identifiersFound),
+    identifiersReturned: stringArray(result.identifiersReturned),
+    identifiersMissing: stringArray(result.identifiersMissing),
+    identifiersOmitted: stringArray(result.identifiersOmitted),
+    ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
+    // Private native-to-owner transport. The hash-ref pager removes this
+    // before model delivery and exposes a continuationRef instead.
+    ...(continuationWindows.length > 0 ? { _continuationWindows: continuationWindows } : {}),
   };
-  return annotateCodeLadder(
-    okEnvelope({ action: "code.window", versionId, data }),
-    ladder,
-    { action: "code.window", sessionId, symbolId: resolved.symbolId || null, file: resolved.targetPath },
-  );
+  return okEnvelope({ action: "code.window", versionId, data });
+}
+
+function stringArray(value) {
+  return Array.isArray(value)
+    ? value.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+}
+
+function normalizeCodeWindowSlices(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry) => ({
+      content: String(entry.content || ""),
+      startLine: Number(entry.startLine || 1),
+      endLine: Number(entry.endLine || entry.startLine || 1),
+      identifiers: stringArray(entry.identifiers),
+    }))
+    .filter((entry) => entry.content.length > 0);
 }
 
 function normalizeIdentifiers(value) {

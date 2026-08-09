@@ -88,7 +88,6 @@ export function buildAtlasCapabilities(args = {}) {
       editPlanning: capability("partial", true, true, "shipped", "Preview-only edit plans produce symbol/file-scoped preconditions; applying edits remains delegated to scoped write tools.", null),
       tokenEfficiencyV2: capability("enabled", true, true, "shipped", "Slices support packed columnar responses, slice ETags, and per-card known ETag refs.", null),
       liveReconciliation: capability("partial", true, true, "shipped", "Buffer-overlay reconciliation reports debounce, queue, dependency-frontier, and checkpoint telemetry; filesystem watcher is still planned.", null),
-      codeModeLadder: capability("enabled", true, true, "shipped", "Code-mode ladder validation records card, skeleton, hot-path, and raw-window ordering with advisory warnings.", null),
     },
   };
 }

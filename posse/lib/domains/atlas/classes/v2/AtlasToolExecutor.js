@@ -33,7 +33,14 @@ const DEFAULT_WAIT_MS = 120_000;
 const DEFAULT_DEDUPE_MAX = 256;
 const DEFAULT_DISPATCH_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_DISPATCH_CACHE_MAX = 256;
+const DEFAULT_SEMANTIC_REPEAT_MAX = 1024;
 export const DEFAULT_SEMANTIC_FILE_LEXICAL_OVERLAP_WEIGHT = 0.75;
+
+const ATLAS_SEMANTIC_REPEAT_ACTIONS = new Set([
+  "symbol.search",
+  "code.lens",
+  "code.window",
+]);
 
 const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "query",
@@ -149,6 +156,49 @@ function mcpTextResult(text, isError = false) {
   };
 }
 
+function successfulAtlasToolResult(value) {
+  if (!value || value.ok === false) return false;
+  const result = value.result || value;
+  if (result?.isError === true) return false;
+  const text = Array.isArray(result?.content)
+    ? result.content.map((entry) => String(entry?.text || "")).join("")
+    : "";
+  return !/^(?:Error:|AUDIT ERROR:)/i.test(text.trimStart());
+}
+
+function semanticRepeatScope(request, repoKey) {
+  const session = request.session || {};
+  const boot = session.bootConfig || session;
+  const source = request.source && typeof request.source === "object" ? request.source : {};
+  const identity = source.agentCallId
+    ?? source.agent_call_id
+    ?? boot.agentCallId
+    ?? boot.agent_call_id
+    ?? boot.attemptId
+    ?? boot.attempt_id
+    ?? session.sessionId
+    ?? session.session_id
+    ?? session.id
+    ?? null;
+  return identity == null || String(identity).trim() === ""
+    ? null
+    : `${repoKey}|scope=${String(identity).trim()}`;
+}
+
+function duplicateSuppressedToolResult(action) {
+  return {
+    result: mcpTextResult(JSON.stringify({
+      action,
+      status: "covered",
+      duplicateSuppressed: true,
+      alreadySurfaced: true,
+      message: "An identical successful call already surfaced this evidence in the current agent session. Reuse that result or make a materially different selection. This does not mean the symbol or query was not found.",
+    }), false),
+    ok: true,
+    errorMsg: null,
+  };
+}
+
 function conductorEnvelopeToToolResult(envelope) {
   if (!envelope || typeof envelope !== "object") {
     return { result: mcpTextResult("Error: ATLAS v2 dispatch returned no envelope", true), ok: false };
@@ -162,8 +212,9 @@ function conductorEnvelopeToToolResult(envelope) {
     };
   }
   const data = envelope.data === undefined ? {} : envelope.data;
-  const payload = envelope.meta && data && typeof data === "object" && !Array.isArray(data)
-    ? { ...data, _meta: envelope.meta }
+  const visibleMeta = modelVisibleAtlasMeta(envelope.meta);
+  const payload = visibleMeta && data && typeof data === "object" && !Array.isArray(data)
+    ? { ...data, _meta: visibleMeta }
     : data;
   // Compact on purpose: pretty-printing inflated every agent-facing tool
   // result by double-digit percent for zero information (2026-07 A/B).
@@ -171,6 +222,16 @@ function conductorEnvelopeToToolResult(envelope) {
   try { text = JSON.stringify(payload); }
   catch { text = String(payload); }
   return { result: mcpTextResult(text, false), ok: true, errorMsg: null };
+}
+
+function modelVisibleAtlasMeta(meta) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const visible = { ...meta };
+  // Compatibility guard for installed native binaries predating removal of
+  // the runtime ladder. Ordering/rung coaching is not result evidence and was
+  // causing repeated retrieval loops when paperclipped onto code responses.
+  delete visible.ladderPolicy;
+  return Object.keys(visible).length > 0 ? visible : null;
 }
 
 export function nativeSymbolSearchArgs(action, args = {}) {
@@ -491,6 +552,8 @@ export class AtlasToolExecutor {
   #readContexts = new Map();
   /** @type {Map<string, string>} */
   #readContextVersions = new Map();
+  /** @type {Map<string, { repoKey: string, atMs: number }>} */
+  #semanticRepeats = new Map();
   #now;
 
   constructor({
@@ -559,7 +622,22 @@ export class AtlasToolExecutor {
       : null;
     const dispatchCacheTtlMs = dispatchCacheKey ? dispatchCacheTtlFor(request) : 0;
     const dispatchCacheReady = this.#dispatchCacheReady();
-    const run = () => this.#runThroughGate({ ...request, toolName, args, action, repoKey });
+    const semanticScope = ATLAS_SEMANTIC_REPEAT_ACTIONS.has(action)
+      ? semanticRepeatScope(request, dedupeRepoKey)
+      : null;
+    const semanticRepeatKey = semanticScope
+      ? `${semanticScope}|${action}|${stableStringify(args)}`
+      : null;
+    if (semanticRepeatKey && this.#semanticRepeats.has(semanticRepeatKey)) {
+      return duplicateSuppressedToolResult(action);
+    }
+    const run = async () => {
+      const value = await this.#runThroughGate({ ...request, toolName, args, action, repoKey });
+      if (semanticRepeatKey && successfulAtlasToolResult(value)) {
+        this.#rememberSemanticRepeat(semanticRepeatKey, dedupeRepoKey);
+      }
+      return value;
+    };
     if (dispatchCacheKey) {
       const result = await this.#dispatchCache.getOrRun(dispatchCacheKey, async () => {
         const value = await run();
@@ -743,6 +821,7 @@ export class AtlasToolExecutor {
 
   invalidateReadCaches() {
     this.#recentDedupe.clear();
+    this.#semanticRepeats.clear();
     this.#dispatchCache?.clear?.();
   }
 
@@ -751,6 +830,7 @@ export class AtlasToolExecutor {
       gate: this.#gate.snapshot?.() || null,
       inflightDedupe: this.#inflightDedupe.size,
       recentDedupe: this.#recentDedupe.size,
+      semanticRepeats: this.#semanticRepeats.size,
       dispatchCache: this.#dispatchCache?.snapshot?.() || null,
       readContexts: this.#readContexts.size,
       dedupeWindowMs: this.#dedupeWindowMs,
@@ -1043,7 +1123,21 @@ export class AtlasToolExecutor {
     for (const key of [...this.#recentDedupe.keys()]) {
       if (String(key).startsWith(prefix)) this.#recentDedupe.delete(key);
     }
+    for (const [key, entry] of [...this.#semanticRepeats.entries()]) {
+      if (entry.repoKey === repoKey || String(key).startsWith(prefix)) {
+        this.#semanticRepeats.delete(key);
+      }
+    }
     this.#dispatchCache?.clearRepo?.(repoKey);
+  }
+
+  #rememberSemanticRepeat(key, repoKey) {
+    this.#semanticRepeats.set(key, { repoKey, atMs: this.#now() });
+    while (this.#semanticRepeats.size > DEFAULT_SEMANTIC_REPEAT_MAX) {
+      const oldest = this.#semanticRepeats.keys().next().value;
+      if (oldest == null) break;
+      this.#semanticRepeats.delete(oldest);
+    }
   }
 
   #rememberDedupe(key, payload) {

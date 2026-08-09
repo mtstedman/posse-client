@@ -546,10 +546,10 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "One section of the terminal research report. Put the substantive answer in claim and summary; ordinary repository path:line citations are allowed there. Evidence refs are optional.",
+    "One concise section of the terminal research report. Target at most 900 characters and never exceed the 1500-character hard limit. Put the substantive answer in claim and summary; ordinary repository path:line citations are allowed there. Evidence refs are optional.",
   properties: {
     ...HANDOFF_CLAIM.properties,
-    claim: { type: "string", minLength: 1, maxLength: 1000 },
+    claim: { type: "string", minLength: 1, maxLength: 1500 },
     summary: { type: "string", maxLength: 4000 },
   },
 };
@@ -557,7 +557,7 @@ const RESEARCHER_HANDOFF_CLAIM = {
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "For researcher.report.v1 this must be non-empty and contain the substantive terminal report; a summary-only report is rejected. researcher.pipeline.v1 may leave it empty.",
+    "For researcher.report.v1 this must be non-empty and contain the substantive terminal report; a summary-only report is rejected. Keep the complete report below the 16000-character narrative cap. researcher.pipeline.v1 may leave it empty.",
   maxItems: 12,
   items: RESEARCHER_HANDOFF_CLAIM,
 };
@@ -943,9 +943,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with compact report content. For researcher.report.v1, claims must contain the substantive terminal report; a summary by itself is invalid. Summary and claim prose are the answer and may contain ordinary repository path:line citations. " +
-    "Evidence refs are optional transport for exact stored excerpts; when useful, select a narrow range such as #abcd:L23-L40 instead of copying tool output. " +
-    "For researcher.report.v1, Posse renders the prose and expands any selected refs into the final Markdown report; researcher.pipeline.v1 remains a compact planner handoff. Do not fetch or create refs solely for this call. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode, claims contain the substantive answer; stored-result selectors are optional. Follow the schema exactly. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {

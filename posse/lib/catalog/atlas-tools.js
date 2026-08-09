@@ -427,7 +427,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Discovery. Search ATLAS's indexed repo-defined symbol graph for relevant project symbols by name, concept, or semantic hint when you do not yet know the symbol ID. Do not use this to resolve language/runtime/library functions such as date, gmdate, password_verify, json_decode, Math.floor, or console.log; use body/code lookup to find repo code that calls them.",
+    description: "Discovery. Search ATLAS's indexed repo-defined symbol graph for relevant project symbols by name, concept, or semantic hint when you do not yet know the symbol ID. Symbols surfaced in a prior symbol.search call will not be surfaced by an identical call in the same agent session; a duplicate-suppressed response means covered, not not-found. Do not use this to resolve language/runtime/library functions such as date, gmdate, password_verify, json_decode, Math.floor, or console.log; use body/code lookup to find repo code that calls them.",
     parameters: {
       type: "object",
       properties: {
@@ -718,7 +718,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_get_skeleton",
-    description: "Lowest-fidelity hard-line code evidence for one file or symbol: signatures and containment without full bodies. For a given symbol, call code.skeleton at most once. If the outline leaves a named implementation gap, escalate that symbol to code.lens or code.window; do not recall code.skeleton with changed arguments.",
+    description: "Code outline for one file or symbol: signatures and containment without full bodies. Use it directly when an outline answers the question. Do not call code.skeleton more than once for the same symbol or file selection.",
     parameters: {
       type: "object",
       properties: {
@@ -780,7 +780,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_get_hot_path",
-    description: "Focused hard-line code evidence for named identifiers, usages, or branches. Batch every currently known identifier for the target into one request. For a given symbol—or the same file with substantially overlapping identifiers—call code.lens at most once. Follow an explicit tailMatchesRef if returned, or escalate a still-unresolved fact to code.window; do not recall code.lens with a revised identifier list.",
+    description: "Focused code excerpts for named identifiers, usages, or branches. Pass only the identifiers the current question needs. A symbol already surfaced by code.lens will not be surfaced by an identical code.lens call; a duplicate-suppressed response means covered, not not-found. Do not call code.lens more than once for the same symbol or substantially overlapping file/identifier selection; follow tailMatchesRef when present. Use code.window directly for a distinct unresolved exact-code fact.",
     parameters: {
       type: "object",
       properties: {
@@ -796,17 +796,17 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_need_window",
-    description: "Highest-fidelity hard-line code evidence for one selected symbol or file region. For a given symbol—or the same file with substantially overlapping identifiers—call code.window at most once. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file; identifier and line hints do not alter that selection. With file, identifiers center one bounded window, expectedLines sizes it, and granularity has no effect. If contentTailRef is returned, fetch it to continue the frozen result. Otherwise this selection is final; changing granularity, budget, or overlapping identifiers is a recall, not escalation. Escalation into code.window from code.skeleton or code.lens is allowed.",
+    description: "Bounded exact code for a selected symbol or named file regions. Use it directly when the target is known. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file; identifier and line hints do not alter that selection. With file, each matched identifier is covered by a bounded slice under one total expectedLines budget; inspect identifiersReturned/identifiersMissing and additionalWindows. A symbol already surfaced by code.window will not be surfaced by an identical code.window call; a duplicate-suppressed response means covered, not not-found. Do not call code.window more than once for the same symbol or substantially overlapping file/identifier selection. Follow continuationRef only when outputTruncated is true; it contains omitted requested slices, never the rest of the file.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID from symbol.search, symbol.card, slice.build, skeleton, or hot path results. Do not pass a file path, symbol name, or file:symbol pair here." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        reason: { type: "string", description: "Name the unresolved fact that requires this highest-fidelity selection and, when escalating, what skeleton/lens could not establish. Reformatting prior evidence, changing parameters, or requesting a next page is not a reason." },
-        identifiersToFind: { type: "array", items: { type: "string" }, description: "File-mode only: anchors used to center one bounded file window, for example [\"generateMusic\",\"json_decode\"]. They are ignored when symbolId is supplied, are not separate requested windows, and do not guarantee that every anchor is returned. Batch related anchors once. Prefer a JSON array; legacy scalar strings are normalized." },
-        expectedLines: { type: "integer", description: "File-mode only: approximate size of the identifier-centered window. Ignored when symbolId is supplied. This is not a continuation offset, and increasing it does not page a prior result. Prefer a JSON number, for example 40; legacy numeric strings are normalized." },
+        reason: { type: "string", description: "Name the exact code fact this selection should establish. Reformatting prior evidence, changing parameters, or requesting a next page is not a reason." },
+        identifiersToFind: { type: "array", items: { type: "string" }, description: "File-mode only: exact anchors for one or more bounded slices, for example [\"generateMusic\",\"json_decode\"]. They are ignored when symbolId is supplied. Batch all related anchors once, then inspect identifiersReturned and identifiersMissing rather than reopening the file. Prefer a JSON array; legacy scalar strings are normalized." },
+        expectedLines: { type: "integer", description: "File-mode only: total approximate line budget shared across all identifier slices. Ignored when symbolId is supplied. This is not a continuation offset, and increasing it does not page a prior result. Prefer a JSON number, for example 40; legacy numeric strings are normalized." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbolId-mode only: choose the resolved symbol, its enclosing block, or its containing file. Ignored when file is supplied. These are alternative selections, not sequential retrieval stages." },
-        maxTokens: { type: "integer", description: "Maximum output budget for this selection. It is not a paging control; follow contentTailRef when one is returned." },
+        maxTokens: { type: "integer", description: "Maximum inline output budget for this selection. It is not a paging control; follow continuationRef only when returned for already-selected requested slices." },
       },
       required: ["reason", "expectedLines", "identifiersToFind"],
       additionalProperties: false,

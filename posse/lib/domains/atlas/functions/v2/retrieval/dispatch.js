@@ -257,7 +257,13 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (treeWalk({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "tree.scope":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (treeScope({ view: ctx.view, versionId: ctx.versionId, params: call }));
+      return /** @type {any} */ (treeScope({
+        view: ctx.view,
+        versionId: ctx.versionId,
+        params: call,
+        config: ctx.config,
+        planner: ctx.planner,
+      }));
     case "tree.expand":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (treeGrow({ view: ctx.view, versionId: ctx.versionId, params: call }));

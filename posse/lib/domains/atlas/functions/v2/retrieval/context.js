@@ -834,7 +834,7 @@ function guidanceFor({ cards }) {
   }
   return [
     "Use symbol.card for dependency/card details.",
-    "Use code.skeleton or code.lens before requesting raw windows.",
+    "Use code.skeleton, code.lens, or code.window directly at whichever detail level the question needs.",
   ];
 }
 

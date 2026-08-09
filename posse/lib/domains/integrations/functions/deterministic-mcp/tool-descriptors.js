@@ -1,10 +1,8 @@
 import { TOOL_INSPECT_FILE } from "../../../worker/functions/helpers/file-inspector.js";
 import { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
-import { resolveAtlasToolGateEnabled, resolveAtlasProseDedup } from "./gate-settings.js";
-import { ATLAS_INDEXABLE_SOURCE_EXTENSIONS } from "./source-file-gate.js";
-import { formatAtlasBackendText, atlasBackendLabel } from "../atlas-label.js";
+import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
+import { atlasBackendLabel } from "../atlas-label.js";
 import { atlasDescriptorSchemaForAction } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
-import { POSSE_MCP_GATEWAY_TRANSPORT } from "../mcp-gateway.js";
 
 // Static data table mirroring each provider's capabilities.toolAttachment.
 // Defined here rather than imported via getProvider() so this module stays
@@ -19,18 +17,6 @@ const TOOL_ATTACHMENT_BY_PROVIDER = Object.freeze({
   copilot: "mcp",
   "posse-local": "function",
 });
-
-function _toolAttachmentModeFor(providerName) {
-  return TOOL_ATTACHMENT_BY_PROVIDER[providerName] || null;
-}
-
-function _providerLabelFor(providerName) {
-  if (providerName === "openai") return "OpenAI";
-  if (providerName === "grok") return "Grok";
-  if (providerName === "codex") return "Codex";
-  if (providerName === "claude") return "Claude";
-  return providerName ? providerName.charAt(0).toUpperCase() + providerName.slice(1) : "This provider";
-}
 
 export { TOOL_ATTACHMENT_BY_PROVIDER };
 
@@ -455,9 +441,9 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
   "slice.refresh": { access: "atlas", summary: "Refresh an ATLAS slice incrementally instead of rebuilding from scratch." },
   "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
-  "code.skeleton": { access: "atlas", summary: "Lowest-fidelity hard-line code evidence for one target. Call once per symbol; escalate a named gap to lens/window instead of recalling skeleton." },
-  "code.lens": { access: "atlas", summary: "Focused hard-line code evidence. Batch known identifiers and call once per symbol/selection; follow tailMatchesRef or escalate a named gap to window instead of recalling lens." },
-  "code.window": { access: "atlas", summary: "Highest-fidelity hard-line code evidence. Call once per symbol/selection; follow contentTailRef when present. Escalation from skeleton/lens is allowed, but changed window arguments are not another escalation." },
+  "code.skeleton": { access: "atlas", summary: "Code outline for one symbol or file. Do not call code.skeleton more than once for the same symbol or file selection." },
+  "code.lens": { access: "atlas", summary: "Focused code excerpts for named identifiers. Do not call code.lens more than once for the same symbol or substantially overlapping file/identifier selection; follow tailMatchesRef when present." },
+  "code.window": { access: "atlas", summary: "Bounded exact code for one symbol or file region. Do not call code.window more than once for the same symbol or substantially overlapping file/identifier selection; follow contentTailRef when present." },
   "code.survey": { access: "atlas", summary: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the already-stored next ten. Search/fetch the stored pages with atlas.fetch_ref, then follow each returned next cursor until none remains. Search stored pages for exact task concepts before choosing among parallel versions or implementations; rank is not a version decision. This traverses the completed survey and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope." },
   "code.structure": { access: "atlas", summary: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed." },
   "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
@@ -941,51 +927,6 @@ export function getAtlasRouteDefinitionForRole(role) {
   };
 }
 
-function atlasProviderForContract(opts = {}) {
-  return String(opts?.atlasAttachment?.provider || opts?.providerName || "").trim().toLowerCase();
-}
-
-function atlasTransportForContract(opts = {}) {
-  return String(opts?.atlasAttachment?.transport || "").trim().toLowerCase();
-}
-
-function hasRuntimeAtlasNaming(opts = {}) {
-  return !!(atlasProviderForContract(opts) || atlasTransportForContract(opts));
-}
-
-function atlasGateEnabledForContract(opts = {}) {
-  if (opts?.atlasGateEnabled != null) return !!opts.atlasGateEnabled;
-  if (opts?.atlasAttachment?.gateEnabled != null) return !!opts.atlasAttachment.gateEnabled;
-  return resolveAtlasToolGateEnabled();
-}
-
-function renderIndexableExtensionList() {
-  return [...ATLAS_INDEXABLE_SOURCE_EXTENSIONS].sort().join(", ");
-}
-
-function snakeAtlasToolName(tool) {
-  return `atlas_${String(tool || "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
-}
-
-function renderAtlasToolNameForContract(tool, opts = {}) {
-  const raw = String(tool || "").trim();
-  if (!raw) return raw;
-  const surfaceToolNames = opts?.atlasAttachment?.surfaceToolNames;
-  if (surfaceToolNames && typeof surfaceToolNames === "object") {
-    const mapped = surfaceToolNames[raw] || surfaceToolNames[stripAtlasPrefix(raw)];
-    if (mapped) return mapped;
-  }
-  if (raw.startsWith("atlas.") || raw.startsWith("atlas_")) return raw;
-  if (!hasRuntimeAtlasNaming(opts)) return `atlas.${raw}`;
-
-  const provider = atlasProviderForContract(opts);
-  const transport = atlasTransportForContract(opts);
-  if (transport === "embedded" || ["openai", "grok"].includes(provider)) {
-    return ATLAS_TOOL_DEFS[raw]?.name || snakeAtlasToolName(raw);
-  }
-  return `atlas.${raw}`;
-}
-
 function normalizeAtlasActionName(tool) {
   const raw = String(tool || "").trim();
   if (!raw) return "";
@@ -1014,210 +955,19 @@ function atlasContractToolsForRoute(route, opts = {}) {
   return routeTools;
 }
 
-function renderProviderNamingLine(opts = {}) {
-  if (!hasRuntimeAtlasNaming(opts)) return null;
-  const label = atlasBackendLabel(opts?.atlasAttachment);
-  const provider = atlasProviderForContract(opts);
-  const mode = _toolAttachmentModeFor(provider);
-  const providerLabel = _providerLabelFor(provider);
-  const transport = String(opts?.atlasAttachment?.transport || "").trim().toLowerCase();
-  if (mode === "function") {
-    return `${providerLabel} exposes ${label} as function tools; call the exact function names listed in this contract.`;
-  }
-  if (transport === POSSE_MCP_GATEWAY_TRANSPORT || transport === "posse-gateway" || transport === "deterministic-mcp") {
-    return `${providerLabel} exposes ${label} through the Posse MCP gateway as a separate atlas.* tool suite; call the exact tool names listed in this contract.`;
-  }
-  if (mode === "deterministic-bridge") {
-    return `${providerLabel} exposes ${label} through the Posse MCP gateway; call the exact tool names listed in this contract.`;
-  }
-  if (mode === "mcp") {
-    return `${providerLabel} exposes ${label} through MCP; call the exact MCP tool names listed in this contract.`;
-  }
-  return `Call the exact ${label} tool names listed in this contract for this provider.`;
-}
-
-function renderActiveAtlasFallbackLines(opts = {}) {
-  // The ATLAS contract is only rendered when ATLAS is attached and advertised
-  // for the active tool surface. The contract's presence already asserts
-  // ATLAS-is-primary, so we don't restate it here.
-  // The "Use standard tools only when:" list below implicitly establishes
-  // ATLAS as the default by enumerating the conditions for falling back.
-  const label = atlasBackendLabel(opts?.atlasAttachment);
-  if (atlasGateEnabledForContract(opts)) {
-    const extensions = renderIndexableExtensionList();
-    return [
-      `${label} is the inspection path; native reads are the exception for a named evidence gap, never the reward for making enough ${label} calls.`,
-      `For indexable source files (${extensions}), discovery is file-scoped: before reading a given source file natively, attempt task-relevant ${label} discovery against that same file or a symbol, tree, or code result that returns that file — often that answers the question and no native read is needed.`,
-      `Each indexable source file needs its own focused ${label} attempt before a native read of it.`,
-      `Never make ${label} calls merely to make native tools available; aim every retrieval at your actual evidence gap and stop when the evidence is sufficient.`,
-      `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only — no code content). If the deliverable is exact file/import/fan-in inventory, use ONE ${renderAtlasToolNameForContract("code.structure", opts)} call; if content understanding is needed, use ONE ${renderAtlasToolNameForContract("code.survey", opts)} call over that directory or file list. These area calls can surface pathAmbiguity or negativeEvidence when duplicate/stub decoys are detected.`,
-      `${label} prefetch and internal bookkeeping calls do not count as active retrieval.`,
-      "Use standard tools only for a named evidence gap:",
-      `- ${label} is unavailable,`,
-      `- ${label} returned stale, empty, or conflicting evidence after a focused attempt,`,
-      "- the target is non-indexed config/data/docs where the raw text is the object,",
-      "- you have mutated files and need exact current worktree state,",
-      `- you need exact surrounding text ${label} code tools could not provide,`,
-      `- you need git state/history/diff operations not exposed through ${label},`,
-      "- you need to run tests, build commands, or other shell commands.",
-      `If you use a standard tool, state the precise gap and the ${label} result that was insufficient.`,
-    ];
-  }
-  const extensions = renderIndexableExtensionList();
-  return [
-    `For indexable source files (${extensions}), attempt task-relevant ${label} discovery against the file before native read_file/chain_read fallback whenever possible.`,
-    `For broad audits, sweeps, enumerations, or unfamiliar areas: pick the area with ${renderAtlasToolNameForContract("tree.branch", opts)} or ${renderAtlasToolNameForContract("tree.expand", opts)} (structure only), then make ONE ${renderAtlasToolNameForContract("code.structure", opts)} call for exact inventory or ONE ${renderAtlasToolNameForContract("code.survey", opts)} call for content intake before any per-file loop.`,
-    "Use standard tools only when:",
-    `- ${label} is unavailable,`,
-    `- ${label} fails to answer the question after a relevant attempt,`,
-    "- you have mutated files and need exact current worktree state,",
-    `- you need git state/history/diff operations not exposed through ${label},`,
-    "- you need to run tests, build commands, or other shell commands.",
-    `If you fall back to standard tools, state what ${label} could not provide.`,
-  ];
-}
-
-function renderPrefetchGuidance(opts = {}) {
-  const status = String(opts?.atlasPrefetchStatus || opts?.atlasAttachment?.prefetchStatus || "").trim().toLowerCase();
-  const label = atlasBackendLabel(opts?.atlasAttachment);
-  if (status === "ok" || status === "ok_relevant" || status === "prefetch_ok_relevant") {
-    return [
-      `${label} prefetch supplied task-relevant context for this handoff.`,
-      atlasGateEnabledForContract(opts)
-        ? `Use prefetch as a comprehension scaffold for the first codebase map; it does not count as active ${label} retrieval. Make additional ${label} calls only for real evidence gaps, never to make native tools available.`
-        : `Use prefetch as a comprehension scaffold for the first codebase map; make additional task-relevant ${label} retrieval only when a specific context gap remains.`,
-      ...renderActiveAtlasFallbackLines(opts),
-    ];
-  }
-  if (status === "ok_unhelpful" || status === "prefetch_ok_unhelpful") {
-    return [
-      `${label} prefetch completed but did not match the requested scope.`,
-      ...renderActiveAtlasFallbackLines(opts),
-    ];
-  }
-  if (status && status !== "skipped") {
-    return [
-      `${label} prefetch status is ${status}. Follow the ${label} CONTEXT fallback notice if one is present.`,
-      `If ${label} tools are still advertised, prefer ${label} retrieval before broad native reads.`,
-    ];
-  }
-  return [
-    ...renderActiveAtlasFallbackLines(opts),
-  ];
-}
-
-function pushAvailableToolLine(lines, tools, tool, label, opts = {}) {
-  if (!tools.includes(tool)) return;
-  lines.push(`- ${renderAtlasToolNameForContract(tool, opts)}: ${label}`);
-}
-
-function renderRouteUsageLines(role, tools, opts = {}) {
-  const label = atlasBackendLabel(opts?.atlasAttachment);
-  const lines = [
-    `How to use this ${label} route:`,
-  ];
-
-  const providerLine = renderProviderNamingLine(opts);
-  if (providerLine) lines.push(providerLine);
-  lines.push(...renderPrefetchGuidance(opts));
-  lines.push(`${label} tree tools are expandable discovery: tree.branch grows depth and tree.expand grows breadth. Code.skeleton, code.lens, and code.window are hard-line evidence rungs; escalation to a higher-fidelity rung is allowed and rungs may be skipped. For each symbol, call each code rung at most once, batch all currently known identifiers into that rung's first request, and follow explicit continuation refs instead of recalling the rung with changed arguments.`);
-  if (tools.some((tool) => ["query", "code", "repo", "agent", "workflow"].includes(tool))) {
-    lines.push(`${label} gateway/workflow tools may take nested action names; nested actions must also appear in this role route. Do not use a wrapper to bypass routing.`);
-  }
-  lines.push(`${label} symbolId values are opaque. Never invent them from file paths, names, or file:symbol pairs; use IDs returned by ATLAS results, or symbolRef/file inputs where the tool explicitly supports them.`);
-  lines.push(`Search ${label} for repo-defined symbols, not language/runtime/library functions such as date, gmdate, password_verify, json_decode, Math.floor, or console.log. If you need repo code that uses those runtime identifiers, treat them as identifier filters: use code.lens on known files, symbol.search with scope=\"body\", or deterministic content search after the ${label} policy allows it.`);
-
-  const discovery = [];
-  pushAvailableToolLine(discovery, tools, "symbol.search", "best first call when you know a repo-defined concept or symbol name but not the exact symbol ID.", opts);
-  pushAvailableToolLine(discovery, tools, "tree.branch", "best first call when you know a path, symbol, or branch and need the structure around it (paths, counts, areas — no code content).", opts);
-  pushAvailableToolLine(discovery, tools, "tree.expand", "best first call when you have seed files, symbols, or areas and need nearby structure, siblings, tests, or entrypoints.", opts);
-  pushAvailableToolLine(discovery, tools, "code.structure", "exact indexed inventory for files, symbols, imports, and fan-in/fan-out; use instead of content tools when bodies are not needed.", opts);
-  if (discovery.length) {
-    lines.push("", "Discovery starters:");
-    lines.push(...discovery);
-  }
-
-  if (tools.includes("review.risk")) {
-    const riskName = renderAtlasToolNameForContract("review.risk", opts);
-    lines.push(
-      "",
-      "Assessor review path:",
-      `- Use ${riskName} when version IDs are available for semantic delta, blast radius, risks, and tests.`,
-      "- Use cards, skeletons, hot paths, or raw windows only to verify specific findings from the risk output.",
-    );
-  }
-
-  return lines;
-}
 
 export function renderAtlasRoleContract(role, opts = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
   const route = getAtlasRouteDefinitionForRole(normalizedRole);
   const routeTools = atlasContractToolsForRoute(route, opts);
-  const title = normalizedRole ? normalizedRole.toUpperCase() : "ROLE";
-  const gateEnabled = atlasGateEnabledForContract(opts);
   const label = atlasBackendLabel(opts?.atlasAttachment);
-  const lines = [
-    "===========================================================",
-    `${label} TOOLS CONTRACT - ${title}`,
-    "===========================================================",
-    "",
-  ];
-
   if (!routeTools.length) {
-    lines.push(
-      `No ${label} tools are routed to this role. Use the deterministic tools granted by the execution contract.`,
-      "",
-      formatAtlasBackendText(route.rationale, label),
-    );
-    return lines.join("\n");
+    return `No ${label} repository tools are issued to this role.`;
   }
-
-  lines.push(
-    "This contract is generated from TOOL_ROLE_LIBRARY.atlasRoutes in the shared tool catalog.",
-    hasRuntimeAtlasNaming(opts)
-      ? "Tool names in this runtime contract are rendered for the active provider/transport; call them exactly as listed."
-      : "Checked-in generated contracts use canonical MCP tool names; embedded function-tool providers render exact function names at runtime.",
-    "",
-    `Route phase: ${route.phase || "none"}`,
-    `Route rationale: ${formatAtlasBackendText(route.rationale, label)}`,
-    "",
-    `Generated ${label} route:`,
-  );
-  for (const tool of routeTools) {
-    const summary = ATLAS_TOOL_DEFS[tool]?.description || TOOL_EXECUTION_SPECS[tool]?.summary || "ATLAS tool.";
-    lines.push(`- ${renderAtlasToolNameForContract(tool, opts)}: ${formatAtlasBackendText(summary, label)}`);
-  }
-
-  // The contract's presence already asserts "ATLAS is the primary path"
-  // (it's only loaded when the role's ATLAS attachment is active). The
-  // evidence-gap selection rules are emitted by renderRouteUsageLines. The
-  // closing block only needs fallback policy and the anti-fabrication rule.
-  // L5b (TOKEN-LEVERS): the handoff atlas-context prose already delivers the
-  // full retrieval/fallback policy at runtime; when atlas_prose_dedup is on we
-  // emit a compact single-statement variant here instead of the full block.
-  // Gated on runtime naming so checked-in generated contracts are unaffected.
-  const proseDedup = hasRuntimeAtlasNaming(opts) && resolveAtlasProseDedup();
-  lines.push(
-    "",
-    ...renderRouteUsageLines(normalizedRole, routeTools, opts),
-    "",
-  );
-  if (proseDedup) {
-    lines.push(
-      `Use deterministic file/search/read/git/test/build/shell tools only for a named evidence gap or for operations ${label} does not expose; do not invent missing repo content.`,
-    );
-  } else {
-    lines.push(
-      gateEnabled
-        ? `Use deterministic file/search/read tools only for a named evidence gap after targeted ${label} retrieval, when ${label} is unavailable or insufficient, or when you have mutated files and need exact current worktree state.`
-        : `Use deterministic file/search/read tools for a named evidence gap when ${label} is unavailable or insufficient, or when you have mutated files and need exact current worktree state.`,
-      `Use deterministic git/test/build/shell tools when those operations are not exposed through ${label}.`,
-      "Do not invent missing repo content.",
-    );
-  }
-
-  return `${lines.join("\n")}\n`;
+  return [
+    `${label} repository inspection is active for the ${normalizedRole || "current"} role.`,
+    "The provider-exposed tool schemas are exhaustive and own exact names, arguments, and action semantics.",
+  ].join("\n");
 }
 
 const ATLAS_MUTATING_ACTIONS = new Set([

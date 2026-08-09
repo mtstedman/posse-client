@@ -817,11 +817,19 @@ function _atlasHandoffPrefetchAllowed(packet) {
     packet?._raw_payload?.allowAtlasHandoffPrefetch,
   ];
   const explicit = values.find((value) => value !== undefined && value !== null);
-  if (explicit === undefined) return true;
-  if (typeof explicit === "string") {
-    return !["0", "false", "no", "off"].includes(explicit.trim().toLowerCase());
+  if (explicit !== undefined) {
+    const payloadAllowed = typeof explicit === "string"
+      ? !["0", "false", "no", "off"].includes(explicit.trim().toLowerCase())
+      : explicit !== false && explicit !== 0;
+    if (!payloadAllowed) {
+      return { allowed: false, reason: "allow_atlas_handoff_prefetch=false", source: "payload" };
+    }
   }
-  return explicit !== false && explicit !== 0;
+  const settingMode = String(getSetting(SETTING_KEYS.ATLAS_HANDOFF_PREFETCH) || "on").trim().toLowerCase();
+  if (settingMode === "off") {
+    return { allowed: false, reason: "atlas_handoff_prefetch=off", source: "setting" };
+  }
+  return { allowed: true, reason: null, source: null };
 }
 
 function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) {
@@ -1568,8 +1576,8 @@ export async function handoff(input, { providerName = null } = {}) {
   };
   let atlasPrefetchStepError = null;
   const atlasPrefetchPacket = { ...packet };
-  const atlasHandoffPrefetchAllowed = _atlasHandoffPrefetchAllowed(packet);
-  if (atlasHandoffPrefetchAllowed) {
+  const atlasHandoffPrefetchPolicy = _atlasHandoffPrefetchAllowed(packet);
+  if (atlasHandoffPrefetchPolicy.allowed) {
     await timeHandoffStep(packet, "atlas.prefetch", () => runWithObservationContext(prefetchCtx, async () => {
       await Promise.all([
         _attachAtlasPlannerSlice(atlasPrefetchPacket),
@@ -1585,17 +1593,21 @@ export async function handoff(input, { providerName = null } = {}) {
     });
   } else if (packet.atlas?.active) {
     packet.atlas.prefetchOptOut = true;
+    packet.atlas.prefetchOptOutReason = atlasHandoffPrefetchPolicy.reason;
     try {
       recordObservation({
         work_item_id: packet.work_item_id ?? null,
         job_id: packet.job_id ?? null,
         attempt_id: parentCtx.attempt_id ?? null,
         observation_type: "atlas.prefetch.skipped",
-        summary: "ATLAS handoff prefetch skipped by explicit packet opt-out",
+        summary: atlasHandoffPrefetchPolicy.source === "setting"
+          ? "ATLAS handoff prefetch skipped by account setting (no-preload mode)"
+          : "ATLAS handoff prefetch skipped by explicit packet opt-out",
         detail: {
           kind: "atlas_prefetch_skipped",
           origin: "handoff",
-          reason: "allow_atlas_handoff_prefetch=false",
+          reason: atlasHandoffPrefetchPolicy.reason,
+          source: atlasHandoffPrefetchPolicy.source,
         },
       });
     } catch {

@@ -21,20 +21,6 @@ export function resolveAtlasToolGateEnabled() {
   }
 }
 
-export const ATLAS_GATE_NUDGE_SETTING = "atlas_gate_nudge";
-export const ATLAS_GATE_NUDGE_DEFAULT = false;
-
-// L3a (TOKEN-LEVERS-PLAN): flip the token-pressure ladder detector from
-// shadow (observation-only) to active steering — the recommendation is
-// appended in-band to the triggering ATLAS tool result. Default OFF.
-export function resolveAtlasGateNudgeEnabled() {
-  try {
-    return parseBoolean(getAccountSetting(ATLAS_GATE_NUDGE_SETTING), ATLAS_GATE_NUDGE_DEFAULT);
-  } catch {
-    return ATLAS_GATE_NUDGE_DEFAULT;
-  }
-}
-
 export const ATLAS_GATEWAY_DEDUP_ADVERTISE_SETTING = "atlas_gateway_dedup_advertise";
 export const ATLAS_GATEWAY_DEDUP_ADVERTISE_DEFAULT = false;
 
@@ -52,13 +38,13 @@ export function resolveAtlasGatewayDedupAdvertise() {
 }
 
 export const ATLAS_PROSE_DEDUP_SETTING = "atlas_prose_dedup";
-export const ATLAS_PROSE_DEDUP_DEFAULT = false;
+export const ATLAS_PROSE_DEDUP_DEFAULT = true;
 
-// L5b (TOKEN-LEVERS-PLAN): the role-contract closing fallback/anti-fabrication
-// policy restates the retrieval policy already delivered by the handoff
-// atlas-context prose. When enabled, the runtime role contract emits a compact
-// single-statement variant (the handoff prose keeps the full policy — both text
-// variants stay checked in). Default OFF (full policy in both places).
+// L5b (TOKEN-LEVERS-PLAN): runtime handoff prose owns prefetch/fallback policy
+// and provider schemas own action-specific semantics. When enabled, the runtime
+// role contract keeps route membership and compact cross-tool routing guidance
+// instead of repeating those surfaces. Default ON after the Stage 5A adoption;
+// explicit off restores the full compatibility contract.
 export function resolveAtlasProseDedup() {
   try {
     return parseBoolean(getAccountSetting(ATLAS_PROSE_DEDUP_SETTING), ATLAS_PROSE_DEDUP_DEFAULT);
