@@ -491,7 +491,6 @@ export class RunSession {
   });
   const bootAbortController = boot.abortController;
   const bootPanel = boot.bootPanel;
-  const bootSteps = boot.bootSteps;
   const TERMINAL_BOOT_LANG_STATES = boot.terminalLangStates;
   const updateBootStep = (label, patch = {}) => boot.updateStep(label, patch);
   const updateProviderBootStep = (label, patch = {}) => boot.updateProviderStep(label, patch);
@@ -2592,14 +2591,11 @@ export class RunSession {
     if (await bailIfBootInterrupted()) return;
   }
 
-  // Resolve any pre-seeded step that never ran this boot (e.g. the git/worktree
-  // steps when no queued job needs a worktree) to "skipped" so the final
-  // checklist has no lingering "-" pending markers.
-  for (const [label, step] of bootSteps.entries()) {
-    if (step.status === "pending") {
-      updateBootStep(label, { status: "skipped", force: true });
-    }
-  }
+  // Freeze the final frame into terminal states before the TUI takes over.
+  // Required gates are complete at this boundary; detached dependency/provider
+  // probes and deliberately-backgrounded ATLAS work render as deferred instead
+  // of leaving permanent spinners in the preserved boot card.
+  boot.finalizeForHandoff();
 
   try {
     recordRunDiagnostic("boot.ready_handoff", {

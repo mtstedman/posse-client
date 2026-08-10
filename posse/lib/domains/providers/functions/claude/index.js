@@ -188,8 +188,8 @@ export function buildClaudeToolPermissionArgs(cliToolConfig = {}, mcpServerNames
   };
 }
 
-const ISOLATED_SYSTEM_PROMPT = [
-  "You are an isolated Posse runtime worker.",
+const NATIVE_COLD_BOOT_SYSTEM_PROMPT = [
+  "You are an isolated native-control research worker.",
   "Use only the instructions, context, and tools explicitly provided by Posse for this job.",
   "Do not use user memory, user settings, local Claude project state, slash-command skills, prior sessions, or ambient workspace context.",
   "If needed context is not present in the prompt or available through the attached Posse tools, report that it is unavailable.",
@@ -626,10 +626,10 @@ export async function callProvider(promptText, {
     }
 
     // ── Thinking / reasoning effort ─────────────────────────────────────
-    // Three dimensions: tier.thinking (model capability), reasoningEffort (task need)
-    //   high effort OR strong tier  → [ultrathink] deep reasoning prefix
-    //   medium effort (default)     → no prefix (model's natural depth)
-    //   low effort                  → conciseness prefix (skip analysis, just do it)
+    // Remote owns normal provider-independent reasoning directives. Native
+    // controls bypass Remote and retain their explicit prompt-based effort
+    // translation so the raw benchmark route still receives its requested
+    // budget.
     const contractBlock = nativeColdBoot
       ? [
           "Execution contract:",
@@ -658,14 +658,17 @@ export async function callProvider(promptText, {
       }
     }
     try {
-      const systemPromptParts = [ISOLATED_SYSTEM_PROMPT];
+      // Normal Posse calls receive provider-independent isolation and
+      // discipline from the Remote rule catalog. Native controls deliberately
+      // bypass Remote, so retain the isolation fallback only on that route.
+      const systemPromptParts = nativeColdBoot ? [NATIVE_COLD_BOOT_SYSTEM_PROMPT] : [];
       for (const filePath of attachedSystemPromptFiles) {
         try {
           const text = fs.readFileSync(filePath, "utf-8").trim();
           if (text) systemPromptParts.push(text);
         } catch {
-          // Optional prompt files are best-effort; the isolation preamble
-          // remains load-bearing even when a role has no extra prompt file.
+          // Optional prompt files are best-effort. Remote remains the owner of
+          // normal runtime behavior; native controls use the fallback above.
         }
       }
       const systemPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-system-"));
@@ -681,11 +684,11 @@ export async function callProvider(promptText, {
     }
     const basePrompt = promptText;
     let finalPrompt = basePrompt;
-    if (deepthink) {
+    if (nativeColdBoot && deepthink) {
       finalPrompt = `[ultrathink] Deep-think budget is enabled for this task. Take the extra time needed to inspect the codebase carefully and synthesize before concluding.\n\n${basePrompt}`;
-    } else if (tierConfig.thinking || reasoningEffort === "high") {
+    } else if (nativeColdBoot && (tierConfig.thinking || reasoningEffort === "high")) {
       finalPrompt = `[ultrathink] This is a complex task requiring deep reasoning.\n\n${basePrompt}`;
-    } else if (reasoningEffort === "low") {
+    } else if (nativeColdBoot && reasoningEffort === "low") {
       finalPrompt = `Be direct and efficient. Skip detailed analysis — just execute the task.\n\n${basePrompt}`;
     }
 
@@ -699,7 +702,7 @@ export async function callProvider(promptText, {
     if (typeof recordFinalPrompt === "function") {
       let systemPromptInline = null;
       try {
-        const parts = [ISOLATED_SYSTEM_PROMPT];
+        const parts = nativeColdBoot ? [NATIVE_COLD_BOOT_SYSTEM_PROMPT] : [];
         for (const filePath of attachedSystemPromptFiles) {
           try { parts.push(fs.readFileSync(filePath, "utf-8").trim()); }
           catch { /* best effort — skip missing/unreadable files */ }

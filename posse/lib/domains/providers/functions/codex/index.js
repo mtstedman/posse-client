@@ -2,7 +2,7 @@
 //
 // Native Codex CLI provider facade for the posse orchestrator.
 
-export { __testBuildCodexRoleGuardBlock, __testBuildCodexWebToolsOverrides, __testBuildShellDisciplineBlock } from "./prompt-blocks.js";
+export { __testBuildCodexWebToolsOverrides } from "./prompt-blocks.js";
 export { capabilities, MODEL_TIERS, getModelTierConfig, __testNormalizeModelForAuthMode } from "./model-config.js";
 export { hasCredentials, __testResolveCodexAuthMode } from "./auth.js";
 export {
@@ -72,5 +72,5 @@ export {
   __testBuildCodexSystemToolLockdownOverrides,
 } from "./request-builders.js";
 export { buildWindowsSpawn as __testBuildCodexSpawn, terminateSpawnedProcess as __testTerminateSpawnedProcess } from "../shared/windows-spawn.js";
-export { callProvider, __testResolveCodexRuntimeInstructionBlocks } from "./call-provider.js";
+export { callProvider } from "./call-provider.js";
 export { escalateTier, extractJson, getRateLimitState, isCodexResumeHandleExpiredError as __testIsCodexResumeHandleExpiredError, parseErrorBackoff, tripRateLimit } from "./errors.js";

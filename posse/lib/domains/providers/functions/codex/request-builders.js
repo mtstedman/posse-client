@@ -111,21 +111,11 @@ export function buildCodexDeveloperInstructionRoute({
   promptPrelude = "",
   contractBlock = "",
   stableContext = "",
-  atlasNote = null,
-  strictMcpNote = null,
-  webToolsNote = null,
-  shellDiscipline = "",
-  roleGuard = "",
 } = {}, {
   softLimit = CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT,
 } = {}) {
   const hardBlocks = [
     contractBlock,
-    atlasNote,
-    strictMcpNote,
-    webToolsNote,
-    shellDiscipline,
-    roleGuard,
   ].filter(Boolean);
   const softBlocks = [
     stableContext,

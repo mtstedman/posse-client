@@ -5,6 +5,7 @@ import {
 } from "../../../catalog/hash-store.js";
 import { localModelProfile } from "../../../catalog/local-model.js";
 import { atlasMemoryEnabled } from "../../../shared/policies/functions/memory-mode.js";
+import { isResearchBudgetDeep } from "../../../shared/policies/functions/role-utils.js";
 
 function normalizedPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -578,6 +579,12 @@ export function buildRemoteCompileRequest(packet, instructions, {
   const requestInstructions = dedupeAtlasSummaryFromInstructions(instructions, packet?.atlas?.summary, atlasSummary);
   const shellPolicyHint = assessorShellPolicyHint(role, packet);
   const promptProfile = packet?.prompt_profile || packet?.promptProfile || null;
+  const researchBudget = packet?.research_budget
+    || packet?.deepthink_budget
+    || packet?._raw_payload?.research_budget
+    || packet?._raw_payload?.deepthink_budget
+    || null;
+  const deepthink = packet?.deepthink === true || isResearchBudgetDeep(researchBudget);
   const renderJobIdentity = role !== "researcher";
   const selectedSkills = Array.isArray(packet?.skills_attached)
     ? packet.skills_attached
@@ -646,9 +653,11 @@ export function buildRemoteCompileRequest(packet, instructions, {
     },
     extra: {
       local_prompt_contract: "remote_skeleton_hash_refs",
+      reasoning_effort: packet?.reasoning_effort || "medium",
+      deepthink,
       ...(promptProfile ? { prompt_profile: promptProfile } : {}),
       ...(packet?.research_role_mode ? { research_role_mode: packet.research_role_mode } : {}),
-      ...(packet?.research_budget ? { research_budget: packet.research_budget } : {}),
+      ...(researchBudget ? { research_budget: researchBudget } : {}),
       ...(packet?.fanout_context ? { fanout: packet.fanout_context } : {}),
       ...(shellPolicyHint ? { shell_policy_hint: shellPolicyHint } : {}),
       memory_mode: memoryEnabled ? "on" : "off",

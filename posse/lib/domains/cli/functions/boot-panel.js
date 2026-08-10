@@ -257,7 +257,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     if (previous.state === "idle" && patch.state && patch.state !== "idle" && !patch.startedAt) {
       merged.startedAt = Date.now();
     }
-    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "failed") && !merged.finishedAt) {
+    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "deferred" || merged.state === "failed") && !merged.finishedAt) {
       merged.finishedAt = Date.now();
     }
     zip = merged;
@@ -285,7 +285,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       && merged.percent < previous.percent) {
       merged.percent = previous.percent;
     }
-    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "failed") && !merged.finishedAt) {
+    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "deferred" || merged.state === "failed") && !merged.finishedAt) {
       merged.finishedAt = Date.now();
     }
     tree = merged;
@@ -315,7 +315,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       && merged.percent < previous.percent) {
       merged.percent = previous.percent;
     }
-    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "failed") && !merged.finishedAt) {
+    if ((merged.state === "done" || merged.state === "skipped" || merged.state === "deferred" || merged.state === "failed") && !merged.finishedAt) {
       merged.finishedAt = Date.now();
     }
     encode = merged;
@@ -538,6 +538,11 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     if (stepList.some((s) => s.status === "warning")) return `${col("yellow")}!${col("reset")}`;
     if (stepList.length > 0 && stepList.every((s) => s.status === "ok")) return `${col("green")}✓${col("reset")}`;
     if (stepList.length > 0 && stepList.every((s) => s.status === "skipped")) return `${col("dim")}⊘${col("reset")}`;
+    if (stepList.some((s) => s.status === "deferred")) return `${col("yellow")}/${col("reset")}`;
+    // A section commonly mixes required successes with optional skips (for
+    // example no worktree cleanup needed). That is terminal readiness, not an
+    // in-flight fallback — render the same check as an all-ok section.
+    if (stepList.length > 0 && stepList.every(isStepResolved)) return `${col("green")}✓${col("reset")}`;
     return spinner();
   };
   const chipFor = (label, padTo = 0) => {
@@ -654,6 +659,11 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
         body = `${col("yellow")}warning${col("reset")}`;
       } else if (allSkipped) {
         body = `${col("dim")}skipped${col("reset")}`;
+      } else if (allResolved) {
+        const deferred = stepList.some((s) => s.status === "deferred");
+        body = deferred
+          ? `${col("yellow")}background${col("reset")}`
+          : `${col("dim")}ready${col("reset")}`;
       } else {
         body = runningSectionBody(labels);
       }
@@ -682,7 +692,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   };
   const tailFrac = (st) => {
     if (!st || st.state === "idle") return 0;
-    if (st.state === "done" || st.state === "skipped" || st.state === "failed") return 1;
+    if (st.state === "done" || st.state === "skipped" || st.state === "deferred" || st.state === "failed") return 1;
     return Number.isFinite(st.percent) ? clamp(st.percent) / 100 : 0;
   };
   // Once the view merge (or the post-view reconcile encode) has started, the
@@ -718,7 +728,10 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       sum += fracOf(...effectiveScipGenKind(e.scip)); units += 1;
       sum += fracOf(...effectiveScipParseKind(e.scip)); units += 1;
     }
-    sum += tailFrac(zip); units += 1;
+    // A cache-hot boot does not build a view, so it emits no merge events.
+    // Count the merge only after it actually starts; reserving an unconditional
+    // unit here capped otherwise-complete ledgers at ~80–90% forever.
+    if (zip && zip.state !== "idle") { sum += tailFrac(zip); units += 1; }
     // The tree refresh only emits events when a view build actually runs (and
     // only from builders new enough to emit them) — count it as a unit once it
     // has started so its absence can't cap the band below 100%.
@@ -738,6 +751,9 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     }
     if (st.state === "skipped") {
       return line(`${prefix}${col("dim")}${"░".repeat(TAIL_BAR)}${col("reset")}  ${col("dim")}⊘ ${st.detail || "skipped"}${col("reset")}`);
+    }
+    if (st.state === "deferred") {
+      return line(`${prefix}${col("dim")}${"░".repeat(TAIL_BAR)}${col("reset")}  ${col("yellow")}/ ${st.detail || "background"}${col("reset")}`);
     }
     if (st.state === "failed") {
       return line(`${prefix}${col("dim")}${"░".repeat(TAIL_BAR)}${col("reset")}  ${col("red")}✗ ${st.detail || "failed"}${col("reset")}`);
@@ -894,12 +910,58 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     return out.length <= limit ? out : compactLines(limit);
   };
 
+  /**
+   * Freeze every ATLAS row into an honest terminal state before the boot card
+   * is handed to the TUI. Cache-hot paths never start merge/tree/encode, while
+   * backgrounded paths intentionally leave active work behind; neither should
+   * survive in the preserved frame as a spinner or a "waiting" bar.
+   *
+   * @param {{ status?: 'ok'|'failed'|'skipped'|'deferred' }} [options]
+   */
+  const finalizeAtlasForHandoff = ({ status = "ok" } = {}) => {
+    const langState = status === "ok" ? "done" : status;
+    const detail = status === "ok"
+      ? "ready"
+      : status === "failed"
+        ? "failed"
+        : status === "deferred"
+          ? "continuing in background"
+          : "not needed";
+    const terminalLangStates = new Set(["done", "skipped", "deferred", "failed"]);
+    for (const [lang, entry] of langs.entries()) {
+      for (const side of ["atlas", "scip"]) {
+        if (terminalLangStates.has(entry?.[side]?.state)) continue;
+        updateLang(lang, side, {
+          state: langState,
+          detail,
+          percent: langState === "done" ? 100 : null,
+        });
+      }
+    }
+
+    const terminalTailStates = new Set(["done", "skipped", "deferred", "failed"]);
+    const finalizeTail = (current, update) => {
+      if (terminalTailStates.has(current?.state)) return;
+      const neverStarted = !current || current.state === "idle";
+      const state = neverStarted && status === "ok" ? "skipped" : langState;
+      update({
+        state,
+        detail: state === "skipped" ? "not needed" : detail,
+        percent: state === "done" ? 100 : null,
+      });
+    };
+    finalizeTail(zip, updateZip);
+    finalizeTail(tree, updateTree);
+    finalizeTail(encode, updateEncode);
+  };
+
   return {
     updateStep,
     updateLang,
     updateZip,
     updateTree,
     updateEncode,
+    finalizeAtlasForHandoff,
     setFooter,
     setAtlasNotice,
     lines,

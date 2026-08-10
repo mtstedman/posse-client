@@ -208,6 +208,9 @@ export class ToolContract {
       `- Test execution: ${contract.allowTests ? "enabled" : "not issued"}`,
       `- Shell route: ${contract.shellMode || "none"}`,
     ];
+    if (contract.platform === "win32" && contract.shellAllowed) {
+      lines.push("- Shell dialect: Windows PowerShell, not bash. Use PowerShell syntax; do not use bash heredocs or bash-only &&/|| chaining.");
+    }
     if (contract.roleMode) {
       lines.splice(3, 0, `- Role mode: ${contract.roleMode}`);
     }

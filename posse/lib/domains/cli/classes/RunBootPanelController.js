@@ -499,6 +499,51 @@ export class RunBootPanelController {
     }
   }
 
+  /**
+   * Resolve the final preserved boot frame before the TUI takes ownership of
+   * the terminal. Reaching this boundary proves the required checklist gates
+   * completed; advisory checks that may still be running are explicitly
+   * deferred and can upgrade themselves later when their async work settles.
+   */
+  finalizeForHandoff() {
+    for (const [label, step] of this.steps.entries()) {
+      if (step.status === "pending") {
+        this.updateStep(label, { status: "skipped", force: true });
+        continue;
+      }
+      if (step.status !== "running" || !STEP_SECTION_MAP.has(label)) continue;
+      if (label === "dependencies") {
+        this.updateStep(label, {
+          status: "deferred",
+          detail: "check continuing in background",
+          force: true,
+        });
+      } else {
+        this.updateStep(label, { status: "ok", force: true });
+      }
+    }
+
+    this.finalizeRunningProviderSteps("deferred", "check continuing in background");
+
+    const atlasStepStatus = this.steps.get("ATLAS warmup")?.status;
+    const atlasStatus = atlasStepStatus === "ok"
+      || atlasStepStatus === "failed"
+      || atlasStepStatus === "skipped"
+      || atlasStepStatus === "deferred"
+      ? atlasStepStatus
+      : "deferred";
+    this.panel.finalizeAtlasForHandoff({ status: atlasStatus });
+
+    // The TUI path preserves the current frame instead of repainting during
+    // stop(), so commit the terminalized Atlas rows to stdout now. Without
+    // this forced render the in-memory state was correct while the visible
+    // card retained its previous 80–90%/working frame forever.
+    if (!this.getDisplay()) {
+      this.ensureMonitor();
+      this.render({ force: true });
+    }
+  }
+
   preserveRenderedPanel() {
     if (!process.stdout?.isTTY || this.renderedRows <= 0) return;
     this.terminalOutputIntercept.writeStdout("\n");

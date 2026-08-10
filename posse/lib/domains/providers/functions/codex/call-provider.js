@@ -5,11 +5,9 @@ import fs from "fs";
 import path from "path";
 import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
-import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../../shared/tools/functions/mcp-surface.js";
+import { buildMcpAtlasSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { logAtlasAttachment, resolveAtlasAssignmentUnit } from "../../../integrations/functions/atlas.js";
-import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
-import { isFallbackAtlasPrefetchStatus } from "../../../integrations/functions/deterministic-mcp/gate.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { resolveDisableSystemTools, resolveWebToolsEnabled } from "../shared/tool-policy-settings.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
@@ -25,9 +23,6 @@ import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { isWebToolName, recordToolUseObservations } from "../../../observability/functions/observations.js";
 import {
-  __testBuildCodexRoleGuardBlock,
-  __testBuildShellDisciplineBlock,
-  buildCodexWebToolsNote,
   buildCodexWebToolsOverrides,
 } from "./prompt-blocks.js";
 import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth.js";
@@ -39,32 +34,6 @@ import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRout
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
-
-export function __testResolveCodexRuntimeInstructionBlocks({
-  skipRolePrompt = false,
-  platform = process.platform,
-  role = "planner",
-  allowWrite = false,
-  atlasAttachment = null,
-  atlasPrefetchStatus = null,
-  executionContract = null,
-} = {}) {
-  return {
-    shellDiscipline: skipRolePrompt ? null : __testBuildShellDisciplineBlock({
-      platform,
-      role,
-      atlasAttachment,
-      atlasPrefetchStatus,
-      executionContract,
-    }),
-    // Remote composition owns the role prompt, but only this process knows the
-    // provider-visible MCP names issued for the current call. Keep the compact
-    // runtime guard so a writable job cannot mistake Codex's intentionally
-    // read-only native sandbox for an absence of scoped mutation authority.
-    roleGuard: __testBuildCodexRoleGuardBlock({ role, allowWrite, executionContract }),
-    contractBlock: skipRolePrompt ? null : renderExecutionContractBlock(executionContract),
-  };
-}
 
 export async function callProvider(promptText, {
   role = "planner",
@@ -91,7 +60,6 @@ export async function callProvider(promptText, {
   complexity = null,
   filesToModifyCount = null,
   deepthink = false,
-  jobDir = null,
   onLine = null,
   onAgentCommentary = null,
   cwd = null,          // real repo / worktree — codex sandbox root + MCP workspace
@@ -109,7 +77,6 @@ export async function callProvider(promptText, {
   promptChars = 0,
   atlasPrefetchStatus = null,
   skipRolePrompt = false,
-  recyclingMode = "fresh",
   priorSessionHandle = null,
   recordFinalPrompt = null,
   disableAtlas = false,
@@ -156,9 +123,6 @@ export async function callProvider(promptText, {
     const workingDir = providerPaths.cwd;
     const mcpWorkspaceCwd = mcpCwd ? path.resolve(mcpCwd) : workingDir;
     const resumeSessionHandle = normalizeCodexSessionHandle(priorSessionHandle);
-    const resumeContractNote = resumeSessionHandle || recyclingMode === "resume"
-      ? "SESSION RESUME CONTRACT: follow the current execution contract, tool scope, sandbox policy, and working directory from this turn even if prior session history differs."
-      : null;
     const spawnCwd = resumeSessionHandle ? workingDir : (loaderCwd ? path.resolve(loaderCwd) : workingDir);
     const assignmentUnit = assignmentUnitForAtlas;
     const { attachment: atlasAttachment, configOverrides: atlasConfigOverrides, serverKey: atlasMcpServerKey } = preparedAtlasConfig;
@@ -244,9 +208,6 @@ export async function callProvider(promptText, {
         serverName: atlasServerName,
       })
       : [];
-    const promptAtlasAttachment = atlasReadyForMcp && remoteAtlasToolNames.length > 0
-      ? { ...atlasAttachment, tools: remoteAtlasToolNames, surfaceToolNames: buildSurfaceNameMap(atlasContractTools) }
-      : { ...atlasAttachment, active: false, tools: [] };
     // Disable AGENTS.md auto-discovery (parent-walk + fallback filenames).
     // Agents access the real repo via the deterministic MCP, not via auto-loaded project docs.
     const memorySuppressionOverrides = ["project_doc_max_bytes=0"];
@@ -296,52 +257,19 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
-    const {
-      shellDiscipline,
-      roleGuard,
-      contractBlock,
-    } = __testResolveCodexRuntimeInstructionBlocks({
-      skipRolePrompt,
-      platform: process.platform,
-      role,
-      allowWrite,
-      atlasAttachment: promptAtlasAttachment,
-      atlasPrefetchStatus,
-      executionContract,
-    });
-    const atlasUnavailableReason = isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)
-      ? `preflight status ${String(atlasPrefetchStatus || "failed")}`
-      : `transport ${atlasAttachment.transport}`;
-    const atlasNote = (!atlasReadyForMcp && atlasAttachment.configured && atlasAttachment.phase)
-      ? `${atlasBackendLabel(atlasAttachment)} CONTEXT ROUTE: requested for ${role} (${atlasAttachment.phase}) but unavailable on codex (${atlasUnavailableReason}); continue with deterministic file tools.`
-      : null;
-    const strictMcpNote = disableSystemTools
-      ? "STRICT MCP MODE: Native/system tools are disabled for this run. Use deterministic MCP tools only."
-      : null;
-    const webToolsNote = webTools.active ? buildCodexWebToolsNote(role) : null;
+    // Remote owns provider-independent behavior. The local adapter appends
+    // only the provider-visible execution manifest and transport framing.
+    const contractBlock = skipRolePrompt ? null : renderExecutionContractBlock(executionContract);
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,
       contractBlock,
       stableContext: skipRolePrompt ? null : stableContext,
-      atlasNote,
-      strictMcpNote,
-      webToolsNote,
-      shellDiscipline,
-      roleGuard,
     });
     if (developerInstructionRoute.configOverride) {
       combinedConfigOverrides.push(developerInstructionRoute.configOverride);
     }
     const finalPrompt = [
       developerInstructionRoute.inlinePromptPrelude ? `ROLE INSTRUCTIONS:\n${developerInstructionRoute.inlinePromptPrelude}` : null,
-      fallbackReads != null && fallbackReads !== "" && Number.isFinite(Number(fallbackReads))
-        ? `FALLBACK READ BUDGET: ${Math.max(0, Number(fallbackReads))}`
-        : null,
-      turnLimit ? `MAX TURNS: ${turnLimit}` : null,
-      resumeContractNote,
-      `WORKING DIRECTORY: ${workingDir}`,
-      jobDir ? `JOB DIR: ${jobDir}` : null,
-      "",
       promptText,
     ].filter(Boolean).join("\n\n");
 

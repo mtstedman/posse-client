@@ -52,6 +52,27 @@ function normalizeRoleContracts(value) {
   return out;
 }
 
+function normalizeRules(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("remote prompt bundle missing rules");
+  }
+  const out = new Map();
+  for (const [rawKey, rawEntry] of Object.entries(value)) {
+    const id = normalizeKey(rawKey);
+    const markdown = typeof rawEntry === "string"
+      ? rawEntry
+      : String(rawEntry?.markdown || "");
+    if (!id || !markdown.trim()) continue;
+    out.set(id, {
+      id,
+      category: normalizeKey(rawEntry?.category) || "behavior",
+      applies_to: normalizeStringArray(rawEntry?.applies_to),
+      markdown,
+    });
+  }
+  return out;
+}
+
 function normalizeSkills(value) {
   if (!Array.isArray(value)) return [];
   const skills = [];
@@ -94,6 +115,10 @@ function normalizePromptBundle(raw) {
     // remote prompt compiler, not assembled locally, so they are optional in the
     // bundle. They are still normalized when present for wire/back-compat.
     contracts: raw?.contracts ? normalizeTextMap(raw.contracts, "contracts") : new Map(),
+    // Additive in schema v1 so older test fixtures and cached bundles still
+    // normalize; readiness rejects a production bundle until required rules
+    // are present.
+    rules: raw?.rules ? normalizeRules(raw.rules) : new Map(),
     role_contracts: normalizeRoleContracts(raw?.role_contracts),
     skills: normalizeSkills(raw?.skills),
     fetched_at: new Date().toISOString(),
@@ -158,6 +183,11 @@ export function getActivePromptBundle({ required = true } = {}) {
 
 export function getPromptBundleVersion() {
   return activeBundle?.prompt_version || null;
+}
+
+export function getPromptBundleRules() {
+  const bundle = getActivePromptBundle();
+  return new Map([...bundle.rules.entries()].map(([id, rule]) => [id, { ...rule }]));
 }
 
 export function getPromptBundleRolePrompt(role, { required = true } = {}) {
