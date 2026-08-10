@@ -908,6 +908,22 @@ pair via `POST /v1/auth/refresh { refresh_token }`. Each call rotates
 the refresh token; replaying an already-spent one returns 401 and
 forces the client to repeat the pairing ceremony.
 
+## Out-of-band: reinstall recovery codes
+
+An authenticated client may call `POST /v1/auth/recovery-code` with its
+session bearer. The relay revokes any prior recovery code for that account,
+returns `{ recovery_code, expires_at }`, and stores only the code hash. The
+client must show the plaintext once and ask the user to save it outside the
+app.
+
+After an uninstall clears platform-secure storage, the saved recovery code can
+be submitted as the `refresh_token` to `POST /v1/auth/refresh`. A successful
+response includes `user`, fresh session/refresh credentials, and atomically
+consumes the recovery code. The client then calls `GET /v1/instances` so every
+repository already paired to the account resurfaces without a new QR
+ceremony. Recovery codes are exact opaque values: clients may trim surrounding
+input whitespace but must not otherwise normalize them.
+
 ## Keeping the three copies in sync
 
 When you touch this file, run a quick diff:

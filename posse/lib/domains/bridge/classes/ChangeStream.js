@@ -441,8 +441,11 @@ export class ChangeStream extends EventEmitter {
       } catch { /* agent_calls may be absent in minimal fixtures */ }
 
       const startedAtMs = Date.parse(job.started_at || job.created_at || "") || nowMs;
-      // elapsed ticks every scan, so dedupe on the meaningful fields only.
-      const dedupeKey = [job.status, job.attempt_count, tokens.tokens_in, tokens.tokens_out, tokens.last_activity_at].join("|");
+      // Progress is also a freshness heartbeat. Include the scan bucket so a
+      // client that reconnects after the previous frame still receives ATLAS
+      // elapsed/token telemetry even when the underlying counters are quiet.
+      const freshnessBucket = Math.floor(nowMs / this.jobProgressScanIntervalMs);
+      const dedupeKey = [freshnessBucket, job.status, job.attempt_count, tokens.tokens_in, tokens.tokens_out, tokens.last_activity_at].join("|");
       if (this.jobProgressLastByJobId.get(jobId) === dedupeKey) continue;
       this.jobProgressLastByJobId.set(jobId, dedupeKey);
 
