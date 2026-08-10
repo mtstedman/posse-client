@@ -1,8 +1,4 @@
 import {
-  ATLAS_TOOL_DEFS,
-  getAtlasRouteDefinitionForRole,
-} from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
-import {
   nativeIndexedReadTargets,
   atlasDiscoveryFileTargets,
   isEmptySourceFileForGate,
@@ -26,26 +22,6 @@ function effectiveAtlasAction(action, args = {}) {
     || "",
   ).trim();
   return nested ? stripAtlasPrefix(nested) : normalized;
-}
-
-function snakeAtlasToolName(action) {
-  return `atlas_${String(action || "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/[^A-Za-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .toLowerCase()}`;
-}
-
-function formatAtlasToolName(action, { atlasNameStyle = "dotted" } = {}) {
-  const raw = String(action || "").trim();
-  if (!raw) return "";
-  if (atlasNameStyle === "embedded") {
-    if (raw.startsWith("atlas_")) return raw;
-    const normalized = stripAtlasPrefix(raw);
-    return ATLAS_TOOL_DEFS[normalized]?.name || snakeAtlasToolName(normalized);
-  }
-  const normalized = stripAtlasPrefix(action);
-  return normalized ? `atlas.${normalized}` : "";
 }
 
 function isUnavailableUnlockReason(reason) {
@@ -238,88 +214,16 @@ export class ToolGate {
   }
 
   buildLockedToolError(toolName, { args = {}, cwd = null, atlasNameStyle = "dotted" } = {}) {
+    void atlasNameStyle;
     const label = this.atlasLabel || "ATLAS";
-    const formatTool = (action) => formatAtlasToolName(action, { atlasNameStyle });
     const indexedReadTargets = nativeIndexedReadTargets(toolName, args, { cwd });
     const lockedIndexedTargets = indexedReadTargets
       .filter((target) => !this.discoveredFiles.has(target.toLowerCase()));
     if (lockedIndexedTargets.length > 0) {
       const target = lockedIndexedTargets[0];
-      const route = getAtlasRouteDefinitionForRole(this.role);
-      const routedMeaningfulTools = (route?.tools || [])
-        .map(stripAtlasPrefix)
-        .filter((action) => this._meaningfulAtlasActions.has(action))
-        .map(formatTool);
-      const meaningfulTools = routedMeaningfulTools.length > 0
-        ? routedMeaningfulTools
-        : [...this._meaningfulAtlasActions].map(formatTool);
-      return [
-        `[${label}-first] ${label} is the inspection path for indexable source files while it is available; a native read is the exception for what ${label} cannot provide.`,
-        "",
-        `Target file not yet inspected through ${label}: ${target}`,
-        "",
-        `Inspect this file through ${label} first — often that answers the question and no native read is needed. If a gap remains (stale/empty/conflicting evidence, or exact surrounding text ${label} could not provide), the native read follows naturally from that focused attempt.`,
-        `Good first calls: ${formatTool("code.skeleton")}({ file: "${target}" }), ${formatTool("code.lens")}, ${formatTool("code.window")}, ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, or ${formatTool("tree.expand")}.`,
-        "",
-        `${label} prefetch and internal bookkeeping calls do NOT count as file discovery; they are not active retrieval.`,
-        `Discovery is file-scoped: each indexable source file needs its own focused ${label} attempt before a native read of it.`,
-        "",
-        `Meaningful ${label} tools for this role:`,
-        ...meaningfulTools.map((tool) => `  - ${tool}`),
-        "",
-        `Attempted tool: ${toolName}`,
-      ].join("\n");
+      return `Native source access is not yet available for ${target}. Inspect it with an available ${label} repository tool first.`;
     }
-
-    const callLine = `  Task-relevant ${label} retrieval calls recorded: ${this.meaningfulAtlasCalls}/${this._requiredMeaningfulAtlasCalls}.`;
-    const strikeLine = this.unhelpfulStrikes > 0
-      ? `  Unhelpful ${label} attempts recorded: ${this.unhelpfulStrikes}/${this._fallbackStrikeLimit} (at ${this._fallbackStrikeLimit}, empty/error fallback to standard tools is appropriate).`
-      : null;
-    const roleLabel = this.role || "this";
-    const lines = [
-      `[${label}-first] ${label} is the inspection path for the ${roleLabel} role while it is available; native research tools are the exception for evidence gaps ${label} cannot answer.`,
-      "",
-      `Always prefer ${label}: use it to answer the question, and stop when the evidence is sufficient — do not make ${label} calls merely to make native tools available. A focused retrieval aimed at your actual evidence gap is what counts.`,
-      `Native research tools are appropriate when ${label} is unavailable, or when focused ${label} attempts (at least ${this._requiredMeaningfulAtlasCalls} since prefetch) still leave a named gap: stale/empty/conflicting results, non-indexed config/data/docs, files you mutated, or exact text ${label} could not provide.`,
-      `For indexable source file reads, discovery is file-scoped: attempt ${label} against that file first.`,
-      `If real ${label} calls only return empty/errors, native research tools are the appropriate fallback.`,
-      "",
-      callLine,
-    ];
-    if (strikeLine) {
-      lines.push("", strikeLine);
-    }
-    const route = getAtlasRouteDefinitionForRole(this.role);
-    const routedMeaningfulTools = (route?.tools || [])
-      .map(stripAtlasPrefix)
-      .filter((action) => this._meaningfulAtlasActions.has(action))
-      .map(formatTool);
-    const meaningfulTools = routedMeaningfulTools.length > 0
-      ? routedMeaningfulTools
-      : [...this._meaningfulAtlasActions].map(formatTool);
-    const replacementHints = {
-      read_file: `For raw file reads, first use ${label} discovery tools such as ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, ${formatTool("tree.expand")}, or ${formatTool("code.skeleton")}; native reads are fallback after discovery.`,
-      inspect_file: `For structure, prefer ${formatTool("symbol.card")} or ${formatTool("code.skeleton")}.`,
-      list_files: `For repo shape, prefer ${formatTool("tree.branch")}, ${formatTool("tree.expand")}, or ${formatTool("symbol.search")}.`,
-      search_files: `For semantic discovery, prefer ${formatTool("symbol.search")} or ${formatTool("tree.expand")}.`,
-      chain_read: `For research context, prefer ${formatTool("symbol.search")}, ${formatTool("tree.branch")}, or ${formatTool("code.skeleton")}.`,
-      git_history: `For assessment changes, prefer ${formatTool("review.risk")} when version ids are known.`,
-    };
-    const hint = replacementHints[String(toolName || "")] || `Use one of the role-routed ${label} tools below to close your actual evidence gap.`;
-    lines.push(
-      "",
-      `Replacement hint: ${hint}`,
-      "",
-      `Meaningful ${label} tools (aim focused retrieval at the actual gap - these are the calls that count):`,
-      ...meaningfulTools.map((tool) => `  - ${tool}`),
-      "",
-      `${label} prefetch and internal bookkeeping calls do NOT count - they are not active retrieval.`,
-      "",
-      `Use ${label} evidence first; when you do fall back to a native tool, state the precise gap and the ${label} result that was insufficient.`,
-      "",
-      `Attempted tool: ${toolName}`,
-    );
-    return lines.join("\n");
+    return `Native repository access is not yet available. Use an available ${label} repository tool first.`;
   }
 
   snapshot() {

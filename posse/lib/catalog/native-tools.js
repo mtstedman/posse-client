@@ -546,19 +546,18 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "One concise section of the terminal research report. Target at most 900 characters and never exceed the 1500-character hard limit. Put the substantive answer in claim and summary; ordinary repository path:line citations are allowed there. Evidence refs are optional.",
+    "One section of the terminal research report. Put the substantive answer in claim and summary; ordinary repository path:line citations are allowed there. Evidence refs are optional.",
   properties: {
     ...HANDOFF_CLAIM.properties,
-    claim: { type: "string", minLength: 1, maxLength: 1500 },
-    summary: { type: "string", maxLength: 4000 },
+    claim: { type: "string", minLength: 1 },
+    summary: { type: "string" },
   },
 };
 
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "For researcher.report.v1 this must be non-empty and contain the substantive terminal report; a summary-only report is rejected. Keep the complete report below the 16000-character narrative cap. researcher.pipeline.v1 may leave it empty.",
-  maxItems: 12,
+    "For researcher.report.v1 this must be non-empty and contain the substantive terminal report; a summary-only report is rejected. The complete claims batch is accepted intact. researcher.pipeline.v1 may leave it empty.",
   items: RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -943,7 +942,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode, claims contain the substantive answer; stored-result selectors are optional. Follow the schema exactly. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode, claims must contain the substantive terminal report. Evidence refs are optional transport. Follow the schema exactly. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -955,7 +954,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         enum: ["success", "gap", "input_required", "complete"],
       },
-      summary: { type: "string", minLength: 1, maxLength: 800 },
+      summary: { type: "string", minLength: 1 },
       claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
         type: "array",

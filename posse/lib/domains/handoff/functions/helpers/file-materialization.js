@@ -82,6 +82,23 @@ function isIgnoredPath(cwd, relPath) {
   }
 }
 
+function isTrackedPath(cwd, relPath) {
+  try {
+    gitExec(
+      ["ls-files", "--error-unmatch", "--", relPath],
+      cwd,
+      { timeoutMs: 10_000 },
+    );
+    return true;
+  } catch (error) {
+    if (error?.status === 1) return false;
+    throw materializationError(
+      `Could not verify repository tracking state for ${relPath}: ${error?.message || String(error)}`,
+      { path: relPath, cause: error },
+    );
+  }
+}
+
 function existingMaterialization(jobId, generation, relPath) {
   return getDb().prepare(`
     SELECT *
@@ -129,6 +146,34 @@ function rollbackCreated(cwd, files, dirs) {
   }
   for (const relDir of [...dirs].reverse()) {
     try { fs.rmdirSync(path.resolve(cwd, relDir)); } catch { /* retain non-empty/operator-owned */ }
+  }
+}
+
+function rollbackStagedGreenfieldFiles(cwd, relPaths) {
+  if (relPaths.length === 0) return;
+  try {
+    gitExec(
+      ["rm", "--cached", "--force", "--ignore-unmatch", "--", ...relPaths],
+      cwd,
+      { timeoutMs: 10_000 },
+    );
+  } catch {
+    // best effort; the original materialization error remains authoritative
+  }
+}
+
+function stageGreenfieldFiles(cwd, relPaths) {
+  if (relPaths.length === 0) return;
+  try {
+    // An untracked empty placeholder is invisible to ordinary `git diff`.
+    // Staging the empty blob gives the provider a baseline, so its subsequent
+    // write appears as an unstaged diff instead of looking like "no changes".
+    gitExec(["add", "--", ...relPaths], cwd, { timeoutMs: 10_000 });
+  } catch (error) {
+    throw materializationError(
+      `Could not stage materialized greenfield files: ${error?.message || String(error)}`,
+      { paths: relPaths, cause: error },
+    );
   }
 }
 
@@ -228,6 +273,7 @@ export function materializeWritingScope(packet) {
   const createdFiles = [];
   const createdDirs = [];
   const materialized = [];
+  const greenfieldFiles = [];
   try {
     for (const relPath of create) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
@@ -252,9 +298,13 @@ export function materializeWritingScope(packet) {
             { path: relPath },
           );
         }
+        if (provenance && stat.size === 0 && !isTrackedPath(cwd, relPath)) {
+          greenfieldFiles.push(relPath);
+        }
         materialized.push(relPath);
         continue;
       }
+      const greenfield = !isTrackedPath(cwd, relPath);
       const parents = createParentDirectories(cwd, absPath);
       createdDirs.push(...parents);
       try {
@@ -266,10 +316,13 @@ export function materializeWritingScope(packet) {
         );
       }
       createdFiles.push(absPath);
+      if (greenfield) greenfieldFiles.push(relPath);
       recordMaterialization(packet, generation, relPath, parents);
       materialized.push(relPath);
     }
+    stageGreenfieldFiles(cwd, greenfieldFiles);
   } catch (error) {
+    rollbackStagedGreenfieldFiles(cwd, greenfieldFiles);
     rollbackCreated(cwd, createdFiles, createdDirs);
     if (createdFiles.length > 0) {
       const rolledBackPaths = createdFiles.map((file) => (

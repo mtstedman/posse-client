@@ -35,7 +35,6 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxEntryBytes: 32 * 1024,
   maxClaims: 12,
   maxClaimChars: 1000,
-  maxResearcherClaimChars: 1500,
   maxSelectorsPerClaim: 8,
   recommendedIdChars: 40,
   maxIdChars: 80,
@@ -54,7 +53,6 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxCitationChildEvidenceChars: 4000,
   recommendedNarrativeChars: 4000,
   maxNarrativeChars: 12000,
-  maxResearcherNarrativeChars: 16000,
   maxCitationChildNarrativeChars: 2000,
   maxStructuredMetadataChars: 12000,
 });
@@ -482,6 +480,7 @@ function materializeClaim(
     allowAgentProseProof = false,
     handoffIndex = 0,
     maxClaimChars = AGENT_HANDOFF_LIMITS.maxClaimChars,
+    maxProseChars = AGENT_HANDOFF_LIMITS.maxSummaryChars,
   } = {},
 ) {
   const normalized = normalizeClaimInput(value, claimIndex);
@@ -551,7 +550,7 @@ function materializeClaim(
     out.prose = boundedString(
       detail.prose,
       `claims[${claimIndex}].prose`,
-      AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      maxProseChars,
       { required: false },
     );
     counters.narrative += out.prose.length;
@@ -1106,12 +1105,6 @@ function researcherClaimFromNarrative(value, index) {
     );
   }
   if (text.length <= 1000) return { claim: text, prose: "" };
-  if (text.length > AGENT_HANDOFF_LIMITS.maxSummaryChars) {
-    fail(
-      "AGENT_HANDOFF_TOO_LARGE",
-      `claims[${index}].text exceeds ${AGENT_HANDOFF_LIMITS.maxSummaryChars} characters`,
-    );
-  }
   const colon = text.indexOf(":");
   const sentence = text.search(/[.!?](?:\s|$)/);
   const preferredEnd = colon >= 20 && colon <= 240
@@ -1128,7 +1121,7 @@ function researcherClaimFromNarrative(value, index) {
 
 function researcherClaims(value, { proof = [], support = [], context = {} } = {}) {
   const inputs = Array.isArray(value) ? value : [];
-  const claims = inputs.slice(0, AGENT_HANDOFF_LIMITS.maxClaims).flatMap((raw, index) => {
+  const claims = inputs.flatMap((raw, index) => {
     if (Array.isArray(raw)) return [raw];
     if (typeof raw === "string") {
       const normalized = researcherClaimFromNarrative(raw, index);
@@ -1172,7 +1165,7 @@ function researcherClaims(value, { proof = [], support = [], context = {} } = {}
     if (globalSupport.length) detail.support = globalSupport;
     claims.push(["Research evidence", detail]);
   }
-  return claims.slice(0, AGENT_HANDOFF_LIMITS.maxClaims);
+  return claims;
 }
 
 function researcherStringArray(...values) {
@@ -1353,7 +1346,7 @@ function normalizeResearcherTerminalArgs(source, context) {
         summary: compactResearcherText(
           first.summary ?? report.summary ?? source.summary,
           "Research complete.",
-        ).slice(0, AGENT_HANDOFF_LIMITS.maxSummaryChars),
+        ),
         claims,
         scope: { key_files: keyFiles, related_files: relatedFiles },
         constraints: researcherStringArray(
@@ -1733,14 +1726,21 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
     capture(() => boundedString(
       report.summary,
       `${label}.report.summary`,
-      AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      profile === "researcher.report.v1"
+        ? AGENT_HANDOFF_LIMITS.maxCallBytes
+        : AGENT_HANDOFF_LIMITS.maxSummaryChars,
       { required: false },
     ));
     capture(() => normalizeScope(report.scope || {}, `${label}.report.scope`, profile));
     if (report.research != null) capture(() => normalizeResearchData(report.research, `${label}.report.research`, profile));
     capture(() => normalizePlannerReportMetadata(report, `${label}.report`, profile));
     for (const key of ["constraints", "success_criteria", "questions"]) {
-      if (report[key] != null) capture(() => stringArray(report[key], `${label}.report.${key}`));
+      if (report[key] != null) capture(() => stringArray(
+        report[key],
+        `${label}.report.${key}`,
+        profile === "researcher.report.v1" ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50,
+        profile === "researcher.report.v1" ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000,
+      ));
     }
     if (report.payload != null) capture(() => exactKeys(report.payload, [], `${label}.report.payload`));
 
@@ -1748,13 +1748,17 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${label}.report.claims must be an array` });
       continue;
     }
-    if (report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
+    const researcherReport = profile === "researcher.report.v1";
+    if (!researcherReport && report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
       issues.push({
         code: "AGENT_HANDOFF_TOO_LARGE",
         message: `${label}.report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`,
       });
     }
-    for (const [claimIndex, rawClaim] of report.claims.slice(0, AGENT_HANDOFF_LIMITS.maxClaims).entries()) {
+    const claimsToValidate = researcherReport
+      ? report.claims
+      : report.claims.slice(0, AGENT_HANDOFF_LIMITS.maxClaims);
+    for (const [claimIndex, rawClaim] of claimsToValidate.entries()) {
       const claimLabel = `${label}.report.claims[${claimIndex}]`;
       const claim = capture(() => normalizeClaimInput(rawClaim, claimIndex));
       if (!claim || claim.length < 1 || claim.length > 2) {
@@ -1769,8 +1773,8 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       capture(() => boundedString(
         claim[0],
         `${claimLabel}.claim`,
-        profile === "researcher.report.v1"
-          ? AGENT_HANDOFF_LIMITS.maxResearcherClaimChars
+        researcherReport
+          ? AGENT_HANDOFF_LIMITS.maxCallBytes
           : AGENT_HANDOFF_LIMITS.maxClaimChars,
       ));
       if (claim.length === 1) continue;
@@ -1779,7 +1783,9 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       if (detail.prose != null) capture(() => boundedString(
         detail.prose,
         `${claimLabel}.prose`,
-        AGENT_HANDOFF_LIMITS.maxSummaryChars,
+        researcherReport
+          ? AGENT_HANDOFF_LIMITS.maxCallBytes
+          : AGENT_HANDOFF_LIMITS.maxSummaryChars,
         { required: false },
       ));
       let selectorCount = 0;
@@ -1885,8 +1891,10 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const effectiveLimit = Math.min(policy.maxHandoffs, localLimit);
   if (source.handoffs.length > effectiveLimit) fail("AGENT_HANDOFF_TOO_LARGE", `handoffs exceeds ${effectiveLimit} entries`);
   const counters = { evidence: 0, narrative: 0 };
+  const researcherReport = profile === "researcher.report.v1";
   const handoffs = source.handoffs.map((raw, index) => {
-    if (Buffer.byteLength(JSON.stringify(raw), "utf8") > AGENT_HANDOFF_LIMITS.maxEntryBytes) {
+    if (!researcherReport
+      && Buffer.byteLength(JSON.stringify(raw), "utf8") > AGENT_HANDOFF_LIMITS.maxEntryBytes) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}] exceeds ${AGENT_HANDOFF_LIMITS.maxEntryBytes} bytes`);
     }
     const entryCounters = { evidence: 0, narrative: 0 };
@@ -1905,11 +1913,16 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     const summary = boundedString(
       report.summary,
       `handoffs[${index}].report.summary`,
-      AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      researcherReport
+        ? AGENT_HANDOFF_LIMITS.maxCallBytes
+        : AGENT_HANDOFF_LIMITS.maxSummaryChars,
       { required: false },
     );
     entryCounters.narrative += summary.length;
-    if (!Array.isArray(report.claims) || report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
+    if (!Array.isArray(report.claims)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `handoffs[${index}].report.claims must be an array`);
+    }
+    if (!researcherReport && report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`);
     }
     const claims = report.claims.map((claim, claimIndex) => materializeClaim(
@@ -1921,9 +1934,12 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         allowAgentProseProof: normalizedRole === "assessor"
           && profile === "assessor.verdict.v1",
         handoffIndex: index,
-        maxClaimChars: profile === "researcher.report.v1"
-          ? AGENT_HANDOFF_LIMITS.maxResearcherClaimChars
+        maxClaimChars: researcherReport
+          ? AGENT_HANDOFF_LIMITS.maxCallBytes
           : AGENT_HANDOFF_LIMITS.maxClaimChars,
+        maxProseChars: researcherReport
+          ? AGENT_HANDOFF_LIMITS.maxCallBytes
+          : AGENT_HANDOFF_LIMITS.maxSummaryChars,
       },
     ));
     if (profile === "researcher.report.v1" && claims.length === 0) {
@@ -1932,25 +1948,44 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         "researcher.report.v1 requires at least one substantive prose claim; evidence refs remain optional",
       );
     }
-    const constraints = report.constraints == null ? [] : stringArray(report.constraints, `handoffs[${index}].report.constraints`);
-    const successCriteria = report.success_criteria == null ? [] : stringArray(report.success_criteria, `handoffs[${index}].report.success_criteria`);
-    const questions = report.questions == null ? [] : stringArray(report.questions, `handoffs[${index}].report.questions`);
+    const reportListMaxItems = researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50;
+    const reportListMaxChars = researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000;
+    const constraints = report.constraints == null ? [] : stringArray(
+      report.constraints,
+      `handoffs[${index}].report.constraints`,
+      reportListMaxItems,
+      reportListMaxChars,
+    );
+    const successCriteria = report.success_criteria == null ? [] : stringArray(
+      report.success_criteria,
+      `handoffs[${index}].report.success_criteria`,
+      reportListMaxItems,
+      reportListMaxChars,
+    );
+    const questions = report.questions == null ? [] : stringArray(
+      report.questions,
+      `handoffs[${index}].report.questions`,
+      reportListMaxItems,
+      reportListMaxChars,
+    );
     const research = normalizeResearchData(report.research, `${reportLabel}.research`, profile);
     const plannerMetadata = normalizePlannerReportMetadata(report, reportLabel, profile);
     entryCounters.narrative += [...constraints, ...successCriteria, ...questions].reduce((sum, text) => sum + text.length, 0);
     const structuredMetadataLength = structuredStringLength(research) + structuredStringLength(plannerMetadata);
-    if (structuredMetadataLength > AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars) {
+    if (!researcherReport
+      && structuredMetadataLength > AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars) {
       fail(
         "AGENT_HANDOFF_TOO_LARGE",
         `handoffs[${index}] exceeds the ${AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars}-character structured metadata limit`,
       );
     }
-    const narrativeLimit = normalizedRole === "subagent"
-      ? AGENT_HANDOFF_LIMITS.maxCitationChildNarrativeChars
-      : profile === "researcher.report.v1"
-        ? AGENT_HANDOFF_LIMITS.maxResearcherNarrativeChars
+    let narrativeLimit = null;
+    if (!researcherReport) {
+      narrativeLimit = normalizedRole === "subagent"
+        ? AGENT_HANDOFF_LIMITS.maxCitationChildNarrativeChars
         : AGENT_HANDOFF_LIMITS.maxNarrativeChars;
-    if (entryCounters.narrative > narrativeLimit) {
+    }
+    if (narrativeLimit != null && entryCounters.narrative > narrativeLimit) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}] exceeds the ${narrativeLimit}-character narrative limit for role ${normalizedRole || "unknown"}`);
     }
     counters.narrative += entryCounters.narrative;

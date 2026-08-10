@@ -25,6 +25,7 @@ import {
   DEFAULT_POSSE_ROOT,
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
+import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 
 const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import.meta.url);
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
@@ -429,46 +430,6 @@ function commandOnPath(command) {
   return result.status === 0;
 }
 
-function resolveWindowsCommand(command) {
-  if (process.platform !== "win32") return command;
-  if (path.isAbsolute(command) || /[\\/]/u.test(command)) return command;
-  const result = spawnSync("where", [command.replace(/\.(cmd|bat)$/iu, "")], {
-    env: dependencyInstallEnv(),
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (result.status !== 0) return command;
-  const candidates = String(result.stdout || "")
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return candidates.find((candidate) => /\.(cmd|bat|exe)$/iu.test(candidate)) || candidates[0] || command;
-}
-
-function quoteCmdToken(value) {
-  return `"${String(value ?? "").replace(/"/gu, '""')}"`;
-}
-
-function spawnSpecForCommand(command, args = []) {
-  const resolved = resolveWindowsCommand(command);
-  if (process.platform === "win32" && /^npm(?:\.cmd)?$/iu.test(path.basename(resolved))) {
-    const npmCli = path.join(path.dirname(resolved), "node_modules", "npm", "bin", "npm-cli.js");
-    const adjacentNode = path.join(path.dirname(resolved), "node.exe");
-    if (fileExists(npmCli) && fileExists(adjacentNode)) {
-      return { command: adjacentNode, args: [npmCli, ...args] };
-    }
-  }
-  if (process.platform === "win32" && /\.(cmd|bat)$/iu.test(resolved)) {
-    const commandLine = [resolved, ...args].map(quoteCmdToken).join(" ");
-    return {
-      command: process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", `"${commandLine}"`],
-      windowsVerbatimArguments: true,
-    };
-  }
-  return { command: resolved, args };
-}
-
 function npmLockedPackageDirs(root, manager) {
   if (manager !== "npm") return [];
   const lock = readJson(path.join(root, "npm-shrinkwrap.json"))
@@ -736,7 +697,8 @@ async function runCommand(command, args, {
     let settleTimer = null;
     let onSigint = null;
     let onSigterm = null;
-    const spawnSpec = spawnSpecForCommand(command, args);
+    const env = dependencyInstallEnv();
+    const spawnSpec = commandSpawnSpec(command, args, { env });
     const removeSignalHandlers = () => {
       if (onSigint) process.off("SIGINT", onSigint);
       if (onSigterm) process.off("SIGTERM", onSigterm);
@@ -753,7 +715,7 @@ async function runCommand(command, args, {
     try {
       child = spawn(spawnSpec.command, spawnSpec.args, {
         cwd,
-        env: dependencyInstallEnv(),
+        env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments === true,

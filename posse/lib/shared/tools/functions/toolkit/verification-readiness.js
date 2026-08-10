@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
 
 const ROOT_MARKERS = Object.freeze([
   "package.json",
@@ -47,19 +48,27 @@ function packageManagerFromManifest(root) {
   return fileExists(path.join(root, "package.json")) ? "npm" : null;
 }
 
-function executableReady(command, root) {
+export function executableReady(command, root, {
+  platform = process.platform,
+  env = process.env,
+  spawnSyncImpl = spawnSync,
+} = {}) {
   if (!command) return false;
-  const executable = process.platform === "win32" && ["npm", "pnpm", "yarn", "bun"].includes(command)
-    ? `${command}.cmd`
-    : command;
-  const result = spawnSync(executable, ["--version"], {
-    cwd: root,
-    stdio: "ignore",
-    shell: false,
-    timeout: 10_000,
-    windowsHide: true,
-  });
-  return result.status === 0;
+  const spawnSpec = commandSpawnSpec(command, ["--version"], { platform, env, spawnSyncImpl });
+  try {
+    const result = spawnSyncImpl(spawnSpec.command, spawnSpec.args, {
+      cwd: root,
+      env,
+      stdio: "ignore",
+      shell: false,
+      timeout: 10_000,
+      windowsHide: true,
+      windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments === true,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function manifestsAt(root) {
@@ -103,7 +112,7 @@ export function groupVerificationFiles(projectRoot, files = []) {
 }
 
 export function packageManagerRun(manager, script, extraArgs = []) {
-  const command = process.platform === "win32" ? `${manager}.cmd` : manager;
+  const command = manager;
   if (manager === "yarn") {
     return { command, args: ["run", script, ...extraArgs] };
   }

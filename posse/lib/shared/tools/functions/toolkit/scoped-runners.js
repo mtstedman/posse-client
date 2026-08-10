@@ -8,6 +8,7 @@ import {
   verificationReadinessManifest,
 } from "./verification-readiness.js";
 import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format/functions/display-paths.js";
+import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
 
 const JS_SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
 const PHP_SOURCE_EXTENSIONS = new Set([".php"]);
@@ -150,25 +151,12 @@ function compact(value, max = MAX_OUTPUT_CHARS) {
   return `${text.slice(0, max)}\n... (truncated ${text.length - max} chars)`;
 }
 
-function quoteCmdArg(value) {
-  const text = String(value || "");
-  if (text === "") return "\"\"";
-  if (!/[\s"]/u.test(text)) return text;
-  return `"${text
-    .replace(/(\\*)"/g, "$1$1\\\"")
-    .replace(/\\+$/g, "$&$&")}"`;
-}
-
 function runProcess(command, args, cwd, { timeoutMs = 120000 } = {}) {
   const startedAt = Date.now();
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const useCmdTrampoline = process.platform === "win32" && /\.cmd$/i.test(command);
-  const spawnCommand = useCmdTrampoline ? (process.env.ComSpec || "cmd.exe") : command;
-  const spawnArgs = useCmdTrampoline
-    ? ["/d", "/s", "/c", [command, ...args].map(quoteCmdArg).join(" ")]
-    : args;
-  const result = spawnSync(spawnCommand, spawnArgs, {
+  const spawnSpec = commandSpawnSpec(command, args, { env });
+  const result = spawnSync(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,
     encoding: "utf8",
@@ -176,6 +164,7 @@ function runProcess(command, args, cwd, { timeoutMs = 120000 } = {}) {
     shell: false,
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
+    windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments === true,
   });
   return {
     command: [command, ...args].join(" "),
