@@ -79,6 +79,7 @@ export async function symbolUsages({ view, versionId, params }) {
       symbolId: params.symbolId,
       name: target.name,
       qualifiedName: target.qualified_name,
+      repoRelPath: target.repo_rel_path,
       rawOccurrenceCount: total,
       distinctFileCount: usageSummary.distinctFileCount,
       distinctResolvedFileCount: usageSummary.distinctResolvedFileCount,

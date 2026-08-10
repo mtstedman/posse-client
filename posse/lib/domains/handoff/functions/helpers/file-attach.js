@@ -207,7 +207,7 @@ export function collectSourceFiles(dir, deps = {}) {
         if (!sourceExtensions.has(ext) && entry.name !== ".gitignore") continue;
         try {
           const stat = fs.statSync(full);
-          if (stat.size > maxFileSize || stat.size === 0) continue;
+          if (stat.size > maxFileSize) continue;
           totalSize += stat.size;
           if (totalSize > maxPreloadTotal) return;
           files.push(path.relative(dir, full).replace(/\\/g, "/"));
@@ -390,13 +390,14 @@ export function attachRelatedFiles(packet, deps = {}) {
       continue;
     }
     const result = readFileFn(relPath, relatedFilesCwd);
-    if (result && result.exists && result.content) {
-      const contentBytes = Buffer.byteLength(result.content, "utf8");
+    if (result && result.exists && typeof result.content === "string") {
+      const attachedContent = result.empty ? "(empty file)" : result.content;
+      const contentBytes = Buffer.byteLength(attachedContent, "utf8");
       if (totalBytes + contentBytes > maxRelatedFilesTotal) {
         dropped.push({ path: relPath, reason: "cumulative_size_limit" });
         continue;
       }
-      related[relPath] = result.content;
+      related[relPath] = attachedContent;
       totalBytes += contentBytes;
       continue;
     }
@@ -431,8 +432,8 @@ export function attachSourcePreload(packet, deps = {}) {
   const filePaths = collectSourceFilesFn(packet.cwd);
   for (const relPath of filePaths) {
     const result = readFileFn(relPath, packet.cwd);
-    if (result && result.exists && result.content) {
-      source_files[relPath] = result.content;
+    if (result && result.exists && typeof result.content === "string") {
+      source_files[relPath] = result.empty ? "(empty file)" : result.content;
     }
   }
   packet.source_files = source_files;

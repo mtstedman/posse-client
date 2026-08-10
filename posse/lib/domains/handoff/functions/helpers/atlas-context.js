@@ -2601,7 +2601,8 @@ function renderRequiredRetrievalOrderLine(packet) {
 
 function renderAtlasContextSection(packet) {
   const label = atlasBackendLabel(packet?.atlas);
-  const hasCallableTools = displayableAtlasTools(packet?.atlas?.tools, packet?.atlas).length > 0;
+  const callableTools = displayableAtlasTools(packet?.atlas?.tools, packet?.atlas);
+  const hasCallableTools = callableTools.length > 0;
   if (packet.atlas?.prefetchFailed) {
     // Prefetch failed but we're in a fallback-eligible mode. Keep phase/repo
     // for debuggability but replace the "active" framing and tool guidance
@@ -2630,6 +2631,9 @@ function renderAtlasContextSection(packet) {
       : `${label} context prefetch is active for this handoff. Use the prefetched context and its backed cursor pages as the initial code map.`,
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
+    hasCallableTools
+      ? atlasField("Tools", callableTools.map((toolName) => displayAtlasToolName(toolName, packet.atlas)).join(", "))
+      : null,
     hasCallableTools ? renderRequiredRetrievalOrderLine(packet) : null,
   ].filter(Boolean).join("\n");
 }

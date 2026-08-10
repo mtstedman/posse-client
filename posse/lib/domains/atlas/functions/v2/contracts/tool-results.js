@@ -472,6 +472,7 @@
  * @property {SymbolId} symbolId
  * @property {string} name
  * @property {string | null} [qualifiedName]
+ * @property {string} repoRelPath
  * @property {number} rawOccurrenceCount
  * @property {number} distinctFileCount
  * @property {number} distinctResolvedFileCount

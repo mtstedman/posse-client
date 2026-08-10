@@ -35,12 +35,10 @@ export {
 import { isExpectedGitPredicateMiss } from "./worktree-internal.js";
 import { gitTopLevelAsync } from "./worktree-path.js";
 import { branchIsAncestorOfTarget, branchIsAncestorOfTargetAsync } from "./worktree-branch-ops.js";
-import { resetDirtyWorktreeAsync } from "./worktree-recovery.js";
 
 export const __testGitDiagnostics = Object.freeze({
   branchIsAncestorOfTarget,
   branchIsAncestorOfTargetAsync,
   gitTopLevelAsync,
   isExpectedGitPredicateMiss,
-  resetDirtyWorktreeAsync,
 });

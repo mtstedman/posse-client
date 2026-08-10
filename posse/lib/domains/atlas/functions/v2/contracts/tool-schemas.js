@@ -82,6 +82,25 @@ const identifierList = (opts = {}) => ({
   maxLength: 5000,
   ...opts,
 });
+const targetRequired = () => ({
+  anyOf: [
+    { required: ["symbolId"] },
+    { required: ["file"] },
+  ],
+});
+const createRefInputMode = () => ({
+  oneOf: [
+    { required: ["text"] },
+    { required: ["source_ref"] },
+    { required: ["chunks"] },
+  ],
+});
+const createRefChunkMode = () => ({
+  oneOf: [
+    { required: ["text"] },
+    { required: ["source_ref"] },
+  ],
+});
 
 // Gateway wrappers accept loose envelopes here because dispatch unwraps them
 // and validates the resolved target action with that action's native schema.
@@ -249,7 +268,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     search_mode: s({ enum: ["auto", "literal", "regex"] }),
   }),
   create_ref: o({
-    text: s({ maxLength: 60000 }),
+    text: s({ minLength: 1, maxLength: 60000 }),
     source_ref: s({ maxLength: 512 }),
     lines: s({ maxLength: 32 }),
     offset: i({ minimum: 0 }),
@@ -258,7 +277,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     object_type: s({ maxLength: 80 }),
     owner_scope: s({ enum: ["work_item", "job"] }),
     chunks: a(o({
-      text: s({ maxLength: 60000 }),
+      text: s({ minLength: 1, maxLength: 60000 }),
       source_ref: s({ maxLength: 512 }),
       lines: s({ maxLength: 32 }),
       offset: i({ minimum: 0 }),
@@ -266,8 +285,8 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
       note: s({ maxLength: 300 }),
       object_type: s({ maxLength: 80 }),
       owner_scope: s({ enum: ["work_item", "job"] }),
-    }), { maxItems: 24 }),
-  }),
+    }, [], createRefChunkMode()), { minItems: 1, maxItems: 24 }),
+  }, [], createRefInputMode()),
 
   "repo.register": o({
     repoId: s({ maxLength: 256 }),
@@ -489,13 +508,13 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "code.lens": o({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
-    identifiersToFind: identifierList({ minItems: 1, maxItems: 50 }),
+    identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
     maxLines: i({ minimum: 1, maximum: 5000 }),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
     contextLines: i({ minimum: 0, maximum: 100 }),
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
-  }, ["identifiersToFind"]),
+  }, ["identifiersToFind"], targetRequired()),
   "code.window": o({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
@@ -506,7 +525,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
     sliceContext: sliceContextHint(),
     sessionId: s({ maxLength: 256 }),
-  }, ["reason", "expectedLines", "identifiersToFind"]),
+  }, ["reason"], targetRequired()),
   "code.survey": o({
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 64 },
     symbols: identifierList({ maxItems: 16 }),
@@ -684,6 +703,8 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
  * @property {number} [maxItems]
  * @property {number} [maxProperties]
  * @property {unknown} [default]
+ * @property {JsonSchema[]} [anyOf]
+ * @property {JsonSchema[]} [oneOf]
  */
 
 /**
@@ -929,6 +950,8 @@ function validateValue(value, schema, path, errors) {
     return;
   }
 
+  validateSchemaAlternatives(value, schema, path, errors);
+
   if (typeof value === "string") {
     if (schema.minLength != null && value.length < schema.minLength) {
       errors.push({ path, code: "minLength", message: `${path} must not be empty` });
@@ -988,6 +1011,27 @@ function validateValue(value, schema, path, errors) {
       if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
         validateValue(childValue, schema.additionalProperties, `${path}.${key}`, errors);
       }
+    }
+  }
+}
+
+function validateSchemaAlternatives(value, schema, path, errors) {
+  for (const [keyword, expectedMatches] of [["anyOf", "at least one"], ["oneOf", "exactly one"]]) {
+    const alternatives = schema[keyword];
+    if (!Array.isArray(alternatives) || alternatives.length === 0) continue;
+    let matches = 0;
+    for (const alternative of alternatives) {
+      const branchErrors = [];
+      validateValue(value, alternative, path, branchErrors);
+      if (branchErrors.length === 0) matches += 1;
+    }
+    const valid = keyword === "anyOf" ? matches > 0 : matches === 1;
+    if (!valid) {
+      errors.push({
+        path,
+        code: keyword,
+        message: `${path} must match ${expectedMatches} supported parameter shape`,
+      });
     }
   }
 }

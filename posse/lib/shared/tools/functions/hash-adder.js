@@ -1374,7 +1374,13 @@ export function fetchHashRefTool(args = {}, {
 }
 
 function createRefError(error, extra = {}) {
-  return { ok: false, error, ...extra };
+  const message = String(error || "create_ref_failed");
+  const code = message.startsWith("create_ref requires text or source_ref")
+    ? "missing_create_ref_input"
+    : (message.startsWith("create_ref accepts text OR source_ref")
+      ? "create_ref_input_conflict"
+      : (message.match(/^[a-z][a-z0-9_]*/i)?.[0] || "create_ref_failed"));
+  return { ok: false, code, error: message, ...extra };
 }
 
 function sliceSourcePayload(payloadText, item) {
@@ -1512,30 +1518,44 @@ function createOneHashRef(hashContext, item = {}) {
  * Batch form:  { chunks: [ ...same per-item fields... ] } with per-item errors.
  * The contract intent: synthesis stays prose; evidence moves as refs.
  */
-export function createHashRefTool(args = {}, {
+export function createHashRefResult(args = {}, {
   context = {},
 } = {}) {
   const hashContext = contextForHashRefs(context);
   if (!hasHashRefScope(hashContext)) {
-    return JSON.stringify({ ok: false, error: "create_ref requires an active work item / job scope" }, null, 2);
+    return createRefError("create_ref requires an active work item / job scope", {
+      code: "create_ref_scope_unavailable",
+      status: "failed",
+    });
   }
   const batch = Array.isArray(args.chunks) ? args.chunks : null;
   if (batch) {
-    if (batch.length === 0) return JSON.stringify({ ok: false, error: "chunks must be a non-empty array" }, null, 2);
+    if (batch.length === 0) return createRefError("chunks must be a non-empty array", { code: "empty_chunks" });
     if (batch.length > CREATE_REF_MAX_BATCH) {
-      return JSON.stringify({ ok: false, error: `too_many_chunks (${batch.length}, max ${CREATE_REF_MAX_BATCH})` }, null, 2);
+      return createRefError(`too_many_chunks (${batch.length}, max ${CREATE_REF_MAX_BATCH})`);
     }
     const results = batch.map((item) => createOneHashRef(hashContext, item && typeof item === "object" ? item : {}));
     const created = results.filter((entry) => entry.ok).length;
-    return JSON.stringify({
+    const failed = results.length - created;
+    const executionFailure = results.some((entry) => entry?.code === "create_failed");
+    return {
       ok: created === results.length,
+      ...(failed > 0 ? { code: created > 0 ? "create_ref_partial" : "create_ref_batch_failed" } : {}),
+      ...(failed > 0 ? { status: created > 0 || executionFailure ? "failed" : "rejected" } : {}),
+      ...(failed > 0 ? { error: created > 0
+        ? `create_ref partially completed (${created} created, ${failed} failed)`
+        : `create_ref batch failed (${failed} failed)` } : {}),
       count: results.length,
       created,
-      failed: results.length - created,
+      failed,
       chunks: results,
-    }, null, 2);
+    };
   }
-  return JSON.stringify(createOneHashRef(hashContext, args), null, 2);
+  return createOneHashRef(hashContext, args);
+}
+
+export function createHashRefTool(args = {}, options = {}) {
+  return JSON.stringify(createHashRefResult(args, options), null, 2);
 }
 
 export const __testHashAdderInternals = Object.freeze({

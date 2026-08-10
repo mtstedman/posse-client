@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { gitExec } from "../../../git/functions/utils.js";
 import {
   normalizeRepoRelativePath,
@@ -107,6 +106,21 @@ function existingMaterialization(jobId, generation, relPath) {
   `).get(jobId, generation, relPath);
 }
 
+export function materializedPathsForJob(jobId, generation = 1) {
+  const numericJobId = Number(jobId);
+  const numericGeneration = Number(generation);
+  if (!Number.isInteger(numericJobId) || numericJobId <= 0) return [];
+  if (!Number.isInteger(numericGeneration) || numericGeneration <= 0) return [];
+  return getDb().prepare(`
+    SELECT path
+    FROM file_materializations
+    WHERE job_id = ? AND generation = ?
+    ORDER BY path
+  `).all(numericJobId, numericGeneration)
+    .map((row) => normalizeRepoRelativePath(row.path))
+    .filter(Boolean);
+}
+
 function recordMaterialization(packet, generation, relPath, createdParentDirs) {
   const operationKey = `materialize:${Number(packet.job_id)}:${generation}:${relPath}`;
   getDb().prepare(`
@@ -186,9 +200,10 @@ function isWritingCodePacket(packet) {
 
 /**
  * Consume planner-owned files_to_create before a writing provider sees the
- * packet. Missing files_to_modify targets are treated as exact creation scope
- * too. Exact files are materialized with exclusive creation, recorded in
- * private provenance, then exposed only as files_to_modify.
+ * packet. Exact files are materialized with exclusive creation, recorded in
+ * private provenance, then exposed only as files_to_modify. A missing modify
+ * target is rejected as a planner/path error; it is never promoted to a new
+ * empty file.
  */
 export function materializeWritingScope(packet) {
   if (!isWritingCodePacket(packet)) return { applied: false, materialized: [] };
@@ -229,16 +244,12 @@ export function materializeWritingScope(packet) {
     let stat;
     try { stat = fs.lstatSync(absPath); } catch { stat = null; }
     if (!stat) {
-      // A missing modify target is either a planner misclassification (should
-      // have been files_to_create) or a typo'd path that will silently become
-      // an empty file. Surface it so operators can tell the two apart.
-      log.warn("handoff", "files_to_modify target missing; promoted to exact creation scope", {
-        job_id: packet.job_id == null ? null : Number(packet.job_id),
-        work_item_id: packet.work_item_id == null ? null : Number(packet.work_item_id),
-        path: relPath,
-      });
-      if (!create.includes(relPath)) create.push(relPath);
-      continue;
+      const error = materializationError(
+        `files_to_modify target does not exist; declare it in files_to_create or correct the path: ${relPath}`,
+        { path: relPath },
+      );
+      error.code = "HANDOFF_MODIFY_TARGET_MISSING";
+      throw error;
     }
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw materializationError(

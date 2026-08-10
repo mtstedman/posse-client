@@ -158,6 +158,10 @@ function nativeScopedCommitError(result, cwd, budget) {
     ? `Branch HEAD moved during scoped commit: ${failure.message || "native compare-and-swap rejected the commit"}`
     : String(failure.message || "Native scoped commit transaction failed"));
   err.code = headMoved ? "BRANCH_HEAD_MOVED" : failureCode;
+  if (failureCode === "MATERIALIZED_FILE_NOT_WRITTEN") {
+    err.retryable = true;
+    err.assessmentRetryable = true;
+  }
   err.nativeFailure = failure;
   err.rollbackStatus = result?.rollbackStatus || null;
   err.rollbackSucceeded = result?.rollbackStatus?.restored === true;
@@ -928,6 +932,14 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       createRoots: [],
       deleteRoots: [],
       requiredPaths: expectedToCommit.map((entry) => repoRelativePath(entry.path)),
+      // Rust applies this only to paths that are creations relative to
+      // expectedHead, so a legitimately empty file already in history remains
+      // editable while an unfilled handoff placeholder fails closed.
+      nonEmptyCreatePaths: [...new Set([
+        ...createFilesRaw,
+        ...(Array.isArray(opts?.nonEmptyCreatePaths) ? opts.nonEmptyCreatePaths : []),
+      ].map(scopeCompatiblePath).filter(Boolean).map(resolveScopedPath))]
+        .map(repoRelativePath),
       options: {
         allowEmpty: false,
         timeoutMs: commitTimeoutBudget.processTimeoutMs,

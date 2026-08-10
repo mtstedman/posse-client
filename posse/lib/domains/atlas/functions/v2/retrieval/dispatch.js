@@ -10,8 +10,6 @@
 // needs worker IO. Handlers that only read an already-open view stay direct,
 // while DB-tapping lifecycle work can be awaited by callers.
 
-import fs from "fs";
-import path from "path";
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
 import {
   ATLAS_GATEWAY_ACTIONS as ATLAS_GATEWAY_ACTION_LISTS,
@@ -42,7 +40,8 @@ import { scipIngest } from "./scip.js";
 import { info } from "./info.js";
 import { actionSearch, manual } from "./discovery.js";
 import { workflowExecute } from "./workflow.js";
-import { createHashRefTool, fetchHashRefTool } from "../../../../../shared/tools/functions/hash-adder.js";
+import { createHashRefResult, fetchHashRefTool } from "../../../../../shared/tools/functions/hash-adder.js";
+import { readRepoFileResult } from "./repo-read.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").Ledger} Ledger */
@@ -515,17 +514,25 @@ function fetchRef({ versionId, params, ctx }) {
  */
 function createHash({ versionId, params, ctx }) {
   try {
-    const text = createHashRefTool(params, {
+    const data = createHashRefResult(params, {
       context: {
         ...(ctx.hashRefContext || {}),
         ...(ctx.config?.hashRefContext && typeof ctx.config.hashRefContext === "object" ? ctx.config.hashRefContext : {}),
       },
     });
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { ok: false, error: "invalid_create_ref_payload", text };
+    if (data?.ok === false) {
+      const failure = /** @type {{ code?: string, status?: string, error?: string, [key: string]: unknown }} */ (data);
+      const code = String(failure.code || "create_ref_failed");
+      const status = ["failed", "rejected"].includes(String(failure.status || ""))
+        ? String(failure.status)
+        : (["create_ref_scope_unavailable", "create_failed", "create_ref_partial"].includes(code) ? "failed" : "rejected");
+      return /** @type {AnyToolResult} */ (/** @type {any} */ (errorEnvelope({
+        action: "create_ref",
+        versionId,
+        code,
+        message: String(failure.error || "create_ref failed"),
+        details: { status, retryable: false, result: data },
+      })));
     }
     return /** @type {AnyToolResult} */ (/** @type {any} */ (okEnvelope({
       action: "create_ref",
@@ -594,26 +601,9 @@ function notIndexed(action, versionId) {
  * @returns {ReadFile}
  */
 function makeFsReadFile(repoRoot) {
-  if (!repoRoot) {
-    return () => null;
-  }
-  const root = path.resolve(repoRoot);
-  let realRoot = root;
-  try { realRoot = fs.realpathSync(root); } catch { /* fall back to resolved root */ }
   return (relPath) => {
-    try {
-      const abs = path.resolve(root, relPath);
-      // Guard against path-traversal: the resolved absolute path must
-      // remain within repoRoot.
-      if (!abs.startsWith(root + path.sep) && abs !== root) return null;
-      const realAbs = fs.realpathSync(abs);
-      if (!realAbs.startsWith(realRoot + path.sep) && realAbs !== realRoot) return null;
-      const stat = fs.statSync(realAbs);
-      if (!stat.isFile()) return null;
-      return fs.readFileSync(realAbs, "utf8");
-    } catch {
-      return null;
-    }
+    const result = readRepoFileResult(repoRoot, relPath);
+    return result.ok ? result.content : null;
   };
 }
 

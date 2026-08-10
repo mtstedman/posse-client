@@ -1116,16 +1116,21 @@ export class DisplayRightPanelRenderer {
 
 
 
-  _formatFailedToolDetailRows(row, width) {
+  _formatToolDetailRows(row, width) {
     const meta = monitorToolMeta(row);
-    if (meta.outcome !== "failed") return [];
+    if (meta.outcome !== "failed" && meta.outcome !== "rejected") return [];
     const safeWidth = Math.max(18, width | 0);
-    const error = _sanitizeDisplayLine(row.error || "No error diagnostic was recorded for this failed call.");
-    const firstPrefix = `   ${C.red}\u21b3 error:${C.reset} `;
-    const nextPrefix = "            ";
+    const rejected = meta.outcome === "rejected";
+    const detail = _sanitizeDisplayLine(rejected
+      ? (row.rejection_reason || "No reason was recorded for this rejected call.")
+      : (row.error || "No error diagnostic was recorded for this failed call."));
+    const label = rejected ? "reason:" : "error:";
+    const color = rejected ? C.yellow : C.red;
+    const firstPrefix = `   ${color}\u21b3 ${label}${C.reset} `;
+    const nextPrefix = " ".repeat(stripAnsi(firstPrefix).length);
     const firstWidth = Math.max(8, safeWidth - stripAnsi(firstPrefix).length - 2);
     const nextWidth = Math.max(8, safeWidth - nextPrefix.length - 2);
-    return wrapHanging(error, firstWidth, nextWidth).map((line, index) =>
+    return wrapHanging(detail, firstWidth, nextWidth).map((line, index) =>
       `${index === 0 ? firstPrefix : nextPrefix}${C.brightWhite}${line}${C.reset}`);
   }
 
@@ -1134,7 +1139,7 @@ export class DisplayRightPanelRenderer {
   _formatMonitorToolRows(row, width) {
     return [
       this._formatMonitorToolRow(row, width),
-      ...this._formatFailedToolDetailRows(row, width),
+      ...this._formatToolDetailRows(row, width),
     ];
   }
 
@@ -1808,7 +1813,7 @@ export class DisplayRightPanelRenderer {
         const summaryBudget = Math.max(10, budget - repeatLen);
         const summaryShort = summary.length > summaryBudget ? summary.slice(0, summaryBudget - 1) + "\u2026" : summary;
         toolLines.push(`${prefix}${summaryShort}${repeatHint}${outcomeHint}`);
-        toolLines.push(...this._formatFailedToolDetailRows(r, width));
+        toolLines.push(...this._formatToolDetailRows(r, width));
       }
     } else {
       toolLines.push(` ${C.dim}No recent tool invocations${C.reset}`);

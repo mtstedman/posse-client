@@ -18,6 +18,7 @@ import {
   updateJobPayload,
 } from "../../../queue/functions/index.js";
 import { parseFileRequest, splitFileRequestsByRisk } from "../../../handoff/functions/index.js";
+import { materializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { isInsideRoot } from "../../../../shared/scope/functions/path.js";
@@ -512,6 +513,17 @@ export async function handlePostExecutionForWorker({
           } else {
           try {
             const jobPayload = preCommitPayload;
+            const rawMaterializationGeneration = Number(
+              jobPayload?.scope_generation ?? jobPayload?._materialization_generation ?? 1,
+            );
+            const materializationGeneration = Number.isFinite(rawMaterializationGeneration)
+              && rawMaterializationGeneration >= 1
+              ? Math.floor(rawMaterializationGeneration)
+              : 1;
+            const materializedCreatePaths = materializedPathsForJob(
+              job.id,
+              materializationGeneration,
+            );
             const activeLocksForCommit = listActiveFileLocks();
             try {
               const caseFoldScopePath = (file) => {
@@ -601,6 +613,7 @@ export async function handlePostExecutionForWorker({
                   snapshotReason: `dev-scope-enforcement-job-${job.id}`,
                   taskMode: jobPayload.task_mode || "code",
                   jobId: job.id,
+                  nonEmptyCreatePaths: materializedCreatePaths,
                   activeFileLocks: activeLocksForCommit,
                 });
                 break;
@@ -814,6 +827,7 @@ export async function handlePostExecutionForWorker({
             ];
             if (siblingSkipped.length > 0) {
               const siblingMsg = `Left ${siblingSkipped.length} sibling-owned dirty path(s) uncommitted: ${siblingSkipped.slice(0, 5).map((entry) => `${entry.file} by #${entry.job_id || "?"}`).join(", ")}`;
+              this.emit(job.id, `${C.yellow}[scope-sibling] WI#${job.work_item_id} job #${job.id}: ${siblingMsg}${C.reset}`);
               logEvent({
                 work_item_id: job.work_item_id,
                 job_id: job.id,
@@ -822,7 +836,7 @@ export async function handlePostExecutionForWorker({
                 actor_type: EVENT_ACTORS.WORKER,
                 message: siblingMsg,
                 event_json: JSON.stringify({
-                  visible: false,
+                  visible: true,
                   dirty: siblingDirtySkipped || [],
                   untracked: siblingUntrackedSkipped || [],
                   staging: siblingStagingSkipped || [],

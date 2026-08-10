@@ -1,4 +1,5 @@
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
+import { getAccountSetting } from "../../../settings/functions/account-settings.js";
 import { ToolGate } from "../../../../shared/tools/classes/ToolGate.js";
 import {
   GATED_NATIVE_TOOLS,
@@ -145,7 +146,7 @@ export function noteAtlasCall({
   telemetryContext = null,
 } = {}) {
   _getGate(scopeKey).noteAtlasCall({ action, ok, empty, args, artifacts, cwd });
-  maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey, telemetryContext });
+  return maybeRecordAtlasShadowTokenPressure({ action, args, artifacts, scopeKey, telemetryContext });
 }
 
 export function unlockForAtlasUnavailable({ reason = "atlas_unavailable", scopeKey = null } = {}) {
@@ -229,12 +230,14 @@ export function noteAtlasToolResult(result, { action = "", args = {}, cwd = null
   const text = typeof result === "string" ? result : String(result ?? "");
   const errored = /^Error:/i.test(text);
   const empty = !errored && (text.trim().length === 0 || text.trim() === "ATLAS returned no output.");
-  noteAtlasCall({ action, ok: !errored, empty, args, cwd, scopeKey });
+  const pressureNotice = noteAtlasCall({ action, ok: !errored, empty, args, cwd, scopeKey });
+  const notices = [];
   if (errored) {
     const unlockNotice = unlockGateForDeadAtlasResult(text, { scopeKey });
-    if (unlockNotice) return `${text}\n\n${unlockNotice}`;
+    if (unlockNotice) notices.push(unlockNotice);
   }
-  return text;
+  if (pressureNotice) notices.push(pressureNotice);
+  return notices.length > 0 ? `${text}\n\n${notices.join("\n\n")}` : text;
 }
 
 export function unlockForAtlasPrefetch({ reason = "prefetch_ok", scopeKey = null } = {}) {
@@ -312,6 +315,8 @@ function maybeRecordAtlasShadowTokenPressure({
 
   if (shouldEmitTotal) entry.emitted.add("total");
   if (shouldEmitWindow) entry.emitted.add("window");
+  const recommendation = "Switch to one area survey before issuing more code.lens/code.window calls for this target.";
+  const mode = atlasGateNudgeEnabled() ? "active" : "shadow";
   try {
     const ctx = telemetryContext && typeof telemetryContext === "object"
       ? telemetryContext
@@ -324,7 +329,7 @@ function maybeRecordAtlasShadowTokenPressure({
       summary: `ATLAS token pressure: ${entry.total} lens/window call(s) for ${target}`,
       detail: {
         kind: "atlas_shadow_token_pressure",
-        mode: "observation",
+        mode,
         scope,
         target,
         total_code_calls: entry.total,
@@ -335,10 +340,20 @@ function maybeRecordAtlasShadowTokenPressure({
           total: PRESSURE_TOTAL_THRESHOLD,
           code_window: PRESSURE_WINDOW_THRESHOLD,
         },
+        recommendation,
       },
     });
   } catch {
     // Token-pressure telemetry is advisory only.
+  }
+  return mode === "active" ? `[token-pressure] ${recommendation}` : null;
+}
+
+function atlasGateNudgeEnabled() {
+  try {
+    return String(getAccountSetting("atlas_gate_nudge") ?? "on").trim().toLowerCase() !== "off";
+  } catch {
+    return true;
   }
 }
 

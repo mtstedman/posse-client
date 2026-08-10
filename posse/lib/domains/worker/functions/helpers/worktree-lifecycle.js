@@ -221,7 +221,7 @@ function logSiblingSetupDirtyReuse(worker, job, wi, dirty, phase) {
   const preview = entries.slice(0, 5).map((entry) => `${entry.path} by #${entry.job_id || "?"}`).join(", ");
   const more = entries.length > 5 ? " ..." : "";
   const message = `Reused worktree with ${entries.length} sibling-owned dirty path(s): ${preview}${more}`;
-  worker.emit(job.id, `${C.dim}[system] WI#${wi.id} ${message}${C.reset}`);
+  worker.emit(job.id, `${C.yellow}[scope-sibling] WI#${wi.id} ${message}${C.reset}`);
   logEvent({
     work_item_id: wi.id,
     job_id: job.id,
@@ -230,7 +230,7 @@ function logSiblingSetupDirtyReuse(worker, job, wi, dirty, phase) {
     message,
     event_json: JSON.stringify({
       phase,
-      visible: false,
+      visible: true,
       entries: entries.slice(0, 20),
     }),
   });
@@ -1233,21 +1233,17 @@ export async function setUpWorktreeForJob(worker, job, leaseToken, options = {})
 }
 
 export function primeCreatableFiles(cwd, filesToCreate = []) {
-  const created = [];
   for (const relPath of filesToCreate) {
     if (!relPath || typeof relPath !== "string") continue;
     const absPath = path.isAbsolute(relPath) ? relPath : path.resolve(cwd, relPath);
     if (fs.existsSync(absPath)) continue;
-    fs.mkdirSync(path.dirname(absPath), { recursive: true });
-    try {
-      fs.writeFileSync(absPath, "", { flag: "wx" });
-    } catch (err) {
-      if (err?.code === "EEXIST") continue;
-      throw err;
-    }
-    created.push(relPath);
+    const error = new Error(
+      `primeCreatableFiles no longer creates placeholders; materialize writing scope before provider execution: ${relPath}`,
+    );
+    error.code = "PRIME_CREATABLE_FILES_RETIRED";
+    throw error;
   }
-  return created;
+  return [];
 }
 
 function shouldPreserveUnmergedCompleteAtlasView(wi) {

@@ -240,7 +240,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        text: { type: "string", description: "Inline chunk to store (max 60000 chars). Use for content you authored or assembled; prefer source_ref slicing for material that already exists as a ref." },
+        text: { type: "string", minLength: 1, description: "Inline chunk to store (max 60000 chars). Use for content you authored or assembled; prefer source_ref slicing for material that already exists as a ref." },
         source_ref: { type: "string", description: "Existing materialized ref alias such as #a3f9 to slice server-side (no payload tokens spent). Combine with lines or offset/limit." },
         lines: { type: "string", description: "1-based line range within source_ref payload, e.g. \"120-180\"." },
         offset: { type: "integer", description: "Character offset within source_ref payload. Default 0." },
@@ -254,7 +254,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           items: {
             type: "object",
             properties: {
-              text: { type: "string" },
+              text: { type: "string", minLength: 1 },
               source_ref: { type: "string" },
               lines: { type: "string" },
               offset: { type: "integer" },
@@ -263,11 +263,21 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
               object_type: { type: "string" },
               owner_scope: { type: "string", enum: ["work_item", "job"] },
             },
+            oneOf: [
+              { required: ["text"] },
+              { required: ["source_ref"] },
+            ],
             additionalProperties: false,
           },
+          minItems: 1,
         },
       },
       required: [],
+      oneOf: [
+        { required: ["text"] },
+        { required: ["source_ref"] },
+        { required: ["chunks"] },
+      ],
       additionalProperties: false,
     },
   },
@@ -786,10 +796,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by ATLAS. Do not construct this from a file path, symbol name, or file:symbol pair." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        identifiersToFind: { type: "array", items: { type: "string" }, description: "Identifiers to match. Prefer a JSON array; legacy scalar strings are normalized." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Identifiers to match. Prefer a JSON array; legacy scalar strings are normalized." },
         contextLines: { type: "integer", description: "Context lines around each match." },
       },
       required: ["identifiersToFind"],
+      anyOf: [
+        { required: ["symbolId"] },
+        { required: ["file"] },
+      ],
       additionalProperties: false,
     },
   },
@@ -808,7 +822,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbolId-mode only: choose the resolved symbol, its enclosing block, or its containing file. Ignored when file is supplied. These are alternative selections, not sequential retrieval stages." },
         maxTokens: { type: "integer", description: "Maximum inline output budget for this selection. It is not a paging control; follow continuationRef only when returned for already-selected requested slices." },
       },
-      required: ["reason", "expectedLines", "identifiersToFind"],
+      required: ["reason"],
+      anyOf: [
+        { required: ["symbolId"] },
+        { required: ["file"] },
+      ],
       additionalProperties: false,
     },
   },

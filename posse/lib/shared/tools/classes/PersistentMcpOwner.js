@@ -57,7 +57,7 @@ import {
 } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
-import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefTool, fetchHashRefTool } from "../functions/hash-adder.js";
+import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool } from "../functions/hash-adder.js";
 import {
   bindAgentAttachmentToSignedContract,
   isInternalAtlasAction,
@@ -649,6 +649,43 @@ function mcpToolTextPayload(text) {
   };
 }
 
+function createRefMcpPayload(data = {}) {
+  const result = /** @type {{ ok?: boolean, code?: string, error?: string, failed?: number, created?: number, status?: string, count?: number, [key: string]: unknown }} */ (data && typeof data === "object" ? data : {
+    ok: false,
+    code: "invalid_create_ref_payload",
+    error: "create_ref returned an invalid result payload",
+  });
+  const text = JSON.stringify(result, null, 2);
+  if (result.ok === true) return mcpToolTextPayload(text);
+
+  const code = String(result.code || "create_ref_failed");
+  const message = String(result.error || "create_ref failed");
+  const failed = Math.max(0, Number(result.failed || 0));
+  const created = Math.max(0, Number(result.created || 0));
+  const status = ["failed", "rejected"].includes(String(result.status || ""))
+    ? String(result.status)
+    : (code === "create_ref_scope_unavailable" || code === "create_failed" || code === "create_ref_partial"
+      ? "failed"
+      : "rejected");
+  const structured = {
+    code,
+    message,
+    details: {
+      status,
+      retryable: false,
+      ...(Number.isFinite(Number(result.count)) ? { count: Number(result.count) } : {}),
+      ...(created > 0 ? { created } : {}),
+      ...(failed > 0 ? { failed } : {}),
+    },
+  };
+  return {
+    content: [{ type: "text", text }],
+    isError: true,
+    structuredContent: { error: structured, data: result },
+    _meta: { atlasError: structured, createRefResult: result },
+  };
+}
+
 // Final pre-transport model-visible size. The downstream Codex client clips
 // oversized tool results to roughly this many characters (head/tail with the
 // middle discarded) without telling Posse, so anything above the clip is
@@ -1011,12 +1048,13 @@ function atlasGateResultState(result = null) {
 }
 
 function mcpToolResultErrorText(result = null) {
+  const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
+  if (structured) return capString(structured, 700);
   if (!result?.isError) return "";
   const contentText = Array.isArray(result?.content)
     ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").filter(Boolean).join("\n")
     : "";
-  const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
-  return capString(contentText || structured || "ATLAS tool returned an error", 700);
+  return capString(contentText || "ATLAS tool returned an error", 700);
 }
 
 function recordOwnerModelControlNotice(session, toolName, notice = {}) {
@@ -2791,10 +2829,11 @@ export class PersistentMcpOwner {
     }
     try {
       if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
-        const hashStoreTool = isAtlasCreateHashTool(toolName, toolArgs) ? createHashRefTool : fetchHashRefTool;
-        let result = mcpToolTextPayload(hashStoreTool(toolArgs || {}, {
-          context: hashRefToolContext(session),
-        }));
+        const createRef = isAtlasCreateHashTool(toolName, toolArgs);
+        const hashContext = { context: hashRefToolContext(session) };
+        let result = createRef
+          ? createRefMcpPayload(createHashRefResult(toolArgs || {}, hashContext))
+          : mcpToolTextPayload(fetchHashRefTool(toolArgs || {}, hashContext));
         result = appendOwnerOperatorFeedbackSignal(result, session);
         result = appendOwnerResearchSynthesisNotice(
           result,

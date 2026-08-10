@@ -16,7 +16,7 @@ import {
   gitHasChangesAsync,
   gitHasIgnoredChanges,
 } from "./utils.js";
-import { runGitNativeMethodAsync } from "./native/invoke.js";
+import { runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 import {
   acquireWorktreeLock,
   acquireWorktreeLockAsync,
@@ -25,9 +25,9 @@ import {
   withWorktreeLockAsync,
 } from "./worktree-locks.js";
 import {
+  dirtySnapshotNativePayload,
   parseBooleanSetting,
-  preserveDirtyWorktreeSnapshot,
-  preserveDirtyWorktreeSnapshotAsync,
+  snapshotRefFromNative,
 } from "./worktree-snapshots.js";
 import { worktreeRoot } from "./worktree-path.js";
 
@@ -90,137 +90,9 @@ export async function worktreeHasIgnoredChangesNodeAsync(wtPath, { signal = null
     .some((line) => line.startsWith("!! "));
 }
 
-// The clean invocation is the drift surface here: `-e .posse/` preserves posse
-// runtime dirs when ignored artifacts are cleared too. Both twins take their
-// argv from this one builder.
-function cleanUntrackedArgs(cleanIgnoredOverride) {
-  const cleanIgnored = cleanIgnoredOverride == null
-    ? parseBooleanSetting("worktree_clean_ignored", false)
-    : !!cleanIgnoredOverride;
-  return cleanIgnored ? ["clean", "-fdx", "-e", ".posse/"] : ["clean", "-fd"];
-}
-
-export function cleanWorktreeUntracked(wtPath, { cleanIgnoredOverride = null } = {}) {
-  gitExec(cleanUntrackedArgs(cleanIgnoredOverride), wtPath);
-}
-
-export async function cleanWorktreeUntrackedAsync(wtPath, { cleanIgnoredOverride = null, signal = null } = {}) {
-  await gitExecAsync(cleanUntrackedArgs(cleanIgnoredOverride), wtPath, { signal });
-}
-
-export function parsePorcelainRemainingPaths(porcelainZ) {
-  const records = String(porcelainZ || "").split("\0").filter(Boolean);
-  const remaining = [];
-  for (let i = 0; i < records.length; i++) {
-    const record = records[i];
-    if (record.length < 4) continue;
-    const statusXY = record.slice(0, 2);
-    const firstPath = record.slice(3);
-    // Porcelain status has separate index/worktree columns; includes() catches
-    // rename/copy markers in either position.
-    const isRenameOrCopy = statusXY.includes("R") || statusXY.includes("C");
-    if (isRenameOrCopy) {
-      const secondPath = records[i + 1];
-      if (secondPath) {
-        remaining.push(secondPath);
-        i += 1;
-        continue;
-      }
-      if (firstPath.includes(" -> ")) {
-        remaining.push(firstPath.split(" -> ").pop().trim());
-        continue;
-      }
-    }
-    remaining.push(firstPath);
-  }
-  return remaining.filter(Boolean);
-}
-
-// resetDirtyWorktree / resetDirtyWorktreeAsync are intentionally NOT twins of
-// one body: the sync fn implements the abort-merge/rebase/cherry-pick + reset
-// sequence in Node, while the async fn delegates the entire semantics to the
-// native Rust method (git.worktree.resetDirty). Changes here must be mirrored
-// in Rust; the snapshot-and-reset twin-parity test pins the equivalence.
-export function resetDirtyWorktree(wtPath, { cleanIgnoredOverride = null } = {}) {
-  // Unmerged paths (MERGE_HEAD/conflicts) make `checkout -- .` fail.
-  // Best effort: clear merge state first, then force-reset tracked and untracked.
-  let gitMetaDir = null;
-  try {
-    const gitDir = gitExec(["rev-parse", "--git-dir"], wtPath, { nativeParity: { disabled: true } });
-    gitMetaDir = path.isAbsolute(gitDir) ? gitDir : path.join(wtPath, gitDir);
-  } catch {
-    gitMetaDir = null;
-  }
-  if (gitMetaDir) {
-    try {
-      const rebaseMerge = path.join(gitMetaDir, "rebase-merge");
-      const rebaseApply = path.join(gitMetaDir, "rebase-apply");
-      if (fs.existsSync(rebaseMerge) || fs.existsSync(rebaseApply)) {
-        try { gitExec(["rebase", "--abort"], wtPath); } catch { /* continue */ }
-      }
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      // Best effort only.
-    }
-    try {
-      if (fs.existsSync(path.join(gitMetaDir, "CHERRY_PICK_HEAD"))) {
-        try { gitExec(["cherry-pick", "--abort"], wtPath); } catch { /* continue */ }
-      }
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      // Best effort only.
-    }
-    try {
-      if (fs.existsSync(path.join(gitMetaDir, "REVERT_HEAD"))) {
-        try { gitExec(["revert", "--abort"], wtPath); } catch { /* continue */ }
-      }
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      // Best effort only.
-    }
-  }
-  try {
-    gitExec(["rev-parse", "--verify", "MERGE_HEAD"], wtPath);
-    try { gitExec(["merge", "--abort"], wtPath); } catch {
-      try { gitExec(["reset", "--merge"], wtPath); } catch { /* continue */ }
-    }
-  } catch {
-    // No merge in progress.
-  }
-  try { gitExec(["reset", "--hard", "HEAD"], wtPath); } catch {
-    // Fallback for odd repo states where reset --hard is unavailable.
-    try { gitExec(["checkout", "--", "."], wtPath); } catch { /* continue */ }
-  }
-  cleanWorktreeUntracked(wtPath, { cleanIgnoredOverride });
-  try {
-    const postZ = gitExec(["status", "--porcelain", "-z"], wtPath);
-    const remaining = parsePorcelainRemainingPaths(postZ);
-    return {
-      clean: remaining.length === 0,
-      postResetPorcelain: String(postZ || "").replace(/\0/g, "\n").trim(),
-      remainingPaths: remaining,
-    };
-  } catch (err) {
-    return { clean: false, postResetPorcelain: `git status failed: ${err?.message || err}`, remainingPaths: [] };
-  }
-}
-
-export async function resetDirtyWorktreeAsync(wtPath, { cleanIgnoredOverride = null, signal = null, nativeParity = {} } = {}) {
-  const cleanIgnored = cleanIgnoredOverride == null
-    ? parseBooleanSetting("worktree_clean_ignored", false)
-    : !!cleanIgnoredOverride;
-  return await runGitNativeMethodAsync(
-    "git.worktree.resetDirty",
-    { wtPath: path.resolve(wtPath), cleanIgnored },
-    { ...nativeParity, signal },
-  );
-}
-
-// resetDirtyWorktreeFallbackAsync was deleted deliberately: every caller used
-// it to answer a snapshot failure with an unsnapshotted `checkout -- .` +
-// `clean -fd`, which is the one response this module exists to prevent. When
-// a snapshot fails, leave the worktree dirty and defer to setup recovery.
-
+// There is intentionally no raw reset export. Dirty-state preservation and
+// destructive cleanup are one Rust-owned mutation so callers cannot bypass
+// the fail-closed snapshot invariant.
 export async function stashDirtyWorktreeAsync(
   wtPath,
   projectDir,
@@ -388,6 +260,71 @@ function notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, 
   }
 }
 
+function snapshotAndResetNativePayload(
+  wtPath,
+  projectDir,
+  { reason, branchName, wiId, cleanIgnoredOverride },
+) {
+  return {
+    ...dirtySnapshotNativePayload(wtPath, projectDir, { reason, branchName, wiId }),
+    cleanIgnored: cleanIgnoredOverride == null
+      ? parseBooleanSetting("worktree_clean_ignored", false)
+      : !!cleanIgnoredOverride,
+  };
+}
+
+function resolveGitWorktreeRoot(wtPath) {
+  const resolved = String(gitExec(
+    ["rev-parse", "--show-toplevel"],
+    wtPath,
+    { nativeParity: { disabled: true } },
+  ) || "").trim();
+  if (!resolved) throw new Error(`Could not resolve Git worktree root for ${wtPath}`);
+  return path.resolve(resolved);
+}
+
+async function resolveGitWorktreeRootAsync(wtPath, { signal = null } = {}) {
+  const resolved = String(await gitExecAsync(
+    ["rev-parse", "--show-toplevel"],
+    wtPath,
+    { signal, nativeParity: { disabled: true } },
+  ) || "").trim();
+  if (!resolved) throw new Error(`Could not resolve Git worktree root for ${wtPath}`);
+  return path.resolve(resolved);
+}
+
+function markSnapshotRefusal(err) {
+  if (/SNAPSHOT_REFUSED_RESET/.test(String(err?.message || err || ""))) {
+    err.code = "SNAPSHOT_REFUSED_RESET";
+  }
+  return err;
+}
+
+function adaptSnapshotAndResetResult(
+  nativeResult,
+  { wtPath, projectDir, reason, branchName, wiId, onResetIncomplete, onMsg },
+) {
+  const snapshotDir = snapshotRefFromNative(nativeResult?.snapshot, {
+    metadata: { reason, wiId, branchName },
+  });
+  const resetResult = nativeResult?.reset || null;
+  if (snapshotDir && typeof onMsg === "function") {
+    onMsg(`preserved dirty worktree at ${snapshotDir.value}`);
+  }
+  if (nativeResult?.recovered) {
+    notifyResetIncomplete(onResetIncomplete, {
+      wtPath,
+      projectDir,
+      reason,
+      branchName,
+      wiId,
+      snapshotDir,
+      resetResult,
+    });
+  }
+  return snapshotDir;
+}
+
 export function snapshotAndResetDirtyWorktree(
   wtPath,
   projectDir,
@@ -400,12 +337,13 @@ export function snapshotAndResetDirtyWorktree(
     lock = true,
     worktreeLockWaitMs = null,
     cleanIgnoredOverride = null,
+    nativeParity = {},
   } = {},
 ) {
-  // Returns null both when there's nothing to clean and when only ignored dirt
-  // was cleared (no snapshot artifact written). Callers must not treat null as
-  // a strict no-op indicator.
-  if (!fs.existsSync(wtPath) || !worktreeNeedsRecovery(wtPath)) return null;
+  // Returns null both when there is nothing to clean and when only ignored
+  // dirt was cleared. Rust makes that decision while owning the snapshot/reset
+  // mutation; Node owns only the surrounding process lock and notifications.
+  if (!fs.existsSync(wtPath)) return null;
 
   const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   let heldLock = null;
@@ -416,20 +354,28 @@ export function snapshotAndResetDirtyWorktree(
     }
   }
   try {
-    const hasTrackedOrUntracked = gitHasChanges(wtPath);
-    const snapshotDir = hasTrackedOrUntracked
-      ? preserveDirtyWorktreeSnapshot(wtPath, projectDir, { reason, branchName, wiId, onMsg })
-      : null;
-    if (hasTrackedOrUntracked && !snapshotDir) {
-      const refusal = new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
-      // Deliberate fail-closed stop — catch-alls must not reclassify it as
-      // corrupt metadata or answer it with an unsnapshotted reset.
-      refusal.code = "SNAPSHOT_REFUSED_RESET";
-      throw refusal;
-    }
-    const resetResult = resetDirtyWorktree(wtPath, { cleanIgnoredOverride });
-    notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult });
-    return snapshotDir;
+    const nativeWtPath = resolveGitWorktreeRoot(wtPath);
+    const nativeResult = runGitNativeMethod(
+      "git.worktree.snapshotAndResetDirty",
+      snapshotAndResetNativePayload(nativeWtPath, projectDir, {
+        reason,
+        branchName,
+        wiId,
+        cleanIgnoredOverride,
+      }),
+      nativeParity,
+    );
+    return adaptSnapshotAndResetResult(nativeResult, {
+      wtPath,
+      projectDir,
+      reason,
+      branchName,
+      wiId,
+      onResetIncomplete,
+      onMsg,
+    });
+  } catch (err) {
+    throw markSnapshotRefusal(err);
   } finally {
     if (heldLock?.acquired) heldLock.release();
   }
@@ -456,7 +402,6 @@ export async function snapshotAndResetDirtyWorktreeAsync(
   } catch {
     return null;
   }
-  if (!(await worktreeNeedsRecoveryAsync(wtPath, { signal }))) return null;
 
   const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   let heldLock = null;
@@ -467,20 +412,29 @@ export async function snapshotAndResetDirtyWorktreeAsync(
     }
   }
   try {
-    const hasTrackedOrUntracked = await worktreeHasChangesNodeAsync(wtPath, { signal });
-    const snapshotDir = hasTrackedOrUntracked
-      ? await preserveDirtyWorktreeSnapshotAsync(wtPath, projectDir, { reason, branchName, wiId, onMsg, signal, nativeParity })
-      : null;
-    if (hasTrackedOrUntracked && !snapshotDir) {
-      const refusal = new Error(`Dirty worktree snapshot failed for ${wtPath}; refusing to reset`);
-      // Deliberate fail-closed stop — catch-alls must not reclassify it as
-      // corrupt metadata or answer it with an unsnapshotted reset.
-      refusal.code = "SNAPSHOT_REFUSED_RESET";
-      throw refusal;
-    }
-    const resetResult = await resetDirtyWorktreeAsync(wtPath, { cleanIgnoredOverride, signal, nativeParity });
-    notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, branchName, wiId, snapshotDir, resetResult });
-    return snapshotDir;
+    const nativeWtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
+    const nativeResult = await runGitNativeMethodAsync(
+      "git.worktree.snapshotAndResetDirty",
+      snapshotAndResetNativePayload(nativeWtPath, projectDir, {
+        reason,
+        branchName,
+        wiId,
+        cleanIgnoredOverride,
+      }),
+      { ...nativeParity, signal },
+    );
+    return adaptSnapshotAndResetResult(nativeResult, {
+      wtPath,
+      projectDir,
+      reason,
+      branchName,
+      wiId,
+      onResetIncomplete,
+      onMsg,
+    });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    throw markSnapshotRefusal(err);
   } finally {
     if (heldLock?.acquired) await heldLock.releaseAsync();
   }

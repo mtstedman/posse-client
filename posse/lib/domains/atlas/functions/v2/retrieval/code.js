@@ -18,6 +18,7 @@ import {
   codeWindowNative,
 } from "../native/code-context.js";
 import { calledFromBreadcrumbs } from "./usages.js";
+import { readRepoFileResult } from "./repo-read.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -112,11 +113,13 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
   const calledFrom = await calledFromBreadcrumbs(view, filtered);
   const source = targetPath ? readFile(targetPath) : null;
   if (source == null && explicitFileRequest) {
+    const failure = repoReadFailure(repoRoot, targetPath, "file");
     return errorEnvelope({
       action: "code.skeleton",
       versionId,
-      code: "file_unreadable",
-      message: `Could not read ${targetPath}`,
+      code: failure.code,
+      message: failure.message,
+      details: failure.details,
     });
   }
   const result = await buildSkeleton({
@@ -169,9 +172,23 @@ export async function codeGetHotPath({ view, versionId, params, readFile, repoRo
 
 async function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, buildHotPath) {
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
-  if (!resolved.ok) return errorEnvelope({ action: "code.lens", versionId, code: resolved.code, message: resolved.message });
+  if (!resolved.ok) return errorEnvelope({
+    action: "code.lens",
+    versionId,
+    code: resolved.code,
+    message: resolved.message,
+    details: "details" in resolved ? resolved.details : undefined,
+  });
   const { source, targetPath, symbolId } = resolved;
   const idents = normalizeIdentifiers(params.identifiersToFind);
+  if (idents.length === 0) {
+    return errorEnvelope({
+      action: "code.lens",
+      versionId,
+      code: "missing_identifiers",
+      message: "code.lens requires at least one identifier in identifiersToFind",
+    });
+  }
   const contextLines = typeof params.contextLines === "number" ? params.contextLines : 2;
   // Breadcrumbs for the definitions the agent is actually looking at: the
   // resolved target plus any requested identifiers defined in this file.
@@ -250,7 +267,13 @@ export async function codeNeedWindow({ view, versionId, params, readFile, repoRo
 
 async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
-  if (!resolved.ok) return errorEnvelope({ action: "code.window", versionId, code: resolved.code, message: resolved.message });
+  if (!resolved.ok) return errorEnvelope({
+    action: "code.window",
+    versionId,
+    code: resolved.code,
+    message: resolved.message,
+    details: "details" in resolved ? resolved.details : undefined,
+  });
   if (!params.reason || params.reason.trim().length < 3) {
     return errorEnvelope({
       action: "code.window",
@@ -365,7 +388,7 @@ async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
     const target = resolved.symbol;
     if (!target) return { ok: false, code: "unresolved_symbol", message: "Symbol not found" };
     const source = resolved.entry?.content ?? readFile(target.repo_rel_path);
-    if (source == null) return { ok: false, code: "file_unreadable", message: `Could not read ${target.repo_rel_path}` };
+    if (source == null) return { ok: false, ...repoReadFailure(repoRoot, target.repo_rel_path, "symbolId") };
     return { ok: true, target, targetPath: target.repo_rel_path, source, symbolId: params.symbolId };
   }
 
@@ -374,11 +397,27 @@ async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
       return { ok: false, code: "invalid_path", message: `${action}: file must be canonical, got ${params.file}` };
     }
     const source = readFile(params.file);
-    if (source == null) return { ok: false, code: "file_unreadable", message: `Could not read ${params.file}` };
+    if (source == null) return { ok: false, ...repoReadFailure(repoRoot, params.file, "file") };
     return { ok: true, target: null, targetPath: params.file, source, symbolId: null };
   }
 
   return { ok: false, code: "invalid_params", message: `${action} requires symbolId or file` };
+}
+
+function repoReadFailure(repoRoot, repoRelPath, targetSource) {
+  const diagnosed = readRepoFileResult(repoRoot, repoRelPath, { targetSource });
+  if (diagnosed.ok === false) return diagnosed;
+  return {
+    code: "file_unreadable",
+    message: `Could not read ${repoRelPath}: the configured source reader returned no content`,
+    details: {
+      status: "failed",
+      retryable: false,
+      path: repoRelPath,
+      targetSource,
+      reason: "source_reader_empty",
+    },
+  };
 }
 
 /**
