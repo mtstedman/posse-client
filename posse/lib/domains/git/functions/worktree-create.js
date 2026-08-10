@@ -147,13 +147,13 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
               onMsg: (msg) => {
                 if (opts.onDirtySnapshot) opts.onDirtySnapshot(null, msg);
               },
-              onResetIncomplete: ({ remainingPaths = [] }) => {
+              onResetIncomplete: ({ remainingPaths = [], operationErrors = [] }) => {
                 const preview = remainingPaths.slice(0, 10).join(", ");
                 const more = remainingPaths.length > 10 ? " ..." : "";
                 if (opts.onDirtyResetIncomplete) {
-                  opts.onDirtyResetIncomplete({ remainingPaths });
+                  opts.onDirtyResetIncomplete({ remainingPaths, operationErrors });
                 } else if (opts.onDirtySnapshot) {
-                  opts.onDirtySnapshot(null, `reset incomplete: ${preview}${more}`);
+                  opts.onDirtySnapshot(null, `reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)${preview ? `: ${preview}${more}` : ""}`);
                 }
               },
             });

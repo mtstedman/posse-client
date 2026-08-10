@@ -126,10 +126,13 @@ function gcSnapshotRemovalCallbacks(wi, {
     onFailure: ({ message }) => {
       onMsg(`GC: failed to clean ${cleanupLabel} worktree for WI#${wiId}: ${message}`);
     },
-    onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null }) => {
+    onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null, operationErrors = [] }) => {
       const preview = remainingPaths.slice(0, 10).join(", ");
       const more = remainingPaths.length > 10 ? " ..." : "";
-      onMsg(`GC: reset incomplete for ${cleanupLabel} WI#${wiId}; remaining path(s): ${preview}${more}`);
+      onMsg(`GC: reset incomplete for ${cleanupLabel} WI#${wiId}; ${remainingPaths.length} remaining path(s), ${operationErrors.length} operation error(s)${preview ? `: ${preview}${more}` : ""}`);
+      for (const operationError of operationErrors.slice(0, 3)) {
+        onMsg(`GC: reset operation failed for ${cleanupLabel} WI#${wiId}: ${operationError}`);
+      }
       if (postResetPorcelain && resetSnapshotDir) {
         onMsg(`GC: reset incomplete snapshot for ${cleanupLabel} WI#${wiId}: ${resetSnapshotDir}`);
       }
@@ -346,10 +349,13 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
                 wiId,
                 onMsg,
                 signal,
-                onResetIncomplete: ({ remainingPaths = [] }) => {
+                onResetIncomplete: ({ remainingPaths = [], operationErrors = [] }) => {
                   const preview = remainingPaths.slice(0, 10).join(", ");
                   const more = remainingPaths.length > 10 ? " ..." : "";
-                  onMsg(`GC: reset incomplete for held WI#${wiId}; remaining path(s): ${preview}${more}`);
+                  onMsg(`GC: reset incomplete for held WI#${wiId}; ${remainingPaths.length} remaining path(s), ${operationErrors.length} operation error(s)${preview ? `: ${preview}${more}` : ""}`);
+                  for (const operationError of operationErrors.slice(0, 3)) {
+                    onMsg(`GC: reset operation failed for held WI#${wiId}: ${operationError}`);
+                  }
                 },
               }), { gitCwd: wtDir });
               if (snapshotDir) {

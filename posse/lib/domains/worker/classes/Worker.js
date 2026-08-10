@@ -940,7 +940,7 @@ export class Worker {
           reason: `${reason}-job-${ctx.jobId}`,
           branchName: ctx.branchName || null,
           wiId: ctx.workItemId ?? null,
-          onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "" }) => {
+          onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", operationErrors = [] }) => {
             resetIncomplete++;
             try {
               logEvent({
@@ -948,9 +948,10 @@ export class Worker {
                 job_id: ctx.jobId ?? null,
                 event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
                 actor_type: EVENT_ACTORS.WORKER,
-                message: `Shutdown dirty sweep left ${remainingPaths.length} path(s)`,
+                message: `Shutdown dirty sweep reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)`,
                 event_json: JSON.stringify({
                   remaining_paths: remainingPaths,
+                  operation_errors: operationErrors,
                   porcelain: postResetPorcelain,
                   wt_path: ctx.wtPath,
                 }),
@@ -1029,7 +1030,7 @@ export class Worker {
           reason: `${reason}-job-${ctx.jobId}`,
           branchName: ctx.branchName || null,
           wiId: ctx.workItemId ?? null,
-          onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "" }) => {
+          onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", operationErrors = [] }) => {
             resetIncomplete++;
             try {
               logEvent({
@@ -1037,9 +1038,10 @@ export class Worker {
                 job_id: ctx.jobId ?? null,
                 event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
                 actor_type: EVENT_ACTORS.WORKER,
-                message: `Shutdown dirty sweep left ${remainingPaths.length} path(s)`,
+                message: `Shutdown dirty sweep reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)`,
                 event_json: JSON.stringify({
                   remaining_paths: remainingPaths,
+                  operation_errors: operationErrors,
                   porcelain: postResetPorcelain,
                   wt_path: ctx.wtPath,
                 }),

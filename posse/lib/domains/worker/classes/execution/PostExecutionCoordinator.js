@@ -1,4 +1,3 @@
-import path from "path";
 import crypto from "crypto";
 import {
   completeAttempt,
@@ -21,7 +20,6 @@ import { parseFileRequest, splitFileRequestsByRisk } from "../../../handoff/func
 import { materializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { isInsideRoot } from "../../../../shared/scope/functions/path.js";
 import { runHookAsync } from "../../../git/functions/hooks.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
@@ -40,7 +38,6 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../catalog/human-input.js";
 import {
   activeSiblingWriteLocks,
-  findActiveSiblingLockForPath,
 } from "../../../queue/functions/sibling-locks.js";
 import {
   isTransientCommitInfraFailure,
@@ -55,6 +52,7 @@ import {
   worktreeLockTimeoutInfoAsync,
 } from "../../functions/execution/commit-diagnostics.js";
 import { storePostAgentFailureCheckpoint } from "../../functions/execution/post-agent-checkpoint.js";
+import { linkSiblingDirtyRecoverySnapshot } from "../../functions/helpers/sibling-dirty-recovery.js";
 import {
   runPostExecutionAssessment as runPostExecutionAssessmentFromModule,
 } from "../../functions/helpers/assessment-pipeline.js";
@@ -525,68 +523,6 @@ export async function handlePostExecutionForWorker({
               materializationGeneration,
             );
             const activeLocksForCommit = listActiveFileLocks();
-            try {
-              const caseFoldScopePath = (file) => {
-                const normalized = String(file || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
-                return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-              };
-              const scopeSet = new Set([
-                ...(jobPayload.files_to_modify || []),
-                ...(jobPayload.files_to_create || []),
-                ...(jobPayload.files_to_delete || []),
-              ].map(caseFoldScopePath).filter(Boolean));
-              const roots = (jobPayload.create_roots || []).filter(Boolean).map(caseFoldScopePath);
-              const preCommit = await gitExecAsync(["status", "--porcelain"], wtPath);
-              const changedPaths = String(preCommit || "")
-                .split("\n")
-                .map((line) => line)
-                .filter(Boolean)
-                .map((line) => {
-                  const normalized = line.replace(/\\/g, "/");
-                  if (normalized.length >= 4 && normalized[2] === " ") return normalized.slice(3).trim();
-                  return normalized.trim().replace(/^[ MADRCU?!]{1,2}\s+/, "").trim();
-                })
-                .filter(Boolean);
-              let nestedRepoPrefix = null;
-              try {
-                const repoRoot = path.resolve(await gitExecAsync(["rev-parse", "--show-toplevel"], wtPath));
-                const rel = path.relative(repoRoot, path.resolve(wtPath)).replace(/\\/g, "/").replace(/\/+$/, "");
-                if (rel && rel !== "." && isInsideRoot(path.resolve(wtPath), repoRoot, { allowEqual: false, followSymlinks: false })) nestedRepoPrefix = rel;
-              } catch {
-                nestedRepoPrefix = null;
-              }
-              const normalizedChangedPaths = changedPaths.map((file) => {
-                const normalized = String(file || "").replace(/\\/g, "/").replace(/^\.\//, "");
-                const scoped = (() => {
-                  if (!nestedRepoPrefix) return normalized;
-                  const prefix = `${nestedRepoPrefix}/`;
-                  return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
-                })();
-                return caseFoldScopePath(scoped);
-              });
-              const outside = normalizedChangedPaths.filter((file) => {
-                if (scopeSet.has(file)) return false;
-                for (const root of roots) {
-                  if (!root || root === ".") continue;
-                  if (file === root || file.startsWith(`${root}/`)) return false;
-                }
-                if (findActiveSiblingLockForPath(file, job, { locks: activeLocksForCommit })) return false;
-                return true;
-              });
-              if (outside.length > 0) {
-                logEvent({
-                  work_item_id: job.work_item_id,
-                  job_id: job.id,
-                  attempt_id: attempt.id,
-                  event_type: EVENT_TYPES.WORKTREE_EXTERNAL_DRIFT_DETECTED,
-                  actor_type: EVENT_ACTORS.WORKER,
-                  message: `Pre-commit telemetry detected ${outside.length} change(s) outside declared scope`,
-                  event_json: JSON.stringify({ files: outside.slice(0, 50) }),
-                });
-              }
-            } catch {
-              // Telemetry-only; never fail the job.
-            }
             const headBefore = await gitCurrentHashAsync(wtPath);
             const commitMsg = `posse: ${job.job_type} job #${job.id} - ${job.title}`;
             // Retry the commit step in place when the failure is a transient
@@ -615,6 +551,7 @@ export async function handlePostExecutionForWorker({
                   jobId: job.id,
                   nonEmptyCreatePaths: materializedCreatePaths,
                   activeFileLocks: activeLocksForCommit,
+                  failOnOutOfScopeDirty: true,
                 });
                 break;
               } catch (commitErr) {
@@ -1155,15 +1092,25 @@ export async function handlePostExecutionForWorker({
                 } : {}),
               }),
             });
-            if (Array.isArray(gitErr.createdOutOfScope) && gitErr.createdOutOfScope.length > 0) {
+            const blockedCreated = Array.isArray(gitErr.createdOutOfScope) ? gitErr.createdOutOfScope : [];
+            const blockedDirty = Array.isArray(gitErr.outOfScopeDirtySkipped) ? gitErr.outOfScopeDirtySkipped : [];
+            const blockedStaged = Array.isArray(gitErr.outOfScopeStagingSkipped) ? gitErr.outOfScopeStagingSkipped : [];
+            const blockedPaths = [...new Set([...blockedCreated, ...blockedDirty, ...blockedStaged])];
+            if (blockedPaths.length > 0) {
               logEvent({
                 work_item_id: job.work_item_id,
                 job_id: job.id,
                 attempt_id: attempt.id,
                 event_type: EVENT_TYPES.JOB_SCOPE_UNTRACKED_OUT_OF_SCOPE_BLOCKED,
                 actor_type: EVENT_ACTORS.WORKER,
-                message: `Blocked commit with ${gitErr.createdOutOfScope.length} out-of-scope untracked file(s): ${gitErr.createdOutOfScope.slice(0, 10).join(", ")}`,
-                event_json: JSON.stringify({ files: gitErr.createdOutOfScope.slice(0, 50) }),
+                message: `Blocked scoped commit with ${blockedPaths.length} non-sibling out-of-scope dirty path(s): ${blockedPaths.slice(0, 10).join(", ")}`,
+                event_json: JSON.stringify({
+                  review_visible: true,
+                  files: blockedPaths.slice(0, 50),
+                  untracked: blockedCreated.slice(0, 50),
+                  dirty: blockedDirty.slice(0, 50),
+                  staged: blockedStaged.slice(0, 50),
+                }),
               });
             }
             await wrappedJob.setError(lockTimeout.timeout
@@ -1188,12 +1135,28 @@ export async function handlePostExecutionForWorker({
                     });
                   } else {
                     try {
-                      await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
+                      const snapshotDir = await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
                         reason: `commit-failed-job-${job.id}`,
                         branchName: getWorkItem(job.work_item_id)?.branch_name || null,
                         wiId: job.work_item_id,
                       });
+                      linkSiblingDirtyRecoverySnapshot({
+                        workItemId: job.work_item_id,
+                        snapshotDir,
+                        jobId: job.id,
+                        reason: `commit-failed-job-${job.id}`,
+                        ownerJobIds: [job.id],
+                      });
                     } catch (resetErr) {
+                      if (resetErr?.snapshotDir) {
+                        linkSiblingDirtyRecoverySnapshot({
+                          workItemId: job.work_item_id,
+                          snapshotDir: resetErr.snapshotDir,
+                          jobId: job.id,
+                          reason: `commit-failed-job-${job.id}-reset-incomplete`,
+                          ownerJobIds: [job.id],
+                        });
+                      }
                       // Snapshot refused or failed — leave the dirt for the
                       // next job's setup recovery rather than wiping the only
                       // copy of the failed attempt's work.

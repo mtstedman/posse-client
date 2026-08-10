@@ -28,7 +28,8 @@ export function errorFromThreadPayload(payload = {}, fallbackMessage = "Worker t
   for (const key of [
     "code", "errno", "syscall", "path", "spawnargs", "status", "signal", "killed", "timeoutMs",
     "stderr", "stdout", "hookOutput", "gitCommitTimedOut", "gitCommitTimeoutBudget",
-    "createdOutOfScope", "gitAddWarnings", "nativeFailure", "rollbackStatus", "rollbackSucceeded",
+    "createdOutOfScope", "outOfScopeDirtySkipped", "outOfScopeStagingSkipped",
+    "retryable", "assessmentRetryable", "gitAddWarnings", "nativeFailure", "rollbackStatus", "rollbackSucceeded",
     "nativeDiagnostics", "headBefore", "headAfter",
   ]) {
     if (payload?.[key] != null) {

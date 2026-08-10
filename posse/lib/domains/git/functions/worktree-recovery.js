@@ -254,10 +254,36 @@ function notifyResetIncomplete(onResetIncomplete, { wtPath, projectDir, reason, 
       snapshotDir,
       remainingPaths: resetResult?.remainingPaths || [],
       postResetPorcelain: resetResult?.postResetPorcelain || "",
+      operationErrors: resetResult?.operationErrors || [],
     });
   } catch {
     // Recovery should remain best-effort.
   }
+}
+
+function incompleteResetError({ wtPath, snapshotDir, resetResult }) {
+  const remainingPaths = Array.isArray(resetResult?.remainingPaths)
+    ? resetResult.remainingPaths
+    : [];
+  const operationErrors = Array.isArray(resetResult?.operationErrors)
+    ? resetResult.operationErrors
+    : [];
+  const detail = [
+    operationErrors.length > 0
+      ? `${operationErrors.length} Git cleanup operation(s) failed: ${operationErrors.slice(0, 3).join("; ")}`
+      : null,
+    remainingPaths.length > 0
+      ? `${remainingPaths.length} path(s) remain dirty: ${remainingPaths.slice(0, 10).join(", ")}`
+      : null,
+  ].filter(Boolean).join("; ") || "native reset did not verify a clean worktree";
+  const error = new Error(`Worktree reset incomplete for ${wtPath}: ${detail}`);
+  error.code = "WORKTREE_RESET_INCOMPLETE";
+  error.snapshotDir = snapshotDir;
+  error.resetResult = resetResult || null;
+  error.remainingPaths = remainingPaths;
+  error.operationErrors = operationErrors;
+  error.postResetPorcelain = resetResult?.postResetPorcelain || "";
+  return error;
 }
 
 function snapshotAndResetNativePayload(
@@ -321,6 +347,9 @@ function adaptSnapshotAndResetResult(
       snapshotDir,
       resetResult,
     });
+  }
+  if (resetResult && resetResult.clean !== true) {
+    throw incompleteResetError({ wtPath, snapshotDir, resetResult });
   }
   return snapshotDir;
 }

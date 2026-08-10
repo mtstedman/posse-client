@@ -382,6 +382,30 @@ function activeFileLocksForCommit(opts = {}) {
   }
 }
 
+function outOfScopeDirtyError({
+  createdOutOfScope = [],
+  outOfScopeDirtySkipped = [],
+  outOfScopeStagingSkipped = [],
+} = {}) {
+  const unique = (files) => [...new Set(files.filter(Boolean))];
+  const untracked = unique(createdOutOfScope);
+  const dirty = unique(outOfScopeDirtySkipped);
+  const staged = unique(outOfScopeStagingSkipped);
+  const all = unique([...untracked, ...dirty, ...staged]);
+  const preview = all.slice(0, 10).join(", ");
+  const more = all.length > 10 ? " ..." : "";
+  const err = new Error(
+    `Scoped commit blocked by ${all.length} non-sibling out-of-scope dirty path(s)${preview ? `: ${preview}${more}` : ""}`,
+  );
+  err.code = "GIT_SCOPED_COMMIT_OUT_OF_SCOPE_DIRTY";
+  err.retryable = true;
+  err.assessmentRetryable = true;
+  err.createdOutOfScope = untracked;
+  err.outOfScopeDirtySkipped = dirty;
+  err.outOfScopeStagingSkipped = staged;
+  return err;
+}
+
 function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const reverted = [];
   const createdViaModifyScope = [];
@@ -877,6 +901,59 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       }
     }
 
+    const throwIfOutOfScopeDirty = () => {
+      if (
+        opts?.failOnOutOfScopeDirty !== true
+        || (
+          createdOutOfScope.length === 0
+          && outOfScopeDirtySkipped.length === 0
+          && outOfScopeStagingSkipped.length === 0
+        )
+      ) return;
+      throw outOfScopeDirtyError({
+        createdOutOfScope,
+        outOfScopeDirtySkipped,
+        outOfScopeStagingSkipped,
+      });
+    };
+    const refreshOutOfScopeAudit = () => {
+      const currentDeleted = collectDeletedTracked();
+      const currentDirty = `${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--cached", "--name-only")}`
+        .split("\n")
+        .map(scopeCompatiblePath)
+        .filter(Boolean);
+      const currentUntracked = gitNameList("ls-files", "--others", "--exclude-standard")
+        .split("\n")
+        .map(scopeCompatiblePath)
+        .filter(Boolean);
+      for (const file of currentDirty) {
+        const normalized = norm(file);
+        if (isSnapshotPath(normalized)) continue;
+        const allowedDeletion = currentDeleted.has(normalized) && canDelete(normalized);
+        if (canEdit(normalized) || allowedDeletion || siblingLockFor(normalized)) continue;
+        rememberUnique(outOfScopeDirtySkipped, file);
+      }
+      for (const file of currentUntracked) {
+        const normalized = norm(file);
+        if (isSnapshotPath(normalized) || canCreateWithoutTrackingCompat(normalized) || siblingLockFor(normalized)) continue;
+        rememberUnique(createdOutOfScope, file);
+      }
+      const currentStaged = gitNameList("diff", "--cached", "--name-only")
+        .split("\n")
+        .map(scopeCompatiblePath)
+        .filter(Boolean);
+      for (const file of currentStaged) {
+        const normalized = norm(file);
+        if (isSnapshotPath(normalized)) continue;
+        const allowedStaged = canEdit(normalized)
+          || canCreateWithoutTrackingCompat(normalized)
+          || (currentDeleted.has(normalized) && canDelete(normalized));
+        if (allowedStaged || siblingLockFor(normalized)) continue;
+        rememberUnique(outOfScopeStagingSkipped, file);
+      }
+    };
+    throwIfOutOfScopeDirty();
+
     const transactionPaths = [...new Set([
       ...nativeModifyPaths,
       ...nativeCreatePaths,
@@ -903,6 +980,8 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       // the secrets gate observes the same scoped working-tree bytes Rust will
       // stage immediately afterward.
       admitPostHookChanges();
+      refreshOutOfScopeAudit();
+      throwIfOutOfScopeDirty();
       const scanPaths = expectedNativeChanges()
         .filter((entry) => entry.changeKind !== "delete")
         .map((entry) => entry.path);

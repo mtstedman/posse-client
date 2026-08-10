@@ -267,6 +267,45 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       }
     } catch (err) {
       if (isAbortError(err)) throw err;
+      if (err?.code === "WORKTREE_RESET_INCOMPLETE") {
+        snapshotDir = err.snapshotDir || null;
+        snapshotSucceeded = !!snapshotDir;
+        if (snapshotDir) {
+          notifySafeRemoveSnapshot(onSnapshot, {
+            wtPath,
+            projectDir,
+            reason,
+            branchName,
+            wiId,
+            snapshotDir,
+            corruptMetadata: false,
+          });
+        }
+        const message = `Worktree reset remained incomplete after preservation; leaving worktree on disk: ${err.message}`;
+        notifySafeRemoveFailure(onFailure, {
+          wtPath,
+          projectDir,
+          reason,
+          branchName,
+          wiId,
+          phase: "reset",
+          message,
+          error: err.message,
+          snapshotDir,
+          operationErrors: err.operationErrors || [],
+          remainingPaths: err.remainingPaths || [],
+          porcelain: err.postResetPorcelain || "",
+        });
+        return safeRemoveBaseResult(wtPath, {
+          skipped: true,
+          snapshotDir,
+          snapshotSucceeded,
+          snapshotFailed,
+          verifiedClean: false,
+          reason: "reset_incomplete",
+          error: err.message,
+        });
+      }
       snapshotFailed = true;
       const message = `Could not snapshot worktree before cleanup; leaving worktree on disk unless it verifies clean: ${err?.message || String(err)}`;
       notifySafeRemoveFailure(onFailure, {

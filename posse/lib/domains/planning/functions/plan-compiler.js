@@ -105,6 +105,7 @@ import {
 import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
 import { rewriteDependenciesAfterSplit } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
+import { deriveAndRecordAssessmentScopes } from "./assessment-scopes.js";
 import {
   resolvePromoteSourceDir,
   routePromoteTaskByOutputDir,
@@ -316,6 +317,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         : null;
       const jobMap = new Map(); // dependency target by planner task index
       const pendingDependencyLinks = [];
+      const wiredPlannerDependencyEdges = [];
       const duplicateTaskClaims = new Map(); // semantic planner task -> first job created for it
       const allCreatedJobIds = new Set(); // every job spawned by this compilation
       const compiledTaskJobIds = new Map(); // planner task index -> spawned job ids
@@ -630,7 +632,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             const dependencyAdded = addDependency(link.jobId, targetJobId, "hard");
             if (!dependencyAdded) {
               logMissingPlannerDependency({ ...link, depIdx, reason: "cycle_or_self_dependency" });
+              continue;
             }
+            wiredPlannerDependencyEdges.push({
+              upstreamTaskIndex: depIdx,
+              dependentTaskIndex: link.taskIndex,
+              dependentJobId: link.jobId,
+            });
           }
         }
       };
@@ -1965,6 +1973,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       }
 
       wirePlannerDependencies();
+
+      deriveAndRecordAssessmentScopes({
+        worker,
+        planJob,
+        tasks,
+        jobMap,
+        plannerDependencyEdges: wiredPlannerDependencyEdges,
+        allCreatedJobIds,
+        compiledTaskJobIds,
+        droppedTaskIndexes,
+      });
 
       if (needsDelegation()) {
         const delegatableJobs = [...jobMap.values()].map(id => getJob(id)).filter((j) =>

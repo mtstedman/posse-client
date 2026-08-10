@@ -31,6 +31,7 @@ import {
 // and re-exported so admin UI / validation imports keep their existing paths.
 import {
   AGENT_COORDINATION_MODE_VALUES,
+  ASSESSMENT_SCOPE_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
@@ -69,6 +70,7 @@ import {
 
 export {
   AGENT_COORDINATION_MODE_VALUES,
+  ASSESSMENT_SCOPE_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
@@ -281,6 +283,9 @@ export const SETTINGS_CATALOG = [
   { key: "disable_system_tools", default: "true", valueType: "boolean", adminVisible: false, description: "Disable Claude's native Read/Write/Grep/Glob/Edit/Bash; agents use only the deterministic MCP + ATLAS tool surface" },
 
   // ── Assessor tuning ──────────────────────────────────────────────────────
+  { key: "assessment_scope_mode",                    default: "off", options: ASSESSMENT_SCOPE_MODE_VALUES, description: "Plan-time assessment-scope experiment: off disables derivation; shadow records hypothetical groups without changing jobs, dependencies, or assessment behavior" },
+  { key: "assessment_scope_max_group_jobs",          default: "4", numeric: { integer: true, min: 2, max: 16 }, description: "Maximum jobs in one hypothetical shadow assessment group" },
+  { key: "assessment_scope_max_group_chars",         default: "120000", numeric: { integer: true, min: 16000, max: 400000 }, description: "Maximum estimated evidence characters in one hypothetical shadow assessment group" },
   { key: "assessor_fallback_reads",                default: "4", numeric: { integer: true, min: 0 }, description: "Extra assessor fallback file reads allowed during verification before retrying (read on attempt 1 if dev didn't surface output)" },
   { key: "assessor_fallback_reads_retry_step",     default: "2", numeric: { integer: true, min: 0 }, description: "Additional fallback reads added per retry attempt" },
   { key: "assessor_internal_retry_limit",          default: "2", numeric: { integer: true, min: 0 }, description: "Internal retry limit before failing assessment" },

@@ -89,6 +89,7 @@ import {
   snapshotAndResetSetupBlockingPathsAsync,
   targetedSetupDirtyRecoveryEligible,
 } from "./worktree-dirty-classification.js";
+import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 
 // Re-exported for external importers (Worker.js, tests) that previously
 // imported these sentinel helpers from this module before the extraction into
@@ -840,7 +841,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               onMsg: (msg) => {
                 worker.emit(job.id, `${C.dim}[system] WI#${wi.id} ${msg}${C.reset}`);
               },
-              onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null }) => {
+              onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null, operationErrors = [] }) => {
                 const preview = remainingPaths.slice(0, 10).join(", ");
                 const more = remainingPaths.length > 10 ? " ..." : "";
                 logEvent({
@@ -848,9 +849,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
                   job_id: job.id,
                   event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
                   actor_type: EVENT_ACTORS.WORKER,
-                  message: `Worktree reset left ${remainingPaths.length} path(s): ${preview}${more}`,
+                  message: `Worktree reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)${preview ? `: ${preview}${more}` : ""}`,
                   event_json: JSON.stringify({
                     remaining_paths: remainingPaths,
+                    operation_errors: operationErrors,
                     porcelain: postResetPorcelain,
                     snapshot_dir: resetSnapshotDir,
                   }),
@@ -858,6 +860,12 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               },
             });
             if (snapshotDir) {
+              linkSiblingDirtyRecoverySnapshot({
+                workItemId: wi.id,
+                snapshotDir,
+                jobId: job.id,
+                reason: `dirty-worktree-setup-wi-${wi.id}-job-${job.id}`,
+              });
               worker.emit(job.id, `${C.dim}[system] WI#${wi.id} preserved dirty worktree snapshot: ${snapshotDir}${C.reset}`);
               logEvent({
                 work_item_id: wi.id,
@@ -869,6 +877,14 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             }
           } catch (err) {
             if (isAbortError(err)) throw err;
+            if (err?.snapshotDir) {
+              linkSiblingDirtyRecoverySnapshot({
+                workItemId: wi.id,
+                snapshotDir: err.snapshotDir,
+                jobId: job.id,
+                reason: `dirty-worktree-setup-wi-${wi.id}-job-${job.id}-reset-incomplete`,
+              });
+            }
             worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} dirty worktree snapshot/reset failed; leaving changes in place (${err.message.split("\n")[0]})${C.reset}`);
             throw err;
           }
@@ -1172,7 +1188,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               });
               worker.emit(job.id, `${C.yellow}[system] WI#${job.work_item_id} ${message}${C.reset}`);
             },
-            onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null }) => {
+            onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null, operationErrors = [] }) => {
               const preview = remainingPaths.slice(0, 10).join(", ");
               const more = remainingPaths.length > 10 ? " ..." : "";
               logEvent({
@@ -1180,9 +1196,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
                 job_id: job.id,
                 event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
                 actor_type: EVENT_ACTORS.WORKER,
-                message: `Setup-failure cleanup left ${remainingPaths.length} path(s): ${preview}${more}`,
+                message: `Setup-failure cleanup reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)${preview ? `: ${preview}${more}` : ""}`,
                 event_json: JSON.stringify({
                   remaining_paths: remainingPaths,
+                  operation_errors: operationErrors,
                   porcelain: postResetPorcelain,
                   snapshot_dir: resetSnapshotDir,
                 }),
@@ -1327,6 +1344,11 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
           }
         },
         onSnapshot: ({ snapshotDir }) => {
+          linkSiblingDirtyRecoverySnapshot({
+            workItemId: wi.id,
+            snapshotDir,
+            reason: "terminal-worktree-cleanup",
+          });
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORKTREE_TERMINAL_SNAPSHOT,
@@ -1340,14 +1362,15 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
         onFailure: ({ message, ...extra }) => {
           logTerminalCleanupFailure(worker, wi, wtDir, message, extra);
         },
-        onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null }) => {
+        onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir: resetSnapshotDir = null, operationErrors = [] }) => {
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
             actor_type: EVENT_ACTORS.WORKER,
-            message: `Terminal cleanup left ${remainingPaths.length} path(s) in worktree`,
+            message: `Terminal cleanup reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)`,
             event_json: JSON.stringify({
               remaining_paths: remainingPaths,
+              operation_errors: operationErrors,
               porcelain: postResetPorcelain,
               snapshot_dir: resetSnapshotDir,
             }),

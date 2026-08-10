@@ -415,6 +415,7 @@ export const EVENT_TYPES = Object.freeze({
   WORKTREE_PRE_ASSESS_DIRTY: "worktree.pre_assess_dirty",
   WORKTREE_RESET_INCOMPLETE: "worktree.reset_incomplete",
   WORKTREE_SHUTDOWN_SWEEP_INCOMPLETE: "worktree.shutdown_sweep_incomplete",
+  WORKTREE_SIBLING_DIRTY_RECOVERED: "worktree.sibling_dirty_recovered",
   WORKTREE_SNAPSHOT_WARNING: "worktree.snapshot_warning",
   WORKTREE_STALE_HEAD_RESET: "worktree.stale_head_reset",
   WORKTREE_TERMINAL_SNAPSHOT: "worktree.terminal_snapshot",

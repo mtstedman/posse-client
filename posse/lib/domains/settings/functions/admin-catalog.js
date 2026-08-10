@@ -334,6 +334,9 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   assessor_fallback_reads_retry_step: "Extra reads per retry",
   assessor_internal_retry_limit: "Assessment retry limit",
   assessor_parse_retry_input_tokens_cap: "Parse retry token limit",
+  assessment_scope_mode: "Assessment scope experiment",
+  assessment_scope_max_group_jobs: "Shadow group job limit",
+  assessment_scope_max_group_chars: "Shadow group evidence limit",
   handoff_max_prompt_chars: "Handoff prompt size limit",
   handoff_max_context_chars: "Handoff context size limit",
   handoff_preload_editable_file_bodies: "Preload editable files",
@@ -351,6 +354,9 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
 });
 
 const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
+  assessment_scope_mode: "Derive and record hypothetical assessment groups during plan compilation. Shadow mode does not create jobs, change dependencies, or suppress inline assessment.",
+  assessment_scope_max_group_jobs: "Maximum number of jobs in one hypothetical shadow assessment group.",
+  assessment_scope_max_group_chars: "Maximum estimated evidence characters in one hypothetical shadow assessment group.",
   posse_local_generation_enabled: "Allow the staged posse-local provider to appear in Admin for an operator-run test. Runtime checks still require a supported platform, the native ML worker, and an installed model package.",
   atlas_v2: "Use ATLAS for code search and context. Turn it off only when ATLAS is unavailable.",
   atlas_phases: "Choose which agent roles receive ATLAS context.",
@@ -923,6 +929,9 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "debug",
     label: "Assessor Tuning",
     keys: Object.freeze([
+      "assessment_scope_mode",
+      "assessment_scope_max_group_jobs",
+      "assessment_scope_max_group_chars",
       "assessor_fallback_reads",
       "assessor_fallback_reads_retry_step",
       "assessor_internal_retry_limit",
@@ -969,6 +978,9 @@ export const SETTINGS_GROUPS = Object.freeze([
 
 const GROUPED_KEY_SET = new Set(SETTINGS_GROUPS.flatMap((group) => group.keys));
 export const TUNING_SETTING_KEYS = new Set([
+  "assessment_scope_mode",
+  "assessment_scope_max_group_jobs",
+  "assessment_scope_max_group_chars",
   "scheduler_max_active_worktrees",
   "scheduler_poll_ms",
   "scheduler_repair_poll_ms",

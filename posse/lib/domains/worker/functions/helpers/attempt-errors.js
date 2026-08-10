@@ -39,6 +39,7 @@ import {
 } from "../../../queue/functions/sibling-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { processVerdict } from "./process-verdict.js";
+import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 
 function deferInterruptedCleanupIfSiblingLocks(job, label) {
   const siblingLocks = activeSiblingWriteLocks(job);
@@ -108,7 +109,7 @@ async function stashWorktreeForFailure(job, wtPath, projectDir) {
     // and reset the worktree clean. Using snapshot-and-reset instead of
     // git stash avoids accumulating orphan stashes across failed jobs.
     try {
-      await snapshotAndResetDirtyWorktreeAsync(wtPath, projectDir || wtPath, {
+      const snapshotDir = await snapshotAndResetDirtyWorktreeAsync(wtPath, projectDir || wtPath, {
         reason: `failed-job-${job.id}`,
         branchName: getWorkItem(job.work_item_id)?.branch_name || null,
         wiId: job.work_item_id,
@@ -121,22 +122,39 @@ async function stashWorktreeForFailure(job, wtPath, projectDir) {
             message: msg,
           });
         },
-        onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir = null }) => {
+        onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", snapshotDir = null, operationErrors = [] }) => {
           logEvent({
             work_item_id: job.work_item_id,
             job_id: job.id,
             event_type: EVENT_TYPES.WORKTREE_RESET_INCOMPLETE,
             actor_type: EVENT_ACTORS.WORKER,
-            message: `Failed-attempt reset left ${remainingPaths.length} path(s)`,
+            message: `Failed-attempt reset incomplete: ${remainingPaths.length} path(s), ${operationErrors.length} operation error(s)`,
             event_json: JSON.stringify({
               remaining_paths: remainingPaths,
+              operation_errors: operationErrors,
               porcelain: postResetPorcelain,
               snapshot_dir: snapshotDir,
             }),
           });
         },
       });
+      linkSiblingDirtyRecoverySnapshot({
+        workItemId: job.work_item_id,
+        snapshotDir,
+        jobId: job.id,
+        reason: `failed-job-${job.id}`,
+        ownerJobIds: [job.id],
+      });
     } catch (resetErr) {
+      if (resetErr?.snapshotDir) {
+        linkSiblingDirtyRecoverySnapshot({
+          workItemId: job.work_item_id,
+          snapshotDir: resetErr.snapshotDir,
+          jobId: job.id,
+          reason: `failed-job-${job.id}-reset-incomplete`,
+          ownerJobIds: [job.id],
+        });
+      }
       // Snapshot refused or failed — leave the dirt for the next attempt's
       // setup recovery rather than wiping the only copy.
       logEvent({

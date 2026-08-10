@@ -11,6 +11,9 @@
 // referenced by name in SETTINGS_CATALOG and consumers.
 
 export const SETTING_KEYS = Object.freeze({
+  ASSESSMENT_SCOPE_MODE: "assessment_scope_mode",
+  ASSESSMENT_SCOPE_MAX_GROUP_JOBS: "assessment_scope_max_group_jobs",
+  ASSESSMENT_SCOPE_MAX_GROUP_CHARS: "assessment_scope_max_group_chars",
   ASSESSOR_FALLBACK_READS: "assessor_fallback_reads",
   ASSESSOR_FALLBACK_READS_RETRY_STEP: "assessor_fallback_reads_retry_step",
   ASSESSOR_INTERNAL_RETRY_LIMIT: "assessor_internal_retry_limit",
@@ -142,6 +145,7 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
 ]);
 
 export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive"]);
+export const ASSESSMENT_SCOPE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
 export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
