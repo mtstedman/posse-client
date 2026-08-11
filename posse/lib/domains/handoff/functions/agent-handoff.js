@@ -219,9 +219,60 @@ function normalizedLines(payload) {
   return lines;
 }
 
+function gutteredSourceLineSlice(entry, start, end) {
+  const tool = String(entry?.descriptor?.tool || entry?.metadata?.tool || "")
+    .toLowerCase()
+    .replace(/^tools[.:]/, "");
+  const objectType = String(entry?.object_type || "").toLowerCase();
+  if (!["chain_read", "read_file", "inspect_file"].includes(tool)
+    && !["chain_read", "read_file", "inspect_file"].includes(objectType)) return null;
+  const windows = [];
+  let current = null;
+  for (const line of normalizedLines(entry?.payload_text)) {
+    const matched = /^\s*(\d+)\t(.*)$/.exec(line);
+    if (!matched) {
+      current = null;
+      continue;
+    }
+    const sourceLine = Number(matched[1]);
+    if (!Number.isInteger(sourceLine) || sourceLine < 1) {
+      current = null;
+      continue;
+    }
+    if (!current || sourceLine !== current.sourceEnd + 1) {
+      current = { sourceStart: sourceLine, sourceEnd: sourceLine, contentLines: [] };
+      windows.push(current);
+    }
+    current.sourceEnd = sourceLine;
+    current.contentLines.push(matched[2]);
+  }
+  if (windows.length === 0) return null;
+  const sourceRanges = windows.map((window) => ({ start: window.sourceStart, end: window.sourceEnd }));
+  const matched = windows.find((window) => start >= window.sourceStart && end <= window.sourceEnd);
+  if (!matched) {
+    return {
+      matched: false,
+      sourceStart: windows[0].sourceStart,
+      sourceEnd: windows[0].sourceEnd,
+      sourceRanges,
+      preferSourceLines: true,
+    };
+  }
+  return {
+    matched: true,
+    sourceStart: matched.sourceStart,
+    sourceEnd: matched.sourceEnd,
+    sourceRanges,
+    preferSourceLines: true,
+    excerpt: matched.contentLines.slice(start - matched.sourceStart, end - matched.sourceStart + 1).join("\n"),
+  };
+}
+
 function materializedSourceLineSlice(entry, start, end) {
   const tool = String(entry?.descriptor?.tool || entry?.metadata?.tool || "").toLowerCase();
   const objectType = String(entry?.object_type || "").toLowerCase();
+  const guttered = gutteredSourceLineSlice(entry, start, end);
+  if (guttered) return guttered;
   if (!tool.endsWith("code.window") && !objectType.includes("code.window")) return null;
   let parsed;
   try { parsed = JSON.parse(String(entry?.payload_text || "")); }
@@ -372,10 +423,11 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   const start = selector.start ?? 1;
   const end = selector.end ?? Math.max(1, lines.length);
   const materializedRangeFits = start <= lines.length && end <= lines.length;
-  const sourceSlice = selector.start == null || materializedRangeFits
+  const sourceSlice = selector.start == null
     ? null
     : materializedSourceLineSlice(entry, start, end);
-  const useSourceLines = sourceSlice?.matched === true;
+  const useSourceLines = sourceSlice?.matched === true
+    && (sourceSlice.preferSourceLines === true || !materializedRangeFits);
   if (!useSourceLines && (end > lines.length || start > lines.length)) {
     const sourceRange = sourceSlice
       ? `; embedded source ranges are ${(sourceSlice.sourceRanges || [{
