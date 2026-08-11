@@ -711,7 +711,7 @@ function roleAllowlistForTool(toolName) {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
   }
   if (toolName === "sub_agent") {
-    return new Set(["dev", "artificer"]);
+    return new Set(["researcher", "dev", "artificer"]);
   }
   const roles = [];
   for (const [role, config] of Object.entries(ROLE_TOOL_ALLOWLISTS)) {
@@ -810,7 +810,7 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     names.unshift("agent_handoff");
   }
-  if (subAgent && ["dev", "artificer"].includes(role)) {
+  if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     names.unshift("sub_agent");
   }
   return names;
@@ -877,7 +877,7 @@ export function getDeterministicMcpToolNames(role, {
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     tools.unshift("agent_handoff");
   }
-  if (subAgent && ["dev", "artificer"].includes(role)) {
+  if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     tools.unshift("sub_agent");
   }
   return tools;

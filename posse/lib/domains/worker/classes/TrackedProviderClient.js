@@ -137,7 +137,7 @@ const RUNTIME_MODEL_ERROR_PATTERNS = [
   /\b(?:do\s+not|don't|does\s+not)\s+have\s+access\b[^\n]{0,100}\bmodel\b/i,
 ];
 const SLOW_PROVIDER_SETUP_PHASE_MS = 1000;
-const SUB_AGENT_CALLER_ROLES = new Set(["dev", "artificer"]);
+const SUB_AGENT_CALLER_ROLES = new Set(["researcher", "dev", "artificer"]);
 
 function providerCallAbortedError(abortSignal, worker, jobId) {
   const err = signalAbortError(abortSignal, "Provider call aborted");
