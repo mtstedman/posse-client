@@ -1,6 +1,7 @@
 // ATLAS-backed file candidate discovery for explicit one-shot requests whose
 // target cannot be resolved uniquely from the request text alone.
 
+import crypto from "node:crypto";
 import path from "node:path";
 
 import { extractJson } from "../../../shared/format/functions/json.js";
@@ -17,6 +18,13 @@ import {
 
 const DEFAULT_MAX_CANDIDATES = 10;
 const ATLAS_SCOPE_POOL_SIZE = 30;
+
+export function oneShotFileScopeChoiceId(value) {
+  const normalized = normalizeCandidatePath(value);
+  if (!normalized || path.isAbsolute(normalized) || normalized.split("/").includes("..")) return null;
+  const digest = crypto.createHash("sha256").update(normalized).digest("hex");
+  return `candidate:sha256:${digest}`;
+}
 
 function clampCandidateLimit(value) {
   return Math.max(1, Math.min(DEFAULT_MAX_CANDIDATES, Number(value) || DEFAULT_MAX_CANDIDATES));
@@ -163,10 +171,10 @@ export function buildOneshotScopeSelector(candidates = [], { status = "ready" } 
     type: "single_select",
     status,
     required: true,
-    accepts_exact_path: rows.length > 0,
+    accepts_exact_path: false,
     options: [
-      ...rows.map((entry, index) => ({
-        value: String(index + 1),
+      ...rows.map((entry) => ({
+        value: oneShotFileScopeChoiceId(entry.file),
         label: entry.file,
         description: entry.source === "atlas" ? "ATLAS semantic match" : "Filename match",
       })),
@@ -194,6 +202,8 @@ export function parseOneshotScopeSelection(answer, candidates = []) {
   const rows = (Array.isArray(candidates) ? candidates : [])
     .map((entry) => typeof entry === "string" ? { file: entry } : entry)
     .filter((entry) => entry?.file);
+  const stable = rows.find((entry) => oneShotFileScopeChoiceId(entry.file) === text);
+  if (stable) return { action: "select", file: stable.file };
   const numbered = text.match(/^(?:option|file)?\s*#?(\d+)\b/i);
   if (numbered) {
     const index = Number(numbered[1]) - 1;

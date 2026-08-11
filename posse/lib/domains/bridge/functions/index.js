@@ -4,3 +4,8 @@ export * from "./human-input-answer.js";
 export * from "./redaction.js";
 export * from "./review-decision.js";
 export * from "./state-snapshot.js";
+export * from "./work-item-actions.js";
+export * from "./work-item-feed.js";
+export * from "./work-item-history.js";
+export * from "./work-item-overview.js";
+export * from "./work-item-stats.js";

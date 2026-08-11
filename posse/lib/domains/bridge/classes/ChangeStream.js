@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import crypto from "node:crypto";
 
 import Database from "better-sqlite3";
 
@@ -27,6 +28,11 @@ import {
   projectBridgeWorkItem,
 } from "../functions/state-snapshot.js";
 import { workItemCost } from "../../billing/functions/cost.js";
+import {
+  WORK_ITEM_BOUNDS,
+  createStreamFeedPayload,
+  projectFeedEvent,
+} from "../functions/work-item-feed.js";
 
 const DEFAULT_REPLAY_LIMIT = 1000;
 const DEFAULT_TAIL_LIMIT = 100;
@@ -238,7 +244,7 @@ export class ChangeStream extends EventEmitter {
     super();
     this.dbPath = dbPath;
     this.pollMs = Math.max(50, Number(pollMs) || 500);
-    this.instanceId = instanceId;
+    this.instanceId = String(instanceId || crypto.randomUUID());
     this.replayLimit = Math.max(1, Number(replayLimit) || DEFAULT_REPLAY_LIMIT);
     this.db = null;
     this.timer = null;
@@ -352,6 +358,17 @@ export class ChangeStream extends EventEmitter {
     return frame;
   }
 
+  publishFeedEvent(event, { durable = false, durableEventId = null } = {}) {
+    const payload = createStreamFeedPayload(event, {
+      producerEpoch: this.instanceId,
+      durable,
+      durableEventId,
+    });
+    if (!payload) return null;
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > WORK_ITEM_BOUNDS.STREAM_PAYLOAD_BYTES) return null;
+    return this.emitBridgeEvent(BRIDGE_EVENT_KINDS.FEED_EVENT, payload);
+  }
+
   snapshotFrame(payload) {
     return createBridgeEventFrame(BRIDGE_EVENT_KINDS.SNAPSHOT, payload, {
       instanceId: this.instanceId,
@@ -366,12 +383,15 @@ export class ChangeStream extends EventEmitter {
   tailFrames({ sinceEventId = 0, limit = DEFAULT_TAIL_LIMIT } = {}) {
     const since = Number(sinceEventId || 0);
     const capped = boundedLimit(limit);
+    const firstReplayId = Number(this.replay[0]?.event_id || this.headEventId() + 1);
     return {
       events: this.replay
         .filter((frame) => Number(frame.event_id) > since)
         .slice(-capped)
         .map(stripBridgeFrame),
       head_event_id: this.headEventId(),
+      replay_start_event_id: firstReplayId,
+      replay_complete: since >= firstReplayId - 1,
     };
   }
 
@@ -525,6 +545,10 @@ export class ChangeStream extends EventEmitter {
       if (kind && !this.shouldSuppressDbGateEvent(row)) {
         const payload = payloadForDbEvent(row);
         if (payload) this.emitBridgeEvent(kind, payload);
+      }
+      const feedEvent = projectFeedEvent(row, { db: this.db });
+      if (feedEvent && feedEvent.event_kind !== "unknown") {
+        this.publishFeedEvent(feedEvent, { durable: true, durableEventId: feedEvent.event_id });
       }
     }
   }

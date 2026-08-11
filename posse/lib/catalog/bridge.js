@@ -13,6 +13,12 @@ export const BRIDGE_COMMANDS = Object.freeze({
   RUN_STOP: "run.stop",
   ATLAS_WARM: "atlas.warm",
   JOB_NUDGE: "job.nudge",
+  WORK_ITEMS_OVERVIEW: "work_items.overview",
+  WORK_ITEMS_HISTORY: "work_items.history",
+  WORK_ITEMS_STATS: "work_items.stats",
+  WORK_ITEMS_TAIL: "work_items.tail",
+  QUESTION_ANSWER: "question.answer",
+  AGENT_NUDGE: "agent.nudge",
   ASK: "ask",
   REVIEW_APPROVE: "review.approve",
   REVIEW_REJECT: "review.reject",
@@ -34,6 +40,7 @@ export const BRIDGE_EVENT_KINDS = Object.freeze({
   INSTANCE_STATUS: "instance_status",
   JOB_PROGRESS: "job_progress",
   AGENT_ACTIVITY: "agent_activity",
+  FEED_EVENT: "feed_event",
 });
 
 export const BRIDGE_FRAME_TYPES = Object.freeze({

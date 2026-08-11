@@ -34,8 +34,8 @@ import {
   snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
 } from "../../../git/functions/worktree.js";
 import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
-import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../catalog/human-input.js";
 import {
   activeSiblingWriteLocks,
 } from "../../../queue/functions/sibling-locks.js";
@@ -377,7 +377,8 @@ export async function handlePostExecutionForWorker({
           const blockedPayload = {
             original_job_id: job.id,
             review_type: "blocked_recovery",
-            choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+            question_kind: "blocked_recovery",
+            choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
             questions: [`Agent was blocked on job #${job.id}. What should be done?`],
             context: [
               `Task: ${job.title}`,
@@ -1414,7 +1415,8 @@ export async function handlePostExecutionForWorker({
                   payload_json: JSON.stringify({
                     original_job_id: job.id,
                     review_type: "blocked_recovery",
-                    choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+                    question_kind: "blocked_recovery",
+                    choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
                     questions: [
                       `Job #${job.id} "${job.title}" has been blocked ${blockedCount + 1} times with the same issue. How should we proceed?`,
                     ],
@@ -1440,7 +1442,8 @@ export async function handlePostExecutionForWorker({
             const blockedPayload = {
               original_job_id: job.id,
               review_type: "blocked_recovery",
-              choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+              question_kind: "blocked_recovery",
+              choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
               questions: [`Dev was blocked on job #${job.id}. What should be done?`],
               context: [
                 `Task: ${job.title}`,

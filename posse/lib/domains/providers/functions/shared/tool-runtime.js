@@ -34,6 +34,7 @@ import {
   requestJobScopeExpansion,
   getIntSetting,
 } from "../../../queue/functions/index.js";
+import { signalPendingOperatorFeedbackForJob } from "../../../queue/functions/agent-interactions.js";
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
@@ -86,6 +87,7 @@ export function operatorFeedbackSignalTextForJob(jobId, toolName = "") {
   if (!Number.isFinite(normalized) || normalized <= 0) return "";
   const pendingCount = countPendingOperatorFeedbackForJob(normalized);
   if (pendingCount <= 0) return "";
+  signalPendingOperatorFeedbackForJob(normalized);
   return [
     "",
     "OPERATOR_FEEDBACK_SIGNAL:",
@@ -409,11 +411,11 @@ export function createStandardToolHandlerMap({
         attempt_id: ambient.attempt_id ?? null,
         agent_call_id: ambient.agent_call_id ?? null,
         phase: args.phase,
-        action: args.status,
+        status: args.status,
         body: args.summary,
         role: ambient.role ?? null,
+        detail: args.detail,
         source: "embedded_tool",
-        metadata_json: { status: args.status || null },
       });
       return "Agent feedback recorded for Monitor Agents.";
     },

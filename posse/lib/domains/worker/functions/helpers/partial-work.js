@@ -6,6 +6,7 @@
 // review.
 
 import path from "path";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import {
   applyDelegation,
   createJob,
@@ -323,6 +324,8 @@ export function spawnPartialWorkReviewJob(worker, job, {
     payload_json: JSON.stringify({
       original_job_id: job.id,
       review_type: "partial_work_recovery",
+      question_kind: "partial_work_recovery",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.partial_work_recovery,
       suggested_max_turns: maxTurns,
       questions: [
         [

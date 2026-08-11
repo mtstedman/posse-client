@@ -230,6 +230,7 @@ export async function prepareOneshotScopeSelection(worker, job, payload, {
   const nextPayload = {
     ...payload,
     subtype: ONESHOT_SCOPE_SELECTION_SUBTYPE,
+    question_kind: "one_shot_file_scope",
     questions: [prompt.question],
     context: prompt.context,
     selector: buildOneshotScopeSelector(candidates, { status: "ready" }),

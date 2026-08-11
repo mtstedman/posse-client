@@ -17,6 +17,12 @@ const AGENT_TO_USER = "agent_to_user";
 const ACTIVE_STATUSES = new Set(["active"]);
 const USER_GUIDANCE_KINDS = new Set(["nudge", "answer", "scope_request", "status_request"]);
 const ACK_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
+const AGENT_FEEDBACK_PHASES = new Set([
+  "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
+]);
+const AGENT_FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
+const AGENT_FEEDBACK_SUMMARY_MAX_CHARS = 180;
+const AGENT_FEEDBACK_DETAIL_MAX_CHARS = 360;
 
 // Identical consecutive activity pings within this window are coalesced into the
 // most recent row instead of inserting a new interaction + event + wakeup.
@@ -64,6 +70,10 @@ function activityProtocolState(metadata = {}) {
   if (["canceled", "cancelled"].includes(raw)) return { kind: "result", status: "canceled" };
   if (["blocked", "waiting"].includes(raw)) return { kind: "progress", status: "waiting" };
   return { kind: "progress", status: "running" };
+}
+
+function scalarLength(value) {
+  return Array.from(String(value ?? "")).length;
 }
 
 function normalizeRow(row) {
@@ -165,6 +175,18 @@ function feedbackToolPayload(row) {
     work_item_id: row.work_item_id,
     job_id: row.job_id,
   };
+}
+
+function retrievedMetadataJson(row, retrievedAt) {
+  const metadata = metadataObject(row.metadata_json);
+  const lifecycle = metadata.nudge_lifecycle || {};
+  metadata.nudge_lifecycle = {
+    ...lifecycle,
+    retrieved_at: lifecycle.retrieved_at || retrievedAt,
+    last_retrieved_at: retrievedAt,
+    delivery_count: Math.max(0, Number(lifecycle.delivery_count) || 0) + 1,
+  };
+  return JSON.stringify(metadata);
 }
 
 export function createAgentInteraction({
@@ -319,7 +341,11 @@ export function createOperatorNudge({
   metadata_json = null,
   expires_at = null,
 } = {}) {
-  const cappedBody = String(body ?? "").slice(0, OPERATOR_NUDGE_BODY_MAX_CHARS);
+  const boundedBody = normalizeText(body);
+  if (!boundedBody) throw new Error("createOperatorNudge requires body");
+  if (scalarLength(boundedBody) > OPERATOR_NUDGE_BODY_MAX_CHARS) {
+    throw new Error(`createOperatorNudge body exceeds ${OPERATOR_NUDGE_BODY_MAX_CHARS} characters`);
+  }
   // Insert + supersede atomically: a concurrent get_operator_feedback in the
   // gap would deliver BOTH the old and new guidance ("latest correction
   // wins" briefly violated), and a crash mid-supersede leaves two actives.
@@ -334,7 +360,7 @@ export function createOperatorNudge({
       status: "active",
       source,
       author,
-      body: cappedBody,
+      body: boundedBody,
       metadata_json,
       expires_at,
     });
@@ -379,21 +405,45 @@ export function recordAgentActivity({
   agent_call_id = null,
   phase = null,
   action = null,
+  status = null,
   body = null,
   role = null,
+  detail = null,
+  provider = null,
+  model = null,
   source = "agent",
   metadata_json = null,
 } = {}) {
   const phaseText = normalizeText(phase);
   const actionText = normalizeText(action);
-  const bodyText = normalizeText(body) || [phaseText, actionText].filter(Boolean).join(": ");
+  const statusText = normalizeText(status || action || "running");
+  const bodyText = normalizeText(body) || [phaseText, actionText || statusText].filter(Boolean).join(": ");
+  const detailText = normalizeText(detail);
+  const typedFeedback = new Set(["agent_feedback", "embedded_tool", "mcp_tool"]).has(normalizeText(source));
+  if (typedFeedback && !AGENT_FEEDBACK_PHASES.has(phaseText)) {
+    throw new Error("recordAgentActivity requires a valid phase");
+  }
+  if (typedFeedback && !AGENT_FEEDBACK_STATUSES.has(statusText)) {
+    throw new Error("recordAgentActivity requires a valid status");
+  }
   if (!bodyText) throw new Error("recordAgentActivity requires phase, action, or body");
+  if (typedFeedback && scalarLength(bodyText) > AGENT_FEEDBACK_SUMMARY_MAX_CHARS) {
+    throw new Error(`recordAgentActivity summary must be 1..${AGENT_FEEDBACK_SUMMARY_MAX_CHARS} characters`);
+  }
+  if (scalarLength(detailText) > AGENT_FEEDBACK_DETAIL_MAX_CHARS) {
+    throw new Error(`recordAgentActivity detail exceeds ${AGENT_FEEDBACK_DETAIL_MAX_CHARS} characters`);
+  }
   const activityBody = bodyText.slice(0, 500);
+  const suppliedMetadata = metadataObject(metadata_json);
   const activityMetadata = {
-    ...(metadata_json && typeof metadata_json === "object" ? metadata_json : {}),
+    ...suppliedMetadata,
     phase: phaseText || null,
-    action: actionText || null,
-    role: normalizeText(role) || normalizeText(metadataObject(metadata_json).role) || null,
+    action: actionText || statusText || null,
+    status: statusText || null,
+    role: normalizeText(role) || normalizeText(suppliedMetadata.role) || null,
+    detail: detailText || null,
+    provider: normalizeText(provider) || normalizeText(suppliedMetadata.provider) || null,
+    model: normalizeText(model) || normalizeText(suppliedMetadata.model) || null,
   };
 
   // Coalesce a chatty agent re-sending the same update: a repeated identical
@@ -508,7 +558,13 @@ export function applyActiveAgentInteractionsForAttempt({
             updated_at = ?
         WHERE id = ?
       `);
-      for (const row of candidates) update.run(nowIso, nowIso, nowIso, row.id);
+      const updateMetadata = db.prepare(`
+        UPDATE agent_interactions SET metadata_json = ? WHERE id = ?
+      `);
+      for (const row of candidates) {
+        update.run(nowIso, nowIso, nowIso, row.id);
+        updateMetadata.run(retrievedMetadataJson(row, nowIso), row.id);
+      }
     }
     return candidates;
   }
@@ -527,6 +583,9 @@ export function applyActiveAgentInteractionsForAttempt({
           updated_at = ?
       WHERE id = ?
     `);
+    const updateMetadata = db.prepare(`
+      UPDATE agent_interactions SET metadata_json = ? WHERE id = ?
+    `);
     const rows = [];
     for (const row of candidates) {
       // The application row is a delivery AUDIT, not a delivery gate: an item
@@ -536,6 +595,7 @@ export function applyActiveAgentInteractionsForAttempt({
       // can never clear (guidance silently undeliverable for the attempt).
       const info = insert.run(row.id, row.work_item_id, row.job_id, attemptId, agentCallId, nowIso);
       update.run(nowIso, nowIso, nowIso, row.id);
+      updateMetadata.run(retrievedMetadataJson(row, nowIso), row.id);
       rows.push({ row, firstDelivery: info.changes > 0 });
     }
     return rows;
@@ -679,6 +739,26 @@ export function countPendingOperatorFeedbackForJob(jobId) {
   return Number(row?.count || 0);
 }
 
+export function signalPendingOperatorFeedbackForJob(jobId) {
+  const normalizedJobId = normalizePositiveInt(jobId);
+  if (!normalizedJobId) return 0;
+  const db = getDb();
+  const signaledAt = now();
+  return runImmediateTransaction(db, () => {
+    const rows = selectPendingOperatorFeedback(db, { job_id: normalizedJobId, nowIso: signaledAt, limit: 100 });
+    const update = db.prepare(`UPDATE agent_interactions SET metadata_json = ?, updated_at = ? WHERE id = ?`);
+    for (const row of rows) {
+      const metadata = metadataObject(row.metadata_json);
+      metadata.nudge_lifecycle = {
+        ...(metadata.nudge_lifecycle || {}),
+        signaled_at: metadata.nudge_lifecycle?.signaled_at || signaledAt,
+      };
+      update.run(JSON.stringify(metadata), signaledAt, row.id);
+    }
+    return rows.length;
+  });
+}
+
 export function getOperatorFeedbackForJob({
   job_id,
   attempt_id = null,
@@ -711,6 +791,9 @@ export function acknowledgeOperatorFeedback({
   const normalizedReason = normalizeText(reason);
   if ((normalizedDecision === "rejected" || normalizedDecision === "deferred") && !normalizedReason) {
     throw new Error(`acknowledgeOperatorFeedback requires reason when decision is ${normalizedDecision}`);
+  }
+  if (scalarLength(normalizedReason) > 500) {
+    throw new Error("acknowledgeOperatorFeedback reason exceeds 500 characters");
   }
 
   const db = getDb();

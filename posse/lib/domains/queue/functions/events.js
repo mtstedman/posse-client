@@ -136,6 +136,25 @@ function readEventFileRows({
       if (minId != null && Number(entry.id || 0) <= minId) return false;
       return true;
     },
+}).map(normalizeEventRow).filter(Boolean);
+}
+
+export function queryRetainedEventRows({
+  limit = 100,
+  order = "desc",
+  predicate = () => true,
+} = {}) {
+  const capped = Math.max(0, Math.min(500, Number(limit) || 0));
+  if (capped === 0) return [];
+  return readRunTelemetryEntries("events", {
+    limit: capped,
+    order: order === "asc" ? "asc" : "desc",
+    currentEpochOnly: false,
+    predicate: (entry) => {
+      const row = normalizeEventRow(entry);
+      if (!row) return false;
+      try { return predicate(row) === true; } catch { return false; }
+    },
   }).map(normalizeEventRow).filter(Boolean);
 }
 

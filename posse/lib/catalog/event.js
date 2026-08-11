@@ -107,6 +107,11 @@ export const EVENT_TYPES = Object.freeze({
   OPERATOR_NUDGE_EXPIRED: "operator_nudge.expired",
   OPERATOR_NUDGE_REQUEUED: "operator_nudge.requeued",
 
+  // ── durable current file-lane state ─────────────────────────────────────
+  FILE_LANE_ACQUIRED: "scheduler.file_lane_acquired",
+  FILE_LANE_CLEARED: "scheduler.file_lane_cleared",
+  FILE_LANE_WAITING: "scheduler.file_lane_waiting",
+
   // ── one-shot routing ───────────────────────────────────────────────────
   ONESHOT_DEMOTED: "oneshot.demoted",
   ONESHOT_FIX_SCOPE_GATED: "oneshot.fix_scope_gated",

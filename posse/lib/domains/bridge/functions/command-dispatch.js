@@ -37,6 +37,10 @@ import {
   resolveReviewGateJob,
 } from "./review-decision.js";
 import { executeGitPushGate } from "./git-push-gate.js";
+import { answerWorkItemQuestion, nudgeWorkItemAgent } from "./work-item-actions.js";
+import { projectWorkItemHistory, projectWorkItemTail } from "./work-item-history.js";
+import { projectWorkItemOverview } from "./work-item-overview.js";
+import { projectWorkItemStats } from "./work-item-stats.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
   addBridgeWorkItem,
@@ -70,6 +74,8 @@ const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.PLAN_APPROVE,
   BRIDGE_COMMANDS.PLAN_REJECT,
   BRIDGE_COMMANDS.GIT_PUSH,
+  BRIDGE_COMMANDS.QUESTION_ANSWER,
+  BRIDGE_COMMANDS.AGENT_NUDGE,
 ]);
 
 function commandIdFromFrame(frame = {}) {
@@ -274,6 +280,24 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.JOB_NUDGE:
       return nudgeBridgeJob(args, context);
+
+    case BRIDGE_COMMANDS.WORK_ITEMS_OVERVIEW:
+      return projectWorkItemOverview(args, context);
+
+    case BRIDGE_COMMANDS.WORK_ITEMS_HISTORY:
+      return projectWorkItemHistory(args, context);
+
+    case BRIDGE_COMMANDS.WORK_ITEMS_STATS:
+      return projectWorkItemStats(args, context);
+
+    case BRIDGE_COMMANDS.WORK_ITEMS_TAIL:
+      return projectWorkItemTail(args, context);
+
+    case BRIDGE_COMMANDS.QUESTION_ANSWER:
+      return answerWorkItemQuestion(args, context);
+
+    case BRIDGE_COMMANDS.AGENT_NUDGE:
+      return nudgeWorkItemAgent(args, context);
 
     case BRIDGE_COMMANDS.ASK: {
       const jobId = jobIdArg(args);

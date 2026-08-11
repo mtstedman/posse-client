@@ -441,6 +441,7 @@ export class LocalServer {
     return {
       projectDir: this.projectDir,
       actor: "bridge",
+      instanceId: this.instanceId,
       tailBridgeEvents: typeof this.tailBridgeEvents === "function" ? this.tailBridgeEvents : null,
       getHeadEventId: typeof this.getHeadEventId === "function" ? this.getHeadEventId : null,
       startPosse: typeof this.startPosse === "function" ? this.startPosse : null,

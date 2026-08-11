@@ -19,6 +19,7 @@ import {
   setJobResult,
 } from "./index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { PUSH_OFFER_SUBTYPE, TERMINAL_WORK_ITEM_STATUSES, runImmediateTransaction } from "./common.js";
 import { withMergeLockSync } from "./locks.js";
 
@@ -152,6 +153,8 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
     const countText = aheadCount != null ? `${aheadCount} commit(s)` : "pending commits";
     const payload = {
       subtype: PUSH_OFFER_SUBTYPE,
+      question_kind: "push_offer",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.push_offer,
       remote,
       push_branch: branch,
       target_branch: String(state.targetBranch || branch),
@@ -164,8 +167,9 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
           wi_id: item.wiId ?? item.wi_id ?? null,
           title: String(item.title || "").slice(0, 120),
           branch: String(item.branchName || item.branch || "").slice(0, 120),
-        })),
+      })),
       prompt: `Push ${countText} on ${branch} to ${remote}?`,
+      questions: [`Push ${countText} on ${branch} to ${remote}?`],
       created_by: createdBy,
     };
 

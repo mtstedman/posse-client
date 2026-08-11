@@ -33,11 +33,11 @@ import {
   sanitizeScopedFixPaths as _sanitizeScopedFixPaths,
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
-import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../../catalog/human-input.js";
 import {
   PROVIDER_AFFINITY_ROUTES,
   providerForAffinityRoute,
 } from "../../../../../shared/policies/functions/provider-affinity.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();
@@ -315,7 +315,8 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
     payload_json: JSON.stringify({
       original_job_id: job.id,
       review_type: "blocked_recovery",
-      choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+      question_kind: "blocked_recovery",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
       questions: [
         `Work item has ${failedCount} failed dev/fix jobs and needs a terminal recovery decision.\n\nLatest failure: "${job.title}"\nAssessor reasons: ${verdict.reasons.join("; ")}\n\n--- FULL FAILURE HISTORY ---\n${failureHistory}`,
       ],
@@ -360,7 +361,8 @@ function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth,
     payload_json: JSON.stringify({
       original_job_id: job.id,
       review_type: "blocked_recovery",
-      choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+      question_kind: "blocked_recovery",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
       questions: [
         `Job "${job.title}" has been through ${fixChainDepth} fix cycles and is still failing.\n\nLatest assessor reasons: ${verdict.reasons.join("; ")}\n\n--- FIX CHAIN HISTORY ---\n${chainHistory}`,
       ],
@@ -759,7 +761,8 @@ function _spawnRecoveryJobsForVerdict({
           original_job_id: job.id,
           gate_kind: "fix_chain_exhausted",
           review_type: "blocked_recovery",
-          choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+          question_kind: "blocked_recovery",
+          choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
           questions: [
             `The same failure/scope fingerprint (${fixFingerprint.slice(0, 12)}) already occurred in this fix lineage.`,
             "Choose retry_with_changes with materially new guidance, replan, pass, fail, or explicit_waiver.",
@@ -847,6 +850,8 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: "cheap",
         payload_json: JSON.stringify({
           original_job_id: job.id,
+          question_kind: "file_scope_approval",
+          choices: WORK_ITEM_QUESTION_CHOICE_IDS.file_scope_approval,
           questions: [
             [
               `Fix #${fixJob.id} descends from one-shot job #${job.id} ("${job.title}") but expands beyond the original one-file scope:`,

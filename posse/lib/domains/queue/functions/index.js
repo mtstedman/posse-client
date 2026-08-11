@@ -171,6 +171,7 @@ export {
   getHeadEventId,
   logAgentActivity,
   logEvent,
+  queryRetainedEventRows,
 } from "./events.js";
 
 export {
@@ -220,6 +221,8 @@ export {
   acquireLeaseWithWriteLocks,
   ancestorJobIdsForJob,
   cleanupStaleFileLocks,
+  clearFileLaneWaitsForJob,
+  fileLaneId,
   findWriteLockConflict,
   getJobWriteScopeAsync,
   getJobWriteScope,
@@ -227,7 +230,11 @@ export {
   jobHoldsWriteLockForPath,
   jobNeedsWriteLocks,
   listActiveFileLocks,
+  listFileLaneWaits,
   queuedCohortJobIdsForJob,
+  reconcileFileLaneWaits,
+  recordFileLaneConflict,
+  recordFileLaneWait,
   releaseWorkItemFileLockForPath,
   releaseJobFileLocks,
   releaseWorkItemFileLocks,

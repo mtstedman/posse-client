@@ -2,7 +2,7 @@
 
 import { updateJobStatus } from "../../../../queue/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
-import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../../catalog/human-input.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
@@ -22,7 +22,8 @@ export function handle(job, verdict, ctx) {
       payload_json: JSON.stringify({
         original_job_id: job.id,
         review_type: "blocked_recovery",
-        choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+        question_kind: "blocked_recovery",
+        choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
         questions: verdict.human_questions,
         context: verdict.reasons,
       }),
@@ -44,7 +45,8 @@ export function handle(job, verdict, ctx) {
     payload_json: JSON.stringify({
       original_job_id: job.id,
       review_type: "blocked_recovery",
-      choices: HUMAN_INPUT_ACTION_ENUMS.blocked_recovery,
+      question_kind: "blocked_recovery",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
       questions: [
         `Job #${job.id} ("${job.title}") is blocked.`,
         `Reasons: ${verdict.reasons.join("; ")}`,

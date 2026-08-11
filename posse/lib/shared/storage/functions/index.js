@@ -989,6 +989,83 @@ function ensureRuntimeDbDir(dir) {
   try { fs.chmodSync(dir, 0o700); } catch { /* Windows/best-effort */ }
 }
 
+function installTerminalTransitionTracking(db) {
+  db.exec(`
+    INSERT OR IGNORE INTO work_item_terminal_transitions (work_item_id, outcome, occurred_at, source)
+    SELECT id,
+           CASE status WHEN 'complete' THEN 'completed' ELSE status END,
+           completed_at,
+           'legacy_current'
+    FROM work_items
+    WHERE status IN ('complete','failed','canceled') AND completed_at IS NOT NULL;
+
+    INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
+    SELECT id,
+           CASE WHEN status = 'dead_letter' THEN 'failed' ELSE status END,
+           finished_at,
+           'legacy_current'
+    FROM jobs
+    WHERE status IN ('succeeded','failed','dead_letter','canceled') AND finished_at IS NOT NULL;
+
+    DROP TRIGGER IF EXISTS trg_work_item_terminal_transition_insert;
+    DROP TRIGGER IF EXISTS trg_work_item_terminal_transition_update;
+    DROP TRIGGER IF EXISTS trg_job_terminal_transition_insert;
+    DROP TRIGGER IF EXISTS trg_job_terminal_transition_update;
+
+    CREATE TRIGGER trg_work_item_terminal_transition_insert
+    AFTER INSERT ON work_items
+    WHEN NEW.status IN ('complete','failed','canceled') AND NEW.completed_at IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO work_item_terminal_transitions (work_item_id, outcome, occurred_at, source)
+      VALUES (
+        NEW.id,
+        CASE NEW.status WHEN 'complete' THEN 'completed' ELSE NEW.status END,
+        NEW.completed_at,
+        'owner_transition'
+      );
+    END;
+
+    CREATE TRIGGER trg_work_item_terminal_transition_update
+    AFTER UPDATE OF status, completed_at ON work_items
+    WHEN NEW.status IN ('complete','failed','canceled') AND NEW.completed_at IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO work_item_terminal_transitions (work_item_id, outcome, occurred_at, source)
+      VALUES (
+        NEW.id,
+        CASE NEW.status WHEN 'complete' THEN 'completed' ELSE NEW.status END,
+        NEW.completed_at,
+        'owner_transition'
+      );
+    END;
+
+    CREATE TRIGGER trg_job_terminal_transition_insert
+    AFTER INSERT ON jobs
+    WHEN NEW.status IN ('succeeded','failed','dead_letter','canceled') AND NEW.finished_at IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
+      VALUES (
+        NEW.id,
+        CASE WHEN NEW.status = 'dead_letter' THEN 'failed' ELSE NEW.status END,
+        NEW.finished_at,
+        'owner_transition'
+      );
+    END;
+
+    CREATE TRIGGER trg_job_terminal_transition_update
+    AFTER UPDATE OF status, finished_at ON jobs
+    WHEN NEW.status IN ('succeeded','failed','dead_letter','canceled') AND NEW.finished_at IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
+      VALUES (
+        NEW.id,
+        CASE WHEN NEW.status = 'dead_letter' THEN 'failed' ELSE NEW.status END,
+        NEW.finished_at,
+        'owner_transition'
+      );
+    END;
+  `);
+}
+
 export function getDb() {
   const dbPath = path.resolve(getRuntimeDbPath());
   if (_db) {
@@ -1282,6 +1359,57 @@ export function getDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_job_file_locks_unique_active
       ON job_file_locks(job_id, path, lock_kind)
       WHERE released_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS file_lane_waits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lane_id TEXT NOT NULL,
+      waiter_job_id INTEGER NOT NULL,
+      waiter_work_item_id INTEGER NOT NULL,
+      holder_type TEXT NOT NULL CHECK (holder_type IN ('job','work_item','active_worker')),
+      holder_key TEXT NOT NULL,
+      holder_job_id INTEGER,
+      holder_work_item_id INTEGER,
+      path TEXT NOT NULL,
+      lock_kind TEXT NOT NULL CHECK (lock_kind IN ('file','root')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (waiter_job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (waiter_work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      FOREIGN KEY (holder_job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+      FOREIGN KEY (holder_work_item_id) REFERENCES work_items(id) ON DELETE SET NULL,
+      UNIQUE(waiter_job_id, lane_id, holder_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_lane_waits_waiter
+      ON file_lane_waits(waiter_job_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_file_lane_waits_work_item
+      ON file_lane_waits(waiter_work_item_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_file_lane_waits_holder
+      ON file_lane_waits(holder_job_id, holder_work_item_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS work_item_terminal_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_item_id INTEGER NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('completed','failed','canceled')),
+      occurred_at TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('owner_transition','legacy_current')),
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      UNIQUE(work_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_work_item_terminal_transitions_window
+      ON work_item_terminal_transitions(occurred_at, outcome, work_item_id);
+
+    CREATE TABLE IF NOT EXISTS job_terminal_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('succeeded','failed','canceled')),
+      occurred_at TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('owner_transition','legacy_current')),
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      UNIQUE(job_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_terminal_transitions_window
+      ON job_terminal_transitions(occurred_at, outcome, job_id);
+
   `);
 
   // ── Migration: branch lifecycle columns ──────────────────────────────────
@@ -2594,6 +2722,7 @@ export function getDb() {
   createHashRefStoreTables(_db);
   createAgentHandoffPacketTable(_db);
   installJsonValidityTriggers(_db);
+  installTerminalTransitionTracking(_db);
 
   return _db;
 }

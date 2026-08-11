@@ -8,6 +8,7 @@ import {
   queueInternalAssessmentRetry,
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
 function isAssessmentDispositionQuestion(question) {
   const text = String(question || "").trim().toLowerCase();
@@ -64,7 +65,11 @@ export function handle(job, verdict, ctx) {
       context: verdict.reasons,
       ...(asksForClarification
         ? { allow_best_judgment: true }
-        : { review_type: "needs_review" }),
+        : {
+            review_type: "needs_review",
+            question_kind: "assessment_review",
+            choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
+          }),
     }),
   });
   spawnedJobs.push(humanJob);
@@ -104,6 +109,8 @@ export function handleParseError(job, verdict, ctx) {
       ],
       context: verdict.reasons.join("; "),
       review_type: "assessment_parse_error",
+      question_kind: "assessment_review",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
     }),
   });
   spawnedJobs.push(reviewJob);
@@ -143,6 +150,8 @@ export function handleUnknownVerdict(job, verdict, ctx) {
       ],
       context: verdict.raw || "",
       review_type: "unknown_verdict",
+      question_kind: "assessment_review",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
     }),
   });
   spawnedJobs.push(unknownReviewJob);

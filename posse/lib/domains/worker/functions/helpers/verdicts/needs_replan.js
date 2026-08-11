@@ -18,6 +18,7 @@ import { cleanupArtifactDirs, wiScopeId } from "../../../../artifacts/functions/
 import { C } from "../../../../../shared/format/functions/colors.js";
 import { getMaxReplans } from "../../../../settings/functions/tunables.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
 function isLoopbackReplanResearchJob(job) {
   if (job?.job_type !== "research") return false;
@@ -82,6 +83,8 @@ export function handle(job, verdict, ctx) {
           ],
           context: "Replan depth limit hit. Previous approaches keep failing assessment.",
           review_type: originalNeverExecuted ? "unexecuted_replan_limit" : "replan_limit",
+          question_kind: "assessment_review",
+          choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
         }),
       });
       spawnedJobs.push(escJob);

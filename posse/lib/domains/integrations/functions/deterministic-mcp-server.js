@@ -70,6 +70,7 @@ import {
   recordAgentActivity,
   requestJobScopeExpansion,
 } from "../../queue/functions/index.js";
+import { signalPendingOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
 import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
@@ -2052,11 +2053,12 @@ function agentFeedback(args = {}) {
     attempt_id: mcpAttemptId,
     agent_call_id: mcpAgentCallId,
     phase: args.phase,
-    action: args.status,
+    status: args.status,
     body: args.summary,
     role: roleName,
+    detail: args.detail,
     source: "mcp_tool",
-    metadata_json: { status: args.status || null, role: roleName || null },
+    metadata_json: { role: roleName || null },
   });
   return "Agent feedback recorded for Monitor Agents.";
 }
@@ -2066,6 +2068,7 @@ function operatorFeedbackSignalText(toolName) {
   if (!mcpJobId) return "";
   const pendingCount = countPendingOperatorFeedbackForJob(mcpJobId);
   if (pendingCount <= 0) return "";
+  signalPendingOperatorFeedbackForJob(mcpJobId);
   return [
     "",
     "OPERATOR_FEEDBACK_SIGNAL:",
@@ -2122,6 +2125,7 @@ function getOperatorFeedback(args = {}) {
   const feedback = getOperatorFeedbackForJob({
     job_id: mcpJobId,
     attempt_id: mcpAttemptId,
+    agent_call_id: mcpAgentCallId,
     limit: args.limit,
   });
   setEmptyOperatorFeedbackPolls(pollKey, feedback.length === 0 ? priorEmptyPolls + 1 : 0);
@@ -2142,6 +2146,7 @@ function ackOperatorFeedback(args = {}) {
     interaction_id: args.interaction_id,
     job_id: mcpJobId,
     attempt_id: mcpAttemptId,
+    agent_call_id: mcpAgentCallId,
     decision: args.decision || "accepted",
     reason: args.reason || "",
   });

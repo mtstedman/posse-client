@@ -47,6 +47,7 @@ import {
   stashDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
 import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { effectiveArtifactTaskMode } from "../../../providers/functions/execution-routing.js";
 import {
   artifactOutputClaimsReusableComplete,
@@ -157,9 +158,11 @@ function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
         original_job_id: job.id,
         gate_kind: "assessment_retry_exhausted",
         review_type: "assessment_retry_limit",
+        question_kind: "assessment_retry_limit",
+        choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit,
         questions: [
           `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
-          "Choose retry_assessment, pass, fail, explicit waiver, or replan.",
+          "Choose pass, fail, skip, or replan.",
         ],
         context: "The implementation attempt and commit are preserved. This gate controls assessment only.",
       }),

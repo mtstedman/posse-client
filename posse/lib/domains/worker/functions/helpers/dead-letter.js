@@ -4,6 +4,7 @@
 // worker.js to keep execution orchestration focused.
 
 import { ROLE_DRIVEN_JOB_TYPES } from "../../../../catalog/job.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import {
   applyDelegation,
   cancelDeadlockedJobsAtomic,
@@ -33,7 +34,7 @@ import {
 import { refreshAndExtractInsights } from "./insights.js";
 import { spawnResearchAfterPreflight } from "./pipeline-continuation.js";
 import { RetryPolicy } from "../../../../shared/policies/classes/RetryPolicy.js";
-import { tierModelName } from "../../../providers/functions/provider.js";
+import { isProviderSelectable, tierModelName } from "../../../providers/functions/provider.js";
 import { escalateModelTier } from "../../../providers/functions/shared/turns.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
@@ -41,6 +42,13 @@ import { isTransientCommitInfraFailure } from "./commit-infra.js";
 import { isBridgePresenceFresh } from "../../../queue/functions/runtime-status.js";
 
 const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
+
+function deadLetterRecoveryChoices() {
+  const providerChoices = ["claude", "openai", "codex", "grok"]
+    .filter((provider) => isProviderSelectable(provider))
+    .map((provider) => `retry:${provider}`);
+  return ["retry", ...providerChoices, "skip", "fail"];
+}
 
 function shortJobTitle(job) {
   const title = String(job?.title || "");
@@ -243,6 +251,8 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
     payload_json: JSON.stringify({
       original_job_id: job.id,
       review_type: "dead_letter_recovery",
+      question_kind: "dead_letter_recovery",
+      choices: deadLetterRecoveryChoices(),
       questions: [
         `Job #${job.id} "${job.title}" ${reasonText}.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\n${dependents.length} downstream job(s) depend on this. What should we do?\n- Provide specific instructions for a retry\n- Retry with a different provider (claude/openai/codex/grok)\n- Skip this job and unblock dependents\n- Simplify the task scope${resolvedProviderHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${resolvedProviderHint}` : ""}`,
       ],
@@ -591,6 +601,8 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           payload_json: JSON.stringify({
             original_job_id: job.id,
             review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
+            question_kind: "pipeline_head_recovery",
+            choices: WORK_ITEM_QUESTION_CHOICE_IDS.pipeline_head_recovery,
             questions: [
               `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
             ],
@@ -643,6 +655,8 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
               ],
               context: `This job repeatedly stalled and exhausted the stall retry budget. It has no downstream dependents, so explicit operator guidance is needed before retrying.`,
               review_type: "stall_exhausted_recovery",
+              question_kind: "dead_letter_recovery",
+              choices: deadLetterRecoveryChoices(),
             }),
           });
           worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} stalled out — spawned human_input #${recoveryJob.id}${C.reset}`);

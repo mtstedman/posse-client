@@ -15,6 +15,7 @@ import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const JOB_LOCK_RELEASE_STATUSES = new Set(["queued", ...TERMINAL_JOB_STATUSES]);
+const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const WI_LOCK_RELEASE_STATUSES = new Set(["failed", "canceled"]);
 // A completed work item still owns file locks until its branch has actually
 // merged. Lock-holding states are every merge_state other than `merged`.
@@ -119,6 +120,204 @@ function scopeToLockRows(scope = {}) {
 function normalizeLockPath(value) {
   const normalized = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "").trim();
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+export function fileLaneId(pathValue, lockKind = "file") {
+  const normalizedPath = normalizeLockPath(pathValue);
+  if (!normalizedPath || !["file", "root"].includes(lockKind)) return null;
+  const digest = crypto.createHash("sha256")
+    .update(`${lockKind}\0${normalizedPath}`, "utf8")
+    .digest("hex");
+  return `lane:sha256:${digest}`;
+}
+
+function fileLaneLabel(pathValue) {
+  const normalizedPath = normalizeLockPath(pathValue);
+  if (!normalizedPath || normalizedPath === "*") return "repository write scope";
+  const parts = normalizedPath.split("/").filter(Boolean);
+  return (parts.at(-1) || normalizedPath).slice(0, 160);
+}
+
+function normalizedWaitDescriptor(detail = {}) {
+  const waiterJobId = Number(detail.waiter_job_id ?? detail.job_id);
+  const waiterWorkItemId = Number(detail.waiter_work_item_id ?? detail.work_item_id);
+  const holderType = String(detail.holder_type || "");
+  const holderJobId = Number(detail.holder_job_id ?? detail.holder_id) || null;
+  const holderWorkItemId = Number(detail.holder_work_item_id) || null;
+  const lockKind = detail.lock_kind === "root" ? "root" : "file";
+  const normalizedPath = normalizeLockPath(detail.path);
+  if (!Number.isInteger(waiterJobId) || waiterJobId <= 0) return null;
+  if (!Number.isInteger(waiterWorkItemId) || waiterWorkItemId <= 0) return null;
+  if (!["job", "work_item", "active_worker"].includes(holderType)) return null;
+  if (!normalizedPath) return null;
+  const laneId = detail.lane_id || fileLaneId(normalizedPath, lockKind);
+  const holderKey = `${holderType}:${holderJobId || holderWorkItemId || "unknown"}`;
+  return {
+    lane_id: laneId,
+    waiter_job_id: waiterJobId,
+    waiter_work_item_id: waiterWorkItemId,
+    holder_type: holderType,
+    holder_key: holderKey,
+    holder_job_id: holderJobId,
+    holder_work_item_id: holderWorkItemId,
+    path: normalizedPath,
+    lock_kind: lockKind,
+  };
+}
+
+function waitDescriptorForConflict(job, conflict) {
+  if (!job || !conflict) return null;
+  const pathValue = conflict.candidate?.path || conflict.lock?.path;
+  const lockKind = conflict.candidate?.lock_kind || conflict.lock?.lock_kind || "file";
+  return normalizedWaitDescriptor({
+    waiter_job_id: job.id,
+    waiter_work_item_id: job.work_item_id,
+    holder_type: conflict.type === "work_item" ? "work_item" : "job",
+    holder_job_id: conflict.lock?.job_id || null,
+    holder_work_item_id: conflict.lock?.work_item_id || null,
+    path: pathValue,
+    lock_kind: lockKind,
+  });
+}
+
+export function recordFileLaneWait(detail = {}) {
+  const descriptor = normalizedWaitDescriptor(detail);
+  if (!descriptor) return null;
+  const db = getDb();
+  const waiter = db.prepare("SELECT status FROM jobs WHERE id = ? AND work_item_id = ?")
+    .get(descriptor.waiter_job_id, descriptor.waiter_work_item_id);
+  if (waiter?.status !== "queued") return null;
+  const existing = db.prepare(`
+    SELECT * FROM file_lane_waits
+    WHERE waiter_job_id = ? AND lane_id = ? AND holder_key = ?
+  `).get(descriptor.waiter_job_id, descriptor.lane_id, descriptor.holder_key);
+  const ts = now();
+  db.prepare(`
+    INSERT INTO file_lane_waits (
+      lane_id, waiter_job_id, waiter_work_item_id, holder_type, holder_key,
+      holder_job_id, holder_work_item_id, path, lock_kind, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(waiter_job_id, lane_id, holder_key) DO UPDATE SET
+      holder_job_id = excluded.holder_job_id,
+      holder_work_item_id = excluded.holder_work_item_id,
+      path = excluded.path,
+      lock_kind = excluded.lock_kind,
+      updated_at = excluded.updated_at
+  `).run(
+    descriptor.lane_id,
+    descriptor.waiter_job_id,
+    descriptor.waiter_work_item_id,
+    descriptor.holder_type,
+    descriptor.holder_key,
+    descriptor.holder_job_id,
+    descriptor.holder_work_item_id,
+    descriptor.path,
+    descriptor.lock_kind,
+    existing?.created_at || ts,
+    ts,
+  );
+  if (!existing) {
+    logEvent({
+      work_item_id: descriptor.waiter_work_item_id,
+      job_id: descriptor.waiter_job_id,
+      event_type: EVENT_TYPES.FILE_LANE_WAITING,
+      actor_type: EVENT_ACTORS.SCHEDULER,
+      message: "Job is waiting for a file lane",
+      event_json: JSON.stringify({
+        event_kind: "lane_state",
+        state: "waiting",
+        summary: `Waiting for file lane ${fileLaneLabel(descriptor.path)}`,
+        lane_id: descriptor.lane_id,
+        waiter_job_id: descriptor.waiter_job_id,
+        holder_job_id: descriptor.holder_job_id,
+        holder_work_item_id: descriptor.holder_work_item_id,
+      }),
+    });
+  }
+  return db.prepare(`
+    SELECT * FROM file_lane_waits
+    WHERE waiter_job_id = ? AND lane_id = ? AND holder_key = ?
+  `).get(descriptor.waiter_job_id, descriptor.lane_id, descriptor.holder_key);
+}
+
+export function recordFileLaneConflict(job, conflict) {
+  const descriptor = waitDescriptorForConflict(job, conflict);
+  return descriptor ? recordFileLaneWait(descriptor) : null;
+}
+
+function emitFileLaneCleared(row, reason) {
+  logEvent({
+    work_item_id: row.waiter_work_item_id,
+    job_id: row.waiter_job_id,
+    event_type: reason === "lane_acquired" ? EVENT_TYPES.FILE_LANE_ACQUIRED : EVENT_TYPES.FILE_LANE_CLEARED,
+    actor_type: EVENT_ACTORS.SCHEDULER,
+    message: "File-lane wait cleared",
+    event_json: JSON.stringify({
+      event_kind: "lane_state",
+      state: reason === "lane_acquired" ? "held" : "available",
+      summary: reason === "lane_acquired"
+        ? `Acquired file lane ${fileLaneLabel(row.path)}`
+        : `File lane ${fileLaneLabel(row.path)} is no longer blocking`,
+      lane_id: row.lane_id,
+      waiter_job_id: row.waiter_job_id,
+      holder_job_id: row.holder_job_id,
+      reason,
+    }),
+  });
+}
+
+export function clearFileLaneWaitsForJob(jobId, reason = "waiter_transition") {
+  const id = Number(jobId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM file_lane_waits WHERE waiter_job_id = ? ORDER BY id").all(id);
+  if (rows.length === 0) return 0;
+  const changes = db.prepare("DELETE FROM file_lane_waits WHERE waiter_job_id = ?").run(id).changes;
+  for (const row of rows.slice(0, 128)) emitFileLaneCleared(row, reason);
+  return changes;
+}
+
+export function listFileLaneWaits({ workItemId = null } = {}) {
+  const db = getDb();
+  if (workItemId == null) return db.prepare("SELECT * FROM file_lane_waits ORDER BY lane_id, created_at, waiter_job_id").all();
+  return db.prepare(`
+    SELECT * FROM file_lane_waits
+    WHERE waiter_work_item_id = ? OR holder_work_item_id = ?
+    ORDER BY lane_id, created_at, waiter_job_id
+  `).all(Number(workItemId), Number(workItemId));
+}
+
+export function reconcileFileLaneWaits() {
+  const db = getDb();
+  const desired = new Map();
+  let lastId = 0;
+  for (;;) {
+    const jobs = db.prepare(`
+      SELECT * FROM jobs
+      WHERE status = 'queued'
+        AND id > ?
+        AND job_type IN (${QUEUE_LOCKING_JOB_TYPES_SQL})
+      ORDER BY id
+      LIMIT 250
+    `).all(lastId, ...QUEUE_LOCKING_JOB_TYPES_LIST);
+    if (jobs.length === 0) break;
+    for (const job of jobs) {
+      lastId = Number(job.id);
+      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job));
+      if (!descriptor) continue;
+      desired.set(`${descriptor.waiter_job_id}|${descriptor.lane_id}|${descriptor.holder_key}`, descriptor);
+    }
+  }
+  for (const descriptor of desired.values()) recordFileLaneWait(descriptor);
+  const current = db.prepare("SELECT * FROM file_lane_waits ORDER BY id").all();
+  let removed = 0;
+  for (const row of current) {
+    const key = `${row.waiter_job_id}|${row.lane_id}|${row.holder_key}`;
+    if (desired.has(key)) continue;
+    removed += db.prepare("DELETE FROM file_lane_waits WHERE id = ?").run(row.id).changes;
+    emitFileLaneCleared(row, "reconciled_stale");
+  }
+  return { active: desired.size, removed };
 }
 
 function lockRowsTouchPath(rows = [], path, lockKind = "file") {
@@ -425,6 +624,7 @@ export function verifyOrAcquireJobWriteLockForPath(jobId, filePath, { source = "
       }
     }
     if (conflict) {
+      recordFileLaneConflict(job, conflict);
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
@@ -528,6 +728,7 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
       if (conflict) {
         const message = lockConflictMessage(fresh, conflict);
         logWriteLockBlockedOnce(db, fresh, ownerId, message, conflict);
+        recordFileLaneConflict(fresh, conflict);
         return null;
       }
     }
@@ -545,6 +746,8 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
       WHERE id = ? AND status = 'queued'
     `).run(ownerId, leaseToken, expiresAt, ts, fresh.id);
     if (result.changes === 0) return null;
+
+    clearFileLaneWaitsForJob(fresh.id, "lane_acquired");
 
     if (needsWriteLocks && hasScope) {
       insertMissingWiLocks(db, fresh, scope, ts);
@@ -603,6 +806,7 @@ export function releaseJobFileLocks(jobId, reason = "job_done") {
       reason: `job_locks_released:${reason}`,
       jobId,
     });
+    reconcileFileLaneWaits();
   }
   return released;
 }
@@ -620,6 +824,7 @@ export function releaseWorkItemFileLocks(workItemId, reason = "work_item_done") 
       reason: `work_item_locks_released:${reason}`,
       workItemId,
     });
+    reconcileFileLaneWaits();
   }
   return released;
 }
@@ -637,6 +842,7 @@ export function releaseWorkItemFileLocksForSourceJob(jobId, reason = "source_job
       reason: `work_item_locks_released:${reason}`,
       jobId,
     });
+    reconcileFileLaneWaits();
   }
   return released;
 }
@@ -661,12 +867,14 @@ export function releaseWorkItemFileLockForPath(workItemId, path, lockKind = "fil
       path: normalizedPath,
       lockKind,
     });
+    reconcileFileLaneWaits();
   }
   return released;
 }
 
 export function releaseJobLocksForStatus(jobId, status) {
   if (!JOB_LOCK_RELEASE_STATUSES.has(status)) return 0;
+  if (TERMINAL_JOB_STATUS_SET.has(status)) clearFileLaneWaitsForJob(jobId, `job_${status}`);
   const reason = `job_${status}`;
   return releaseJobFileLocks(jobId, reason);
 }
@@ -716,6 +924,7 @@ export function cleanupStaleFileLocks() {
     notifyQueueStateChanged({
       reason: "stale_file_locks_released",
     });
+    reconcileFileLaneWaits();
   }
   return { job_locks_released: releaseJobs, wi_locks_released: releaseWis };
 }

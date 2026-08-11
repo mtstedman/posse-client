@@ -34,6 +34,7 @@ import {
   hasJobs,
   countJobsByStatus,
   cleanupStaleFileLocks,
+  clearFileLaneWaitsForJob,
   listJobsByWorkItem,
   logEvent,
   releaseWorkItemFileLockForPath,
@@ -52,6 +53,8 @@ import {
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
   onQueueStateChanged,
+  reconcileFileLaneWaits,
+  recordFileLaneWait,
   waitForQueueStateChangeAfter,
 } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -528,6 +531,10 @@ export class Scheduler {
   _isJobInRunScope(job) {
     return this.onlyWorkItemIds.length === 0
       || this.onlyWorkItemIds.includes(Number(job?.work_item_id));
+  }
+
+  _reconcileFileLaneWaits() {
+    return reconcileFileLaneWaits();
   }
 
   /**
@@ -1495,6 +1502,9 @@ export class Scheduler {
 
     const activeWorkers = new Map(); // jobId -> { promise, job, startTime }
     const queueLockIndex = createHeldQueueLockIndex();
+    // Durable current waiter truth is rebuilt before the first published
+    // scheduler snapshot so restart never loses file-lane contention.
+    this._reconcileFileLaneWaits();
     const unsubscribeQueueWake = onQueueStateChanged((payload) => {
       queueLockIndex.applyWake(payload, { readJob: getJob });
       // Re-emit the queue snapshot whenever real state changes. The
@@ -1888,6 +1898,15 @@ export class Scheduler {
             && entry.holder_type === detail.holder_type
             && entry.holder_id === detail.holder_id)) return;
           blockedLockDetails.push(detail);
+          if (["job", "work_item", "active_worker"].includes(detail.holder_type)) {
+            recordFileLaneWait({
+              ...detail,
+              waiter_job_id: detail.job_id,
+              waiter_work_item_id: detail.work_item_id,
+              holder_job_id: detail.holder_id,
+              lock_kind: detail.lock_kind || (detail.path === "*" ? "root" : "file"),
+            });
+          }
         };
         while (!stopCandidateScan && candidateCount < maxCandidateScan) {
           const fetchLimit = Math.min(MAX_RUNNABLE_SCAN_PER_TICK, maxCandidateScan - candidateCount);
@@ -2021,6 +2040,7 @@ export class Scheduler {
                     holder_id: conflict.lock?.job_id || null,
                     holder_work_item_id: conflict.lock?.work_item_id || null,
                     path: conflictPath,
+                    lock_kind: conflict.candidate?.lock_kind || conflict.lock?.lock_kind || "file",
                     message: conflictType === "work_item"
                       ? `#${job.id} waits on ${conflictPath}; held by WI#${conflict.lock?.work_item_id}`
                       : `#${job.id} waits on ${conflictPath}; held by job #${conflict.lock?.job_id}`,
@@ -2066,6 +2086,8 @@ export class Scheduler {
             skipJobIds.add(job.id);
             continue;
           } // race, try next
+
+          clearFileLaneWaitsForJob(job.id, "lane_acquired");
 
           if (strictShadowOverlaps.length > 0) {
             logEvent({

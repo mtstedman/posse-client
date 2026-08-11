@@ -10,6 +10,7 @@ import { ChangeStream } from "./ChangeStream.js";
 export const BOSSY_LOCAL_STREAM_PROTOCOL = "posse.local_stream.v1";
 const MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_CLIENT_BUFFER_BYTES = 2 * MAX_FRAME_BYTES;
+const LOCAL_REPLAY_LIMIT = 256;
 
 export function normalizeBossyStreamRepoPath(projectDir = process.cwd(), platform = process.platform) {
   let normalized = path.resolve(projectDir).replaceAll("\\", "/");
@@ -109,15 +110,25 @@ export class BossyLocalStream {
       role: "posse",
       protocol: BOSSY_LOCAL_STREAM_PROTOCOL,
       repo_path: normalizeBossyStreamRepoPath(this.projectDir),
+      instance_id: String(this.changeStream?.instanceId || "local"),
     });
     const headEventId = Number(this.changeStream?.headEventId?.() || 0);
+    const replay = this.changeStream?.tailFrames?.({ sinceEventId: 0, limit: LOCAL_REPLAY_LIMIT }) || {
+      events: [],
+      head_event_id: headEventId,
+      replay_start_event_id: headEventId + 1,
+      replay_complete: true,
+    };
     this.send(socket, eventFrame({
-      event_id: 0,
+      event_id: headEventId,
       kind: "snapshot",
-      payload: { head_event_id: headEventId },
+      payload: {
+        head_event_id: headEventId,
+        replay_start_event_id: Number(replay.replay_start_event_id ?? headEventId + 1),
+        replay_complete: replay.replay_complete !== false,
+      },
       ts: new Date().toISOString(),
     }));
-    const replay = this.changeStream?.tailFrames?.({ sinceEventId: 0, limit: 500 });
     for (const frame of replay?.events || []) this.send(socket, eventFrame(frame));
   }
 

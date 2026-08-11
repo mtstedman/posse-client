@@ -11,6 +11,7 @@
 // mechanism — the scheduler needs no special knowledge.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { TERMINAL_JOB_STATUSES } from "../../queue/functions/common.js";
 import {
   addDependency,
@@ -176,6 +177,9 @@ export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
   const wiId = planJob.work_item_id;
   const payload = {
     subtype: "plan_approval",
+    question_kind: "plan_approval",
+    choices: WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval,
+    questions: ["Approve or reject the current plan?"],
     plan_job_id: planJob.id,
     gated_job_ids: targets.slice(),
     summary: summary || null,
@@ -348,4 +352,3 @@ export function respawnAfterRejection(wiId, { feedback = null, rejectedArtifactI
   });
   return { ok: true, researchJobId: researchJob.id };
 }
-

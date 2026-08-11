@@ -6,6 +6,26 @@
 // live in
 // lib/domains/integrations/functions/deterministic-mcp/tool-descriptors.js.
 
+// Canonical structured-question choice identities. The owner projection and
+// every static producer consume this single pure-data vocabulary; rendered
+// labels and compatibility parser synonyms are deliberately absent.
+export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
+  plan_approval: Object.freeze(["approve", "reject"]),
+  file_scope_approval: Object.freeze(["approve", "reject"]),
+  assessment_review: Object.freeze(["pass", "fail", "skip", "replan"]),
+  assessment_transport_recovery: Object.freeze(["retry", "pass", "fail", "skip", "replan"]),
+  assessment_retry_limit: Object.freeze(["pass", "fail", "skip", "replan"]),
+  blocked_recovery: Object.freeze(["retry", "skip", "replan", "pass", "fail"]),
+  partial_work_recovery: Object.freeze(["extend", "commit", "revert"]),
+  dead_letter_recovery: Object.freeze([
+    "retry", "retry:claude", "retry:openai", "retry:codex", "retry:grok", "skip", "fail",
+  ]),
+  pipeline_head_recovery: Object.freeze(["pass", "fail", "skip", "replan"]),
+  one_shot_file_scope: Object.freeze(["plan", "cancel"]),
+  push_offer: Object.freeze(["push", "decline"]),
+  legacy_unstructured: Object.freeze([]),
+});
+
 export const TOOL_READ_FILE = {
   type: "function",
   name: "read_file",
@@ -1599,7 +1619,14 @@ export const TOOL_AGENT_FEEDBACK = {
       },
       summary: {
         type: "string",
-        description: "One short operator-facing update, no hidden reasoning. Keep under 240 characters.",
+        minLength: 1,
+        maxLength: 180,
+        description: "One short operator-facing update, no hidden reasoning. Maximum 180 characters.",
+      },
+      detail: {
+        type: "string",
+        maxLength: 360,
+        description: "Optional bounded supporting detail, no hidden reasoning. Maximum 360 characters.",
       },
     },
     required: ["phase", "summary"],
