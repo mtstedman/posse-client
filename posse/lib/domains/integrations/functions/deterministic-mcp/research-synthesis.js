@@ -81,7 +81,7 @@ export function buildResearchEarlyFetchSynthesisAuditText({ fetchBatches = 0 } =
 export function buildResearchFinalFetchBatchText() {
   return [
     "FINAL FETCH BATCH COMPLETE.",
-    "No further discovery or stored-ref calls are available. Synthesize the terminal report now from the gathered evidence.",
+    "No further discovery or stored-ref calls are available. Call agent_handoff now with the terminal researcher report synthesized from the gathered evidence; do not end the turn with prose alone.",
   ].join("\n");
 }
 
@@ -120,6 +120,6 @@ export function buildResearchSynthesisRequiredText({
     absoluteCeilingReached
       ? `Exploration budget used: ${explorationSteps}/${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
       : `No new relevant evidence in the last ${staleSteps} exploration calls.`,
-    `No further discovery calls are available. If essential unseen stored evidence remains, put every eligible ref into one final batched atlas.fetch_ref call; after that response, make no further tool calls. Otherwise submit the best-supported terminal report now with stop_reason=${stopReason}.`,
+    `No further discovery calls are available. If essential unseen stored evidence remains, put every eligible ref into one final batched atlas.fetch_ref call. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }
