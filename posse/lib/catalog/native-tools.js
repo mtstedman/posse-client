@@ -729,7 +729,7 @@ const PLANNER_COMPACT_TASK_V3 = {
 
 const CITATION_EVIDENCE_SELECTOR = {
   ...HANDOFF_EVIDENCE_SELECTOR,
-  description: "Citation-child selector. The selected evidence is limited to 40 lines and the 4000-character child evidence budget.",
+  description: "Citation-child selector. The selected evidence is limited to 40 lines and the 4000-character child evidence budget. Narrow it before the first handoff; normally select no more than 10 decisive lines from one input.",
   properties: {
     ...HANDOFF_EVIDENCE_SELECTOR.properties,
     lines: {
@@ -1067,7 +1067,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
 
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
-    "Finish citation synthesis with one parent report. Use named claim objects with summary for optional synthesis; citation-child ceilings remain strict. Do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
+    "Finish citation synthesis with one parent report. Use named claim objects with summary for optional synthesis; citation-child ceilings remain strict. Before the first handoff, narrow every evidence selector and keep the sum of all selected line counts at 30 or fewer. Do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
   profile: "citation_synthesis.v1",
   outcomes: ["complete", "partial", "failed"],
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {

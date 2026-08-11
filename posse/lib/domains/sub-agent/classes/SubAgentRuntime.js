@@ -32,6 +32,7 @@ export const SUB_AGENT_LIMITS = Object.freeze({
   maxIntentChars: 2000,
   maxEvidenceLines: 80,
   maxEvidenceChars: 4000,
+  targetTerminalEvidenceLines: 30,
   maxAtlasWindowTokens: 900,
   maxRequestBytes: 32 * 1024,
 });
@@ -260,6 +261,37 @@ function structuredSourceToolEvidence(parsed, tool, args = {}) {
   };
 }
 
+function parseLeadingJsonValue(text) {
+  const source = String(text ?? "");
+  const start = source.search(/\S/);
+  if (start < 0 || !["{", "["].includes(source[start])) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    else if (char === "}" || char === "]") depth -= 1;
+    if (depth !== 0) continue;
+    try {
+      return JSON.parse(source.slice(start, index + 1));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function deterministicToolEvidence(raw, tool, args = {}) {
   const rawText = typeof raw === "string" ? raw : JSON.stringify(raw);
   const provenance = { kind: "Tool Result", source: tool, object_type: "tool_result" };
@@ -270,7 +302,12 @@ function deterministicToolEvidence(raw, tool, args = {}) {
   let parsed;
   try {
     parsed = JSON.parse(structuredText);
-  } catch { /* unstructured native read */ }
+  } catch {
+    // Parent research-budget controls can be appended after an otherwise
+    // complete deterministic JSON envelope. Preserve the source result and
+    // leave the parent-only control text out of the child's evidence body.
+    parsed = parseLeadingJsonValue(structuredText);
+  }
   const structuredSource = structuredSourceToolEvidence(parsed, tool, args);
   if (structuredSource) return structuredSource;
   if (tool !== "tools.read_file") return { text: rawText, provenance };
@@ -470,6 +507,11 @@ function cursorEvidenceResponse(entry, input, position, evidence, provenance = e
       source_content_sha256: evidence.source_content_sha256,
       lines: lines.map((text, index) => ({ line: evidence.lines.start + index, text })),
     },
+    terminal_evidence_budget: {
+      max_chars: SUB_AGENT_LIMITS.maxEvidenceChars,
+      conservative_total_selected_lines: SUB_AGENT_LIMITS.targetTerminalEvidenceLines,
+      action: "Narrow proof selectors before the first terminal handoff.",
+    },
     consumed: entry.cursorPosition,
     remaining: Math.max(0, consumable - entry.cursorPosition),
     next_position: entry.cursorPosition < consumable
@@ -564,7 +606,7 @@ export function buildCitationChildPrompt(input = {}) {
     "When sufficient, call agent_handoff as your sole and final action. Do not call update_goal, request_user_input, list_mcp_resources, read_mcp_resource, spawn_agent, or any other tool. Do not ask questions and do not return prose outside tool calls.",
     "Use this exact terminal shape, replacing only the prose and evidence selector values: {\"protocol\":\"posse.agent_handoff.v1\",\"profile\":\"citation_synthesis.v1\",\"outcome\":\"complete\",\"handoffs\":[{\"target\":{\"kind\":\"parent\",\"role\":\"$parent\"},\"report\":{\"summary\":\"brief synthesis\",\"claims\":[{\"claim\":\"supported conclusion\",\"proof\":[RETURNED_EVIDENCE_SELECTOR],\"summary\":\"why the selector supports the claim\"}]}}]}. For a failed outcome, omit claims and explain the failure in report.summary. Do not add confidence, scope, payload, constraints, success_criteria, or questions, and do not put report fields beside target.",
     "Treat the intent as a completeness checklist. Before terminal handoff, explicitly preserve every requested public shape, semantic field, assertion, ordering or precedence interaction, and accepted/rejected boundary that the evidence establishes. For tests, validators, and matchers, name literal boundary examples or exact predicate shapes instead of collapsing them into a broad label such as validation. Classify each boundary as throw, normalize, match, or ordinary non-match/default; do not turn a failed match predicate into invalid input unless the evidence explicitly requires rejection. Use two claims when two independent boundary groups are needed for complete coverage; never omit a checklist item merely to prefer one claim.",
-    "Cite only selectors returned by successful cursor calls, or narrower line ranges within them. Your terminal report has a strict 4,000-character aggregate evidence ceiling and a 2,000-character total narrative ceiling across intent, report summary, claims, claim summaries, and decoy reasons. Full selectors from multiple inputs commonly exceed that aggregate evidence ceiling: before handoff, narrow every proof to the exact decisive evidence.lines. Use this conservative hard shape: report.summary at most 350 characters, each claim at most 160, each claim summary at most 100, total narrative at most 1,000, and no more than two claims. Do not restate the same fact in summary, claim, and claim summary. Never reuse one selector across multiple claims. When you consume multiple related inputs, prefer one compact claim whose proof cites each returned selector exactly once; use two claims only when the conclusions are genuinely independent. If the terminal tool rejects evidence or narrative size, retry once with one shorter combined claim and narrower unique selectors rather than changing a supported synthesis to failed. Select only the exact lines needed instead of echoing whole inputs. Put synthesis in report.summary and identify misleading evidence in decoy only when essential.",
+    "Cite only selectors returned by successful cursor calls, or narrower line ranges within them. Your terminal report has a strict 4,000-character aggregate evidence ceiling and a 2,000-character total narrative ceiling across intent, report summary, claims, claim summaries, and decoy reasons. Full selectors from multiple inputs commonly exceed that aggregate evidence ceiling: before the first handoff, narrow every proof to the exact decisive evidence.lines and keep the sum of all selected line counts at 30 or fewer. Never submit a full returned selector unchanged when it contains more than 10 lines. Use this conservative hard shape: report.summary at most 350 characters, each claim at most 160, each claim summary at most 100, total narrative at most 1,000, and no more than two claims. Do not restate the same fact in summary, claim, and claim summary. Never reuse one selector across multiple claims. When you consume multiple related inputs, prefer one compact claim whose proof cites each returned selector exactly once; use two claims only when the conclusions are genuinely independent. If the terminal tool rejects evidence or narrative size, retry once with one shorter combined claim and narrower unique selectors rather than changing a supported synthesis to failed. Select only the exact lines needed instead of echoing whole inputs. Put synthesis in report.summary and identify misleading evidence in decoy only when essential.",
   ].join("\n\n");
 }
 
