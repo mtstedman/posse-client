@@ -10,6 +10,7 @@ import {
   listWorkItems,
 } from "../../queue/functions/index.js";
 import { getObservationsByJob } from "../../observability/functions/observations.js";
+import { isInternalBackgroundObservationType } from "../../../catalog/observation.js";
 import { dirSizeBytes, worktreeRootAsync } from "../../git/functions/worktree.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { ACTIVE_LEASE_STATUSES, COMPLETED_OUTCOME_JOB_STATUSES } from "../../../catalog/job.js";
@@ -143,8 +144,9 @@ export async function runAuditCommand(args = [], { projectDir = process.cwd(), t
     if ((payload.files_to_modify || []).length > 0) console.log(`    files_to_modify: ${JSON.stringify(payload.files_to_modify)}`);
     if ((payload.files_to_create || []).length > 0) console.log(`    files_to_create: ${JSON.stringify(payload.files_to_create)}`);
 
-    const contractObservations = observations.filter((obs) => !String(obs.observation_type || "").startsWith("tool."));
-    const toolObservations = observations.filter((obs) => String(obs.observation_type || "").startsWith("tool."));
+    const visibleObservations = observations.filter((obs) => !isInternalBackgroundObservationType(obs.observation_type));
+    const contractObservations = visibleObservations.filter((obs) => !String(obs.observation_type || "").startsWith("tool."));
+    const toolObservations = visibleObservations.filter((obs) => String(obs.observation_type || "").startsWith("tool."));
 
     if (contractObservations.length > 0) {
       console.log(`    ${C.bold}Observations${C.reset}`);

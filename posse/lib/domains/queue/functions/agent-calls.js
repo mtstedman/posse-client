@@ -674,6 +674,7 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
       WHERE work_item_id IS NOT NULL
         AND observation_type LIKE 'tool.%'
         AND observation_type != 'tool.chain_read'
+        AND observation_type != 'tool.response_transform'
       GROUP BY work_item_id
     ) obs ON obs.work_item_id = wi.id
     ORDER BY wi.id DESC
@@ -698,6 +699,7 @@ export function getAgentCallsWithToolCountsByWorkItem(workItemId) {
         WHERE o.job_id = ac.job_id
           AND o.observation_type LIKE 'tool.%'
           AND o.observation_type != 'tool.chain_read'
+          AND o.observation_type != 'tool.response_transform'
           AND o.created_at >= ac.started_at
           AND (
             ac.finished_at IS NULL
@@ -738,6 +740,7 @@ export function getToolInvocationsForAgentCall(agentCallId) {
     WHERE job_id = ?
       AND observation_type LIKE 'tool.%'
       AND observation_type != 'tool.chain_read'
+      AND observation_type != 'tool.response_transform'
       AND julianday(created_at) >= julianday(?) - (${TOOL_LOG_BOUNDARY_GRACE_SECONDS} / 86400.0)
       AND (
         ? IS NULL

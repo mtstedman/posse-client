@@ -422,6 +422,7 @@ function readPriorAttemptObservations(jobId, currentAttemptId = null) {
           observation_type LIKE 'tool.%'
           OR observation_type IN ('attempt.failed', 'provider.fallback', 'atlas.fallback.rebind')
         )
+        AND observation_type != 'tool.response_transform'
       ORDER BY id ASC
       LIMIT ?
     `).all(jobId, currentAttemptId, currentAttemptId, RETRY_SALVAGE_OBSERVATION_LIMIT);

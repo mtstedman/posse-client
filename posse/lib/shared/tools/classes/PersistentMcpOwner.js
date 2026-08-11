@@ -15,6 +15,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
+import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
@@ -1338,7 +1339,7 @@ function recordOwnerToolObservation({
         work_item_id: boot.workItemId ?? null,
         job_id: boot.jobId ?? null,
         attempt_id: boot.attemptId ?? null,
-        observation_type: "tool.response_transform",
+        observation_type: RESPONSE_TRANSFORM_OBSERVATION_TYPE,
         summary: `Model-visible ${transform.kind || "result"} transform applied to ${toolName || "ATLAS result"}`,
         detail: {
           ...transform,

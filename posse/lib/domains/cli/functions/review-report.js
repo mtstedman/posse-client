@@ -379,6 +379,7 @@ export function buildReviewReportData(reviewable, {
         FROM job_observations
         WHERE work_item_id IN (${placeholders})
           AND observation_type LIKE 'tool.%'
+          AND observation_type != 'tool.response_transform'
         GROUP BY work_item_id, observation_type
         ORDER BY work_item_id ASC, count DESC, observation_type ASC
       `).all(...workItemIds);

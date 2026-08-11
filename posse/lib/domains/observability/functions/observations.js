@@ -13,6 +13,10 @@ import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
 import { appendRunTelemetry, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { isResearchAtlasExplorationAction } from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
+import {
+  INTERNAL_BACKGROUND_OBSERVATION_TYPES,
+  isInternalBackgroundObservationType,
+} from "../../../catalog/observation.js";
 
 let _fd = null;
 let _currentDate = "";
@@ -161,6 +165,7 @@ function readObservationFileRows({
   workItemId = null,
   typePrefix = null,
   excludeTypeSuffix = null,
+  excludeTypes = null,
   limit = 100,
   order = "desc",
 } = {}) {
@@ -176,6 +181,7 @@ function readObservationFileRows({
         && [].concat(excludeTypeSuffix).some((suffix) => suffix && type.endsWith(suffix))) {
         return false;
       }
+      if (excludeTypes && [].concat(excludeTypes).includes(type)) return false;
       return true;
     },
   }).map(normalizeObservationRow).filter(Boolean);
@@ -468,22 +474,25 @@ export function recordObservation({
       created_at: createdAt,
     };
 
-    const mirrored = appendRunTelemetry("observations", {
+    const internalBackground = isInternalBackgroundObservationType(observation_type);
+    const mirrored = internalBackground ? false : appendRunTelemetry("observations", {
       ...row,
       detail,
     });
 
-    _writeStreamEntry({
-      id: row.id,
-      t: createdAt,
-      wi: row.work_item_id,
-      job: row.job_id,
-      attempt: row.attempt_id,
-      type: observation_type,
-      summary,
-      detail,
-      detail_json: detailJson,
-    });
+    if (!internalBackground) {
+      _writeStreamEntry({
+        id: row.id,
+        t: createdAt,
+        wi: row.work_item_id,
+        job: row.job_id,
+        attempt: row.attempt_id,
+        type: observation_type,
+        summary,
+        detail,
+        detail_json: detailJson,
+      });
+    }
     if (mirrored) {
       markTelemetryRowsMirrored("job_observations", [row.id]);
       try { pruneTelemetryTableToTail(db, "job_observations"); } catch { /* best effort */ }
@@ -1651,10 +1660,16 @@ export function __testToolReplayCacheStats() {
 export function getObservationsByJob(jobId, limit = 100) {
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
-  const fileRows = readObservationFileRows({ jobId, limit: cappedLimit, order: "desc" });
+  const fileRows = readObservationFileRows({
+    jobId,
+    excludeTypes: INTERNAL_BACKGROUND_OBSERVATION_TYPES,
+    limit: cappedLimit,
+    order: "desc",
+  });
   const dbRows = db.prepare(`
     SELECT * FROM job_observations
     WHERE job_id = ?
+      AND observation_type NOT IN ('system.response_transform', 'tool.response_transform')
     ORDER BY created_at DESC, id DESC
     LIMIT ?
   `).all(jobId, cappedLimit);
@@ -1693,6 +1708,7 @@ export function summarizeJobToolMix(jobId) {
       if (!type.startsWith("tool.")) continue;
       if (type.endsWith(".started")) continue;          // completion half only
       if (type === "tool.chain_read") continue;         // paired with chain_verdict
+      if (isInternalBackgroundObservationType(type)) continue;
       const isSystemLane = type.endsWith(".prefetch") || type.endsWith(".autofeedback");
       byType[type] = (byType[type] || 0) + 1;
       if (!isSystemLane) toolCalls += 1;                 // agent-lane calls only
@@ -1778,6 +1794,7 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
     WHERE o.observation_type LIKE 'tool.%'
       AND o.observation_type NOT LIKE '%.prefetch'
       AND o.observation_type NOT LIKE '%.autofeedback'
+      AND o.observation_type != 'tool.response_transform'
       AND o.created_at >= ?
     ORDER BY o.id DESC
     LIMIT ?
@@ -1787,12 +1804,14 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
     WHERE o.observation_type LIKE 'tool.%'
       AND o.observation_type NOT LIKE '%.prefetch'
       AND o.observation_type NOT LIKE '%.autofeedback'
+      AND o.observation_type != 'tool.response_transform'
     ORDER BY o.id DESC
     LIMIT ?
   `).all(candidateLimit);
   return enrichToolInvocationRows(
     db,
-    _collapseToolInvocationRows(mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)),
+    _collapseToolInvocationRows(mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)
+      .filter((row) => !isInternalBackgroundObservationType(row.observation_type))),
     { includeUnscoped },
   ).slice(0, cappedLimit);
 }
@@ -1811,6 +1830,7 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
     WHERE observation_type LIKE 'tool.%'
       AND observation_type NOT LIKE '%.prefetch'
       AND observation_type NOT LIKE '%.autofeedback'
+      AND observation_type != 'tool.response_transform'
     ORDER BY id DESC
     LIMIT ?
   `).all(candidateLimit);
@@ -1819,6 +1839,7 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
       && row.observation_type !== "tool.chain_read"
       && !String(row.observation_type || "").endsWith(".started")
       && !HARNESS_SYSTEM_TYPE_SUFFIXES.some((suffix) => String(row.observation_type || "").endsWith(suffix))
+      && !isInternalBackgroundObservationType(row.observation_type)
       && String(row.observation_type || "").startsWith("tool."));
 
   const groups = new Map();
