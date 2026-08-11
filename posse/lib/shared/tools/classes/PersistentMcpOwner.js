@@ -125,9 +125,9 @@ const SUB_AGENT_ROUTING_BLOCK =
   "Dispatch one sub_agent batch with completion.mode=wait_all, preferring one citation_synthesis.v1 request with two or three ordered inputs for related targets, " +
   "or continue without another read if current context is sufficient.";
 const SUB_AGENT_DELEGATED_REPEAT_BLOCK =
-  "This target was already materialized and synthesized by the completed citation child. " +
-  "Use the returned cited packet as the inspection result and proceed without reopening the delegated input. " +
-  "A successful write to the target clears this guard so post-edit verification can read it.";
+  "Duplicate delegated read suppressed successfully: this target was already materialized and synthesized by the completed citation child. " +
+  "Use the returned cited packet as the inspection result and synthesize now. " +
+  "Do not retry this target through another evidence tool. A successful write to the target still permits post-edit verification.";
 const SUB_AGENT_REDUNDANT_DISPATCH_BLOCK =
   "Every requested sub-agent input target is already present in the parent context from successful evidence calls. " +
   "Do not dispatch a child to reread completed parent work; make the decision or mutation directly.";
@@ -230,7 +230,7 @@ function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null) 
       && result.results.length > 0
       && result.results.every((entry) => (
         entry?.status === "completed"
-        && entry?.packet?.outcome === "complete"
+        && ["complete", "partial"].includes(entry?.packet?.outcome)
       ));
     if (completedWaitAll) {
       for (const target of subAgentEvidenceTargets(args)) state.delegatedTargets.add(target);
@@ -301,6 +301,29 @@ function subAgentInputObservationDetails(result) {
 
 export function __testSubAgentInputObservationDetails(result) {
   return subAgentInputObservationDetails(result);
+}
+
+function subAgentRoutingGuardResult(reason) {
+  const delegatedRepeat = reason === "delegated_repeat";
+  const redundantDispatch = reason === "redundant_dispatch";
+  return {
+    content: [{
+      type: "text",
+      text: delegatedRepeat
+        ? SUB_AGENT_DELEGATED_REPEAT_BLOCK
+        : redundantDispatch
+          ? SUB_AGENT_REDUNDANT_DISPATCH_BLOCK
+          : SUB_AGENT_ROUTING_BLOCK,
+    }],
+    // A delegated repeat is a successful deduplication, not an execution
+    // failure. Marking it as an error makes providers troubleshoot the guard
+    // by retrying the same target through alternate read tools.
+    isError: !delegatedRepeat,
+  };
+}
+
+export function __testSubAgentRoutingGuardResult(reason) {
+  return subAgentRoutingGuardResult(reason);
 }
 
 function appendToolResultText(response, suffix, { kind = "runtime_control", trigger = null } = {}) {
@@ -2335,7 +2358,7 @@ export class PersistentMcpOwner {
             attempt_id: session?.bootConfig?.attemptId ?? null,
             observation_type: "sub_agent.routing_guard",
             summary: delegatedRepeat
-              ? "Parent duplicate evidence call blocked after child synthesis"
+              ? "Parent duplicate evidence call deduplicated after child synthesis"
               : redundantDispatch
                 ? "Redundant sub-agent dispatch blocked after parent inspection"
                 : "Parent evidence call paused for required sub-agent routing",
@@ -2357,17 +2380,7 @@ export class PersistentMcpOwner {
             message: {
               jsonrpc: "2.0",
               id: message?.id ?? null,
-              result: {
-                content: [{
-                  type: "text",
-                  text: delegatedRepeat
-                    ? SUB_AGENT_DELEGATED_REPEAT_BLOCK
-                    : redundantDispatch
-                      ? SUB_AGENT_REDUNDANT_DISPATCH_BLOCK
-                      : SUB_AGENT_ROUTING_BLOCK,
-                }],
-                isError: true,
-              },
+              result: subAgentRoutingGuardResult(routingBlockReason),
             },
           });
           return;

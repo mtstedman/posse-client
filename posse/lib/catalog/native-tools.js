@@ -1067,7 +1067,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
 
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
-    "Finish citation synthesis with one parent report. Use named claim objects with summary for optional synthesis; citation-child ceilings remain strict. Before the first handoff, narrow every evidence selector and keep the sum of all selected line counts at 30 or fewer. Do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
+    "Finish citation synthesis with one parent report. Use named claim objects with summary for optional synthesis; citation-child ceilings remain strict. Report only supported findings; do not inventory absent evidence, unsupported facts, gaps, or limitations. Before the first handoff, narrow every evidence selector and keep the sum of all selected line counts at 30 or fewer. Do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
   profile: "citation_synthesis.v1",
   outcomes: ["complete", "partial", "failed"],
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
