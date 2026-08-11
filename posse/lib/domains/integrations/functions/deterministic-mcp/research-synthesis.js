@@ -14,6 +14,7 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 5;
+export const RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES = 2;
 // Exploration-time traversal remains available for omitted or bounded stored
 // payloads. The gate only becomes terminal after closeout has admitted one
 // final batched fetch_ref request.
@@ -57,7 +58,23 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
   }
   return [
     "FETCH_REF NOT ELIGIBLE: early stored-ref traversal is limited to omitted, bounded, cursor, survey, or otherwise unseen payloads.",
-    "Do not fetch content already delivered in full. Batch known eligible refs instead of reading them in separate turns.",
+    "Do not fetch content already delivered in full. A ref marked ref_role=citation is already usable as evidence in the current context; only ref_role=continuation or an explicit cursor/continuation field advertises unseen content.",
+    "During exploration, wait to accumulate at least two eligible refs before fetching. Use a singleton only when one required cursor or omitted region blocks the next traversal step.",
+  ].join("\n");
+}
+
+export function buildResearchEarlyFetchBatchingText() {
+  return [
+    "FETCH BATCHING CHECKPOINT: this exploration fetch contained one ref.",
+    "Do not fetch another singleton merely because a citation ref is visible. Accumulate at least two eligible continuation refs; use a singleton only when one required cursor or omitted region blocks the next traversal step.",
+  ].join("\n");
+}
+
+export function buildResearchEarlyFetchSynthesisAuditText({ fetchBatches = 0 } = {}) {
+  return [
+    `SYNTHESIS AUDIT: ${Math.max(0, Number(fetchBatches) || 0)} exploration fetch batches have been used.`,
+    "Compare the gathered evidence with every requested flow, branch, and boundary. If each material item has direct support, synthesize now instead of gathering corroboration.",
+    "If a material gap remains, make only the highest-value targeted lookup and accumulate any further continuation refs into one batch.",
   ].join("\n");
 }
 
@@ -69,7 +86,11 @@ export function buildResearchFinalFetchBatchText() {
 }
 
 export function buildResearchMidpointAuditText() {
-  return "RESEARCH BUDGET: half of the exploration-call budget has been used. Continue with the highest-value missing evidence.";
+  return [
+    `SYNTHESIS CHECKPOINT: ${RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS} exploration calls have been used.`,
+    "Compare the gathered evidence with every requested flow, branch, and boundary. If each material item has direct support, synthesize now; do not browse for extra corroboration.",
+    "If a material gap remains, use only targeted calls for that gap and batch any eligible continuation refs.",
+  ].join("\n");
 }
 
 export function buildResearchCurtainCallText({

@@ -2745,7 +2745,7 @@ function _surveyRefStub(evidenceRef) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 180);
-  return `[ref_hash ${objectType} ${sizeChars} chars ${ref}${note ? ` note="${note}"` : ""}]`;
+  return `[ref_hash ${objectType} ${sizeChars} chars ${ref} ref_role=continuation current_fetch=allowed${note ? ` note="${note}"` : ""}]`;
 }
 
 function _surveyFileSummaries(sc) {

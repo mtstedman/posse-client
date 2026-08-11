@@ -261,12 +261,20 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
       SUM(COALESCE(ac.input_tokens, 0)) AS input_tokens,
       SUM(COALESCE(ac.output_tokens, 0)) AS output_tokens,
       SUM(COALESCE(ac.cached_input_tokens, 0)) AS cached_input_tokens,
+      SUM(COALESCE(ac.turns_used, 0)) AS turns_used,
       SUM(COALESCE(ac.cost_estimate_usd, 0)) AS cost_usd,
       SUM(COALESCE(ac.duration_ms, 0)) AS duration_ms,
       MAX(COALESCE(ac.started_at, ac.created_at)) AS last_call_at,
       COALESCE(ev.evidence_count, 0) AS evidence_count,
       COALESCE(ev.novel_relevant_files, 0) AS novel_relevant_files,
-      COALESCE(ev.synthesis_required_count, 0) AS synthesis_required_count
+      COALESCE(ev.synthesis_required_count, 0) AS synthesis_required_count,
+      COALESCE(ev.fetch_batches, 0) AS fetch_batches,
+      COALESCE(ev.singleton_fetch_batches, 0) AS singleton_fetch_batches,
+      COALESCE(ev.multi_fetch_batches, 0) AS multi_fetch_batches,
+      COALESCE(ev.fetched_refs, 0) AS fetched_refs,
+      COALESCE(ev.lookup_calls, 0) AS lookup_calls,
+      COALESCE(ev.lookup_service_ms, 0) AS lookup_service_ms,
+      COALESCE(ev.lookup_queue_wait_ms, 0) AS lookup_queue_wait_ms
     FROM agent_calls ac
     LEFT JOIN jobs j ON j.id = ac.job_id
     LEFT JOIN (
@@ -279,9 +287,43 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
             AND json_extract(detail_json, '$.novel_relevant_file') = 1
           THEN 1 ELSE 0 END
         ) AS novel_relevant_files,
-        SUM(CASE WHEN observation_type = 'research.synthesis_required' THEN 1 ELSE 0 END) AS synthesis_required_count
+        SUM(CASE WHEN observation_type = 'research.synthesis_required' THEN 1 ELSE 0 END) AS synthesis_required_count,
+        SUM(CASE WHEN observation_type = 'hash_ref.fetch_batch' THEN 1 ELSE 0 END) AS fetch_batches,
+        SUM(CASE
+          WHEN observation_type = 'hash_ref.fetch_batch'
+            AND COALESCE(json_extract(detail_json, '$.ref_count'), 0) = 1
+          THEN 1 ELSE 0 END
+        ) AS singleton_fetch_batches,
+        SUM(CASE
+          WHEN observation_type = 'hash_ref.fetch_batch'
+            AND COALESCE(json_extract(detail_json, '$.ref_count'), 0) > 1
+          THEN 1 ELSE 0 END
+        ) AS multi_fetch_batches,
+        SUM(CASE
+          WHEN observation_type = 'hash_ref.fetch_batch'
+          THEN COALESCE(json_extract(detail_json, '$.ref_count'), 0) ELSE 0 END
+        ) AS fetched_refs,
+        SUM(CASE
+          WHEN observation_type IN (
+            'tool.atlas', 'tool.chain_verdict', 'tool.list', 'tool.search',
+            'tool.git_history', 'tool.inspect', 'tool.hash'
+          )
+          THEN 1 ELSE 0 END
+        ) AS lookup_calls,
+        SUM(CASE
+          WHEN observation_type = 'tool.atlas'
+          THEN COALESCE(json_extract(detail_json, '$.duration_ms'), 0) ELSE 0 END
+        ) AS lookup_service_ms,
+        SUM(CASE
+          WHEN observation_type = 'tool.atlas'
+          THEN COALESCE(json_extract(detail_json, '$.queue_wait_ms'), 0) ELSE 0 END
+        ) AS lookup_queue_wait_ms
       FROM job_observations
-      WHERE observation_type IN ('research.evidence', 'research.synthesis_required')
+      WHERE observation_type IN (
+        'research.evidence', 'research.synthesis_required', 'hash_ref.fetch_batch',
+        'tool.atlas', 'tool.chain_verdict', 'tool.list', 'tool.search',
+        'tool.git_history', 'tool.inspect', 'tool.hash'
+      )
       ${sinceIso ? "AND created_at >= ?" : ""}
       GROUP BY job_id
     ) ev ON ev.job_id = ac.job_id
@@ -301,11 +343,19 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
     acc.input_tokens += Number(row.input_tokens || 0);
     acc.output_tokens += Number(row.output_tokens || 0);
     acc.cached_input_tokens += Number(row.cached_input_tokens || 0);
+    acc.turns_used += Number(row.turns_used || 0);
     acc.cost_usd += Number(row.cost_usd || 0);
     acc.duration_ms += Number(row.duration_ms || 0);
     acc.evidence_count += Number(row.evidence_count || 0);
     acc.novel_relevant_files += Number(row.novel_relevant_files || 0);
     acc.synthesis_required_count += Number(row.synthesis_required_count || 0);
+    acc.fetch_batches += Number(row.fetch_batches || 0);
+    acc.singleton_fetch_batches += Number(row.singleton_fetch_batches || 0);
+    acc.multi_fetch_batches += Number(row.multi_fetch_batches || 0);
+    acc.fetched_refs += Number(row.fetched_refs || 0);
+    acc.lookup_calls += Number(row.lookup_calls || 0);
+    acc.lookup_service_ms += Number(row.lookup_service_ms || 0);
+    acc.lookup_queue_wait_ms += Number(row.lookup_queue_wait_ms || 0);
     return acc;
   }, {
     jobs: 0,
@@ -317,11 +367,19 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
     input_tokens: 0,
     output_tokens: 0,
     cached_input_tokens: 0,
+    turns_used: 0,
     cost_usd: 0,
     duration_ms: 0,
     evidence_count: 0,
     novel_relevant_files: 0,
     synthesis_required_count: 0,
+    fetch_batches: 0,
+    singleton_fetch_batches: 0,
+    multi_fetch_batches: 0,
+    fetched_refs: 0,
+    lookup_calls: 0,
+    lookup_service_ms: 0,
+    lookup_queue_wait_ms: 0,
   });
 
   return {

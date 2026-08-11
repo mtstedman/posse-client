@@ -217,7 +217,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Traverse one or more opaque refs from the current agent scope. A ref or returned next-page cursor opens the already-stored result; it is not a fresh retrieval and does not rerun the originating tool. During exploration, fetch only omitted or bounded content, returned cursor/survey refs, or focused matches from a stored survey or bounded payload; fully emitted content, duplicate pages, and repeated empty searches are rejected by the visible-content ledger. Batch known refs instead of opening them in separate turns. Use search for focused stored-result matches; auto mode preserves literal matches and otherwise accepts the same regex/OR syntax as repository search. Call the originating tool again only for a materially different path, symbol, query, or scope; do not infer payload type from the ref. In bounded researcher runs, closeout admits one final multi-ref fetch batch for essential unseen evidence; after its response, synthesize without another repository tool call.",
+    description: "Open already-stored content for citable #refs; this never reruns the originating tool. A ref_role=citation/current_fetch=not_needed stub is already visible: cite or hand it off without fetching. Fetch only ref_role=continuation, explicit cursor/survey/continuation fields, omitted or bounded content, or focused matches within stored payloads. The ledger rejects fully visible content, duplicate pages, and repeated empty searches. Re-call the producer only for a materially different scope; do not infer payload type from the ref.",
     parameters: {
       type: "object",
       properties: {

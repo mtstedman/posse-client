@@ -47,10 +47,14 @@ import {
 } from "../../../domains/observability/functions/observations.js";
 import {
   RESEARCH_CITATION_FETCH_GATE_ENABLED,
+  RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES,
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+  RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
+  buildResearchEarlyFetchBatchingText,
+  buildResearchEarlyFetchSynthesisAuditText,
   buildResearchFinalFetchBatchText,
   buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
@@ -396,7 +400,13 @@ function researchNoticeFlagsFor(session) {
   const key = researchBudgetKey(session?.bootConfig || {});
   let flags = researchNoticeFlagState.get(key);
   if (!flags) {
-    flags = { midpoint: false, curtain: false, lastSlot: false };
+    flags = {
+      midpoint: false,
+      curtain: false,
+      lastSlot: false,
+      earlyFetchBatching: false,
+      earlyFetchSynthesisAudit: false,
+    };
     researchNoticeFlagState.set(key, flags);
     while (researchNoticeFlagState.size > RESEARCH_NOTICE_FLAG_LIMIT) {
       researchNoticeFlagState.delete(researchNoticeFlagState.keys().next().value);
@@ -917,7 +927,16 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     && isResearchAtlasCitationFetchAction(requestedAction);
   const exploration = isResearchAtlasExplorationAction(requestedAction);
   if (String(boot.role || "") !== "researcher" || (!exploration && !citationFetch)) {
-    return { tracked: false, blocked: false, explorationSteps: 0, assignedExplorationStep: null };
+    return {
+      tracked: false,
+      blocked: false,
+      explorationSteps: 0,
+      assignedExplorationStep: null,
+      fetchBatchesTotal: 0,
+      explorationFetchBatches: 0,
+      singletonFetchBatches: 0,
+      multiFetchBatches: 0,
+    };
   }
   const status = researchExplorationObservationStatus({
     jobId: boot.jobId ?? null,
@@ -925,6 +944,10 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   });
   const citationFetches = Math.max(0, Number(status.citation_fetches || 0));
   const citationFetchBatches = Math.max(0, Number(status.citation_fetch_batches || 0));
+  const fetchBatchesTotal = Math.max(0, Number(status.fetch_batches_total || 0));
+  const explorationFetchBatches = Math.max(0, Number(status.exploration_fetch_batches || 0));
+  const singletonFetchBatches = Math.max(0, Number(status.singleton_fetch_batches || 0));
+  const multiFetchBatches = Math.max(0, Number(status.multi_fetch_batches || 0));
   if (citationFetch) {
     const synthesisRequired = status.synthesis_required === true;
     return {
@@ -934,6 +957,10 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
       citationFetch: true,
       citationFetches,
       citationFetchBatches,
+      fetchBatchesTotal,
+      explorationFetchBatches,
+      singletonFetchBatches,
+      multiFetchBatches,
       explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
       assignedExplorationStep: null,
       synthesisRequired,
@@ -951,6 +978,10 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     citationFetch: false,
     citationFetches,
     citationFetchBatches,
+    fetchBatchesTotal,
+    explorationFetchBatches,
+    singletonFetchBatches,
+    multiFetchBatches,
     explorationSteps: Math.max(observedExplorationSteps, assignedStep - 1),
     assignedExplorationStep: assignedStep,
     synthesisRequired: status.synthesis_required === true,
@@ -964,6 +995,59 @@ function appendOwnerResearchFinalFetchNotice(result, admission) {
     kind: "research_final_fetch_batch",
     trigger: "synthesis_fetch_batch_complete",
   });
+}
+
+function requestedFetchRefCount(args = {}) {
+  const refs = new Set();
+  const add = (value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized) refs.add(normalized);
+  };
+  const addMany = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) add(item);
+      return;
+    }
+    if (typeof value === "string" && /[\s,;]+/.test(value.trim())) {
+      for (const item of value.split(/[\s,;]+/)) add(item);
+      return;
+    }
+    add(value);
+  };
+  addMany(args.refs);
+  addMany(args.hashes);
+  if (refs.size === 0) addMany(args.ref ?? args.hash);
+  return refs.size;
+}
+
+function appendOwnerResearchEarlyFetchNotice(result, session, args, admission) {
+  if (!admission?.citationFetch || admission.researchPhase !== "exploration") return result;
+  const flags = researchNoticeFlagsFor(session);
+  const refCount = requestedFetchRefCount(args);
+  const fetchBatches = Math.max(0, Number(admission.explorationFetchBatches || 0)) + 1;
+  let next = result;
+  if (refCount === 1 && !flags.earlyFetchBatching) {
+    flags.earlyFetchBatching = true;
+    next = appendOwnerModelControlNotice(next, `\n\n${buildResearchEarlyFetchBatchingText()}`, {
+      kind: "research_fetch_batching",
+      trigger: "exploration_singleton_fetch",
+    });
+  }
+  if (
+    fetchBatches >= RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES
+    && !flags.earlyFetchSynthesisAudit
+  ) {
+    flags.earlyFetchSynthesisAudit = true;
+    next = appendOwnerModelControlNotice(
+      next,
+      `\n\n${buildResearchEarlyFetchSynthesisAuditText({ fetchBatches })}`,
+      {
+        kind: "research_fetch_synthesis_audit",
+        trigger: "exploration_fetch_batch_threshold",
+      },
+    );
+  }
+  return next;
 }
 
 function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName) {
@@ -1022,7 +1106,7 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     notice = buildResearchCurtainCallText({ explorationSteps });
     noticeKind = "research_curtain";
   } else if (
-    explorationSteps >= Math.floor(RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS / 2)
+    explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
     && !flags.midpoint
   ) {
     flags.midpoint = true;
@@ -2965,6 +3049,12 @@ export class PersistentMcpOwner {
               enforcePolicy: String(session?.bootConfig?.role || "") === "researcher",
             }));
         result = appendOwnerOperatorFeedbackSignal(result, session);
+        result = appendOwnerResearchEarlyFetchNotice(
+          result,
+          session,
+          toolArgs || {},
+          synthesisAdmission,
+        );
         result = appendOwnerResearchFinalFetchNotice(result, synthesisAdmission);
         result = appendOwnerResearchSynthesisNotice(
           result,

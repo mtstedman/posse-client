@@ -524,6 +524,11 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       synthesis_required: false,
       citation_fetches: 0,
       citation_fetch_batches: 0,
+      fetch_batches_total: 0,
+      exploration_fetch_batches: 0,
+      singleton_fetch_batches: 0,
+      multi_fetch_batches: 0,
+      fetched_refs_total: 0,
     };
   }
   try {
@@ -591,12 +596,31 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         AND observation_type = 'hash_ref.fetch_batch'
         AND json_extract(detail_json, '$.research_phase') = 'synthesis'
     `).get(...scopeParams);
+    const fetchBatchStats = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE
+          WHEN COALESCE(json_extract(detail_json, '$.research_phase'), 'exploration') = 'exploration'
+          THEN 1 ELSE 0 END
+        ) AS exploration,
+        SUM(CASE WHEN COALESCE(json_extract(detail_json, '$.ref_count'), 0) = 1 THEN 1 ELSE 0 END) AS singleton,
+        SUM(CASE WHEN COALESCE(json_extract(detail_json, '$.ref_count'), 0) > 1 THEN 1 ELSE 0 END) AS multi,
+        SUM(COALESCE(json_extract(detail_json, '$.ref_count'), 0)) AS refs
+      FROM job_observations
+      WHERE ${scopeWhere}
+        AND observation_type = 'hash_ref.fetch_batch'
+    `).get(...scopeParams);
     return {
       exploration_steps: Math.max(0, explorationCount),
       last_successful_owner_exploration_step: Math.max(0, lastSuccessfulOwnerExplorationStep),
       synthesis_required: synthesis?.present === 1,
       citation_fetches: Math.max(0, Number(citationFetches?.count || 0)),
       citation_fetch_batches: Math.max(0, Number(citationFetchBatches?.count || 0)),
+      fetch_batches_total: Math.max(0, Number(fetchBatchStats?.total || 0)),
+      exploration_fetch_batches: Math.max(0, Number(fetchBatchStats?.exploration || 0)),
+      singleton_fetch_batches: Math.max(0, Number(fetchBatchStats?.singleton || 0)),
+      multi_fetch_batches: Math.max(0, Number(fetchBatchStats?.multi || 0)),
+      fetched_refs_total: Math.max(0, Number(fetchBatchStats?.refs || 0)),
     };
   } catch {
     return {
@@ -605,6 +629,11 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       synthesis_required: false,
       citation_fetches: 0,
       citation_fetch_batches: 0,
+      fetch_batches_total: 0,
+      exploration_fetch_batches: 0,
+      singleton_fetch_batches: 0,
+      multi_fetch_batches: 0,
+      fetched_refs_total: 0,
     };
   }
 }

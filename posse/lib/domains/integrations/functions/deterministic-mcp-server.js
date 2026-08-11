@@ -1922,7 +1922,7 @@ function appendResearchExplorationNotice(text, toolName) {
     notice = buildResearchCurtainCallText({ explorationSteps });
     noticeKind = "research_curtain";
   } else if (
-    explorationSteps >= Math.floor(RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS / 2)
+    explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
     && !researchNoticeFlags.midpoint
   ) {
     researchNoticeFlags.midpoint = true;

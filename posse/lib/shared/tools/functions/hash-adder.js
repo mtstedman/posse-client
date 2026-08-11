@@ -305,7 +305,12 @@ function renderBoundedResult(text, {
   } else if (omitted > 0) {
     lines.push("", `[... ${omitted} chars omitted from bounded view ...]`);
   }
-  lines.push(refStub({ entry, toolName: objectLabel, sizeChars }));
+  lines.push(refStub({
+    entry,
+    toolName: objectLabel,
+    sizeChars,
+    refRole: materialized && omitted > 0 ? "continuation" : "citation",
+  }));
   return lines.join("\n");
 }
 
@@ -996,7 +1001,7 @@ function shouldSurfaceHashRef(toolName, result, {
   return true;
 }
 
-function refStub({ entry, toolName, sizeChars }) {
+function refStub({ entry, toolName, sizeChars, refRole = "citation" }) {
   const ref = entry?.ref || "";
   const objectType = String(entry?.object_type || toolName || "tool_result")
     .replace(/[^0-9A-Za-z_.:-]+/g, "_")
@@ -1007,10 +1012,14 @@ function refStub({ entry, toolName, sizeChars }) {
     .trim()
     .slice(0, 140);
   const note = noteValue ? ` note="${noteValue}"` : "";
-  return `\n\n[ref_hash ${objectType} ${sizeChars} chars ${ref}${note}]`;
+  const normalizedRole = refRole === "continuation" ? "continuation" : "citation";
+  const currentFetch = normalizedRole === "continuation" ? "allowed" : "not_needed";
+  return `\n\n[ref_hash ${objectType} ${sizeChars} chars ${ref} ref_role=${normalizedRole} current_fetch=${currentFetch}${note}]`;
 }
 
-function recordHashObservation(context, surfaced, toolName, sizeChars) {
+function recordHashObservation(context, surfaced, toolName, sizeChars, {
+  refRole = "citation",
+} = {}) {
   if (!surfaced?.ok || !surfaced?.entry?.ref) return;
   recordObservation({
     work_item_id: context.work_item_id ?? null,
@@ -1024,6 +1033,9 @@ function recordHashObservation(context, surfaced, toolName, sizeChars) {
       content_hash: surfaced.entry.content_hash,
       size_chars: sizeChars,
       reused: surfaced.reused === true,
+      fetch_class: surfaced.entry?.metadata?.fetch_class || null,
+      ref_role: refRole === "continuation" ? "continuation" : "citation",
+      current_fetch: refRole === "continuation" ? "allowed" : "not_needed",
     },
   });
 }
@@ -1208,7 +1220,8 @@ export function appendHashRefIfMajor(toolName, result, {
     });
     return result;
   }
-  recordHashObservation(hashContext, surfaced, toolName, sizeChars);
+  const refRole = boundedIngress && materialized ? "continuation" : "citation";
+  recordHashObservation(hashContext, surfaced, toolName, sizeChars, { refRole });
   if (boundPolicy && sizeChars > boundPolicy.capChars) {
     const bounded = renderBoundedResult(text, {
       policy: boundPolicy,
@@ -1227,7 +1240,7 @@ export function appendHashRefIfMajor(toolName, result, {
     });
     return bounded;
   }
-  const stamped = `${result}${refStub({ entry: surfaced.entry, toolName, sizeChars })}`;
+  const stamped = `${result}${refStub({ entry: surfaced.entry, toolName, sizeChars, refRole })}`;
   recordContextMeterSample(hashContext, toolName, {
     fullSizeChars: sizeChars,
     emittedSizeChars: stamped.length,
@@ -1342,6 +1355,7 @@ function recordFetchBatchObservation(hashContext, refs, args, {
     detail: {
       kind: "hash_ref_fetch_batch",
       ref_count: refs.length,
+      batch_shape: refs.length === 1 ? "singleton" : (refs.length > 1 ? "multi" : "empty"),
       refs,
       research_phase: researchPhase || null,
       visible_ledger_enforced: enforcePolicy === true,

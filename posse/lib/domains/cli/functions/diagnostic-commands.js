@@ -201,12 +201,14 @@ export function cmdCalls({ tierModelName }) {
     const g = researcherGuardrails.totals;
     const cachePct = g.input_tokens > 0 ? ((g.cached_input_tokens || 0) / g.input_tokens) * 100 : 0;
     const cost = Number(g.cost_usd || 0);
+    const lookupsPerTurn = g.turns_used > 0 ? (g.lookup_calls / g.turns_used).toFixed(2) : "0.00";
     console.log(`\n  ${C.bold}Researcher Guardrails${C.reset}`);
     console.log(
       `  jobs:${String(g.jobs).padStart(3)} ` +
       `${C.green}succeeded:${String(g.succeeded_jobs).padStart(3)}${C.reset} ` +
       `${g.failed_jobs > 0 ? C.red : C.dim}failed:${String(g.failed_jobs).padStart(3)}${C.reset} ` +
       `calls:${String(g.call_count).padStart(3)} ` +
+      `turns:${String(g.turns_used).padStart(4)} ` +
       `in:${fmtTok(g.input_tokens).padStart(7)} ` +
       `cached:${fmtTok(g.cached_input_tokens).padStart(7)} (${fmtUsagePct(cachePct)}) ` +
       `cost:$${cost.toFixed(cost >= 10 ? 2 : 4)}`
@@ -214,8 +216,17 @@ export function cmdCalls({ tierModelName }) {
     console.log(
       `  evidence:${String(g.evidence_count).padStart(3)} ` +
       `novel:${String(g.novel_relevant_files).padStart(3)} ` +
-      `synthesize-now:${String(g.synthesis_required_count).padStart(3)} ${C.dim}` +
+      `synthesize-now:${String(g.synthesis_required_count).padStart(3)} ` +
+      `fetch-batches:${String(g.fetch_batches).padStart(3)} ` +
+      `singleton:${String(g.singleton_fetch_batches).padStart(3)} ` +
+      `refs:${String(g.fetched_refs).padStart(3)} ${C.dim}` +
       `(compare per-job tokens/cost with pass/fail in --json)${C.reset}`
+    );
+    console.log(
+      `  lookups:${String(g.lookup_calls).padStart(4)} ` +
+      `per-turn:${lookupsPerTurn} ` +
+      `service:${Math.round(g.lookup_service_ms)}ms ` +
+      `queue:${Math.round(g.lookup_queue_wait_ms)}ms`
     );
   }
 
