@@ -113,11 +113,11 @@ export class DelegateRole extends BaseRole {
     ].join("\n");
   }
 
-  buildContract({ job } = {}) {
+  buildContract({ job, ctx } = {}) {
     const { loadNudges } = this.roleDeps();
     return [
       getPromptBundleRolePrompt("delegator").trim(),
-      job ? loadNudges(job.id) : "",
+      job ? loadNudges(job.id, { attemptId: ctx?.attemptId }) : "",
     ].filter(Boolean).join("\n");
   }
 

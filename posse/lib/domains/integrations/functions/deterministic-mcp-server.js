@@ -131,6 +131,7 @@ import {
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
 import {
+  RESEARCH_CITATION_FETCH_GATE_ENABLED,
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
@@ -1834,6 +1835,7 @@ function shouldBlockForResearchSynthesis(toolName, { requestedAtlasTool = false 
 }
 
 function researchCitationFetchGate(toolName) {
+  if (!RESEARCH_CITATION_FETCH_GATE_ENABLED) return null;
   if (!isResearcherRole || !isResearchAtlasCitationFetchAction(toolName)) return null;
   maybeMarkResearchSynthesisRequired({ toolName });
   syncResearchSynthesisStateFromObservations();
@@ -1841,11 +1843,15 @@ function researchCitationFetchGate(toolName) {
     jobId: mcpJobId,
     attemptId: mcpAttemptId,
   });
-  if (!researchState.synthesisRequiredAt) {
-    return { reason: "before_synthesis", citationFetches: Number(observed.citation_fetches || 0) };
-  }
-  if (Number(observed.citation_fetches || 0) >= 1) {
-    return { reason: "budget_exhausted", citationFetches: Number(observed.citation_fetches || 0) };
+  if (
+    researchState.synthesisRequiredAt
+    && Number(observed.citation_fetch_batches || 0) >= 1
+  ) {
+    return {
+      reason: "budget_exhausted",
+      citationFetches: Number(observed.citation_fetches || 0),
+      citationFetchBatches: Number(observed.citation_fetch_batches || 0),
+    };
   }
   return null;
 }
@@ -3079,6 +3085,7 @@ async function handleRequest(msg) {
         canonicalTool: toolName,
         reason: citationFetchGate.reason,
         citationFetches: citationFetchGate.citationFetches,
+        citationFetchBatches: citationFetchGate.citationFetchBatches,
       });
       const citationGateText = buildResearchCitationFetchGateText({ reason: citationFetchGate.reason });
       recordEmbeddedModelControlNotice(toolName, {

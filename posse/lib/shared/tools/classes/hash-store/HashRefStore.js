@@ -115,6 +115,51 @@ function mergeNotes(existing, next) {
   return `${oldText} | ${nextText}`.slice(0, 1000);
 }
 
+function mergeVisibleScopes(existing = [], incoming = []) {
+  const out = Array.isArray(existing) ? existing.map((scope) => ({ ...scope })) : [];
+  for (const candidate of Array.isArray(incoming) ? incoming : []) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const attemptId = Number(candidate.attempt_id) || null;
+    const agentCallId = Number(candidate.agent_call_id) || null;
+    const index = out.findIndex((scope) => (
+      (Number(scope?.attempt_id) || null) === attemptId
+      && (Number(scope?.agent_call_id) || null) === agentCallId
+    ));
+    if (index < 0) {
+      out.push({ ...candidate });
+      continue;
+    }
+    const prior = out[index];
+    const rank = { hidden: 0, partial: 1, full: 2 };
+    const visibility = (rank[candidate.visibility] ?? 0) > (rank[prior.visibility] ?? 0)
+      ? candidate.visibility
+      : prior.visibility;
+    const ranges = [...(Array.isArray(prior.ranges) ? prior.ranges : [])];
+    for (const range of Array.isArray(candidate.ranges) ? candidate.ranges : []) {
+      if (!ranges.some((entry) => entry?.start === range?.start && entry?.end === range?.end)) {
+        ranges.push(range);
+      }
+    }
+    out[index] = { ...prior, ...candidate, visibility, ranges };
+  }
+  return out.slice(-64);
+}
+
+function mergedHashRefMetadata(existing, incoming, { pinBounded = false } = {}) {
+  const current = existing && typeof existing === "object" ? existing : null;
+  const next = incoming && typeof incoming === "object" ? incoming : null;
+  if (!current && !next && !pinBounded) return null;
+  const merged = { ...(current || next || {}) };
+  if (next?.model_visible_scopes) {
+    merged.model_visible_scopes = mergeVisibleScopes(
+      current?.model_visible_scopes,
+      next.model_visible_scopes,
+    );
+  }
+  if (pinBounded) merged.bounded_ingress = true;
+  return merged;
+}
+
 function runImmediateTransaction(db, fn) {
   if (db.inTransaction) return fn();
   db.exec("BEGIN IMMEDIATE");
@@ -551,11 +596,14 @@ export class HashRefStore {
     const currentMetadata = parseJson(row.metadata_json);
     const shouldPin = metadata?.bounded_ingress === true || metadata?.bounded_ingress === 1;
     const pinChanged = shouldPin && currentMetadata?.bounded_ingress !== true && currentMetadata?.bounded_ingress !== 1;
-    const nextMetadata = pinChanged
-      ? { ...(currentMetadata || {}), bounded_ingress: true }
-      : currentMetadata;
+    const nextMetadata = mergedHashRefMetadata(currentMetadata, metadata, { pinBounded: shouldPin });
+    const metadataChanged = stableJsonStringify(nextMetadata) !== stableJsonStringify(currentMetadata);
     const mergedNote = mergeNotes(row.note, note);
-    const shouldTouch = rematerialized || row.entry_kind === "materialized" || pinChanged || mergedNote !== (row.note || null);
+    const shouldTouch = rematerialized
+      || row.entry_kind === "materialized"
+      || pinChanged
+      || metadataChanged
+      || mergedNote !== (row.note || null);
     if (!shouldTouch) return { row, rematerialized: false };
 
     this.db.prepare(`

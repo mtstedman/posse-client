@@ -8,6 +8,8 @@ import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from ".
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
 const CODEX_LAZY_MCP_SERVER_SUFFIX = "lazy";
+const CODEX_POSSE_MCP_STARTUP_TIMEOUT_SECONDS = 35;
+const INTENTIONALLY_TOOLLESS_ROLES = new Set(["preflight", "delegator"]);
 // Remote issuance has already narrowed this surface by role, task mode, and
 // operator policy. Keep that issued surface direct by default: a tool belongs
 // here only when it is intentionally safe to require tool_search before use.
@@ -27,6 +29,7 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
   configOverrides.push(
     `mcp_servers.${serverKey}.command=${_toTomlLiteral(serverConfig.command)}`,
     `mcp_servers.${serverKey}.args=${_toTomlLiteral(serverConfig.args || [])}`,
+    `mcp_servers.${serverKey}.startup_timeout_sec=${CODEX_POSSE_MCP_STARTUP_TIMEOUT_SECONDS}`,
   );
   if (serverConfig.cwd) {
     configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);
@@ -38,7 +41,7 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
   });
 }
 
-function buildCodexDeterministicMcpAttachment(serverConfig) {
+function buildCodexDeterministicMcpAttachment(serverConfig, { role = "" } = {}) {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
   const atlasTools = Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [];
@@ -49,6 +52,33 @@ function buildCodexDeterministicMcpAttachment(serverConfig) {
     : null;
   const directServerKeys = [];
   const configOverrides = [];
+  const totalToolCount = toolNames.length + atlasTools.length;
+
+  if (totalToolCount === 0) {
+    if (INTENTIONALLY_TOOLLESS_ROLES.has(String(role || "").trim().toLowerCase())) {
+      return {
+        active: false,
+        tools: [],
+        directTools: [],
+        lazyTools: [],
+        atlasTools: [],
+        requiredTools: [],
+        contractTools: [],
+        configOverrides: [],
+        serverConfig,
+        serverKey: null,
+        lazyServerKey: null,
+        directServerKeys: [],
+        providerHomeEnv: serverConfig.providerHomeEnv || null,
+        reason: "intentional_toolless_role",
+      };
+    }
+    const error = new Error(
+      `Codex operational MCP projection is empty for ${role || "unknown-role"}`,
+    );
+    error.code = "POSSE_CODEX_MCP_SURFACE_INCOMPLETE";
+    throw error;
+  }
 
   appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, { toolNames });
   const baseDisabledTools = lazyTools.map(rawToolsMcpName);
@@ -60,8 +90,8 @@ function buildCodexDeterministicMcpAttachment(serverConfig) {
   // The base gateway carries scoped repository tools plus every role-issued
   // ATLAS action. Those are prerequisites for the execution contract and the
   // ATLAS-first gate, so they must never depend on model-initiated discovery.
+  configOverrides.push(`mcp_servers.${serverKey}.required=true`);
   if (directTools.length > 0 || atlasTools.length > 0) {
-    configOverrides.push(`mcp_servers.${serverKey}.required=true`);
     directServerKeys.push(serverKey);
   }
   if (lazyServerKey) {
@@ -71,6 +101,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig) {
     });
     configOverrides.push(
       `mcp_servers.${lazyServerKey}.enabled_tools=${_toTomlLiteral(rawLazyTools)}`,
+      `mcp_servers.${lazyServerKey}.required=true`,
     );
   }
   if (directServerKeys.length > 0) {
@@ -97,6 +128,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig) {
     directTools,
     lazyTools,
     atlasTools,
+    requiredTools: Array.isArray(serverConfig.requiredTools) ? serverConfig.requiredTools : [],
     contractTools,
     configOverrides,
     serverConfig,
@@ -293,7 +325,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     };
   }
 
-  return buildCodexDeterministicMcpAttachment(serverConfig);
+  return buildCodexDeterministicMcpAttachment(serverConfig, { role });
 }
 
 export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, options = {}) {
@@ -375,7 +407,11 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     };
   }
 
-  return buildCodexDeterministicMcpAttachment(serverConfig);
+  return buildCodexDeterministicMcpAttachment(serverConfig, { role });
+}
+
+export function __testBuildCodexDeterministicMcpAttachment(serverConfig, options = {}) {
+  return buildCodexDeterministicMcpAttachment(serverConfig, options);
 }
 
 export function buildCodexSystemToolLockdownOverrides({

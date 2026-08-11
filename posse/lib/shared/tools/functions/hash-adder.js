@@ -1,6 +1,10 @@
 import crypto from "crypto";
 
-import { getObservationContext, recordObservation } from "../../../domains/observability/functions/observations.js";
+import {
+  getObservationContext,
+  hashRefFetchObservationLedger,
+  recordObservation,
+} from "../../../domains/observability/functions/observations.js";
 import {
   fetchHashRefForContext,
   surfaceHashRefForContext,
@@ -21,6 +25,7 @@ import {
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { logEvent } from "../../../domains/queue/functions/events.js";
 import { ContextMeter } from "../../classes/ContextMeter.js";
+import { admitHashRefFetch, hashRefModelVisibility } from "./fetch-ref-policy.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -515,6 +520,7 @@ export function compactTreeScopeResult(toolName, result, {
         sizeChars: payloadText.length,
         metadata: {
           surfaced_by: "tree_scope_rank_compactor",
+          fetch_class: "cursor_page",
           tool: "tree.scope",
           rank_start: rankStart,
           rank_end: rankEnd,
@@ -638,6 +644,7 @@ export function materializeCodeSurveyPages(data, {
         sizeChars: payloadText.length,
         metadata: {
           surfaced_by: "survey_snapshot_pager",
+          fetch_class: "survey_page",
           // A cursor is only useful while every frozen page remains
           // materialized. Keep survey pages out of the ordinary LRU budget so
           // storing a later page cannot degrade an earlier cursor to a
@@ -828,6 +835,7 @@ export function compactCodeWindowLensResult(toolName, result, {
           recomputable: true,
           metadata: {
             surfaced_by: "requested_region_continuation",
+            fetch_class: "result_continuation",
             tool: "code.window",
             windows: continuation.length,
           },
@@ -903,7 +911,12 @@ export function compactCodeWindowLensResult(toolName, result, {
         note: `lower-ranked code.lens matches ${LENS_INLINE_MATCHES + 1}-${data.matches.length}`,
         sizeChars: tailPayload.length,
         recomputable: true,
-        metadata: { surfaced_by: "result_ref_paging", tool: "code.lens", matches: tail.length },
+        metadata: {
+          surfaced_by: "result_ref_paging",
+          fetch_class: "result_tail",
+          tool: "code.lens",
+          matches: tail.length,
+        },
       }, scope);
     } catch (err) {
       recordHashSurfaceFailure(hashContext, tool, tailPayload.length, err?.message || err);
@@ -948,7 +961,12 @@ export function compactCodeWindowLensResult(toolName, result, {
         note: `${data.repo_rel_path} lines ${tailStartLine}-${data.endLine}`,
         sizeChars: tailPayload.length,
         recomputable: true,
-        metadata: { surfaced_by: "result_ref_paging", tool: "code.window", tail_start_line: tailStartLine },
+        metadata: {
+          surfaced_by: "result_ref_paging",
+          fetch_class: "result_tail",
+          tool: "code.window",
+          tail_start_line: tailStartLine,
+        },
       }, scope);
     } catch (err) {
       recordHashSurfaceFailure(hashContext, tool, tailPayload.length, err?.message || err);
@@ -1082,6 +1100,16 @@ function recordContextMeterSample(context, toolName, {
   }
 }
 
+function initiallyVisibleHashRefRanges(policy, sizeChars) {
+  if (!policy) return [{ start: 0, end: sizeChars }];
+  const headChars = Math.max(0, Math.min(policy.headChars || policy.capChars || 0, sizeChars));
+  const tailChars = Math.max(0, Math.min(policy.tailChars || 0, Math.max(0, sizeChars - headChars)));
+  return [
+    ...(headChars > 0 ? [{ start: 0, end: headChars }] : []),
+    ...(tailChars > 0 ? [{ start: sizeChars - tailChars, end: sizeChars }] : []),
+  ];
+}
+
 export function appendHashRefIfMajor(toolName, result, {
   args = {},
   context = {},
@@ -1151,10 +1179,15 @@ export function appendHashRefIfMajor(toolName, result, {
       sizeChars,
       metadata: {
         surfaced_by: "hash_adder",
+        fetch_class: boundedIngress ? "bounded_result" : "visible_copy",
         tool: toolName || null,
         materialized,
         bounded_ingress: boundedIngress,
         retention_exceeded: boundedIngress && !materialized,
+        ...hashRefModelVisibility(hashContext, {
+          visibility: boundedIngress ? "partial" : "full",
+          ranges: initiallyVisibleHashRefRanges(boundedIngress ? boundPolicy : null, sizeChars),
+        }),
       },
     }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
   } catch (err) {
@@ -1259,6 +1292,7 @@ function fetchDeliveryDetail(renderedText) {
     const returnedChars = Number.isFinite(Number(page.returned_chars))
       ? Number(page.returned_chars)
       : (typeof rendered?.text === "string" ? rendered.text.length : null);
+    const pageOffset = Number.isFinite(Number(page.offset)) ? Number(page.offset) : null;
     return {
       object_type: rendered?.object_type || null,
       page_mode: page.mode || null,
@@ -1269,6 +1303,10 @@ function fetchDeliveryDetail(renderedText) {
         ? Number(page.truncated_match_rows)
         : null,
       returned_chars: returnedChars,
+      delivered_range_start: page.mode === "offset" ? pageOffset : null,
+      delivered_range_end: page.mode === "offset" && pageOffset != null && returnedChars != null
+        ? pageOffset + returnedChars
+        : null,
       has_more: page.has_more === true,
       empty: rendered?.ok === true && returnedChars === 0,
       search_error: page.search_error || null,
@@ -1282,6 +1320,8 @@ function fetchDeliveryDetail(renderedText) {
       match_count: null,
       truncated_match_rows: null,
       returned_chars: null,
+      delivered_range_start: null,
+      delivered_range_end: null,
       has_more: false,
       empty: false,
       search_error: null,
@@ -1289,8 +1329,59 @@ function fetchDeliveryDetail(renderedText) {
   }
 }
 
-function recordFetchObservation(hashContext, ref, result, renderedText = null) {
+function recordFetchBatchObservation(hashContext, refs, args, {
+  researchPhase = null,
+  enforcePolicy = false,
+} = {}) {
+  recordObservation({
+    work_item_id: hashContext.work_item_id ?? null,
+    job_id: hashContext.job_id ?? null,
+    attempt_id: hashContext.attempt_id ?? null,
+    observation_type: "hash_ref.fetch_batch",
+    summary: `fetch_ref batch requested with ${refs.length} ref${refs.length === 1 ? "" : "s"}`,
+    detail: {
+      kind: "hash_ref_fetch_batch",
+      ref_count: refs.length,
+      refs,
+      research_phase: researchPhase || null,
+      visible_ledger_enforced: enforcePolicy === true,
+      search: String(args?.search || "").trim() || null,
+      requested_search_mode: String(args?.search_mode ?? args?.searchMode ?? "auto"),
+      requested_offset: Number.isFinite(Number(args?.offset)) ? Number(args.offset) : 0,
+      requested_limit: Number.isFinite(Number(args?.limit)) ? Number(args.limit) : null,
+      agent_call_id: hashContext.agent_call_id ?? null,
+    },
+  });
+}
+
+function recordFetchObservation(hashContext, ref, result, renderedText = null, policy = {}) {
   const delivery = fetchDeliveryDetail(renderedText);
+  const admitted = policy.allowed !== false;
+  const message = admitted
+    ? (result?.ok && result?.found ? `Fetched ${ref}` : `Fetch miss for ${ref}`)
+    : `Rejected ${policy.classification || "fetch_ref"} for ${ref}`;
+  const detail = {
+    ref,
+    content_hash: result?.entry?.content_hash || null,
+    ok: admitted && result?.ok === true,
+    found: result?.found === true,
+    error: admitted ? (result?.error || null) : (policy.code || "fetch_ref_rejected"),
+    admission: admitted ? "allowed" : "rejected",
+    classification: policy.classification || null,
+    fetch_class: policy.fetch_class || null,
+    initial_visibility: policy.initial_visibility || null,
+    retryable: policy.retryable === true,
+    search_signature: policy.search_signature || null,
+    requested_offset: policy.requested_offset ?? null,
+    requested_limit: policy.requested_limit ?? null,
+    effective_offset: policy.effective_offset ?? null,
+    effective_limit: policy.effective_limit ?? null,
+    skipped_visible_chars: policy.skipped_visible_chars ?? 0,
+    research_phase: policy.research_phase || null,
+    visible_ledger_enforced: policy.visible_ledger_enforced === true,
+    agent_call_id: hashContext.agent_call_id ?? null,
+    ...delivery,
+  };
   try {
     logEvent({
       work_item_id: hashContext.work_item_id ?? null,
@@ -1299,14 +1390,8 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null) {
       event_type: EVENT_TYPES.HASH_REF_FETCH,
       actor_type: EVENT_ACTORS.SYSTEM,
       actor_id: "hash_ref_store",
-      message: result?.ok && result?.found ? `Fetched ${ref}` : `Fetch miss for ${ref}`,
-      event_json: {
-        ref,
-        ok: result?.ok === true,
-        found: result?.found === true,
-        error: result?.error || null,
-        ...delivery,
-      },
+      message,
+      event_json: detail,
     });
   } catch {
     // Durable counters are useful, but fetch_ref delivery must stay best-effort.
@@ -1316,14 +1401,8 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null) {
     job_id: hashContext.job_id ?? null,
     attempt_id: hashContext.attempt_id ?? null,
     observation_type: "hash_ref.fetch",
-    summary: result?.ok && result?.found ? `Fetched ${ref}` : `Fetch miss for ${ref}`,
-    detail: {
-      ref,
-      ok: result?.ok === true,
-      found: result?.found === true,
-      error: result?.error || null,
-      ...delivery,
-    },
+    summary: message,
+    detail,
   });
 }
 
@@ -1346,29 +1425,65 @@ function parseFetchPayload(text) {
 
 export function fetchHashRefTool(args = {}, {
   context = {},
+  researchPhase = null,
+  enforcePolicy = false,
 } = {}) {
   const hashContext = contextForHashRefs(context);
   const refs = refInputs(args);
+  recordFetchBatchObservation(hashContext, refs, args, { researchPhase, enforcePolicy });
   if (refs.length === 0) return JSON.stringify({ ok: false, error: "fetch_ref requires ref or refs" }, null, 2);
-  if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
-    const result = isHashRefAlias(refs[0]) ? fetchHashRefForContext(hashContext, refs[0]) : invalidRefResult(refs[0]);
-    const rendered = fetchResultText(result, args);
-    recordFetchObservation(hashContext, refs[0], result, rendered);
+
+  const fetchOne = (ref) => {
+    const result = isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref);
+    const history = result?.entry?.content_hash
+      ? hashRefFetchObservationLedger({
+          jobId: hashContext.job_id,
+          attemptId: hashContext.attempt_id,
+          agentCallId: hashContext.agent_call_id,
+          contentHash: result.entry.content_hash,
+        })
+      : [];
+    const policy = admitHashRefFetch({
+      entry: result?.entry || null,
+      args,
+      history,
+      context: hashContext,
+      enforce: enforcePolicy,
+    });
+    let rendered;
+    if (policy.allowed === false) {
+      rendered = JSON.stringify({
+        ok: false,
+        ref: normalizeRef(ref),
+        code: policy.code,
+        classification: policy.classification,
+        retryable: false,
+        message: policy.message,
+      }, null, 2);
+    } else {
+      rendered = fetchResultText(result, policy.args || args);
+    }
+    recordFetchObservation(hashContext, ref, result, rendered, {
+      ...policy,
+      research_phase: researchPhase,
+      visible_ledger_enforced: enforcePolicy,
+    });
     return rendered;
+  };
+
+  if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
+    return fetchOne(refs[0]);
   }
 
-  const results = refs.map((ref) => {
-    const result = isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref);
-    const rendered = fetchResultText(result, args);
-    recordFetchObservation(hashContext, ref, result, rendered);
-    return parseFetchPayload(rendered);
-  });
+  const results = refs.map((ref) => parseFetchPayload(fetchOne(ref)));
   const found = results.filter((entry) => entry?.ok === true).length;
+  const rejected = results.filter((entry) => entry?.retryable === false && entry?.classification).length;
   return JSON.stringify({
     ok: found === refs.length,
     count: refs.length,
     found,
     missing: refs.length - found,
+    rejected,
     refs: results,
   }, null, 2);
 }

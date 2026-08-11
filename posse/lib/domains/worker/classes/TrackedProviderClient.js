@@ -125,7 +125,7 @@ const DEFAULT_PROVIDER_ERROR_PATTERNS = [
   /claude exited via signal/i,
   /socket connection was closed unexpectedly/i,
   /^Codex CLI exited with code 1\s*$/i,
-  /MCP_ATTACH_PROOF_MISSING|MCP attach proof missing|deterministic MCP attach proof missing/i,
+  /MCP_ATTACH_PROOF_MISSING|MCP_ATTACH_PROJECTION_MISMATCH|MCP attach proof missing|deterministic MCP attach proof missing|deterministic MCP projection mismatch/i,
   /ECONNREFUSED|ECONNRESET|ETIMEDOUT/i,
   /connection error/i,
   /circuit breaker open/i,
@@ -484,6 +484,11 @@ function agentJobAttachment(opts = {}, context = {}) {
     .includes("tools.agent_handoff");
   const subAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.sub_agent");
+  const issuedToolAllowlist = opts?._remoteIssuedPolicy?.valid === true
+    && opts._remoteIssuedPolicy?.toolAllowlist
+    && typeof opts._remoteIssuedPolicy.toolAllowlist === "object"
+    ? opts._remoteIssuedPolicy.toolAllowlist
+    : null;
   return {
     role: opts.role,
     agentCallRole: opts._agentCallRole || null,
@@ -503,6 +508,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     allowImageGeneration: opts.needsImageGeneration === true,
     agentHandoff,
     subAgent,
+    ...(issuedToolAllowlist ? { toolAllowlist: issuedToolAllowlist } : {}),
     coordinationChild: opts._subAgentChild === true,
     atlasAvailable: opts.disableAtlas !== true && atlasConfig.enabled !== false,
     atlasGateEnabled: opts.atlasGateEnabled !== false,

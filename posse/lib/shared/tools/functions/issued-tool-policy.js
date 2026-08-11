@@ -637,7 +637,11 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     attachment.projectDbCapability || (attachment.projectDbWrite === true ? "write" : "none"),
   );
   const projectDbCapability = intersectProjectDbCapabilities(signedDb, requestedDb);
-  const toolAllowlist = normalizeSuiteToolAllowlist(signed.toolAllowlist);
+  const attachmentHasAllowlist = !!plainObject(attachment.toolAllowlist);
+  const toolAllowlist = intersectSuiteToolAllowlists(
+    signed.toolAllowlist,
+    attachmentHasAllowlist ? attachment.toolAllowlist : null,
+  );
   if (attachment.agentHandoff !== true) {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "agent_handoff");
   }
@@ -676,8 +680,9 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     atlasGateEnabled: signed.atlasGateEnabled === true && attachment.atlasGateEnabled !== false,
     atlasPrefetchStatus: String(attachment.atlasPrefetchStatus || ""),
     atlas: { ...(plainObject(attachment.atlas) || {}) },
-    // The signed OAuth capability claims are the immutable role/tool contract.
-    // A rotating bearer and its Job attachment can never widen this allowlist.
+    // The signed OAuth capability claims are the immutable role/tool maximum.
+    // A trusted per-Job issuance may narrow it further, and a rotating bearer
+    // plus attachment can never widen either boundary.
     toolAllowlist,
   };
 }

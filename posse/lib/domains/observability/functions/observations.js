@@ -523,6 +523,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       last_successful_owner_exploration_step: 0,
       synthesis_required: false,
       citation_fetches: 0,
+      citation_fetch_batches: 0,
     };
   }
   try {
@@ -583,11 +584,19 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       WHERE ${scopeWhere}
         AND observation_type = 'hash_ref.fetch'
     `).get(...scopeParams);
+    const citationFetchBatches = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM job_observations
+      WHERE ${scopeWhere}
+        AND observation_type = 'hash_ref.fetch_batch'
+        AND json_extract(detail_json, '$.research_phase') = 'synthesis'
+    `).get(...scopeParams);
     return {
       exploration_steps: Math.max(0, explorationCount),
       last_successful_owner_exploration_step: Math.max(0, lastSuccessfulOwnerExplorationStep),
       synthesis_required: synthesis?.present === 1,
       citation_fetches: Math.max(0, Number(citationFetches?.count || 0)),
+      citation_fetch_batches: Math.max(0, Number(citationFetchBatches?.count || 0)),
     };
   } catch {
     return {
@@ -595,7 +604,61 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       last_successful_owner_exploration_step: 0,
       synthesis_required: false,
       citation_fetches: 0,
+      citation_fetch_batches: 0,
     };
+  }
+}
+
+/**
+ * Durable content-coverage/search ledger for fetch_ref admission. Rows are
+ * scoped to the model that received them when agent_call_id is available, so
+ * an inherited ref remains fetchable by a different agent.
+ */
+export function hashRefFetchObservationLedger({
+  jobId = null,
+  attemptId = null,
+  agentCallId = null,
+  contentHash = null,
+} = {}) {
+  const normalizedAttemptId = Number(attemptId);
+  const normalizedJobId = Number(jobId);
+  const normalizedAgentCallId = Number(agentCallId);
+  const useAttempt = Number.isInteger(normalizedAttemptId) && normalizedAttemptId > 0;
+  const useJob = Number.isInteger(normalizedJobId) && normalizedJobId > 0;
+  const useAgentCall = Number.isInteger(normalizedAgentCallId) && normalizedAgentCallId > 0;
+  const normalizedHash = String(contentHash || "").trim().toLowerCase();
+  if ((!useAttempt && !useJob) || !normalizedHash) return [];
+  try {
+    const db = getDb();
+    const scopeWhere = useAttempt && useJob
+      ? "job_id = ? AND (attempt_id = ? OR attempt_id IS NULL)"
+      : useAttempt ? "attempt_id = ?" : "job_id = ?";
+    const scopeParams = useAttempt && useJob
+      ? [normalizedJobId, normalizedAttemptId]
+      : [useAttempt ? normalizedAttemptId : normalizedJobId];
+    const rows = db.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE ${scopeWhere}
+        AND observation_type = 'hash_ref.fetch'
+      ORDER BY id ASC
+    `).all(...scopeParams);
+    const out = [];
+    for (const row of rows) {
+      let detail;
+      try {
+        detail = JSON.parse(String(row.detail_json || "{}"));
+      } catch {
+        continue;
+      }
+      if (String(detail?.content_hash || "").trim().toLowerCase() !== normalizedHash) continue;
+      const rowAgentCallId = Number(detail?.agent_call_id) || null;
+      if (useAgentCall ? rowAgentCallId !== normalizedAgentCallId : rowAgentCallId != null) continue;
+      out.push(detail);
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 

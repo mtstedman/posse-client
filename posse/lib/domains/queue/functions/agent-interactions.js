@@ -1,8 +1,9 @@
 // Durable operator/agent interaction channel used by Monitor Agents.
 //
-// A nudge is durable guidance scoped to a job. It is delivered through the
-// live tool channel and must be explicitly acknowledged by the agent; nudge
-// bodies are never injected into assembled prompts.
+// A nudge is durable guidance scoped to a job. Feedback pending before a
+// provider starts is included in its prompt and recorded as delivered. New
+// feedback that arrives mid-run is delivered through the live tool channel
+// and must be explicitly acknowledged by the agent.
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -96,6 +97,43 @@ function interactionLabel(row) {
   if (row.kind === "scope_request") return "scope";
   if (row.kind === "status_request") return "status";
   return row.kind || "guidance";
+}
+
+function formatGuidanceRows(rows) {
+  const usable = (rows || [])
+    .filter((row) => row && row.direction === USER_TO_AGENT && USER_GUIDANCE_KINDS.has(row.kind))
+    .filter((row) => ACTIVE_STATUSES.has(row.status) || row.status === "answered")
+    .filter((row) => normalizeText(row.body));
+
+  if (usable.length === 0) return "";
+
+  const lines = usable.map((row) => {
+    const label = interactionLabel(row);
+    const source = row.source ? ` from ${row.source}` : "";
+    return `- [${label} #${row.id}${source}] ${normalizeText(row.body)}`;
+  });
+
+  return [
+    "OPERATOR GUIDANCE (available at startup; apply before continuing):",
+    "These items were delivered in this prompt. Do not call get_operator_feedback for them; use that tool only after a later OPERATOR_FEEDBACK_SIGNAL.",
+    ...lines,
+    "",
+  ].join("\n");
+}
+
+function selectActiveGuidance(db, { job_id, nowIso }) {
+  return db.prepare(`
+    SELECT *
+    FROM agent_interactions
+    WHERE job_id = ?
+      AND direction = 'user_to_agent'
+      AND kind IN ('nudge','answer','scope_request','status_request')
+      AND status IN ('active','answered')
+      AND blocking_policy IN ('checkpoint','wait')
+      AND (ack_state = 'pending' OR (ack_state = 'acknowledged' AND ack_decision IS NULL))
+      AND (expires_at IS NULL OR expires_at > ?)
+    ORDER BY created_at ASC, id ASC
+  `).all(job_id, nowIso).map(normalizeRow);
 }
 
 function selectPendingOperatorFeedback(db, { job_id, nowIso, limit = 20 }) {
@@ -526,14 +564,82 @@ export function applyActiveAgentInteractionsForAttempt({
   return applied.map((entry) => entry.row);
 }
 
-export function buildOperatorGuidanceForAttempt({
-  job_id: _job_id,
-  attempt_id: _attempt_id = null,
-  agent_call_id: _agent_call_id = null,
+function applyOperatorGuidanceToPrompt({
+  job_id,
+  attempt_id,
+  agent_call_id = null,
 } = {}) {
-  // Live operator feedback is delivered through get_operator_feedback after a
-  // tool-result signal, not through prompt injection.
-  return "";
+  const jobId = normalizePositiveInt(job_id);
+  const attemptId = normalizePositiveInt(attempt_id);
+  if (!jobId || !attemptId) return [];
+  const agentCallId = normalizePositiveInt(agent_call_id);
+  const db = getDb();
+  const nowIso = now();
+
+  const applied = runImmediateTransaction(db, () => {
+    // Select and acknowledge in the same transaction so feedback arriving
+    // during prompt assembly cannot be consumed without appearing in the
+    // returned prompt text.
+    const active = selectActiveGuidance(db, { job_id: jobId, nowIso });
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO agent_interaction_applications (
+        interaction_id, work_item_id, job_id, attempt_id, agent_call_id, applied_at, result
+      ) VALUES (?, ?, ?, ?, ?, ?, 'included')
+    `);
+    const update = db.prepare(`
+      UPDATE agent_interactions
+      SET ack_state = CASE WHEN ack_state = 'pending' THEN 'acknowledged' ELSE ack_state END,
+          acknowledged_at = CASE
+            WHEN ack_state = 'pending' THEN COALESCE(acknowledged_at, ?)
+            ELSE acknowledged_at
+          END,
+          first_applied_at = COALESCE(first_applied_at, ?),
+          last_applied_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `);
+    return active.map((row) => {
+      const info = insert.run(row.id, row.work_item_id, row.job_id, attemptId, agentCallId, nowIso);
+      update.run(nowIso, nowIso, nowIso, nowIso, row.id);
+      return { row, firstDelivery: info.changes > 0 };
+    });
+  });
+
+  for (const { row, firstDelivery } of applied) {
+    if (!firstDelivery) continue;
+    logEvent({
+      work_item_id: row.work_item_id,
+      job_id: row.job_id,
+      attempt_id: attemptId,
+      event_type: applicationEventType(row.kind),
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Included ${interactionLabel(row)} #${row.id} in startup prompt for attempt #${attemptId}`,
+      event_json: {
+        interaction_id: row.id,
+        kind: row.kind,
+        agent_call_id: agentCallId,
+        prompt_delivery: true,
+      },
+    });
+  }
+  if (applied.some((entry) => entry.firstDelivery)) {
+    notifyQueueStateChanged({ reason: "agent_interactions_applied", jobId, workItemId: applied[0]?.row?.work_item_id ?? null });
+  }
+  return applied.map((entry) => entry.row);
+}
+
+export function buildOperatorGuidanceForAttempt({
+  job_id,
+  attempt_id = null,
+  agent_call_id = null,
+} = {}) {
+  const jobId = normalizePositiveInt(job_id);
+  if (!jobId) return "";
+  const attemptId = normalizePositiveInt(attempt_id);
+  const rows = attemptId
+    ? applyOperatorGuidanceToPrompt({ job_id: jobId, attempt_id: attemptId, agent_call_id })
+    : selectActiveGuidance(getDb(), { job_id: jobId, nowIso: now() });
+  return formatGuidanceRows(rows);
 }
 
 export function hasPendingOperatorFeedbackForJob(jobId) {

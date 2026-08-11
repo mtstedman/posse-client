@@ -639,6 +639,7 @@ export async function callProvider(promptText, {
       });
       stats.mcpAttachProof = mcpCleanup?.attachProofResult?.proof || null;
       stats.mcpAttachMissingProof = mcpCleanup?.attachProofResult?.missingProof === true;
+      stats.mcpAttachProjectionMismatch = mcpCleanup?.attachProofResult?.projectionMismatch === true;
       Object.assign(stats, termination);
       Object.assign(stats, terminalUsageFlush.snapshot());
 
@@ -671,6 +672,19 @@ export async function callProvider(promptText, {
           reject(err);
           return;
         }
+        if (stats.mcpAttachProjectionMismatch) {
+          const err = new Error("Codex deterministic MCP projection mismatch: the thin gate did not surface its required tool contract.");
+          err.code = "MCP_ATTACH_PROJECTION_MISMATCH";
+          err.stats = stats;
+          err.stdout = stdout;
+          err.stderr = stderr;
+          err.output = finalOutput || stdout.trim() || null;
+          err.partialOutput = err.output;
+          err.toolUses = toolUses;
+          err.mcpAttachProjectionMismatch = true;
+          reject(err);
+          return;
+        }
         resolve({ output: finalOutput || stdout.trim(), stats });
         return;
       }
@@ -692,6 +706,7 @@ export async function callProvider(promptText, {
       err.partialOutput = err.output;
       err.toolUses = toolUses;
       err.mcpAttachMissingProof = stats.mcpAttachMissingProof;
+      err.mcpAttachProjectionMismatch = stats.mcpAttachProjectionMismatch;
       reject(err);
     });
     } catch (err) {

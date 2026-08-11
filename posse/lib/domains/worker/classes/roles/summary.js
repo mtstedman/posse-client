@@ -37,11 +37,11 @@ export class SummaryRole extends BaseRole {
     return `OUTPUTS:\n${allOutputs.slice(0, 10000)}`;
   }
 
-  buildContract({ job } = {}) {
+  buildContract({ job, ctx } = {}) {
     const { loadNudges } = this.roleDeps();
     return [
       getPromptBundleRolePrompt("summary").trim(),
-      job ? loadNudges(job.id) : "",
+      job ? loadNudges(job.id, { attemptId: ctx?.attemptId }) : "",
     ].filter(Boolean).join("\n");
   }
 

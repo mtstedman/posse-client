@@ -29,8 +29,11 @@ import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integ
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import {
   issuedToolNamesForSuite,
+  intersectProjectDbCapabilities,
+  intersectSuiteToolAllowlists,
   isRegisteredRemoteToolSurface,
   narrowBootConfigToRemoteSurface,
+  normalizeSuiteToolAllowlist,
   normalizeRemoteIssuedPolicy,
   normalizeProjectDbCapability,
 } from "../functions/issued-tool-policy.js";
@@ -344,6 +347,109 @@ function expectedMcpToolNames(role, bootPayload = {}) {
   }
 }
 
+function canonicalProjectionNames(allowlist = {}) {
+  const normalized = normalizeSuiteToolAllowlist(allowlist);
+  return [
+    ...(normalized.tools || []).map((name) => `tools.${name}`),
+    ...(normalized.atlas || []).map((name) => `atlas.${name}`),
+  ];
+}
+
+function validateAgentToolProjection(role, requestedBootPayload = {}, projectedBootPayload = {}) {
+  const requested = normalizeSuiteToolAllowlist(requestedBootPayload.toolAllowlist);
+  const projected = normalizeSuiteToolAllowlist(projectedBootPayload.toolAllowlist);
+  const requestedTools = requested.tools || [];
+  const projectedTools = new Set(projected.tools || []);
+  const requestedNames = canonicalProjectionNames(requested);
+  const projectedNames = canonicalProjectionNames(projected);
+  const missingRequirements = [];
+
+  // Preflight/delegator gates deliberately request no provider-visible tools.
+  // Every other role that requested an operational surface must receive at
+  // least one usable projection from the thin per-agent gate.
+  if (requestedNames.length > 0 && projectedNames.length === 0) {
+    missingRequirements.push("an operational tool");
+  }
+
+  if (requestedBootPayload.coordinationChild === true) {
+    for (const name of requestedTools) {
+      if (!projectedTools.has(name)) missingRequirements.push(`tools.${name}`);
+    }
+  } else {
+    if (requestedBootPayload.allowWrite === true) {
+      if (String(role || "").trim().toLowerCase() === "dev") {
+        if (requestedTools.includes("edit_file") && !projectedTools.has("edit_file")) {
+          missingRequirements.push("tools.edit_file");
+        }
+      }
+    }
+  }
+
+  return {
+    valid: missingRequirements.length === 0,
+    missingRequirements: [...new Set(missingRequirements)],
+    requestedNames,
+    projectedNames,
+  };
+}
+
+function requiredProviderProjectionTools(role, bootPayload = {}) {
+  const tools = normalizeSuiteToolAllowlist(bootPayload.toolAllowlist).tools || [];
+  if (bootPayload.coordinationChild === true) {
+    return tools.map((name) => `tools.${name}`);
+  }
+  if (String(role || "").trim().toLowerCase() === "dev"
+    && bootPayload.allowWrite === true
+    && tools.includes("edit_file")) {
+    return ["tools.edit_file"];
+  }
+  return [];
+}
+
+function assertJobSurfaceWithinAgentGate(role, providerName, gateBootConfig = {}, remoteSurface = null) {
+  if (!isRegisteredRemoteToolSurface(remoteSurface)) {
+    const error = new Error("Per-job MCP tool issuance is not a trusted Posse Remote surface");
+    error.code = "POSSE_AGENT_MCP_JOB_SURFACE_UNTRUSTED";
+    throw error;
+  }
+  const issued = normalizeRemoteIssuedPolicy(remoteSurface, {
+    expectedRole: role,
+    expectedProvider: providerName || null,
+  });
+  if (!issued.valid) {
+    const error = new Error("Per-job MCP tool issuance does not match the attached agent identity");
+    error.code = "POSSE_AGENT_MCP_JOB_SURFACE_MISMATCH";
+    throw error;
+  }
+  const gateAllowlist = normalizeSuiteToolAllowlist(gateBootConfig.toolAllowlist);
+  const missing = [];
+  const gateToolNames = new Set(gateAllowlist.tools || []);
+  for (const name of issued.toolAllowlist.tools || []) {
+    if (!gateToolNames.has(name)) missing.push(`tools.${name}`);
+  }
+  // The reusable gate is minted after local feature availability (for
+  // example ATLAS memory and code-lens settings) has narrowed the remote
+  // catalog. A per-Job prompt may still contain those optional ATLAS names.
+  // The provider projection intersects them away below; deterministic tools
+  // and DB authority remain strict because they control repository mutation.
+  const gateDbCapability = normalizeProjectDbCapability(
+    gateBootConfig.projectDbCapability || (gateBootConfig.projectDbWrite === true ? "write" : "none"),
+  );
+  if (intersectProjectDbCapabilities(issued.projectDbCapability, gateDbCapability)
+    !== issued.projectDbCapability) {
+    missing.push(`project_db:${issued.projectDbCapability}`);
+  }
+  if (missing.length > 0) {
+    const error = new Error(
+      `Per-job MCP tool issuance exceeds the reusable agent gate: ${missing.join(", ")}`,
+    );
+    error.code = "POSSE_AGENT_MCP_JOB_SURFACE_EXCEEDS_GATE";
+    error.missingTools = missing;
+    throw error;
+  }
+  return remoteSurface;
+}
+
 function logMcpBootTelemetry(kind, role, bootPayload = {}, extra = {}) {
   const remoteCatalog = bootPayload.remoteCatalog || {};
   const expectedTools = expectedMcpToolNames(role, bootPayload);
@@ -652,6 +758,14 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
     throw error;
   }
   mcpGate.assertCompatible({ role, providerName: bootPayload.providerName });
+  // The stdio gateway is intentionally thin: advertise only the intersection
+  // of this Job projection and the immutable main-gate contract. In
+  // particular, an optional ATLAS tool present in the prompt issuance cannot
+  // reappear after local settings removed it when the Agent gate was minted.
+  bootPayload.toolAllowlist = intersectSuiteToolAllowlists(
+    mcpGate.contractBootConfig.toolAllowlist,
+    bootPayload.toolAllowlist,
+  );
   const effectiveRemoteToolSurface = bootPayload.coordinationChild === true
     ? projectCitationChildRemoteSurface(remoteToolSurface)
     : remoteToolSurface;
@@ -725,9 +839,10 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
       ...deterministicMcpBaseEnv(process.env),
       ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
     },
-    tools: mcpGate.contractBootConfig.toolAllowlist?.tools || [],
-    atlasTools: mcpGate.contractBootConfig.toolAllowlist?.atlas || [],
-    remoteToolSurface: mcpGate.remoteToolSurface,
+    tools: narrowedBootPayload.toolAllowlist?.tools || [],
+    atlasTools: narrowedBootPayload.toolAllowlist?.atlas || [],
+    requiredTools: requiredProviderProjectionTools(role, narrowedBootPayload),
+    remoteToolSurface: narrowedBootPayload.remoteToolSurface,
     ownerSession: mcpGate.ownerSession,
   });
 }
@@ -822,6 +937,7 @@ export class McpServerConfig {
     ownerSession = null,
     tools = [],
     atlasTools = [],
+    requiredTools = [],
     remoteToolSurface = null,
   } = {}) {
     this.ready = !!ready;
@@ -834,6 +950,7 @@ export class McpServerConfig {
     this.env = normalizedEnv(env);
     this.tools = Array.isArray(tools) ? [...tools] : [];
     this.atlasTools = Array.isArray(atlasTools) ? [...atlasTools] : [];
+    this.requiredTools = Array.isArray(requiredTools) ? [...requiredTools] : [];
     this.remoteToolSurface = remoteToolSurface && typeof remoteToolSurface === "object"
       ? JSON.parse(JSON.stringify(remoteToolSurface))
       : null;
@@ -864,6 +981,7 @@ export class McpServerConfig {
       env: this.toEnv(),
       tools: [...this.tools],
       atlasTools: [...this.atlasTools],
+      requiredTools: [...this.requiredTools],
       remoteToolSurface: this.remoteToolSurface ? JSON.parse(JSON.stringify(this.remoteToolSurface)) : null,
       ownerSession: this.ownerSession ? { ...this.ownerSession } : null,
     };
@@ -970,6 +1088,26 @@ export class McpServerConfig {
     const narrowedBootPayload = narrowBootConfigToRemoteSurface(bootPayload, issuedSurface);
     if (!narrowedBootPayload.remoteToolSurface) {
       throw requiredRemoteToolSurfaceError(role, null, "returned an invalid or mismatched agent tool contract");
+    }
+    const projectionValidation = validateAgentToolProjection(role, bootPayload, narrowedBootPayload);
+    if (!projectionValidation.valid) {
+      logMcpBootTelemetry("mcp.agent_gate.projection_refused", role, bootPayload, {
+        outcome: "incomplete_projection",
+        missing_requirements: projectionValidation.missingRequirements,
+        requested_tool_names: projectionValidation.requestedNames,
+        projected_tool_names: projectionValidation.projectedNames,
+        remote_prompt_version: issuedSurface?.prompt_version || null,
+        remote_policy_version: issuedSurface?.policy_version || null,
+        remote_surface: remoteSurfaceSummary(issuedSurface),
+      });
+      const error = new Error(
+        `Remote MCP projection is incomplete for ${role || "unknown-role"}: ${projectionValidation.missingRequirements.join(", ")}`,
+      );
+      error.code = "POSSE_AGENT_MCP_SURFACE_INCOMPLETE";
+      error.missingRequirements = projectionValidation.missingRequirements;
+      error.requestedTools = projectionValidation.requestedNames;
+      error.projectedTools = projectionValidation.projectedNames;
+      throw error;
     }
     narrowedBootPayload.remoteToolSurface = sanitizeRemoteToolSurfaceForBoot(
       narrowedBootPayload.remoteToolSurface,
@@ -1153,21 +1291,33 @@ export class McpServerConfig {
       // Prompt composition already resolved this exact remote-issued policy.
       // Revalidate it below against role/provider and reuse it so a redundant
       // catalog request cannot turn a successful issuance into an outage.
-      remoteResolution = opts.mcpGate.remoteToolSurface
+      const suppliedJobSurface = opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
+        && opts.remoteToolSurface !== opts.mcpGate.remoteToolSurface
+        ? assertJobSurfaceWithinAgentGate(
+            role,
+            bootPayload.providerName,
+            opts.mcpGate.contractBootConfig,
+            opts.remoteToolSurface,
+          )
+        : null;
+      remoteResolution = suppliedJobSurface
+        ? {
+            surface: suppliedJobSurface,
+            mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
+          }
+        : opts.mcpGate.remoteToolSurface
         ? {
             surface: opts.mcpGate.remoteToolSurface,
             mcpOAuthToken: "",
-          }
-        : opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
-        ? {
-            surface: opts.remoteToolSurface,
-            mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
           }
         : await resolveRemoteMcpToolSurfaceWithRetry(bootPayload, {
             attempts: opts.remoteToolSurfaceAttempts || 3,
             remoteToolSurfaceOptions: opts.remoteToolSurfaceOptions || {},
           });
     } catch (err) {
+      if (String(err?.code || "").startsWith("POSSE_AGENT_MCP_JOB_SURFACE_")) {
+        throw err;
+      }
       remoteResolutionError = err;
       remoteResolution = null;
     }

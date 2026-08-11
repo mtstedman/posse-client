@@ -46,10 +46,12 @@ import {
   researchExplorationObservationStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
+  RESEARCH_CITATION_FETCH_GATE_ENABLED,
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
+  buildResearchFinalFetchBatchText,
   buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
@@ -632,6 +634,19 @@ function toolsListCount(message) {
   return Array.isArray(tools) ? tools.length : null;
 }
 
+function toolsListNames(message) {
+  const tools = message?.result?.tools;
+  if (!Array.isArray(tools)) return [];
+  return [...new Set(tools
+    .map((tool) => String(tool?.name || "").trim())
+    .filter(Boolean))].sort();
+}
+
+function toolsListDigest(names = []) {
+  if (!Array.isArray(names)) return null;
+  return crypto.createHash("sha256").update(names.join("\n"), "utf8").digest("hex");
+}
+
 function agentHandoffSchemaTelemetry(message) {
   const tools = message?.result?.tools;
   if (!Array.isArray(tools)) return null;
@@ -898,7 +913,8 @@ function mcpToolResultMessage(message, result) {
 
 function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExplorationStep = null } = {}) {
   const boot = session?.bootConfig || {};
-  const citationFetch = isResearchAtlasCitationFetchAction(requestedAction);
+  const citationFetch = RESEARCH_CITATION_FETCH_GATE_ENABLED
+    && isResearchAtlasCitationFetchAction(requestedAction);
   const exploration = isResearchAtlasExplorationAction(requestedAction);
   if (String(boot.role || "") !== "researcher" || (!exploration && !citationFetch)) {
     return { tracked: false, blocked: false, explorationSteps: 0, assignedExplorationStep: null };
@@ -908,17 +924,20 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     attemptId: boot.attemptId ?? null,
   });
   const citationFetches = Math.max(0, Number(status.citation_fetches || 0));
+  const citationFetchBatches = Math.max(0, Number(status.citation_fetch_batches || 0));
   if (citationFetch) {
     const synthesisRequired = status.synthesis_required === true;
     return {
       tracked: true,
-      blocked: !synthesisRequired || citationFetches >= 1,
-      blockReason: synthesisRequired ? "budget_exhausted" : "before_synthesis",
+      blocked: synthesisRequired && citationFetchBatches >= 1,
+      blockReason: synthesisRequired && citationFetchBatches >= 1 ? "budget_exhausted" : null,
       citationFetch: true,
       citationFetches,
+      citationFetchBatches,
       explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
       assignedExplorationStep: null,
       synthesisRequired,
+      researchPhase: synthesisRequired ? "synthesis" : "exploration",
     };
   }
   const observedExplorationSteps = Math.max(0, Number(status.exploration_steps || 0));
@@ -931,10 +950,20 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     blockReason: "exploration_ceiling",
     citationFetch: false,
     citationFetches,
+    citationFetchBatches,
     explorationSteps: Math.max(observedExplorationSteps, assignedStep - 1),
     assignedExplorationStep: assignedStep,
     synthesisRequired: status.synthesis_required === true,
   };
+}
+
+function appendOwnerResearchFinalFetchNotice(result, admission) {
+  if (!admission?.citationFetch || admission.researchPhase !== "synthesis") return result;
+  const notice = buildResearchFinalFetchBatchText();
+  return appendOwnerModelControlNotice(result, `\n\n${notice}`, {
+    kind: "research_final_fetch_batch",
+    trigger: "synthesis_fetch_batch_complete",
+  });
 }
 
 function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName) {
@@ -1325,6 +1354,8 @@ class PersistentMcpSession {
       initializeSeenAt: null,
       toolsListSeenAt: null,
       toolsListCount: null,
+      toolsListNames: [],
+      toolsListSha256: null,
       agentHandoffToolSchemaName: null,
       agentHandoffToolSchemaSha256: null,
       agentHandoffToolSchemaChars: null,
@@ -1379,6 +1410,10 @@ class PersistentMcpSession {
       initializeSeenAt: this.attachProof.initializeSeenAt || null,
       toolsListSeenAt: this.attachProof.toolsListSeenAt || null,
       toolsListCount: this.attachProof.toolsListCount ?? null,
+      toolsListNames: Array.isArray(this.attachProof.toolsListNames)
+        ? [...this.attachProof.toolsListNames]
+        : [],
+      toolsListSha256: this.attachProof.toolsListSha256 || null,
       agentHandoffToolSchemaName: this.attachProof.agentHandoffToolSchemaName || null,
       agentHandoffToolSchemaSha256: this.attachProof.agentHandoffToolSchemaSha256 || null,
       agentHandoffToolSchemaChars: this.attachProof.agentHandoffToolSchemaChars ?? null,
@@ -1410,9 +1445,12 @@ class PersistentMcpSession {
 
   noteToolsList(response = null, now = Date.now()) {
     const count = toolsListCount(response);
+    const names = toolsListNames(response);
     const handoffSchema = agentHandoffSchemaTelemetry(response);
     this.attachProof.toolsListSeenAt = this.attachProof.toolsListSeenAt || now;
     this.attachProof.toolsListCount = count;
+    this.attachProof.toolsListNames = names;
+    this.attachProof.toolsListSha256 = toolsListDigest(names);
     this.attachProof.agentHandoffToolSchemaName = handoffSchema?.name || null;
     this.attachProof.agentHandoffToolSchemaSha256 = handoffSchema?.sha256 || null;
     this.attachProof.agentHandoffToolSchemaChars = handoffSchema?.chars ?? null;
@@ -2708,6 +2746,8 @@ export class PersistentMcpOwner {
         this._logAttachProof(session, "mcp.attach.tools_list_seen", {
           method,
           tool_count: count,
+          tool_names: session.attachProof.toolsListNames,
+          tool_names_sha256: session.attachProof.toolsListSha256,
           agent_handoff_schema_name: session.attachProof.agentHandoffToolSchemaName,
           agent_handoff_schema_sha256: session.attachProof.agentHandoffToolSchemaSha256,
           agent_handoff_schema_chars: session.attachProof.agentHandoffToolSchemaChars,
@@ -2907,6 +2947,7 @@ export class PersistentMcpOwner {
         tool_name: toolName,
         exploration_steps: synthesisAdmission.explorationSteps,
         citation_fetches: synthesisAdmission.citationFetches,
+        citation_fetch_batches: synthesisAdmission.citationFetchBatches,
         reason: synthesisAdmission.blockReason,
         duration_ms: Date.now() - startedAt,
       });
@@ -2918,8 +2959,13 @@ export class PersistentMcpOwner {
         const hashContext = { context: hashRefToolContext(session) };
         let result = createRef
           ? createRefMcpPayload(createHashRefResult(toolArgs || {}, hashContext))
-          : mcpToolTextPayload(fetchHashRefTool(toolArgs || {}, hashContext));
+          : mcpToolTextPayload(fetchHashRefTool(toolArgs || {}, {
+              ...hashContext,
+              researchPhase: synthesisAdmission.researchPhase || null,
+              enforcePolicy: String(session?.bootConfig?.role || "") === "researcher",
+            }));
         result = appendOwnerOperatorFeedbackSignal(result, session);
+        result = appendOwnerResearchFinalFetchNotice(result, synthesisAdmission);
         result = appendOwnerResearchSynthesisNotice(
           result,
           session,

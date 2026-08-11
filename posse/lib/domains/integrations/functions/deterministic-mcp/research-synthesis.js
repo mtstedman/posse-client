@@ -14,6 +14,10 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 5;
+// Exploration-time traversal remains available for omitted or bounded stored
+// payloads. The gate only becomes terminal after closeout has admitted one
+// final batched fetch_ref request.
+export const RESEARCH_CITATION_FETCH_GATE_ENABLED = true;
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([
   "buffer.push",
   "create.ref",
@@ -47,13 +51,20 @@ export function isResearchAtlasExplorationAction(action) {
 export function buildResearchCitationFetchGateText({ reason = "before_synthesis" } = {}) {
   if (reason === "budget_exhausted") {
     return [
-      "CITATION FETCH BUDGET EXHAUSTED: the one synthesis-phase atlas.fetch_ref call has already been used.",
-      "Close out using the evidence already gathered.",
+      "FINAL FETCH BATCH ALREADY USED: the one synthesis-phase atlas.fetch_ref batch has completed.",
+      "Do not call another tool. Submit the best-supported terminal report using the evidence already gathered.",
     ].join("\n");
   }
   return [
-    "CITATION FETCH DEFERRED: atlas.fetch_ref is reserved for the synthesis phase.",
-    "Continue within the exploration budget without fetching the stored ref. After closeout, one exact retrieval of an already-surfaced ref is admitted when its stored payload is essential to a final claim.",
+    "FETCH_REF NOT ELIGIBLE: early stored-ref traversal is limited to omitted, bounded, cursor, survey, or otherwise unseen payloads.",
+    "Do not fetch content already delivered in full. Batch known eligible refs instead of reading them in separate turns.",
+  ].join("\n");
+}
+
+export function buildResearchFinalFetchBatchText() {
+  return [
+    "FINAL FETCH BATCH COMPLETE.",
+    "No further discovery or stored-ref calls are available. Synthesize the terminal report now from the gathered evidence.",
   ].join("\n");
 }
 
@@ -88,6 +99,6 @@ export function buildResearchSynthesisRequiredText({
     absoluteCeilingReached
       ? `Exploration budget used: ${explorationSteps}/${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
       : `No new relevant evidence in the last ${staleSteps} exploration calls.`,
-    `No further discovery calls are available, except one exact atlas.fetch_ref retrieval of an already-surfaced ref when its stored payload is essential to a final claim. Submit the best-supported terminal report from the evidence already gathered with stop_reason=${stopReason}.`,
+    `No further discovery calls are available. If essential unseen stored evidence remains, put every eligible ref into one final batched atlas.fetch_ref call; after that response, make no further tool calls. Otherwise submit the best-supported terminal report now with stop_reason=${stopReason}.`,
   ].join("\n");
 }

@@ -38,6 +38,28 @@ function serverNamesFromPayload(payload = null) {
   return servers && typeof servers === "object" ? Object.keys(servers).filter(Boolean) : [];
 }
 
+function canonicalExpectedMcpNames(deterministicReadMcp = null) {
+  return [...new Set([
+    ...toNameList(deterministicReadMcp?.tools || []).map((name) => (
+      name.startsWith("tools.") ? name : `tools.${name}`
+    )),
+    ...toNameList(deterministicReadMcp?.atlasTools || []).map((name) => (
+      name.startsWith("atlas.") ? name : `atlas.${name}`
+    )),
+  ])].sort();
+}
+
+function canonicalRequiredMcpNames(deterministicReadMcp = null) {
+  return [...new Set(toNameList(
+    deterministicReadMcp?.requiredTools
+      || deterministicReadMcp?.serverConfig?.requiredTools
+      || [],
+  ).map((name) => {
+    if (name.startsWith("tools.") || name.startsWith("atlas.")) return name;
+    return `tools.${name}`;
+  }))].sort();
+}
+
 // Provider-agnostic extraction of MCP/gateway-relevant lines from an agent
 // CLI's stderr. The attach-under-load failure (the CLI failing to bring up the
 // stdio posse-gateway server) surfaces in the CLI's own stderr, which Posse
@@ -184,8 +206,30 @@ export function logProviderMcpAttachProofTelemetry({
   const initializeSeen = !!proof?.initializeSeenAt;
   const toolsListSeen = !!proof?.toolsListSeenAt;
   const missingProof = deterministicActive && (!initializeSeen || !toolsListSeen);
+  const expectedToolNames = canonicalExpectedMcpNames(deterministicReadMcp);
+  const requiredToolNames = canonicalRequiredMcpNames(deterministicReadMcp);
+  const actualToolNames = [...new Set(toNameList(proof?.toolsListNames || []))].sort();
+  const expectedToolSet = new Set(expectedToolNames);
+  const actualToolSet = new Set(actualToolNames);
+  const missingRequiredToolNames = requiredToolNames.filter((name) => !actualToolSet.has(name));
+  const unexpectedToolNames = actualToolNames.filter((name) => !expectedToolSet.has(name));
+  const emptyOperationalProjection = deterministicActive
+    && toolsListSeen
+    && expectedToolNames.length > 0
+    && actualToolNames.length === 0;
+  const projectionMismatch = deterministicActive
+    && toolsListSeen
+    && (
+      emptyOperationalProjection
+      || missingRequiredToolNames.length > 0
+      || unexpectedToolNames.length > 0
+    );
   appendRunTelemetry("diagnostics", {
-    kind: missingProof ? "mcp.attach.missing_proof" : "mcp.attach.proof",
+    kind: missingProof
+      ? "mcp.attach.missing_proof"
+      : projectionMismatch
+      ? "mcp.attach.projection_mismatch"
+      : "mcp.attach.proof",
     component: "provider_tool_surface",
     phase,
     provider: providerName || null,
@@ -201,6 +245,14 @@ export function logProviderMcpAttachProofTelemetry({
     initialize_seen: initializeSeen,
     tools_list_seen: toolsListSeen,
     tools_list_count: proof?.toolsListCount ?? null,
+    tools_list_names: actualToolNames,
+    tools_list_sha256: proof?.toolsListSha256 || null,
+    expected_tool_names: expectedToolNames,
+    required_tool_names: requiredToolNames,
+    missing_required_tool_names: missingRequiredToolNames,
+    unexpected_tool_names: unexpectedToolNames,
+    empty_operational_projection: emptyOperationalProjection,
+    projection_mismatch: projectionMismatch,
     first_tool_call_seen: !!proof?.firstToolCallSeenAt,
     first_tool_name: proof?.firstToolName || null,
     owner_request_count: proof?.requestCount ?? null,
@@ -209,5 +261,10 @@ export function logProviderMcpAttachProofTelemetry({
     missing_attach_proof: missingProof,
     ...extra,
   });
-  return { missingProof, proof };
+  return {
+    missingProof,
+    projectionMismatch,
+    invalidProof: missingProof || projectionMismatch,
+    proof,
+  };
 }
