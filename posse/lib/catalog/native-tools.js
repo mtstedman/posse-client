@@ -493,7 +493,9 @@ const HANDOFF_EVIDENCE_SELECTOR = {
     ref: HANDOFF_REF,
     lines: {
       type: "object",
-      description: "Optional 1-based window. Prefer at most 40 lines; 300 is the compactness recommendation and 2000 is the hard safety ceiling.",
+      description:
+        "Optional 1-based window into this exact ref. For source-backed refs, start/count use source-file line numbers shown in gutters or source metadata, not lines in a stored JSON/tool envelope; the range must fit wholly within one source window from the same ref. " +
+        "For non-source refs, start/count address materialized ref-text lines. Omit lines only to select the entire stored ref. A citation ref resolves to the exact visible anchor or fetched view. Omitted content uses a separate continuation ref: fetch it, then select the returned view_ref rather than the continuation ref.",
       properties: {
         start: { type: "integer", minimum: 1 },
         count: { type: "integer", minimum: 1, maximum: 2000 },

@@ -668,15 +668,23 @@ export async function executeToolWithMap(name, argsStr, context, {
         return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
       }
       const treeCompacted = compactTreeScopeResult(name, result, { args, context });
-      if (treeCompacted.compacted) return appendLiveChannelSignal(treeCompacted.result, name);
-      // Surveys materialize into stable ten-file cursor pages. The compacted
-      // result already owns its snapshot ref, so do not stamp a duplicate.
+      if (treeCompacted.compacted) {
+        const anchored = appendHashRefIfMajor(name, treeCompacted.result, { args, context, minChars: 1 });
+        return appendLiveChannelSignal(anchored, name);
+      }
       const surveyCompacted = compactCodeSurveyResult(name, result, { args, context });
-      if (surveyCompacted.compacted) return appendLiveChannelSignal(surveyCompacted.result, name);
+      if (surveyCompacted.compacted) {
+        const anchored = appendHashRefIfMajor(name, surveyCompacted.result, { args, context, minChars: 1 });
+        return appendLiveChannelSignal(anchored, name);
+      }
       // Window/lens ref-paging (flag-gated) runs after survey compaction and
       // before the ambient stamp so the stamp covers the compacted inline head.
       const refPaged = compactCodeWindowLensResult(name, surveyCompacted.result, { args, context });
-      const withHashRef = appendHashRefIfMajor(name, refPaged.result, { args, context });
+      const withHashRef = appendHashRefIfMajor(name, refPaged.result, {
+        args,
+        context,
+        ...(refPaged.compacted ? { minChars: 1 } : {}),
+      });
       return appendLiveChannelSignal(withHashRef, name);
     }
     if (typeof onUnknown === "function") {

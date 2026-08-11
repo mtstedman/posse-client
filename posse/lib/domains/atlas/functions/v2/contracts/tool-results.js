@@ -806,8 +806,13 @@
  * @property {string[]} identifiersMissing
  * @property {string[]} identifiersOmitted
  * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [additionalWindows]
- * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [_continuationWindows] Private owner transport; never model-visible.
- * @property {string} [continuationRef]       Stored requested regions omitted from the inline budget.
+ * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [_continuationWindows] Exact selected regions omitted from the native inline line/token budget; private owner transport, never model-visible.
+ * @property {string} [continuationRef]       One stored, ordered, de-duplicated continuation containing every selected region omitted from the inline display.
+ * @property {number} [continuationWindows]
+ * @property {string[]} [continuationRanges]
+ * @property {Array<{content:string,startLine:number,endLine:number,rangeStart:number,rangeEnd:number,signature:string,callableKind:string,owner?:string,anchor:string}>} [_returnedFunctionAnchors] Private owner transport; replaced with returnedFunctionAnchors before model delivery.
+ * @property {Array<{anchor:string,owner?:string,signature:string,callableKind:string,startLine:number,endLine:number,ref?:string}>} [returnedFunctionAnchors] Temporary fetchable anchors for directly returned anonymous functions visible in this result.
+ * @property {number} [returnedFunctionAnchorsOmitted]
  */
 
 /**

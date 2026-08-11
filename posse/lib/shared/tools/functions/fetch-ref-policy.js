@@ -71,6 +71,24 @@ function visibleScope(entry, context) {
   return { visibility, ranges };
 }
 
+/**
+ * Resolve the model-visibility contract attached to a ref for the current
+ * agent call. Refs created before visibility tracking have no contract and
+ * remain legacy-compatible; refs that do carry scopes are usable as evidence
+ * only when this exact model call received the complete payload.
+ */
+export function hashRefModelVisibleScope(entry, context = {}) {
+  const scopes = Array.isArray(entry?.metadata?.model_visible_scopes)
+    ? entry.metadata.model_visible_scopes
+    : [];
+  const resolved = visibleScope(entry, context);
+  return {
+    ...resolved,
+    contracted: scopes.length > 0,
+    fully_visible: resolved.visibility === "full",
+  };
+}
+
 function fetchClassForEntry(entry = {}) {
   const explicit = String(entry?.metadata?.fetch_class || "").trim();
   if (explicit) return explicit;

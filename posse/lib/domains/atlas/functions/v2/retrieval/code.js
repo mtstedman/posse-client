@@ -310,6 +310,20 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   });
   const additionalWindows = normalizeCodeWindowSlices(result.additionalWindows);
   const continuationWindows = normalizeCodeWindowSlices(result._continuationWindows);
+  const returnedFunctionAnchors = normalizeReturnedFunctionAnchors(result._returnedFunctionAnchors);
+  const ownerSymbols = returnedFunctionAnchors.length > 0
+    ? [
+        ...(target ? [target] : []),
+        ...(typeof view.query.symbolsInFile === "function"
+          ? await view.query.symbolsInFile(targetPath)
+          : []),
+      ]
+    : [];
+  for (const anchor of returnedFunctionAnchors) {
+    const owner = smallestContainingSymbol(ownerSymbols, anchor.rangeStart, anchor.rangeEnd);
+    if (owner) anchor.owner = String(owner.qualified_name || owner.name || "").trim();
+    anchor.anchor = returnedFunctionAnchorLabel(anchor);
+  }
   /** @type {CodeWindowData} */
   const data = {
     ...(symbolId ? { symbolId } : {}),
@@ -331,6 +345,12 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     // Private native-to-owner transport. The hash-ref pager removes this
     // before model delivery and exposes a continuationRef instead.
     ...(continuationWindows.length > 0 ? { _continuationWindows: continuationWindows } : {}),
+    // Private native-to-owner transport. The owner materializes each exact
+    // callable body once and replaces this carrier with a compact ref map.
+    ...(returnedFunctionAnchors.length > 0 ? { _returnedFunctionAnchors: returnedFunctionAnchors } : {}),
+    ...(Number(result.returnedFunctionAnchorsOmitted) > 0
+      ? { returnedFunctionAnchorsOmitted: Number(result.returnedFunctionAnchorsOmitted) }
+      : {}),
   };
   return okEnvelope({ action: "code.window", versionId, data });
 }
@@ -352,6 +372,52 @@ function normalizeCodeWindowSlices(value) {
       identifiers: stringArray(entry.identifiers),
     }))
     .filter((entry) => entry.content.length > 0);
+}
+
+function normalizeReturnedFunctionAnchors(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry) => ({
+      content: String(entry.content || ""),
+      startLine: Number(entry.startLine || 1),
+      endLine: Number(entry.endLine || entry.startLine || 1),
+      rangeStart: Math.max(0, Number(entry.rangeStart) || 0),
+      rangeEnd: Math.max(0, Number(entry.rangeEnd) || Number(entry.rangeStart) || 0),
+      signature: String(entry.signature || "").trim(),
+      callableKind: String(entry.callableKind || "anonymous_function").trim(),
+      owner: "",
+      anchor: "",
+    }))
+    .filter((entry) => entry.content.length > 0)
+    .filter((entry) => {
+      const key = `${entry.rangeStart}:${entry.rangeEnd}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function smallestContainingSymbol(symbols, rangeStart, rangeEnd) {
+  return (Array.isArray(symbols) ? symbols : [])
+    .filter((symbol) => {
+      const start = Number(symbol?.range_start);
+      const end = Number(symbol?.range_end);
+      return Number.isFinite(start) && Number.isFinite(end)
+        && start <= rangeStart && end >= rangeEnd;
+    })
+    .sort((left, right) => (
+      (Number(left.range_end) - Number(left.range_start))
+      - (Number(right.range_end) - Number(right.range_start))
+    ))[0] || null;
+}
+
+function returnedFunctionAnchorLabel(anchor) {
+  const signature = anchor.signature || anchor.callableKind || "anonymous function";
+  return anchor.owner
+    ? `${anchor.owner}::<returned ${signature}>`
+    : `<returned ${signature} @ line ${anchor.startLine}>`;
 }
 
 function normalizeIdentifiers(value) {

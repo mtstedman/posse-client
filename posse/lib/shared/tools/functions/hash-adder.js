@@ -25,7 +25,11 @@ import {
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { logEvent } from "../../../domains/queue/functions/events.js";
 import { ContextMeter } from "../../classes/ContextMeter.js";
-import { admitHashRefFetch, hashRefModelVisibility } from "./fetch-ref-policy.js";
+import {
+  admitHashRefFetch,
+  hashRefModelVisibility,
+  hashRefModelVisibleScope,
+} from "./fetch-ref-policy.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -272,28 +276,34 @@ function overflowDigest(text, policy, toolName, args = {}) {
   return { ...base, ...genericDigest(text) };
 }
 
+function boundedResultSlices(text, policy, sizeChars = String(text || "").length) {
+  const headChars = Math.max(0, Math.min(policy.headChars || policy.capChars || 0, sizeChars));
+  const tailChars = Math.max(0, Math.min(policy.tailChars || 0, Math.max(0, sizeChars - headChars)));
+  const tailStart = sizeChars - tailChars;
+  return {
+    head: text.slice(0, headChars),
+    tail: tailChars > 0 ? text.slice(tailStart) : "",
+    omitted: text.slice(headChars, tailStart),
+    omittedStart: headChars,
+    omittedEnd: tailStart,
+  };
+}
+
 function renderBoundedResult(text, {
   policy,
   toolName,
   objectType,
   args,
-  entry,
   sizeChars,
-  materialized = false,
+  slices = boundedResultSlices(text, policy, sizeChars),
 }) {
-  const headChars = Math.max(0, Math.min(policy.headChars || policy.capChars || 0, sizeChars));
-  const tailBudget = Math.max(0, Math.min(policy.tailChars || 0, Math.max(0, sizeChars - headChars)));
-  const head = text.slice(0, headChars);
-  const tail = tailBudget > 0 ? text.slice(sizeChars - tailBudget) : "";
-  const omitted = Math.max(0, sizeChars - head.length - tail.length);
+  const { head, tail } = slices;
+  const omitted = slices.omitted.length;
   const objectLabel = normalizeObjectType(objectType) || normalizeObjectType(toolName) || "tool_result";
   const digest = overflowDigest(text, policy, toolName, args);
   const digestText = JSON.stringify(digest, null, 2);
   const lines = [
     `[bounded_result ${objectLabel}: full payload ${sizeChars} chars; showing ${head.length}${tail ? `+${tail.length}` : ""} chars; omitted ${omitted} chars]`,
-    materialized
-      ? `[bounded_result_ref ${entry?.ref || ""}]`
-      : "[bounded_result_unretained]",
     "[overflow_digest]",
     digestText,
     "[/overflow_digest]",
@@ -305,12 +315,6 @@ function renderBoundedResult(text, {
   } else if (omitted > 0) {
     lines.push("", `[... ${omitted} chars omitted from bounded view ...]`);
   }
-  lines.push(refStub({
-    entry,
-    toolName: objectLabel,
-    sizeChars,
-    refRole: materialized && omitted > 0 ? "continuation" : "citation",
-  }));
   return lines.join("\n");
 }
 
@@ -526,6 +530,7 @@ export function compactTreeScopeResult(toolName, result, {
         metadata: {
           surfaced_by: "tree_scope_rank_compactor",
           fetch_class: "cursor_page",
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
           tool: "tree.scope",
           rank_start: rankStart,
           rank_end: rankEnd,
@@ -650,6 +655,7 @@ export function materializeCodeSurveyPages(data, {
         metadata: {
           surfaced_by: "survey_snapshot_pager",
           fetch_class: "survey_page",
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
           // A cursor is only useful while every frozen page remains
           // materialized. Keep survey pages out of the ordinary LRU budget so
           // storing a later page cannot degrade an earlier cursor to a
@@ -779,6 +785,34 @@ function resultRefPagingMinChars() {
   }
 }
 
+function dedupeCodeWindowContinuationWindows(entries) {
+  const windows = [];
+  const byContentRange = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== "object" || typeof entry.content !== "string" || !entry.content) continue;
+    const startLine = Math.max(1, Number(entry.startLine) || 1);
+    const endLine = Math.max(startLine, Number(entry.endLine) || startLine);
+    const identifiers = Array.isArray(entry.identifiers)
+      ? [...new Set(entry.identifiers.map(String).filter(Boolean))]
+      : [];
+    const key = `${startLine}\u0000${endLine}\u0000${entry.content}`;
+    const existing = byContentRange.get(key);
+    if (existing) {
+      existing.identifiers = [...new Set([...existing.identifiers, ...identifiers])];
+      continue;
+    }
+    const normalized = { content: entry.content, startLine, endLine, identifiers };
+    byContentRange.set(key, normalized);
+    windows.push(normalized);
+  }
+  windows.sort((left, right) => (
+    left.startLine - right.startLine
+    || left.endLine - right.endLine
+    || left.content.localeCompare(right.content)
+  ));
+  return windows;
+}
+
 export function compactCodeWindowLensResult(toolName, result, {
   args = {},
   context = {},
@@ -809,18 +843,144 @@ export function compactCodeWindowLensResult(toolName, result, {
   const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : bare;
   if (!data) return { result, compacted: false };
   const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
+  const pagingEnabled = enabled ?? resultRefPagingEnabled();
   let compacted = false;
 
-  // Native code.window can return several distant requested regions inline.
-  // Only regions that a hard output/coverage budget actually omitted travel
-  // in this private field. Materialize those exact slices; never interpret the
-  // legacy `truncated` bit as permission to page the rest of the file because
-  // that bit also describes an ordinary bounded selection.
-  if (tool === "code.window" && Array.isArray(data._continuationWindows)) {
-    const continuation = data._continuationWindows.filter((entry) => (
-      entry && typeof entry === "object" && typeof entry.content === "string" && entry.content.length > 0
-    ));
+  // A returned anonymous callable is useful as an addressable source scope,
+  // but not as a durable indexed symbol. Materialize its exact native range
+  // once in the job hash store and expose only a compact line/ref map. This
+  // runs independently of result-tail paging because it is addressability,
+  // not a response-size optimization.
+  if (tool === "code.window" && Array.isArray(data._returnedFunctionAnchors)) {
+    const seen = new Set();
+    const anchors = data._returnedFunctionAnchors.filter((entry) => {
+      if (!entry || typeof entry !== "object" || typeof entry.content !== "string" || !entry.content) {
+        return false;
+      }
+      const key = [
+        data.repo_rel_path,
+        Number(entry.rangeStart) || 0,
+        Number(entry.rangeEnd) || 0,
+        entry.content,
+      ].join("\u0000");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    delete data._returnedFunctionAnchors;
+    const anchorMap = [];
+    for (const entry of anchors) {
+      const startLine = Math.max(1, Number(entry.startLine) || 1);
+      const endLine = Math.max(startLine, Number(entry.endLine) || startLine);
+      const signature = String(entry.signature || "").trim();
+      const callableKind = String(entry.callableKind || "anonymous_function").trim();
+      const owner = String(entry.owner || "").trim();
+      const anchor = String(entry.anchor || "").trim()
+        || (owner ? `${owner}::<returned ${signature || callableKind}>` : `<returned ${signature || callableKind} @ line ${startLine}>`);
+      const visible = {
+        anchor,
+        ...(owner ? { owner } : {}),
+        signature,
+        callableKind,
+        startLine,
+        endLine,
+      };
+      if (hasHashRefScope(hashContext)) {
+        let surfaced;
+        try {
+          surfaced = surfaceHashRefForContext(hashContext, {
+            entryKind: "materialized",
+            payloadText: entry.content,
+            descriptor: {
+              kind: "source_anchor",
+              tool: "code.window",
+              repo_rel_path: data.repo_rel_path,
+              startLine,
+              endLine,
+              relation: "return",
+            },
+            objectType: "code.window.returned_function",
+            source: "tool:code.window",
+            note: `${data.repo_rel_path} returned anonymous function lines ${startLine}-${endLine}`,
+            sizeChars: entry.content.length,
+            recomputable: true,
+            metadata: {
+              surfaced_by: "returned_function_anchor",
+              fetch_class: "source_anchor",
+              ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+              tool: "code.window",
+              repo_rel_path: data.repo_rel_path,
+              start_line: startLine,
+              end_line: endLine,
+              relation: "return",
+            },
+          }, scope);
+        } catch (err) {
+          recordHashSurfaceFailure(hashContext, tool, entry.content.length, err?.message || err);
+        }
+        if (surfaced?.ok && surfaced?.entry?.ref) visible.ref = surfaced.entry.ref;
+      }
+      anchorMap.push(visible);
+    }
+    if (anchorMap.length > 0) data.returnedFunctionAnchors = anchorMap;
+    compacted = true;
+  }
+
+  // A continuation is a lossless partition of the already-selected result.
+  // Combine the native hard-budget remainder with any Node display tail before
+  // materialization so one ordered ref owns every omitted line exactly once.
+  // Never infer a continuation from the legacy `truncated` bit: it also marks
+  // intentional bounded selections.
+  if (tool === "code.window") {
+    const nativeContinuation = Array.isArray(data._continuationWindows)
+      ? data._continuationWindows
+      : [];
+    const carriedNativeContinuation = Array.isArray(data._continuationWindows);
     delete data._continuationWindows;
+    let displayTail = null;
+    let displayOriginal = null;
+    if (
+      pagingEnabled
+      && result.length > min
+      && hasHashRefScope(hashContext)
+      && typeof data.content === "string"
+      && data.content.length > min
+    ) {
+      const lines = data.content.split("\n");
+      let headChars = 0;
+      let splitAt = lines.length;
+      for (let index = 0; index < lines.length; index++) {
+        headChars += lines[index].length + 1;
+        if (headChars >= min) {
+          splitAt = index + 1;
+          break;
+        }
+      }
+      if (splitAt < lines.length) {
+        const startLine = Number(data.startLine) || 1;
+        const contentEndLine = startLine + lines.length - 1;
+        const originalEndLine = Math.max(contentEndLine, Number(data.endLine) || contentEndLine);
+        displayOriginal = {
+          endLine: originalEndLine,
+          outputTruncated: data.outputTruncated === true,
+          truncated: data.truncated === true,
+        };
+        displayTail = {
+          content: lines.slice(splitAt).join("\n"),
+          startLine: startLine + splitAt,
+          endLine: originalEndLine,
+          identifiers: [],
+        };
+        data.content = lines.slice(0, splitAt).join("\n");
+        data.endLine = displayTail.startLine - 1;
+        data.outputTruncated = true;
+        data.truncated = true;
+      }
+    }
+    const continuation = dedupeCodeWindowContinuationWindows([
+      ...nativeContinuation,
+      ...(displayTail ? [displayTail] : []),
+    ]);
     if (continuation.length > 0 && hasHashRefScope(hashContext)) {
       const continuationPayload = JSON.stringify({
         tool: "code.window",
@@ -835,12 +995,13 @@ export function compactCodeWindowLensResult(toolName, result, {
           descriptor: { kind: "tool_result", tool: "code.window", args, source: "tool:code.window" },
           objectType: "code.window.continuation",
           source: "tool:code.window",
-          note: `${continuation.length} requested code.window region(s) omitted from the inline budget`,
+          note: `${continuation.length} selected code.window region(s) omitted from the inline display`,
           sizeChars: continuationPayload.length,
           recomputable: true,
           metadata: {
             surfaced_by: "requested_region_continuation",
             fetch_class: "result_continuation",
+            ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
             tool: "code.window",
             windows: continuation.length,
           },
@@ -851,15 +1012,26 @@ export function compactCodeWindowLensResult(toolName, result, {
       if (surfaced?.ok && surfaced?.entry?.ref) {
         data.continuationRef = surfaced.entry.ref;
         data.continuationWindows = continuation.length;
+        data.continuationRanges = continuation.map((entry) => `${entry.startLine}-${entry.endLine}`);
       } else {
-        // A context without a hash owner must not silently discard requested
-        // evidence. Fall back to inline slices instead of leaking the private
-        // transport field or pretending the identifiers were not found.
+        // Materialization failure must not silently discard selected evidence.
+        // Restore the display tail to the primary content and expose native
+        // slices inline.
+        if (displayTail) {
+          data.content = `${data.content}\n${displayTail.content}`;
+          data.endLine = displayOriginal.endLine;
+          data.outputTruncated = displayOriginal.outputTruncated;
+          data.truncated = displayOriginal.truncated;
+        }
+        const nativeInline = continuation.filter((entry) => !(displayTail
+          && entry.startLine === displayTail.startLine
+          && entry.endLine === displayTail.endLine
+          && entry.content === displayTail.content));
         data.additionalWindows = [
           ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
-          ...continuation,
+          ...nativeInline,
         ];
-        const nowInline = [...new Set(continuation.flatMap((entry) => (
+        const nowInline = [...new Set(nativeInline.flatMap((entry) => (
           Array.isArray(entry.identifiers) ? entry.identifiers.map(String) : []
         )))];
         data.identifiersReturned = [...new Set([
@@ -873,11 +1045,21 @@ export function compactCodeWindowLensResult(toolName, result, {
       }
       compacted = true;
     } else if (continuation.length > 0) {
+      if (displayTail) {
+        data.content = `${data.content}\n${displayTail.content}`;
+        data.endLine = displayOriginal.endLine;
+        data.outputTruncated = displayOriginal.outputTruncated;
+        data.truncated = displayOriginal.truncated;
+      }
+      const nativeInline = continuation.filter((entry) => !(displayTail
+        && entry.startLine === displayTail.startLine
+        && entry.endLine === displayTail.endLine
+        && entry.content === displayTail.content));
       data.additionalWindows = [
         ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
-        ...continuation,
+        ...nativeInline,
       ];
-      const nowInline = [...new Set(continuation.flatMap((entry) => (
+      const nowInline = [...new Set(nativeInline.flatMap((entry) => (
         Array.isArray(entry.identifiers) ? entry.identifiers.map(String) : []
       )))];
       data.identifiersReturned = [...new Set([
@@ -889,12 +1071,11 @@ export function compactCodeWindowLensResult(toolName, result, {
       data.outputTruncated = false;
       data.continuationInline = true;
       compacted = true;
-    } else {
+    } else if (carriedNativeContinuation) {
       compacted = true;
     }
   }
 
-  const pagingEnabled = enabled ?? resultRefPagingEnabled();
   if (!pagingEnabled || result.length <= min || !hasHashRefScope(hashContext)) {
     return compacted
       ? { result: JSON.stringify(envelope, null, 2), compacted: true }
@@ -919,6 +1100,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         metadata: {
           surfaced_by: "result_ref_paging",
           fetch_class: "result_tail",
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
           tool: "code.lens",
           matches: tail.length,
         },
@@ -931,56 +1113,6 @@ export function compactCodeWindowLensResult(toolName, result, {
     data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
     data.tailMatchesRef = surfaced.entry.ref;
     data.tailMatchesTotal = LENS_INLINE_MATCHES + tail.length;
-    return { result: JSON.stringify(envelope, null, 2), compacted: true };
-  }
-
-  // code.window: keep head lines inline up to the char budget, page the tail.
-  if (tool === "code.window" && typeof data.content === "string" && data.content.length > min) {
-    const lines = data.content.split("\n");
-    let headChars = 0;
-    let splitAt = lines.length;
-    for (let i = 0; i < lines.length; i++) {
-      headChars += lines[i].length + 1;
-      if (headChars >= min) { splitAt = i + 1; break; }
-    }
-    if (splitAt >= lines.length) return { result, compacted: false };
-    const headContent = lines.slice(0, splitAt).join("\n");
-    const tailContent = lines.slice(splitAt).join("\n");
-    const startLine = Number(data.startLine) || 1;
-    const tailStartLine = startLine + splitAt;
-    const tailPayload = JSON.stringify({
-      tool: "code.window",
-      repo_rel_path: data.repo_rel_path,
-      startLine: tailStartLine,
-      endLine: data.endLine,
-      content: tailContent,
-    }, null, 1);
-    let surfaced;
-    try {
-      surfaced = surfaceHashRefForContext(hashContext, {
-        entryKind: "materialized",
-        payloadText: tailPayload,
-        descriptor: { kind: "tool_result", tool: "code.window", args, source: "tool:code.window" },
-        objectType: "code.window.tail",
-        source: "tool:code.window",
-        note: `${data.repo_rel_path} lines ${tailStartLine}-${data.endLine}`,
-        sizeChars: tailPayload.length,
-        recomputable: true,
-        metadata: {
-          surfaced_by: "result_ref_paging",
-          fetch_class: "result_tail",
-          tool: "code.window",
-          tail_start_line: tailStartLine,
-        },
-      }, scope);
-    } catch (err) {
-      recordHashSurfaceFailure(hashContext, tool, tailPayload.length, err?.message || err);
-      return { result, compacted: false };
-    }
-    if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
-    data.content = headContent;
-    data.contentTailRef = surfaced.entry.ref;
-    data.contentTailLines = `${tailStartLine}-${data.endLine}`;
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
 
@@ -1152,14 +1284,151 @@ export function appendHashRefIfMajor(toolName, result, {
   const effectiveObjectType = normalizeObjectType(objectType || toolName || "tool_result") || "tool_result";
   const boundPolicy = boundingPolicyFor(toolName, effectiveObjectType, { searchPaging });
   const boundedIngress = !!(boundPolicy && sizeChars > boundPolicy.capChars);
-  const retainedBoundedPayload = boundedIngress && sizeChars <= CONTEXT_BOUNDED_RETENTION_CHAR_CAP;
-  const materialized = sizeChars <= materializeCharCap || retainedBoundedPayload;
   const descriptor = {
     kind: "tool_result",
     tool: toolName,
     args,
     source: source || `tool:${toolName}`,
   };
+  const resolvedOwnerScope = ownerScope || (hashContext.job_id != null ? "job" : null);
+
+  if (boundedIngress) {
+    const slices = boundedResultSlices(text, boundPolicy, sizeChars);
+    const boundedAnchor = renderBoundedResult(text, {
+      policy: boundPolicy,
+      toolName,
+      objectType: effectiveObjectType,
+      args,
+      sizeChars,
+      slices,
+    });
+    const continuationMaterialized = slices.omitted.length <= CONTEXT_BOUNDED_RETENTION_CHAR_CAP;
+    const continuationDescriptor = {
+      ...descriptor,
+      kind: "bounded_result_continuation",
+      original_size_chars: sizeChars,
+      original_char_range: { start: slices.omittedStart, end: slices.omittedEnd },
+    };
+    let continuation;
+    if (slices.omitted.length > 0) {
+      try {
+        continuation = surfaceHashRefForContext(hashContext, {
+          ...(continuationMaterialized
+            ? {
+                entryKind: "materialized",
+                payloadText: slices.omitted,
+                descriptor: continuationDescriptor,
+                recomputable: true,
+              }
+            : {
+                entryKind: "descriptor",
+                descriptor: continuationDescriptor,
+                fingerprintMap: lineFingerprintMap(slices.omitted),
+                recomputable: true,
+              }),
+          objectType: `${effectiveObjectType}.continuation`,
+          source: source || `tool:${toolName}`,
+          note: [
+            note,
+            continuationMaterialized
+              ? `omitted original chars ${slices.omittedStart}-${slices.omittedEnd}`
+              : "bounded continuation exceeded retention cap",
+          ].filter(Boolean).join(" | "),
+          sizeChars: slices.omitted.length,
+          metadata: {
+            surfaced_by: "hash_adder",
+            fetch_class: "bounded_result",
+            tool: toolName || null,
+            materialized: continuationMaterialized,
+            bounded_ingress: true,
+            bounded_continuation: true,
+            retention_exceeded: !continuationMaterialized,
+            original_size_chars: sizeChars,
+            original_char_start: slices.omittedStart,
+            original_char_end: slices.omittedEnd,
+            ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+          },
+        }, { ownerScope: resolvedOwnerScope });
+      } catch (err) {
+        recordHashSurfaceFailure(hashContext, toolName, slices.omitted.length, err?.message || err);
+      }
+    }
+    const continuationAvailable = continuationMaterialized
+      && continuation?.ok
+      && continuation?.entry?.ref;
+    let anchor;
+    try {
+      anchor = surfaceHashRefForContext(hashContext, {
+        entryKind: "materialized",
+        payloadText: boundedAnchor,
+        descriptor: {
+          ...descriptor,
+          kind: "bounded_result_anchor",
+          continuation_ref: continuationAvailable ? continuation.entry.ref : null,
+        },
+        objectType: effectiveObjectType,
+        source: source || `tool:${toolName}`,
+        note: [note, "bounded visible anchor"].filter(Boolean).join(" | "),
+        sizeChars: boundedAnchor.length,
+        recomputable: true,
+        metadata: {
+          surfaced_by: "hash_adder",
+          fetch_class: "visible_copy",
+          tool: toolName || null,
+          materialized: true,
+          bounded_ingress: true,
+          bounded_anchor: true,
+          continuation_ref: continuationAvailable ? continuation.entry.ref : null,
+          ...hashRefModelVisibility(hashContext, {
+            visibility: "full",
+            ranges: [{ start: 0, end: boundedAnchor.length }],
+          }),
+        },
+      }, { ownerScope: resolvedOwnerScope });
+    } catch (err) {
+      recordHashSurfaceFailure(hashContext, toolName, boundedAnchor.length, err?.message || err);
+    }
+    if (!anchor?.ok || !anchor?.entry?.ref) {
+      recordHashSurfaceFailure(hashContext, toolName, boundedAnchor.length, anchor?.error || "surface_failed");
+      recordContextMeterSample(hashContext, toolName, {
+        fullSizeChars: sizeChars,
+        emittedSizeChars: boundedAnchor.length,
+        bounded: true,
+      });
+      return boundedAnchor;
+    }
+    recordHashObservation(hashContext, anchor, toolName, boundedAnchor.length, { refRole: "citation" });
+    if (continuationAvailable) {
+      recordHashObservation(hashContext, continuation, toolName, slices.omitted.length, { refRole: "continuation" });
+    }
+    const bounded = [
+      boundedAnchor,
+      refStub({
+        entry: anchor.entry,
+        toolName: effectiveObjectType,
+        sizeChars: boundedAnchor.length,
+        refRole: "citation",
+      }),
+      ...(continuationAvailable ? [
+        `\n\n[bounded_continuation_ref ${continuation.entry.ref}]`,
+        refStub({
+          entry: continuation.entry,
+          toolName: `${effectiveObjectType}.continuation`,
+          sizeChars: slices.omitted.length,
+          refRole: "continuation",
+        }),
+      ] : ["\n\n[bounded_result_unretained]"]),
+    ].join("");
+    recordContextMeterSample(hashContext, toolName, {
+      fullSizeChars: sizeChars,
+      emittedSizeChars: bounded.length,
+      bounded: true,
+      ref: anchor.entry.ref,
+    });
+    return bounded;
+  }
+
+  const materialized = sizeChars <= materializeCharCap;
   const entry = materialized
     ? {
       entryKind: "materialized",
@@ -1174,14 +1443,7 @@ export function appendHashRefIfMajor(toolName, result, {
       recomputable: true,
     };
   let surfaced;
-  const noteText = [
-    note,
-    boundedIngress
-      ? (materialized
-        ? "bounded stored result"
-        : "bounded result exceeded retention cap")
-      : "",
-  ].filter(Boolean).join(" | ") || null;
+  const noteText = note || null;
   try {
     surfaced = surfaceHashRefForContext(hashContext, {
       ...entry,
@@ -1191,17 +1453,15 @@ export function appendHashRefIfMajor(toolName, result, {
       sizeChars,
       metadata: {
         surfaced_by: "hash_adder",
-        fetch_class: boundedIngress ? "bounded_result" : "visible_copy",
+        fetch_class: "visible_copy",
         tool: toolName || null,
         materialized,
-        bounded_ingress: boundedIngress,
-        retention_exceeded: boundedIngress && !materialized,
         ...hashRefModelVisibility(hashContext, {
-          visibility: boundedIngress ? "partial" : "full",
-          ranges: initiallyVisibleHashRefRanges(boundedIngress ? boundPolicy : null, sizeChars),
+          visibility: "full",
+          ranges: initiallyVisibleHashRefRanges(null, sizeChars),
         }),
       },
-    }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) });
+    }, { ownerScope: resolvedOwnerScope });
   } catch (err) {
     recordHashSurfaceFailure(hashContext, toolName, sizeChars, err?.message || err);
     recordContextMeterSample(hashContext, toolName, {
@@ -1220,27 +1480,8 @@ export function appendHashRefIfMajor(toolName, result, {
     });
     return result;
   }
-  const refRole = boundedIngress && materialized ? "continuation" : "citation";
-  recordHashObservation(hashContext, surfaced, toolName, sizeChars, { refRole });
-  if (boundPolicy && sizeChars > boundPolicy.capChars) {
-    const bounded = renderBoundedResult(text, {
-      policy: boundPolicy,
-      toolName,
-      objectType: effectiveObjectType,
-      args,
-      entry: surfaced.entry,
-      sizeChars,
-      materialized: surfaced.entry?.entry_kind === "materialized",
-    });
-    recordContextMeterSample(hashContext, toolName, {
-      fullSizeChars: sizeChars,
-      emittedSizeChars: bounded.length,
-      bounded: true,
-      ref: surfaced.entry?.ref || null,
-    });
-    return bounded;
-  }
-  const stamped = `${result}${refStub({ entry: surfaced.entry, toolName, sizeChars, refRole })}`;
+  recordHashObservation(hashContext, surfaced, toolName, sizeChars, { refRole: "citation" });
+  const stamped = `${result}${refStub({ entry: surfaced.entry, toolName, sizeChars, refRole: "citation" })}`;
   recordContextMeterSample(hashContext, toolName, {
     fullSizeChars: sizeChars,
     emittedSizeChars: stamped.length,
@@ -1296,6 +1537,78 @@ function fetchResultText(result, args = {}) {
       ? "Payload unavailable: bounded retention cap exceeded."
       : "Payload unavailable: descriptor-backed ref cannot be recomputed in this runtime.",
   }, null, 2);
+}
+
+function attachFetchedViewRef(renderedText, {
+  hashContext,
+  sourceEntry,
+  fetchArgs = {},
+} = {}) {
+  let rendered;
+  try {
+    rendered = JSON.parse(String(renderedText || "{}"));
+  } catch {
+    return renderedText;
+  }
+  if (rendered?.ok !== true || typeof rendered.text !== "string" || rendered.text.length === 0) {
+    return renderedText;
+  }
+  const viewText = rendered.text;
+  let surfaced;
+  try {
+    surfaced = surfaceHashRefForContext(hashContext, {
+      entryKind: "materialized",
+      payloadText: viewText,
+      descriptor: {
+        kind: "fetch_ref_view",
+        tool: sourceEntry?.descriptor?.tool || sourceEntry?.metadata?.tool || "fetch_ref",
+        source_ref: sourceEntry?.ref || null,
+        fetch: {
+          offset: Number(rendered?.page?.offset) || 0,
+          limit: Number(rendered?.page?.returned_chars) || viewText.length,
+          mode: rendered?.page?.mode || "offset",
+          ...(fetchArgs?.search ? { search: String(fetchArgs.search) } : {}),
+        },
+      },
+      objectType: `${normalizeObjectType(sourceEntry?.object_type || "stored_ref")}.view`,
+      source: sourceEntry?.source || "tool:fetch_ref",
+      note: `exact fetched view of ${sourceEntry?.ref || "stored ref"}`,
+      sizeChars: viewText.length,
+      recomputable: true,
+      metadata: {
+        surfaced_by: "fetch_ref_view",
+        fetch_class: "visible_copy",
+        source_ref: sourceEntry?.ref || null,
+        exact_visible_field: "text",
+        ...hashRefModelVisibility(hashContext, {
+          visibility: "full",
+          ranges: [{ start: 0, end: viewText.length }],
+        }),
+      },
+    }, {
+      // Keep fetched views beside ordinary tool refs so an all-content page
+      // reuses the continuation row instead of materializing the same bytes a
+      // second time. Model visibility remains scoped to this agent call.
+      ownerScope: hashContext?.job_id != null ? "job" : "work_item",
+    });
+  } catch (err) {
+    recordHashSurfaceFailure(hashContext, "fetch_ref.view", viewText.length, err?.message || err);
+    return renderedText;
+  }
+  if (!surfaced?.ok || !surfaced?.entry?.ref) {
+    recordHashSurfaceFailure(hashContext, "fetch_ref.view", viewText.length, surfaced?.error || "surface_failed");
+    return renderedText;
+  }
+  recordHashObservation(hashContext, surfaced, "fetch_ref.view", viewText.length, { refRole: "citation" });
+  rendered.view_ref = {
+    ref: surfaced.entry.ref,
+    ref_role: "citation",
+    current_fetch: "not_needed",
+    exact_field: "text",
+    chars: viewText.length,
+    lines: normalizedLinesForHandoff(viewText),
+  };
+  return JSON.stringify(rendered, null, 2);
 }
 
 function fetchDeliveryDetail(renderedText) {
@@ -1476,6 +1789,11 @@ export function fetchHashRefTool(args = {}, {
       }, null, 2);
     } else {
       rendered = fetchResultText(result, policy.args || args);
+      rendered = attachFetchedViewRef(rendered, {
+        hashContext,
+        sourceEntry: result?.entry || null,
+        fetchArgs: policy.args || args,
+      });
     }
     recordFetchObservation(hashContext, ref, result, rendered, {
       ...policy,
@@ -1557,6 +1875,13 @@ function createOneHashRef(hashContext, item = {}) {
     }
     if (fetched.entry.payload_text == null) {
       return createRefError("source_ref_not_materialized (descriptor-only payloads cannot be sliced)", { source_ref: sourceAlias });
+    }
+    const visible = hashRefModelVisibleScope(fetched.entry, hashContext);
+    if (visible.contracted && !visible.fully_visible) {
+      return createRefError(
+        "source_ref_not_visible (fetch the continuation and use the returned view_ref as source_ref)",
+        { source_ref: sourceAlias },
+      );
     }
     const sliced = sliceSourcePayload(fetched.entry.payload_text, item);
     if (sliced.error) return createRefError(sliced.error, { source_ref: sourceAlias });

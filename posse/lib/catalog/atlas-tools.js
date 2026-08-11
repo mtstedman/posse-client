@@ -217,7 +217,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Open already-stored content for citable #refs; this never reruns the originating tool. A ref_role=citation/current_fetch=not_needed stub is already visible: cite or hand it off without fetching. Fetch only ref_role=continuation, explicit cursor/survey/continuation fields, omitted or bounded content, or focused matches within stored payloads. The ledger rejects fully visible content, duplicate pages, and repeated empty searches. Re-call the producer only for a materially different scope; do not infer payload type from the ref.",
+    description: "Open already-stored content for citable #refs; this never reruns the originating tool. A ref_role=citation/current_fetch=not_needed stub is already visible: cite or hand it off without fetching. Fetch only ref_role=continuation, explicit cursor/survey/continuation fields, omitted or bounded content, or focused matches within stored payloads. Every non-empty fetch returns view_ref, whose payload is exactly the returned text field; cite, slice, or hand off view_ref rather than the continuation ref. The ledger rejects fully visible content, duplicate pages, and repeated empty searches. Re-call the producer only for a materially different scope; do not infer payload type from the ref.",
     parameters: {
       type: "object",
       properties: {
@@ -236,7 +236,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "create_ref": {
     type: "function",
     name: "atlas_create_ref",
-    description: "Citation-store minting. Store a chunk of evidence and get back a #ref stub. Accepts inline text, a slice of an existing materialized ref (source_ref + lines/offset), or a batch via chunks[]. The optional note is retained with the stored ref.",
+    description: "Citation-store minting. Store a chunk of evidence and get back a #ref stub. Accepts inline text, a slice of a fully visible materialized ref (source_ref + lines/offset), or a batch via chunks[]. For continuation content, fetch first and use the returned view_ref as source_ref. The optional note is retained with the stored ref.",
     parameters: {
       type: "object",
       properties: {
@@ -810,7 +810,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_need_window",
-    description: "Bounded exact code for a selected symbol or named file regions. Use it directly when the target is known. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file; identifier and line hints do not alter that selection. With file, each matched identifier is covered by a bounded slice under one total expectedLines budget; inspect identifiersReturned/identifiersMissing and additionalWindows. A symbol already surfaced by code.window will not be surfaced by an identical code.window call; a duplicate-suppressed response means covered, not not-found. Do not call code.window more than once for the same symbol or substantially overlapping file/identifier selection. Follow continuationRef only when outputTruncated is true; it contains omitted requested slices, never the rest of the file.",
+    description: "Bounded exact code for a selected symbol or named file regions. Use it directly when the target is known. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file; identifier and line hints do not alter that selection. With file, each matched identifier is covered by a bounded slice under one total expectedLines budget; inspect identifiersReturned/identifiersMissing and additionalWindows. When a selected region intersects an anonymous function directly returned by an enclosing scope, returnedFunctionAnchors provides a temporary owner/signature/line map; follow its ref to inspect that exact callable without searching for an indexed symbol. A symbol already surfaced by code.window will not be surfaced by an identical code.window call; a duplicate-suppressed response means covered, not not-found. Do not call code.window more than once for the same symbol or substantially overlapping file/identifier selection. Follow the single continuationRef when outputTruncated is true; it contains every selected inline-omitted slice once in source order, never the rest of the file.",
     parameters: {
       type: "object",
       properties: {

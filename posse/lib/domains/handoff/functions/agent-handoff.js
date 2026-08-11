@@ -11,6 +11,7 @@ import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../..
 import { fetchHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
+import { hashRefModelVisibleScope } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
@@ -35,7 +36,9 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxEntryBytes: 32 * 1024,
   maxClaims: 12,
   maxClaimChars: 1000,
-  maxSelectorsPerClaim: 8,
+  // The public schema permits eight selectors in each of proof, support, and
+  // decoy. Runtime counts canonical selectors across those three lanes.
+  maxSelectorsPerClaim: 24,
   recommendedIdChars: 40,
   maxIdChars: 80,
   recommendedSummaryChars: 2000,
@@ -103,6 +106,7 @@ const PROFILE_POLICY = Object.freeze({
 });
 
 const TABLE = "agent_handoff_packets";
+const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materialization_cache");
 const READY_DBS = new WeakSet();
 
 function fail(code, message) {
@@ -411,6 +415,9 @@ function evidenceProvenance(entry, context, seen = new Set()) {
 
 export function materializeAgentHandoffEvidenceSelector(selectorValue, context) {
   const selector = parseAgentHandoffEvidenceSelector(selectorValue);
+  const cacheKey = `${selector.ref}:${selector.start ?? "all"}-${selector.end ?? "all"}`;
+  const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
+  if (cache?.has(cacheKey)) return cache.get(cacheKey);
   const fetched = fetchHashRefForContext(context, selector.ref);
   if (!fetched?.found || !fetched.entry) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_FOUND", `Evidence ${selector.ref} is not visible to the current agent call`);
@@ -418,6 +425,13 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   const entry = fetched.entry;
   if (entry.entry_kind !== "materialized" || entry.payload_text == null) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", `Evidence ${selector.ref} is not materialized`);
+  }
+  const visible = hashRefModelVisibleScope(entry, context);
+  if (visible.contracted && !visible.fully_visible) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE",
+      `Evidence ${selector.ref} is a continuation or partial ref, not the exact view shown to this agent. Fetch it and use the returned view_ref, or use the original citation anchor.`,
+    );
   }
   const lines = normalizedLines(entry.payload_text);
   const start = selector.start ?? 1;
@@ -451,7 +465,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Evidence ${selector.ref}:${start}-${end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorChars} characters`);
   }
   const provenance = evidenceProvenance(entry, context);
-  return {
+  const materialized = {
     selector: `${selector.ref}:L${start}-L${end}`,
     ref: selector.ref,
     lines: { start, end },
@@ -461,6 +475,8 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
     provenance,
     line_semantics: useSourceLines ? "source" : "materialized",
   };
+  cache?.set(cacheKey, materialized);
+  return materialized;
 }
 
 function normalizeScope(value, label, profile) {
@@ -570,14 +586,14 @@ function materializeClaim(
   if (normalized.length === 1) return [claim];
   const detail = normalizeClaimDetail(normalized[1], `claims[${claimIndex}][1]`);
   const out = {};
-  let selectorCount = 0;
+  const selectors = new Set();
   for (const lane of ["proof", "support"]) {
     if (detail[lane] == null) continue;
     if (!Array.isArray(detail[lane])) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${lane} must be an array`);
     const materialized = [];
     for (const selector of detail[lane]) {
-      selectorCount += 1;
       const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+      selectors.add(evidence.selector);
       if (lane === "proof" && !isAllowedProofProvenance(evidence, {
         allowAgentProse: allowAgentProseProof,
       })) {
@@ -609,15 +625,15 @@ function materializeClaim(
     out.decoy = detail.decoy.map((entry, index) => {
       const normalizedEntry = normalizeDecoyInput(entry, `decoy[${index}]`);
       if (normalizedEntry.length !== 2) fail("AGENT_HANDOFF_SCHEMA_INVALID", `decoy[${index}] must be [selector, reason]`);
-      selectorCount += 1;
       const evidence = materializeAgentHandoffEvidenceSelector(normalizedEntry[0], context);
+      selectors.add(evidence.selector);
       const reason = boundedString(normalizedEntry[1], `decoy[${index}][1]`, 500);
       counters.evidence += evidence.excerpt.length;
       counters.narrative += reason.length;
       return [evidence, reason];
     });
   }
-  if (selectorCount > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
+  if (selectors.size > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
     fail("AGENT_HANDOFF_TOO_LARGE", `claims[${claimIndex}] exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`);
   }
   if (detail.prose != null) {
@@ -1862,7 +1878,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           : AGENT_HANDOFF_LIMITS.maxSummaryChars,
         { required: false },
       ));
-      let selectorCount = 0;
+      const selectors = new Set();
       for (const lane of ["proof", "support"]) {
         if (detail[lane] == null) continue;
         if (!Array.isArray(detail[lane])) {
@@ -1870,8 +1886,8 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           continue;
         }
         for (const selector of detail[lane]) {
-          selectorCount += 1;
           const evidence = capture(() => materializeAgentHandoffEvidenceSelector(selector, context));
+          if (evidence?.selector) selectors.add(evidence.selector);
           if (lane === "proof" && evidence && !isAllowedProofProvenance(evidence, {
             allowAgentProse: allowAgentProseProof,
           }) && !isDegradableAgentProof(evidence, {
@@ -1894,13 +1910,13 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
               `${claimLabel}.decoy[${decoyIndex}]`,
             ));
             if (!decoy || decoy.length !== 2) continue;
-            selectorCount += 1;
-            capture(() => materializeAgentHandoffEvidenceSelector(decoy[0], context));
+            const evidence = capture(() => materializeAgentHandoffEvidenceSelector(decoy[0], context));
+            if (evidence?.selector) selectors.add(evidence.selector);
             capture(() => boundedString(decoy[1], `${claimLabel}.decoy[${decoyIndex}].reason`, 500));
           }
         }
       }
-      if (selectorCount > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
+      if (selectors.size > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
         issues.push({
           code: "AGENT_HANDOFF_TOO_LARGE",
           message: `${claimLabel} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`,
@@ -1924,6 +1940,10 @@ function failCollectedAgentHandoffIssues(issues) {
 
 function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
+  const materializationContext = {
+    ...context,
+    [EVIDENCE_MATERIALIZATION_CACHE]: new Map(),
+  };
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
     normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
     { role: normalizedRole, context },
@@ -1936,7 +1956,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     return materializeTerminalCompletion(normalizedArgs || {}, normalizedRole);
   }
   failCollectedAgentHandoffIssues(collectAgentHandoffValidationIssues(normalizedArgs, {
-    context,
+    context: materializationContext,
     role: normalizedRole,
     maxHandoffs,
   }));
@@ -2002,7 +2022,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     const claims = report.claims.map((claim, claimIndex) => materializeClaim(
       claim,
       claimIndex,
-      context,
+      materializationContext,
       entryCounters,
       {
         allowAgentProseProof: normalizedRole === "assessor"
@@ -2090,10 +2110,15 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   validatePlannerPacketSemantics(semanticPacket);
   validatePlannerCompatibilityTasks(semanticPacket);
   validateCitationChildPacketSemantics({ profile, outcome, handoffs });
+  const uniqueEvidence = packetEvidence({ handoffs });
+  const evidenceChars = uniqueEvidence.reduce(
+    (total, evidence) => total + String(evidence?.excerpt || "").length,
+    0,
+  );
   const evidenceLimit = normalizedRole === "subagent"
     ? AGENT_HANDOFF_LIMITS.maxCitationChildEvidenceChars
     : AGENT_HANDOFF_LIMITS.maxEvidenceChars;
-  if (counters.evidence > evidenceLimit) {
+  if (evidenceChars > evidenceLimit) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Materialized evidence exceeds ${evidenceLimit} characters for role ${normalizedRole || "unknown"}`);
   }
   return {
@@ -2103,7 +2128,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     ...(confidence == null ? {} : { confidence }),
     role: normalizedRole,
     handoffs,
-    evidence_chars: counters.evidence,
+    evidence_chars: evidenceChars,
     narrative_chars: counters.narrative,
     authoritative: true,
   };
@@ -2236,7 +2261,69 @@ function latestAgentHandoffRejection(agentCallId, db = getDb()) {
 export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
   const row = handoffRow(agentCallId, db);
   if (!row) return null;
-  return { ...row, packet: JSON.parse(row.materialized_packet_json) };
+  return { ...row, packet: parseStoredAgentHandoffPacket(row.materialized_packet_json) };
+}
+
+function mapStoredClaimEvidence(claim, mapEvidence) {
+  const detail = claim?.[1];
+  if (!detail || typeof detail !== "object") return claim;
+  const mapped = { ...detail };
+  for (const lane of ["proof", "support"]) {
+    if (Array.isArray(detail[lane])) mapped[lane] = detail[lane].map(mapEvidence);
+  }
+  if (Array.isArray(detail.decoy)) {
+    mapped.decoy = detail.decoy.map(([evidence, reason]) => [mapEvidence(evidence), reason]);
+  }
+  return [claim[0], mapped];
+}
+
+function mapStoredPacketEvidence(packet, mapEvidence) {
+  return {
+    ...packet,
+    handoffs: (packet.handoffs || []).map((handoff) => ({
+      ...handoff,
+      report: {
+        ...handoff.report,
+        claims: (handoff.report?.claims || []).map((claim) => mapStoredClaimEvidence(claim, mapEvidence)),
+      },
+    })),
+  };
+}
+
+function serializeStoredAgentHandoffPacket(packet) {
+  const evidenceCatalog = packetEvidence(packet);
+  if (evidenceCatalog.length === 0) return JSON.stringify(packet);
+  const evidenceIds = new Map(evidenceCatalog.map((evidence, index) => [evidence.selector, index]));
+  const stored = mapStoredPacketEvidence(packet, (evidence) => ({
+    evidence_id: evidenceIds.get(evidence.selector),
+  }));
+  stored.evidence_catalog = evidenceCatalog;
+  return JSON.stringify(stored);
+}
+
+function parseStoredAgentHandoffPacket(materializedJson) {
+  const stored = JSON.parse(materializedJson);
+  if (!Array.isArray(stored.evidence_catalog)) return stored;
+  const selectors = new Set();
+  for (const evidence of stored.evidence_catalog) {
+    const selector = String(evidence?.selector || "");
+    if (!selector || selectors.has(selector)) {
+      fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", "Stored agent_handoff evidence catalog is invalid");
+    }
+    selectors.add(selector);
+  }
+  const packet = mapStoredPacketEvidence(stored, (pointer) => {
+    const evidenceId = Number(pointer?.evidence_id);
+    const evidence = Number.isInteger(evidenceId) && evidenceId >= 0
+      ? stored.evidence_catalog[evidenceId]
+      : null;
+    if (!evidence) {
+      fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", "Stored agent_handoff evidence pointer is missing");
+    }
+    return evidence;
+  });
+  delete packet.evidence_catalog;
+  return packet;
 }
 
 export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs = null, db = getDb() } = {}) {
@@ -2276,7 +2363,7 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
   packet.work_item_id = resolvedContext.workItemId;
   packet.job_id = resolvedContext.jobId;
   packet.attempt_id = resolvedContext.attemptId;
-  const materializedJson = JSON.stringify(packet);
+  const materializedJson = serializeStoredAgentHandoffPacket(packet);
   const digest = crypto.createHash("sha256").update(materializedJson).digest("hex");
   const existing = handoffRow(agentCallId, database);
   if (existing) {
@@ -2461,15 +2548,21 @@ function plannerTaskSpec(handoff) {
 }
 
 function packetEvidence(packet) {
-  const out = [];
+  const bySelector = new Map();
+  const add = (evidence) => {
+    if (!evidence?.selector || bySelector.has(evidence.selector)) return;
+    bySelector.set(evidence.selector, evidence);
+  };
   for (const handoff of packet.handoffs || []) {
     for (const claim of handoff.report?.claims || []) {
       const detail = claim[1] || {};
-      for (const lane of ["proof", "support"]) out.push(...(detail[lane] || []));
-      for (const [evidence] of detail.decoy || []) out.push(evidence);
+      for (const lane of ["proof", "support"]) {
+        for (const evidence of detail[lane] || []) add(evidence);
+      }
+      for (const [evidence] of detail.decoy || []) add(evidence);
     }
   }
-  return out;
+  return [...bySelector.values()];
 }
 
 function packetEvidenceMetrics(packet) {
@@ -2698,7 +2791,7 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
     fail("TERMINAL_PROTOCOL_ERROR", "agent_handoff was required but no report was staged");
   }
   if (row.status === "rejected") fail("TERMINAL_PROTOCOL_ERROR", `agent_handoff was rejected (${row.rejection_code || "protocol violation"})`);
-  const packet = JSON.parse(row.materialized_packet_json);
+  const packet = parseStoredAgentHandoffPacket(row.materialized_packet_json);
   const digest = crypto.createHash("sha256").update(row.materialized_packet_json).digest("hex");
   if (digest !== row.packet_digest) fail("TERMINAL_PROTOCOL_ERROR", "agent_handoff digest verification failed");
   try {

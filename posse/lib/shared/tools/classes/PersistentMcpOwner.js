@@ -1158,20 +1158,17 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
   const requested = requestedToolPolicyName(toolName, toolArgs);
   const args = toolArgs && typeof toolArgs === "object" ? toolArgs : {};
   const context = hashRefToolContext(session);
-  // Surveys materialize into stable ten-file cursor pages. A compacted survey
-  // already contains its page-1 hash, so do not stamp a duplicate payload.
   const compacted = compactCodeSurveyResult(requested.name || toolName, first.text, { args, context });
   const refPaged = compacted.compacted
     ? compacted
     : compactCodeWindowLensResult(requested.name || toolName, compacted.result, { args, context });
-  const stamped = compacted.compacted
-    ? compacted.result
-    : appendHashRefIfMajor(requested.name || toolName, refPaged.result, {
-        args,
-        context,
-        source: `atlas:${requested.name || toolName}`,
-        objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
-      });
+  const stamped = appendHashRefIfMajor(requested.name || toolName, refPaged.result, {
+    args,
+    context,
+    source: `atlas:${requested.name || toolName}`,
+    objectType: requested.name ? `atlas.${requested.name}` : "atlas.tool_result",
+    ...((compacted.compacted || refPaged.compacted) ? { minChars: 1 } : {}),
+  });
   if (stamped === first.text) return result;
   const transformed = {
     ...result,
