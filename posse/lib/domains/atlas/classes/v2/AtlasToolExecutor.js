@@ -991,6 +991,7 @@ export class AtlasToolExecutor {
     if (!directReadEligible(request.action, request.args)) return null;
     const context = await this.#readContextFor(request, conductor);
     if (!context) return null;
+    this.#assertReadContextCompatible(request, context);
     const args = request.args && typeof request.args === "object" ? request.args : {};
     const action = request.action;
     // action LAST: an `action` key inside args (a legitimate semantic arg for
@@ -1106,6 +1107,35 @@ export class AtlasToolExecutor {
       repoId: config.repoId || atlas.repoId || null,
       config,
     };
+  }
+
+  #assertReadContextCompatible(request, context) {
+    if (!workItemKeyForRequest(request)) return;
+    const requested = this.#requestReadContext(request);
+    if (!requested?.readRoot) return;
+    const config = request.config || {};
+    const session = request.session || {};
+    const boot = session.bootConfig || session || {};
+    const atlas = boot?.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
+    const projectRoot = config.projectRoot
+      || boot?.projectRoot
+      || config.storageRepoPath
+      || atlas.storageRepoPath
+      || null;
+    if (!projectRoot || normalizeRepoKey(requested.readRoot) === normalizeRepoKey(projectRoot)) return;
+
+    const expectedViewPath = worktreeViewPath(requested.readRoot);
+    const actualViewPath = context.viewPath || null;
+    const readRootMatches = normalizeRepoKey(context.readRoot) === normalizeRepoKey(requested.readRoot);
+    const viewMatches = normalizeRepoKey(actualViewPath) === normalizeRepoKey(expectedViewPath);
+    if (readRootMatches && viewMatches) return;
+
+    const err = Object.assign(new Error(
+      `ATLAS read context mismatch for ${workItemKeyForRequest(request)}: `
+      + `read root ${requested.readRoot} requires mounted view ${expectedViewPath}; `
+      + `resolved read root ${context.readRoot || "(missing)"}, view ${actualViewPath || "(missing)"}`,
+    ), { code: "ATLAS_READ_CONTEXT_MISMATCH" });
+    throw err;
   }
 
   #readContextVersion(context) {

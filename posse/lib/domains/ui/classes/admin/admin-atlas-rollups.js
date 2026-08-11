@@ -17,6 +17,7 @@ function parseJsonObject(value) {
 }
 
 function finiteNumber(value) {
+  if (value == null || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -81,6 +82,8 @@ export function deriveAtlasReliabilityAction(detail = {}, row = {}) {
     || Object.prototype.hasOwnProperty.call(detail, "durationMs")
     || Object.prototype.hasOwnProperty.call(detail, "result_chars")
     || Object.prototype.hasOwnProperty.call(detail, "resultChars")
+    || Object.prototype.hasOwnProperty.call(detail?.response || {}, "result_chars")
+    || Object.prototype.hasOwnProperty.call(detail?.response || {}, "resultChars")
     || Object.prototype.hasOwnProperty.call(detail, "fallback");
   if (!hasReliabilitySignal) return null;
 
@@ -116,10 +119,15 @@ export function extractAtlasToolReliability(row = {}) {
     || status === "canceled"
     || /user cancelled mcp tool call|cancelled|canceled/i.test(errorText);
   const failed = detail.ok === false || !!errorText || cancelled || status === "error" || status === "failed";
+  const response = detail.response && typeof detail.response === "object" ? detail.response : {};
   const hasResultChars = Object.prototype.hasOwnProperty.call(detail, "result_chars")
-    || Object.prototype.hasOwnProperty.call(detail, "resultChars");
-  const resultChars = finiteNumber(detail.result_chars ?? detail.resultChars);
-  const empty = detail.empty === true || (ok && hasResultChars && Number(resultChars || 0) === 0);
+    || Object.prototype.hasOwnProperty.call(detail, "resultChars")
+    || Object.prototype.hasOwnProperty.call(response, "result_chars")
+    || Object.prototype.hasOwnProperty.call(response, "resultChars");
+  const resultChars = finiteNumber(
+    detail.result_chars ?? detail.resultChars ?? response.result_chars ?? response.resultChars,
+  );
+  const empty = detail.empty === true || (ok && hasResultChars && resultChars != null && resultChars === 0);
 
   return {
     action,

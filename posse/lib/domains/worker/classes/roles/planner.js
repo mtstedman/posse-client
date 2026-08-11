@@ -43,6 +43,7 @@ import {
   buildWorkflowModeBlock,
 } from "../../../intake/functions/hints.js";
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
+import { worktreePathAsync } from "../../../git/functions/worktree-path.js";
 import { getExplicitIntakeBindings } from "../../../planning/functions/plan-routing.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
@@ -92,9 +93,32 @@ const DEFAULT_DEPS = {
   researchBudgetPromptBlock: defaultResearchBudgetPromptBlock,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
+  resolvePlannerReadRoot,
   shortJobTitle: defaultShortJobTitle,
   unwrapTaskArray: defaultUnwrapTaskArray,
 };
+
+export async function resolvePlannerReadRoot(projectDir, workItemId, jobWorktreePath = null, {
+  resolveWorktreePath = worktreePathAsync,
+} = {}) {
+  const projectRoot = path.resolve(projectDir);
+  const candidates = [];
+  if (jobWorktreePath) candidates.push(path.resolve(jobWorktreePath));
+  if (workItemId != null) {
+    try {
+      candidates.push(path.resolve(await resolveWorktreePath(projectRoot, workItemId)));
+    } catch {
+      // An absent/unavailable worktree is normal for the first planning pass.
+    }
+  }
+  return candidates.find((candidate) => {
+    try {
+      return fs.statSync(candidate).isDirectory();
+    } catch {
+      return false;
+    }
+  }) || projectRoot;
+}
 
 export class PlannerRole extends BaseRole {
   static role = "planner";
@@ -125,7 +149,9 @@ export class PlannerRole extends BaseRole {
         plannerCtx.desiredOutputsBlock,
         job ? loadNudges(job.id, { attemptId: plannerCtx.attemptId }) : "",
         plannerCtx.plannerRoutingContext,
-        plannerCtx.projectDir ? `PROJECT ROOT: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
+        (plannerCtx.plannerReadRoot || plannerCtx.projectDir)
+          ? `PROJECT ROOT: ${(plannerCtx.plannerReadRoot || plannerCtx.projectDir).replace(/\\/g, "/")}`
+          : null,
         "",
         "Do NOT emit the final executable task JSON array.",
         "Do NOT create a compromise plan by averaging ideas.",
@@ -190,7 +216,9 @@ export class PlannerRole extends BaseRole {
       plannerCtx.desiredOutputsBlock,
       job ? loadNudges(job.id, { attemptId: plannerCtx.attemptId }) : "",
       plannerCtx.plannerRoutingContext,
-      plannerCtx.projectDir ? `PROJECT ROOT: ${plannerCtx.projectDir.replace(/\\/g, "/")}` : null,
+      (plannerCtx.plannerReadRoot || plannerCtx.projectDir)
+        ? `PROJECT ROOT: ${(plannerCtx.plannerReadRoot || plannerCtx.projectDir).replace(/\\/g, "/")}`
+        : null,
       "",
       atlasDevBriefContract,
     ].filter(Boolean).join("\n");
@@ -200,10 +228,16 @@ export class PlannerRole extends BaseRole {
     const worker = this.context;
     const {
       getResearchBudget,
+      resolvePlannerReadRoot: resolveReadRoot,
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
     const payload = worker.parsePayload(job);
+    const plannerReadRoot = await resolveReadRoot(
+      worker.projectDir,
+      job.work_item_id,
+      job._worktreePath,
+    );
     const planningMode = isRedTeamPlanningPayload(payload) ? RED_TEAM_PLANNING_MODE : "normal";
     const plannerRoleMode = planningMode === RED_TEAM_PLANNING_MODE
       ? normalizePlannerRoleMode(payload.planner_role_mode)
@@ -347,7 +381,7 @@ export class PlannerRole extends BaseRole {
 
       for (const filePath of keyFiles) {
         try {
-          const src = path.resolve(worker.projectDir, filePath);
+          const src = path.resolve(plannerReadRoot, filePath);
           const content = fs.readFileSync(src, "utf-8");
           if (!/\.(js|ts|jsx|tsx|mjs|cjs)$/i.test(filePath)) {
             funcLines.push(`## ${filePath}`, `(non-JS file - ${content.split("\n").length} lines)`, "");
@@ -377,7 +411,7 @@ export class PlannerRole extends BaseRole {
         fs.mkdirSync(fullDir, { recursive: true });
         for (const filePath of fullFiles) {
           try {
-            const src = path.resolve(worker.projectDir, filePath);
+            const src = path.resolve(plannerReadRoot, filePath);
             const dest = path.join(fullDir, filePath);
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(src, dest);
@@ -492,7 +526,7 @@ export class PlannerRole extends BaseRole {
       "- If no existing suite applies, omit test_command instead of inventing one. Test execution is verification metadata, not a success criterion.",
       // Conditional: empty when this repo has no project-db config, so
       // unconfigured repos see no db-task guidance at all.
-      ...buildProjectDbRoutingLines(worker.projectDir),
+      ...buildProjectDbRoutingLines(plannerReadRoot),
       "",
     ].join("\n");
 
@@ -502,7 +536,7 @@ export class PlannerRole extends BaseRole {
     const plannerPacket = await handoff({
       recipient: "planner",
       data: {
-        cwd: worker.projectDir,
+        cwd: plannerReadRoot,
         job_id: job.id,
         work_item_id: job.work_item_id,
         job_type: job.job_type,
@@ -597,6 +631,7 @@ export class PlannerRole extends BaseRole {
       plannerFilePriorities,
       plannerOutputBindingRules,
       plannerPacket,
+      plannerReadRoot,
       plannerRoleMode,
       plannerRoutingContext,
       primaryPlanText,
@@ -664,11 +699,11 @@ export class PlannerRole extends BaseRole {
     };
   }
 
-  buildMeta(job) {
+  buildMeta(job, ctx = {}) {
     return {
       job_id: job.id,
       work_item_id: job.work_item_id,
-      cwd: this.context.projectDir,
+      cwd: ctx.plannerReadRoot || this.context.projectDir,
       jobProvider: currentExecutionProvider(job),
       jobModelName: job.model_name || null,
     };

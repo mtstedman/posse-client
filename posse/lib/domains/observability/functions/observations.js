@@ -1477,8 +1477,13 @@ export function recordToolUseObservations({
     const error = rejectedStatus ? "" : rawError;
     const rejection = String(toolUse?.rejection || (rejectedStatus ? rawError : "")).trim();
     const outcome = normalizedToolOutcome(toolUse?.outcome, { status, error });
+    const observationDetail = toolUse?.observation_detail && typeof toolUse.observation_detail === "object"
+      && !Array.isArray(toolUse.observation_detail)
+      ? toolUse.observation_detail
+      : {};
     const detail = {
       ...(summary.detail && typeof summary.detail === "object" ? summary.detail : {}),
+      ...observationDetail,
       ...(outcome ? { outcome, ok: outcome === "succeeded" } : {}),
       ...(error ? { error: error.slice(0, 200) } : {}),
       ...(rejection ? { rejection_reason: rejection.slice(0, 200) } : {}),

@@ -9,7 +9,6 @@ import {
   buildProviderUsageWindowMap,
   clipPlainTail,
   correspondingLimitSettingKey,
-  finiteNumber,
   fit,
   fmtDate,
   formatModelSettingDisplayValue,
@@ -27,7 +26,6 @@ import {
   loadReports,
   matchesHotkey,
   normalizeRawInput,
-  parseJsonObject,
   parseProviderList,
   parseProviderUsageSettingKey,
   parseReportTimestamp,
@@ -84,6 +82,10 @@ import {
 } from "../../../providers/functions/model-catalog.js";
 import { PROVIDER_ROLE_NAMES } from "../../../providers/functions/roles.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
+import {
+  foldAtlasTokenSavings,
+  foldAtlasToolReliability,
+} from "./admin-atlas-rollups.js";
 import {
   formatDuration as fmtDuration,
   formatRelativeTime as fmtRelativeTime,
@@ -216,175 +218,6 @@ function canUseAdminTui({ stdin = process.stdin, stdout = process.stdout } = {})
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-function extractAtlasTokenUsage(detailJson) {
-  const detail = parseJsonObject(detailJson);
-  const usage = detail?.token_usage || detail?.tokenUsage || null;
-  if (!usage || typeof usage !== "object") return null;
-  const atlasTokens = finiteNumber(usage.atlas_tokens ?? usage.atlasTokens);
-  const rawEquivalent = finiteNumber(usage.raw_equivalent ?? usage.rawEquivalent);
-  if (atlasTokens == null || rawEquivalent == null || rawEquivalent <= 0) return null;
-  const savedTokens = finiteNumber(usage.saved_tokens ?? usage.savedTokens) ?? (rawEquivalent - atlasTokens);
-  return {
-    atlas_tokens: atlasTokens,
-    raw_equivalent: rawEquivalent,
-    saved_tokens: savedTokens,
-  };
-}
-
-function foldAtlasTokenSavings(rows = []) {
-  const byMethod = new Map();
-  const ensure = (method) => {
-    const key = String(method || "unknown");
-    if (!byMethod.has(key)) {
-      byMethod.set(key, {
-        atlas_method: key,
-        measured_calls: 0,
-        raw_equivalent: 0,
-        atlas_tokens: 0,
-        saved_tokens: 0,
-        negative_calls: 0,
-      });
-    }
-    return byMethod.get(key);
-  };
-  for (const row of rows) {
-    const usage = extractAtlasTokenUsage(row.detail_json);
-    if (!usage) continue;
-    const method = row.atlas_method || (String(row.observation_type || "") === "tool.atlas.prefetch" ? "prefetch" : "unknown");
-    const bucket = ensure(method);
-    bucket.measured_calls += 1;
-    bucket.raw_equivalent += usage.raw_equivalent;
-    bucket.atlas_tokens += usage.atlas_tokens;
-    bucket.saved_tokens += usage.saved_tokens;
-    if (usage.saved_tokens < 0) bucket.negative_calls += 1;
-  }
-  return [...byMethod.values()].sort((a, b) => {
-    if (b.measured_calls !== a.measured_calls) return b.measured_calls - a.measured_calls;
-    return String(a.atlas_method).localeCompare(String(b.atlas_method));
-  });
-}
-
-function deriveAtlasReliabilityAction(detail = {}, row = {}) {
-  const explicitAction = String(detail.action || "").trim();
-  if (explicitAction) return explicitAction;
-
-  const hasReliabilitySignal = Object.prototype.hasOwnProperty.call(detail, "ok")
-    || Object.prototype.hasOwnProperty.call(detail, "status")
-    || Object.prototype.hasOwnProperty.call(detail, "error")
-    || Object.prototype.hasOwnProperty.call(detail, "empty")
-    || Object.prototype.hasOwnProperty.call(detail, "duration_ms")
-    || Object.prototype.hasOwnProperty.call(detail, "durationMs")
-    || Object.prototype.hasOwnProperty.call(detail, "result_chars")
-    || Object.prototype.hasOwnProperty.call(detail, "resultChars")
-    || Object.prototype.hasOwnProperty.call(detail, "fallback");
-  if (!hasReliabilitySignal) return null;
-
-  const fallback = String(detail.fallback || "").trim();
-  if (fallback) {
-    const origin = String(
-      detail.origin || (row.observation_type === "tool.atlas.prefetch" ? "prefetch" : "agent")
-    ).trim();
-    return origin.toLowerCase() === "prefetch" ? "prefetch.fallback" : "fallback";
-  }
-
-  const summary = String(row.summary || "").trim();
-  const summaryMatch = summary.match(/^ATLAS\s+([A-Za-z0-9_.:-]+)/i);
-  if (summaryMatch?.[1]) return summaryMatch[1];
-
-  return row.observation_type === "tool.atlas.prefetch" ? "prefetch" : "unknown";
-}
-
-function extractAtlasToolReliability(row = {}) {
-  const detail = parseJsonObject(row.detail_json);
-  if (!detail || typeof detail !== "object") return null;
-  if (detail.kind && String(detail.kind).toLowerCase() !== "atlas") return null;
-
-  const action = deriveAtlasReliabilityAction(detail, row);
-  if (!action) return null;
-  const origin = String(
-    detail.origin || (row.observation_type === "tool.atlas.prefetch" ? "prefetch" : "agent")
-  ).trim() || "agent";
-  const status = String(detail.status || "").trim().toLowerCase();
-  const errorText = String(detail.error || "").trim();
-  const ok = detail.ok === true;
-  const cancelled = status === "cancelled"
-    || status === "canceled"
-    || /user cancelled mcp tool call|cancelled|canceled/i.test(errorText);
-  const failed = detail.ok === false || !!errorText || cancelled || status === "error" || status === "failed";
-  const hasResultChars = Object.prototype.hasOwnProperty.call(detail, "result_chars")
-    || Object.prototype.hasOwnProperty.call(detail, "resultChars");
-  const resultChars = finiteNumber(detail.result_chars ?? detail.resultChars);
-  const empty = detail.empty === true || (ok && hasResultChars && Number(resultChars || 0) === 0);
-
-  return {
-    action,
-    origin,
-    ok,
-    failed,
-    cancelled,
-    empty,
-    fallback: !!detail.fallback,
-    duration_ms: finiteNumber(detail.duration_ms ?? detail.durationMs),
-    result_chars: resultChars,
-  };
-}
-
-function foldAtlasToolReliability(rows = []) {
-  const byAction = new Map();
-  const ensure = (action, origin) => {
-    const key = `${origin}\u0000${action}`;
-    if (!byAction.has(key)) {
-      byAction.set(key, {
-        action,
-        origin,
-        calls: 0,
-        ok_calls: 0,
-        failed_calls: 0,
-        cancelled_calls: 0,
-        empty_calls: 0,
-        fallback_calls: 0,
-        duration_calls: 0,
-        total_duration_ms: 0,
-        result_char_calls: 0,
-        total_result_chars: 0,
-      });
-    }
-    return byAction.get(key);
-  };
-
-  for (const row of rows) {
-    const entry = extractAtlasToolReliability(row);
-    if (!entry) continue;
-    const bucket = ensure(entry.action, entry.origin);
-    bucket.calls += 1;
-    if (entry.ok) bucket.ok_calls += 1;
-    if (entry.failed) bucket.failed_calls += 1;
-    if (entry.cancelled) bucket.cancelled_calls += 1;
-    if (entry.empty) bucket.empty_calls += 1;
-    if (entry.fallback) bucket.fallback_calls += 1;
-    if (entry.duration_ms != null) {
-      bucket.duration_calls += 1;
-      bucket.total_duration_ms += entry.duration_ms;
-    }
-    if (entry.result_chars != null) {
-      bucket.result_char_calls += 1;
-      bucket.total_result_chars += entry.result_chars;
-    }
-  }
-
-  return [...byAction.values()].map((row) => ({
-    ...row,
-    avg_duration_ms: row.duration_calls > 0 ? Math.round(row.total_duration_ms / row.duration_calls) : null,
-    avg_result_chars: row.result_char_calls > 0 ? Math.round(row.total_result_chars / row.result_char_calls) : null,
-  })).sort((a, b) => {
-    if (b.calls !== a.calls) return b.calls - a.calls;
-    if (b.failed_calls !== a.failed_calls) return b.failed_calls - a.failed_calls;
-    const actionCmp = String(a.action).localeCompare(String(b.action));
-    if (actionCmp !== 0) return actionCmp;
-    return String(a.origin).localeCompare(String(b.origin));
-  });
-}
 
 function normalizeAdminLine(str) {
   return String(str ?? "")

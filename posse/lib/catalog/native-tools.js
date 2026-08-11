@@ -1931,8 +1931,11 @@ export const TOOL_CHAIN_READ = {
   type: "function",
   name: "chain_read",
   description:
-    "Read a file. This is your ONLY way to read file contents. You must maintain " +
-    "an audit log of every file read. Reading a file locks the chain until you " +
+    "Read a file through the audited deterministic fallback. When ATLAS is active, " +
+    "successful ATLAS source retrieval already counts as file-content evidence; do not " +
+    "repeat it with chain_read merely to audit, verify, or cite it. Use chain_read only " +
+    "for a named remaining ATLAS evidence gap, exact mutated or non-indexed state, an " +
+    "unsupported operation, or when ATLAS is unavailable. Reading a file locks the chain until you " +
     "call chain_verdict to issue your verdict. Large files may be paged with " +
     "offset/limit by issuing a verdict for each page, then calling chain_read " +
     "again with a higher offset; continuation pages for the same file are allowed. " +
@@ -1963,8 +1966,10 @@ export const TOOL_CHAIN_VERDICT = {
   description:
     "Issue your verdict on the file you just read. You MUST call this after every " +
     "chain_read before you can read another file. Mark the file relevant or " +
-    "irrelevant. Relevant files are kept in your research buffer for downstream " +
-    "agents. Irrelevant files are logged so they are never re-read.",
+    "irrelevant. The classification stays in the local audit ledger for duplicate " +
+    "suppression and research telemetry; it does not make raw-read evidence preferable " +
+    "to sufficient ATLAS evidence or automatically add a file to the terminal handoff. " +
+    "Irrelevant files are logged so they are never re-read.",
   parameters: {
     type: "object",
     properties: {

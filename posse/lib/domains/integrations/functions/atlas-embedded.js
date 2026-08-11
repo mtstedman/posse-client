@@ -892,6 +892,7 @@ function recordAtlasToolObservation({
         fallback: origin === "prefetch" && !ok ? "deterministic_tools" : null,
         cache_hit: !!cacheHit,
         atlas_artifacts: artifacts || null,
+        ...(resultChars == null ? {} : { result_chars: Number(resultChars || 0) }),
         response: responseTelemetry ? {
           ...responseTelemetry,
           result_chars: Number(resultChars || 0),
@@ -1011,7 +1012,10 @@ async function openEmbeddedLedgerForView({ repoRoot, viewMeta, cwd = null, confi
 
 function resolveEmbeddedV2ReadRoot({ cwd, repoRoot, viewPath, viewMeta }) {
   if (cwd && viewPath === worktreeViewPath(cwd)) return cwd;
-  return cwd || viewMeta?.repo_root || repoRoot || process.cwd();
+  // A selected main/repository view describes its own filesystem root. Do not
+  // relabel it with a caller's worktree cwd: that creates an impossible
+  // branch-filesystem/view pairing which can return plausible stale symbols.
+  return viewMeta?.repo_root || repoRoot || cwd || process.cwd();
 }
 
 function atlasV2ViewWaitMs(config) {

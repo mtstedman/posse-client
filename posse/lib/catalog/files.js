@@ -4,11 +4,11 @@
 export const ATLAS_INDEXABLE_SOURCE_EXTENSIONS = new Set([
   ".ts", ".tsx", ".mts", ".cts",
   ".js", ".jsx", ".mjs", ".cjs",
-  ".py", ".pyi", ".pyw",
+  ".py", ".pyi",
   ".go", ".java", ".cs",
   ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx",
-  ".php", ".phtml", ".rs", ".kt", ".kts",
-  ".sh", ".bash", ".zsh",
+  ".php", ".rs", ".kt", ".kts",
+  ".sh", ".bash",
 ]);
 
 export const HANDOFF_SOURCE_EXTENSIONS = new Set([

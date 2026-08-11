@@ -1098,11 +1098,24 @@ function recordOwnerModelControlNotice(session, toolName, notice = {}) {
  *   toolArgs?: Record<string, any>,
  *   result?: any,
  *   error?: any,
+ *   durationMs?: number | null,
+ *   queueWaitMs?: number | null,
+ *   executor?: Record<string, any> | null,
  * }} [observation]
  */
-function recordOwnerToolObservation({ session, toolName, toolArgs, result = null, error = null } = {}) {
+function recordOwnerToolObservation({
+  session,
+  toolName,
+  toolArgs,
+  result = null,
+  error = null,
+  durationMs = null,
+  queueWaitMs = null,
+  executor = null,
+} = {}) {
   const boot = session?.bootConfig || {};
   const outcome = error ? "failed" : classifyMcpToolResult(result);
+  const resultChars = mcpResultTextChars(result);
   const errorText = error
     ? capString(error?.message || String(error), 700)
     : mcpToolResultErrorText(result);
@@ -1122,6 +1135,20 @@ function recordOwnerToolObservation({ session, toolName, toolArgs, result = null
         outcome,
         ...(outcome === "failed" && errorText ? { status: "failed", error: errorText } : {}),
         ...(outcome === "rejected" && errorText ? { status: "rejected", rejection: errorText } : {}),
+        observation_detail: {
+          duration_ms: durationMs == null ? null : Number(durationMs),
+          queue_wait_ms: queueWaitMs == null ? null : Number(queueWaitMs),
+          result_chars: resultChars,
+          transport: "mcp_owner",
+          executor: executor && typeof executor === "object" ? executor : null,
+          atlas_artifacts: result?._meta?.atlasArtifacts || null,
+          response: {
+            result_chars: resultChars,
+            content_blocks: Array.isArray(result?.content) ? result.content.length : 0,
+            is_error: result?.isError === true,
+            over_client_clip: resultChars > CLIENT_RESULT_CLIP_CHARS,
+          },
+        },
       }],
     });
     for (const notice of result?.[OWNER_MODEL_CONTROL_NOTICES] || []) {
@@ -2769,7 +2796,15 @@ export class PersistentMcpOwner {
     const memoryAction = isMemoryToolAction(requested.name);
     if (memoryAction && this._terminalMemoryToolSessions.has(session)) {
       const result = terminalMemoryToolRejection(requested.name);
-      recordOwnerToolObservation({ session, toolName, toolArgs, result });
+      recordOwnerToolObservation({
+        session,
+        toolName,
+        toolArgs,
+        result,
+        durationMs: Date.now() - startedAt,
+        queueWaitMs,
+        executor: { via: "memory_terminal_gate" },
+      });
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
@@ -2841,7 +2876,15 @@ export class PersistentMcpOwner {
           toolName,
           synthesisAdmission,
         );
-        recordOwnerToolObservation({ session, toolName, toolArgs, result });
+        recordOwnerToolObservation({
+          session,
+          toolName,
+          toolArgs,
+          result,
+          durationMs: Date.now() - startedAt,
+          queueWaitMs,
+          executor: { via: "hash_ref_store" },
+        });
         appendRunTelemetry("diagnostics", {
           kind: "mcp.owner.atlas_tool_call",
           ...context,
@@ -2889,8 +2932,16 @@ export class PersistentMcpOwner {
         toolName,
         synthesisAdmission,
       );
-      recordOwnerToolObservation({ session, toolName, toolArgs, result });
       const resultChars = mcpResultTextChars(result);
+      recordOwnerToolObservation({
+        session,
+        toolName,
+        toolArgs,
+        result,
+        durationMs: Date.now() - startedAt,
+        queueWaitMs,
+        executor: executed?.executor || null,
+      });
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
@@ -2934,7 +2985,15 @@ export class PersistentMcpOwner {
         toolName,
         synthesisAdmission,
       );
-      recordOwnerToolObservation({ session, toolName, toolArgs, result, error: err });
+      recordOwnerToolObservation({
+        session,
+        toolName,
+        toolArgs,
+        result,
+        error: err,
+        durationMs: Date.now() - startedAt,
+        queueWaitMs,
+      });
       return mcpToolResultMessage(
         message,
         result,
