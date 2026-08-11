@@ -260,6 +260,49 @@ function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null) 
   return "";
 }
 
+function subAgentObservationResults(results) {
+  return Array.isArray(results) ? results.map((entry) => ({
+    id: entry?.id || null,
+    status: entry?.status || null,
+    outcome: entry?.packet?.outcome || null,
+    error_code: entry?.error?.code || null,
+    coverage: entry?.coverage ? {
+      authorized: entry.coverage.authorized ?? null,
+      consumed: entry.coverage.consumed ?? null,
+      selected: entry.coverage.selected ?? null,
+      unconsumed: entry.coverage.unconsumed ?? null,
+      stopped_early: entry.coverage.stopped_early === true,
+    } : null,
+  })) : [];
+}
+
+export function __testSubAgentObservationResults(results) {
+  return subAgentObservationResults(results);
+}
+
+function subAgentInputObservationDetails(result) {
+  const entries = result?.op === "next_input_batch" && Array.isArray(result.results)
+    ? result.results
+    : result ? [result] : [];
+  const inputIds = entries.map((entry) => entry?.input?.id).filter(Boolean).slice(0, 3);
+  const errorCodes = [...new Set(entries.map((entry) => entry?.error?.code).filter(Boolean))].slice(0, 3);
+  return {
+    input_id: entries.length === 1 ? inputIds[0] || null : null,
+    input_ids: inputIds,
+    result_count: entries.length,
+    succeeded_count: entries.filter((entry) => entry?.ok === true).length,
+    failed_count: entries.filter((entry) => entry?.ok !== true).length,
+    error_codes: errorCodes,
+    evidence_chars: entries.reduce((total, entry) => total + (entry?.evidence?.lines || [])
+      .reduce((sum, line) => sum + String(line?.text || "").length, 0), 0),
+    evidence_lines: entries.reduce((total, entry) => total + (entry?.evidence?.lines?.length || 0), 0),
+  };
+}
+
+export function __testSubAgentInputObservationDetails(result) {
+  return subAgentInputObservationDetails(result);
+}
+
 function appendToolResultText(response, suffix, { kind = "runtime_control", trigger = null } = {}) {
   if (!suffix || !response || response?.result?.isError === true) return response;
   const result = appendOwnerModelControlNotice(response.result, suffix, { kind, trigger });
@@ -2393,7 +2436,8 @@ export class PersistentMcpOwner {
               summary: `Sub-agent input ${toolArgs?.position ?? "?"} materialized`,
               detail: {
                 position: toolArgs?.position ?? null,
-                input_id: result?.input?.id || null,
+                requested_count: toolArgs?.count ?? 1,
+                ...subAgentInputObservationDetails(result),
                 ok: result?.ok === true,
                 next_position: result?.next_position ?? null,
                 child_agent_call_id: session?.bootConfig?.agentCallId ?? null,
@@ -2473,17 +2517,7 @@ export class PersistentMcpOwner {
                 completion_mode: result?.mode || toolArgs?.completion?.mode || null,
                 wait_ms: toolArgs?.wait_ms ?? null,
                 request_count: Array.isArray(result?.requests) ? result.requests.length : null,
-                results: Array.isArray(result?.results) ? result.results.map((entry) => ({
-                  id: entry?.id || null,
-                  status: entry?.status || null,
-                  coverage: entry?.coverage ? {
-                    authorized: entry.coverage.authorized ?? null,
-                    consumed: entry.coverage.consumed ?? null,
-                    selected: entry.coverage.selected ?? null,
-                    unconsumed: entry.coverage.unconsumed ?? null,
-                    stopped_early: entry.coverage.stopped_early === true,
-                  } : null,
-                })) : [],
+                results: subAgentObservationResults(result?.results),
                 parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
                 duration_ms: Date.now() - startedAt,
               },
