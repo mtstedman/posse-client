@@ -1934,7 +1934,24 @@ function appendResearchExplorationNotice(text, toolName) {
 }
 
 function chainRead(args) {
-  return researchLedger.chainRead(args || {});
+  let raw = researchLedger.chainRead(args || {});
+  const inherited = researchLedger.takeInheritedVerdict?.();
+  if (inherited) {
+    recordResearchEvidenceObservation({
+      filePath: inherited.path,
+      verdict: inherited.verdict,
+      summary: inherited.summary,
+      continuation: true,
+      ledger: inherited.ledger,
+      novelRelevantFile: false,
+    });
+    // chain_read is normally paired with chain_verdict and the pair consumes
+    // one exploration step. Preserve that accounting when a relevant
+    // continuation inherits its verdict and skips the second tool call.
+    noteResearchExplorationStep({ toolName: "chain_verdict", novelRelevantFile: false });
+    raw = appendResearchExplorationNotice(raw, "chain_verdict");
+  }
+  return raw;
 }
 
 function chainVerdict(args) {

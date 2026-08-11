@@ -42,6 +42,7 @@ export function createChainLedger({
     irrelevant: new Set(),    // paths tagged irrelevant
     readOrder: [],            // ordered list of all reads
   };
+  let inheritedVerdict = null;
 
   if (persist && typeof persist.load === "function") {
     try {
@@ -72,6 +73,7 @@ export function createChainLedger({
   }
 
   function chainRead(args = {}) {
+    inheritedVerdict = null;
     const requestedPath = args.path;
     if (!requestedPath) return "Error: path is required.";
 
@@ -112,14 +114,40 @@ export function createChainLedger({
       return `AUDIT ERROR: ${message || "read failed"} Nothing was recorded.`;
     }
 
-    if (!result.startsWith("Error:")) {
+    const inheritRelevantVerdict = continuationRead && state.relevant.has(relPath);
+    if (!result.startsWith("Error:") && inheritRelevantVerdict) {
+      const previous = state.relevant.get(relPath) || {};
+      state.relevant.set(relPath, {
+        summary: previous.summary || "(no summary)",
+        content: [previous.content, result].filter(Boolean).join("\n\n--- chain_read continuation ---\n\n"),
+      });
+      state.readOrder.push(relPath);
+      inheritedVerdict = {
+        path: relPath,
+        verdict: "relevant",
+        summary: previous.summary || "",
+        continuation: true,
+        novelRelevantFile: false,
+        ledger: { relevant: state.relevant.size, irrelevant: state.irrelevant.size, total: state.readOrder.length },
+      };
+      save();
+    } else if (!result.startsWith("Error:")) {
       state.currentlyReading = { path: relPath, content: result, offset, limit, continuation: continuationRead };
       state.readOrder.push(relPath);
       save();
     }
 
     const ledgerLine = `[audit ledger: ${state.relevant.size} relevant, ${state.irrelevant.size} irrelevant, ${state.readOrder.length} total reads]`;
+    if (inheritRelevantVerdict) {
+      return `${ledgerLine}\n[continuation verdict inherited: "${relPath}" remains relevant; do not call chain_verdict]\n\n${result}`;
+    }
     return `${ledgerLine}\n[chain locked — call chain_verdict when done reviewing this file]\n\n${result}`;
+  }
+
+  function takeInheritedVerdict() {
+    const value = inheritedVerdict;
+    inheritedVerdict = null;
+    return value;
   }
 
   function chainVerdict(args = {}) {
@@ -192,5 +220,5 @@ export function createChainLedger({
     };
   }
 
-  return { chainRead, chainVerdict, digest, save, state };
+  return { chainRead, chainVerdict, takeInheritedVerdict, digest, save, state };
 }

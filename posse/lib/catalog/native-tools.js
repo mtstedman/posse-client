@@ -1931,14 +1931,16 @@ export const TOOL_CHAIN_READ = {
   type: "function",
   name: "chain_read",
   description:
-    "Read a file through the audited deterministic fallback. When ATLAS is active, " +
+    "Read exact missing file context through the deterministic fallback. When ATLAS is active, " +
     "successful ATLAS source retrieval already counts as file-content evidence; do not " +
     "repeat it with chain_read merely to audit, verify, or cite it. Use chain_read only " +
-    "for a named remaining ATLAS evidence gap, exact mutated or non-indexed state, an " +
-    "unsupported operation, or when ATLAS is unavailable. Reading a file locks the chain until you " +
+    "for remaining ATLAS evidence gaps, exact mutated or non-indexed state, an " +
+    "unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you " +
     "call chain_verdict to issue your verdict. Large files may be paged with " +
-    "offset/limit by issuing a verdict for each page, then calling chain_read " +
-    "again with a higher offset; continuation pages for the same file are allowed. " +
+    "offset/limit; after the file is tagged relevant, later continuation pages inherit " +
+    "that verdict and do not require another chain_verdict. When ATLAS already returned " +
+    "source content for an indexed file, request an explicit slice of at most 250 lines " +
+    "or use search/jsonPath. " +
     "If a previously relevant file is restored from the audit ledger, its verdict carries over and no new verdict is needed. " +
     "Optional search/jsonPath/maxBytes uses the same structured extraction as read_file.",
   parameters: {
@@ -1964,8 +1966,9 @@ export const TOOL_CHAIN_VERDICT = {
   type: "function",
   name: "chain_verdict",
   description:
-    "Issue your verdict on the file you just read. You MUST call this after every " +
-    "chain_read before you can read another file. Mark the file relevant or " +
+    "Issue your verdict on a newly read file. You MUST call this after the first " +
+    "chain_read before you can read another file. Relevant continuation pages inherit " +
+    "that verdict without another call. Mark the file relevant or " +
     "irrelevant. The classification stays in the local audit ledger for duplicate " +
     "suppression and research telemetry; it does not make raw-read evidence preferable " +
     "to sufficient ATLAS evidence or automatically add a file to the terminal handoff. " +

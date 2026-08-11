@@ -237,12 +237,12 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   chain_read: {
     access: "read",
-    summary: "Read one file for researcher review; must be paired with chain_verdict.",
+    summary: "Read exact missing context; the first page is paired with chain_verdict and relevant continuations inherit it.",
     observation: { type: "tool.chain_read", label: "ChainRead", format: "file", pathKeys: ["path"], requireTarget: true, pair: "chain_read+chain_verdict" },
   },
   chain_verdict: {
     access: "read",
-    summary: "Record whether the preceding chain_read was relevant before reading another file.",
+    summary: "Record whether a newly read file was relevant; later pages inherit a relevant verdict.",
     observation: { type: "tool.chain_verdict", label: "ChainReview", format: "chain_verdict", pathKeys: ["path"], pair: "chain_read+chain_verdict" },
   },
   pull_brief: {

@@ -214,7 +214,10 @@ export class ToolContract {
     if (contract.roleMode) {
       lines.splice(3, 0, `- Role mode: ${contract.roleMode}`);
     }
-    if (contract.fallbackReads != null) {
+    // Researcher exact-source fallback is issued through chain_read, while
+    // this provider budget governs read_file. Rendering it for researchers
+    // advertised a limit that did not apply to their actual tool surface.
+    if (contract.fallbackReads != null && contract.role !== "researcher") {
       lines.push(`- Fallback read budget: ${contract.fallbackReads}`);
     }
     const scope = contract.scope || {};
@@ -241,8 +244,9 @@ export class ToolContract {
       const chainRead = renderedNameForCanonicalTool(contract, "chain_read");
       const chainVerdict = renderedNameForCanonicalTool(contract, "chain_verdict");
       const readFile = renderedNameForCanonicalTool(contract, "read_file");
-      if (chainRead && chainVerdict && readFile) {
-        lines.push(`- File content path: use ${chainRead} + ${chainVerdict}, not ${readFile}.`);
+      if (chainRead && chainVerdict) {
+        const readFileRule = readFile ? `, not ${readFile}` : "";
+        lines.push(`- Exact-source fallback: use ${chainRead}${readFileRule}. When ATLAS is active, successful ATLAS retrieval is sufficient; use fallback only for exact context still missing. Pair the first page of a new file with ${chainVerdict}; relevant continuation pages inherit that verdict.`);
       }
     } else if (contract.role === "planner") {
       const readFile = renderedNameForCanonicalTool(contract, "read_file");

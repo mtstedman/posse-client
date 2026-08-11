@@ -55,6 +55,24 @@ export function isEmptySourceFileForGate(value, { cwd = null } = {}) {
   }
 }
 
+// A cheap worktree-version marker for source evidence returned by ATLAS. The
+// marker is intentionally metadata-only: reading and hashing every surveyed
+// source file would recreate the raw-I/O cost this gate is meant to avoid.
+// BigInt stats retain nanosecond mtimes where the platform exposes them, so a
+// same-size edit still invalidates the evidence on normal local filesystems.
+export function sourceFileVersionForGate(value, { cwd = null } = {}) {
+  const normalized = normalizeRepoPathForGate(value, { cwd });
+  if (!normalized || !cwd) return null;
+  try {
+    const target = path.resolve(String(cwd), ...normalized.split("/"));
+    const stat = fs.statSync(target, { bigint: true });
+    if (!stat.isFile()) return null;
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs].map(String).join(":");
+  } catch {
+    return null;
+  }
+}
+
 function addPath(out, value, { cwd = null, onlyIndexable = true } = {}) {
   const normalized = normalizeRepoPathForGate(value, { cwd });
   if (!normalized) return;

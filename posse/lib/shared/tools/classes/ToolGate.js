@@ -2,6 +2,7 @@ import {
   nativeIndexedReadTargets,
   atlasDiscoveryFileTargets,
   isEmptySourceFileForGate,
+  sourceFileVersionForGate,
 } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
 
 function stripAtlasPrefix(action) {
@@ -10,6 +11,8 @@ function stripAtlasPrefix(action) {
 }
 
 const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_SOURCE_CONTENT_ACTIONS = new Set(["code.window", "code.lens", "code.survey"]);
+export const ATLAS_CHAIN_READ_MAX_LINES = 250;
 
 function effectiveAtlasAction(action, args = {}) {
   const normalized = stripAtlasPrefix(action);
@@ -77,6 +80,7 @@ export class ToolGate {
     this.meaningfulAtlasCalls = 0;
     this.usefulAtlasCalls = 0;
     this.discoveredFiles = new Set();
+    this.sourceEvidenceFiles = new Map();
     this._configured = true;
   }
 
@@ -89,6 +93,7 @@ export class ToolGate {
     this.meaningfulAtlasCalls = 0;
     this.usefulAtlasCalls = 0;
     this.discoveredFiles = new Set();
+    this.sourceEvidenceFiles = new Map();
     this._configured = false;
   }
 
@@ -135,6 +140,15 @@ export class ToolGate {
 
     for (const filePath of atlasDiscoveryFileTargets(normalized, args, artifacts, { cwd })) {
       this.discoveredFiles.add(filePath.toLowerCase());
+    }
+
+    if (ok && !empty && ATLAS_SOURCE_CONTENT_ACTIONS.has(normalized)) {
+      for (const filePath of atlasDiscoveryFileTargets(normalized, args, artifacts, { cwd })) {
+        this.sourceEvidenceFiles.set(filePath.toLowerCase(), {
+          path: filePath,
+          version: sourceFileVersionForGate(filePath, { cwd }),
+        });
+      }
     }
 
     if (this.unlocked) return;
@@ -200,6 +214,43 @@ export class ToolGate {
       if (gatedTargets.length === 0) {
         return { allowed: true, reason: "indexed_file_empty", targets: indexedReadTargets };
       }
+      if (toolName === "chain_read" && !isUnavailableUnlockReason(this.unlockReason)) {
+        const evidence = this.sourceEvidenceFiles.get(gatedTargets[0].toLowerCase());
+        if (evidence) {
+          const currentVersion = sourceFileVersionForGate(evidence.path, { cwd });
+          if (evidence.version && evidence.version !== currentVersion) {
+            this.sourceEvidenceFiles.delete(gatedTargets[0].toLowerCase());
+            return { allowed: true, reason: "indexed_file_changed_since_atlas", targets: indexedReadTargets };
+          }
+
+          const structured = String(args?.search || "").trim() || String(args?.jsonPath || "").trim();
+          if (structured) {
+            return { allowed: true, reason: "atlas_source_structured_fallback", targets: indexedReadTargets };
+          }
+
+          const requestedLimit = Number.parseInt(String(args?.limit ?? ""), 10);
+          if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) {
+            return {
+              allowed: false,
+              reason: "atlas_source_range_required",
+              target: gatedTargets[0],
+              targets: gatedTargets,
+              maxLines: ATLAS_CHAIN_READ_MAX_LINES,
+            };
+          }
+          if (requestedLimit > ATLAS_CHAIN_READ_MAX_LINES) {
+            return {
+              allowed: false,
+              reason: "atlas_source_range_too_broad",
+              target: gatedTargets[0],
+              targets: gatedTargets,
+              maxLines: ATLAS_CHAIN_READ_MAX_LINES,
+              requestedLines: requestedLimit,
+            };
+          }
+          return { allowed: true, reason: "atlas_source_targeted_fallback", targets: indexedReadTargets };
+        }
+      }
       return { allowed: true, reason: "indexed_file_discovered", targets: indexedReadTargets };
     }
     if (exactReadTool) {
@@ -216,6 +267,13 @@ export class ToolGate {
   buildLockedToolError(toolName, { args = {}, cwd = null, atlasNameStyle = "dotted" } = {}) {
     void atlasNameStyle;
     const label = this.atlasLabel || "ATLAS";
+    const decision = this.checkNativeToolAllowed(toolName, args, { cwd });
+    if (decision.reason === "atlas_source_range_required") {
+      return `${label} already supplied source evidence for ${decision.target}. Request only the exact missing slice with limit at most ${decision.maxLines}, use structured search/jsonPath, or continue synthesis.`;
+    }
+    if (decision.reason === "atlas_source_range_too_broad") {
+      return `${label} already supplied source evidence for ${decision.target}. Narrow this fallback from ${decision.requestedLines} to at most ${decision.maxLines} lines, use structured search/jsonPath, or continue synthesis.`;
+    }
     const indexedReadTargets = nativeIndexedReadTargets(toolName, args, { cwd });
     const lockedIndexedTargets = indexedReadTargets
       .filter((target) => !this.discoveredFiles.has(target.toLowerCase()));
@@ -237,6 +295,7 @@ export class ToolGate {
       meaningfulAtlasCalls: this.meaningfulAtlasCalls,
       usefulAtlasCalls: this.usefulAtlasCalls,
       discoveredFiles: [...this.discoveredFiles],
+      sourceEvidenceFiles: [...this.sourceEvidenceFiles.values()].map((entry) => ({ ...entry })),
       fallbackStrikeLimit: this._fallbackStrikeLimit,
       requiredMeaningfulAtlasCalls: this._requiredMeaningfulAtlasCalls,
     };
