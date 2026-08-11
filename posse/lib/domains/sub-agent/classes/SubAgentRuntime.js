@@ -32,6 +32,7 @@ export const SUB_AGENT_LIMITS = Object.freeze({
   maxIntentChars: 2000,
   maxEvidenceLines: 80,
   maxEvidenceChars: 4000,
+  maxAtlasWindowTokens: 900,
   maxRequestBytes: 32 * 1024,
 });
 
@@ -408,6 +409,27 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
   boundedJsonValue(args, `${label}.arguments`);
   if (Buffer.byteLength(JSON.stringify(args), "utf8") > SUB_AGENT_LIMITS.maxInputArgumentBytes) {
     throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label}.arguments exceeds ${SUB_AGENT_LIMITS.maxInputArgumentBytes} bytes`, { stage: "validation" });
+  }
+  if (tool === "atlas.code.window") {
+    const { expectedLines, maxTokens } = args;
+    if (!Number.isInteger(expectedLines)
+      || expectedLines < 1
+      || expectedLines > SUB_AGENT_LIMITS.maxEvidenceLines) {
+      throw runtimeError(
+        "SUB_AGENT_INPUT_INVALID",
+        `${label}.arguments.expectedLines must be an integer from 1 through ${SUB_AGENT_LIMITS.maxEvidenceLines}`,
+        { stage: "validation" },
+      );
+    }
+    if (!Number.isInteger(maxTokens)
+      || maxTokens < 1
+      || maxTokens > SUB_AGENT_LIMITS.maxAtlasWindowTokens) {
+      throw runtimeError(
+        "SUB_AGENT_INPUT_INVALID",
+        `${label}.arguments.maxTokens must be an integer from 1 through ${SUB_AGENT_LIMITS.maxAtlasWindowTokens}`,
+        { stage: "validation" },
+      );
+    }
   }
   return { id, kind: "call", tool, arguments: JSON.parse(JSON.stringify(args)) };
 }
