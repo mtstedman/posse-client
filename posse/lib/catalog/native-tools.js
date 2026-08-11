@@ -882,7 +882,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects with summary for optional synthesis. Prefer 40-line evidence slices and 2000-character summaries; bounded overflow is accepted up to the schema hard ceilings. Do not submit confidence or payload. The receipt ends provider generation.",
+    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects with summary for optional synthesis. In report mode, target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Prefer 40-line evidence slices when refs add value. Do not submit confidence or payload. The receipt ends provider generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -944,7 +944,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode, claims must contain the substantive terminal report. Evidence refs are optional transport. Follow the schema exactly. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode, claims must contain the substantive terminal report; target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional transport: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Follow the schema exactly. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
