@@ -222,24 +222,43 @@ function normalizedLines(payload) {
 function materializedSourceLineSlice(entry, start, end) {
   const tool = String(entry?.descriptor?.tool || entry?.metadata?.tool || "").toLowerCase();
   const objectType = String(entry?.object_type || "").toLowerCase();
-  if (tool !== "code.window" && !objectType.startsWith("code.window")) return null;
+  if (!tool.endsWith("code.window") && !objectType.includes("code.window")) return null;
   let parsed;
   try { parsed = JSON.parse(String(entry?.payload_text || "")); }
   catch { return null; }
   const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
-  if (typeof data?.content !== "string") return null;
-  const sourceStart = Number(data.startLine);
-  if (!Number.isInteger(sourceStart) || sourceStart < 1) return null;
-  const contentLines = normalizedLines(data.content);
-  const sourceEnd = sourceStart + Math.max(0, contentLines.length - 1);
-  if (start < sourceStart || end > sourceEnd) {
-    return { matched: false, sourceStart, sourceEnd };
+  const candidates = [
+    data,
+    ...(Array.isArray(data?.additionalWindows) ? data.additionalWindows : []),
+    ...(Array.isArray(data?.additional_windows) ? data.additional_windows : []),
+  ];
+  const windows = candidates.flatMap((candidate) => {
+    if (!candidate || typeof candidate.content !== "string") return [];
+    const sourceStart = Number(candidate.startLine ?? candidate.start_line);
+    if (!Number.isInteger(sourceStart) || sourceStart < 1) return [];
+    const contentLines = normalizedLines(candidate.content);
+    return [{
+      sourceStart,
+      sourceEnd: sourceStart + Math.max(0, contentLines.length - 1),
+      contentLines,
+    }];
+  });
+  if (windows.length === 0) return null;
+  const matched = windows.find((window) => start >= window.sourceStart && end <= window.sourceEnd);
+  if (!matched) {
+    return {
+      matched: false,
+      sourceStart: windows[0].sourceStart,
+      sourceEnd: windows[0].sourceEnd,
+      sourceRanges: windows.map((window) => ({ start: window.sourceStart, end: window.sourceEnd })),
+    };
   }
   return {
     matched: true,
-    sourceStart,
-    sourceEnd,
-    excerpt: contentLines.slice(start - sourceStart, end - sourceStart + 1).join("\n"),
+    sourceStart: matched.sourceStart,
+    sourceEnd: matched.sourceEnd,
+    sourceRanges: windows.map((window) => ({ start: window.sourceStart, end: window.sourceEnd })),
+    excerpt: matched.contentLines.slice(start - matched.sourceStart, end - matched.sourceStart + 1).join("\n"),
   };
 }
 
@@ -359,7 +378,10 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   const useSourceLines = sourceSlice?.matched === true;
   if (!useSourceLines && (end > lines.length || start > lines.length)) {
     const sourceRange = sourceSlice
-      ? `; embedded source lines are ${sourceSlice.sourceStart}-${sourceSlice.sourceEnd}`
+      ? `; embedded source ranges are ${(sourceSlice.sourceRanges || [{
+        start: sourceSlice.sourceStart,
+        end: sourceSlice.sourceEnd,
+      }]).map((range) => `${range.start}-${range.end}`).join(", ")}`
       : "";
     fail("AGENT_HANDOFF_EVIDENCE_RANGE_INVALID", `Evidence ${selector.ref} has ${lines.length} materialized lines${sourceRange}; requested ${start}-${end}`);
   }
