@@ -1181,7 +1181,12 @@ const SUB_AGENT_REQUEST = {
             properties: {
               id: { type: "string", minLength: 1, maxLength: 40 },
               kind: { type: "string", enum: ["call"] },
-              tool: { type: "string", minLength: 1, maxLength: 120 },
+              tool: {
+                type: "string",
+                minLength: 1,
+                maxLength: 120,
+                description: "Use the exact canonical issued name, for example atlas.code.window. Do not prepend an MCP server namespace or rewrite dots as underscores.",
+              },
               arguments: { type: "object" },
             },
             required: ["id", "kind", "tool", "arguments"],
@@ -1208,7 +1213,7 @@ export const TOOL_SUB_AGENT = {
   name: "sub_agent",
   description:
     "Dispatch or control an admin-gated batch of one to three isolated citation agents. " +
-    "Mandatory routing check: when two or more independent files, components, or spec sections need synthesis and four or more direct read/materialization calls are expected, you MUST dispatch one batch before your fourth direct read; making that fourth read instead is a protocol error. Prefetched names, skeletons, and file lists are not answers. Skip only when current context contains the answers or one targeted call is sufficient. Developer parents may use child evidence to guide implementation, but children do not implement. " +
+    "Mandatory routing check: after two parent evidence calls across multiple targets, before another read or materialization call you MUST dispatch one batch when at least two related targets still need synthesis. Continue directly only when current context contains the answers or the remaining question needs one targeted call. Prefetched names, skeletons, and file lists are not answers. Developer parents may use child evidence to guide implementation, but children do not implement. " +
     "Children receive a private lazy input cursor plus terminal agent_handoff. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
   parameters: {
     oneOf: [

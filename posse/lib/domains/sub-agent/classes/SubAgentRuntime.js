@@ -48,7 +48,7 @@ const FORBIDDEN_CURSOR_TOOLS = new Set([
 ].map(canonicalToolName));
 
 function runtimeError(code, message, { retryable = false, stage = "runtime" } = {}) {
-  const error = /** @type {Error & { code: string, retryable: boolean, stage: string }} */ (new Error(message));
+  const error = /** @type {Error & { code: string, retryable: boolean, stage: string, inputTool?: string }} */ (new Error(message));
   error.code = code;
   error.retryable = retryable;
   error.stage = stage;
@@ -320,7 +320,9 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
       || isSubAgentEvidenceSafeAtlasTool(tool)
     );
   if (!readOnly || FORBIDDEN_CURSOR_TOOLS.has(tool)) {
-    throw runtimeError("SUB_AGENT_INPUT_TOOL_FORBIDDEN", `${tool} is not an issued read-only parent tool`, { stage: "validation" });
+    const error = runtimeError("SUB_AGENT_INPUT_TOOL_FORBIDDEN", `${tool} is not an issued read-only parent tool`, { stage: "validation" });
+    error.inputTool = tool;
+    throw error;
   }
   const args = selected.arguments == null
     ? {}

@@ -66,7 +66,13 @@ function stripMcpSurfacePrefix(toolName = "") {
   const raw = String(toolName || "").trim();
   if (!raw.toLowerCase().startsWith("mcp__")) return raw;
   const parts = raw.split("__");
-  return parts.length >= 3 ? parts.slice(2).join("__") : raw;
+  if (parts.length >= 3) return parts.slice(2).join("__");
+  // Providers normally spell an MCP tool as mcp__server__tool, but models
+  // occasionally copy the display namespace with a dot separator instead.
+  // Normalize that harmless qualification here; the issued-tool allowlist
+  // still decides whether the resulting canonical action is authorized.
+  const dotted = /^mcp__[^.]+[.](.+)$/i.exec(raw);
+  return dotted?.[1] || raw;
 }
 
 function stripRepeatedAtlasPrefix(value = "") {

@@ -2518,6 +2518,9 @@ export class PersistentMcpOwner {
                 code: errorCode,
                 stage: String(error?.stage || "runtime").slice(0, 40),
                 retryable: error?.retryable === true,
+                ...(errorCode === "SUB_AGENT_INPUT_TOOL_FORBIDDEN" && error?.inputTool
+                  ? { input_tool: String(error.inputTool).slice(0, 160) }
+                  : {}),
                 parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
                 duration_ms: Date.now() - startedAt,
               },
