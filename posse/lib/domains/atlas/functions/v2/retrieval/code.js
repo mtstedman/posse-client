@@ -25,6 +25,7 @@ import { readRepoFileResult } from "./repo-read.js";
 /** @typedef {import("../contracts/tool-params.js").CodeGetSkeletonParams} CodeGetSkeletonParams */
 /** @typedef {import("../contracts/tool-params.js").CodeGetHotPathParams} CodeGetHotPathParams */
 /** @typedef {import("../contracts/tool-params.js").CodeNeedWindowParams} CodeNeedWindowParams */
+/** @typedef {import("../contracts/tool-params.js").CodeWindowItemParams} CodeWindowItemParams */
 /** @typedef {import("../contracts/tool-results.js").CodeSkeletonData} CodeSkeletonData */
 /** @typedef {import("../contracts/tool-results.js").CodeHotPathData} CodeHotPathData */
 /** @typedef {import("../contracts/tool-results.js").CodeWindowData} CodeWindowData */
@@ -59,6 +60,7 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
         versionId,
         code: "invalid_symbol_id",
         message: `Malformed symbolId ${params.symbolId}`,
+        details: symbolIdCorrectionDetails("code.skeleton", params),
       });
     }
     const target = resolved.symbol;
@@ -68,6 +70,7 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
         versionId,
         code: "unresolved_symbol",
         message: "Symbol not found",
+        details: symbolIdCorrectionDetails("code.skeleton", params, { wellFormed: true }),
       });
     }
     targetPath = target.repo_rel_path;
@@ -87,6 +90,7 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
         versionId,
         code: "invalid_path",
         message: `code.skeleton: file must be canonical, got ${params.file}`,
+        details: await pathCorrectionDetails(view, params.file, "code.skeleton", params),
       });
     }
     targetPath = params.file;
@@ -113,7 +117,14 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
   const calledFrom = await calledFromBreadcrumbs(view, filtered);
   const source = targetPath ? readFile(targetPath) : null;
   if (source == null && explicitFileRequest) {
-    const failure = repoReadFailure(repoRoot, targetPath, "file");
+    const failure = await repoReadFailureWithSuggestions({
+      view,
+      repoRoot,
+      repoRelPath: targetPath,
+      targetSource: "file",
+      action: "code.skeleton",
+      params,
+    });
     return errorEnvelope({
       action: "code.skeleton",
       versionId,
@@ -262,7 +273,67 @@ function finishCodeHotPath({ versionId, params, targetPath, symbolId, hotPath, c
  * }} args
  */
 export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
+  if (Array.isArray(params.items)) {
+    return await codeNeedWindowBatch({ view, versionId, params, readFile, repoRoot, ledger, repoId });
+  }
   return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNative);
+}
+
+async function codeNeedWindowBatch({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
+  const items = params.items.slice(0, 4);
+  const policy = getEffectivePolicy(ledger, repoId);
+  const policyItemCap = Math.max(64, positiveInteger(policy.maxWindowTokens) || 1200);
+  const maximumBatchTokens = policyItemCap * items.length;
+  const requestedBatchTokens = positiveInteger(params.maxTokens) || maximumBatchTokens;
+  const totalMaxTokens = Math.max(
+    64 * items.length,
+    Math.min(requestedBatchTokens, maximumBatchTokens),
+  );
+  const fairItemCap = Math.max(64, Math.floor(totalMaxTokens / items.length));
+  const envelopes = await Promise.all(items.map((item) => {
+    const requestedItemCap = positiveInteger(item.maxTokens) || fairItemCap;
+    return codeNeedWindowWithNative({
+      view,
+      versionId,
+      params: {
+        ...item,
+        maxTokens: Math.min(requestedItemCap, fairItemCap),
+        ...(item.sessionId || !params.sessionId ? {} : { sessionId: params.sessionId }),
+      },
+      readFile,
+      repoRoot,
+      ledger,
+      repoId,
+    }, codeWindowNative);
+  }));
+  const results = envelopes.map((envelope, index) => ({
+    index,
+    target: codeWindowItemTarget(items[index]),
+    ok: envelope?.ok === true,
+    ...(envelope?.ok === true ? { data: envelope.data } : { error: envelope?.error || {
+      code: "window_failed",
+      message: "code.window batch item returned no result",
+    } }),
+  }));
+  return okEnvelope({
+    action: "code.window",
+    versionId,
+    data: {
+      batch: true,
+      itemCount: results.length,
+      succeeded: results.filter((item) => item.ok).length,
+      failed: results.filter((item) => !item.ok).length,
+      totalMaxTokens,
+      perItemMaxTokens: fairItemCap,
+      items: results,
+    },
+  });
+}
+
+function codeWindowItemTarget(item = {}) {
+  return item.symbolId
+    ? { symbolId: String(item.symbolId) }
+    : { file: String(item.file || "") };
 }
 
 async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
@@ -449,25 +520,184 @@ async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
   if (params.symbolId) {
     const resolved = await resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId: /** @type {any} */ (params).sessionId });
     if (resolved.error === "invalid") {
-      return { ok: false, code: "invalid_symbol_id", message: `Malformed symbolId ${params.symbolId}` };
+      return {
+        ok: false,
+        code: "invalid_symbol_id",
+        message: `Malformed symbolId ${params.symbolId}`,
+        details: symbolIdCorrectionDetails(action, params),
+      };
     }
     const target = resolved.symbol;
-    if (!target) return { ok: false, code: "unresolved_symbol", message: "Symbol not found" };
+    if (!target) return {
+      ok: false,
+      code: "unresolved_symbol",
+      message: "Symbol not found",
+      details: symbolIdCorrectionDetails(action, params, { wellFormed: true }),
+    };
     const source = resolved.entry?.content ?? readFile(target.repo_rel_path);
-    if (source == null) return { ok: false, ...repoReadFailure(repoRoot, target.repo_rel_path, "symbolId") };
+    if (source == null) return {
+      ok: false,
+      ...await repoReadFailureWithSuggestions({
+        view,
+        repoRoot,
+        repoRelPath: target.repo_rel_path,
+        targetSource: "symbolId",
+        action,
+        params,
+      }),
+    };
     return { ok: true, target, targetPath: target.repo_rel_path, source, symbolId: params.symbolId };
   }
 
   if (params.file) {
     if (!isCanonicalRepoPath(params.file)) {
-      return { ok: false, code: "invalid_path", message: `${action}: file must be canonical, got ${params.file}` };
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: `${action}: file must be canonical, got ${params.file}`,
+        details: await pathCorrectionDetails(view, params.file, action, params),
+      };
     }
     const source = readFile(params.file);
-    if (source == null) return { ok: false, ...repoReadFailure(repoRoot, params.file, "file") };
+    if (source == null) return {
+      ok: false,
+      ...await repoReadFailureWithSuggestions({
+        view,
+        repoRoot,
+        repoRelPath: params.file,
+        targetSource: "file",
+        action,
+        params,
+      }),
+    };
     return { ok: true, target: null, targetPath: params.file, source, symbolId: null };
   }
 
   return { ok: false, code: "invalid_params", message: `${action} requires symbolId or file` };
+}
+
+async function repoReadFailureWithSuggestions({ view, repoRoot, repoRelPath, targetSource, action, params }) {
+  const failure = repoReadFailure(repoRoot, repoRelPath, targetSource);
+  if (targetSource !== "file") return failure;
+  return {
+    ...failure,
+    details: {
+      ...(failure.details || {}),
+      ...await pathCorrectionDetails(view, repoRelPath, action, params),
+    },
+  };
+}
+
+async function pathCorrectionDetails(view, requestedPath, action, params = {}) {
+  const requested = String(requestedPath || "");
+  const normalized = requested.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  const candidates = await nearestIndexedPaths(view, normalized);
+  const unique = unambiguousPathCandidate(normalized, candidates);
+  return {
+    invalidField: "file",
+    requestedValue: requested,
+    expected: "canonical repository-relative indexed path",
+    candidates,
+    ...(unique ? {
+      correctedRequest: {
+        action,
+        ...codeRequestFields(params),
+        file: unique.path,
+      },
+    } : {}),
+  };
+}
+
+function symbolIdCorrectionDetails(action, params = {}, { wellFormed = false } = {}) {
+  return {
+    invalidField: "symbolId",
+    requestedValue: String(params.symbolId || ""),
+    expected: "opaque ATLAS symbol ID matching <64 lowercase hex chars>:<local integer>",
+    retryable: false,
+    correctiveAction: {
+      action: "symbol.search",
+      message: wellFormed
+        ? "The issued symbol is no longer resolvable. Search by its real symbol name and reuse the returned symbolId."
+        : "Do not construct symbolId values. Search by the real symbol name, or use file for a known repository path.",
+    },
+    originalAction: action,
+  };
+}
+
+function codeRequestFields(params = {}) {
+  const allowed = [
+    "reason",
+    "identifiersToFind",
+    "expectedLines",
+    "granularity",
+    "maxTokens",
+    "exportedOnly",
+    "maxLines",
+    "ifNoneMatch",
+    "sessionId",
+    "surveyGap",
+  ];
+  return Object.fromEntries(allowed
+    .filter((key) => params[key] !== undefined)
+    .map((key) => [key, params[key]]));
+}
+
+async function nearestIndexedPaths(view, requestedPath, limit = 3) {
+  if (typeof view?.query?.indexedPaths !== "function") return [];
+  let indexed = [];
+  try {
+    indexed = await view.query.indexedPaths({ limit: 5000 });
+  } catch {
+    return [];
+  }
+  const requested = String(requestedPath || "").toLowerCase();
+  const requestedBase = requested.split("/").pop() || requested;
+  return [...new Set(indexed.map((entry) => String(entry || "")).filter(Boolean))]
+    .map((candidate) => {
+      const lowered = candidate.toLowerCase();
+      const base = lowered.split("/").pop() || lowered;
+      const editRatio = levenshteinDistance(requested, lowered) / Math.max(1, requested.length, lowered.length);
+      const basenameRatio = levenshteinDistance(requestedBase, base) / Math.max(1, requestedBase.length, base.length);
+      const score = Math.min(editRatio, basenameRatio + (requestedBase === base ? 0 : 0.15));
+      return { path: candidate, score: Number(score.toFixed(3)) };
+    })
+    .filter((candidate) => candidate.score <= 0.55)
+    .sort((left, right) => left.score - right.score || left.path.localeCompare(right.path))
+    .slice(0, Math.max(1, limit));
+}
+
+function unambiguousPathCandidate(normalizedRequested, candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const exact = candidates.find((candidate) => candidate.path.toLowerCase() === normalizedRequested.toLowerCase());
+  if (exact) return exact;
+  const requestedBase = normalizedRequested.toLowerCase().split("/").pop();
+  const sameBase = candidates.filter((candidate) => candidate.path.toLowerCase().split("/").pop() === requestedBase);
+  if (sameBase.length === 1) return sameBase[0];
+  if (candidates[0].score <= 0.2 && (!candidates[1] || candidates[1].score - candidates[0].score >= 0.2)) {
+    return candidates[0];
+  }
+  return null;
+}
+
+function levenshteinDistance(left, right) {
+  const a = String(left || "");
+  const b = String(right || "");
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+  let prior = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        prior[j] + 1,
+        prior[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prior = current;
+  }
+  return prior[b.length];
 }
 
 function repoReadFailure(repoRoot, repoRelPath, targetSource) {

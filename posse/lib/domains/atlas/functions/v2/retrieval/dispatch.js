@@ -60,6 +60,7 @@ import { readRepoFileResult } from "./repo-read.js";
  * @property {View} [view]
  * @property {string} versionId
  * @property {Ledger} [ledger]        Optional ledger for history-aware operations (review.delta, agent.feedback persistence, retrieval feedback boost).
+ * @property {string} [ledgerPath]    Ledger identity used to resolve sidecar stores without opening a write handle.
  * @property {ReadFile} [readFile]
  * @property {string} [repoRoot]      Filesystem root used to resolve repo-relative reads.
  * @property {string} [viewPath]
@@ -83,11 +84,13 @@ export function dispatch(call, ctx) {
   const normalizedCall = normalizeAtlasToolCall(normalizeToolCall(call));
   const usage = {
     ledger: ctx.ledger,
+    ledgerPath: ctx.ledgerPath,
     action: String(normalizedCall?.action || ""),
     repoId: ctx.repoId,
     versionId: ctx.versionId,
     startedAt,
     taskType: ctx.taskType || (typeof /** @type {any} */ (normalizedCall).taskType === "string" ? /** @type {any} */ (normalizedCall).taskType : null),
+    telemetryEnabled: usageTelemetryEnabled(ctx.config),
   };
   let result;
   try {
@@ -346,7 +349,13 @@ function dispatchImpl(call, ctx) {
     case "policy.set":
       return /** @type {any} */ (policySet({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
     case "usage.stats":
-      return /** @type {any} */ (usageStats({ versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoId: ctx.repoId }));
+      return /** @type {any} */ (usageStats({
+        versionId: ctx.versionId,
+        params: call,
+        ledger: ctx.ledger,
+        ledgerPath: ctx.ledgerPath,
+        repoId: ctx.repoId,
+      }));
     case "runtime.execute":
       return /** @type {any} */ (runtimeExecute({
         versionId: ctx.versionId,
@@ -665,4 +674,10 @@ export function normalizeActionName(value) {
  */
 function actionKey(action) {
   return String(action || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function usageTelemetryEnabled(config = {}) {
+  const value = config?.usageTelemetryEnabled ?? config?.atlas_usage_telemetry;
+  if (value === false) return false;
+  return !["off", "false", "0"].includes(String(value ?? "on").trim().toLowerCase());
 }

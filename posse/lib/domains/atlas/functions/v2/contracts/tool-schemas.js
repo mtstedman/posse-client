@@ -88,6 +88,16 @@ const targetRequired = () => ({
     { required: ["file"] },
   ],
 });
+const codeWindowItem = () => o({
+  symbolId: symbolId(),
+  file: s({ minLength: 1 }),
+  reason: s({ minLength: 3, maxLength: 20_000 }),
+  expectedLines: { type: ["integer", "string"], minimum: 1, maximum: 20_000, maxLength: 20, pattern: "^[0-9]+$" },
+  identifiersToFind: identifierList({ maxItems: 50 }),
+  granularity: s({ enum: CODE_GRANULARITIES, default: "symbol" }),
+  maxTokens: i({ minimum: 1, maximum: 200_000 }),
+  sessionId: s({ maxLength: 256 }),
+}, ["reason"], targetRequired());
 const createRefInputMode = () => ({
   oneOf: [
     { required: ["text"] },
@@ -504,6 +514,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     identifiersToFind: identifierList({ maxItems: 50 }),
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
+    surveyGap: s({ minLength: 3, maxLength: 1000 }),
   }),
   "code.lens": o({
     symbolId: symbolId(),
@@ -523,9 +534,16 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     identifiersToFind: identifierList({ maxItems: 50 }),
     granularity: s({ enum: CODE_GRANULARITIES, default: "symbol" }),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
+    items: a(codeWindowItem(), { minItems: 2, maxItems: 4 }),
     sliceContext: sliceContextHint(),
     sessionId: s({ maxLength: 256 }),
-  }, ["reason"], targetRequired()),
+  }, [], {
+    anyOf: [
+      { required: ["items"] },
+      { required: ["reason", "symbolId"] },
+      { required: ["reason", "file"] },
+    ],
+  }),
   "code.survey": o({
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 64 },
     symbols: identifierList({ maxItems: 16 }),

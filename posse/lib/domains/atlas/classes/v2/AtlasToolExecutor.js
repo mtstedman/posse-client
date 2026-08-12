@@ -8,6 +8,7 @@ import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncG
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
+import { recordAtlasUsageEvent } from "../../functions/v2/retrieval/usage.js";
 import {
   ledgerBranchForWi,
   ledgerDbPath,
@@ -204,9 +205,18 @@ function conductorEnvelopeToToolResult(envelope) {
     return { result: mcpTextResult("Error: ATLAS v2 dispatch returned no envelope", true), ok: false };
   }
   if (envelope.ok === false || envelope.error) {
-    const message = envelope.error?.message || envelope.error?.code || "v2 backend error";
+    const structuredError = {
+      code: String(envelope.error?.code || "atlas_tool_error"),
+      message: String(envelope.error?.message || envelope.error?.code || "v2 backend error"),
+      ...(envelope.error?.details === undefined ? {} : { details: envelope.error.details }),
+    };
+    const message = structuredError.message;
     return {
-      result: mcpTextResult(`Error: ATLAS v2 ${envelope.action || ""}: ${message}`, true),
+      result: {
+        ...mcpTextResult(`Error: ATLAS v2 ${envelope.action || ""}: ${message}`, true),
+        structuredContent: { error: structuredError },
+        _meta: { atlasError: structuredError },
+      },
       ok: false,
       errorMsg: String(message),
     };
@@ -221,7 +231,23 @@ function conductorEnvelopeToToolResult(envelope) {
   let text;
   try { text = JSON.stringify(payload); }
   catch { text = String(payload); }
-  return { result: mcpTextResult(text, false), ok: true, errorMsg: null };
+  const result = mcpTextResult(text, false);
+  if (data?.batch === true && Array.isArray(data.items)) {
+    result._meta = {
+      atlasBatch: {
+        item_count: Number(data.itemCount || data.items.length),
+        succeeded: Number(data.succeeded || 0),
+        failed: Number(data.failed || 0),
+        items: data.items.slice(0, 4).map((item) => ({
+          index: Number(item?.index || 0),
+          ok: item?.ok === true,
+          target: item?.target || null,
+          error_code: item?.error?.code || null,
+        })),
+      },
+    };
+  }
+  return { result, ok: true, errorMsg: null };
 }
 
 function modelVisibleAtlasMeta(meta) {
@@ -926,27 +952,50 @@ export class AtlasToolExecutor {
         const completeToolArgs = request.action === "code.survey"
           ? { ...nativeArgs, _backedSnapshot: true }
           : nativeArgs;
-        const envelope = await this.#nativeToolCall({
-          contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
-          action: request.action,
-          args: cloneJson(completeToolArgs) || {},
-          viewPath: readPayload.viewPath,
+        const usage = {
           ledgerPath: readPayload.ledgerPath,
-          repoRoot: readPayload.readRoot
-            || request.config?.repoRoot
-            || request.session?.bootConfig?.atlas?.repoPath
-            || request.session?.bootConfig?.cwd
-            || request.session?.cwd
-            || process.cwd(),
+          action: request.action,
           repoId: readPayload.repoId,
           versionId: readPayload.versionId,
-          config: readPayload.config || {},
-          ...(vectorBridge ? { vectorBridge } : {}),
-          deadline: this.#now() + timeoutMs,
-        }, {
-          timeoutMs,
-          idempotent: true,
-        });
+          startedAt: Date.now(),
+          taskType: typeof request.args?.taskType === "string" ? request.args.taskType : null,
+          telemetryEnabled: usageTelemetryEnabled(readPayload.config),
+        };
+        let envelope;
+        try {
+          envelope = await this.#nativeToolCall({
+            contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+            action: request.action,
+            args: cloneJson(completeToolArgs) || {},
+            viewPath: readPayload.viewPath,
+            ledgerPath: readPayload.ledgerPath,
+            repoRoot: readPayload.readRoot
+              || request.config?.repoRoot
+              || request.session?.bootConfig?.atlas?.repoPath
+              || request.session?.bootConfig?.cwd
+              || request.session?.cwd
+              || process.cwd(),
+            repoId: readPayload.repoId,
+            versionId: readPayload.versionId,
+            config: readPayload.config || {},
+            ...(vectorBridge ? { vectorBridge } : {}),
+            deadline: this.#now() + timeoutMs,
+          }, {
+            timeoutMs,
+            idempotent: true,
+          });
+          recordAtlasUsageEvent({ ...usage, envelope });
+        } catch (err) {
+          recordAtlasUsageEvent({
+            ...usage,
+            envelope: {
+              ok: false,
+              action: request.action,
+              error: { code: "native_complete_failed", message: String(/** @type {any} */ (err)?.message || err) },
+            },
+          });
+          throw err;
+        }
         return conductorEnvelopeToToolResult(
           request.action === "symbol.search"
             ? applyNativeSymbolSearchPriors(envelope, request.args || {})
@@ -1186,6 +1235,12 @@ export class AtlasToolExecutor {
       return "main";
     }
   }
+}
+
+function usageTelemetryEnabled(config = {}) {
+  const value = config?.usageTelemetryEnabled ?? config?.atlas_usage_telemetry;
+  if (value === false) return false;
+  return !["off", "false", "0"].includes(String(value ?? "on").trim().toLowerCase());
 }
 
 export function treeScopeDiscoveryArgs(args = {}, repoRoot = "") {

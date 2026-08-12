@@ -19,7 +19,12 @@ export function hiddenSessionFromParams(params = {}) {
   const session = record && typeof record === "object" ? record._posseSession : null;
   if (!session || typeof session !== "object") return null;
   const boot = session.bootConfig && typeof session.bootConfig === "object" ? session.bootConfig : null;
-  return boot ? { bootConfig: boot } : null;
+  return boot
+    ? {
+        sessionId: String(session.sessionId || "").trim() || null,
+        bootConfig: boot,
+      }
+    : null;
 }
 
 export function stripHiddenSessionParam(params = {}) {

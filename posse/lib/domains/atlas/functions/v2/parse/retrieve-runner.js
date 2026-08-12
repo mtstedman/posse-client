@@ -399,6 +399,7 @@ export async function runConductorRetrieve(payload) {
       return Promise.resolve(dispatch(/** @type {any} */ (payload.call), {
         view,
         ledger,
+        ledgerPath: ledgerPath || undefined,
         versionId: String(payload.versionId || ""),
         repoRoot: readRoot || undefined,
         repoId: payload.repoId ? String(payload.repoId) : null,

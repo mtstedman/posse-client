@@ -647,6 +647,145 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   }
 }
 
+export function researchSurveyCoverageStatus({ jobId = null, attemptId = null, file = "" } = {}) {
+  const scope = researchObservationScope(jobId, attemptId);
+  const target = normalizedCoveragePath(file);
+  if (!scope || !target) return null;
+  try {
+    const rows = getDb().prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE ${scope.where}
+        AND observation_type = 'atlas.prefetch.survey'
+      ORDER BY id DESC
+    `).all(...scope.params);
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      if (detail?.ok !== true) continue;
+      const match = (Array.isArray(detail.files) ? detail.files : [])
+        .find((entry) => normalizedCoveragePath(entry?.path) === target);
+      if (!match) continue;
+      return {
+        file: String(match.path || file),
+        fileTruncated: match.truncated === true,
+        surveyTruncated: detail.truncated === true,
+        surveyRef: String(detail.survey_ref || "").trim() || null,
+        scope: detail.scope || null,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function researchRetrievalCoverageStatus({ jobId = null, attemptId = null } = {}) {
+  const scope = researchObservationScope(jobId, attemptId);
+  if (!scope) return emptyResearchRetrievalCoverage();
+  try {
+    const rows = getDb().prepare(`
+      SELECT observation_type, detail_json
+      FROM job_observations
+      WHERE ${scope.where}
+        AND observation_type IN ('atlas.prefetch.survey', 'tool.atlas')
+      ORDER BY id ASC
+    `).all(...scope.params);
+    const surveyed = new Set();
+    const skeletonized = new Set();
+    const windowed = new Set();
+    let symbolWindows = 0;
+    const failed = [];
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      if (row.observation_type === "atlas.prefetch.survey") {
+        if (detail?.ok === true) {
+          for (const entry of Array.isArray(detail.files) ? detail.files : []) {
+            const file = normalizedCoveragePath(entry?.path);
+            if (file) surveyed.add(file);
+          }
+        }
+        continue;
+      }
+      const action = String(detail?.action || "");
+      const args = detail?.args && typeof detail.args === "object" ? detail.args : {};
+      const succeeded = detail?.outcome === "succeeded" || detail?.ok === true;
+      if (action === "code.skeleton" && succeeded && args.file) {
+        skeletonized.add(normalizedCoveragePath(args.file));
+      }
+      if (action === "code.window" && succeeded) {
+        const batchItems = Array.isArray(detail?.atlas_batch?.items)
+          ? detail.atlas_batch.items
+          : null;
+        if (batchItems) {
+          for (const item of batchItems) {
+            if (item?.ok === true && item?.target?.file) windowed.add(normalizedCoveragePath(item.target.file));
+            else if (item?.ok === true && item?.target?.symbolId) symbolWindows += 1;
+            else if (item?.ok === false && failed.length < 4) {
+              failed.push({
+                action,
+                target: String(item?.target?.file || item?.target?.symbolId || "").slice(0, 160),
+                reason: String(item?.error_code || "batch_item_failed").slice(0, 180),
+              });
+            }
+          }
+        } else {
+          if (args.file) windowed.add(normalizedCoveragePath(args.file));
+          if (args.symbolId) symbolWindows += 1;
+          for (const item of Array.isArray(args.items) ? args.items : []) {
+            if (item?.file) windowed.add(normalizedCoveragePath(item.file));
+            else if (item?.symbolId) symbolWindows += 1;
+          }
+        }
+      }
+      if (!succeeded && failed.length < 4) {
+        failed.push({
+          action,
+          target: String(args.file || args.symbolId || "").slice(0, 160),
+          reason: String(detail?.error || detail?.rejection_reason || detail?.status || "failed").slice(0, 180),
+        });
+      }
+    }
+    return {
+      surveyedFiles: [...surveyed].filter(Boolean).sort(),
+      skeletonizedFiles: [...skeletonized].filter(Boolean).sort(),
+      windowedFiles: [...windowed].filter(Boolean).sort(),
+      symbolWindows,
+      failedLookups: failed,
+    };
+  } catch {
+    return emptyResearchRetrievalCoverage();
+  }
+}
+
+function researchObservationScope(jobId, attemptId) {
+  const normalizedAttemptId = Number(attemptId);
+  const normalizedJobId = Number(jobId);
+  const useAttempt = Number.isInteger(normalizedAttemptId) && normalizedAttemptId > 0;
+  const useJob = Number.isInteger(normalizedJobId) && normalizedJobId > 0;
+  if (!useAttempt && !useJob) return null;
+  return useAttempt && useJob
+    ? { where: "job_id = ? AND (attempt_id = ? OR attempt_id IS NULL)", params: [normalizedJobId, normalizedAttemptId] }
+    : useAttempt
+      ? { where: "attempt_id = ?", params: [normalizedAttemptId] }
+      : { where: "job_id = ?", params: [normalizedJobId] };
+}
+
+function normalizedCoveragePath(value) {
+  return normPath(String(value || "")).replace(/^\.\//, "").toLowerCase();
+}
+
+function emptyResearchRetrievalCoverage() {
+  return {
+    surveyedFiles: [],
+    skeletonizedFiles: [],
+    windowedFiles: [],
+    symbolWindows: 0,
+    failedLookups: [],
+  };
+}
+
 /**
  * Durable content-coverage/search ledger for fetch_ref admission. Rows are
  * scoped to the model that received them when agent_call_id is available, so
@@ -977,6 +1116,16 @@ function _summarizeAtlasArgs(input = {}) {
     if (value == null) out[key] = null;
     else if (typeof value === "string") out[key] = _truncate(value, 160);
     else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
+    else if (Array.isArray(value) && key === "items") {
+      out[key] = value.slice(0, 4).map((item) => (
+        item && typeof item === "object"
+          ? {
+              ...(item.file ? { file: _truncate(item.file, 160) } : {}),
+              ...(item.symbolId ? { symbolId: _truncate(item.symbolId, 80) } : {}),
+            }
+          : _truncate(item, 80)
+      ));
+    }
     else if (Array.isArray(value)) out[key] = value.slice(0, 8).map((item) => _truncate(item, 80));
     else if (typeof value === "object") out[key] = "[object]";
     else out[key] = _truncate(value, 80);

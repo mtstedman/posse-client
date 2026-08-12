@@ -19,6 +19,7 @@ function load(name) {
 }
 
 export const LEDGER_DDL = load("ledger.sql");
+export const USAGE_DDL = load("usage.sql");
 export const VIEW_DDL = load("view.sql");
 
 /**
@@ -29,3 +30,4 @@ export const VIEW_DDL = load("view.sql");
 export const ATLAS_DATA_SCHEMA_VERSION = 3;
 export const LEDGER_SCHEMA_VERSION = ATLAS_DATA_SCHEMA_VERSION;
 export const VIEW_SCHEMA_VERSION = ATLAS_DATA_SCHEMA_VERSION;
+export const USAGE_SCHEMA_VERSION = 1;

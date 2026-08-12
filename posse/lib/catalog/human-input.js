@@ -10,6 +10,7 @@ import {
   JOB_STATUSES,
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
 } from "./job.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
 const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
@@ -20,7 +21,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   scope_expansion_request: freezeChoices(["approve", "deny"]),
   scope_expansion_required: freezeChoices(["approve", "reject"]),
   partial_work_recovery: freezeChoices(["extend", "commit", "revert"]),
-  blocked_recovery: freezeChoices(["retry_with_changes", "explicit_waiver", "replan", "pass", "fail"]),
+  blocked_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery),
   dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
   research_dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
   oneshot_dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
@@ -77,7 +78,7 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   blocked_recovery: {
     gate_kind: "developer_blocked",
-    allowed_actions: ["retry_with_changes", "explicit_waiver", "replan", "pass", "fail"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery],
     allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES],
   },
   dead_letter_recovery: {

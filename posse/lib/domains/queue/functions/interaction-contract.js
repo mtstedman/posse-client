@@ -1,5 +1,5 @@
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
-import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
@@ -22,6 +22,7 @@ const MAX_NUDGE_BODY_CHARS = 4000;
 const MAX_ACTION_ID_BYTES = 128;
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
+const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
 const OPEN_GATE_STATUS_SET = new Set(["queued", "waiting_on_human", "waiting_on_review"]);
 const CURRENT_GATE_STATUSES = Object.freeze([
   "queued", "waiting_on_human", "waiting_on_review", "running", "assessing",
@@ -380,7 +381,7 @@ function gateQuestionState(job) {
   if (OPEN_GATE_STATUS_SET.has(job.status)) return "open";
   if (["running", "assessing"].includes(job.status)) return "pending";
   if (job.status === "succeeded") return "answered";
-  if (["failed", "dead_letter"].includes(job.status)) return "rejected";
+  if (FAILED_JOB_STATUS_SET.has(job.status)) return "rejected";
   if (job.status === "canceled") return "closed";
   return "closed";
 }

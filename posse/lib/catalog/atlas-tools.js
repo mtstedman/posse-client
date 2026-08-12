@@ -728,13 +728,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_get_skeleton",
-    description: "Code outline for one file or symbol: signatures and containment without full bodies. Use it directly when an outline answers the question. Do not call code.skeleton more than once for the same symbol or file selection.",
+    description: "Code outline for one file or symbol: signatures and containment without full bodies. A successful prefetched code.survey already supplies this structural orientation for every surveyed file; use code.window for an exact unresolved fact. Set surveyGap only when you can name structure the delivered survey omitted or bounded. Do not repeat the same selection.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Optional opaque ATLAS symbol ID returned by ATLAS. Do not pass a file path here; use file for path-based skeletons." },
         file: { type: "string", description: "Optional relative file path to inspect." },
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
+        surveyGap: { type: "string", minLength: 3, description: "Exact structural fact missing from the delivered survey. Supplying it bypasses the survey-aware redirect; do not use it merely to request a second outline." },
       },
       required: [],
       additionalProperties: false,
@@ -810,7 +811,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_need_window",
-    description: "Bounded exact code for a selected symbol or named file regions. Use it directly when the target is known. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file; identifier and line hints do not alter that selection. With file, each matched identifier is covered by a bounded slice under one total expectedLines budget; inspect identifiersReturned/identifiersMissing and additionalWindows. When a selected region intersects an anonymous function directly returned by an enclosing scope, returnedFunctionAnchors provides a temporary owner/signature/line map; follow its ref to inspect that exact callable without searching for an indexed symbol. A symbol already surfaced by code.window will not be surfaced by an identical code.window call; a duplicate-suppressed response means covered, not not-found. Do not call code.window more than once for the same symbol or substantially overlapping file/identifier selection. Follow the single continuationRef when outputTruncated is true; it contains every selected inline-omitted slice once in source order, never the rest of the file.",
+    description: "Bounded exact code for one selected symbol/file region, or for two to four independent known targets in items. Batch related exact targets after survey/tree orientation; each batch item has an independent status and evidenceRef, and one invalid target does not fail its siblings. In scalar mode maxTokens caps the selection; in batch mode it is the shared cap and each item's maxTokens is additionally bounded by a fair share. With symbolId, granularity selects the resolved symbol, enclosing block, or containing file. With file, identifiersToFind selects bounded slices. Follow returnedFunctionAnchors and continuationRef values. Do not repeat overlapping selections.",
     parameters: {
       type: "object",
       properties: {
@@ -820,12 +821,37 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         identifiersToFind: { type: "array", items: { type: "string" }, description: "File-mode only: exact anchors for one or more bounded slices, for example [\"generateMusic\",\"json_decode\"]. They are ignored when symbolId is supplied. Batch all related anchors once, then inspect identifiersReturned and identifiersMissing rather than reopening the file. Prefer a JSON array; legacy scalar strings are normalized." },
         expectedLines: { type: "integer", description: "File-mode only: total approximate line budget shared across all identifier slices. Ignored when symbolId is supplied. This is not a continuation offset, and increasing it does not page a prior result. Prefer a JSON number, for example 40; legacy numeric strings are normalized." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbolId-mode only: choose the resolved symbol, its enclosing block, or its containing file. Ignored when file is supplied. These are alternative selections, not sequential retrieval stages." },
-        maxTokens: { type: "integer", description: "Maximum inline output budget for this selection. It is not a paging control; follow continuationRef only when returned for already-selected requested slices." },
+        maxTokens: { type: "integer", description: "Scalar-mode inline cap, or batch-wide cap shared fairly across items. It is not a paging control." },
+        items: {
+          type: "array",
+          minItems: 2,
+          maxItems: 4,
+          description: "Two to four independent exact selections to retrieve in one turn. Use only after orientation identifies the targets.",
+          items: {
+            type: "object",
+            properties: {
+              symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID for this item." },
+              file: { type: "string", description: "Repository-relative file fallback for this item." },
+              reason: { type: "string", minLength: 3, description: "Exact code fact this item should establish." },
+              identifiersToFind: { type: "array", items: { type: "string" }, description: "File-mode anchors for this item." },
+              expectedLines: { type: "integer", description: "File-mode approximate line budget for this item." },
+              granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Symbol-mode selection granularity for this item." },
+              maxTokens: { type: "integer", description: "Requested per-item cap, bounded by the batch fair share." },
+            },
+            required: ["reason"],
+            anyOf: [
+              { required: ["symbolId"] },
+              { required: ["file"] },
+            ],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["reason"],
+      required: [],
       anyOf: [
-        { required: ["symbolId"] },
-        { required: ["file"] },
+        { required: ["items"] },
+        { required: ["reason", "symbolId"] },
+        { required: ["reason", "file"] },
       ],
       additionalProperties: false,
     },
@@ -1064,7 +1090,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "usage.stats": {
     type: "function",
     name: "atlas_usage_stats",
-    description: "Usage. Report native ATLAS v2 action counts, latency, and estimated token savings from ledger usage events.",
+    description: "Usage. Report eventually consistent native ATLAS v2 action counts, latency, and estimated token savings from the dedicated usage store (normally delayed by at most one flush interval).",
     parameters: {
       type: "object",
       properties: {

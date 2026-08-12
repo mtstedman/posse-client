@@ -4,141 +4,146 @@
 // events rather than depending on the original ATLAS token accumulator.
 
 import { okEnvelope, errorEnvelope } from "./envelope.js";
+import {
+  enqueueAtlasUsageEvent,
+  getAtlasUsageTelemetryStats,
+} from "../../../classes/v2/UsageTelemetry.js";
+import { openUsageStoreReadOnly } from "./usage-store.js";
 
 /**
  * @param {{
  *   versionId: string,
  *   params: import("../contracts/tool-params.js").UsageStatsParams,
  *   ledger?: import("../contracts/api.js").Ledger,
+ *   ledgerPath?: string | null,
  *   repoId?: string | null,
  * }} args
  */
-export function usageStats({ versionId, params, ledger, repoId }) {
-  const db = ledgerDb(ledger);
-  if (!db) return ledgerUnavailable("usage.stats", versionId);
-  const effectiveRepoId = effectiveRepo(repoId, params.repoId);
-  const scope = ["session", "history", "both"].includes(String(params.scope || ""))
-    ? String(params.scope)
-    : "both";
-  const since = typeof params.since === "string" && params.since.trim() ? params.since.trim() : null;
-  const limit = clampInt(params.limit, 1, 100, 20);
-  const aggregateLimit = clampInt(params.aggregateLimit, 1, 10000, 1000);
-  const snapshotRows = readUsageRows(db, { repoId: effectiveRepoId, since, limit });
-  const aggregateSourceRows = readUsageRows(db, { repoId: effectiveRepoId, since, limit: aggregateLimit });
-  const aggregate = aggregateRows(aggregateSourceRows);
-  const totalMatchingCalls = countUsageRows(db, { repoId: effectiveRepoId, since });
-  aggregate.totalCalls = totalMatchingCalls;
-  aggregate.truncated = totalMatchingCalls > aggregateSourceRows.length;
-  aggregate.sampledCalls = aggregateSourceRows.length;
-  const snapshots = snapshotRows.map((row) => usageSnapshot(row));
-  const toolBreakdown = aggregateToolBreakdown(aggregateSourceRows);
-  const response = {};
-  if (scope === "session" || scope === "both") {
-    response.session = {
-      sessionId: "native-v2",
-      repoId: effectiveRepoId,
-      timestamp: new Date().toISOString(),
-      ...aggregate,
-      toolBreakdown,
-      tokenAccounting: tokenAccountingMethod(),
-    };
+export function usageStats({ versionId, params, ledger, ledgerPath, repoId }) {
+  const resolvedLedgerPath = ledgerPathOf(ledgerPath, ledger);
+  let store;
+  try {
+    store = openUsageStoreReadOnly(resolvedLedgerPath);
+  } catch (err) {
+    return usageStoreUnavailable(versionId, err);
   }
-  if (scope === "history" || scope === "both") {
-    response.history = {
-      snapshots,
-      aggregate: {
+  if (!store) return usageStoreUnavailable(versionId);
+  const db = store.db;
+  try {
+    const effectiveRepoId = effectiveRepo(repoId, params.repoId);
+    const scope = ["session", "history", "both"].includes(String(params.scope || ""))
+      ? String(params.scope)
+      : "both";
+    const since = typeof params.since === "string" && params.since.trim() ? params.since.trim() : null;
+    const limit = clampInt(params.limit, 1, 100, 20);
+    const aggregateLimit = clampInt(params.aggregateLimit, 1, 10000, 1000);
+    const snapshotRows = readUsageRows(db, { repoId: effectiveRepoId, since, limit });
+    const aggregateSourceRows = readUsageRows(db, { repoId: effectiveRepoId, since, limit: aggregateLimit });
+    const aggregate = aggregateRows(aggregateSourceRows);
+    const totalMatchingCalls = countUsageRows(db, { repoId: effectiveRepoId, since });
+    aggregate.totalCalls = totalMatchingCalls;
+    aggregate.truncated = totalMatchingCalls > aggregateSourceRows.length;
+    aggregate.sampledCalls = aggregateSourceRows.length;
+    const snapshots = snapshotRows.map((row) => usageSnapshot(row));
+    const toolBreakdown = aggregateToolBreakdown(aggregateSourceRows);
+    const response = {};
+    if (scope === "session" || scope === "both") {
+      response.session = {
+        sessionId: "native-v2",
+        repoId: effectiveRepoId,
+        timestamp: new Date().toISOString(),
         ...aggregate,
-        topToolsBySavings: topToolsBySavings(toolBreakdown),
+        toolBreakdown,
         tokenAccounting: tokenAccountingMethod(),
-      },
-    };
-  }
-  response.formattedSummary = formatSummary(aggregate);
-  return okEnvelope({
-    action: "usage.stats",
-    versionId,
-    data: response,
-  });
-}
-
-/**
- * Best-effort usage recorder called by dispatch after a native v2 action runs.
- *
- * @param {{
- *   ledger?: import("../contracts/api.js").Ledger,
- *   action: string,
- *   repoId?: string | null,
- *   versionId?: string | null,
- *   startedAt: number,
- *   envelope: any,
- *   taskType?: string | null,
- * }} args
- */
-// Reads dispatched on the conductor reader lane carry a READ-ONLY ledger
-// handle, so their usage events cannot be inserted from that thread. Count the
-// drops (surfaced via getUsageEventDropStats and a once-per-process warn)
-// instead of silently swallowing SQLITE_READONLY per call — usage.stats
-// systematically undercounting the default read path looked like low usage,
-// not like a broken recorder.
-let _readOnlyDrops = 0;
-let _warnedReadOnlyDrops = false;
-
-/** @returns {{ droppedReadOnly: number }} */
-export function getUsageEventDropStats() {
-  return { droppedReadOnly: _readOnlyDrops };
-}
-
-/**
- * @param {{ ledger?: import("../contracts/api.js").Ledger, action: string, repoId?: string | null, versionId?: string | null, startedAt: number, envelope: any, taskType?: string | null }} args
- */
-export function recordAtlasUsageEvent({ ledger, action, repoId, versionId, startedAt, envelope, taskType = null }) {
-  if (action === "usage.stats") return;
-  const db = ledgerDb(ledger);
-  if (!db) return;
-  if (/** @type {any} */ (db).readonly === true) {
-    _readOnlyDrops += 1;
-    if (!_warnedReadOnlyDrops) {
-      _warnedReadOnlyDrops = true;
-      console.warn("[atlas-v2 usage] reader-lane ledger handle is read-only; usage events from this lane are counted as drops, not persisted");
+      };
     }
-    return;
+    if (scope === "history" || scope === "both") {
+      response.history = {
+        snapshots,
+        aggregate: {
+          ...aggregate,
+          topToolsBySavings: topToolsBySavings(toolBreakdown),
+          tokenAccounting: tokenAccountingMethod(),
+        },
+      };
+    }
+    response.formattedSummary = formatSummary(aggregate);
+    return okEnvelope({
+      action: "usage.stats",
+      versionId,
+      data: response,
+    });
+  } catch (err) {
+    return usageStoreUnavailable(versionId, err);
+  } finally {
+    try { store.db.close(); } catch { /* best effort */ }
   }
+}
+
+/** Backward-compatible accessor; the returned shape now includes lane stats. */
+export function getUsageEventDropStats() {
+  return getAtlasUsageTelemetryStats();
+}
+
+/**
+ * Best-effort usage recorder called after a native v2 action runs.
+ *
+ * @param {{ ledger?: import("../contracts/api.js").Ledger, ledgerPath?: string | null, action: string, repoId?: string | null, versionId?: string | null, startedAt: number, envelope: any, taskType?: string | null, telemetryEnabled?: boolean }} args
+ */
+export function recordAtlasUsageEvent({
+  ledger,
+  ledgerPath,
+  action,
+  repoId,
+  versionId,
+  startedAt,
+  envelope,
+  taskType = null,
+  telemetryEnabled = true,
+}) {
+  if (action === "usage.stats") return;
   try {
     const ok = envelope?.ok === true ? 1 : 0;
     const resultBytes = Buffer.byteLength(JSON.stringify(envelope?.data ?? envelope?.error ?? {}), "utf8");
     const recordedAction = String(envelope?.action || action || "unknown");
-    db.prepare(
-      `INSERT INTO usage_events
-         (ts, repo_id, action, ok, duration_ms, result_bytes, version_id, task_type, error_code)
-       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      new Date().toISOString(),
-      effectiveRepo(repoId, null),
-      recordedAction,
-      ok,
-      Math.max(0, Date.now() - startedAt),
-      resultBytes,
-      versionId || null,
-      taskType || null,
-      envelope?.ok === false ? String(envelope?.error?.code || "error") : null,
-    );
+    enqueueAtlasUsageEvent({
+      ledgerPath: ledgerPathOf(ledgerPath, ledger),
+      row: {
+        ts: new Date().toISOString(),
+        repoId: effectiveRepo(repoId, null),
+        action: recordedAction,
+        ok,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        resultBytes,
+        versionId: versionId || null,
+        taskType: taskType || null,
+        errorCode: envelope?.ok === false ? String(envelope?.error?.code || "error") : null,
+      },
+    }, { enabled: telemetryEnabled !== false });
   } catch {
     // Usage accounting must never affect tool execution.
   }
 }
 
-function ledgerDb(ledger) {
-  return typeof /** @type {any} */ (ledger)?._unsafeDb === "function"
-    ? /** @type {any} */ (ledger)._unsafeDb()
-    : null;
+function ledgerPathOf(explicitPath, ledger) {
+  if (explicitPath) return String(explicitPath);
+  try {
+    return typeof /** @type {any} */ (ledger)?._dbPath === "function"
+      ? String(/** @type {any} */ (ledger)._dbPath() || "")
+      : "";
+  } catch {
+    return "";
+  }
 }
 
-function ledgerUnavailable(action, versionId) {
+function usageStoreUnavailable(versionId, err = null) {
   return errorEnvelope({
-    action: /** @type {any} */ (action),
+    action: "usage.stats",
     versionId,
-    code: "ledger_unavailable",
-    message: `${action} requires a ledger-backed ATLAS context`,
+    code: "usage_store_unavailable",
+    message: err
+      ? `Atlas usage telemetry store is unavailable: ${String(/** @type {any} */ (err)?.message || err)}`
+      : "Atlas usage telemetry store is not available yet",
   });
 }
 
@@ -324,7 +329,7 @@ function percentile(values, p) {
 function tokenAccountingMethod() {
   return {
     method: "result_bytes/action_multiplier",
-    description: "Native v2 estimates ATLAS tokens from serialized result bytes and raw-equivalent savings from action-specific multipliers.",
+    description: "Native v2 estimates ATLAS tokens from serialized result bytes and raw-equivalent savings from action-specific multipliers. Dedicated usage telemetry is eventually consistent and normally trails dispatch by no more than one flush interval.",
     confidence: "estimate",
   };
 }

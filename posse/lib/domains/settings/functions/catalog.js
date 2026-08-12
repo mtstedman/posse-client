@@ -30,6 +30,7 @@ import {
 // lib/catalog/atlas.js). Imported here for use inside SETTINGS_CATALOG below
 // and re-exported so admin UI / validation imports keep their existing paths.
 import {
+  SETTING_KEYS,
   AGENT_COORDINATION_MODE_VALUES,
   ASSESSMENT_SCOPE_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
@@ -319,6 +320,7 @@ export const SETTINGS_CATALOG = [
 
   // ── ATLAS integration ──────────────────────────────────────────────────────
   { key: "atlas_v2",                      default: "on",                 options: ATLAS_V2_MODE_VALUES, description: "ATLAS v2 backend mode. The pipeline contract (research seed handoffs, tree prefetch, symbol cards) assumes on; off is a degraded-compatibility escape hatch (broken native binary, CI, kill switch) where agents fall back to raw read/search tools." },
+  { key: SETTING_KEYS.ATLAS_USAGE_TELEMETRY, default: "on",                options: ["off", "on"], description: "Record best-effort Atlas action usage in the dedicated per-repository telemetry store. Off disables emission and keeps the telemetry lane dormant." },
   { key: "atlas_parse_max_parallel",       default: "",                   numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse maximum concurrent SCIP-stage subprocesses (empty = computed from languages and CPU)" },
   { key: "atlas_parse_per_lang_tandem",    default: "true",               valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse tandem tree-sitter/SCIP staging flag" },
   { key: "atlas_parse_file_progress_throttle_ms", default: "100",         numeric: { integer: true, min: 0 }, adminVisible: false, description: "Internal Atlas Parse filename progress throttle in milliseconds; 0 emits every event" },

@@ -272,6 +272,7 @@ export function ProcessTransport(opts) {
  * @param {{
  *   moduleUrl: URL | string,
  *   workerData?: Record<string, unknown>,
+ *   transferList?: import("node:worker_threads").Transferable[],
  *   resourceLimits?: import("node:worker_threads").ResourceLimits,
  *   nativeBridge?: boolean,
  *   retirePayload?: Record<string, unknown> | null,
@@ -320,7 +321,7 @@ export function ThreadTransport(opts) {
       try {
         const workerData = { ...(opts.workerData || {}) };
         /** @type {import("node:worker_threads").Transferable[]} */
-        const transferList = [];
+        const transferList = [...(opts.transferList || [])];
         if (opts.nativeBridge === true) {
           const channel = new MessageChannel();
           bridgePorts = channel;
@@ -343,14 +344,20 @@ export function ThreadTransport(opts) {
           releasePromise: null,
         };
         active = record;
-        worker.unref();
         worker.on("message", (message) => {
           if (active !== record || record.exited) return;
           for (const cb of messageHandlers) cb(message);
         });
         worker.on("error", () => emitExit(record));
         worker.on("exit", () => emitExit(record));
+        // Adding a Worker message listener starts (and references) its
+        // underlying MessagePort. Unref only after all transport listeners are
+        // attached so an idle daemon cannot pin short-lived processes.
+        worker.unref();
       } catch {
+        for (const transferable of (opts.transferList || [])) {
+          try { /** @type {any} */ (transferable)?.close?.(); } catch { /* ignore */ }
+        }
         try { bridgePorts?.port1.close(); } catch { /* ignore */ }
         try { bridgePorts?.port2.close(); } catch { /* ignore */ }
         try { void bridgeDispose?.(); } catch { /* ignore */ }

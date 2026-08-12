@@ -29,11 +29,17 @@ import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thre
 import { installNativeThreadBridge } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
+import {
+  closeAtlasUsageTelemetry,
+  getAtlasUsageTelemetryStats,
+  installAtlasUsageTelemetryPort,
+} from "../../../classes/v2/UsageTelemetry.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
   nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
+installAtlasUsageTelemetryPort(workerData?.usageTelemetryPort);
 
 // Telemetry counters surfaced via `info` — tests assert invalidation delivery
 // through these, and field diagnostics can confirm reads route here.
@@ -114,10 +120,21 @@ runDaemonThread(async (payload) => {
         const { storageCacheStatsNativeAsync } = await import("../native/storage.js");
         storageCache = await storageCacheStatsNativeAsync();
       } catch { /* diagnostics stay best effort */ }
-      return { lane: "reader", retrieves, invalidations, writeBegins, writeEnds, activeWriteHolds, invalidationsDuringWrite, storageCache };
+      return {
+        lane: "reader",
+        retrieves,
+        invalidations,
+        writeBegins,
+        writeEnds,
+        activeWriteHolds,
+        invalidationsDuringWrite,
+        storageCache,
+        usage: getAtlasUsageTelemetryStats(),
+      };
     }
 
     case "close": {
+      try { await closeAtlasUsageTelemetry(); } catch { /* best effort */ }
       try {
         const { disposeConductorRetrieveResources } = await import("./retrieve-runner.js");
         await disposeConductorRetrieveResources();

@@ -833,6 +833,73 @@ export function compactCodeWindowLensResult(toolName, result, {
   } catch {
     return { result, compacted: false };
   }
+  const batchData = envelope?.data && typeof envelope.data === "object"
+    ? envelope.data
+    : envelope;
+  if (tool === "code.window" && batchData?.batch === true && Array.isArray(batchData.items)) {
+    const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
+    let compacted = false;
+    for (const item of batchData.items) {
+      if (item?.ok !== true || !item.data || typeof item.data !== "object") continue;
+      const itemArgs = Array.isArray(args?.items) ? args.items[item.index] || {} : {};
+      const child = compactCodeWindowLensResult("code.window", JSON.stringify(item.data), {
+        args: itemArgs,
+        context,
+        ownerScope,
+        enabled,
+        minChars,
+      });
+      try {
+        item.data = JSON.parse(child.result);
+        compacted ||= child.compacted;
+      } catch {
+        // The child began as JSON; retain the original structured data if a
+        // defensive transform ever returns a non-JSON transport string.
+      }
+      if (!hasHashRefScope(hashContext)) continue;
+      const payloadText = JSON.stringify(item.data, null, 1);
+      let surfaced;
+      try {
+        surfaced = surfaceHashRefForContext(hashContext, {
+          entryKind: "materialized",
+          payloadText,
+          descriptor: {
+            kind: "tool_result",
+            tool: "code.window",
+            args: itemArgs,
+            batchItem: Number(item.index),
+            source: "tool:code.window",
+          },
+          objectType: "atlas.code.window.batch_item",
+          source: "tool:code.window",
+          note: `code.window batch item ${Number(item.index) + 1}: ${item.data.repo_rel_path || item.target?.file || item.target?.symbolId || "selection"}`,
+          sizeChars: payloadText.length,
+          recomputable: true,
+          metadata: {
+            surfaced_by: "code_window_batch",
+            fetch_class: "citation",
+            ...hashRefModelVisibility(hashContext, { visibility: "visible" }),
+            tool: "code.window",
+            batch_item: Number(item.index),
+            repo_rel_path: item.data.repo_rel_path || null,
+          },
+        }, scope);
+      } catch (err) {
+        recordHashSurfaceFailure(hashContext, tool, payloadText.length, err?.message || err);
+      }
+      if (surfaced?.ok && surfaced?.entry?.ref) {
+        item.evidenceRef = {
+          ref: surfaced.entry.ref,
+          objectType: surfaced.entry.object_type,
+          sizeChars: payloadText.length,
+        };
+        compacted = true;
+      }
+    }
+    return compacted
+      ? { result: JSON.stringify(envelope, null, 2), compacted: true }
+      : { result, compacted: false };
+  }
   // Like code.survey above: the MCP owner stamps the BARE payload (top-level
   // matches[]/content), dispatch envelopes nest it under .data. Accept both —
   // the .data-only assumption silently no-ops the production owner/embedded paths.

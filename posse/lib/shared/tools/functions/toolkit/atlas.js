@@ -575,6 +575,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
         ...(payload.symbolId ? { symbolId: optionalAtlasSymbolId(payload.symbolId, "code.skeleton symbolId") } : {}),
         ...(payload.file ? { file: sanitizeString(payload.file, 512) } : {}),
         ...(payload.exportedOnly == null ? {} : { exportedOnly: !!payload.exportedOnly }),
+        ...(payload.surveyGap ? { surveyGap: sanitizeString(payload.surveyGap, 1000) } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -603,6 +604,42 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
   }
 
   if (normalizedAction === "code.window") {
+    if (Array.isArray(payload.items)) {
+      if (payload.items.length < 2 || payload.items.length > 4) {
+        throw new Error("ATLAS code.window items must contain two to four selections.");
+      }
+      const items = payload.items.map((item, index) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          throw new Error(`ATLAS code.window items[${index}] must be an object.`);
+        }
+        const reason = sanitizeString(item.reason || item.justification || "", ATLAS_MAX_QUERY_LENGTH);
+        const symbolId = optionalAtlasSymbolId(item.symbolId, `code.window items[${index}] symbolId`);
+        const file = item.file && isSafeRelativePath(item.file)
+          ? sanitizeString(item.file, 512)
+          : null;
+        if (!symbolId && !file) throw new Error(`ATLAS code.window items[${index}] requires symbolId or file.`);
+        if (!reason) throw new Error(`ATLAS code.window items[${index}] requires reason.`);
+        return {
+          ...(symbolId ? { symbolId } : { file }),
+          reason,
+          identifiersToFind: sanitizeIdentifierList(item.identifiersToFind),
+          expectedLines: clampInt(item.expectedLines, 1, 2000, 120),
+          ...(item.granularity ? { granularity: sanitizeString(item.granularity, 32) } : {}),
+          ...(item.maxTokens == null ? {} : { maxTokens: clampInt(item.maxTokens, 64, ATLAS_MAX_BUDGET_TOKENS, 1200) }),
+          ...(item.sessionId ? { sessionId: sanitizeString(item.sessionId, 256) } : {}),
+        };
+      });
+      return {
+        action: normalizedAction,
+        cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
+        payload: {
+          items,
+          maxTokens: clampInt(payload.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, Math.min(4800, items.length * 1200)),
+          ...(payload.sessionId ? { sessionId: sanitizeString(payload.sessionId, 256) } : {}),
+          ...(payload.repoId ? { repoId: payload.repoId } : {}),
+        },
+      };
+    }
     const reason = sanitizeString(payload.reason || payload.justification || "", ATLAS_MAX_QUERY_LENGTH);
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.window symbolId");
     const file = payload.file && isSafeRelativePath(payload.file)

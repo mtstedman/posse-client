@@ -813,6 +813,23 @@
  * @property {Array<{content:string,startLine:number,endLine:number,rangeStart:number,rangeEnd:number,signature:string,callableKind:string,owner?:string,anchor:string}>} [_returnedFunctionAnchors] Private owner transport; replaced with returnedFunctionAnchors before model delivery.
  * @property {Array<{anchor:string,owner?:string,signature:string,callableKind:string,startLine:number,endLine:number,ref?:string}>} [returnedFunctionAnchors] Temporary fetchable anchors for directly returned anonymous functions visible in this result.
  * @property {number} [returnedFunctionAnchorsOmitted]
+ * @property {boolean} [batch]                True only for a bounded multi-item response.
+ * @property {number} [itemCount]
+ * @property {number} [succeeded]
+ * @property {number} [failed]
+ * @property {number} [totalMaxTokens]
+ * @property {number} [perItemMaxTokens]
+ * @property {CodeWindowBatchItemResult[]} [items]
+ */
+
+/**
+ * @typedef {Object} CodeWindowBatchItemResult
+ * @property {number} index
+ * @property {{symbolId?: string, file?: string}} target
+ * @property {boolean} ok
+ * @property {CodeWindowData} [data]
+ * @property {ToolError} [error]
+ * @property {{ref:string, objectType:string, sizeChars:number}} [evidenceRef]
  */
 
 /**
@@ -1326,6 +1343,7 @@
  * @property {Record<string, unknown>} storage
  * @property {Record<string, unknown>} view
  * @property {Record<string, unknown>} ledger
+ * @property {Record<string, unknown>} usage
  * @property {Record<string, unknown>} [policy]
  * @property {string[]} warnings
  */

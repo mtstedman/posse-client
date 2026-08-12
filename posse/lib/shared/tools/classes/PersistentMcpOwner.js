@@ -15,6 +15,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
+import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
@@ -45,6 +46,8 @@ import {
   recordObservation,
   recordToolUseObservations,
   researchExplorationObservationStatus,
+  researchRetrievalCoverageStatus,
+  researchSurveyCoverageStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
   RESEARCH_CITATION_FETCH_GATE_ENABLED,
@@ -665,8 +668,8 @@ function agentHandoffSchemaTelemetry(message) {
   return schema ? toolSchemaTelemetry(schema) : null;
 }
 
-function attachTelemetryContext(session, ownerBootId) {
-  const boot = session?.bootConfig || {};
+function attachTelemetryContext(session, ownerBootId, bootConfig = session?.bootConfig || {}) {
+  const boot = bootConfig || {};
   return {
     component: "deterministic_mcp",
     owner_boot_id: ownerBootId || null,
@@ -687,6 +690,7 @@ function injectSessionContext(message, session, { delegatedEvidence = false } = 
   delete params._posseSession;
   const bootConfig = stripGatewaySessionTokenFields(session.bootConfig || {});
   bootConfig.ownerAtlasGateEvents = session.atlasGateEventsSnapshot();
+  bootConfig.ownerGatewayBindingEpoch = Number(session?._gatewayBindingEpoch) || 1;
   if (delegatedEvidence === true) bootConfig.delegatedEvidenceCursor = true;
   params._posseSession = {
     sessionId: session.id,
@@ -694,6 +698,45 @@ function injectSessionContext(message, session, { delegatedEvidence = false } = 
   };
   outbound.params = params;
   return outbound;
+}
+
+function gatewaySessionReleaseNotification(session) {
+  return injectSessionContext({
+    jsonrpc: "2.0",
+    method: MCP_SESSION_RELEASED_NOTIFICATION,
+    params: {},
+  }, session);
+}
+
+function gatewayGateBindingKey(bootConfig = {}, sessionId = null) {
+  const numericPart = (value) => Number(value) || null;
+  return JSON.stringify([
+    String(bootConfig?.mcpOAuth?.tokenId || sessionId || "").trim(),
+    numericPart(bootConfig?.jobId),
+    numericPart(bootConfig?.workItemId),
+    numericPart(bootConfig?.attemptId),
+    numericPart(bootConfig?.agentCallId),
+    String(bootConfig?.role || "").trim(),
+    path.resolve(String(bootConfig?.cwd || ".")),
+    bootConfig?.atlasAvailable === true,
+    bootConfig?.atlasGateEnabled === true,
+  ]);
+}
+
+function gatewayBindingSnapshot(session) {
+  const bootConfig = cloneJson(session?.bootConfig || {});
+  return {
+    epoch: Number(session?._gatewayBindingEpoch) || null,
+    key: gatewayGateBindingKey(bootConfig, session?.id),
+    bootConfig,
+  };
+}
+
+function gatewayBindingIsCurrent(session, binding) {
+  if (!binding) return true;
+  const currentEpoch = Number(session?._gatewayBindingEpoch) || null;
+  if (binding.epoch != null && currentEpoch !== binding.epoch) return false;
+  return gatewayGateBindingKey(session?.bootConfig || {}, session?.id) === binding.key;
 }
 
 function deniedToolCallMessage(message, toolName, policy) {
@@ -922,6 +965,12 @@ function mcpToolResultMessage(message, result) {
   };
 }
 
+function staleGatewayBindingToolResult(message) {
+  return mcpToolResultMessage(message, mcpToolErrorPayload(
+    "MCP session binding changed while the ATLAS tool was running; the obsolete result was discarded",
+  ));
+}
+
 function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExplorationStep = null } = {}) {
   const boot = session?.bootConfig || {};
   const citationFetch = RESEARCH_CITATION_FETCH_GATE_ENABLED
@@ -987,6 +1036,68 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     assignedExplorationStep: assignedStep,
     synthesisRequired: status.synthesis_required === true,
   };
+}
+
+function surveyAwareSkeletonRedirect(session, requested, toolArgs = {}) {
+  const boot = session?.bootConfig || {};
+  if (String(boot.role || "") !== "researcher") return null;
+  if (effectiveAtlasResearchAction(requested) !== "code.skeleton") return null;
+  const file = String(toolArgs.file || "").trim();
+  if (!file || String(toolArgs.surveyGap || "").trim()) return null;
+  const coverage = researchSurveyCoverageStatus({
+    jobId: boot.jobId ?? null,
+    attemptId: boot.attemptId ?? null,
+    file,
+  });
+  if (!coverage) return null;
+  const result = mcpToolTextPayload(JSON.stringify({
+    action: "code.skeleton",
+    status: "redirected",
+    code: "structure_already_visible",
+    structureAlreadyVisible: true,
+    file: coverage.file,
+    surveyRef: coverage.surveyRef,
+    surveyBounded: coverage.surveyTruncated || coverage.fileTruncated,
+    message: "The prefetched code.survey already supplied this file's structural outline. Use that survey evidence and request exact unresolved code with code.window.",
+    nextAction: {
+      action: "code.window",
+      instruction: "Request the exact unresolved identifier or branch; batch 2-4 known targets in items when useful.",
+    },
+    escapeHatch: {
+      field: "surveyGap",
+      instruction: "Retry code.skeleton only when the survey omitted or bounded a named structural fact, and put that fact in surveyGap.",
+    },
+  }));
+  return annotateOwnerResultTransform(result, {
+    kind: "survey_aware_skeleton_redirect",
+    action: "code.skeleton",
+    file: coverage.file,
+    survey_ref: coverage.surveyRef,
+    survey_bounded: coverage.surveyTruncated || coverage.fileTruncated,
+  });
+}
+
+function recordSurveyAwareSkeletonRedirect(session, toolName, toolArgs, result) {
+  const boot = session?.bootConfig || {};
+  const parsed = (() => {
+    try { return JSON.parse(result?.content?.[0]?.text || "{}"); } catch { return {}; }
+  })();
+  recordObservation({
+    work_item_id: boot.workItemId ?? null,
+    job_id: boot.jobId ?? null,
+    attempt_id: boot.attemptId ?? null,
+    observation_type: "atlas.skeleton_after_survey",
+    summary: `Redirected redundant code.skeleton for ${String(toolArgs?.file || "surveyed file").slice(0, 180)}`,
+    detail: {
+      kind: "survey_aware_skeleton_redirect",
+      action: "code.skeleton",
+      tool: toolName || null,
+      file: toolArgs?.file || null,
+      survey_ref: parsed?.surveyRef || null,
+      survey_bounded: parsed?.surveyBounded === true,
+      redirected: true,
+    },
+  });
 }
 
 function appendOwnerResearchFinalFetchNotice(result, admission) {
@@ -1078,7 +1189,30 @@ function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolNam
   });
 }
 
-function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
+function researchCoverageForSession(session, toolName = "", toolArgs = {}) {
+  const boot = session?.bootConfig || {};
+  const coverage = researchRetrievalCoverageStatus({
+    jobId: boot.jobId ?? null,
+    attemptId: boot.attemptId ?? null,
+  });
+  const action = effectiveAtlasResearchAction(requestedToolPolicyName(toolName, toolArgs));
+  const addFile = (bucket, value) => {
+    const file = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+    if (file && !bucket.includes(file)) bucket.push(file);
+  };
+  if (action === "code.skeleton") addFile(coverage.skeletonizedFiles, toolArgs?.file);
+  if (action === "code.window") {
+    if (toolArgs?.file) addFile(coverage.windowedFiles, toolArgs.file);
+    else if (toolArgs?.symbolId) coverage.symbolWindows += 1;
+    for (const item of Array.isArray(toolArgs?.items) ? toolArgs.items : []) {
+      if (item?.file) addFile(coverage.windowedFiles, item.file);
+      else if (item?.symbolId) coverage.symbolWindows += 1;
+    }
+  }
+  return coverage;
+}
+
+function appendOwnerResearchSynthesisNotice(result, session, toolName, admission, toolArgs = {}) {
   if (!admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.assignedExplorationStep
     ?? admission.explorationSteps + 1;
@@ -1095,6 +1229,7 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
       absoluteCeilingReached: true,
+      coverage: researchCoverageForSession(session, toolName, toolArgs),
     });
     noticeKind = "research_closeout";
   } else if (
@@ -1111,7 +1246,9 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     && !flags.midpoint
   ) {
     flags.midpoint = true;
-    notice = buildResearchMidpointAuditText();
+    notice = buildResearchMidpointAuditText({
+      coverage: researchCoverageForSession(session, toolName, toolArgs),
+    });
     noticeKind = "research_midpoint";
   }
   if (!notice) return result;
@@ -1122,10 +1259,10 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
   });
 }
 
-function atlasExecutorSessionContext(session) {
+function atlasExecutorSessionContext(session, bootConfig = session?.bootConfig || {}) {
   return {
     id: session?.id || null,
-    bootConfig: stripGatewaySessionTokenFields(session?.bootConfig || {}),
+    bootConfig: stripGatewaySessionTokenFields(bootConfig),
     tokenSource: session?.tokenSource || null,
     tokenVerified: session?.tokenVerified === true,
   };
@@ -1319,6 +1456,7 @@ function recordOwnerToolObservation({
           transport: "mcp_owner",
           executor: executor && typeof executor === "object" ? executor : null,
           atlas_artifacts: result?._meta?.atlasArtifacts || null,
+          atlas_batch: result?._meta?.atlasBatch || null,
           response: {
             result_chars: resultChars,
             content_blocks: Array.isArray(result?.content) ? result.content.length : 0,
@@ -1426,6 +1564,7 @@ class PersistentMcpSession {
     this.lastSeenAt = now;
     this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : null;
     this.attachProof = this._newAttachProof();
+    this._gatewayBindingEpoch = 1;
     this._atlasGateEventSeq = 0;
     this._atlasGateEvents = [];
     this._subAgentRouting = createSubAgentRoutingState();
@@ -1460,15 +1599,11 @@ class PersistentMcpSession {
       this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : this.expiresAt;
     }
     if (bootConfig) {
-      const previousJobId = this.bootConfig?.jobId ?? null;
-      const previousWorkItemId = this.bootConfig?.workItemId ?? null;
-      const previousAgentCallId = this.bootConfig?.agentCallId ?? null;
+      const previousBindingKey = gatewayGateBindingKey(this.bootConfig, this.id);
+      const nextBindingKey = gatewayGateBindingKey(bootConfig, this.id);
       this.bootConfig = bootConfig;
-      if (
-        previousJobId !== (bootConfig.jobId ?? null)
-        || previousWorkItemId !== (bootConfig.workItemId ?? null)
-        || previousAgentCallId !== (bootConfig.agentCallId ?? null)
-      ) {
+      if (previousBindingKey !== nextBindingKey) {
+        this._gatewayBindingEpoch += 1;
         this._atlasGateEventSeq = 0;
         this._atlasGateEvents = [];
         this._subAgentRouting = createSubAgentRoutingState();
@@ -1707,6 +1842,18 @@ class PersistentMcpSession {
         reject(err);
       }
     });
+  }
+
+  notify(message = {}) {
+    if (!this._proc || this._proc.exitCode != null || this._proc.killed) return false;
+    const outbound = cloneJson(message);
+    if (outbound && typeof outbound === "object") delete outbound.id;
+    try {
+      this._write(outbound);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   prewarm() {
@@ -2038,6 +2185,9 @@ export class PersistentMcpOwner {
       throw new Error("MCP agent contract is missing suite-scoped toolAllowlist");
     }
     if (serverSpec?.command) this._ensureGatewaySession({ serverSpec, prewarm: true });
+    const previousGatewayScopeReleaseNotified = gatewayGateBindingKey(session.bootConfig, session.id)
+      !== gatewayGateBindingKey(boundBootConfig, session.id)
+      && this._notifyGatewaySessionRelease(session);
     // Rotate only after every fallible validation/setup step. Otherwise an
     // attach error strands the caller with the old bearer and prevents its
     // cleanup path from unregistering the session.
@@ -2048,6 +2198,7 @@ export class PersistentMcpOwner {
       sessionId: id,
       jobId: boundBootConfig.jobId ?? null,
       workItemId: boundBootConfig.workItemId ?? null,
+      previousGatewayScopeReleaseNotified,
       ...(rotatedToken ? { token: rotatedToken } : {}),
     };
   }
@@ -2082,6 +2233,7 @@ export class PersistentMcpOwner {
       cleared: result.bound === true,
       sessionId: result.sessionId,
       reason,
+      previousGatewayScopeReleaseNotified: result.previousGatewayScopeReleaseNotified === true,
       ...(result.token ? { token: result.token } : {}),
     };
   }
@@ -2096,6 +2248,10 @@ export class PersistentMcpOwner {
     } catch {
       // Telemetry must not affect MCP request handling.
     }
+  }
+
+  _notifyGatewaySessionRelease(session) {
+    return this._gatewaySession?.notify?.(gatewaySessionReleaseNotification(session)) === true;
   }
 
   _removeSession(id, { reason = "released", context = null, telemetry = true } = {}) {
@@ -2115,6 +2271,7 @@ export class PersistentMcpOwner {
     for (const key of this._activeResearchAtlasReads.keys()) {
       if (key.endsWith(`:${id}`)) this._activeResearchAtlasReads.delete(key);
     }
+    const gatewayScopeReleaseNotified = this._notifyGatewaySessionRelease(session);
     let gatewayReleased = false;
     let gatewayStopped = false;
     if (this._sessions.size === 0 && this._gatewaySession) {
@@ -2143,6 +2300,7 @@ export class PersistentMcpOwner {
         session_count: this._sessions.size,
         gateway_released: gatewayReleased,
         gateway_stopped: gatewayStopped,
+        gateway_scope_release_notified: gatewayScopeReleaseNotified,
         registered_at: session.registeredAt || null,
         last_seen_at: session.lastSeenAt || null,
         expires_at: session.expiresAt || null,
@@ -2157,6 +2315,7 @@ export class PersistentMcpOwner {
       sessionCount: this._sessions.size,
       gatewayReleased,
       gatewayStopped,
+      gatewayScopeReleaseNotified,
       attachProof,
     };
   }
@@ -2410,6 +2569,10 @@ export class PersistentMcpOwner {
     }
     session.touch();
     const method = String(message?.method || "").trim();
+    if (method === MCP_SESSION_RELEASED_NOTIFICATION) {
+      sendJson(res, 403, { ok: false, error: "reserved_owner_method" });
+      return;
+    }
     const proofEvent = session.noteRequest(message);
     if (proofEvent === "initialize") {
       this._logAttachProof(session, "mcp.attach.initialize_seen", {
@@ -2905,10 +3068,12 @@ export class PersistentMcpOwner {
   }
 
   async _executeAtlasToolCall(args) {
-    const boot = args?.session?.bootConfig || {};
+    const binding = args?.binding || gatewayBindingSnapshot(args?.session);
+    const boot = binding.bootConfig;
     const queueKey = [
       boot.jobId ?? "no-job",
       boot.attemptId ?? "no-attempt",
+      binding.epoch ?? binding.key,
       args?.session?.id || "no-session",
     ].join(":");
     const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
@@ -2920,7 +3085,7 @@ export class PersistentMcpOwner {
       && !this._atlasToolCallQueues.has(queueKey);
     if (concurrentResearchRead) {
       const synthesisAdmission = this._admitResearchExploration(args?.session, effectiveAction);
-      const current = this._executeAtlasToolCallNow({ ...args, synthesisAdmission, enqueuedAt });
+      const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt });
       const active = this._activeResearchAtlasReads.get(queueKey) || new Set();
       active.add(current);
       this._activeResearchAtlasReads.set(queueKey, active);
@@ -2939,7 +3104,7 @@ export class PersistentMcpOwner {
       .then(async () => {
         const activeReads = [...(this._activeResearchAtlasReads.get(queueKey) || [])];
         if (activeReads.length > 0) await Promise.allSettled(activeReads);
-        return this._executeAtlasToolCallNow({ ...args, enqueuedAt });
+        return this._executeAtlasToolCallNow({ ...args, binding, enqueuedAt });
       });
     const tail = current.catch(() => {});
     this._atlasToolCallQueues.set(queueKey, tail);
@@ -2956,6 +3121,7 @@ export class PersistentMcpOwner {
     session,
     toolName,
     toolArgs,
+    binding,
     synthesisAdmission: reservedSynthesisAdmission = null,
     enqueuedAt = null,
   }) {
@@ -2963,7 +3129,10 @@ export class PersistentMcpOwner {
     // Serial calls can sit behind the per-session promise queue; duration_ms
     // alone hides that wall-clock cost, so surface the wait separately.
     const queueWaitMs = enqueuedAt != null ? Math.max(0, startedAt - enqueuedAt) : 0;
-    const context = attachTelemetryContext(session, this.bootId);
+    if (!gatewayBindingIsCurrent(session, binding)) {
+      return staleGatewayBindingToolResult(message);
+    }
+    const context = attachTelemetryContext(session, this.bootId, binding?.bootConfig);
     const requested = requestedToolPolicyName(toolName, toolArgs);
     const memoryAction = isMemoryToolAction(requested.name);
     if (memoryAction && this._terminalMemoryToolSessions.has(session)) {
@@ -3003,6 +3172,7 @@ export class PersistentMcpOwner {
         : buildResearchSynthesisRequiredText({
           explorationSteps: synthesisAdmission.explorationSteps,
           absoluteCeilingReached: true,
+          coverage: researchCoverageForSession(session),
         });
       const result = tagOwnerModelControlNotice({
         content: [{
@@ -3036,6 +3206,43 @@ export class PersistentMcpOwner {
       return mcpToolResultMessage(message, result);
     }
     try {
+      const skeletonRedirect = surveyAwareSkeletonRedirect(session, requested, toolArgs || {});
+      if (skeletonRedirect) {
+        let result = appendOwnerOperatorFeedbackSignal(skeletonRedirect, session);
+        result = appendOwnerResearchSynthesisNotice(
+          result,
+          session,
+          toolName,
+          synthesisAdmission,
+          {},
+        );
+        session.noteAtlasGateEvent?.({
+          action: "code.skeleton",
+          args: toolArgs,
+          ok: true,
+          empty: false,
+        });
+        recordSurveyAwareSkeletonRedirect(session, toolName, toolArgs, result);
+        recordOwnerToolObservation({
+          session,
+          toolName,
+          toolArgs,
+          result,
+          durationMs: Date.now() - startedAt,
+          queueWaitMs,
+          executor: { via: "survey_aware_skeleton_redirect" },
+        });
+        appendRunTelemetry("diagnostics", {
+          kind: "mcp.owner.atlas_skeleton_after_survey",
+          ...context,
+          outcome: "redirected",
+          tool_name: toolName,
+          file: toolArgs?.file || null,
+          duration_ms: Date.now() - startedAt,
+          queue_wait_ms: queueWaitMs,
+        });
+        return mcpToolResultMessage(message, result);
+      }
       if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
         const createRef = isAtlasCreateHashTool(toolName, toolArgs);
         const hashContext = { context: hashRefToolContext(session) };
@@ -3059,6 +3266,7 @@ export class PersistentMcpOwner {
           session,
           toolName,
           synthesisAdmission,
+          toolArgs,
         );
         recordOwnerToolObservation({
           session,
@@ -3085,13 +3293,25 @@ export class PersistentMcpOwner {
       const executed = await executor.executeTool({
         toolName,
         args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
-        session: atlasExecutorSessionContext(session),
+        session: atlasExecutorSessionContext(session, binding?.bootConfig),
         source: {
           kind: "mcp_owner",
           ownerBootId: this.bootId,
           sessionId: session?.id || null,
         },
       });
+      if (!gatewayBindingIsCurrent(session, binding)) {
+        appendRunTelemetry("diagnostics", {
+          kind: "mcp.owner.atlas_tool_call",
+          ...context,
+          outcome: "discarded",
+          tool_name: toolName,
+          duration_ms: Date.now() - startedAt,
+          queue_wait_ms: queueWaitMs,
+          reason: "stale_gateway_binding",
+        });
+        return staleGatewayBindingToolResult(message);
+      }
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
@@ -3115,6 +3335,7 @@ export class PersistentMcpOwner {
         session,
         toolName,
         synthesisAdmission,
+        toolArgs,
       );
       const resultChars = mcpResultTextChars(result);
       recordOwnerToolObservation({
@@ -3139,6 +3360,9 @@ export class PersistentMcpOwner {
       });
       return mcpToolResultMessage(message, result);
     } catch (err) {
+      if (!gatewayBindingIsCurrent(session, binding)) {
+        return staleGatewayBindingToolResult(message);
+      }
       session.noteAtlasGateEvent?.({
         action: effectiveAtlasResearchAction(requested) || toolName,
         args: toolArgs,
@@ -3168,6 +3392,7 @@ export class PersistentMcpOwner {
         session,
         toolName,
         synthesisAdmission,
+        toolArgs,
       );
       recordOwnerToolObservation({
         session,

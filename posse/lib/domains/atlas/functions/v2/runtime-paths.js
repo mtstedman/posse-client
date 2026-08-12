@@ -8,6 +8,7 @@
 //
 //   <repoRoot>/.posse/atlas/
 //     ledger.db                                  -- single source of truth
+//     usage.db                                   -- best-effort Atlas usage telemetry
 //     memory.db                                  -- durable ATLAS memories
 //     slices.db                                  -- rebuildable slice handles
 //     views/
@@ -36,6 +37,19 @@ export function atlasDir(repoRoot) {
  */
 export function ledgerDbPath(repoRoot) {
   return path.join(atlasDir(repoRoot), "ledger.db");
+}
+
+/**
+ * Resolve the dedicated usage store beside the ledger that identifies its
+ * repository. Both telemetry writers and readers must use this helper so a
+ * custom ledger path cannot split accounting across derived locations.
+ *
+ * @param {string | null | undefined} ledgerPath
+ * @returns {string}
+ */
+export function usageDbPathFor(ledgerPath) {
+  const value = String(ledgerPath || "").trim();
+  return value ? path.join(path.dirname(path.resolve(value)), "usage.db") : "";
 }
 
 /**

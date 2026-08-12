@@ -91,6 +91,18 @@ export function releaseGate({ scopeKey = null } = {}) {
   }
 }
 
+export function pruneGateScopes({ limit = 5000 } = {}) {
+  const normalizedLimit = Math.max(0, Math.floor(Number(limit) || 0));
+  const released = [];
+  while (_gates.size > normalizedLimit) {
+    const oldest = _gates.keys().next().value;
+    if (oldest == null) break;
+    released.push(String(oldest));
+    releaseGate({ scopeKey: oldest });
+  }
+  return released;
+}
+
 export function isGateActive({ scopeKey = null } = {}) {
   return _getGate(scopeKey).isActive();
 }

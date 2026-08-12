@@ -75,6 +75,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_MEMORY_SURFACE: "atlas_memory_surface",
   ATLAS_SHADOW_GUARDRAILS: "atlas_shadow_guardrails",
   ATLAS_V2_BOOT_TIMEOUT_MS: "atlas_v2_boot_timeout_ms",
+  ATLAS_USAGE_TELEMETRY: "atlas_usage_telemetry",
   ATLAS_HANDOFF_PREFETCH: "atlas_handoff_prefetch",
   ATLAS_HANDOFF_PREFETCH_TIMEOUT_MS: "atlas_handoff_prefetch_timeout_ms",
   ATLAS_EMBEDDED_TIMEOUT_MS: "atlas_embedded_timeout_ms",

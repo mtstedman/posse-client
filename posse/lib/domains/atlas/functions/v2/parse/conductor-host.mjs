@@ -21,11 +21,17 @@ import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManage
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
+import {
+  closeAtlasUsageTelemetry,
+  getAtlasUsageTelemetryStats,
+  installAtlasUsageTelemetryPort,
+} from "../../../classes/v2/UsageTelemetry.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
   nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
+installAtlasUsageTelemetryPort(workerData?.usageTelemetryPort);
 
 // One handle entry per (ledger, view) target, reused across requests. The
 // ledger and view connections are opened lazily and independently: the `warm`
@@ -93,7 +99,11 @@ runDaemonThread(async (payload, _message, emitProgress) => {
   const op = String(request.op || "");
   switch (op) {
     case "info":
-      return { openTargets: [...handles.keys()], dbWriteDepth: dbWrite.active + dbWrite.pending };
+      return {
+        openTargets: [...handles.keys()],
+        dbWriteDepth: dbWrite.active + dbWrite.pending,
+        usage: getAtlasUsageTelemetryStats(),
+      };
 
     case "stage": {
       // Parallel SCIP generation, gated by the stage semaphore. A `lang`
@@ -226,6 +236,7 @@ runDaemonThread(async (payload, _message, emitProgress) => {
     }
 
     case "close": {
+      try { await closeAtlasUsageTelemetry(); } catch { /* best effort */ }
       try {
         const { disposeConductorRetrieveResources } = await import("./retrieve-runner.js");
         await disposeConductorRetrieveResources();

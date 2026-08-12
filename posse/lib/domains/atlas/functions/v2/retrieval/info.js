@@ -10,6 +10,8 @@ import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../runtime-paths.j
 import { viewFreshness } from "../view-health.js";
 import { getEffectivePolicy } from "./policy.js";
 import { branchFromVersion } from "./version.js";
+import { getAtlasUsageTelemetryStats } from "../../../classes/v2/UsageTelemetry.js";
+import { usageStoreEventSummary } from "./usage-store.js";
 
 /**
  * @param {{
@@ -42,6 +44,8 @@ export async function info({ versionId, params = {}, view, ledger, repoRoot, rep
         headSeq: ledgerHead,
         reason: view ? null : "view_unavailable",
       };
+  const usageStore = usageStoreEventSummary(ledgerPath);
+  const usageLane = getAtlasUsageTelemetryStats();
   const warnings = [];
   if (!root) warnings.push("Repository root is not available in the ATLAS v2 context.");
   if (!ledger && ledgerPath && !fs.existsSync(ledgerPath)) warnings.push("ATLAS v2 ledger file is missing.");
@@ -84,6 +88,22 @@ export async function info({ versionId, params = {}, view, ledger, repoRoot, rep
       branch,
       headSeq: ledgerHead,
       counts: params.includeCounts && ledger ? ledgerCounts(ledger) : undefined,
+    },
+    usage: {
+      events: usageStore.events,
+      storeAvailable: usageStore.available,
+      storePath: usageStore.path,
+      queued: usageLane.queued,
+      enqueued: usageLane.enqueued,
+      flushed: usageLane.flushed,
+      persisted: usageLane.persisted,
+      malformed: usageLane.malformed,
+      droppedOverflow: usageLane.droppedOverflow,
+      droppedDelivery: usageLane.droppedDelivery,
+      droppedDisabled: usageLane.droppedDisabled,
+      droppedUnavailable: usageLane.droppedUnavailable,
+      laneAlive: usageLane.laneAlive,
+      lastError: usageLane.lastError,
     },
     policy: params.includePolicy
       ? getEffectivePolicy(ledger, repoId || params.repoId || "default")

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
+import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
@@ -47,7 +48,8 @@ const AGENT_FEEDBACK_PHASES = new Set([
   "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
 ]);
 const AGENT_FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
-const TERMINAL_FEEDBACK_JOB_STATUSES = new Set(["succeeded", "failed", "dead_letter", "canceled"]);
+const TERMINAL_FEEDBACK_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
+const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
 const QUESTION_STATES = new Set(["open", "pending", "answered", "rejected", "expired", "superseded", "closed"]);
 const QUESTION_KINDS = new Set([
   "plan_approval", "file_scope_approval", "assessment_review",
@@ -232,7 +234,7 @@ function questionStateForJob(job) {
   if (["queued", "waiting_on_human", "waiting_on_review"].includes(job?.status)) return "open";
   if (["running", "assessing"].includes(job?.status)) return "pending";
   if (job?.status === "succeeded") return "answered";
-  if (["failed", "dead_letter"].includes(job?.status)) return "rejected";
+  if (FAILED_JOB_STATUS_SET.has(job?.status)) return "rejected";
   return "closed";
 }
 

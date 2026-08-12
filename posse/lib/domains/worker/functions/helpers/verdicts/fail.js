@@ -765,7 +765,7 @@ function _spawnRecoveryJobsForVerdict({
           choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
           questions: [
             `The same failure/scope fingerprint (${fixFingerprint.slice(0, 12)}) already occurred in this fix lineage.`,
-            "Choose retry_with_changes with materially new guidance, replan, pass, fail, or explicit_waiver.",
+            "Choose retry with materially new guidance, replan, pass, fail, or skip.",
           ],
           context: "Posse did not enqueue another identical fix because it would repeat an unsatisfiable repair loop.",
           fix_satisfiability_fingerprint: fixFingerprint,

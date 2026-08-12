@@ -13,6 +13,7 @@ import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
 import { surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
+import { detectUnavailableDependencySources } from "./dependency-source-preflight.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
 import { resolvePathWithin } from "../../../runtime/functions/fs-safety.js";
@@ -1950,6 +1951,10 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       }, startedAt);
     }
     const evidenceRef = _surfaceAtlasSurveyRef(packet, data);
+    const dependencyBoundaries = detectUnavailableDependencySources({
+      repoRoot: packet.cwd,
+      taskText,
+    });
     return _finishAtlasSurveyPrefetch(packet, {
       ok: true,
       attempted: true,
@@ -1961,6 +1966,7 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       granularity: data.granularity || null,
       truncated: !!data.truncated,
       evidenceRef,
+      dependencyBoundaries,
       retries,
     }, startedAt);
   } catch (err) {
@@ -2049,6 +2055,9 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     topFiles: fileSummaries.map((file) => file.path),
     callMapSummary: summary,
     evidenceRef: result.evidenceRef || null,
+    dependencyBoundaries: Array.isArray(result.dependencyBoundaries)
+      ? result.dependencyBoundaries.slice(0, 6)
+      : [],
     fullPayloadOmitted: true,
   };
 }
@@ -2173,6 +2182,22 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
         duration_ms: Number(result?.durationMs || 0),
         retries: Number(result?.retries || 0),
         scope: _summarizeSurveyScope(result?.scope),
+        files: (Array.isArray(result?.files) ? result.files : [])
+          .slice(0, MAX_SURVEY_FILES)
+          .map((file) => ({
+            path: String(file?.path || "").trim(),
+            truncated: file?.truncated === true,
+          }))
+          .filter((file) => file.path),
+        truncated: result?.truncated === true,
+        survey_ref: String(result?.evidenceRef?.ref || "").trim() || null,
+        dependency_boundaries: (Array.isArray(result?.dependencyBoundaries) ? result.dependencyBoundaries : [])
+          .slice(0, 6)
+          .map((entry) => ({
+            dependency: entry?.dependency || null,
+            version: entry?.version || null,
+            source_status: entry?.sourceStatus || null,
+          })),
         file_count: fileCount,
         internal_edge_count: internalEdgeCount,
         error: result?.error ? String(result.error).slice(0, 500) : null,
@@ -2780,6 +2805,12 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     ? Number(sc.fileCount)
     : (Array.isArray(sc.files) ? sc.files.length : 0);
   if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
+  if (fileCount > 0) {
+    lines.push("  structure already visible: do not call code.skeleton for surveyed files unless a named omitted/bounded fact requires surveyGap; go directly to code.window for exact code, batching 2-4 known targets when useful.");
+  }
+  for (const boundary of Array.isArray(sc.dependencyBoundaries) ? sc.dependencyBoundaries : []) {
+    lines.push(`  source boundary: ${boundary.dependency}${boundary.version ? ` (${boundary.version})` : ""} is declared in ${boundary.manifest || "the dependency manifest"} but its source is absent from this checkout; stop at the local call boundary and do not reconstruct dependency internals.`);
+  }
   const summary = sc.callMapSummary || _compactSurveyCallMap(sc.callMap, sc.metrics || {}, {
     edgeLimit: _surveyBriefEdgeLimit(packet),
   });

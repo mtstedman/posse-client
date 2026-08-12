@@ -83,6 +83,22 @@ export const VOLATILE_FIELDS = Object.freeze(
 );
 
 const VOLATILE_OPTIONAL_DEPENDENCIES = new Set();
+const VOLATILE_USAGE_STATUS_FIELDS = new Set([
+  "events",
+  "storeAvailable",
+  "storePath",
+  "queued",
+  "enqueued",
+  "flushed",
+  "persisted",
+  "malformed",
+  "droppedOverflow",
+  "droppedDelivery",
+  "droppedDisabled",
+  "droppedUnavailable",
+  "laneAlive",
+  "lastError",
+]);
 
 /**
  * Drop volatile fields from a JSON-serializable tree, returning a fresh
@@ -104,8 +120,9 @@ export function stripVolatileFields(value) {
     }
     /** @type {Record<string, unknown>} */
     const out = {};
+    const usageStatus = isUsageTelemetryStatus(value);
     for (const [k, v] of Object.entries(/** @type {Record<string, unknown>} */ (value))) {
-      if (VOLATILE_FIELDS.has(k)) continue;
+      if (VOLATILE_FIELDS.has(k) || (usageStatus && VOLATILE_USAGE_STATUS_FIELDS.has(k))) continue;
       out[k] = stripVolatileFields(v);
     }
     return /** @type {any} */ (out);
@@ -134,8 +151,9 @@ export function maskVolatileFields(value, sentinel = "<stripped>") {
     }
     /** @type {Record<string, unknown>} */
     const out = {};
+    const usageStatus = isUsageTelemetryStatus(value);
     for (const [k, v] of Object.entries(/** @type {Record<string, unknown>} */ (value))) {
-      if (VOLATILE_FIELDS.has(k)) {
+      if (VOLATILE_FIELDS.has(k) || (usageStatus && VOLATILE_USAGE_STATUS_FIELDS.has(k))) {
         out[k] = sentinel;
         continue;
       }
@@ -153,4 +171,12 @@ function isVolatileOptionalDependency(value) {
     && VOLATILE_OPTIONAL_DEPENDENCIES.has(obj.name)
     && Object.hasOwn(obj, "available")
     && Object.hasOwn(obj, "path");
+}
+
+function isUsageTelemetryStatus(value) {
+  if (!value || typeof value !== "object") return false;
+  const obj = /** @type {Record<string, unknown>} */ (value);
+  return Object.hasOwn(obj, "storeAvailable")
+    && Object.hasOwn(obj, "storePath")
+    && Object.hasOwn(obj, "droppedOverflow");
 }

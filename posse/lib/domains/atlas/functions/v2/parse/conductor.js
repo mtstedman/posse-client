@@ -15,6 +15,11 @@
 import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { log } from "../../../../../shared/telemetry/functions/logging/logger.js";
+import {
+  closeAtlasUsageTelemetry,
+  createAtlasUsageTelemetryWorkerChannel,
+  getAtlasUsageTelemetryStats,
+} from "../../../classes/v2/UsageTelemetry.js";
 
 const HOST_URL = new URL("./conductor-host.mjs", import.meta.url);
 const READER_HOST_URL = new URL("./reader-host.mjs", import.meta.url);
@@ -43,6 +48,17 @@ function registerAtlasThreadDaemon(kind, daemon, label) {
   return daemon;
 }
 
+function atlasThreadTransport(moduleUrl, { nativeAuth, retirePayload }) {
+  const usageChannel = createAtlasUsageTelemetryWorkerChannel();
+  return ThreadTransport({
+    moduleUrl,
+    workerData: { nativeAuth, usageTelemetryPort: usageChannel.port },
+    transferList: usageChannel.transferList,
+    nativeBridge: true,
+    retirePayload,
+  });
+}
+
 /** @returns {{ stage, ingest, warm, merge, retrieve, executeTool, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
 export function createConductorDaemon(opts = {}) {
   const nativeAuth = heartbeatAuthManager.getCapability();
@@ -54,7 +70,7 @@ export function createConductorDaemon(opts = {}) {
     ? Math.max(1, Number(opts.readerWriteOpTimeoutMs))
     : READER_WRITE_OP_TIMEOUT_MS;
   const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
-    transportFactory: () => ThreadTransport({ moduleUrl: HOST_URL, workerData: { nativeAuth }, nativeBridge: true, retirePayload: { op: "close" } }),
+    transportFactory: () => atlasThreadTransport(HOST_URL, { nativeAuth, retirePayload: { op: "close" } }),
     timeoutMs: STAGE_TIMEOUT_MS,
     label: "atlas-conductor",
   }), "atlas-conductor");
@@ -75,7 +91,7 @@ export function createConductorDaemon(opts = {}) {
     slot,
     inFlight: 0,
     daemon: registerAtlasThreadDaemon(`atlas-reader-${slot + 1}`, new Daemon({
-        transportFactory: () => ThreadTransport({ moduleUrl: readerHostUrl, workerData: { nativeAuth }, nativeBridge: true, retirePayload: { op: "close" } }),
+        transportFactory: () => atlasThreadTransport(readerHostUrl, { nativeAuth, retirePayload: { op: "close" } }),
         timeoutMs: RETRIEVE_TIMEOUT_MS,
         label: `atlas-reader-${slot + 1}`,
         onLifecycle: (event) => {
@@ -348,7 +364,26 @@ export function createConductorDaemon(opts = {}) {
   const ingest = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts));
   const warm = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts), { holdEmbeddings: true });
   const merge = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
-  const retrieve = (opts, reqOpts) => callReader({ op: "retrieve", ...opts }, reqOpts);
+  const retrieve = async (opts, reqOpts) => {
+    const result = await callReader({ op: "retrieve", ...opts }, reqOpts);
+    if (result?.ok === true && result?.action === "info" && result?.data?.usage) {
+      const producer = result.data.usage;
+      const processQueue = getAtlasUsageTelemetryStats();
+      result.data.usage = {
+        ...producer,
+        ...processQueue,
+        queued: Number(producer.queued || 0) + Number(processQueue.queued || 0),
+        droppedOverflow: Number(producer.droppedOverflow || 0) + Number(processQueue.droppedOverflow || 0),
+        droppedDelivery: Number(producer.droppedDelivery || 0) + Number(processQueue.droppedDelivery || 0),
+        droppedDisabled: Number(producer.droppedDisabled || 0) + Number(processQueue.droppedDisabled || 0),
+        droppedUnavailable: Number(producer.droppedUnavailable || 0) + Number(processQueue.droppedUnavailable || 0),
+        lastError: processQueue.lastError || producer.lastError || null,
+        producer,
+        processQueue,
+      };
+    }
+    return result;
+  };
   const executeTool = (opts, reqOpts) => callReader({ op: "executeTool", ...opts }, reqOpts);
 
   const aggregateReaderInfo = async ({ ensurePool = false } = {}) => {
@@ -424,7 +459,13 @@ export function createConductorDaemon(opts = {}) {
         }
         try { await entry.daemon.dispose(); } catch { /* best effort */ }
       }));
-      return call(daemon, { op: "close" });
+      try {
+        return await call(daemon, { op: "close" });
+      } finally {
+        // Reader/writer source queues have posted their final batches. Drain
+        // the process-global queue last, then release usage.db writer handles.
+        await closeAtlasUsageTelemetry();
+      }
     },
     /**
      * Full reindex via the hosted ParseEngine: warm (parse tree-sitter + SCIP

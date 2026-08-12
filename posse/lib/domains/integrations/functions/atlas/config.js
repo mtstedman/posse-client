@@ -549,6 +549,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       atlasVersion: "v2",
       atlasV2Enabled: false,
       atlasV2Mode: "off",
+      usageTelemetryEnabled: false,
       transport: "v2",
       installPath: null,
       command: null,
@@ -601,6 +602,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   }
 
   const dbAtlasV2Mode = useLiveSettings ? readDbSetting("atlas_v2") : null;
+  const dbUsageTelemetry = useLiveSettings ? readDbSetting("atlas_usage_telemetry") : null;
   const dbScipMode = useLiveSettings ? readDbSetting("atlas_scip_mode") : null;
   const dbScipLanguages = useLiveSettings ? readDbSetting("atlas_scip_languages") : null;
   const dbScipIndexCommand = useLiveSettings ? readDbSetting("atlas_scip_index_command") : null;
@@ -644,6 +646,11 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbDriftCheckIntervalMs = useLiveSettings ? readDbSetting("atlas_drift_check_interval_ms") : null;
   const rawAtlasV2Mode = String(firstProvided(explicitValue("atlasV2Mode", "atlas_v2", "POSSE_ATLAS_V2"), dbAtlasV2Mode, "")).trim().toLowerCase();
   const atlasV2Mode = normalizeAtlasV2Mode(rawAtlasV2Mode);
+  const usageTelemetryEnabled = !["off", "false", "0"].includes(String(firstProvided(
+    explicitValue("usageTelemetryEnabled", "atlas_usage_telemetry"),
+    dbUsageTelemetry,
+    "on",
+  )).trim().toLowerCase());
   const rawScipMode = String(firstProvided(explicitValue("scipMode", "atlas_scip_mode", "POSSE_ATLAS_SCIP_MODE"), dbScipMode, "")).trim().toLowerCase();
   const scipMode = rawScipMode === "consume"
     ? "on"
@@ -791,6 +798,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     atlasVersion: "v2",
     atlasV2Enabled,
     atlasV2Mode,
+    usageTelemetryEnabled,
     scipMode,
     scipLanguages: scipLanguages.length > 0 ? scipLanguages : [...ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES],
     scipIndexCommand,

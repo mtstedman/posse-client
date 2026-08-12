@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
@@ -23,6 +23,7 @@ import {
 
 const TERMINAL_WORK_ITEM_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const TERMINAL_JOB_SET = new Set(TERMINAL_JOB_STATUSES);
+const FAILED_JOB_SET = new Set(FAILED_JOB_STATUSES);
 const PRODUCTIVE_JOB_TYPES = new Set(["delegate", "dev", "assess", "fix", "summarize", "artificer", "promote"]);
 const PLANNING_JOB_TYPES = new Set(["plan"]);
 const RESEARCH_JOB_TYPES = new Set(["research", "preflight"]);
@@ -84,7 +85,7 @@ function summaryRow(workItem, jobs, group, canonicalIndex, queuePosition, isPrim
       : null,
     active_agent_count: currentJobs.length,
     needs_input: workItem.status === "waiting_on_human" || jobs.some((job) => job.status === "waiting_on_human"),
-    has_failure: workItem.status === "failed" || jobs.some((job) => ["failed", "dead_letter"].includes(job.status)),
+    has_failure: workItem.status === "failed" || jobs.some((job) => FAILED_JOB_SET.has(job.status)),
     is_primary: Boolean(isPrimary),
   };
 }
@@ -147,7 +148,7 @@ function agentState(job, hasLaneWait) {
 
 function agentStatus(job, feedback, hasLaneWait) {
   if (job.status === "succeeded") return "done";
-  if (["failed", "dead_letter"].includes(job.status)) return "failed";
+  if (FAILED_JOB_SET.has(job.status)) return "failed";
   if (job.status === "canceled") return "canceled";
   if (feedback?.status) return feedback.status;
   if (hasLaneWait) return "waiting";

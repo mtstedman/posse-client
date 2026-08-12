@@ -368,8 +368,9 @@ CREATE TABLE IF NOT EXISTS atlas_policy (
 );
 
 -- -----------------------------------------------------------------------------
--- Native ATLAS usage events. Dispatch writes one compact row per v2 action so
--- usage.stats can report session/history data without the old ATLAS runtime.
+-- Legacy native ATLAS usage events. New events live in the dedicated usage.db
+-- store; retain this frozen table so existing operator data remains readable
+-- and no automatic migration mixes known-skewed history with complete data.
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS usage_events (

@@ -39,6 +39,7 @@ import {
   safePath,
 } from "../../../shared/tools/functions/toolkit/index.js";
 import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
+import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   recordAgentHandoffRejection,
@@ -361,15 +362,16 @@ let mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
 let atlasAvailable = bootConfig.atlasAvailable === true;
 let atlasGateEnabled = bootConfig.atlasGateEnabled === true;
 let atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
-let gateBootedAtMs = Date.now();
 // Fail-open deadman: if ATLAS-first gate remains locked while ATLAS calls are
 // stuck/cancelled in the host bridge, unlock native tools to avoid permanent
 // job deadlock. Keep this short so blocked runs recover promptly.
 const GATE_FAIL_OPEN_MS = 15000;
+const GATEWAY_SCOPE_STATE_LIMIT = 5000;
+const gatewayScopeStateByKey = new Map();
+const ownerAtlasGateEventSeqByScope = new Map();
 let imageGenerationMaxCalls = Number.isInteger(Number(bootConfig.imageGenerationMaxCalls)) && Number(bootConfig.imageGenerationMaxCalls) >= 0
   ? Number(bootConfig.imageGenerationMaxCalls)
   : 12;
-let imageGenerationCallCount = 0;
 let remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remoteCatalog === "object"
   ? bootConfig.remoteCatalog
   : {};
@@ -458,7 +460,52 @@ let effectiveScopePredicates = scopeParseState.invalid
 // Tight-loop duplicate read guard:
 // Short-circuit identical read_file calls against unchanged files.
 const READ_DEDUPE_WINDOW_MS = 8000;
-let _lastReadMeta = null;
+
+function gatewayScopeState(scopeKey = gateScopeKey, { gateConfiguration = null } = {}) {
+  const key = String(scopeKey || "").trim();
+  if (!key) throw new Error("Gateway scope state requires a scope key");
+  let state = gatewayScopeStateByKey.get(key);
+  if (!state) {
+    state = {
+      gateBootedAtMs: Date.now(),
+      gateConfiguration,
+      imageGenerationCallCount: 0,
+      lastReadMeta: null,
+    };
+    gatewayScopeStateByKey.set(key, state);
+  } else if (gateConfiguration != null && state.gateConfiguration !== gateConfiguration) {
+    state.gateBootedAtMs = Date.now();
+    state.gateConfiguration = gateConfiguration;
+    ownerAtlasGateEventSeqByScope.delete(key);
+  }
+  return state;
+}
+
+function assertGatewayScopeCapacity(scopeKey) {
+  const key = String(scopeKey || "").trim();
+  if (!key) throw new Error("Gateway scope state requires a scope key");
+  if (gatewayScopeStateByKey.has(key) || gatewayScopeStateByKey.size < GATEWAY_SCOPE_STATE_LIMIT) return;
+  const error = new Error(`MCP gateway scope capacity exhausted (${GATEWAY_SCOPE_STATE_LIMIT})`);
+  error.code = "POSSE_MCP_GATEWAY_SCOPE_LIMIT";
+  throw error;
+}
+
+function gatewayGateConfiguration({ role, atlasAvailable, enabled, atlasLabel }) {
+  return JSON.stringify([
+    String(role || "").trim() || null,
+    enabled === true && atlasAvailable === true,
+    String(atlasLabel || "ATLAS").trim() || "ATLAS",
+  ]);
+}
+
+function releaseGatewayScope(scopeKey) {
+  const key = String(scopeKey || "").trim();
+  if (!key) return false;
+  releaseGate({ scopeKey: key });
+  ownerAtlasGateEventSeqByScope.delete(key);
+  gatewayScopeStateByKey.delete(key);
+  return true;
+}
 
 // ── ATLAS-first gate + gateway ATLAS proxy ────────────────────────────────────
 // This single MCP process is a neutral gateway: native deterministic tools and
@@ -470,12 +517,23 @@ let _lastReadMeta = null;
 // tools keep their normal scope/security checks but are not ATLAS-gated.
 // Researcher, planner, dev, and assessor are all gated; artificer/delegator
 // are exempt. Both modules live under ./deterministic-mcp/.
+const initialGateAtlasLabel = atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null);
+const initialGateScopeKey = gateScopeKeyForBootConfig(bootConfig);
+assertGatewayScopeCapacity(initialGateScopeKey);
 let gateScopeKey = configureGate({
   role: roleName,
   atlasAvailable,
   enabled: atlasGateEnabled,
-  atlasLabel: atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null),
-  scopeKey: gateScopeKeyForBootConfig(bootConfig),
+  atlasLabel: initialGateAtlasLabel,
+  scopeKey: initialGateScopeKey,
+});
+gatewayScopeState(gateScopeKey, {
+  gateConfiguration: gatewayGateConfiguration({
+    role: roleName,
+    atlasAvailable,
+    enabled: atlasGateEnabled,
+    atlasLabel: initialGateAtlasLabel,
+  }),
 });
 if (atlasAvailable && isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)) {
   unlockForAtlasUnavailable({ reason: `prefetch_${atlasPrefetchStatus}`, scopeKey: gateScopeKey });
@@ -966,12 +1024,14 @@ function appendToolLog(entry = {}) {
 function maybeFailOpenLockedGate(reason = "limbo_timeout") {
   try {
     if (!isGateActive({ scopeKey: gateScopeKey }) || isGateUnlocked({ scopeKey: gateScopeKey })) return false;
-    if ((Date.now() - gateBootedAtMs) < GATE_FAIL_OPEN_MS) return false;
+    const state = gatewayScopeState(gateScopeKey);
+    const elapsedMs = Date.now() - state.gateBootedAtMs;
+    if (elapsedMs < GATE_FAIL_OPEN_MS) return false;
     unlockForAtlasUnavailable({ reason, scopeKey: gateScopeKey });
     appendToolLog({
       event: "atlas_gate_fail_open",
       reason,
-      elapsedMs: Date.now() - gateBootedAtMs,
+      elapsedMs,
       role: roleName,
     });
     return true;
@@ -1042,23 +1102,25 @@ function dedupeReadFile(args = {}) {
   const now = Date.now();
   const key = _buildReadDedupeKey(normalizedArgs);
   const stat = _statReadTarget(normalizedArgs);
+  const state = gatewayScopeState(gateScopeKey);
+  const lastReadMeta = state.lastReadMeta;
   if (
     READ_DEDUPE_WINDOW_MS > 0
-    && _lastReadMeta
-    && _lastReadMeta.key === key
-    && (now - _lastReadMeta.atMs) <= READ_DEDUPE_WINDOW_MS
+    && lastReadMeta
+    && lastReadMeta.key === key
+    && (now - lastReadMeta.atMs) <= READ_DEDUPE_WINDOW_MS
     && stat
-    && _lastReadMeta.path === stat.fullPath
-    && _lastReadMeta.size === stat.size
-    && _lastReadMeta.mtimeMs === stat.mtimeMs
+    && lastReadMeta.path === stat.fullPath
+    && lastReadMeta.size === stat.size
+    && lastReadMeta.mtimeMs === stat.mtimeMs
   ) {
-    const elapsed = Math.max(0, now - _lastReadMeta.atMs);
+    const elapsed = Math.max(0, now - lastReadMeta.atMs);
     return `Duplicate read suppressed: ${normalizedArgs.path} (same range, unchanged file, ${elapsed}ms since last read). Reuse the previous read result or change offset/limit.`;
   }
 
   const result = execReadFile(normalizedArgs, workspaceCwd, effectiveScopePredicates);
   if (typeof result === "string" && !/^Error:/i.test(result)) {
-    _lastReadMeta = {
+    state.lastReadMeta = {
       key,
       atMs: now,
       path: stat?.fullPath || null,
@@ -1066,7 +1128,23 @@ function dedupeReadFile(args = {}) {
       mtimeMs: stat?.mtimeMs ?? null,
     };
   } else {
-    _lastReadMeta = null;
+    state.lastReadMeta = null;
+  }
+  return result;
+}
+
+async function generateImageWithinScope(args = {}) {
+  const state = gatewayScopeState(gateScopeKey);
+  if (state.imageGenerationCallCount >= imageGenerationMaxCalls) {
+    return `Error: generate_image call limit reached for this job (${imageGenerationMaxCalls}). Ask for operator guidance before generating more images.`;
+  }
+  state.imageGenerationCallCount += 1;
+  const result = await execGenerateImageInternal(args, {
+    cwd: workspaceCwd,
+    scopePredicates: effectiveScopePredicates,
+  });
+  if (typeof result === "string" && result.startsWith("Error:")) {
+    state.imageGenerationCallCount = Math.max(0, state.imageGenerationCallCount - 1);
   }
   return result;
 }
@@ -1633,6 +1711,7 @@ function makeDirWithinScope(args = {}) {
 // Tracks what the researcher has read, gates the next read until a verdict is
 // emitted (relevant/irrelevant). Persists to a JSON file so restarts resume.
 
+const RESEARCH_STATE_LIMIT = 5000;
 const researchStatesByKey = new Map();
 
 function researchStatePathForCurrentBoot() {
@@ -2306,20 +2385,7 @@ if (ownerHotGateway || roleName === "artificer") {
   mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
 }
 if (allowImageGeneration) {
-  mcpToolRegistry.attach("generate_image", async (args) => {
-    if (imageGenerationCallCount >= imageGenerationMaxCalls) {
-      return `Error: generate_image call limit reached for this job (${imageGenerationMaxCalls}). Ask for operator guidance before generating more images.`;
-    }
-    imageGenerationCallCount += 1;
-    const result = await execGenerateImageInternal(args || {}, {
-      cwd: workspaceCwd,
-      scopePredicates: effectiveScopePredicates,
-    });
-    if (typeof result === "string" && result.startsWith("Error:")) {
-      imageGenerationCallCount = Math.max(0, imageGenerationCallCount - 1);
-    }
-    return result;
-  });
+  mcpToolRegistry.attach("generate_image", (args) => generateImageWithinScope(args || {}));
 }
 if (ownerHotGateway || isResearcherRole) {
   mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
@@ -2346,27 +2412,40 @@ for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
 }
 
 let activeRuntimeSessionKey = "";
-const ownerAtlasGateEventSeqByScope = new Map();
-const OWNER_ATLAS_GATE_SCOPE_LIMIT = 5000;
 
-function runtimeSessionKey(config = bootConfig) {
+function runtimeSessionKey(config = bootConfig, sessionId = null) {
   const token = String(config?.mcpOAuth?.tokenId || "").trim();
+  const ownerSession = String(sessionId || "").trim();
   const job = config?.jobId != null && config.jobId !== "" ? `job:${config.jobId}` : "";
   const workItem = config?.workItemId != null && config.workItemId !== "" ? `wi:${config.workItemId}` : "";
   const attempt = config?.attemptId != null && config.attemptId !== "" ? `attempt:${config.attemptId}` : "";
   const agentCall = config?.agentCallId != null && config.agentCallId !== "" ? `call:${config.agentCallId}` : "";
   const role = String(config?.role || "").trim();
   const cwd = String(config?.cwd || "").trim();
-  return [token ? `mcp:${token}` : "", job, workItem, attempt, agentCall, role, cwd].filter(Boolean).join("|") || "owner-hot";
+  const bindingEpoch = Number(config?.ownerGatewayBindingEpoch);
+  const binding = Number.isSafeInteger(bindingEpoch) && bindingEpoch > 0 ? `binding:${bindingEpoch}` : "";
+  return [token ? `mcp:${token}` : (ownerSession ? `session:${ownerSession}` : ""), job, workItem, attempt, agentCall, role, cwd, binding]
+    .filter(Boolean).join("|") || "owner-hot";
 }
 
-function gateScopeKeyForBootConfig(config = bootConfig) {
-  return buildAtlasGateScopeKey({
+function gateScopeKeyForBootConfig(config = bootConfig, { sessionId = null } = {}) {
+  const scopeKey = buildAtlasGateScopeKey({
     tokenId: config?.mcpOAuth?.tokenId,
     jobId: config?.jobId,
     attemptId: config?.attemptId,
     agentCallId: config?.agentCallId,
+    fallback: runtimeSessionKey(config, sessionId),
   });
+  const bindingEpoch = Number(config?.ownerGatewayBindingEpoch);
+  return Number.isSafeInteger(bindingEpoch) && bindingEpoch > 0
+    ? `${scopeKey}|binding:${bindingEpoch}`
+    : scopeKey;
+}
+
+function releaseGatewaySessionState(config, { sessionId = null } = {}) {
+  const released = releaseGatewayScope(gateScopeKeyForBootConfig(config, { sessionId }));
+  researchStatesByKey.delete(runtimeSessionKey(config, sessionId));
+  return released;
 }
 
 function applyOwnerAtlasGateEvents(config = bootConfig, scopeKey = gateScopeKey) {
@@ -2393,11 +2472,6 @@ function applyOwnerAtlasGateEvents(config = bootConfig, scopeKey = gateScopeKey)
     seenSeq = seq;
   }
   ownerAtlasGateEventSeqByScope.set(scopeKey, seenSeq);
-  while (ownerAtlasGateEventSeqByScope.size > OWNER_ATLAS_GATE_SCOPE_LIMIT) {
-    const oldest = ownerAtlasGateEventSeqByScope.keys().next().value;
-    if (oldest == null) break;
-    ownerAtlasGateEventSeqByScope.delete(oldest);
-  }
 }
 
 function computeDeclaredNativeToolNamesForCurrentBoot() {
@@ -2510,20 +2584,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
   }
   if (allowImageGeneration) {
-    mcpToolRegistry.attach("generate_image", async (args) => {
-      if (imageGenerationCallCount >= imageGenerationMaxCalls) {
-        return `Error: generate_image call limit reached for this job (${imageGenerationMaxCalls}). Ask for operator guidance before generating more images.`;
-      }
-      imageGenerationCallCount += 1;
-      const result = await execGenerateImageInternal(args || {}, {
-        cwd: workspaceCwd,
-        scopePredicates: effectiveScopePredicates,
-      });
-      if (typeof result === "string" && result.startsWith("Error:")) {
-        imageGenerationCallCount = Math.max(0, imageGenerationCallCount - 1);
-      }
-      return result;
-    });
+    mcpToolRegistry.attach("generate_image", (args) => generateImageWithinScope(args || {}));
   }
   if (ownerHotGateway || isResearcherRole) {
     mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
@@ -2569,19 +2630,24 @@ function recomputeAtlasAllowedActionsForCurrentBoot() {
   }
 }
 
-function selectResearchStateForCurrentBoot() {
+function selectResearchStateForCurrentBoot(sessionKey = runtimeSessionKey()) {
   researchLogPath = researchStatePathForCurrentBoot();
-  const key = runtimeSessionKey();
+  const key = String(sessionKey || runtimeSessionKey());
   let ledger = researchStatesByKey.get(key);
   if (!ledger) {
     ledger = createResearchLedger(researchLogPath);
     researchStatesByKey.set(key, ledger);
+    while (researchStatesByKey.size > RESEARCH_STATE_LIMIT) {
+      const oldest = researchStatesByKey.keys().next().value;
+      if (oldest == null || oldest === key) break;
+      researchStatesByKey.delete(oldest);
+    }
   }
   researchLedger = ledger;
   researchState = ledger.state;
 }
 
-function applyRuntimeBootConfig(nextConfig = {}) {
+function applyRuntimeBootConfig(nextConfig = {}, { sessionId = null } = {}) {
   let parsedConfig = bootConfigFromOAuthToken(nextConfig && typeof nextConfig === "object" ? nextConfig : {});
   const parsedDbPath = String(parsedConfig.dbPath || "").trim();
   if (parsedDbPath) setRuntimePathOverrides({ dbPath: parsedDbPath });
@@ -2608,7 +2674,9 @@ function applyRuntimeBootConfig(nextConfig = {}) {
       };
     }
   }
-  const nextSessionKey = runtimeSessionKey(parsedConfig);
+  const nextSessionKey = runtimeSessionKey(parsedConfig, sessionId);
+  const nextGateScopeKey = gateScopeKeyForBootConfig(parsedConfig, { sessionId });
+  assertGatewayScopeCapacity(nextGateScopeKey);
   const sessionChanged = nextSessionKey !== activeRuntimeSessionKey;
   const previousMeterContext = {
     work_item_id: mcpWorkItemId,
@@ -2616,7 +2684,6 @@ function applyRuntimeBootConfig(nextConfig = {}) {
     attempt_id: mcpAttemptId,
     agent_call_id: mcpAgentCallId,
   };
-  if (sessionChanged && gateScopeKey) releaseGate({ scopeKey: gateScopeKey });
   bootConfig = parsedConfig;
   ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
   const ownerHotUnscoped = ownerHotGateway && !mcpMessageSessionScoped;
@@ -2691,12 +2758,21 @@ function applyRuntimeBootConfig(nextConfig = {}) {
       nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(bootConfig.nativeAuth));
     } catch { /* best effort */ }
   }
+  const gateAtlasLabel = atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null);
   gateScopeKey = configureGate({
     role: roleName,
     atlasAvailable,
     enabled: atlasGateEnabled,
-    atlasLabel: atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null),
-    scopeKey: gateScopeKeyForBootConfig(bootConfig),
+    atlasLabel: gateAtlasLabel,
+    scopeKey: nextGateScopeKey,
+  });
+  gatewayScopeState(gateScopeKey, {
+    gateConfiguration: gatewayGateConfiguration({
+      role: roleName,
+      atlasAvailable,
+      enabled: atlasGateEnabled,
+      atlasLabel: gateAtlasLabel,
+    }),
   });
   applyOwnerAtlasGateEvents(bootConfig, gateScopeKey);
   if (atlasAvailable && isFallbackAtlasPrefetchStatus(atlasPrefetchStatus)) {
@@ -2712,9 +2788,6 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   _remoteToolCatalogPromise = null;
   if (sessionChanged) {
     ContextMeter.release(previousMeterContext);
-    gateBootedAtMs = Date.now();
-    imageGenerationCallCount = 0;
-    _lastReadMeta = null;
     activeRuntimeSessionKey = nextSessionKey;
   }
   ContextMeter.forContext({
@@ -2725,7 +2798,7 @@ function applyRuntimeBootConfig(nextConfig = {}) {
   }, { promptChars: mcpPromptChars });
   rebuildNativeToolSchemas();
   rebuildToolExecutors();
-  selectResearchStateForCurrentBoot();
+  selectResearchStateForCurrentBoot(nextSessionKey);
 }
 
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
@@ -2926,7 +2999,19 @@ function sendMessage(payload) {
 }
 
 async function handleRequest(msg) {
-  const session = hiddenSessionFromParams(msg?.params);
+  const privateSession = hiddenSessionFromParams(msg?.params);
+  const id = msg && Object.prototype.hasOwnProperty.call(msg, "id") ? msg.id : null;
+  if (privateSession && !ownerHotProcess) {
+    if (id != null) sendMessage(jsonRpcError(id, -32602, "Private owner session context is not accepted by direct MCP servers"));
+    return;
+  }
+  const session = ownerHotProcess ? privateSession : null;
+  if (msg?.method === MCP_SESSION_RELEASED_NOTIFICATION) {
+    if (ownerHotProcess && session) {
+      releaseGatewaySessionState(session.bootConfig, { sessionId: session.sessionId });
+    }
+    return;
+  }
   const delegatedEvidenceCursor = session?.bootConfig?.delegatedEvidenceCursor === true;
   // Owner-hot messages are session-scoped per message; without the hidden
   // param the module globals (mcpJobId/mcpAttemptId/role/cwd) are STICKY
@@ -2936,10 +3021,10 @@ async function handleRequest(msg) {
   // by requestQueue, so a module flag is race-free.
   mcpMessageSessionScoped = !!session;
   if (session) {
-    applyRuntimeBootConfig(session.bootConfig);
+    applyRuntimeBootConfig(session.bootConfig, { sessionId: session.sessionId });
     msg = { ...msg, params: stripHiddenSessionParam(msg?.params) };
   }
-  const { id, method, params } = msg || {};
+  const { method, params } = msg || {};
   if (!method) {
     if (id != null) sendMessage(jsonRpcError(id, -32600, "Invalid request: missing method"));
     return;
@@ -3473,7 +3558,7 @@ function dispatchParsed(parsed) {
   // Re-establish observation context per-message — stdin's async scope
   // predates module-level enterObservationContext, so ALS values set at
   // load time don't propagate into data events.
-  const session = hiddenSessionFromParams(parsed?.params);
+  const session = ownerHotProcess ? hiddenSessionFromParams(parsed?.params) : null;
   const sessionBoot = session?.bootConfig || {};
   requestQueue = requestQueue.then(() => runWithObservationContext(
     {

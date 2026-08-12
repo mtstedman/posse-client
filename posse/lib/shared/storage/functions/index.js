@@ -65,6 +65,7 @@ import {
   JOB_REASONING_EFFORT_LIST_SQL,
   JOB_STATUSES,
   JOB_STATUS_LIST_SQL,
+  TERMINAL_JOB_STATUSES_SQL,
   JOB_TYPES,
   JOB_TYPE_LIST_SQL,
 } from "../../../catalog/job.js";
@@ -1005,7 +1006,7 @@ function installTerminalTransitionTracking(db) {
            finished_at,
            'legacy_current'
     FROM jobs
-    WHERE status IN ('succeeded','failed','dead_letter','canceled') AND finished_at IS NOT NULL;
+    WHERE status IN (${TERMINAL_JOB_STATUSES_SQL}) AND finished_at IS NOT NULL;
 
     DROP TRIGGER IF EXISTS trg_work_item_terminal_transition_insert;
     DROP TRIGGER IF EXISTS trg_work_item_terminal_transition_update;
@@ -1040,7 +1041,7 @@ function installTerminalTransitionTracking(db) {
 
     CREATE TRIGGER trg_job_terminal_transition_insert
     AFTER INSERT ON jobs
-    WHEN NEW.status IN ('succeeded','failed','dead_letter','canceled') AND NEW.finished_at IS NOT NULL
+    WHEN NEW.status IN (${TERMINAL_JOB_STATUSES_SQL}) AND NEW.finished_at IS NOT NULL
     BEGIN
       INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
       VALUES (
@@ -1053,7 +1054,7 @@ function installTerminalTransitionTracking(db) {
 
     CREATE TRIGGER trg_job_terminal_transition_update
     AFTER UPDATE OF status, finished_at ON jobs
-    WHEN NEW.status IN ('succeeded','failed','dead_letter','canceled') AND NEW.finished_at IS NOT NULL
+    WHEN NEW.status IN (${TERMINAL_JOB_STATUSES_SQL}) AND NEW.finished_at IS NOT NULL
     BEGIN
       INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
       VALUES (

@@ -85,11 +85,37 @@ export function buildResearchFinalFetchBatchText() {
   ].join("\n");
 }
 
-export function buildResearchMidpointAuditText() {
+export function buildResearchCoverageLedgerText(coverage = {}) {
+  const surveyed = compactCoverageFiles(coverage.surveyedFiles);
+  const skeletonized = compactCoverageFiles(coverage.skeletonizedFiles);
+  const windowed = compactCoverageFiles(coverage.windowedFiles);
+  const symbolWindows = Math.max(0, Number(coverage.symbolWindows || 0));
+  const failed = Array.isArray(coverage.failedLookups) ? coverage.failedLookups.length : 0;
+  return [
+    `RETRIEVAL COVERAGE: survey=${surveyed.count}${surveyed.sample}; skeleton=${skeletonized.count}${skeletonized.sample}; exact-file=${windowed.count}${windowed.sample}; exact-symbol=${symbolWindows}; failed=${failed}.`,
+    "TASK-LANE LEDGER: mark every requested flow, branch, ownership boundary, failure path, test-proof requirement, and adversarial trace as direct, indirect, or missing.",
+    "Make only the highest-value lookup for a missing material lane; otherwise close out now. Do not reread the files summarized above.",
+  ].join("\n");
+}
+
+function compactCoverageFiles(value) {
+  const files = [...new Set((Array.isArray(value) ? value : [])
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean))];
+  const head = files.slice(0, 4);
+  return {
+    count: files.length,
+    sample: head.length > 0
+      ? ` [${head.join(", ")}${files.length > head.length ? `, +${files.length - head.length}` : ""}]`
+      : "",
+  };
+}
+
+export function buildResearchMidpointAuditText({ coverage = {} } = {}) {
   return [
     `SYNTHESIS CHECKPOINT: ${RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS} exploration calls have been used.`,
-    "Compare the gathered evidence with every requested flow, branch, and boundary. If each material item has direct support, synthesize now; do not browse for extra corroboration.",
-    "If a material gap remains, use only targeted calls for that gap and batch any eligible continuation refs.",
+    buildResearchCoverageLedgerText(coverage),
+    "Batch any eligible continuation refs and batch two to four known exact-window targets when one decision needs them.",
   ].join("\n");
 }
 
@@ -111,6 +137,7 @@ export function buildResearchSynthesisRequiredText({
   explorationSteps = 0,
   staleSteps = 0,
   absoluteCeilingReached = true,
+  coverage = {},
 } = {}) {
   const stopReason = absoluteCeilingReached
     ? "deterministic_research_tool_ceiling"
@@ -120,6 +147,7 @@ export function buildResearchSynthesisRequiredText({
     absoluteCeilingReached
       ? `Exploration budget used: ${explorationSteps}/${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
       : `No new relevant evidence in the last ${staleSteps} exploration calls.`,
+    buildResearchCoverageLedgerText(coverage),
     `No further discovery calls are available. If essential unseen stored evidence remains, put every eligible ref into one final batched atlas.fetch_ref call. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }

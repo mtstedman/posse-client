@@ -203,6 +203,7 @@ export function toStorageSettingKey(settingKey = "") {
 // breaks persisted settings, environment overrides, or automation.
 const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   atlas_v2: "ATLAS retrieval",
+  atlas_usage_telemetry: "Usage telemetry",
   atlas_phases: "Enabled ATLAS roles",
   atlas_live_funnel: "Prompt context injection",
   atlas_live_index: "Live edit indexing",
@@ -359,6 +360,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   assessment_scope_max_group_chars: "Maximum estimated evidence characters in one hypothetical shadow assessment group.",
   posse_local_generation_enabled: "Allow the staged posse-local provider to appear in Admin for an operator-run test. Runtime checks still require a supported platform, the native ML worker, and an installed model package.",
   atlas_v2: "Use ATLAS for code search and context. Turn it off only when ATLAS is unavailable.",
+  atlas_usage_telemetry: "Record best-effort Atlas action counts and latency in a dedicated per-repository store. Turning this off keeps the telemetry lane dormant and does not affect tool results.",
   atlas_phases: "Choose which agent roles receive ATLAS context.",
   atlas_live_funnel: "Add ATLAS search results and code context to agent prompts.",
   atlas_live_index: "Let running jobs search edits that have not been merged yet.",
@@ -550,6 +552,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Core",
     keys: Object.freeze([
       "atlas_v2",
+      "atlas_usage_telemetry",
       "atlas_phases",
       "atlas_live_funnel",
       "atlas_live_index",
