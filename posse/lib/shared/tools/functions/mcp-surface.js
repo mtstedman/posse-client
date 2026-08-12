@@ -141,6 +141,12 @@ export function renderMcpSurfaceName({ providerName = "generic", serverName, too
   const server = String(serverName || "").trim();
   const renderedTool = renderMcpToolNameForProvider(toolName, { providerName });
   if (!server || !renderedTool) return "";
+  // Codex code mode flattens direct MCP namespaces to the MCP tool name
+  // itself (for example tools.edit_file -> tools_edit_file). The mcp__server
+  // prefix is the configuration namespace, not the callable name exposed to
+  // the model. Advertising that configuration name caused writable dev jobs
+  // to fall back to native apply_patch inside Posse's read-only sandbox.
+  if (normalizeProviderName(providerName) === "codex") return renderedTool;
   return `mcp__${server}__${renderedTool}`;
 }
 

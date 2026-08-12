@@ -35,6 +35,15 @@ import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSess
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 
+export function buildCodexRuntimeContractBlock(executionContract, {
+  skipRolePrompt: _skipRolePrompt = false,
+} = {}) {
+  // skipRolePrompt suppresses duplicate provider-independent role guidance,
+  // never the provider-local mapping from issued tools to callable names.
+  void _skipRolePrompt;
+  return renderExecutionContractBlock(executionContract);
+}
+
 export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
@@ -257,9 +266,10 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
-    // Remote owns provider-independent behavior. The local adapter appends
-    // only the provider-visible execution manifest and transport framing.
-    const contractBlock = skipRolePrompt ? null : renderExecutionContractBlock(executionContract);
+    // Remote owns provider-independent behavior. This process alone knows the
+    // callable names produced by Codex code mode, so the provider-visible
+    // execution manifest must remain present even for remote-composed prompts.
+    const contractBlock = buildCodexRuntimeContractBlock(executionContract, { skipRolePrompt });
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,
       contractBlock,

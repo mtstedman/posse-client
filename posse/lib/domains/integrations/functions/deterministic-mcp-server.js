@@ -186,6 +186,12 @@ function finishToolInvocation(invocation, opts) {
 
 const SERVER_INFO = { name: POSSE_MCP_GATEWAY_SERVER_INFO_NAME, version: "1.0.0" };
 const SUPPORTED_PROTOCOL = "2024-11-05";
+const MCP_SERVER_INSTRUCTIONS = [
+  "Posse MCP tools are the authoritative execution surface.",
+  "Codex native filesystem tools are intentionally read-only.",
+  "When tools.edit_file or another Posse mutation tool is exposed, use it for permitted mutations; do not use native apply_patch or shell writes.",
+  "Posse tools enforce job scope and authorization.",
+].join(" ");
 const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 // Hard ceiling on accumulated, unframed stdin. A complete legal frame is
 // consumed as soon as it arrives, so the buffer only approaches this when a
@@ -2944,6 +2950,7 @@ async function handleRequest(msg) {
       protocolVersion: params?.protocolVersion || SUPPORTED_PROTOCOL,
       capabilities: { tools: {} },
       serverInfo: SERVER_INFO,
+      instructions: MCP_SERVER_INSTRUCTIONS,
     }));
     return;
   }
@@ -3389,7 +3396,10 @@ async function handleRequest(msg) {
         durationMs: Date.now() - start,
         resultPreview: capString(text, 300),
       });
-      sendMessage(jsonRpcSuccess(id, { content: [{ type: "text", text: responseText }] }));
+      sendMessage(jsonRpcSuccess(id, {
+        content: [{ type: "text", text: responseText }],
+        ...(!ok ? { isError: true } : {}),
+      }));
     } catch (err) {
       if (toolName === "agent_handoff") {
         recordAgentHandoffRejection(mcpAgentCallId, err);

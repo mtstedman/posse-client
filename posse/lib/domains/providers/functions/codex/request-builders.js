@@ -30,6 +30,10 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
     `mcp_servers.${serverKey}.command=${_toTomlLiteral(serverConfig.command)}`,
     `mcp_servers.${serverKey}.args=${_toTomlLiteral(serverConfig.args || [])}`,
     `mcp_servers.${serverKey}.startup_timeout_sec=${CODEX_POSSE_MCP_STARTUP_TIMEOUT_SECONDS}`,
+    // Codex's native filesystem sandbox remains read-only. This approval is
+    // limited to the Posse-owned MCP gateway, whose owner process enforces the
+    // issued tool surface, job scope, protected paths, and write lock.
+    `mcp_servers.${serverKey}.default_tools_approval_mode=${_toTomlLiteral("approve")}`,
   );
   if (serverConfig.cwd) {
     configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);

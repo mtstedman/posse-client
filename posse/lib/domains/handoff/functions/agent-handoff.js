@@ -8,7 +8,10 @@ import {
 } from "../../../catalog/handoff.js";
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
 import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
-import { fetchHashRefForContext } from "../../queue/functions/hash-refs.js";
+import {
+  fetchHashRefForContext,
+  findFetchedHashRefViewsForContext,
+} from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
 import { hashRefModelVisibleScope } from "../../../shared/tools/functions/fetch-ref-policy.js";
@@ -414,7 +417,7 @@ function evidenceProvenance(entry, context, seen = new Set()) {
 }
 
 export function materializeAgentHandoffEvidenceSelector(selectorValue, context) {
-  const selector = parseAgentHandoffEvidenceSelector(selectorValue);
+  let selector = parseAgentHandoffEvidenceSelector(selectorValue);
   const cacheKey = `${selector.ref}:${selector.start ?? "all"}-${selector.end ?? "all"}`;
   const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
@@ -422,16 +425,31 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   if (!fetched?.found || !fetched.entry) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_FOUND", `Evidence ${selector.ref} is not visible to the current agent call`);
   }
-  const entry = fetched.entry;
+  let entry = fetched.entry;
   if (entry.entry_kind !== "materialized" || entry.payload_text == null) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", `Evidence ${selector.ref} is not materialized`);
   }
   const visible = hashRefModelVisibleScope(entry, context);
   if (visible.contracted && !visible.fully_visible) {
-    fail(
-      "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE",
-      `Evidence ${selector.ref} is a continuation or partial ref, not the exact view shown to this agent. Fetch it and use the returned view_ref, or use the original citation anchor.`,
-    );
+    const sourceRef = selector.ref;
+    const fetchedViews = findFetchedHashRefViewsForContext(context, sourceRef)
+      .filter((candidate) => {
+        if (candidate?.entry_kind !== "materialized" || candidate.payload_text == null) return false;
+        if (!hashRefModelVisibleScope(candidate, context).fully_visible) return false;
+        if (selector.end == null) return true;
+        const candidateLines = normalizedLines(candidate.payload_text);
+        if (selector.end <= candidateLines.length) return true;
+        return materializedSourceLineSlice(candidate, selector.start, selector.end)?.matched === true;
+      });
+    const exactView = fetchedViews[0] || null;
+    if (!exactView) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE",
+        `Evidence ${sourceRef} is a continuation or partial ref and no exact fetched view is visible to this agent call. Fetch it and use the returned view_ref, or use the original citation anchor.`,
+      );
+    }
+    entry = exactView;
+    selector = { ...selector, ref: entry.ref };
   }
   const lines = normalizedLines(entry.payload_text);
   const start = selector.start ?? 1;

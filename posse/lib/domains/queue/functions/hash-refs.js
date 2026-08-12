@@ -2,6 +2,7 @@ import { HashMinter } from "../../../shared/tools/classes/hash-store/HashMinter.
 import { HashRefStore } from "../../../shared/tools/classes/hash-store/HashRefStore.js";
 import {
   HASH_REF_OWNER_SCOPE_SET,
+  normalizeHashRefAlias,
 } from "../../../catalog/hash-store.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 
@@ -240,6 +241,75 @@ export function fetchHashRefForContext(context = {}, ref, opts = {}) {
     return { ok: false, found: false, ref: String(ref || ""), error: "missing_hash_ref_scope" };
   }
   return store.fetch(ref);
+}
+
+/**
+ * Find exact fetch_ref views derived from one stored ref and visible through
+ * the current hash-ref scope. Terminal handoff validation uses this to
+ * canonicalize a model's source-ref citation after that same model fetched an
+ * exact view but repeated the source alias instead of the returned view_ref.
+ */
+export function findFetchedHashRefViewsForContext(context = {}, sourceRef, opts = {}) {
+  const db = opts.db || getDb();
+  const resolved = resolveHashRefContext(context, db);
+  const normalizedSourceRef = normalizeHashRefAlias(sourceRef);
+  if (resolved.error || !normalizedSourceRef) return [];
+
+  const ownerQueries = [];
+  if (resolved.attemptId) {
+    ownerQueries.push({
+      table: "agent_run_hash_refs",
+      ownerColumn: "attempt_id",
+      ownerIds: [resolved.attemptId],
+    });
+  }
+  if (resolved.jobId) {
+    ownerQueries.push({
+      table: "job_hash_refs",
+      ownerColumn: "job_id",
+      ownerIds: jobAncestorRows(db, resolved.jobId, resolved.workItemId).map((row) => row.id),
+    });
+  }
+  if (resolved.workItemId) {
+    ownerQueries.push({
+      table: "work_item_hash_refs",
+      ownerColumn: "work_item_id",
+      ownerIds: [resolved.workItemId],
+    });
+  }
+
+  const refs = [];
+  for (const query of ownerQueries) {
+    if (query.ownerIds.length === 0) continue;
+    const placeholders = query.ownerIds.map(() => "?").join(", ");
+    let rows = [];
+    try {
+      rows = db.prepare(`
+        SELECT ref
+        FROM ${query.table}
+        WHERE ${query.ownerColumn} IN (${placeholders})
+          AND entry_kind = 'materialized'
+          AND payload_text IS NOT NULL
+          AND json_valid(metadata_json)
+          AND json_extract(metadata_json, '$.surfaced_by') = 'fetch_ref_view'
+          AND lower(json_extract(metadata_json, '$.source_ref')) = ?
+        ORDER BY updated_at DESC, id DESC
+      `).all(...query.ownerIds, normalizedSourceRef);
+    } catch {
+      continue;
+    }
+    refs.push(...rows.map((row) => row.ref));
+  }
+
+  const entries = [];
+  const seen = new Set();
+  for (const ref of refs) {
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    const fetched = fetchHashRefForContext(context, ref, opts);
+    if (fetched?.found && fetched.entry) entries.push(fetched.entry);
+  }
+  return entries;
 }
 
 export function giveHashRefToParentForContext(context = {}, ref, opts = {}) {

@@ -240,6 +240,27 @@ export class ToolContract {
       return lines.join("\n");
     }
     lines.push("- Tool interface: the provider-exposed tool schemas are exhaustive; call their exact exposed names.");
+    const aliasedTools = (contract.tools || []).filter((tool) => {
+      const explicitSurfaceName = String(tool?.providerSurfaceName || tool?.surfaceName || "").trim();
+      const renderedName = renderedToolName(tool, contract);
+      const canonicalName = canonicalToolName(tool);
+      return explicitSurfaceName && canonicalName && renderedName && canonicalName !== renderedName;
+    });
+    if (aliasedTools.length > 0) {
+      lines.push("- Provider tool map (call the left-hand name exactly; canonical labels are explanatory only):");
+      for (const tool of aliasedTools) {
+        lines.push(`  - ${renderedToolName(tool, contract)} (canonical: ${canonicalToolName(tool)})`);
+      }
+    }
+    if (contract.role === "dev" && contract.allowWrite) {
+      const editFile = renderedNameForCanonicalTool(contract, "edit_file");
+      if (editFile) {
+        lines.push(`- Dev mutation route: use ${editFile} for scoped file changes. Native apply_patch and shell writes are unavailable unless they are explicitly listed in this manifest.`);
+        lines.push("- Exact files_to_create are materialized before provider execution; populate those files through the same edit route.");
+      } else {
+        lines.push("- Dev mutation route: unavailable. Do not attempt native apply_patch or shell writes; report the missing issued edit capability.");
+      }
+    }
     if (contract.role === "researcher") {
       const chainRead = renderedNameForCanonicalTool(contract, "chain_read");
       const chainVerdict = renderedNameForCanonicalTool(contract, "chain_verdict");
