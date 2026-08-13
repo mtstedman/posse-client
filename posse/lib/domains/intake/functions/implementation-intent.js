@@ -35,6 +35,8 @@ const PASSIVE_REQUIREMENT_RE =
   /\b(?:should|must|needs?\s+to|ought\s+to|has\s+to|have\s+to)\b/iu;
 const SELF_DIRECTED_REQUIREMENT_RE =
   /\b(?:should|must|can|could|would|will|do|does)\s+(?:i|we)\b/iu;
+const EXPLICIT_REPO_WORK_RE =
+  /\b(?:dev(?:elopment)?|coding|implementation)\s+(?:job|task|work)\b|\b(?:job|task|work)\s+(?:is\s+)?(?:dev(?:elopment)?|coding|implementation)\b/iu;
 
 export function hasUnnegatedVerbIntent(text, verbs) {
   const alternatives = [...new Set((verbs || []).map((verb) => String(verb || "").trim()).filter(Boolean))]
@@ -63,6 +65,10 @@ export function hasRepoMutationIntent(
     ...(includeCompletion ? ["complete", "correct"] : []),
   ];
   return hasUnnegatedVerbIntent(text, verbs);
+}
+
+export function hasExplicitRepoWorkIntent(text) {
+  return EXPLICIT_REPO_WORK_RE.test(String(text || ""));
 }
 
 export function hasPassiveRepoRequirementIntent(text) {

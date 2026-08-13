@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import {
+  hasExplicitRepoWorkIntent,
   hasPassiveRepoRequirementIntent,
   hasRepoMutationIntent,
   hasUnnegatedVerbIntent,
@@ -173,8 +174,10 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     includeCreate: true,
     includeCompletion: true,
   });
-  const strongImplementationIntent = passiveRequirementIntent
-    || hasRepoMutationIntent(lower, { includeCompletion: true });
+  const explicitRepoWorkIntent = hasExplicitRepoWorkIntent(lower);
+  const repoMutationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
+  const strongImplementationIntent = explicitRepoWorkIntent || passiveRequirementIntent
+    || repoMutationIntent;
   const bugfixVerbIntent = hasUnnegatedVerbIntent(lower, ["fix", "correct", "repair"]);
 
   // Mutation language is authoritative for build intake. Requests such as
@@ -184,11 +187,6 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
   if (reportGenerationRe.test(lower) && !strongImplementationIntent) {
     hints.intent_type = "report";
     hints.deliverable_type = /\bpdf\b/.test(lower) ? "pdf" : "markdown";
-    hints.output_mode = "auto";
-    hints.desired_outputs = ["artifact"];
-  } else if (imageGenerationRe.test(lower) || /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/.test(lower)) {
-    hints.intent_type = "image";
-    hints.deliverable_type = "image";
     hints.output_mode = "auto";
     hints.desired_outputs = ["artifact"];
   } else if (selfDirectedImplementationQuestion) {
@@ -201,6 +199,16 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "code";
     hints.output_mode = "auto";
     hints.desired_outputs = ["repo"];
+  } else if (explicitRepoWorkIntent || repoMutationIntent) {
+    hints.intent_type = "task";
+    hints.deliverable_type = "code";
+    hints.output_mode = "auto";
+    hints.desired_outputs = ["repo"];
+  } else if (imageGenerationRe.test(lower) || /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/.test(lower)) {
+    hints.intent_type = "image";
+    hints.deliverable_type = "image";
+    hints.output_mode = "auto";
+    hints.desired_outputs = ["artifact"];
   } else if (implementationIntent) {
     hints.intent_type = "task";
     hints.deliverable_type = "code";

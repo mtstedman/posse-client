@@ -1,7 +1,7 @@
-import { hasRepoMutationIntent } from "./implementation-intent.js";
+import { hasExplicitRepoWorkIntent, hasRepoMutationIntent } from "./implementation-intent.js";
 
 const IMAGE_MODE_ACTION_RE = /\b(generate|create|make|draw|design)\b/i;
-const IMAGE_MODE_NOUN_RE = /\b(image|photo|picture|illustration|banner|icon|logo|artwork|mermaid)\b/i;
+const IMAGE_MODE_NOUN_RE = /\b(images?|photos?|pictures?|illustrations?|banners?|icons?|logos?|artworks?|mermaid)\b/i;
 const IMAGE_MODE_DIRECT_RE = /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/i;
 const NEGATED_IMAGE_MODE_RE = /\b(?:not\s+(?:an?\s+)?|no\s+(?:new\s+)?|without\s+(?:an?\s+)?)(?:image|photo|picture|illustration|banner|icon|logo|artwork|mermaid|images|photos|pictures|illustrations|banners|icons|logos)\b|\b(?:do not|don't|no need to)\s+(?:generate|create|make|draw|design)\b[\s\S]{0,60}\b(?:image|photo|picture|illustration|banner|icon|logo|artwork|mermaid|images|photos|pictures|illustrations|banners|icons|logos)\b/i;
 
@@ -19,11 +19,12 @@ function hasImageModeIntent(text) {
 
 export function inferWiMode(text) {
   const lower = String(text || "").toLowerCase();
-  if (hasImageModeIntent(lower)) return "image";
   // Creation verbs are legitimate report-generation signals, but explicit
   // repository mutation verbs must keep a mixed "analyze ... and fix it"
   // request in build mode.
-  const repoMutationIntent = hasRepoMutationIntent(lower);
+  const repoMutationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
+  if (repoMutationIntent || hasExplicitRepoWorkIntent(lower)) return null;
+  if (hasImageModeIntent(lower)) return "image";
   const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
   const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
   if (!repoMutationIntent && new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
