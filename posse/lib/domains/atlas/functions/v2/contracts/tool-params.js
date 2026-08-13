@@ -441,7 +441,7 @@
  * @property {string} [file]                  Canonical repo-relative path.
  * @property {string} [reason]                Proof-of-need for raw-window escalation; required in scalar mode.
  * @property {number} [expectedLines]          Integer.
- * @property {string[]} [identifiersToFind]   Max 50.
+ * @property {string[]} [identifiersToFind]   Required with file; 1..50.
  * @property {CodeGranularity} [granularity]
  * @property {number} [maxTokens]             Scalar item cap, or batch-wide cap when items is present.
  * @property {CodeWindowItemParams[]} [items]  Two to four independent exact selections.
@@ -455,7 +455,7 @@
  * @property {string} [file]                  Canonical repo-relative path.
  * @property {string} reason                  Exact fact this item should establish.
  * @property {number} [expectedLines]
- * @property {string[]} [identifiersToFind]   Max 50.
+ * @property {string[]} [identifiersToFind]   Required with file; 1..50.
  * @property {CodeGranularity} [granularity]
  * @property {number} [maxTokens]             Per-item cap, additionally bounded by the batch-wide fair share.
  * @property {string} [sessionId]

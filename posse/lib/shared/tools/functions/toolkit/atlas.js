@@ -619,10 +619,14 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
           : null;
         if (!symbolId && !file) throw new Error(`ATLAS code.window items[${index}] requires symbolId or file.`);
         if (!reason) throw new Error(`ATLAS code.window items[${index}] requires reason.`);
+        const identifiersToFind = sanitizeIdentifierList(item.identifiersToFind);
+        if (file && identifiersToFind.length === 0) {
+          throw new Error(`ATLAS code.window items[${index}] file mode requires identifiersToFind.`);
+        }
         return {
           ...(symbolId ? { symbolId } : { file }),
           reason,
-          identifiersToFind: sanitizeIdentifierList(item.identifiersToFind),
+          identifiersToFind,
           expectedLines: clampInt(item.expectedLines, 1, 2000, 120),
           ...(item.granularity ? { granularity: sanitizeString(item.granularity, 32) } : {}),
           ...(item.maxTokens == null ? {} : { maxTokens: clampInt(item.maxTokens, 64, ATLAS_MAX_BUDGET_TOKENS, 1200) }),
@@ -647,13 +651,17 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
       : null;
     if (!symbolId && !file) throw new Error("ATLAS code.window requires symbolId or file.");
     if (!reason) throw new Error("ATLAS code.window requires reason.");
+    const identifiersToFind = sanitizeIdentifierList(payload.identifiersToFind);
+    if (file && identifiersToFind.length === 0) {
+      throw new Error("ATLAS code.window file mode requires identifiersToFind.");
+    }
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         ...(symbolId ? { symbolId } : { file }),
         reason,
-        identifiersToFind: sanitizeIdentifierList(payload.identifiersToFind),
+        identifiersToFind,
         expectedLines: clampInt(payload.expectedLines, 1, 2000, 120),
         ...(payload.maxTokens == null ? {} : { maxTokens: clampInt(payload.maxTokens, 64, ATLAS_MAX_BUDGET_TOKENS, 1200) }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),

@@ -1081,7 +1081,7 @@ export function buildFoldedAtlasToolDescriptor(schema = {}, {
       required: [],
       anyOf: [
         { required: ["reason", "symbolId"] },
-        { required: ["reason", "file"] },
+        { required: ["reason", "file", "identifiersToFind"] },
       ],
     };
     canonicalDescription = "Bounded exact code for one symbol or anchored file region. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections.";
