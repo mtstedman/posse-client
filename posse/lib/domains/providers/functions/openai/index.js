@@ -440,7 +440,9 @@ export async function callProvider(promptText, {
   executionContract = appendExecutionTools(executionContract, atlasAttachment.tools);
   const tools = getToolsForRole(executionContract);
   executionContract = projectFunctionToolSurface(executionContract, tools);
-  const contractBlock = renderExecutionContractBlock(executionContract);
+  const contractBlock = renderExecutionContractBlock(executionContract, {
+    remoteComposed: skipRolePrompt,
+  });
   const omitSessionPreamble = recyclingMode === "resume";
   const remoteSystemPromptText = omitSessionPreamble ? null : (String(remoteSystemPrompt || "").trim() || null);
   const systemPrompt = [

@@ -424,7 +424,9 @@ export async function callProvider(promptText, {
   executionContract = appendExecutionTools(executionContract, atlasAttachment.tools);
   const tools = getToolsForRole(executionContract);
   executionContract = projectFunctionToolSurface(executionContract, tools);
-  const contractBlock = renderExecutionContractBlock(executionContract);
+  const contractBlock = renderExecutionContractBlock(executionContract, {
+    remoteComposed: skipRolePrompt,
+  });
   const remoteSystemPromptText = String(remoteSystemPrompt || "").trim() || null;
   const systemPrompt = [
     remoteSystemPromptText,

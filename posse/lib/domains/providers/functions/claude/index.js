@@ -639,7 +639,9 @@ export async function callProvider(promptText, {
           "- Do not use MCP, Atlas, prior sessions, or ambient memory.",
           "- Do not modify files.",
         ].join("\n")
-      : renderExecutionContractBlock(executionContract);
+      : renderExecutionContractBlock(executionContract, {
+          remoteComposed: skipRolePrompt,
+        });
     const stablePromptText = omitSessionPreamble
       ? ""
       : [contractBlock, stableContext].filter(Boolean).join("\n\n");

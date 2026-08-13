@@ -40,8 +40,17 @@ export function adaptExecutionContractForProvider(contract = {}, provider = "gen
   return ToolContract.adaptForProvider(contract, provider);
 }
 
-export function renderExecutionContractBlock(contract = {}) {
-  return new ToolContract(contract).renderBlock();
+export function renderExecutionContractBlock(contract = {}, {
+  remoteComposed = false,
+} = {}) {
+  const toolContract = new ToolContract(contract);
+  return remoteComposed
+    ? toolContract.renderProviderBatchingGuidanceBlock()
+    : toolContract.renderBlock();
+}
+
+export function renderProviderBatchingGuidanceBlock(contract = {}) {
+  return new ToolContract(contract).renderProviderBatchingGuidanceBlock();
 }
 
 export function buildClaudeCliToolConfig(contract = {}, opts = {}) {

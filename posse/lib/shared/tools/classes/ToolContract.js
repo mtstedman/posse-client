@@ -182,6 +182,15 @@ export class ToolContract {
     return ToolContract.adaptForProvider(this.contract, provider);
   }
 
+  renderProviderBatchingGuidanceBlock(toolRenderer = null) {
+    const contract = this.contract;
+    const renderer = toolRenderer || new ProviderToolRenderer({
+      providerName: contract.provider,
+      issuedSurface: contract,
+    });
+    return renderToolBatchingGuidance(contract, renderer).join("\n");
+  }
+
   renderBlock() {
     const contract = this.contract;
     const toolRenderer = new ProviderToolRenderer({
@@ -228,7 +237,8 @@ export class ToolContract {
       return lines.join("\n");
     }
     lines.push("- Tool interface: the provider-exposed tool schemas are exhaustive; call their exact exposed names.");
-    lines.push(...renderToolBatchingGuidance(contract, toolRenderer));
+    const batchingGuidance = this.renderProviderBatchingGuidanceBlock(toolRenderer);
+    if (batchingGuidance) lines.push(batchingGuidance);
     if (contract.role === "dev" && contract.allowWrite) {
       const editFile = toolRenderer.tryRender(TOOL_REFS.tools.editFile);
       if (editFile) {

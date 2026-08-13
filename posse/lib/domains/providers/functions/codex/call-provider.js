@@ -40,13 +40,16 @@ import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
 } = {}) {
-  if (!skipRolePrompt) return renderExecutionContractBlock(executionContract);
+  const contractBlock = renderExecutionContractBlock(executionContract, {
+    remoteComposed: skipRolePrompt,
+  });
+  if (!skipRolePrompt) return contractBlock;
 
   // Remote-composed prompts already carry the provider-independent contract,
-  // while Codex receives every exact callable name in its tool schemas. The
-  // only provider-local delta the model needs is the mutation route because
-  // Codex's ambient apply_patch/shell writes are deliberately unavailable.
-  if (executionContract?.allowWrite !== true) return "";
+  // but this process alone knows the exact callable names issued to Codex.
+  // The shared renderer supplies provider-local guidance for every provider;
+  // writable Codex roles additionally need Codex's local mutation route.
+  if (executionContract?.allowWrite !== true) return contractBlock;
   const tools = new ProviderToolRenderer({
     providerName: "codex",
     toolAttachmentMode: "deterministic-bridge",
@@ -58,10 +61,13 @@ export function buildCodexRuntimeContractBlock(executionContract, {
     editFile ? `${editFile} for scoped edits` : null,
     writeFile ? `${writeFile} for full-file output` : null,
   ].filter(Boolean);
+  let mutationRoute;
   if (routes.length === 0) {
-    return "CODEX MUTATION ROUTE: no Posse file-mutation tool was issued. Native apply_patch and shell writes are unavailable; report the missing capability.";
+    mutationRoute = "CODEX MUTATION ROUTE: no Posse file-mutation tool was issued. Native apply_patch and shell writes are unavailable; report the missing capability.";
+  } else {
+    mutationRoute = `CODEX MUTATION ROUTE: use ${routes.join(" and ")}. Native apply_patch and shell writes are unavailable.`;
   }
-  return `CODEX MUTATION ROUTE: use ${routes.join(" and ")}. Native apply_patch and shell writes are unavailable.`;
+  return [contractBlock, mutationRoute].filter(Boolean).join("\n");
 }
 
 export async function callProvider(promptText, {
@@ -286,9 +292,8 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
-    // Remote owns provider-independent behavior. This process alone knows the
-    // callable names produced by Codex code mode, so the provider-visible
-    // execution manifest must remain present even for remote-composed prompts.
+    // Remote owns provider-independent behavior. The shared renderer keeps
+    // provider-local guidance aligned with the exact issued Codex surface.
     const contractBlock = buildCodexRuntimeContractBlock(executionContract, { skipRolePrompt });
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,
