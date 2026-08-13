@@ -764,6 +764,74 @@ export function compactCodeSurveyResult(toolName, result, {
 // the tail lines behind one fetch_ref. Threshold from atlas_result_ref_paging_min_chars.
 const RESULT_REF_PAGING_DEFAULT_MIN_CHARS = 12000;
 const LENS_INLINE_MATCHES = 8;
+const BATCH_WINDOW_INLINE_CONTENT_CHARS = 4000;
+
+function boundedBatchWindowContent(content) {
+  if (content.length <= BATCH_WINDOW_INLINE_CONTENT_CHARS) {
+    return { content, truncated: false };
+  }
+  const bounded = content.slice(0, BATCH_WINDOW_INLINE_CONTENT_CHARS);
+  const finalLineBreak = bounded.lastIndexOf("\n");
+  return {
+    content: finalLineBreak > 0 ? bounded.slice(0, finalLineBreak) : bounded,
+    truncated: true,
+  };
+}
+
+function compactBatchCodeWindowItem(data = {}) {
+  const compact = {};
+  for (const key of [
+    "repo_rel_path",
+    "symbolId",
+    "startLine",
+    "endLine",
+    "totalLines",
+    "estimatedTokens",
+    "truncated",
+    "selectionBounded",
+    "outputTruncated",
+    "identifiersFound",
+    "identifiersReturned",
+    "identifiersMissing",
+    "identifiersOmitted",
+    "returnedFunctionAnchors",
+    "returnedFunctionAnchorsOmitted",
+    "continuationRef",
+    "continuationWindows",
+    "continuationRanges",
+  ]) {
+    if (data[key] != null) compact[key] = data[key];
+  }
+  if (typeof data.content === "string") {
+    const preview = boundedBatchWindowContent(data.content);
+    compact.content = preview.content;
+    if (preview.truncated) {
+      compact.inlineContentTruncated = true;
+      compact.fullContentEndLine = data.endLine;
+      const startLine = Number(data.startLine);
+      if (Number.isFinite(startLine) && preview.content.length > 0) {
+        compact.endLine = startLine + preview.content.split("\n").length - 1;
+      }
+    }
+  }
+  const additionalWindows = Array.isArray(data.additionalWindows)
+    ? data.additionalWindows
+    : [];
+  if (additionalWindows.length > 0) {
+    compact.inlineAdditionalWindowsOmitted = additionalWindows.length;
+    compact.additionalWindowRanges = additionalWindows.map((window) => ({
+      startLine: Number(window?.startLine) || null,
+      endLine: Number(window?.endLine) || null,
+      ...(Array.isArray(window?.identifiers) && window.identifiers.length > 0
+        ? { identifiers: window.identifiers.map(String) }
+        : {}),
+    }));
+  }
+  if (compact.inlineContentTruncated || additionalWindows.length > 0) {
+    compact.fetchEvidenceRefForFullContent = true;
+  }
+  return compact;
+}
 
 function resultRefPagingEnabled() {
   try {
@@ -878,7 +946,10 @@ export function compactCodeWindowLensResult(toolName, result, {
           metadata: {
             surfaced_by: "code_window_batch",
             fetch_class: "citation",
-            ...hashRefModelVisibility(hashContext, { visibility: "visible" }),
+            // The response carries a flattened preview, not this complete
+            // stored payload. Keep the full-item ref fetchable for any
+            // explicitly reported omitted content or secondary windows.
+            ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
             tool: "code.window",
             batch_item: Number(item.index),
             repo_rel_path: item.data.repo_rel_path || null,
@@ -893,6 +964,8 @@ export function compactCodeWindowLensResult(toolName, result, {
           objectType: surfaced.entry.object_type,
           sizeChars: payloadText.length,
         };
+        Object.assign(item, compactBatchCodeWindowItem(item.data));
+        delete item.data;
         compacted = true;
       }
     }

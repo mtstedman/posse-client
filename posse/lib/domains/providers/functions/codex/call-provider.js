@@ -36,12 +36,32 @@ import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolU
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
-  skipRolePrompt: _skipRolePrompt = false,
+  skipRolePrompt = false,
 } = {}) {
-  // skipRolePrompt suppresses duplicate provider-independent role guidance,
-  // never the provider-local mapping from issued tools to callable names.
-  void _skipRolePrompt;
-  return renderExecutionContractBlock(executionContract);
+  if (!skipRolePrompt) return renderExecutionContractBlock(executionContract);
+
+  // Remote-composed prompts already carry the provider-independent contract,
+  // while Codex receives every exact callable name in its tool schemas. The
+  // only provider-local delta the model needs is the mutation route because
+  // Codex's ambient apply_patch/shell writes are deliberately unavailable.
+  if (executionContract?.allowWrite !== true) return "";
+  const tools = Array.isArray(executionContract?.tools) ? executionContract.tools : [];
+  const surfaceName = (canonicalName) => {
+    const tool = tools.find((candidate) => (
+      String(candidate?.canonicalName || candidate?.name || "").trim() === canonicalName
+    ));
+    return String(tool?.providerSurfaceName || tool?.surfaceName || "").trim() || null;
+  };
+  const editFile = surfaceName("edit_file");
+  const writeFile = surfaceName("write_file");
+  const routes = [
+    editFile ? `${editFile} for scoped edits` : null,
+    writeFile ? `${writeFile} for full-file output` : null,
+  ].filter(Boolean);
+  if (routes.length === 0) {
+    return "CODEX MUTATION ROUTE: no Posse file-mutation tool was issued. Native apply_patch and shell writes are unavailable; report the missing capability.";
+  }
+  return `CODEX MUTATION ROUTE: use ${routes.join(" and ")}. Native apply_patch and shell writes are unavailable.`;
 }
 
 export async function callProvider(promptText, {

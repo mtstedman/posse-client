@@ -2806,7 +2806,7 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     : (Array.isArray(sc.files) ? sc.files.length : 0);
   if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
   if (fileCount > 0) {
-    lines.push("  structure already visible: do not call code.skeleton for surveyed files unless a named omitted/bounded fact requires surveyGap; go directly to code.window for exact code, batching 2-4 known targets when useful.");
+    lines.push("  structure already visible: do not call code.skeleton for surveyed files unless a named omitted/bounded fact requires surveyGap; go directly to code.window for exact code and issue independent exact-code calls together.");
   }
   for (const boundary of Array.isArray(sc.dependencyBoundaries) ? sc.dependencyBoundaries : []) {
     lines.push(`  source boundary: ${boundary.dependency}${boundary.version ? ` (${boundary.version})` : ""} is declared in ${boundary.manifest || "the dependency manifest"} but its source is absent from this checkout; stop at the local call boundary and do not reconstruct dependency internals.`);

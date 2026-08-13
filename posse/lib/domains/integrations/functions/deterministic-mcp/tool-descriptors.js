@@ -443,7 +443,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
   "code.skeleton": { access: "atlas", summary: "Code outline for one symbol or file. A successful prefetched code.survey already provides the structural outline for its files; go directly to code.window unless you can name a surveyGap. Do not repeat the same selection." },
   "code.lens": { access: "atlas", summary: "Focused code excerpts for named identifiers. Do not call code.lens more than once for the same symbol or substantially overlapping file/identifier selection; follow tailMatchesRef when present." },
-  "code.window": { access: "atlas", summary: "Bounded exact code for one selection, or 2-4 independent selections in items under one shared token cap. Batch known targets; every item returns its own status/evidence ref and one invalid item does not fail the others. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections." },
+  "code.window": { access: "atlas", summary: "Bounded exact code for a symbol or anchored file region. Follow continuation refs and do not repeat overlapping selections." },
   "code.survey": { access: "atlas", summary: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the already-stored next ten. Search/fetch the stored pages with atlas.fetch_ref, then follow each returned next cursor until none remains. Search stored pages for exact task concepts before choosing among parallel versions or implementations; rank is not a version decision. This traverses the completed survey and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope." },
   "code.structure": { access: "atlas", summary: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed." },
   "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
@@ -1052,16 +1052,44 @@ export function buildNativeToolDescriptor(schema) {
   };
 }
 
-export function buildFoldedAtlasToolDescriptor(schema = {}) {
+export function buildFoldedAtlasToolDescriptor(schema = {}, {
+  providerName = null,
+  role = null,
+} = {}) {
   const annotations = schema.annotations && typeof schema.annotations === "object"
     ? schema.annotations
     : {};
   const name = String(schema.name || "");
   const mutating = isBlockedFoldedAtlasTool(name);
-  const canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
+  let canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
+  let inputSchema = schema.inputSchema;
+  // The multi-selection executor remains available, but the first follow-up
+  // Codex researcher surface stays scalar. Separate independent tool calls can
+  // then be emitted concurrently instead of being collapsed into one large,
+  // nested result that suppresses top-level provider concurrency.
+  if (
+    String(providerName || "").toLowerCase() === "codex"
+    && String(role || "").toLowerCase() === "researcher"
+    && stripAtlasPrefix(name) === "code.window"
+    && inputSchema?.properties?.items
+  ) {
+    const properties = { ...inputSchema.properties };
+    delete properties.items;
+    inputSchema = {
+      ...inputSchema,
+      properties,
+      required: [],
+      anyOf: [
+        { required: ["reason", "symbolId"] },
+        { required: ["reason", "file"] },
+      ],
+    };
+    canonicalDescription = "Bounded exact code for one symbol or anchored file region. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections.";
+  }
   return {
     ...schema,
     description: canonicalDescription || schema.description,
+    ...(inputSchema ? { inputSchema } : {}),
     annotations: {
       ...annotations,
       title: annotations.title || name,

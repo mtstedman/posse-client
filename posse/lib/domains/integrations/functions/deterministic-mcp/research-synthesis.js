@@ -85,37 +85,21 @@ export function buildResearchFinalFetchBatchText() {
   ].join("\n");
 }
 
-export function buildResearchCoverageLedgerText(coverage = {}) {
-  const surveyed = compactCoverageFiles(coverage.surveyedFiles);
-  const skeletonized = compactCoverageFiles(coverage.skeletonizedFiles);
-  const windowed = compactCoverageFiles(coverage.windowedFiles);
-  const symbolWindows = Math.max(0, Number(coverage.symbolWindows || 0));
-  const failed = Array.isArray(coverage.failedLookups) ? coverage.failedLookups.length : 0;
+export function buildResearchStopCheckpointText() {
+  // Coverage remains in telemetry/session state for diagnostics, but exposing
+  // a lane-by-lane ledger made the model expand its task and seek exhaustive
+  // corroboration. Keep the model-visible checkpoint stop-first and bounded.
   return [
-    `RETRIEVAL COVERAGE: survey=${surveyed.count}${surveyed.sample}; skeleton=${skeletonized.count}${skeletonized.sample}; exact-file=${windowed.count}${windowed.sample}; exact-symbol=${symbolWindows}; failed=${failed}.`,
-    "TASK-LANE LEDGER: mark every requested flow, branch, ownership boundary, failure path, test-proof requirement, and adversarial trace as direct, indirect, or missing.",
-    "Make only the highest-value lookup for a missing material lane; otherwise close out now. Do not reread the files summarized above.",
+    "If the gathered evidence supports the requested result, synthesize now.",
+    "Otherwise issue every currently known answer-critical missing target as independent calls in one parallel response. Do not seek corroboration or reread covered files.",
   ].join("\n");
 }
 
-function compactCoverageFiles(value) {
-  const files = [...new Set((Array.isArray(value) ? value : [])
-    .map((entry) => String(entry || "").trim())
-    .filter(Boolean))];
-  const head = files.slice(0, 4);
-  return {
-    count: files.length,
-    sample: head.length > 0
-      ? ` [${head.join(", ")}${files.length > head.length ? `, +${files.length - head.length}` : ""}]`
-      : "",
-  };
-}
-
 export function buildResearchMidpointAuditText({ coverage = {} } = {}) {
+  void coverage;
   return [
     `SYNTHESIS CHECKPOINT: ${RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS} exploration calls have been used.`,
-    buildResearchCoverageLedgerText(coverage),
-    "Batch any eligible continuation refs and batch two to four known exact-window targets when one decision needs them.",
+    buildResearchStopCheckpointText(),
   ].join("\n");
 }
 
@@ -139,6 +123,7 @@ export function buildResearchSynthesisRequiredText({
   absoluteCeilingReached = true,
   coverage = {},
 } = {}) {
+  void coverage;
   const stopReason = absoluteCeilingReached
     ? "deterministic_research_tool_ceiling"
     : "deterministic_synthesize_now_no_novel_evidence";
@@ -147,7 +132,6 @@ export function buildResearchSynthesisRequiredText({
     absoluteCeilingReached
       ? `Exploration budget used: ${explorationSteps}/${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
       : `No new relevant evidence in the last ${staleSteps} exploration calls.`,
-    buildResearchCoverageLedgerText(coverage),
-    `No further discovery calls are available. If essential unseen stored evidence remains, put every eligible ref into one final batched atlas.fetch_ref call. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
+    `No further discovery calls are available. If essential unseen stored evidence remains, issue one final batched atlas.fetch_ref call containing all eligible refs. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }

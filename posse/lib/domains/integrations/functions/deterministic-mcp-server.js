@@ -187,12 +187,10 @@ function finishToolInvocation(invocation, opts) {
 
 const SERVER_INFO = { name: POSSE_MCP_GATEWAY_SERVER_INFO_NAME, version: "1.0.0" };
 const SUPPORTED_PROTOCOL = "2024-11-05";
-const MCP_SERVER_INSTRUCTIONS = [
-  "Posse MCP tools are the authoritative execution surface.",
-  "Codex native filesystem tools are intentionally read-only.",
-  "When tools.edit_file or another Posse mutation tool is exposed, use it for permitted mutations; do not use native apply_patch or shell writes.",
-  "Posse tools enforce job scope and authorization.",
-].join(" ");
+function mcpServerInstructions() {
+  if (!allowWrite || (roleName !== "dev" && roleName !== "artificer" && roleName !== "fix")) return null;
+  return "Use the exposed Posse mutation tool for permitted changes; native apply_patch and shell writes are unavailable.";
+}
 const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 // Hard ceiling on accumulated, unframed stdin. A complete legal frame is
 // consumed as soon as it arrives, so the buffer only approaches this when a
@@ -3031,11 +3029,12 @@ async function handleRequest(msg) {
   }
 
   if (method === "initialize") {
+    const instructions = mcpServerInstructions();
     sendMessage(jsonRpcSuccess(id, {
       protocolVersion: params?.protocolVersion || SUPPORTED_PROTOCOL,
       capabilities: { tools: {} },
       serverInfo: SERVER_INFO,
-      instructions: MCP_SERVER_INSTRUCTIONS,
+      ...(instructions ? { instructions } : {}),
     }));
     return;
   }
@@ -3091,7 +3090,7 @@ async function handleRequest(msg) {
       .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
       .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
       .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name)))
-      .map(buildFoldedAtlasToolDescriptor);
+      .map((tool) => buildFoldedAtlasToolDescriptor(tool, { providerName, role: roleName }));
     if (isGateActive({ scopeKey: gateScopeKey }) && atlasTools.length === 0) {
       unlockForAtlasUnavailable({ reason: "atlas_tools_unavailable", scopeKey: gateScopeKey });
       appendToolLog({
@@ -3379,7 +3378,15 @@ async function handleRequest(msg) {
     // and the tool is still locked. Return a verbose isError so the LLM reads
     // the rule and redirects to an ATLAS call.
     if (!delegatedEvidenceCursor && isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
-      const gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
+      let gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
+      // chain_read's ordinary default is intentionally broad. When an exact
+      // ATLAS result already covered the file, turn an omitted limit into the
+      // gate's bounded fallback rather than rejecting a recoverable call and
+      // making the model spend another turn restating it.
+      if (toolName === "chain_read" && gateDecision.reason === "atlas_source_range_required") {
+        args.limit = gateDecision.maxLines;
+        gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
+      }
       if (gateDecision.allowed) {
         // Continue to the native handler below.
       } else {
