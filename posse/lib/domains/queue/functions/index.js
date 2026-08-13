@@ -1755,12 +1755,18 @@ function scopeRequestBatchEntries(request = {}) {
 
 function scopeGateQuestionText(job, request) {
   const entries = scopeRequestBatchEntries(request);
+  const approvalAction = request?.live_wait === true
+    ? "continue the active agent session"
+    : "retry the job";
+  const denialAction = request?.live_wait === true
+    ? "return an out-of-scope error to the agent"
+    : "fail it with an out-of-scope error";
   return [
     `Job #${job.id} (${job.title}) attempted to write outside its writable scope:`,
     ...entries.map((entry) => `  ${entry.path} (${entry.access})${entry.reason ? ` — ${entry.reason}` : ""}`),
     entries.length === 1
-      ? `Approve to add this exact path to ${entries[0].access === "modify" ? "files_to_modify" : "files_to_create"} and retry the job, or deny to fail it with an out-of-scope error.`
-      : `Approve to add these ${entries.length} exact paths to the job's writable scope and retry the job, or deny to fail it with an out-of-scope error.`,
+      ? `Approve to add this exact path to ${entries[0].access === "modify" ? "files_to_modify" : "files_to_create"} and ${approvalAction}, or deny to ${denialAction}.`
+      : `Approve to add these ${entries.length} exact paths to the job's writable scope and ${approvalAction}, or deny to ${denialAction}.`,
     `Reply with "approve" or "deny".`,
   ].join("\n");
 }
@@ -1780,21 +1786,25 @@ function scopeRequestResult({ request, humanJobId = null, reused = false } = {})
   return {
     ok: false,
     code: "scope_approval_pending",
-    paused: true,
+    paused: request?.live_wait !== true,
+    waiting: true,
     request_id: request?.id || null,
     approval_job_id: humanJobId,
     path: request?.path || null,
     access: request?.access || null,
     operation: request?.operation || null,
+    live: request?.live_wait === true,
     reused,
-    message: `The current job is paused until a human approves or denies writable scope for ${request?.path || "the requested path"}${batchSize > 1 ? ` (+${batchSize - 1} batched path(s))` : ""}.`,
+    message: request?.live_wait === true
+      ? `The current file operation is waiting for a human to approve or deny writable scope for ${request?.path || "the requested path"}${batchSize > 1 ? ` (+${batchSize - 1} batched path(s))` : ""}; the active agent session will continue after the decision.`
+      : `The current job is paused until a human approves or denies writable scope for ${request?.path || "the requested path"}${batchSize > 1 ? ` (+${batchSize - 1} batched path(s))` : ""}.`,
   };
 }
 
 /**
- * Persist one exact-path scope expansion and park the active job. This is the
- * queue-side implementation behind the internal request_scope tool; callers
- * must resolve and authorize the path before invoking it.
+ * Persist one exact-path scope expansion. Legacy callers park the active job;
+ * live-wait callers leave its lease and provider session active while the
+ * internal request_scope tool waits for a human decision.
  */
 export function requestJobScopeExpansion({
   jobId,
@@ -1806,6 +1816,7 @@ export function requestJobScopeExpansion({
   operation,
   reason = "",
   source = "internal_tool",
+  liveWait = false,
 } = {}) {
   const normalizedJobId = Number(jobId);
   const normalizedPath = normalizeRequestedScopePath(path);
@@ -1987,6 +1998,7 @@ export function requestJobScopeExpansion({
       requested_at: now(),
       attempt_id: Number(attemptId) || null,
       agent_call_id: Number(agentCallId) || null,
+      live_wait: liveWait === true,
     };
     request.batch = [{
       path: normalizedPath,
@@ -2014,12 +2026,14 @@ export function requestJobScopeExpansion({
       ...payload,
       _pending_scope_request: request,
     }));
-    const parked = updateJobStatus(current.id, "waiting_on_human", {
-      expectedStatuses: ["running"],
-      force: true,
-    });
-    if (parked) {
-      decrementAttemptCount(current.id);
+    if (request.live_wait !== true) {
+      const parked = updateJobStatus(current.id, "waiting_on_human", {
+        expectedStatuses: ["running"],
+        force: true,
+      });
+      if (parked) {
+        decrementAttemptCount(current.id);
+      }
     }
     logEvent({
       work_item_id: current.work_item_id,
@@ -2027,8 +2041,10 @@ export function requestJobScopeExpansion({
       attempt_id: Number(attemptId) || null,
       event_type: EVENT_TYPES.JOB_SCOPE_REQUESTED,
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Paused for ${normalizedAccess} scope approval: ${normalizedPath}`,
-      event_json: JSON.stringify({ request, approval_job_id: humanJob.id }),
+      message: request.live_wait === true
+        ? `Waiting in the active agent session for ${normalizedAccess} scope approval: ${normalizedPath}`
+        : `Paused for ${normalizedAccess} scope approval: ${normalizedPath}`,
+      event_json: JSON.stringify({ request, approval_job_id: humanJob.id, live_wait: request.live_wait === true }),
     });
     return scopeRequestResult({ request, humanJobId: humanJob.id });
   });
@@ -2071,10 +2087,11 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
           entry.path,
         ])];
       }
-      const executionSettled = pending.execution_settled === true;
+      const liveActive = pending.live_wait === true && original.status === "running";
+      const executionSettled = pending.execution_settled === true || (pending.live_wait === true && !liveActive);
       if (executionSettled) delete nextPayload._pending_scope_request;
       updateJobPayload(original.id, JSON.stringify(nextPayload));
-      if (executionSettled) {
+      if (executionSettled && original.status === "waiting_on_human") {
         updateJobStatus(original.id, "queued", { expectedStatuses: ["waiting_on_human"], force: true });
       }
       logEvent({
@@ -2085,7 +2102,14 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
         message: `Approved scope for ${entries.map((entry) => entry.path).join(", ")}`,
         event_json: JSON.stringify({ request, approval_job_id: humanJob.id, answer: String(answer || "").slice(0, 300) }),
       });
-      return { ok: true, approved: true, requeued: executionSettled, job: getJob(original.id), request: pending };
+      return {
+        ok: true,
+        approved: true,
+        live: liveActive,
+        requeued: executionSettled && original.status === "waiting_on_human",
+        job: getJob(original.id),
+        request: pending,
+      };
     }
 
     nextPayload._scope_request_denials = [
@@ -2093,12 +2117,16 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
       { ...pending, denied_at: now(), answer: String(answer || "").slice(0, 300) },
     ].slice(-20);
     const error = scopeRequestDeniedError(pending);
-    const executionSettled = pending.execution_settled === true;
+    const liveActive = pending.live_wait === true && original.status === "running";
+    const executionSettled = pending.execution_settled === true || (pending.live_wait === true && !liveActive);
     if (executionSettled) delete nextPayload._pending_scope_request;
     updateJobPayload(original.id, JSON.stringify(nextPayload));
     if (executionSettled) {
       setJobError(original.id, error);
-      updateJobStatus(original.id, "failed", { expectedStatuses: ["waiting_on_human"], force: true });
+      updateJobStatus(original.id, "failed", {
+        expectedStatuses: ["waiting_on_human", "queued", "running"],
+        force: true,
+      });
     }
     logEvent({
       work_item_id: original.work_item_id,
@@ -2108,8 +2136,102 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
       message: error,
       event_json: JSON.stringify({ request, approval_job_id: humanJob.id, answer: String(answer || "").slice(0, 300) }),
     });
-    return { ok: true, approved: false, finalized: executionSettled, job: getJob(original.id), request, error };
+    return {
+      ok: true,
+      approved: false,
+      live: liveActive,
+      finalized: executionSettled,
+      job: getJob(original.id),
+      request: pending,
+      error,
+    };
   });
+}
+
+/**
+ * Wait for a human decision without ending the provider call, then consume the
+ * decision atomically. Polling is intentional: deterministic MCP runs in a
+ * child process, so in-memory queue wake listeners cannot observe the answer.
+ */
+export async function awaitJobScopeExpansionDecision({
+  jobId,
+  requestId,
+  attemptId = null,
+  signal = null,
+  pollMs = 200,
+} = {}) {
+  const normalizedJobId = Number(jobId);
+  const normalizedRequestId = String(requestId || "");
+  const delayMs = Math.max(25, Math.min(2000, Number(pollMs) || 200));
+  const abortResult = () => ({
+    ok: false,
+    approved: false,
+    live: true,
+    code: "scope_wait_aborted",
+    message: "The active scope wait was aborted before a human decision arrived.",
+  });
+
+  while (true) {
+    if (signal?.aborted) return abortResult();
+    const decision = runInTransaction(() => {
+      const job = getJob(normalizedJobId);
+      if (!job) {
+        return { ok: false, approved: false, live: true, code: "scope_request_job_missing", message: `Job #${normalizedJobId} no longer exists.` };
+      }
+      const payload = parseJobPayloadObject(job);
+      const pending = payload._pending_scope_request;
+      if (!pending || pending.id !== normalizedRequestId) {
+        return { ok: false, approved: false, live: true, code: "scope_request_stale", message: "The scope request is no longer active." };
+      }
+      if (pending.attempt_id && attemptId && Number(pending.attempt_id) !== Number(attemptId)) {
+        return { ok: false, approved: false, live: true, code: "scope_request_attempt_mismatch", message: "The scope request belongs to a different job attempt." };
+      }
+      if (!pending.decision) return null;
+
+      const nextPayload = { ...payload };
+      delete nextPayload._pending_scope_request;
+      updateJobPayload(job.id, JSON.stringify(nextPayload));
+      const entries = scopeRequestBatchEntries(pending);
+      if (pending.decision === "approved") {
+        return {
+          ok: true,
+          approved: true,
+          live: true,
+          paused: false,
+          code: "scope_approved_live",
+          path: pending.path || null,
+          access: pending.access || null,
+          operation: pending.operation || null,
+          batch: entries,
+          message: `Writable scope approved for ${entries.map((entry) => entry.path).join(", ")}; continuing the active agent session.`,
+        };
+      }
+      return {
+        ok: false,
+        approved: false,
+        live: true,
+        paused: false,
+        code: "scope_request_denied",
+        path: pending.path || null,
+        access: pending.access || null,
+        operation: pending.operation || null,
+        batch: entries,
+        message: scopeRequestDeniedError(pending),
+      };
+    });
+    if (decision) return decision;
+
+    await new Promise((resolve) => {
+      let timer = null;
+      const finish = () => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener?.("abort", finish);
+        resolve();
+      };
+      timer = setTimeout(finish, delayMs);
+      signal?.addEventListener?.("abort", finish, { once: true });
+    });
+  }
 }
 
 /**

@@ -28,6 +28,7 @@ import {
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
+  awaitJobScopeExpansionDecision,
   countPendingOperatorFeedbackForJob,
   getOperatorFeedbackForJob,
   recordAgentActivity,
@@ -37,6 +38,7 @@ import {
 import { signalPendingOperatorFeedbackForJob } from "../../../queue/functions/agent-interactions.js";
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
+const LIVE_SCOPE_WAIT = Symbol("posse.live-scope-wait");
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "Bash",
   "Edit",
@@ -339,6 +341,33 @@ export function createStandardToolHandlerMap({
     }
     return ledger;
   };
+  const beginLiveScopeRequest = (args, ctx) => {
+    const ambient = getObservationContext() || {};
+    const result = requestJobScopeExpansion({
+      jobId: ambient.job_id,
+      workItemId: ambient.work_item_id,
+      attemptId: ambient.attempt_id,
+      agentCallId: ambient.agent_call_id,
+      path: args.path,
+      access: args.access,
+      operation: args.operation,
+      reason: args.reason,
+      source: "embedded_internal_tool",
+      liveWait: true,
+    });
+    if (result?.approved === true) {
+      const entries = Array.isArray(result.batch) && result.batch.length > 0
+        ? result.batch
+        : [result];
+      for (const entry of entries) {
+        if (entry?.path) ctx?.scopePredicates?.policy?.grantWritePath?.(entry.path);
+      }
+    }
+    if (result?.live === true && result?.code === "scope_approval_pending") {
+      return { [LIVE_SCOPE_WAIT]: true, request: result, resume: null };
+    }
+    return result;
+  };
   const handlers = {
     agent_handoff(args, ctx) {
       const ambient = getObservationContext() || {};
@@ -377,24 +406,8 @@ export function createStandardToolHandlerMap({
       return JSON.stringify(result);
     },
     request_scope(args, ctx) {
-      const ambient = getObservationContext() || {};
-      const result = requestJobScopeExpansion({
-        jobId: ambient.job_id,
-        workItemId: ambient.work_item_id,
-        attemptId: ambient.attempt_id,
-        agentCallId: ambient.agent_call_id,
-        path: args.path,
-        access: args.access,
-        operation: args.operation,
-        reason: args.reason,
-        source: "embedded_internal_tool",
-      });
-      if (result?.auto === true && result?.approved === true && result?.path) {
-        // Widen the live per-attempt predicates so the retried write passes
-        // now; the durable grant is already in the job payload.
-        ctx?.scopePredicates?.policy?.grantWritePath?.(result.path);
-      }
-      return JSON.stringify(result, null, 2);
+      const result = beginLiveScopeRequest(args, ctx);
+      return result?.[LIVE_SCOPE_WAIT] === true ? result : JSON.stringify(result, null, 2);
     },
     chain_read(args, ctx) {
       return embeddedChainLedger(ctx).chainRead(args);
@@ -475,12 +488,24 @@ export function createStandardToolHandlerMap({
         if (ambient.job_id == null) {
           return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
         }
-        return handlers.request_scope({
+        const scopeResult = beginLiveScopeRequest({
           path: toRepoRelativePath(ctx.cwd, writePath) ?? "",
           access: exists ? "modify" : "create",
           operation: "write_file",
           reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
         }, ctx);
+        if (scopeResult?.[LIVE_SCOPE_WAIT] === true) {
+          return {
+            ...scopeResult,
+            resume: () => {
+              const resumedPath = safePath(ctx.cwd, args.path, ctx.scopePredicates);
+              const resumedProtectedErr = protectedMutationError("write_file", args.path, resumedPath, ctx);
+              if (resumedProtectedErr) return resumedProtectedErr;
+              return deterministicWriteFile(args, ctx.cwd, ctx.scopePredicates);
+            },
+          };
+        }
+        if (scopeResult?.approved !== true) return JSON.stringify(scopeResult, null, 2);
       }
       return deterministicWriteFile(args, ctx.cwd, ctx.scopePredicates);
     },
@@ -494,12 +519,24 @@ export function createStandardToolHandlerMap({
         if (ambient.job_id == null) {
           return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
         }
-        return handlers.request_scope({
+        const scopeResult = beginLiveScopeRequest({
           path: toRepoRelativePath(ctx.cwd, editPath) ?? "",
           access: "modify",
           operation: "edit_file",
           reason: "edit_file requires this existing file to complete the active job",
         }, ctx);
+        if (scopeResult?.[LIVE_SCOPE_WAIT] === true) {
+          return {
+            ...scopeResult,
+            resume: () => {
+              const resumedPath = safePath(ctx.cwd, args.path, ctx.scopePredicates);
+              const resumedProtectedErr = protectedMutationError("edit_file", args.path, resumedPath, ctx);
+              if (resumedProtectedErr) return resumedProtectedErr;
+              return deterministicEditFile(args, ctx.cwd, ctx.scopePredicates);
+            },
+          };
+        }
+        if (scopeResult?.approved !== true) return JSON.stringify(scopeResult, null, 2);
       }
       return deterministicEditFile(args, ctx.cwd, ctx.scopePredicates);
     },
@@ -662,9 +699,38 @@ export async function executeToolWithMap(name, argsStr, context, {
       }
       const label = `tool.${name}`;
       const key = nativeToolGateKey(context?.cwd);
-      const result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
+      let result = BLOCKING_NATIVE_TOOL_NAMES.has(name)
         ? await PROVIDER_TOOL_GATE.write(key, run, { label, waitMs: 120000, barrierName: label })
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
+      if (result?.[LIVE_SCOPE_WAIT] === true) {
+        const ambientJob = getObservationContext() || {};
+        const decision = await awaitJobScopeExpansionDecision({
+          jobId: ambientJob.job_id,
+          requestId: result.request?.request_id,
+          attemptId: ambientJob.attempt_id,
+          signal: context?.abortSignal || null,
+        });
+        if (decision?.approved === true) {
+          const entries = Array.isArray(decision.batch) && decision.batch.length > 0
+            ? decision.batch
+            : [decision];
+          for (const entry of entries) {
+            if (entry?.path) context?.scopePredicates?.policy?.grantWritePath?.(entry.path);
+          }
+          // The human wait happens outside the repository gate. Reacquire the
+          // mutation lane only for the original write/edit operation itself.
+          const continuation = result;
+          result = typeof continuation.resume === "function"
+            ? await PROVIDER_TOOL_GATE.write(key, () => continuation.resume(decision), {
+              label: `${label}.approved`,
+              waitMs: 120000,
+              barrierName: `${label}.approved`,
+            })
+            : JSON.stringify(decision, null, 2);
+        } else {
+          result = JSON.stringify(decision, null, 2);
+        }
+      }
       if (name === "agent_handoff" || name === "sub_agent" || name === "sub_agent_next_input") return result;
       if (violatesTerminalHandoff()) {
         return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";

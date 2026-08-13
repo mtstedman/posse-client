@@ -65,6 +65,7 @@ import { recordToolInvocation as _recordToolInvocation, recordObservation as _re
 import { registeredTestToolResultObservation } from "../../observability/functions/registered-test-tool-result.js";
 import {
   acknowledgeOperatorFeedback,
+  awaitJobScopeExpansionDecision,
   countPendingOperatorFeedbackForJob,
   getIntSetting,
   getOperatorFeedbackForJob,
@@ -1411,8 +1412,8 @@ function resolveMutationPath(toolName, displayPath) {
   }
 }
 
-function requestScopeExpansionWithinJob(args = {}) {
-  const result = requestJobScopeExpansion({
+async function requestScopeExpansionWithinJob(args = {}) {
+  let result = requestJobScopeExpansion({
     jobId: mcpJobId,
     workItemId: mcpWorkItemId,
     attemptId: mcpAttemptId,
@@ -1422,20 +1423,33 @@ function requestScopeExpansionWithinJob(args = {}) {
     operation: args.operation,
     reason: args.reason,
     source: "deterministic_mcp_internal_tool",
+    liveWait: true,
   });
-  if (result?.auto === true && result?.approved === true && result?.path) {
-    // Widen the live predicates so the retried write passes now; the
-    // durable grant is already in the job payload.
-    effectiveScopePredicates?.policy?.grantWritePath?.(result.path);
+  if (result?.live === true && result?.code === "scope_approval_pending") {
+    result = await awaitJobScopeExpansionDecision({
+      jobId: mcpJobId,
+      requestId: result.request_id,
+      attemptId: mcpAttemptId,
+    });
+  }
+  if (result?.approved === true) {
+    // Widen the subprocess-local predicates so this same MCP invocation can
+    // finish the blocked operation. The queue already persisted the grant.
+    const entries = Array.isArray(result.batch) && result.batch.length > 0
+      ? result.batch
+      : [result];
+    for (const entry of entries) {
+      if (entry?.path) effectiveScopePredicates?.policy?.grantWritePath?.(entry.path);
+    }
   }
   return result;
 }
 
-function requestScopeWithinJob(args = {}) {
-  return JSON.stringify(requestScopeExpansionWithinJob(args), null, 2);
+async function requestScopeWithinJob(args = {}) {
+  return JSON.stringify(await requestScopeExpansionWithinJob(args), null, 2);
 }
 
-function writeFileWithinScope(args = {}) {
+async function writeFileWithinScope(args = {}) {
   if (!writeEnabled) return "Error: Write access is not granted for this role.";
   const resolved = resolveMutationPath("write_file", args.path);
   if (resolved.error) return resolved.error;
@@ -1449,21 +1463,21 @@ function writeFileWithinScope(args = {}) {
     if (!mcpJobId) {
       return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
     }
-    const scopeResult = requestScopeExpansionWithinJob({
+    const scopeResult = await requestScopeExpansionWithinJob({
       path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
       access: exists ? "modify" : "create",
       operation: "write_file",
       reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
     });
-    if (!(scopeResult?.auto === true && scopeResult?.approved === true)) {
+    if (scopeResult?.approved !== true) {
       return JSON.stringify(scopeResult, null, 2);
     }
-    // Auto-approved: complete the original write in the same call.
+    // Approved: complete the original write in the same call.
   }
   return execWriteFile(args || {}, workspaceCwd, effectiveScopePredicates);
 }
 
-function editFileWithinScope(args = {}) {
+async function editFileWithinScope(args = {}) {
   if (!writeEnabled) return "Error: Write access is not granted for this role.";
   const resolved = resolveMutationPath("edit_file", args.path);
   if (resolved.error) return resolved.error;
@@ -1473,16 +1487,16 @@ function editFileWithinScope(args = {}) {
     if (!mcpJobId) {
       return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
     }
-    const scopeResult = requestScopeExpansionWithinJob({
+    const scopeResult = await requestScopeExpansionWithinJob({
       path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
       access: "modify",
       operation: "edit_file",
       reason: "edit_file requires this existing file to complete the active job",
     });
-    if (!(scopeResult?.auto === true && scopeResult?.approved === true)) {
+    if (scopeResult?.approved !== true) {
       return JSON.stringify(scopeResult, null, 2);
     }
-    // Auto-approved: complete the original edit in the same call.
+    // Approved: complete the original edit in the same call.
   }
   return execEditFile(args || {}, workspaceCwd, effectiveScopePredicates);
 }

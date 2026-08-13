@@ -114,7 +114,7 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
     });
   }
 
-  async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null, declaredScope = {}, executionContract = null, mcpGate = null) {
+  async function executeTool(name, argsStr, cwd, allowWrite, scopePredicates, atlasConfig = null, gateScopeKey = null, declaredScope = {}, executionContract = null, mcpGate = null, abortSignal = null) {
     const atlasAction = resolveEmbeddedAtlasAction(name);
     const canonicalName = atlasAction || String(name || "");
     if (executionContract && !(executionContract.tools || []).some((tool) => (tool?.canonicalName || tool?.name) === canonicalName)) {
@@ -135,7 +135,7 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
       }
     }
 
-    const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope }, {
+    const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope, abortSignal }, {
       handlers: standardToolHandlers,
       onUnknown: (toolName, args) => {
         if (atlasAction) {

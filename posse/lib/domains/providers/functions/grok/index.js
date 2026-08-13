@@ -749,7 +749,7 @@ export async function callProvider(promptText, {
         const displayToolName = formatAtlasToolUseDisplayName(call.name, callInput) || call.name;
         emit(`${C.dim}  [tool] ${displayToolName}(${shortArgs}${shortArgs.length >= 100 ? "..." : ""})${C.reset}`);
 
-        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope, executionContract, mcpGate);
+        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope, executionContract, mcpGate, abortSignal);
         const toolMs = Date.now() - toolStart;
         // executeTool can yield non-strings (e.g. error paths in tool handlers
         // that surface objects). Coerce before .length / .slice so a single
