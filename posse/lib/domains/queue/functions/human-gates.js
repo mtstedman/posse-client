@@ -395,6 +395,39 @@ export function reconcileHumanGates() {
       }
     }
 
+    // An open gate whose gate job row (or whole work item) no longer exists
+    // is unanswerable: nothing can lease it, no resolver can act on it, and
+    // it lingers in gate listings forever (wowiekowie run: developer_blocked
+    // gate #136 stayed open for days after its job and WI rows were pruned).
+    // Every other sweep in this function inner-joins jobs, so orphans are
+    // invisible to them — retire them here.
+    const orphaned = db.prepare(`
+      SELECT hg.gate_job_id
+      FROM human_gates hg
+      LEFT JOIN jobs j ON j.id = hg.gate_job_id
+      LEFT JOIN work_items wi ON wi.id = j.work_item_id
+      WHERE hg.gate_state IN ('open','resolving')
+        AND (j.id IS NULL OR (j.work_item_id IS NOT NULL AND wi.id IS NULL))
+    `).all();
+    for (const row of orphaned) {
+      db.prepare(`
+        UPDATE jobs
+        SET status='canceled', finished_at=COALESCE(finished_at, ?),
+            lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+            last_error=COALESCE(last_error, 'Gate work item no longer exists'),
+            updated_at=?
+        WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+      `).run(now(), now(), row.gate_job_id);
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state='superseded', resolved_at=COALESCE(resolved_at, ?), updated_at=?,
+            resolver_lease_token=NULL,
+            resolution_error=COALESCE(resolution_error, 'Gate job or work item no longer exists')
+        WHERE gate_job_id=? AND gate_state IN ('open','resolving')
+      `).run(now(), now(), row.gate_job_id);
+      retired += 1;
+    }
+
     // Older workers reopened a gate after a valid answer whenever applying
     // the selected action failed. That converts an internal/stale-target
     // failure into an endless human prompt. The durable failure event proves

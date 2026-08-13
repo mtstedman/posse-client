@@ -16,6 +16,7 @@ import {
   setJobError,
   settleJobScopeExpansionAttempt,
   storeArtifact,
+  updateJobPayload,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -690,6 +691,15 @@ export async function handleExecuteAttemptError(worker, {
   worker._retryOrFail(job, leaseToken, err);
 }
 
+const SQLITE_CONTENTION_MAX_REQUEUES = 4;
+const SQLITE_CONTENTION_BACKOFF_BASE_MS = 20_000;
+
+function isSqliteContentionError(err) {
+  const code = String(err?.code || err?.errno || "").toUpperCase();
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+  return /database is (?:busy|locked)|sqlite_(?:busy|locked)/i.test(String(err?.message || err || ""));
+}
+
 export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerErr }) {
   if (handlePreAttemptInterruption(worker, { job, leaseToken, outerErr })) {
     return;
@@ -713,12 +723,8 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
   // attempt and child jobs are already durable, replaying the provider creates
   // a second plan wave. Treat those durable side effects as the commit point
   // and settle the existing lease instead.
+  const sqliteContention = isSqliteContentionError(outerErr);
   if (job.job_type === "plan") {
-    const outerCode = String(outerErr?.code || outerErr?.errno || "").toUpperCase();
-    const outerMessage = String(outerErr?.message || outerErr || "");
-    const sqliteContention = outerCode === "SQLITE_BUSY"
-      || outerCode === "SQLITE_LOCKED"
-      || /database is (?:busy|locked)|sqlite_(?:busy|locked)/i.test(outerMessage);
     try {
       const attempts = getAttempts(job.id);
       const latestAttempt = attempts.at(-1);
@@ -750,6 +756,33 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
         return;
       }
       // Non-SQLite proof failures retain ordinary catastrophic handling.
+    }
+  }
+  // SQLite contention is environmental, not a property of this job: the
+  // orchestrator DB writer was busy (tree compression, checkpoint, another
+  // worker). Burning attempt counts on it dead-letters healthy jobs (run
+  // 2026-08-13 plan #237 died 3/3 on "database is locked"). Requeue with a
+  // growing delay and no attempt penalty, bounded so a genuinely wedged
+  // database still surfaces through the normal retry/dead-letter path.
+  if (sqliteContention && !worker.shuttingDown) {
+    try {
+      const payload = parseJobPayload(job) || {};
+      const priorRequeues = Number(payload._sqlite_contention_requeues || 0) || 0;
+      if (priorRequeues < SQLITE_CONTENTION_MAX_REQUEUES) {
+        payload._sqlite_contention_requeues = priorRequeues + 1;
+        updateJobPayload(job.id, JSON.stringify(payload));
+        const delayMs = SQLITE_CONTENTION_BACKOFF_BASE_MS * (priorRequeues + 1);
+        const readyAt = new Date(Date.now() + delayMs).toISOString();
+        if (worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt })) {
+          worker.emit(
+            job.id,
+            `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: transient SQLite contention (${priorRequeues + 1}/${SQLITE_CONTENTION_MAX_REQUEUES}) — requeued without attempt penalty, retrying in ${Math.round(delayMs / 1000)}s${C.reset}`,
+          );
+          return;
+        }
+      }
+    } catch {
+      // Fall through to the standard catastrophic path below.
     }
   }
   try {

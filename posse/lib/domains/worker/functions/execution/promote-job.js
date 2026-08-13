@@ -113,7 +113,11 @@ export function assertPromoteOverwritePolicy(preview, { allowOverwrite = false, 
     .filter(Boolean)
     .slice(0, 12);
   const suffix = targets.length > 0 ? `: ${targets.join(", ")}` : "";
-  throw new Error(`Promote would overwrite ${blockedOverwrites.length} existing file(s)${suffix}`);
+  const err = new Error(`Promote would overwrite ${blockedOverwrites.length} existing file(s)${suffix}`);
+  // Deterministic conflict — retrying the identical promote cannot succeed.
+  // retryOrFail routes this straight to dead-letter/operator recovery.
+  err.code = "PROMOTE_OVERWRITE_BLOCKED";
+  throw err;
 }
 
 export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}) {

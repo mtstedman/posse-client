@@ -128,6 +128,26 @@ export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   ].some((re) => re.test(text));
 }
 
+// Deterministic policy conflicts: re-running the identical job cannot change
+// the outcome, so a retry only delays the operator gate. Promote overwrite
+// refusals are the canonical case — the conflicting file will still be there
+// 30 seconds later (wowiekowie run 2026-08-13 promote #304 burned its retry
+// on this before dead-lettering).
+const DETERMINISTIC_POLICY_CONFLICT_RE = /\bPromote would overwrite \d+ existing file\(s\)/;
+
+export function isDeterministicPolicyConflict(errorDetailsOrErr = null) {
+  const errorDetails = errorDetailsOrErr && typeof errorDetailsOrErr === "object"
+    && ("fullText" in errorDetailsOrErr || "summary" in errorDetailsOrErr || "stderr" in errorDetailsOrErr || "partialOutput" in errorDetailsOrErr)
+    ? errorDetailsOrErr
+    : getErrorDetails(errorDetailsOrErr);
+  const text = [
+    errorDetails.fullText || "",
+    errorDetails.summary || "",
+    errorDetails.stderr || "",
+  ].filter(Boolean).join("\n");
+  return DETERMINISTIC_POLICY_CONFLICT_RE.test(text);
+}
+
 export function retryingAttemptWording(errorDetails = null) {
   if (!errorDetails) return null;
   const text = [

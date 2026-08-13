@@ -285,6 +285,7 @@ export async function materializeWritingScope(packet) {
   const createdDirs = [];
   const materialized = [];
   const greenfieldFiles = [];
+  const convertedToModify = [];
   try {
     for (const relPath of create) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
@@ -304,6 +305,19 @@ export async function materializeWritingScope(packet) {
           });
         }
         if (!provenance && !modify.includes(relPath)) {
+          // A tracked collision means the file was committed on this branch
+          // by an earlier job (a sibling, a prior plan wave, or a salvaged
+          // predecessor WI) while the planner compiled against a root that
+          // predates it. That is WI-authored content, so editing it is what
+          // the planner would have scoped had it seen the branch; reclassify
+          // to modify instead of failing the attempt. Untracked collisions
+          // stay hard errors — they may hold unsaved content this job's
+          // scoped commit could silently swallow.
+          if (await isTrackedPath(cwd, relPath)) {
+            convertedToModify.push(relPath);
+            modify.push(relPath);
+            continue;
+          }
           throw materializationError(
             `Creation target already exists without matching handoff provenance: ${relPath}`,
             { path: relPath },
@@ -360,5 +374,5 @@ export async function materializeWritingScope(packet) {
     delete packet._raw_payload.files_to_create;
     delete packet._raw_payload.create_roots;
   }
-  return { applied: true, materialized };
+  return { applied: true, materialized, convertedToModify };
 }

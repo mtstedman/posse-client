@@ -193,13 +193,28 @@ export function isDeleteNoopSatisfied(job, payload, cwd) {
 
 export function isFilePlacementNoopSatisfied(job, payload, cwd, output = "") {
   if (!isFilePlacementTask(job, payload)) return false;
-  const createFiles = Array.isArray(payload?.files_to_create) ? payload.files_to_create : [];
-  const scopedFiles = uniqueScopeFiles(createFiles, payload?.files_to_modify || []);
+  // Only files_to_create carry placement evidence: a destination that exists
+  // with content suggests the placement already happened. files_to_modify
+  // targets exist by definition, so counting them would make any
+  // "no changes needed" claim on a modify-scoped task auto-satisfy whenever
+  // the loose placement keywords (move/put/install/...) appear in the spec.
+  const scopedFiles = uniqueScopeFiles(
+    Array.isArray(payload?.files_to_create) ? payload.files_to_create : [],
+  );
   if (scopedFiles.length === 0) return false;
   const outputText = String(output || "").toLowerCase();
   const reportedAlreadyDone = /\b(already exists|already there|already present|already in place|nothing to (?:move|copy|do)|no changes needed|up to date|up-to-date)\b/.test(outputText);
   if (!reportedAlreadyDone) return false;
-  return scopedFiles.every((file) => fs.existsSync(path.resolve(cwd, file)));
+  return scopedFiles.every((file) => {
+    try {
+      const stat = fs.statSync(path.resolve(cwd, file));
+      // Zero-byte destinations are unfilled materialization placeholders,
+      // not completed placements.
+      return stat.isFile() && stat.size > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function looksLikePermissionRequest(output) {

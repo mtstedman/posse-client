@@ -466,9 +466,18 @@ export async function handlePostExecutionForWorker({
             return;
           }
           const preCommitPayload = this.parsePayload(job);
+          // The delete-noop shortcut may only skip the scoped commit when the
+          // agent verifiably wrote nothing. Removal-task classification is
+          // keyword-based and delete targets can be inferred from prose, so a
+          // dev job that actually edited files can still classify as a
+          // "satisfied" cleanup; skipping the commit then silently discards
+          // the attempt's real work in the worktree (wowiekowie run 2026-08-13
+          // job #194, 2026-08-10 WI#5 jobs #105-#109). A dirty worktree must
+          // always reach the scoped-commit machinery instead.
           if (
             requiresGitNoopCheckFromModule(job, preCommitPayload)
             && isDeleteNoopSatisfiedFromModule(job, preCommitPayload, wtPath)
+            && !(await gitHasChangesAsync(wtPath).catch(() => true))
           ) {
             const noopDeleteMsg = `Cleanup task already satisfied before commit — scoped files absent, skipping gitCommitAll`;
             this.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id}: ${noopDeleteMsg}${C.reset}`);
@@ -1537,7 +1546,13 @@ export async function handlePostExecutionForWorker({
             hasFileChanges = true;
             satisfiedNoop = true;
           } else if (devStatus === "COMPLETE" && isFilePlacementNoopSatisfiedFromModule(job, this.parsePayload(job), wtPath || job._worktreePath || this.projectDir, output)) {
-            const noopPlacementMsg = `File placement task already satisfied — destination file(s) already exist, so there was nothing left to move or copy`;
+            // Placement-noop rests on the dev's own "already exists" claim
+            // plus destination existence — weaker evidence than a verified
+            // deletion, and the placement classifier is keyword-based (a
+            // chess "move" or a docs "install" matches). Route it through the
+            // real assessor like a VERIFIED_NO_CHANGE claim instead of
+            // granting a deterministic high-confidence pass.
+            const noopPlacementMsg = `File placement destinations already exist and the agent reported no work left; routing current scoped files to assessment`;
             this.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id}: ${noopPlacementMsg}${C.reset}`);
             logEvent({
               work_item_id: job.work_item_id,
@@ -1547,8 +1562,7 @@ export async function handlePostExecutionForWorker({
               actor_type: EVENT_ACTORS.WORKER,
               message: noopPlacementMsg,
             });
-            hasFileChanges = true;
-            satisfiedNoop = true;
+            verifiedNoChange = true;
           } else {
             // True no-op: no file changes and no file requests. Early attempts
             // requeue without assessment; the final budgeted attempt fails.

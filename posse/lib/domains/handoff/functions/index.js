@@ -1505,7 +1505,19 @@ export async function handoff(input, { providerName = null } = {}) {
     }
   }
 
-  await timeHandoffStep(packet, "scope.materialize", () => materializeWritingScope(packet));
+  const materializeResult = await timeHandoffStep(packet, "scope.materialize", () => materializeWritingScope(packet));
+  if (Array.isArray(materializeResult?.convertedToModify) && materializeResult.convertedToModify.length > 0) {
+    try {
+      recordObservation({
+        work_item_id: packet.work_item_id ?? null,
+        job_id: packet.job_id ?? null,
+        attempt_id: getObservationContext()?.attempt_id ?? null,
+        observation_type: "handoff.create_target_converted",
+        summary: `Reclassified ${materializeResult.convertedToModify.length} tracked creation target(s) as modify scope`,
+        detail: { paths: materializeResult.convertedToModify.slice(0, 20) },
+      });
+    } catch { /* observation logging is best-effort */ }
+  }
   await timeHandoffStep(packet, "scope.preflight", () => assertHandoffScopePreflight(packet));
 
   // Step 1: ATLAS attachment + required-mode fail-closed checks. Resolve this

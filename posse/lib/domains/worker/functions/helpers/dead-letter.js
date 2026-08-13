@@ -27,6 +27,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import {
   buildPromptExcerpt,
   getErrorDetails,
+  isDeterministicPolicyConflict,
   isPermanentProviderConfigError,
   isTurnBudgetExhaustedDetails,
   retryingAttemptWording,
@@ -433,7 +434,8 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   const errSummary = errorDetails.summary || "unknown error";
   const errRepeatKey = errorDetails.repeatKey || errSummary;
   const turnBudgetExhausted = isTurnBudgetExhaustedError(errorDetails);
-  const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails);
+  const deterministicPolicyConflict = isDeterministicPolicyConflict(errorDetails);
+  const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails) || deterministicPolicyConflict;
   const transientCommitInfraFailure = isTransientCommitInfraFailure(errorOrMsg);
 
   if (worker.shuttingDown) {
@@ -451,7 +453,9 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
 
   let sameErrorRepeat = false;
   let failedAttempts = [];
-  if (permanentProviderConfigError) {
+  if (deterministicPolicyConflict) {
+    worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: deterministic policy conflict — retrying cannot change the outcome, dead-lettering for operator recovery${C.reset}`);
+  } else if (permanentProviderConfigError) {
     worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: permanent provider configuration/model error — dead-lettering without retry${C.reset}`);
   } else if (!turnBudgetExhausted && freshJob.attempt_count >= 2) {
     const prevAttempts = getAttempts(job.id);
@@ -519,7 +523,9 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   if (permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {
     const reason = stallExhausted
       ? "stall retries exhausted"
-      : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`));
+      : (deterministicPolicyConflict
+        ? "deterministic policy conflict"
+        : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`)));
     log.error("worker", `Dead letter: ${job.job_type} #${job.id}`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, attempts: freshJob.attempt_count, error: errSummary, reason });
     jobLog("DEAD_LETTER", { wi: job.work_item_id, job: job.id, detail: `${job.job_type} "${shortJobTitle(job).slice(0, 50)}" — ${reason}: ${errSummary}` });
     recordObservation({
