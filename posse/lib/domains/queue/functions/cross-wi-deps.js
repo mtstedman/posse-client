@@ -70,6 +70,74 @@ export function getWorkItemMergeDependencies(workItemOrId) {
   return deps.map(normalizeCrossWiMergeDependency).filter(Boolean);
 }
 
+/**
+ * Return work items in a stable topological merge order.
+ *
+ * Cross-WI handoffs record dependencies on the downstream work item, so the
+ * source WI must appear before that downstream WI in review and auto-merge
+ * queues. Items without an in-list dependency retain their relative database
+ * order. Cyclic leftovers are appended in their original order as a defensive
+ * fallback; cycle creation is rejected when dependencies are recorded.
+ */
+export function orderWorkItemsByMergeDependencies(workItems = []) {
+  const items = Array.isArray(workItems) ? [...workItems] : [];
+  if (items.length < 2) return items;
+
+  const byId = new Map();
+  const originalIndex = new Map();
+  for (let index = 0; index < items.length; index++) {
+    const id = Number(items[index]?.id);
+    if (!Number.isFinite(id) || byId.has(id)) continue;
+    byId.set(id, items[index]);
+    originalIndex.set(id, index);
+  }
+
+  const indegree = new Map([...byId.keys()].map((id) => [id, 0]));
+  const dependents = new Map([...byId.keys()].map((id) => [id, new Set()]));
+  for (const item of items) {
+    const targetId = Number(item?.id);
+    if (!byId.has(targetId)) continue;
+    for (const dependency of getWorkItemMergeDependencies(item)) {
+      const sourceId = Number(dependency.source_work_item_id);
+      if (!byId.has(sourceId) || sourceId === targetId) continue;
+      const targets = dependents.get(sourceId);
+      if (targets.has(targetId)) continue;
+      targets.add(targetId);
+      indegree.set(targetId, (indegree.get(targetId) || 0) + 1);
+    }
+  }
+
+  const byOriginalOrder = (left, right) => (originalIndex.get(left) ?? 0) - (originalIndex.get(right) ?? 0);
+  const ready = [...byId.keys()].filter((id) => indegree.get(id) === 0).sort(byOriginalOrder);
+  const orderedIds = [];
+  while (ready.length > 0) {
+    const sourceId = ready.shift();
+    orderedIds.push(sourceId);
+    const targets = [...(dependents.get(sourceId) || [])].sort(byOriginalOrder);
+    for (const targetId of targets) {
+      const remaining = (indegree.get(targetId) || 0) - 1;
+      indegree.set(targetId, remaining);
+      if (remaining === 0) {
+        ready.push(targetId);
+        ready.sort(byOriginalOrder);
+      }
+    }
+  }
+
+  const emitted = new Set(orderedIds);
+  for (const item of items) {
+    const id = Number(item?.id);
+    if (byId.has(id) && !emitted.has(id)) {
+      orderedIds.push(id);
+      emitted.add(id);
+    }
+  }
+
+  const ordered = orderedIds.map((id) => byId.get(id));
+  const represented = new Set(ordered);
+  return [...ordered, ...items.filter((item) => !represented.has(item))];
+}
+
 function findMergeDependencyPath(startWorkItemId, targetWorkItemId) {
   const start = Number(startWorkItemId);
   const target = Number(targetWorkItemId);

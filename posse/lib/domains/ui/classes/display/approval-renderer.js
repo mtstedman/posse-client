@@ -363,18 +363,23 @@ export class DisplayApprovalRenderer {
     } else if (this._approvalMemoryPicker) {
       buf += this._renderMemoryPickerOverlay(this._approvalMemoryPicker);
     }
-    if (typeof this._baseFrameForBlockingOverlay === "function") {
-      buf = this._baseFrameForBlockingOverlay(buf);
-    }
-    if (typeof this._applyBlockingOverlay === "function") {
-      buf = this._applyBlockingOverlay(buf);
-    }
+    const baseFrame = typeof this._baseFrameForBlockingOverlay === "function"
+      ? this._baseFrameForBlockingOverlay(buf)
+      : buf;
+    const overlayPart = this._blockingOverlay && typeof this._applyBlockingOverlay === "function"
+      ? this._applyBlockingOverlay("")
+      : "";
+    const full = baseFrame + overlayPart;
 
-    if (buf !== this._lastFrame) {
-      // DEC 2026 synchronized output (same as the main render path): the
-      // blocking-overlay spinner repaints this frame on a wall-clock tick,
-      // and an unsynchronized full-frame write at that cadence tears.
-      const ok = process.stdout.write(`\x1b[?2026h${buf}\x1b[?2026l`);
+    if (full !== this._lastFrame) {
+      // Once the approval screen beneath a blocking action modal is frozen,
+      // spinner ticks and merge-phase changes only need to repaint the modal.
+      // Rewriting the whole review screen here visibly flashed on terminals
+      // without DEC 2026 synchronized-output support.
+      const overlayActive = !!this._blockingOverlay;
+      const baseSame = overlayActive && this._lastFrame !== "" && this._lastFrameBase === baseFrame;
+      const payload = baseSame ? overlayPart : full;
+      const ok = process.stdout.write(`\x1b[?2026h${payload}\x1b[?2026l`);
       if (!ok) {
         // Mirror the main render path's backpressure handling: requestRender()
         // skips frames while _stdoutBackedUp is set, and the drained frame is
@@ -383,10 +388,13 @@ export class DisplayApprovalRenderer {
         process.stdout.once("drain", () => {
           this._stdoutBackedUp = false;
           this._lastFrame = "";
+          this._lastFrameBase = "";
           this.requestRender({ force: true });
         });
       } else {
-        this._lastFrame = buf;
+        this._lastFrame = full;
+        this._lastFrameBase = baseFrame;
+        this._lastFrameInput = "";
       }
     }
   }

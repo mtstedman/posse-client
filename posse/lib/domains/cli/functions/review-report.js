@@ -10,6 +10,7 @@ import {
   getInsightsByWorkItem,
   listJobsByWorkItem,
   listWorkItems,
+  orderWorkItemsByMergeDependencies,
   reconcileMergedWorkItemReviewStates,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
@@ -359,7 +360,9 @@ export function listReviewableWorkItemsForApproval(isReviewableWorkItem) {
   // strand the approval screen indefinitely.
   reconcileMergedWorkItemReviewStates();
   const predicate = typeof isReviewableWorkItem === "function" ? isReviewableWorkItem : () => true;
-  return listWorkItems(["complete", "failed"]).filter(predicate);
+  return orderWorkItemsByMergeDependencies(
+    listWorkItems(["complete", "failed"]).filter(predicate),
+  );
 }
 
 export function buildReviewReportData(reviewable, {

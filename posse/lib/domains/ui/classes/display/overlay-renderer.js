@@ -77,7 +77,7 @@ export class DisplayOverlayRenderer {
       "",
     ];
     const widthBasis = [
-      `  + ${title}`,
+      `  + ${stripAnsi(String(meta.layoutTitle || title)).replace(/[.\u2026]+$/, "")}`,
       flowText ? `    ${flowText}` : "",
       itemText ? `  ${itemText}` : "",
       "  0:00 \u00b7 please wait",

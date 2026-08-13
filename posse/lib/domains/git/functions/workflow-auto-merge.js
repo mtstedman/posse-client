@@ -6,6 +6,7 @@ import {
   listWorkItems,
   logEvent,
   markWorkItemMergeFailed,
+  orderWorkItemsByMergeDependencies,
   refreshWorkItemStatuses,
   setMergeState,
 } from "../../queue/functions/index.js";
@@ -38,10 +39,12 @@ export function createAutoMergeWorkflowHelpers(context, {
   } = context;
 
   function listEndOfRunMergeableWorkItems() {
-    return listWorkItems(["complete"])
-      .filter(wi => wi.branch_name && wi.merge_state !== "merged")
-      .filter((wi) => !isIterativeWorkItemActive(wi))
-      .filter((wi) => autoMerge || shouldAutoApproveIterativeWorkItem(wi));
+    return orderWorkItemsByMergeDependencies(
+      listWorkItems(["complete"])
+        .filter(wi => wi.branch_name && wi.merge_state !== "merged")
+        .filter((wi) => !isIterativeWorkItemActive(wi))
+        .filter((wi) => autoMerge || shouldAutoApproveIterativeWorkItem(wi)),
+    );
   }
 
   function hasAutoMergeableCompletedWorkItems() {

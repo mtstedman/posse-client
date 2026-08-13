@@ -1,6 +1,7 @@
 // Review, approval, and wrap-up orchestration for CLI sessions.
 
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { orderWorkItemsByMergeDependencies } from "../../queue/functions/cross-wi-deps.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
 import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-dirty-state.js";
@@ -646,7 +647,14 @@ export class ReviewSession {
       nonInteractive,
     } = this;
 
-  return listReviewableWorkItemsForApprovalFromModule(isReviewableWorkItem);
+  if (typeof listReviewableWorkItemsForApprovalFromModule === "function") {
+    return listReviewableWorkItemsForApprovalFromModule(isReviewableWorkItem);
+  }
+  const predicate = typeof isReviewableWorkItem === "function" ? isReviewableWorkItem : () => true;
+  const workItems = typeof listWorkItems === "function"
+    ? listWorkItems(["complete", "failed"]).filter(predicate)
+    : [];
+  return orderWorkItemsByMergeDependencies(workItems);
 
   }
 
@@ -817,13 +825,19 @@ export class ReviewSession {
       branch: wi.branch_name || null,
       target: wi.branch_name ? currentTargetBranch() : null,
       item: wiLabel ? (wiTitle ? `${wiLabel} · ${wiTitle.slice(0, 60)}` : wiLabel) : null,
+      layoutTitle: item?._mergeOverlayLayoutTitle || title,
     };
     display.setBlockingOverlay(title, wiLabel ? `${wiLabel} - please wait` : "Please wait", meta);
   }
 
-  function enqueueGitWork(item, run, { overlay = "Merging....", advanceAfter = true } = {}) {
+  function enqueueGitWork(item, run, {
+    overlay = "Merging....",
+    overlayLayoutTitle = overlay,
+    advanceAfter = true,
+  } = {}) {
     item._mergeInFlight = true;
     item._mergePhase = overlay;
+    item._mergeOverlayLayoutTitle = overlayLayoutTitle;
     display._approvalActionBusy = true;
     setApprovalOverlay(overlay, item);
     display.requestRender({ force: true });
@@ -859,6 +873,7 @@ export class ReviewSession {
             item._mergePhase = null;
             display._approvalActionBusy = false;
             setApprovalOverlay(null);
+            item._mergeOverlayLayoutTitle = null;
             display.requestRender({ force: true });
             if (shouldAdvance && typeof display._advanceApproval === "function") {
               display._advanceApproval();
@@ -1031,7 +1046,7 @@ export class ReviewSession {
           item._mergeResult = `${C.red}\u2717 ${result.message}${C.reset}`;
           return { keepFocused: true };
         }
-      }, { overlay: "Merging....", advanceAfter: true });
+      }, { overlay: "Merging....", overlayLayoutTitle: "Retrying Merge....", advanceAfter: true });
       return { deferAdvance: true };
     } else if (action === "reject") {
       const freshWi = refreshApprovalItem(item, "reject");
@@ -2121,8 +2136,7 @@ export class ReviewSession {
 
   // Build report data for each reviewable work item. Research-only and other
   // non-writing work stays in the admin/event logs, not the approval queue.
-  const reviewable = await wrapUp.run("review-data", () => listWorkItems(["complete", "failed"])
-    .filter(isReviewableWorkItem), {
+  const reviewable = await wrapUp.run("review-data", () => this.listReviewableWorkItemsForApproval(), {
     doneDetail: (items) => items.length > 0 ? `${items.length} item${items.length === 1 ? "" : "s"}` : "none",
   });
   // Count auto-merged WIs (complete, no branch, had dev/fix jobs = auto-approved+merged)

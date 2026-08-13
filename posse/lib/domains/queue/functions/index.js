@@ -369,6 +369,7 @@ export function getWorkItem(id) {
 
 export {
   getWorkItemMergeDependencies,
+  orderWorkItemsByMergeDependencies,
   crossWiMergeDependencyWouldCycle,
   addCrossWiMergeDependency,
   removeCrossWiMergeDependency,
