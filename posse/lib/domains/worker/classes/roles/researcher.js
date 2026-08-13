@@ -56,6 +56,7 @@ import {
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { hasLineRef } from "../../../research/functions/line-refs.js";
 import { buildWebFetchCachePreload, cacheResearchWebFetches } from "../../../research/functions/web-cache.js";
+import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 
 const CHILD_BRIEF_SYNTH_CHAR_LIMIT = 12000;
 const CHILD_BRIEF_EXCERPT_CHAR_LIMIT = 3000;
@@ -74,6 +75,7 @@ const DEFAULT_DEPS = {
   getResearchBudget: defaultGetResearchBudget,
   isDeepthinkTask: defaultIsDeepthinkTask,
   isResearchBudgetDeep: defaultIsResearchBudgetDeep,
+  ensureAtlasReadRootMounted,
   loadNudges: () => "",
   maxTurnsOverrideFromPayload: defaultMaxTurnsOverrideFromPayload,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
@@ -510,6 +512,7 @@ export class ResearcherRole extends BaseRole {
     const baseProjectDir = worker?.projectDir || process.cwd();
     let projectDir = baseProjectDir;
     const {
+      ensureAtlasReadRootMounted: ensureReadRootMounted,
       getResearchBudget,
       isDeepthinkTask,
       isResearchBudgetDeep,
@@ -520,6 +523,14 @@ export class ResearcherRole extends BaseRole {
     const payload = parsePayload(worker, job);
     const replanCwd = await resolveAssessmentReplanCwd(baseProjectDir, job, payload, { signal: ctx.abortSignal || null });
     projectDir = replanCwd.cwd;
+    const atlasReadMount = await ensureReadRootMounted({
+      projectDir: baseProjectDir,
+      readRoot: projectDir,
+      workItemId: job.work_item_id,
+      signal: ctx.abortSignal || null,
+    });
+    if (atlasReadMount.config) job._atlasConfig = atlasReadMount.config;
+    const disableAtlasForReadRoot = atlasReadMount.required && !atlasReadMount.mounted;
     const assessmentReplanDiffBlock = await buildAssessmentReplanDiffBlock(payload, projectDir);
     const assessmentReplanEvidenceBlock = buildAssessmentReplanEvidenceBlock(payload, {
       researchCwd: projectDir,
@@ -642,6 +653,9 @@ export class ResearcherRole extends BaseRole {
           title: workItem.title || "",
           project_context: projectContext,
           files_to_modify: [],
+          disableAtlas: payload.disableAtlas === true || disableAtlasForReadRoot,
+          disableAtlasReason: payload.disableAtlasReason
+            || (disableAtlasForReadRoot ? `read_root_mount_failed: ${atlasReadMount.reason}` : null),
         },
       }, { providerName: researcherExecProvider });
     } else {

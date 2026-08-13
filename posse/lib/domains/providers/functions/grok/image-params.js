@@ -21,7 +21,7 @@ export function buildGrokImageGenerateParams(imageModel, args = {}, ext = ".png"
     model: normalizedImageModel,
     prompt: args.prompt,
     n: 1,
-    response_format: "b64_json",
+    response_format: "url",
   };
   const aspect = sizeToAspectRatio(args.size);
   if (aspect) params.aspect_ratio = aspect;

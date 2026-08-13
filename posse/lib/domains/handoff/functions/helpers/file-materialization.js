@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import { gitExec } from "../../../git/functions/utils.js";
+import { gitExecAsync } from "../../../git/functions/utils.js";
 import {
   normalizeRepoRelativePath,
   validateMutableRepoPath,
@@ -64,9 +64,9 @@ function assertNoSymlinkParents(cwd, absPath, relPath) {
   }
 }
 
-function isIgnoredPath(cwd, relPath) {
+async function isIgnoredPath(cwd, relPath) {
   try {
-    gitExec(
+    await gitExecAsync(
       ["check-ignore", "-q", "--no-index", "--", relPath],
       cwd,
       { timeoutMs: 10_000 },
@@ -81,9 +81,9 @@ function isIgnoredPath(cwd, relPath) {
   }
 }
 
-function isTrackedPath(cwd, relPath) {
+async function isTrackedPath(cwd, relPath) {
   try {
-    gitExec(
+    await gitExecAsync(
       ["ls-files", "--error-unmatch", "--", relPath],
       cwd,
       { timeoutMs: 10_000 },
@@ -163,10 +163,10 @@ function rollbackCreated(cwd, files, dirs) {
   }
 }
 
-function rollbackStagedGreenfieldFiles(cwd, relPaths) {
+async function rollbackStagedGreenfieldFiles(cwd, relPaths) {
   if (relPaths.length === 0) return;
   try {
-    gitExec(
+    await gitExecAsync(
       ["rm", "--cached", "--force", "--ignore-unmatch", "--", ...relPaths],
       cwd,
       { timeoutMs: 10_000 },
@@ -176,13 +176,13 @@ function rollbackStagedGreenfieldFiles(cwd, relPaths) {
   }
 }
 
-function stageGreenfieldFiles(cwd, relPaths) {
+async function stageGreenfieldFiles(cwd, relPaths) {
   if (relPaths.length === 0) return;
   try {
     // An untracked empty placeholder is invisible to ordinary `git diff`.
     // Staging the empty blob gives the provider a baseline, so its subsequent
     // write appears as an unstaged diff instead of looking like "no changes".
-    gitExec(["add", "--", ...relPaths], cwd, { timeoutMs: 10_000 });
+    await gitExecAsync(["add", "--", ...relPaths], cwd, { timeoutMs: 10_000 });
   } catch (error) {
     throw materializationError(
       `Could not stage materialized greenfield files: ${error?.message || String(error)}`,
@@ -205,7 +205,7 @@ function isWritingCodePacket(packet) {
  * target is rejected as a planner/path error; it is never promoted to a new
  * empty file.
  */
-export function materializeWritingScope(packet) {
+export async function materializeWritingScope(packet) {
   if (!isWritingCodePacket(packet)) return { applied: false, materialized: [] };
   const cwd = path.resolve(packet.cwd || process.cwd());
   const requestedModify = uniquePaths(packet.files_to_modify);
@@ -289,7 +289,7 @@ export function materializeWritingScope(packet) {
     for (const relPath of create) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
       assertNoSymlinkParents(cwd, absPath, relPath);
-      if (isIgnoredPath(cwd, relPath)) {
+      if (await isIgnoredPath(cwd, relPath)) {
         throw materializationError(
           `files_to_create target is ignored by repository policy: ${relPath}`,
           { path: relPath },
@@ -309,13 +309,13 @@ export function materializeWritingScope(packet) {
             { path: relPath },
           );
         }
-        if (provenance && stat.size === 0 && !isTrackedPath(cwd, relPath)) {
+        if (provenance && stat.size === 0 && !(await isTrackedPath(cwd, relPath))) {
           greenfieldFiles.push(relPath);
         }
         materialized.push(relPath);
         continue;
       }
-      const greenfield = !isTrackedPath(cwd, relPath);
+      const greenfield = !(await isTrackedPath(cwd, relPath));
       const parents = createParentDirectories(cwd, absPath);
       createdDirs.push(...parents);
       try {
@@ -331,9 +331,9 @@ export function materializeWritingScope(packet) {
       recordMaterialization(packet, generation, relPath, parents);
       materialized.push(relPath);
     }
-    stageGreenfieldFiles(cwd, greenfieldFiles);
+    await stageGreenfieldFiles(cwd, greenfieldFiles);
   } catch (error) {
-    rollbackStagedGreenfieldFiles(cwd, greenfieldFiles);
+    await rollbackStagedGreenfieldFiles(cwd, greenfieldFiles);
     rollbackCreated(cwd, createdFiles, createdDirs);
     if (createdFiles.length > 0) {
       const rolledBackPaths = createdFiles.map((file) => (

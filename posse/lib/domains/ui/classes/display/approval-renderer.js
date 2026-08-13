@@ -271,7 +271,9 @@ export class DisplayApprovalRenderer {
     }).join("  ");
     navLines.push(` ${C.bold}Work Items:${C.reset} ${wiIndicators}`);
 
-    if (this._approvalExitConfirm) {
+    if (this._approvalRequeueConfirm) {
+      navLines.push(` ${C.red}${C.bold}Re-queue WI#${current.wi?.id ?? "?"}?${C.reset} ${C.yellow}This restarts its write jobs and cleans its review branch/worktree.${C.reset}  ${C.dim}[Enter/y] Re-queue  [Esc/n] Cancel${C.reset}`);
+    } else if (this._approvalExitConfirm) {
       const undecided = this._approvalData.filter((d) => !d._decision && !d._isInfo).length;
       navLines.push(` ${C.yellow}${C.bold}Leave review?${C.reset} ${C.yellow}${undecided} undecided item${undecided === 1 ? "" : "s"} will stay pending.${C.reset}  ${C.dim}[Enter/y] Leave  [Esc/n] Keep reviewing${C.reset}`);
     } else if (current._isInfo) {
@@ -940,16 +942,33 @@ export class DisplayApprovalRenderer {
     lines.push(brandRule({ label: "tools", color: C.cyan, width: _ruleWidth }));
     const toolSummary = Array.isArray(data.toolUsageSummary)
       ? data.toolUsageSummary
-        .map((item) => ({ type: String(item?.type || "unknown"), count: Number(item?.count) || 0 }))
+        .map((item) => {
+          const count = Number(item?.count) || 0;
+          const failed = Number(item?.failed) || 0;
+          const rejected = Number(item?.rejected) || 0;
+          return {
+            type: String(item?.type || "unknown"),
+            count,
+            succeeded: item?.succeeded == null
+              ? Math.max(0, count - failed - rejected)
+              : Number(item.succeeded) || 0,
+            failed,
+            rejected,
+          };
+        })
         .filter((item) => item.count > 0)
       : [];
     if (toolSummary.length > 0) {
-      const hdrTools = `  ${"Tool".padEnd(18)} ${"Calls".padStart(8)} ${"Share".padStart(8)}`;
+      const hdrTools = `  ${"Tool".padEnd(18)} ${"Calls".padStart(7)} ${"OK".padStart(7)} ${"Fail".padStart(7)} ${"Reject".padStart(7)} ${"Share".padStart(7)}`;
       lines.push(` ${C.dim}${hdrTools}${C.reset}`);
       lines.push(` ${C.dim}${"─".repeat(Math.min(hdrTools.length + 2, inner))}${C.reset}`);
       for (const item of toolSummary) {
         const share = totalToolCalls > 0 ? `${Math.round((100 * item.count) / totalToolCalls)}%` : "—";
-        lines.push(`  ${item.type.slice(0, 18).padEnd(18)} ${String(item.count).padStart(8)} ${share.padStart(8)}`);
+        lines.push(
+          `  ${item.type.slice(0, 18).padEnd(18)} ${String(item.count).padStart(7)} `
+          + `${String(item.succeeded).padStart(7)} ${String(item.failed).padStart(7)} `
+          + `${String(item.rejected).padStart(7)} ${share.padStart(7)}`,
+        );
       }
     } else {
       lines.push(`  ${C.dim}No tool calls recorded${C.reset}`);

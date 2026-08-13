@@ -131,8 +131,44 @@ export function buildImageClient() {
   if (!apiKey) {
     throw new Error("XAI_API_KEY is required for Grok image generation.");
   }
-  return new OpenAI({ apiKey, baseURL: "https://api.x.ai/v1", maxRetries: 0 });
+  return buildGrokImageClient(apiKey);
 }
+
+function buildGrokImageClient(apiKey, { fetchImpl = globalThis.fetch } = {}) {
+  return {
+    images: {
+      async generate(params, options = {}) {
+        const response = await fetchImpl("https://api.x.ai/v1/images/generations", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(params),
+          signal: options.signal,
+        });
+        const body = await response.text();
+        let parsed;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          const error = new Error("xAI image API returned an invalid JSON response.");
+          error.status = response.status;
+          throw error;
+        }
+        if (!response.ok) {
+          const error = new Error(parsed?.error?.message || `xAI image API returned HTTP ${response.status}.`);
+          error.status = response.status;
+          error.headers = response.headers;
+          throw error;
+        }
+        return parsed;
+      },
+    },
+  };
+}
+
+export const __testBuildGrokImageClient = buildGrokImageClient;
 
 // --- Model Tier Config ------------------------------------------------------
 

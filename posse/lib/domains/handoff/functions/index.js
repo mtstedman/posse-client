@@ -519,7 +519,7 @@ export function assertHandoffScopePreflight(packet) {
   return assertHandoffScopePreflightFromModule(packet);
 }
 
-export function materializeWritingScope(packet) {
+export async function materializeWritingScope(packet) {
   return materializeWritingScopeFromModule(packet);
 }
 

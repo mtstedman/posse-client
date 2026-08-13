@@ -32,7 +32,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 8;
+export const HOST_SCHEMA_VERSION = 9;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -520,4 +520,112 @@ export function repairHumanGateAssessmentSchema(db) {
 
 export function __testRepairHumanGateAssessmentSchema(db) {
   return repairHumanGateAssessmentSchema(db);
+}
+
+const QUEUE_ORPHAN_REPAIR_TABLES = new Set([
+  "agent_handoff_packets",
+  "agent_interaction_applications",
+  "agent_interactions",
+  "file_lane_waits",
+  "file_materializations",
+  "human_gate_outbox",
+  "human_gates",
+  "job_terminal_transitions",
+  "posse_test_runs",
+  "posse_test_suites",
+  "posse_tests",
+  "work_item_terminal_transitions",
+]);
+
+export function needsQueueForeignKeyOrphanRepair(db) {
+  return db.pragma("foreign_key_check")
+    .some((row) => QUEUE_ORPHAN_REPAIR_TABLES.has(String(row.table || "")));
+}
+
+/**
+ * Version 9 repairs rows left by the legacy clearAll implementation. Retained
+ * telemetry and registered-test history have their missing queue references
+ * detached. Materialization, lane, gate, and terminal-transition rows are
+ * queue state and are removed only when their required parent no longer exists.
+ */
+export function repairQueueForeignKeyOrphans(db) {
+  let changed = 0;
+  const detachMissingParent = (table, column, parentTable) => {
+    if (!tableExists(db, table) || !tableExists(db, parentTable)) return 0;
+    return db.prepare(`
+      UPDATE ${quoteIdent(table)}
+      SET ${quoteIdent(column)} = NULL
+      WHERE ${quoteIdent(column)} IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM ${quoteIdent(parentTable)} parent
+          WHERE parent.id = ${quoteIdent(table)}.${quoteIdent(column)}
+        )
+    `).run().changes;
+  };
+  db.transaction(() => {
+    if (tableExists(db, "agent_handoff_packets")) {
+      changed += detachMissingParent("agent_handoff_packets", "work_item_id", "work_items");
+      changed += detachMissingParent("agent_handoff_packets", "job_id", "jobs");
+      changed += detachMissingParent("agent_handoff_packets", "attempt_id", "job_attempts");
+    }
+    for (const table of ["agent_interactions", "agent_interaction_applications"]) {
+      changed += detachMissingParent(table, "work_item_id", "work_items");
+      changed += detachMissingParent(table, "job_id", "jobs");
+      changed += detachMissingParent(table, "attempt_id", "job_attempts");
+    }
+    for (const table of ["posse_test_suites", "posse_tests", "posse_test_runs"]) {
+      changed += detachMissingParent(table, "created_by_work_item_id", "work_items");
+      changed += detachMissingParent(table, "created_by_job_id", "jobs");
+    }
+    if (tableExists(db, "file_lane_waits")) {
+      changed += detachMissingParent("file_lane_waits", "holder_work_item_id", "work_items");
+      changed += detachMissingParent("file_lane_waits", "holder_job_id", "jobs");
+      changed += db.prepare(`
+        DELETE FROM file_lane_waits
+        WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = file_lane_waits.waiter_job_id)
+           OR NOT EXISTS (SELECT 1 FROM work_items wi WHERE wi.id = file_lane_waits.waiter_work_item_id)
+      `).run().changes;
+    }
+    if (tableExists(db, "file_materializations")) {
+      changed += db.prepare(`
+        DELETE FROM file_materializations
+        WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = file_materializations.job_id)
+           OR (work_item_id IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM work_items wi WHERE wi.id = file_materializations.work_item_id
+           ))
+      `).run().changes;
+    }
+    if (tableExists(db, "human_gates")) {
+      changed += detachMissingParent("human_gates", "original_job_id", "jobs");
+      changed += db.prepare(`
+        DELETE FROM human_gates
+        WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = human_gates.gate_job_id)
+      `).run().changes;
+    }
+    if (tableExists(db, "human_gate_outbox")) {
+      changed += db.prepare(`
+        DELETE FROM human_gate_outbox
+        WHERE NOT EXISTS (
+          SELECT 1 FROM human_gates hg WHERE hg.gate_job_id = human_gate_outbox.gate_job_id
+        )
+      `).run().changes;
+    }
+    if (tableExists(db, "job_terminal_transitions")) {
+      changed += db.prepare(`
+        DELETE FROM job_terminal_transitions
+        WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = job_terminal_transitions.job_id)
+      `).run().changes;
+    }
+    if (tableExists(db, "work_item_terminal_transitions")) {
+      changed += db.prepare(`
+        DELETE FROM work_item_terminal_transitions
+        WHERE NOT EXISTS (SELECT 1 FROM work_items wi WHERE wi.id = work_item_terminal_transitions.work_item_id)
+      `).run().changes;
+    }
+  })();
+  return changed > 0;
+}
+
+export function __testRepairQueueForeignKeyOrphans(db) {
+  return repairQueueForeignKeyOrphans(db);
 }

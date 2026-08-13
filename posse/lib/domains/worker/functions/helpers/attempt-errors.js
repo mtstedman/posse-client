@@ -12,6 +12,7 @@ import {
   getWorkItem,
   incrementAttemptCount,
   logEvent,
+  listJobsByWorkItem,
   setJobError,
   settleJobScopeExpansionAttempt,
   storeArtifact,
@@ -706,6 +707,50 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
     });
   } catch {
     // best effort
+  }
+  // Planner compilation happens before the generic post-execution success
+  // settlement. If that settlement loses a transient SQLite lock after the
+  // attempt and child jobs are already durable, replaying the provider creates
+  // a second plan wave. Treat those durable side effects as the commit point
+  // and settle the existing lease instead.
+  if (job.job_type === "plan") {
+    const outerCode = String(outerErr?.code || outerErr?.errno || "").toUpperCase();
+    const outerMessage = String(outerErr?.message || outerErr || "");
+    const sqliteContention = outerCode === "SQLITE_BUSY"
+      || outerCode === "SQLITE_LOCKED"
+      || /database is (?:busy|locked)|sqlite_(?:busy|locked)/i.test(outerMessage);
+    try {
+      const attempts = getAttempts(job.id);
+      const latestAttempt = attempts.at(-1);
+      const hasChildren = listJobsByWorkItem(job.work_item_id)
+        .some((candidate) => (
+          Number(candidate.parent_job_id) === Number(job.id)
+          && String(candidate.created_at || "") >= String(latestAttempt?.started_at || "~")
+        ));
+      if (latestAttempt?.status === "succeeded" && hasChildren) {
+        let released = false;
+        try {
+          released = worker._releaseLease(job, leaseToken, "succeeded");
+        } catch {
+          // The lease-expiry reconciler applies the same durable-side-effect
+          // rule, so leaving this lease in place is safer than provider replay.
+        }
+        worker.emit(
+          job.id,
+          `${C.yellow}[worker] WI#${job.work_item_id} planner post-success error ${released ? "recovered" : "deferred to lease recovery"}; existing child jobs will not be replayed${C.reset}`,
+        );
+        return;
+      }
+    } catch {
+      if (sqliteContention) {
+        worker.emit(
+          job.id,
+          `${C.yellow}[worker] WI#${job.work_item_id} planner recovery proof deferred after SQLite contention; lease expiry will reconcile before any replay${C.reset}`,
+        );
+        return;
+      }
+      // Non-SQLite proof failures retain ordinary catastrophic handling.
+    }
   }
   try {
     if (worker.shuttingDown) {

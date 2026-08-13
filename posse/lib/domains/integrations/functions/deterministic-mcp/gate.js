@@ -175,6 +175,7 @@ const DEAD_ATLAS_RESULT_PATTERNS = [
   /ATLAS temporarily disabled for \d+s/i,
   /backend unavailable/i,
   /ATLAS proxy init failed/i,
+  /ATLAS read context mismatch/i,
 ];
 
 // Machine codes carried in the structured error block that
@@ -187,6 +188,7 @@ const DEAD_ATLAS_ERROR_CODES = new Set([
   "atlas_runtime_disabled",
   "atlas_conductor_unavailable",
   "atlas_gate_timeout",
+  "atlas_read_context_mismatch",
   "backend_unavailable",
 ]);
 

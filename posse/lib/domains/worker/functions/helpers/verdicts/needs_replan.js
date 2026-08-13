@@ -57,7 +57,7 @@ export function handle(job, verdict, ctx) {
   const MAX_REPLANS = getMaxReplans();
   const allJobs = listJobsByWorkItem(job.work_item_id);
   const replanCount = allJobs.filter(isLoopbackReplanResearchJob).length;
-  if (replanCount >= MAX_REPLANS) {
+  if (replanCount >= MAX_REPLANS && !ctx.humanApprovedReplan) {
     runInTransaction(() => {
       log(`${C.red}[assessor] WI#${job.work_item_id} hit replan limit (${replanCount}/${MAX_REPLANS}) - escalating to human${C.reset}`);
       const changed = typeof ctx.updateJobStatus === "function"

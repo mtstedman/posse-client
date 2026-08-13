@@ -835,6 +835,9 @@ export async function runHumanInputJob(worker, job, {
       handledReviewDecision = true;
 
       if (decision.action === "skip") {
+        if (origJob) {
+          await worker._setJobRowStatus(origJob, "canceled");
+        }
         worker.emit(job.id, `${C.yellow}[human] Dead-letter recovery skipped original job #${payload.original_job_id}; dependent job(s) can proceed${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,
@@ -1031,7 +1034,11 @@ export async function runHumanInputJob(worker, job, {
             reasons: [`Human requested replan via review job #${job.id}`],
             spawn_jobs: [],
             human_questions: [],
-          }, { emit: emitFn, autoApprove: worker.autoApprove });
+          }, {
+            emit: emitFn,
+            autoApprove: worker.autoApprove,
+            humanApprovedReplan: true,
+          });
         } else if (reviewDecision === "skip") {
           handledReviewDecision = true;
           const targetStatus = assessmentReview ? "succeeded" : "canceled";

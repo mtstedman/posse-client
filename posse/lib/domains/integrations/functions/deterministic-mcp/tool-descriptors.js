@@ -706,6 +706,8 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
 // context discovery. It deliberately does NOT gate:
 //   - write tools (write_file, edit_file, move/copy/make_dir, bash) — mutation
 //     is governed by scope/policy, never by ATLAS-first ordering, and
+//   - git_history — Git state/history is not mirrored in ATLAS, so ATLAS
+//     retrieval cannot substitute for it, and
 //   - inbound operator-feedback tools (get_operator_feedback and
 //     ack_operator_feedback) — the live operator channel must stay reachable
 //     regardless of ATLAS readiness. Outbound status uses native commentary.
@@ -715,7 +717,6 @@ export const GATED_NATIVE_TOOLS = new Set([
   "chain_verdict",
   "list_files",
   "search_files",
-  "git_history",
   "inspect_file",
   "hash_file",
   "read_file",

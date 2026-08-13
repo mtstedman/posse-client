@@ -44,6 +44,7 @@ import {
 } from "../../../intake/functions/hints.js";
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { worktreePathAsync } from "../../../git/functions/worktree-path.js";
+import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 import { getExplicitIntakeBindings } from "../../../planning/functions/plan-routing.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
@@ -93,6 +94,7 @@ const DEFAULT_DEPS = {
   researchBudgetPromptBlock: defaultResearchBudgetPromptBlock,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
+  ensureAtlasReadRootMounted,
   resolvePlannerReadRoot,
   shortJobTitle: defaultShortJobTitle,
   unwrapTaskArray: defaultUnwrapTaskArray,
@@ -105,6 +107,14 @@ export async function resolvePlannerReadRoot(projectDir, workItemId, jobWorktree
   const candidates = [];
   if (jobWorktreePath) candidates.push(path.resolve(jobWorktreePath));
   if (workItemId != null) {
+    const numericWorkItemId = Number(workItemId);
+    if (Number.isInteger(numericWorkItemId) && numericWorkItemId > 0) {
+      // Keep planning usable when the native Git heartbeat is temporarily
+      // unavailable. Posse's canonical WI worktree location is deterministic,
+      // and checking it before the native lookup prevents a silent fallback to
+      // main that would misclassify files created earlier in the same WI.
+      candidates.push(path.join(projectRoot, ".posse-worktrees", `wi-${numericWorkItemId}`));
+    }
     try {
       candidates.push(path.resolve(await resolveWorktreePath(projectRoot, workItemId)));
     } catch {
@@ -227,6 +237,7 @@ export class PlannerRole extends BaseRole {
   async assembleContext(job, ctx) {
     const worker = this.context;
     const {
+      ensureAtlasReadRootMounted: ensureReadRootMounted,
       getResearchBudget,
       resolvePlannerReadRoot: resolveReadRoot,
     } = this.roleDeps();
@@ -238,6 +249,14 @@ export class PlannerRole extends BaseRole {
       job.work_item_id,
       job._worktreePath,
     );
+    const atlasReadMount = await ensureReadRootMounted({
+      projectDir: worker.projectDir,
+      readRoot: plannerReadRoot,
+      workItemId: job.work_item_id,
+      signal: ctx.abortSignal || null,
+    });
+    if (atlasReadMount.config) job._atlasConfig = atlasReadMount.config;
+    const disableAtlasForReadRoot = atlasReadMount.required && !atlasReadMount.mounted;
     const planningMode = isRedTeamPlanningPayload(payload) ? RED_TEAM_PLANNING_MODE : "normal";
     const plannerRoleMode = planningMode === RED_TEAM_PLANNING_MODE
       ? normalizePlannerRoleMode(payload.planner_role_mode)
@@ -540,8 +559,9 @@ export class PlannerRole extends BaseRole {
         job_id: job.id,
         work_item_id: job.work_item_id,
         job_type: job.job_type,
-        disableAtlas: payload.disableAtlas === true,
-        disableAtlasReason: payload.disableAtlasReason || null,
+        disableAtlas: payload.disableAtlas === true || disableAtlasForReadRoot,
+        disableAtlasReason: payload.disableAtlasReason
+          || (disableAtlasForReadRoot ? `read_root_mount_failed: ${atlasReadMount.reason}` : null),
         title: workItem.title || "",
         project_context: (payload.task_spec || workItem.description || "").slice(0, 4000),
         files_to_modify: [],
@@ -897,6 +917,7 @@ export class PlannerRole extends BaseRole {
     }
     worker.createJobsFromPlan(job, tasks, {
       atlasDevBriefsEnabled: !!ctx.plannerPacket?.atlas?.active,
+      fileKindProjectDir: ctx.plannerReadRoot || worker.projectDir,
       sourceHashRefContext: {
         work_item_id: job.work_item_id,
         job_id: job.id,

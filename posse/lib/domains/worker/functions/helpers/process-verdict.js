@@ -32,7 +32,12 @@ const ASSESSOR_SPAWN_ROLE = Object.freeze({
  * @param {object} verdict - Result from assessResult()
  * @returns {object} { action, spawnedJobs }
  */
-export function processVerdict(job, verdict, { emit = null, autoApprove = false, leaseToken = null } = {}) {
+export function processVerdict(job, verdict, {
+  emit = null,
+  autoApprove = false,
+  leaseToken = null,
+  humanApprovedReplan = false,
+} = {}) {
   const emitLog = emit || ((msg) => console.log(`  ${msg}`));
   const spawnedJobs = [];
   const spawnFromAssessor = (outcome, jobType, payload) =>
@@ -90,6 +95,7 @@ export function processVerdict(job, verdict, { emit = null, autoApprove = false,
     desiredOutputs: prepared.desiredOutputs,
     emitLog,
     isFromSuggestion,
+    humanApprovedReplan,
     reasonBrief,
     leaseToken,
     recordAssessorVerdict,

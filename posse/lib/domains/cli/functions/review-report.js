@@ -375,20 +375,39 @@ export function buildReviewReportData(reviewable, {
     if (workItemIds.length > 0) {
       const placeholders = workItemIds.map(() => "?").join(",");
       const rows = getDb().prepare(`
-        SELECT work_item_id, observation_type, COUNT(*) as count
+        SELECT work_item_id, observation_type, COUNT(*) as count,
+          SUM(CASE
+            WHEN LOWER(COALESCE(json_extract(detail_json, '$.outcome'), json_extract(detail_json, '$.status'), '')) = 'rejected'
+              THEN 1 ELSE 0 END
+          ) AS rejected,
+          SUM(CASE
+            WHEN LOWER(COALESCE(json_extract(detail_json, '$.outcome'), json_extract(detail_json, '$.status'), '')) IN ('failed','error','canceled')
+              OR (
+                COALESCE(json_extract(detail_json, '$.ok'), 1) IN (0, false)
+                AND LOWER(COALESCE(json_extract(detail_json, '$.outcome'), json_extract(detail_json, '$.status'), '')) != 'rejected'
+              )
+              THEN 1 ELSE 0 END
+          ) AS failed
         FROM job_observations
         WHERE work_item_id IN (${placeholders})
           AND observation_type LIKE 'tool.%'
           AND observation_type != 'tool.response_transform'
+          AND observation_type NOT LIKE '%.started'
         GROUP BY work_item_id, observation_type
         ORDER BY work_item_id ASC, count DESC, observation_type ASC
       `).all(...workItemIds);
       for (const row of rows) {
         const wiId = Number(row.work_item_id);
         if (!toolUsageByWorkItem.has(wiId)) toolUsageByWorkItem.set(wiId, []);
+        const count = Number(row.count) || 0;
+        const failed = Number(row.failed) || 0;
+        const rejected = Number(row.rejected) || 0;
         toolUsageByWorkItem.get(wiId).push({
           type: String(row.observation_type || "tool.unknown").replace(/^tool\./, ""),
-          count: Number(row.count) || 0,
+          count,
+          succeeded: Math.max(0, count - failed - rejected),
+          failed,
+          rejected,
         });
       }
     }

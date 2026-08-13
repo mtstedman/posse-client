@@ -301,6 +301,7 @@ function mergeSkillId(skillIds, skillId) {
 export function createJobsFromPlan(worker, planJob, tasks, {
   atlasDevBriefsEnabled = false,
   sourceHashRefContext = null,
+  fileKindProjectDir = worker.projectDir,
   artifactTaskSlug = (title, mode) => `${String(mode || "task")}-${String(title || "task")}`,
   buildIntermediateReportTask = (task) => task,
   logBadInputFailure = () => {},
@@ -784,7 +785,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           droppedTaskIndexes.add(i);
           continue;
         }
-        const fileKindRepair = reconcilePlannerFileKinds(t, worker.projectDir);
+        const fileKindRepair = reconcilePlannerFileKinds(t, fileKindProjectDir);
         if (fileKindRepair.changed) {
           const details = [
             fileKindRepair.movedToCreate.length > 0
@@ -795,6 +796,47 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               : null,
           ].filter(Boolean).join(", ");
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: reconciled file kinds for task "${t.title}" (${details})`);
+        }
+        // Exact repo creation files are the complete authority granted to a
+        // code-writing handoff. Planner models often redundantly include the
+        // files' parent directories in create_roots; retaining those roots
+        // makes the downstream materializer reject an otherwise precise plan.
+        // Strip only the redundant dev/code shape before schema validation.
+        const preValidationJobType = String(t.job_type || "dev").trim().toLowerCase();
+        const preValidationTaskMode = String(t.task_mode || "code").trim().toLowerCase();
+        if (
+          preValidationJobType === "dev"
+          && preValidationTaskMode === "code"
+          && Array.isArray(t.files_to_create)
+          && t.files_to_create.length > 0
+          && Array.isArray(t.create_roots)
+          && t.create_roots.length > 0
+        ) {
+          const normalizeCreateScopePath = (value) => String(value || "")
+            .replace(/\\/g, "/")
+            .replace(/\/+$/, "")
+            .replace(/^\.\/+/, "");
+          const exactCreateFiles = t.files_to_create
+            .map(normalizeCreateScopePath)
+            .filter(Boolean);
+          const redundantRoots = [];
+          t.create_roots = t.create_roots.filter((value) => {
+            const root = normalizeCreateScopePath(value);
+            const isWildcardRoot = root === "." || root === "*";
+            const isAbsoluteRoot = /^(?:\/|[a-z]:\/)/i.test(root);
+            const coversExactFile = !isAbsoluteRoot && exactCreateFiles.some((file) => (
+              isWildcardRoot || file === root || file.startsWith(`${root}/`)
+            ));
+            if (!coversExactFile) return true;
+            redundantRoots.push(value);
+            return false;
+          });
+          if (redundantRoots.length > 0) {
+            worker.emit(
+              planJob.id,
+              `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: stripped ${redundantRoots.length} redundant create root(s) from exact-file code task "${t.title}"`,
+            );
+          }
         }
         const preValidationWi = getWorkItem(planJob.work_item_id);
         const preValidationWiMode = preValidationWi?.mode || "build";

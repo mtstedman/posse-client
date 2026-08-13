@@ -276,6 +276,7 @@ export class Display {
     this._approvalPicker = null; // {itemId, candidates, selected:Set, cursor} when picking files to discard
     this._approvalMemoryPicker = null; // {itemId, memories, cursor, textEntry} while reviewing surfaced memories
     this._approvalActionBusy = false;
+    this._approvalRequeueConfirm = false;
     this._approvalExitConfirm = false;
     this._approvalFlash = null;
 
@@ -1222,6 +1223,7 @@ export class Display {
     this._approvalPicker = null;
     this._approvalMemoryPicker = null;
     this._approvalActionBusy = false;
+    this._approvalRequeueConfirm = false;
     this._approvalExitConfirm = false;
     this._approvalFlash = null;
     if (mode === "normal" && !this._aborted && !this._inputMode && this._questionQueue.length > 0) {
@@ -1306,6 +1308,7 @@ export class Display {
       this._approvalPicker = null;
       this._approvalMemoryPicker = null;
       this._approvalActionBusy = false;
+      this._approvalRequeueConfirm = false;
       this._approvalExitConfirm = false;
       this._approvalFlash = null;
       this._approvalDone = resolve;

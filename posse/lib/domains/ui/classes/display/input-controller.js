@@ -884,6 +884,44 @@ export class DisplayInputController {
       return;
     }
 
+    // Live review opens from the normal queue with [r], which is also the
+    // review screen's re-queue hotkey. A repeated/buffered opening key must
+    // never become a destructive rejection. Require a distinct confirmation
+    // key so another `r` is harmless even when the terminal repeats it across
+    // the async transition into approval mode.
+    if (this._approvalRequeueConfirm) {
+      if (isEnterKey(str, key) || matchesHotkey(str, key, "y")) {
+        this._approvalRequeueConfirm = false;
+        const current = this._approvalData[this._approvalIdx];
+        if (!current?._decision && !current?._isInfo) {
+          if (!getReviewDirtyState(current.worktreeStatus).canDecide) {
+            this._approvalFlash = {
+              text: "Resolve dirty files before re-queue",
+              at: Date.now(),
+            };
+            this.requestRender({ force: true });
+            return;
+          }
+          const applied = this.onApprovalAction ? this.onApprovalAction(current.wi.id, "reject") : true;
+          if (applied === false) return;
+          current._decision = "rejected";
+          if (applied && typeof applied === "object" && applied.deferAdvance) return;
+          this._advanceApproval();
+        }
+        this.requestRender({ force: true });
+        return;
+      }
+      if (isEscapeKey(str, key) || matchesHotkey(str, key, "n")) {
+        this._approvalRequeueConfirm = false;
+        this.requestRender({ force: true });
+        return;
+      }
+      // In particular, ignore key-repeat `r` events. Other keys also cannot
+      // accidentally confirm a destructive re-queue.
+      this.requestRender({ force: true });
+      return;
+    }
+
     // Exit-confirm prompt is up: only y/Enter (leave) and n/Esc (stay) answer
     // it. Any other key dismisses the prompt and is handled normally below.
     if (this._approvalExitConfirm) {
@@ -961,11 +999,7 @@ export class DisplayInputController {
           this.requestRender({ force: true });
           return;
         }
-        const applied = this.onApprovalAction ? this.onApprovalAction(current.wi.id, "reject") : true;
-        if (applied === false) return;
-        current._decision = "rejected";
-        if (applied && typeof applied === "object" && applied.deferAdvance) return;
-        this._advanceApproval();
+        this._approvalRequeueConfirm = true;
       }
     } else if (matchesHotkey(str, key, "d")) {
       const current = this._approvalData[this._approvalIdx];

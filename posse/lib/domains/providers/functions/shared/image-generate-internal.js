@@ -2,10 +2,16 @@ import fs from "fs";
 import path from "path";
 import { getArtifactProtocol, getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { getDefaultImageModel, getDefaultImageProvider, normalizeGrokImageModelName } from "../model-catalog.js";
+import {
+  convertImageToJpeg,
+  convertImageToPng,
+  detectImageFormat,
+} from "../../../../shared/tools/functions/toolkit/image-codec.js";
 
 export { TOOL_GENERATE_IMAGE } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 
 const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 600_000;
+const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
 
 // Each image-capable provider owns construction of its OpenAI-shaped client
@@ -70,7 +76,9 @@ function _buildGrokParams(model, args, ext) {
     model: normalizedModel,
     prompt: args.prompt,
     n: 1,
-    response_format: "b64_json",
+    // xAI's inline base64 responses are large enough to be truncated by the
+    // upstream transport. Request a short-lived URL and download it below.
+    response_format: "url",
   };
   const aspect = _sizeToAspectRatio(args.size);
   if (aspect) params.aspect_ratio = aspect;
@@ -147,6 +155,76 @@ async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_I
   }
 }
 
+async function _downloadImageWithTimeout(url, {
+  fetchImpl = globalThis.fetch,
+  timeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
+  maxBytes = MAX_DOWNLOADED_IMAGE_BYTES,
+} = {}) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || ""));
+  } catch {
+    throw new Error("Image API returned an invalid download URL.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("Image API returned a non-HTTPS download URL.");
+  }
+  if (typeof fetchImpl !== "function") {
+    throw new Error("Image download transport is unavailable.");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(_buildImageTimeoutError(timeoutMs)), timeoutMs);
+  timer.unref?.();
+  try {
+    const response = await fetchImpl(parsed.href, { signal: controller.signal, redirect: "follow" });
+    if (!response?.ok) {
+      throw new Error(`Image download failed with HTTP ${response?.status || "unknown"}.`);
+    }
+    const declaredLength = Number(response.headers?.get?.("content-length") || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      throw new Error(`Downloaded image exceeds the ${maxBytes}-byte limit.`);
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0) throw new Error("Downloaded image was empty.");
+    if (bytes.length > maxBytes) throw new Error(`Downloaded image exceeds the ${maxBytes}-byte limit.`);
+    return bytes;
+  } catch (err) {
+    if (controller.signal.aborted && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
+      throw _buildImageTimeoutError(timeoutMs);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function _writeImageInRequestedFormat(outputPath, imageBytes, ext) {
+  const detected = detectImageFormat(imageBytes);
+  const requested = ext === ".jpg" ? "jpeg" : ext.slice(1);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  if (detected === requested) {
+    fs.writeFileSync(outputPath, imageBytes);
+    return;
+  }
+
+  if (!["png", "jpeg"].includes(requested)) {
+    throw new Error(`Image API returned ${detected} bytes for requested ${requested} output.`);
+  }
+  const tempPath = `${outputPath}.download-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tempPath, imageBytes);
+    const converted = requested === "png"
+      ? convertImageToPng(imageBytes, tempPath, outputPath)
+      : convertImageToJpeg(imageBytes, tempPath, outputPath);
+    if (!converted?.ok || !fs.existsSync(outputPath)) {
+      throw new Error(`Could not convert generated ${detected} image to ${requested}.`);
+    }
+  } finally {
+    try { fs.unlinkSync(tempPath); } catch {}
+  }
+}
+
 async function _resolveImageExecutionProvider(payload) {
   const { resolveImageExecutionProvider } = await import("../execution-routing.js");
   return resolveImageExecutionProvider(payload);
@@ -161,6 +239,7 @@ export async function execGenerateImageInternal(args = {}, {
   cwd = process.cwd(),
   scopePredicates,
   buildImageClient = _buildImageClient,
+  fetchImpl = globalThis.fetch,
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
   enforceProviderAvailability = buildImageClient === _buildImageClient,
 } = {}) {
@@ -213,6 +292,7 @@ export async function execGenerateImageInternal(args = {}, {
       provider,
       model,
       buildImageClient,
+      fetchImpl,
       imageTimeoutMs,
     });
   }
@@ -237,6 +317,7 @@ export async function execGenerateImageInternal(args = {}, {
     provider,
     model,
     buildImageClient,
+    fetchImpl,
     imageTimeoutMs,
   });
 }
@@ -249,6 +330,7 @@ async function _executeGenerateImageWithRoute({
   provider,
   model,
   buildImageClient,
+  fetchImpl,
   imageTimeoutMs,
 }) {
   try {
@@ -262,12 +344,16 @@ async function _executeGenerateImageWithRoute({
       return "Error: API returned no image data.";
     }
     const imageData = response.data[0]?.b64_json;
-    if (!imageData) {
+    const imageUrl = response.data[0]?.url;
+    if (!imageData && !imageUrl) {
       return "Error: API returned no image data.";
     }
 
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.writeFileSync(outputPath, Buffer.from(imageData, "base64"));
+    const imageBytes = imageData
+      ? Buffer.from(imageData, "base64")
+      : await _downloadImageWithTimeout(imageUrl, { fetchImpl, timeoutMs: imageTimeoutMs });
+
+    _writeImageInRequestedFormat(outputPath, imageBytes, ext);
     const sizeKB = (fs.statSync(outputPath).size / 1024).toFixed(1);
     return `Image saved to ${filename} (${sizeKB} KB, provider=${provider}, model=${model}, quality=${quality || "default"}).`;
   } catch (err) {

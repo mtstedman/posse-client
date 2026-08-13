@@ -2562,7 +2562,26 @@ export function requeueExpiredLeases() {
   const cutoff = _graceCutoff();
   clearExpiredParkedLeaseTokens(db, ts, cutoff);
   const expired = db.prepare(`
-    SELECT id, status, work_item_id, lease_token, lease_owner, job_type FROM jobs
+    SELECT id, status, work_item_id, lease_token, lease_owner, job_type,
+      CASE WHEN job_type = 'plan'
+        AND (
+          SELECT ja.status FROM job_attempts ja
+          WHERE ja.job_id = jobs.id
+          ORDER BY ja.attempt_number DESC
+          LIMIT 1
+        ) = 'succeeded'
+        AND EXISTS (
+          SELECT 1 FROM jobs child
+          WHERE child.parent_job_id = jobs.id
+            AND child.created_at >= (
+              SELECT ja.started_at FROM job_attempts ja
+              WHERE ja.job_id = jobs.id
+              ORDER BY ja.attempt_number DESC
+              LIMIT 1
+            )
+        )
+      THEN 1 ELSE 0 END AS completed_plan
+    FROM jobs
     WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})
       AND lease_owner IS NOT NULL
       AND lease_expires_at IS NOT NULL
@@ -2584,6 +2603,23 @@ export function requeueExpiredLeases() {
         finished_at = ?,
         updated_at = ?,
         last_error = COALESCE(last_error, 'atlas_warm: lease expired (fail-silent per policy)')
+    WHERE id = ?
+      AND lease_token = ?
+      AND lease_owner IS NOT NULL
+      AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at < ?
+  `);
+
+  const settleCompletedPlan = db.prepare(`
+    UPDATE jobs
+    SET status = 'succeeded',
+        lease_owner = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        finished_at = COALESCE(finished_at, ?),
+        updated_at = ?,
+        last_error = NULL
     WHERE id = ?
       AND lease_token = ?
       AND lease_owner IS NOT NULL
@@ -2626,7 +2662,21 @@ export function requeueExpiredLeases() {
   let requeuedCount = 0;
   let changedCount = 0;
   const requeueAll = () => runInTransaction(() => {
-    for (const { id, status, work_item_id, lease_token, job_type } of expired) {
+    for (const { id, status, work_item_id, lease_token, job_type, completed_plan } of expired) {
+      if (completed_plan) {
+        const res = settleCompletedPlan.run(ts, ts, id, lease_token, cutoff);
+        if ((res?.changes || 0) < 1) continue;
+        changedCount += 1;
+        releaseJobLocksForStatus(id, "succeeded");
+        affectedWIs.add(work_item_id);
+        logEvent({
+          job_id: id,
+          event_type: EVENT_TYPES.JOB_LEASE_EXPIRED,
+          actor_type: EVENT_ACTORS.SCHEDULER,
+          message: "Recovered completed planner from expired lease; durable child jobs already existed",
+        });
+        continue;
+      }
       if (job_type === "atlas_warm") {
         const res = failWarm.run(ts, ts, id, lease_token, cutoff);
         if ((res?.changes || 0) < 1) continue;
@@ -2864,6 +2914,10 @@ export {
  * when parent rows in work_items/jobs are deleted.
  */
 export function clearAll() {
+  // Drain buffered events while their parent rows still exist, then detach
+  // them with the rest of the retained history below. Otherwise the delayed
+  // event batch can wake after reset and try to reference deleted queue rows.
+  flushEventsNow();
   const db = getDb();
   db.pragma("foreign_keys = OFF");
   try {
@@ -2874,6 +2928,12 @@ export function clearAll() {
       db.prepare(`UPDATE agent_calls SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE job_observations SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE run_insights SET work_item_id = NULL, job_id = NULL`).run();
+      db.prepare(`UPDATE agent_handoff_packets SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+      db.prepare(`UPDATE agent_interactions SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+      db.prepare(`UPDATE agent_interaction_applications SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+      db.prepare(`UPDATE posse_test_suites SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
+      db.prepare(`UPDATE posse_tests SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
+      db.prepare(`UPDATE posse_test_runs SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
       db.prepare(`DELETE FROM agent_run_hash_ref_aliases`).run();
       db.prepare(`DELETE FROM job_hash_ref_aliases`).run();
       db.prepare(`DELETE FROM work_item_hash_ref_aliases`).run();
@@ -2883,6 +2943,12 @@ export function clearAll() {
       db.prepare(`DELETE FROM hash_ref_aliases`).run();
       db.prepare(`DELETE FROM job_file_locks`).run();
       db.prepare(`DELETE FROM work_item_file_locks`).run();
+      db.prepare(`DELETE FROM file_lane_waits`).run();
+      db.prepare(`DELETE FROM file_materializations`).run();
+      db.prepare(`DELETE FROM human_gate_outbox`).run();
+      db.prepare(`DELETE FROM human_gates`).run();
+      db.prepare(`DELETE FROM job_terminal_transitions`).run();
+      db.prepare(`DELETE FROM work_item_terminal_transitions`).run();
       db.prepare(`DELETE FROM session_recycle_savings`).run();
       db.prepare(`DELETE FROM job_sessions`).run();
       db.prepare(`DELETE FROM session_lanes`).run();
@@ -2892,6 +2958,13 @@ export function clearAll() {
       db.prepare(`DELETE FROM work_items`).run();
       db.prepare(`DELETE FROM scheduler_locks`).run();
       db.prepare(`DELETE FROM scheduler_wakeups`).run();
+      const violations = db.pragma("foreign_key_check");
+      if (violations.length > 0) {
+        const sample = violations.slice(0, 5)
+          .map((row) => `${row.table}[${row.rowid}] -> ${row.parent}`)
+          .join(", ");
+        throw new Error(`Queue reset would leave ${violations.length} foreign-key violation(s): ${sample}`);
+      }
     })();
   } finally {
     db.pragma("foreign_keys = ON");
