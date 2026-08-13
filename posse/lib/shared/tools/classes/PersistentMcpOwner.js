@@ -55,6 +55,7 @@ import {
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
+  RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
   buildResearchEarlyFetchBatchingText,
@@ -64,6 +65,7 @@ import {
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
+  researchSynthesisDecision,
 } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
@@ -998,8 +1000,13 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   const explorationFetchBatches = Math.max(0, Number(status.exploration_fetch_batches || 0));
   const singletonFetchBatches = Math.max(0, Number(status.singleton_fetch_batches || 0));
   const multiFetchBatches = Math.max(0, Number(status.multi_fetch_batches || 0));
+  const progressDecision = researchSynthesisDecision({
+    explorationSteps: status.exploration_steps,
+    staleSteps: status.stale_steps,
+    synthesisRequired: status.synthesis_required,
+  });
   if (citationFetch) {
-    const synthesisRequired = status.synthesis_required === true;
+    const synthesisRequired = progressDecision.required;
     return {
       tracked: true,
       blocked: synthesisRequired && citationFetchBatches >= 1,
@@ -1012,8 +1019,11 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
       singletonFetchBatches,
       multiFetchBatches,
       explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
+      staleSteps: Math.max(0, Number(status.stale_steps || 0)),
+      lastNovelEvidenceStep: Math.max(0, Number(status.last_novel_evidence_step || 0)),
       assignedExplorationStep: null,
       synthesisRequired,
+      synthesisReason: progressDecision.reason,
       researchPhase: synthesisRequired ? "synthesis" : "exploration",
     };
   }
@@ -1021,10 +1031,11 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   const assignedStep = Number.isSafeInteger(assignedExplorationStep)
     ? assignedExplorationStep
     : observedExplorationSteps + 1;
+  const assignedAbsoluteCeiling = assignedStep > RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
   return {
     tracked: true,
-    blocked: assignedStep > RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
-    blockReason: "exploration_ceiling",
+    blocked: progressDecision.required || assignedAbsoluteCeiling,
+    blockReason: progressDecision.reason || (assignedAbsoluteCeiling ? "exploration_ceiling" : null),
     citationFetch: false,
     citationFetches,
     citationFetchBatches,
@@ -1033,8 +1044,11 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     singletonFetchBatches,
     multiFetchBatches,
     explorationSteps: Math.max(observedExplorationSteps, assignedStep - 1),
+    staleSteps: Math.max(0, Number(status.stale_steps || 0)),
+    lastNovelEvidenceStep: Math.max(0, Number(status.last_novel_evidence_step || 0)),
     assignedExplorationStep: assignedStep,
-    synthesisRequired: status.synthesis_required === true,
+    synthesisRequired: progressDecision.required || assignedAbsoluteCeiling,
+    synthesisReason: progressDecision.reason || (assignedAbsoluteCeiling ? "exploration_ceiling" : null),
   };
 }
 
@@ -1162,29 +1176,39 @@ function appendOwnerResearchEarlyFetchNotice(result, session, args, admission) {
   return next;
 }
 
-function recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName) {
+function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) {
   const boot = session?.bootConfig || {};
   const current = researchExplorationObservationStatus({
     jobId: boot.jobId ?? null,
     attemptId: boot.attemptId ?? null,
   });
   if (current.synthesis_required) return;
+  const explorationSteps = Math.max(
+    0,
+    Number(progress.explorationSteps ?? current.exploration_steps) || 0,
+  );
+  const staleSteps = Math.max(0, Number(progress.staleSteps ?? current.stale_steps) || 0);
+  const lastNovelEvidenceStep = Math.max(
+    0,
+    Number(progress.lastNovelEvidenceStep ?? current.last_novel_evidence_step) || 0,
+  );
+  const decision = researchSynthesisDecision({ explorationSteps, staleSteps });
   recordObservation({
     work_item_id: boot.workItemId ?? null,
     job_id: boot.jobId ?? null,
     attempt_id: boot.attemptId ?? null,
     observation_type: "research.synthesis_required",
-    summary: `Research synthesis required after ${explorationSteps} exploration calls with 0 stale calls`,
+    summary: `Research synthesis required after ${explorationSteps} exploration calls with ${staleSteps} stale calls`,
     detail: {
       kind: "research_synthesis_required",
       exploration_steps: explorationSteps,
-      stale_steps: 0,
-      min_exploration_steps: RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
-      stale_exploration_steps: 0,
-      last_novel_evidence_step: null,
+      stale_steps: staleSteps,
+      min_exploration_steps: RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
+      stale_exploration_steps: RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
+      last_novel_evidence_step: lastNovelEvidenceStep,
       relevant_files: null,
       irrelevant_files: null,
-      reason: `exploration_steps=${explorationSteps}; stale_steps=0; absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}; last_tool=${toolName}; source=mcp_owner`,
+      reason: `exploration_steps=${explorationSteps}; stale_steps=${staleSteps}; stop_reason=${progress.synthesisReason || decision.reason || "owner_closeout"}; last_tool=${toolName}; source=mcp_owner`,
     },
   });
 }
@@ -1225,7 +1249,12 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     flags.midpoint = true;
     flags.curtain = true;
     flags.lastSlot = true;
-    recordOwnerResearchSynthesisRequired(session, explorationSteps, toolName);
+    recordOwnerResearchSynthesisRequired(session, {
+      explorationSteps,
+      staleSteps: admission.staleSteps,
+      lastNovelEvidenceStep: admission.lastNovelEvidenceStep,
+      synthesisReason: admission.synthesisReason || "exploration_ceiling",
+    }, toolName);
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
       absoluteCeilingReached: true,
@@ -1361,6 +1390,143 @@ function atlasGateResultState(result = null) {
   };
 }
 
+const OWNER_EVIDENCE_IDENTITY_VERSION = 1;
+const OWNER_EVIDENCE_IDENTITY_MAX = 64;
+const OWNER_EVIDENCE_KEY_NAMES = new Set([
+  "content_hash",
+  "contentHash",
+  "file",
+  "filePath",
+  "path",
+  "repo_rel_path",
+  "repoRelPath",
+  "qualifiedName",
+  "symbolId",
+  "symbol_id",
+]);
+const OWNER_EVIDENCE_COLLECTION_KEYS = new Set([
+  "cards",
+  "candidateFiles",
+  "edges",
+  "files",
+  "items",
+  "matches",
+  "symbols",
+]);
+
+function ownerResultTextWithoutControls(result = null) {
+  let text = Array.isArray(result?.content)
+    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("\n")
+    : "";
+  for (const notice of result?.[OWNER_MODEL_CONTROL_NOTICES] || []) {
+    const noticeText = String(notice?.text || "");
+    if (noticeText) text = text.replace(noticeText, "");
+  }
+  return text.trim();
+}
+
+function normalizedEvidenceDigestValue(value, key = "") {
+  if (Array.isArray(value)) {
+    return value.slice(0, 200).map((item) => normalizedEvidenceDigestValue(item, key));
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const childKey of Object.keys(value).sort()) {
+      if (/^(?:_?meta|runtimeTelemetry|timings?|duration|created_at|updated_at)$/i.test(childKey)) continue;
+      if (/^(?:view_ref|surveyRef|ref)$/i.test(childKey)) continue;
+      out[childKey] = normalizedEvidenceDigestValue(value[childKey], childKey);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    return value
+      .replace(/#[0-9a-f]{4,64}\b/gi, "#ref")
+      .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, "<timestamp>");
+  }
+  void key;
+  return value;
+}
+
+function collectOwnerEvidenceIdentities(value, identities, key = "", depth = 0) {
+  if (depth > 8 || identities.size >= OWNER_EVIDENCE_IDENTITY_MAX) return;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 200)) {
+      collectOwnerEvidenceIdentities(item, identities, key, depth + 1);
+      if (identities.size >= OWNER_EVIDENCE_IDENTITY_MAX) break;
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [childKey, childValue] of Object.entries(value)) {
+    if (OWNER_EVIDENCE_KEY_NAMES.has(childKey) && childValue != null) {
+      const normalized = String(childValue).replace(/\\/g, "/").trim().toLowerCase();
+      if (normalized) identities.add(`${childKey.toLowerCase()}:${normalized.slice(0, 240)}`);
+    }
+    if (OWNER_EVIDENCE_COLLECTION_KEYS.has(childKey) || (childValue && typeof childValue === "object")) {
+      collectOwnerEvidenceIdentities(childValue, identities, childKey, depth + 1);
+    }
+    if (identities.size >= OWNER_EVIDENCE_IDENTITY_MAX) break;
+  }
+  void key;
+}
+
+/**
+ * @param {{
+ *   session?: any,
+ *   toolName?: string,
+ *   toolArgs?: Record<string, any>,
+ *   result?: any,
+ *   outcome?: string,
+ * }} [input]
+ */
+function ownerAtlasEvidenceIdentities({ session, toolName, toolArgs, result, outcome } = {}) {
+  const role = String(session?.bootConfig?.role || "");
+  const action = effectiveAtlasResearchAction(requestedToolPolicyName(toolName, toolArgs));
+  if (role !== "researcher" || !isResearchAtlasExplorationAction(action)) return null;
+  if (outcome !== "succeeded" || result?.isError === true) return [];
+
+  const text = ownerResultTextWithoutControls(result);
+  if (!text || /^(?:Error:|AUDIT ERROR:)/i.test(text)) return [];
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { /* plain source evidence */ }
+  if (
+    parsed?.ok === false
+    || parsed?.found === false
+    || parsed?.duplicateSuppressed === true
+    || parsed?.alreadySurfaced === true
+    || String(parsed?.status || "").toLowerCase() === "covered"
+  ) {
+    return [];
+  }
+
+  const identities = new Set();
+  collectOwnerEvidenceIdentities(parsed, identities);
+  collectOwnerEvidenceIdentities(result?._meta?.atlasArtifacts, identities);
+  collectOwnerEvidenceIdentities(result?._meta?.atlasBatch, identities);
+
+  const hasStructuredMaterial = identities.size > 0 || (() => {
+    if (!parsed || typeof parsed !== "object") return text.length > 0;
+    for (const key of OWNER_EVIDENCE_COLLECTION_KEYS) {
+      if (Array.isArray(parsed?.[key]) && parsed[key].length > 0) return true;
+      if (Array.isArray(parsed?.data?.[key]) && parsed.data[key].length > 0) return true;
+    }
+    return [parsed.text, parsed.content, parsed.source, parsed.data?.text, parsed.data?.content]
+      .some((value) => typeof value === "string" && value.length > 0);
+  })();
+  if (!hasStructuredMaterial) return [];
+
+  let digestSource;
+  try {
+    digestSource = parsed == null
+      ? text.replace(/#[0-9a-f]{4,64}\b/gi, "#ref")
+      : JSON.stringify(normalizedEvidenceDigestValue(parsed));
+  } catch {
+    digestSource = text.replace(/#[0-9a-f]{4,64}\b/gi, "#ref");
+  }
+  identities.add(`result:sha256:${crypto.createHash("sha256").update(digestSource).digest("hex")}`);
+  return [...identities].slice(0, OWNER_EVIDENCE_IDENTITY_MAX);
+}
+
 function mcpToolResultErrorText(result = null) {
   const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
   if (structured) return capString(structured, 700);
@@ -1433,6 +1599,13 @@ function recordOwnerToolObservation({
   const errorText = error
     ? capString(error?.message || String(error), 700)
     : mcpToolResultErrorText(result);
+  const evidenceIdentities = ownerAtlasEvidenceIdentities({
+    session,
+    toolName,
+    toolArgs,
+    result,
+    outcome,
+  });
   try {
     recordToolUseObservations({
       work_item_id: boot.workItemId ?? null,
@@ -1457,6 +1630,10 @@ function recordOwnerToolObservation({
           executor: executor && typeof executor === "object" ? executor : null,
           atlas_artifacts: result?._meta?.atlasArtifacts || null,
           atlas_batch: result?._meta?.atlasBatch || null,
+          ...(evidenceIdentities == null ? {} : {
+            evidence_identity_version: OWNER_EVIDENCE_IDENTITY_VERSION,
+            evidence_identities: evidenceIdentities,
+          }),
           response: {
             result_chars: resultChars,
             content_blocks: Array.isArray(result?.content) ? result.content.length : 0,
@@ -3159,19 +3336,20 @@ export class PersistentMcpOwner {
     }
     const synthesisAdmission = reservedSynthesisAdmission
       || this._admitResearchExploration(session, effectiveAtlasResearchAction(requested));
+    if (synthesisAdmission.synthesisRequired) {
+      recordOwnerResearchSynthesisRequired(
+        session,
+        synthesisAdmission,
+        toolName,
+      );
+    }
     if (synthesisAdmission.blocked) {
-      if (!synthesisAdmission.citationFetch) {
-        recordOwnerResearchSynthesisRequired(
-          session,
-          synthesisAdmission.explorationSteps,
-          toolName,
-        );
-      }
       const gateText = synthesisAdmission.citationFetch
         ? buildResearchCitationFetchGateText({ reason: synthesisAdmission.blockReason })
         : buildResearchSynthesisRequiredText({
           explorationSteps: synthesisAdmission.explorationSteps,
-          absoluteCeilingReached: true,
+          staleSteps: synthesisAdmission.staleSteps,
+          absoluteCeilingReached: synthesisAdmission.blockReason === "exploration_ceiling",
           coverage: researchCoverageForSession(session),
         });
       const result = tagOwnerModelControlNotice({
@@ -3290,6 +3468,7 @@ export class PersistentMcpOwner {
         return mcpToolResultMessage(message, result);
       }
       const executor = getSharedAtlasToolExecutor();
+      const executorStartedAt = Date.now();
       const executed = await executor.executeTool({
         toolName,
         args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
@@ -3315,6 +3494,8 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      const executorCompletedAt = Date.now();
+      const transformStartedAt = Date.now();
       if (memoryAction && result?.isError === true) {
         this._terminalMemoryToolSessions.add(session);
         result = appendTerminalMemoryToolNotice(result);
@@ -3337,6 +3518,15 @@ export class PersistentMcpOwner {
         synthesisAdmission,
         toolArgs,
       );
+      const ownerTransformMs = Math.max(0, Date.now() - transformStartedAt);
+      const executorDiagnostics = {
+        ...(executed?.executor || {}),
+        timings_ms: {
+          ...(executed?.executor?.timings_ms || {}),
+          owner_executor_await: Math.max(0, executorCompletedAt - executorStartedAt),
+          owner_result_transform: ownerTransformMs,
+        },
+      };
       const resultChars = mcpResultTextChars(result);
       recordOwnerToolObservation({
         session,
@@ -3345,7 +3535,7 @@ export class PersistentMcpOwner {
         result,
         durationMs: Date.now() - startedAt,
         queueWaitMs,
-        executor: executed?.executor || null,
+        executor: executorDiagnostics,
       });
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
@@ -3356,7 +3546,7 @@ export class PersistentMcpOwner {
         queue_wait_ms: queueWaitMs,
         result_chars: resultChars,
         over_client_clip: resultChars > CLIENT_RESULT_CLIP_CHARS,
-        executor: executed?.executor || null,
+        executor: executorDiagnostics,
       });
       return mcpToolResultMessage(message, result);
     } catch (err) {

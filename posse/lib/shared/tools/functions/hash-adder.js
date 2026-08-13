@@ -62,6 +62,12 @@ const CREATE_REF_MAX_BATCH = 24;
 const CREATE_REF_OWNER_SCOPES = new Set(["work_item", "job"]);
 const FETCH_REF_SEARCH_MODES = new Set(["auto", "literal", "regex"]);
 const FETCH_REF_REGEX_HINT = /[\\^$.*+?()[\]{}|]/;
+const RESEARCH_FETCH_REF_MAX_REFS = 24;
+const RESEARCH_FETCH_REF_PER_REF_CHARS = 8000;
+const RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS = 32000;
+const RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS = 40000;
+const RESEARCH_FETCH_REF_ENVELOPE_BASE_RESERVE = 4096;
+const RESEARCH_FETCH_REF_ENVELOPE_PER_REF_RESERVE = 1024;
 const TREE_SCOPE_INLINE_CANDIDATES = 10;
 const TREE_SCOPE_DEFERRED_PAGES = Object.freeze([
   Object.freeze({ start: 10, end: 20 }),
@@ -1798,6 +1804,7 @@ function fetchDeliveryDetail(renderedText) {
 function recordFetchBatchObservation(hashContext, refs, args, {
   researchPhase = null,
   enforcePolicy = false,
+  deliveryBudget = null,
 } = {}) {
   recordObservation({
     work_item_id: hashContext.work_item_id ?? null,
@@ -1816,9 +1823,67 @@ function recordFetchBatchObservation(hashContext, refs, args, {
       requested_search_mode: String(args?.search_mode ?? args?.searchMode ?? "auto"),
       requested_offset: Number.isFinite(Number(args?.offset)) ? Number(args.offset) : 0,
       requested_limit: Number.isFinite(Number(args?.limit)) ? Number(args.limit) : null,
+      delivery_budget: deliveryBudget,
       agent_call_id: hashContext.agent_call_id ?? null,
     },
   });
+}
+
+function recordFetchBatchDeliveryObservation(hashContext, refs, renderedText, {
+  researchPhase = null,
+  enforcePolicy = false,
+  deliveryBudget = null,
+} = {}) {
+  let returnedTextChars = 0;
+  try {
+    const parsed = JSON.parse(String(renderedText || "{}"));
+    const entries = Array.isArray(parsed?.refs) ? parsed.refs : [parsed];
+    returnedTextChars = entries.reduce(
+      (sum, entry) => sum + (typeof entry?.text === "string" ? entry.text.length : 0),
+      0,
+    );
+  } catch {
+    returnedTextChars = 0;
+  }
+  recordObservation({
+    work_item_id: hashContext.work_item_id ?? null,
+    job_id: hashContext.job_id ?? null,
+    attempt_id: hashContext.attempt_id ?? null,
+    observation_type: "hash_ref.fetch_batch_delivery",
+    summary: `fetch_ref delivered ${returnedTextChars} text characters across ${refs.length} ref${refs.length === 1 ? "" : "s"}`,
+    detail: {
+      kind: "hash_ref_fetch_batch_delivery",
+      ref_count: refs.length,
+      returned_text_chars: returnedTextChars,
+      serialized_chars: String(renderedText || "").length,
+      research_phase: researchPhase || null,
+      visible_ledger_enforced: enforcePolicy === true,
+      delivery_budget: deliveryBudget,
+      agent_call_id: hashContext.agent_call_id ?? null,
+    },
+  });
+}
+
+function researchFetchDeliveryBudget(refCount) {
+  const count = Math.max(1, Math.min(RESEARCH_FETCH_REF_MAX_REFS, Number(refCount) || 1));
+  const envelopeAwareTextCap = Math.max(
+    count,
+    RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS
+      - RESEARCH_FETCH_REF_ENVELOPE_BASE_RESERVE
+      - (count * RESEARCH_FETCH_REF_ENVELOPE_PER_REF_RESERVE),
+  );
+  const totalTextChars = Math.min(RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS, envelopeAwareTextCap);
+  return {
+    max_refs: RESEARCH_FETCH_REF_MAX_REFS,
+    max_per_ref_chars: RESEARCH_FETCH_REF_PER_REF_CHARS,
+    max_total_text_chars: RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS,
+    max_serialized_chars: RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS,
+    allocated_total_text_chars: totalTextChars,
+    allocated_per_ref_chars: Math.max(
+      1,
+      Math.min(RESEARCH_FETCH_REF_PER_REF_CHARS, Math.floor(totalTextChars / count)),
+    ),
+  };
 }
 
 function recordFetchObservation(hashContext, ref, result, renderedText = null, policy = {}) {
@@ -1897,8 +1962,33 @@ export function fetchHashRefTool(args = {}, {
 } = {}) {
   const hashContext = contextForHashRefs(context);
   const refs = refInputs(args);
-  recordFetchBatchObservation(hashContext, refs, args, { researchPhase, enforcePolicy });
+  if (enforcePolicy && refs.length > RESEARCH_FETCH_REF_MAX_REFS) {
+    return JSON.stringify({
+      ok: false,
+      code: "fetch_ref_batch_too_large",
+      error: `fetch_ref accepts at most ${RESEARCH_FETCH_REF_MAX_REFS} unique refs for a researcher call`,
+      requested: refs.length,
+      max_refs: RESEARCH_FETCH_REF_MAX_REFS,
+      retryable: true,
+    });
+  }
+  const deliveryBudget = enforcePolicy && refs.length > 0
+    ? researchFetchDeliveryBudget(refs.length)
+    : null;
+  recordFetchBatchObservation(hashContext, refs, args, { researchPhase, enforcePolicy, deliveryBudget });
   if (refs.length === 0) return JSON.stringify({ ok: false, error: "fetch_ref requires ref or refs" }, null, 2);
+
+  const requestedLimit = parsePositiveInt(
+    args.limit,
+    CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS,
+    CONTEXT_FETCH_REF_MAX_LIMIT_CHARS,
+  );
+  const deliveryArgs = deliveryBudget
+    ? {
+        ...args,
+        limit: Math.min(requestedLimit, deliveryBudget.allocated_per_ref_chars),
+      }
+    : args;
 
   const fetchOne = (ref) => {
     const result = isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref);
@@ -1912,7 +2002,7 @@ export function fetchHashRefTool(args = {}, {
       : [];
     const policy = admitHashRefFetch({
       entry: result?.entry || null,
-      args,
+      args: deliveryArgs,
       history,
       context: hashContext,
       enforce: enforcePolicy,
@@ -1928,11 +2018,11 @@ export function fetchHashRefTool(args = {}, {
         message: policy.message,
       }, null, 2);
     } else {
-      rendered = fetchResultText(result, policy.args || args);
+      rendered = fetchResultText(result, policy.args || deliveryArgs);
       rendered = attachFetchedViewRef(rendered, {
         hashContext,
         sourceEntry: result?.entry || null,
-        fetchArgs: policy.args || args,
+        fetchArgs: policy.args || deliveryArgs,
       });
     }
     recordFetchObservation(hashContext, ref, result, rendered, {
@@ -1944,20 +2034,32 @@ export function fetchHashRefTool(args = {}, {
   };
 
   if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
-    return fetchOne(refs[0]);
+    const rendered = fetchOne(refs[0]);
+    recordFetchBatchDeliveryObservation(hashContext, refs, rendered, {
+      researchPhase,
+      enforcePolicy,
+      deliveryBudget,
+    });
+    return rendered;
   }
 
   const results = refs.map((ref) => parseFetchPayload(fetchOne(ref)));
   const found = results.filter((entry) => entry?.ok === true).length;
   const rejected = results.filter((entry) => entry?.retryable === false && entry?.classification).length;
-  return JSON.stringify({
+  const rendered = JSON.stringify({
     ok: found === refs.length,
     count: refs.length,
     found,
     missing: refs.length - found,
     rejected,
     refs: results,
-  }, null, 2);
+  });
+  recordFetchBatchDeliveryObservation(hashContext, refs, rendered, {
+    researchPhase,
+    enforcePolicy,
+    deliveryBudget,
+  });
+  return rendered;
 }
 
 function createRefError(error, extra = {}) {

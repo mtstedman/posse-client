@@ -530,6 +530,9 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     return {
       exploration_steps: 0,
       last_successful_owner_exploration_step: 0,
+      last_novel_evidence_step: 0,
+      stale_steps: 0,
+      evidence_identity_count: 0,
       synthesis_required: false,
       citation_fetches: 0,
       citation_fetch_batches: 0,
@@ -558,18 +561,49 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     `).all(...scopeParams, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
     let explorationCount = 0;
     let lastSuccessfulOwnerExplorationStep = 0;
+    let lastNovelEvidenceStep = 0;
+    const seenEvidenceIdentities = new Set();
+    const noteNovelIdentities = (identities) => {
+      let novel = false;
+      for (const identity of Array.isArray(identities) ? identities : []) {
+        const normalized = String(identity || "").trim().slice(0, 300);
+        if (!normalized || seenEvidenceIdentities.has(normalized)) continue;
+        seenEvidenceIdentities.add(normalized);
+        novel = true;
+      }
+      if (novel) lastNovelEvidenceStep = explorationCount;
+      return novel;
+    };
     for (const row of explorationRows) {
       if (row.observation_type === "tool.chain_verdict") {
         try {
           const detail = JSON.parse(String(row.detail_json || "{}"));
           const guidancePath = normPath(detail?.path).toUpperCase();
           if (guidancePath === "AGENTS.MD" || guidancePath === "CLAUDE.MD") continue;
+          explorationCount += 1;
+          if (detail?.novel_relevant_file === true || String(detail?.verdict || "") === "relevant") {
+            const pathIdentity = normPath(detail?.path || "").toLowerCase();
+            const hasIdentity = pathIdentity && noteNovelIdentities([`file:${pathIdentity}`]);
+            if (detail?.novel_relevant_file === true && !hasIdentity) {
+              // The producer is authoritative for novelty even if an older
+              // observation omitted the normalized path.
+              lastNovelEvidenceStep = explorationCount;
+            }
+          }
+          continue;
         } catch {
           // Malformed verdict telemetry remains conservatively counted.
+          explorationCount += 1;
+          lastNovelEvidenceStep = explorationCount;
+          continue;
         }
       }
       if (row.observation_type !== "tool.atlas") {
         explorationCount += 1;
+        // Historic native observations do not carry evidence identities.
+        // Conservatively credit them so a mixed-version deployment cannot
+        // close productive work early.
+        lastNovelEvidenceStep = explorationCount;
         continue;
       }
       try {
@@ -578,6 +612,12 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         explorationCount += 1;
         if (detail?.outcome === "succeeded" || detail?.ok === true) {
           lastSuccessfulOwnerExplorationStep = explorationCount;
+          const explicitEvidenceContract = Number(detail?.evidence_identity_version) === 1;
+          const novel = noteNovelIdentities(detail?.evidence_identities);
+          // Before evidence identity v1, success was the only available owner
+          // progress signal. Retain that conservative fallback across rolling
+          // deployments; an explicit empty v1 identity set is stale.
+          if (!explicitEvidenceContract && !novel) lastNovelEvidenceStep = explorationCount;
         }
       } catch {
         // A malformed historic Atlas observation remains conservatively
@@ -622,6 +662,9 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     return {
       exploration_steps: Math.max(0, explorationCount),
       last_successful_owner_exploration_step: Math.max(0, lastSuccessfulOwnerExplorationStep),
+      last_novel_evidence_step: Math.max(0, lastNovelEvidenceStep),
+      stale_steps: Math.max(0, explorationCount - lastNovelEvidenceStep),
+      evidence_identity_count: seenEvidenceIdentities.size,
       synthesis_required: synthesis?.present === 1,
       citation_fetches: Math.max(0, Number(citationFetches?.count || 0)),
       citation_fetch_batches: Math.max(0, Number(citationFetchBatches?.count || 0)),
@@ -635,6 +678,9 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     return {
       exploration_steps: 0,
       last_successful_owner_exploration_step: 0,
+      last_novel_evidence_step: 0,
+      stale_steps: 0,
+      evidence_identity_count: 0,
       synthesis_required: false,
       citation_fetches: 0,
       citation_fetch_batches: 0,

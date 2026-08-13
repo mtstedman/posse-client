@@ -222,6 +222,10 @@ function conductorEnvelopeToToolResult(envelope) {
     };
   }
   const data = envelope.data === undefined ? {} : envelope.data;
+  const runtimeTelemetry = envelope?.meta?.runtimeTelemetry
+    && typeof envelope.meta.runtimeTelemetry === "object"
+    ? cloneJson(envelope.meta.runtimeTelemetry)
+    : null;
   const visibleMeta = modelVisibleAtlasMeta(envelope.meta);
   const payload = visibleMeta && data && typeof data === "object" && !Array.isArray(data)
     ? { ...data, _meta: visibleMeta }
@@ -247,7 +251,12 @@ function conductorEnvelopeToToolResult(envelope) {
       },
     };
   }
-  return { result, ok: true, errorMsg: null };
+  return {
+    result,
+    ok: true,
+    errorMsg: null,
+    ...(runtimeTelemetry ? { executor: { native: runtimeTelemetry } } : {}),
+  };
 }
 
 function modelVisibleAtlasMeta(meta) {
@@ -257,6 +266,7 @@ function modelVisibleAtlasMeta(meta) {
   // the runtime ladder. Ordering/rung coaching is not result evidence and was
   // causing repeated retrieval loops when paperclipped onto code responses.
   delete visible.ladderPolicy;
+  delete visible.runtimeTelemetry;
   return Object.keys(visible).length > 0 ? visible : null;
 }
 
@@ -362,6 +372,18 @@ function withDedupeMarker(value, mode) {
     executor: {
       ...(cloned.executor || {}),
       deduped: mode,
+    },
+  };
+}
+
+function withExecutorDiagnostics(value, diagnostics = {}) {
+  const cloned = cloneJson(value);
+  if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) return cloned;
+  return {
+    ...cloned,
+    executor: {
+      ...(cloned.executor || {}),
+      ...diagnostics,
     },
   };
 }
@@ -892,6 +914,7 @@ export class AtlasToolExecutor {
     const mode = ATLAS_BLOCKING_ACTIONS.has(String(request.action || ""));
     const label = `atlas.tool.${request.action || request.toolName}`;
     const runner = async (queueInfo) => {
+      const runnerStartedAt = this.#now();
       const conductor = this.#conductorFactory();
       const payload = {
         toolName: request.toolName,
@@ -910,7 +933,9 @@ export class AtlasToolExecutor {
           },
         },
       };
+      const readContextStartedAt = this.#now();
       const readPayload = await this.#readPayloadFor(request, conductor);
+      const readContextMs = Math.max(0, this.#now() - readContextStartedAt);
       if (ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS.has(request.action)) {
         if (!readPayload) {
           throw new Error(`ATLAS ${request.action} requires a resolved native read context`);
@@ -921,6 +946,7 @@ export class AtlasToolExecutor {
           : request.action === "tree.scope"
             ? String(request.args?.taskText || "")
             : "";
+        const vectorStartedAt = this.#now();
         const vectorBridge = vectorQuery && (
           (request.action === "symbol.search" && request.args?.semantic === true)
           || request.action === "tree.scope"
@@ -940,6 +966,7 @@ export class AtlasToolExecutor {
             config: readPayload.config || {},
           })
           : null;
+        const vectorBridgeMs = Math.max(0, this.#now() - vectorStartedAt);
         const nativeArgs = request.action === "tree.scope"
           ? treeScopeDiscoveryArgs(request.args || {}, readPayload.readRoot)
           : nativeSymbolSearchArgs(request.action, request.args || {});
@@ -962,6 +989,7 @@ export class AtlasToolExecutor {
           telemetryEnabled: usageTelemetryEnabled(readPayload.config),
         };
         let envelope;
+        const nativeStartedAt = this.#now();
         try {
           envelope = await this.#nativeToolCall({
             contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
@@ -996,21 +1024,74 @@ export class AtlasToolExecutor {
           });
           throw err;
         }
-        return conductorEnvelopeToToolResult(
+        const nativeCallMs = Math.max(0, this.#now() - nativeStartedAt);
+        const transformStartedAt = this.#now();
+        const converted = conductorEnvelopeToToolResult(
           request.action === "symbol.search"
             ? applyNativeSymbolSearchPriors(envelope, request.args || {})
             : envelope,
         );
+        const resultTransformMs = Math.max(0, this.#now() - transformStartedAt);
+        return withExecutorDiagnostics(converted, {
+          via: "native_complete",
+          queue: {
+            key: queueInfo.key,
+            wait_ms: queueInfo.waitMs,
+            depth_at_enqueue: queueInfo.depthAtEnqueue,
+            in_flight_at_enqueue: queueInfo.inFlightAtEnqueue,
+            mode: queueInfo.mode,
+          },
+          timings_ms: {
+            read_context: readContextMs,
+            vector_bridge: vectorBridgeMs,
+            native_call: nativeCallMs,
+            result_transform: resultTransformMs,
+            executor_total: Math.max(0, this.#now() - runnerStartedAt),
+          },
+        });
       }
       if (readPayload && typeof conductor.retrieve === "function") {
+        const dispatchStartedAt = this.#now();
         const envelope = await conductor.retrieve(readPayload, { timeoutMs: request.waitMs || this.#waitMs });
-        return conductorEnvelopeToToolResult(envelope);
+        const dispatchMs = Math.max(0, this.#now() - dispatchStartedAt);
+        const transformStartedAt = this.#now();
+        const converted = conductorEnvelopeToToolResult(envelope);
+        return withExecutorDiagnostics(converted, {
+          via: "conductor_retrieve",
+          queue: { wait_ms: queueInfo.waitMs, mode: queueInfo.mode },
+          timings_ms: {
+            read_context: readContextMs,
+            dispatch: dispatchMs,
+            result_transform: Math.max(0, this.#now() - transformStartedAt),
+            executor_total: Math.max(0, this.#now() - runnerStartedAt),
+          },
+        });
       }
       if (typeof conductor.executeTool === "function") {
-        return conductor.executeTool(payload, { timeoutMs: request.waitMs || this.#waitMs });
+        const dispatchStartedAt = this.#now();
+        const executed = await conductor.executeTool(payload, { timeoutMs: request.waitMs || this.#waitMs });
+        return withExecutorDiagnostics(executed, {
+          via: "conductor_execute",
+          queue: { wait_ms: queueInfo.waitMs, mode: queueInfo.mode },
+          timings_ms: {
+            read_context: readContextMs,
+            dispatch: Math.max(0, this.#now() - dispatchStartedAt),
+            executor_total: Math.max(0, this.#now() - runnerStartedAt),
+          },
+        });
       }
       if (typeof conductor.retrieve === "function") {
-        return conductor.retrieve(payload, { timeoutMs: request.waitMs || this.#waitMs });
+        const dispatchStartedAt = this.#now();
+        const executed = await conductor.retrieve(payload, { timeoutMs: request.waitMs || this.#waitMs });
+        return withExecutorDiagnostics(executed, {
+          via: "conductor_retrieve_fallback",
+          queue: { wait_ms: queueInfo.waitMs, mode: queueInfo.mode },
+          timings_ms: {
+            read_context: readContextMs,
+            dispatch: Math.max(0, this.#now() - dispatchStartedAt),
+            executor_total: Math.max(0, this.#now() - runnerStartedAt),
+          },
+        });
       }
       throw new Error("ATLAS conductor does not expose executeTool/retrieve");
     };

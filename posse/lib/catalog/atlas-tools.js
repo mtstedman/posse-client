@@ -225,7 +225,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         refs: { type: "array", items: { type: "string" }, description: "Batch of hash ref aliases to fetch in one call." },
         hashes: { type: "array", items: { type: "string" }, description: "Alias for refs." },
         offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0." },
-        limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000, max: 60000." },
+        limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs." },
         search: { type: "string", description: "Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. Returns matching numbered lines instead of a raw offset page." },
         search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax)." },
       },

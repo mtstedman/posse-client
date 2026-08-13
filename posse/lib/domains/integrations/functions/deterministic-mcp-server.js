@@ -144,6 +144,7 @@ import {
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
+  researchSynthesisDecision,
 } from "./deterministic-mcp/research-synthesis.js";
 import {
   jsonRpcSuccess,
@@ -1814,20 +1815,15 @@ function syncResearchSynthesisStateFromObservations() {
     priorExplorationSteps,
     observedExplorationSteps,
   );
-  // An increase sourced from the shared observation ledger represents work
-  // completed by the persistent owner (normally Atlas) rather than by this
-  // gateway process. Treat it as recent progress for the gateway-local stale
-  // guard. The aggregate absolute ceiling still bounds repeated owner calls.
-  const lastSuccessfulOwnerExplorationStep = Number(
-    observed.last_successful_owner_exploration_step || 0,
-  );
-  if (
-    observedExplorationSteps > priorExplorationSteps
-    && lastSuccessfulOwnerExplorationStep > 0
-  ) {
+  // Owner-executed success is not automatically progress. The shared ledger
+  // resolves novelty from bounded evidence identities/result digests, so a
+  // duplicate successful Atlas response advances the stale streak instead of
+  // resetting it.
+  const lastNovelEvidenceStep = Number(observed.last_novel_evidence_step || 0);
+  if (observedExplorationSteps > priorExplorationSteps && lastNovelEvidenceStep > 0) {
     researchState.lastNovelEvidenceStep = Math.max(
       Number(researchState.lastNovelEvidenceStep || 0),
-      lastSuccessfulOwnerExplorationStep,
+      lastNovelEvidenceStep,
     );
   }
   if (observed.synthesis_required && !researchState.synthesisRequiredAt) {
@@ -1880,16 +1876,14 @@ function maybeMarkResearchSynthesisRequired({ toolName = null } = {}) {
   if (!isResearcherRole || researchState.synthesisRequiredAt) return false;
   const explorationSteps = Number(researchState.explorationSteps || 0);
   const staleSteps = researchSynthesisStaleStepCount();
-  const absoluteCeilingReached = explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
-  const staleCeilingReached = explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
-    && staleSteps >= RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS;
-  if (!absoluteCeilingReached && !staleCeilingReached) return false;
+  const decision = researchSynthesisDecision({ explorationSteps, staleSteps });
+  if (!decision.required) return false;
 
   researchState.synthesisRequiredAt = new Date().toISOString();
   researchState.synthesisReason = [
     `exploration_steps=${explorationSteps}`,
     `stale_steps=${staleSteps}`,
-    absoluteCeilingReached ? `absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}` : null,
+    decision.absoluteCeilingReached ? `absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}` : null,
     toolName ? `last_tool=${toolName}` : null,
   ].filter(Boolean).join("; ");
   recordResearchSynthesisRequiredObservation();

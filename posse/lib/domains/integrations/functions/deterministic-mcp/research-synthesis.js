@@ -49,6 +49,29 @@ export function isResearchAtlasExplorationAction(action) {
     && !NON_EXPLORATION_ATLAS_ACTIONS.has(normalized);
 }
 
+export function researchSynthesisDecision({
+  explorationSteps = 0,
+  staleSteps = 0,
+  synthesisRequired = false,
+} = {}) {
+  const steps = Math.max(0, Number(explorationSteps) || 0);
+  const stale = Math.max(0, Number(staleSteps) || 0);
+  const absoluteCeilingReached = steps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
+  const staleCeilingReached = steps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
+    && stale >= RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS;
+  const required = synthesisRequired === true || absoluteCeilingReached || staleCeilingReached;
+  return {
+    required,
+    absoluteCeilingReached,
+    staleCeilingReached,
+    explorationSteps: steps,
+    staleSteps: stale,
+    reason: absoluteCeilingReached
+      ? "exploration_ceiling"
+      : (staleCeilingReached ? "stale_evidence" : (synthesisRequired ? "already_required" : null)),
+  };
+}
+
 export function buildResearchCitationFetchGateText({ reason = "before_synthesis" } = {}) {
   if (reason === "budget_exhausted") {
     return [

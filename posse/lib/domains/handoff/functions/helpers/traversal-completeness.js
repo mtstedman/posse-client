@@ -2,22 +2,34 @@
 
 export const DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS = 1600;
 
+export const TRAVERSAL_COMPLETION_LANES = Object.freeze([
+  Object.freeze({
+    id: "default_precedence",
+    terms: Object.freeze(["default", "precedence", "ordering", "override", "winning", "first", "last"]),
+    minimum: 1,
+  }),
+  Object.freeze({
+    id: "ordered_control_flow",
+    terms: Object.freeze(["trace", "flow", "through", "dispatch", "validation", "invoke", "error", "return"]),
+    minimum: 2,
+    requiredAny: Object.freeze(["trace", "through", "dispatch", "validation", "invoke"]),
+  }),
+  Object.freeze({
+    id: "registry_dispatch",
+    terms: Object.freeze(["registry", "registration", "descriptor", "route", "alias", "dispatch"]),
+    minimum: 2,
+    requiredAny: Object.freeze(["registry", "registration", "descriptor", "route"]),
+  }),
+  Object.freeze({
+    id: "lifecycle_resource",
+    terms: Object.freeze(["lifecycle", "generation", "completion", "save", "reconcile", "fallback", "resource", "cleanup"]),
+    minimum: 2,
+    requiredAny: Object.freeze(["lifecycle", "generation", "completion", "save", "reconcile", "resource", "cleanup"]),
+  }),
+]);
+
 export const TRAVERSAL_COMPLETION_TRIGGER_TERMS = Object.freeze([
-  "trace",
-  "path",
-  "flow",
-  "through",
-  "dispatch",
-  "registration",
-  "generation",
-  "validation",
-  "fallback",
-  "completion",
-  "save",
-  "reconcile",
-  "invoke",
-  "error",
-  "return",
+  ...new Set(TRAVERSAL_COMPLETION_LANES.flatMap((lane) => lane.terms)),
 ]);
 
 const TRAVERSAL_COMPLETION_MODE_VALUES = new Set(["off", "shadow", "on"]);
@@ -86,19 +98,29 @@ export function classifyTraversalCompletionTask(packet = {}) {
     || TRAVERSAL_COMPLETION_JOB_TYPES.has(jobType);
 
   if (!roleEligible) {
-    return { triggered: false, matchedTerms: [], taskTextChars: 0 };
+    return { triggered: false, matchedTerms: [], matchedLanes: [], taskTextChars: 0 };
   }
 
   const text = collectTraversalCompletionTaskText(packet);
   const lower = text.toLowerCase();
-  const matchedTerms = TRAVERSAL_COMPLETION_TRIGGER_TERMS.filter((term) => {
+  const termPresent = (term) => {
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return new RegExp(`\\b${escaped}\\b`, "i").test(lower);
-  });
+  };
+  const matchedLanes = [];
+  const matchedTerms = new Set();
+  for (const lane of TRAVERSAL_COMPLETION_LANES) {
+    const terms = lane.terms.filter(termPresent);
+    if (terms.length < lane.minimum) continue;
+    if (lane.requiredAny && !lane.requiredAny.some((term) => terms.includes(term))) continue;
+    matchedLanes.push(lane.id);
+    for (const term of terms) matchedTerms.add(term);
+  }
 
   return {
-    triggered: matchedTerms.length > 0,
-    matchedTerms,
+    triggered: matchedLanes.length > 0,
+    matchedTerms: [...matchedTerms],
+    matchedLanes,
     taskTextChars: text.length,
   };
 }
@@ -122,6 +144,7 @@ export function buildTraversalCompletionCheck(packet = {}, opts = {}) {
     mode,
     triggered: classification.triggered,
     matched_terms: classification.matchedTerms,
+    matched_lanes: classification.matchedLanes,
     task_text_chars: classification.taskTextChars,
     max_chars: maxChars,
     rendered_chars: text.length,

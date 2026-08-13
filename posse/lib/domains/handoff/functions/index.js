@@ -82,6 +82,7 @@ import {
   attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule,
   attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule,
   classifyAtlasPrefetchRelevance as classifyAtlasPrefetchRelevanceFromModule,
+  classifyAtlasPrefetchCoverage as classifyAtlasPrefetchCoverageFromModule,
   collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule,
   renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule,
   resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule,
@@ -1765,6 +1766,13 @@ export async function handoff(input, { providerName = null } = {}) {
       status = "partial";
     }
     packet.atlas.prefetchStatus = status;
+    packet.atlas.prefetchDeliveryStatus = status === "skipped"
+      ? "skipped"
+      : (status === "failed" ? "failed" : (status === "partial" ? "partial" : "ok"));
+    packet.atlas.prefetchRelevanceStatus = status === "ok_relevant"
+      ? "relevant"
+      : (status === "ok_unhelpful" ? "unhelpful" : "unknown");
+    packet.atlas.prefetchCoverageStatus = classifyAtlasPrefetchCoverageFromModule(packet, recipient);
   }
 
   // Step 4: Directory tree
@@ -1828,24 +1836,29 @@ function _applyTraversalCompletionCheck(packet) {
     const ctx = getObservationContext() || {};
     const status = check.attach ? "attached" : (check.shadow ? "shadowed" : "skipped");
     const terms = check.matched_terms.length > 0 ? check.matched_terms.join(",") : "none";
+    const lanes = check.matched_lanes.length > 0 ? check.matched_lanes.join(",") : "none";
     recordObservation({
       work_item_id: packet.work_item_id ?? ctx.work_item_id ?? null,
       job_id: packet.job_id ?? ctx.job_id ?? null,
       attempt_id: ctx.attempt_id ?? null,
       observation_type: "handoff.traversal_completion_check",
-      summary: `Traversal completion check ${status} (${check.mode}; terms=${terms})`,
+      summary: `Traversal completion check ${status} (${check.mode}; lanes=${lanes}; terms=${terms})`,
       detail: {
         kind: "handoff_traversal_completion_check",
         mode: check.mode,
         status,
         triggered: check.triggered,
         matched_terms: check.matched_terms,
+        matched_lanes: check.matched_lanes,
         rendered_chars: check.rendered_chars,
         max_chars: check.max_chars,
         task_text_chars: check.task_text_chars,
         recipient: packet.recipient || null,
         job_type: packet.job_type || null,
         atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
+        atlas_prefetch_delivery_status: packet.atlas?.prefetchDeliveryStatus || null,
+        atlas_prefetch_relevance_status: packet.atlas?.prefetchRelevanceStatus || null,
+        atlas_prefetch_coverage_status: packet.atlas?.prefetchCoverageStatus || null,
       },
     });
   } catch {
@@ -1882,6 +1895,9 @@ function _applyAtlasShadowGuardrails(packet) {
         recipient: packet.recipient || null,
         job_type: packet.job_type || null,
         atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
+        atlas_prefetch_delivery_status: packet.atlas?.prefetchDeliveryStatus || null,
+        atlas_prefetch_relevance_status: packet.atlas?.prefetchRelevanceStatus || null,
+        atlas_prefetch_coverage_status: packet.atlas?.prefetchCoverageStatus || null,
       },
     });
   } catch {
