@@ -2615,7 +2615,7 @@ export function classifyAtlasPrefetchRelevance(packet, recipient = packet?.recip
 export function classifyAtlasPrefetchCoverage(packet, recipient = packet?.recipient) {
   if (!packet?.atlas?.active || packet.atlas?.prefetchFailed) return "unknown";
   const role = String(recipient || packet?.recipient || "").trim().toLowerCase();
-  if (role !== "planner" && role !== "dev") return "unknown";
+  if (role !== "planner" && role !== "dev" && role !== "researcher") return "unknown";
   if (!packet.atlas_slice_context?.ok) return "unknown";
   const requested = _pathSet(_collectExplicitAtlasPrefetchFiles(packet));
   if (requested.size === 0) return "unknown";
@@ -2626,7 +2626,7 @@ export function classifyAtlasPrefetchCoverage(packet, recipient = packet?.recipi
   }
   if (covered === requested.size) return "scoped_exact";
   if (covered > 0) return "scoped_partial";
-  return "unknown";
+  return "scoped_none";
 }
 
 function renderRequiredRetrievalOrderLine(packet) {

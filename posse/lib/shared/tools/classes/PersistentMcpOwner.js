@@ -1413,6 +1413,15 @@ const OWNER_EVIDENCE_COLLECTION_KEYS = new Set([
   "matches",
   "symbols",
 ]);
+const OWNER_EVIDENCE_MATERIAL_KEY_NAMES = new Set([
+  "body",
+  "content",
+  "signature",
+  "snippet",
+  "sourceText",
+  "source_text",
+  "text",
+]);
 
 function ownerResultTextWithoutControls(result = null) {
   let text = Array.isArray(result?.content)
@@ -1461,6 +1470,14 @@ function collectOwnerEvidenceIdentities(value, identities, key = "", depth = 0) 
     if (OWNER_EVIDENCE_KEY_NAMES.has(childKey) && childValue != null) {
       const normalized = String(childValue).replace(/\\/g, "/").trim().toLowerCase();
       if (normalized) identities.add(`${childKey.toLowerCase()}:${normalized.slice(0, 240)}`);
+    }
+    if (OWNER_EVIDENCE_MATERIAL_KEY_NAMES.has(childKey) && typeof childValue === "string") {
+      const normalized = childValue.replace(/\r\n?/g, "\n").trim();
+      if (normalized) {
+        identities.add(
+          `material:${childKey.toLowerCase()}:sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}`,
+        );
+      }
     }
     if (OWNER_EVIDENCE_COLLECTION_KEYS.has(childKey) || (childValue && typeof childValue === "object")) {
       collectOwnerEvidenceIdentities(childValue, identities, childKey, depth + 1);
@@ -1515,15 +1532,21 @@ function ownerAtlasEvidenceIdentities({ session, toolName, toolArgs, result, out
   })();
   if (!hasStructuredMaterial) return [];
 
-  let digestSource;
-  try {
-    digestSource = parsed == null
-      ? text.replace(/#[0-9a-f]{4,64}\b/gi, "#ref")
-      : JSON.stringify(normalizedEvidenceDigestValue(parsed));
-  } catch {
-    digestSource = text.replace(/#[0-9a-f]{4,64}\b/gi, "#ref");
+  // Stable paths/symbols and exact evidence-bearing source fields are the
+  // monotonic novelty contract. A whole-result digest is fallback-only:
+  // ranking scores, result order, pagination, and request echo fields may
+  // legitimately change while returning no new repository evidence.
+  if (identities.size === 0) {
+    let digestSource;
+    try {
+      digestSource = parsed == null
+        ? text.replace(/#[0-9a-z]{4,64}\b/gi, "#ref")
+        : JSON.stringify(normalizedEvidenceDigestValue(parsed));
+    } catch {
+      digestSource = text.replace(/#[0-9a-z]{4,64}\b/gi, "#ref");
+    }
+    identities.add(`result:sha256:${crypto.createHash("sha256").update(digestSource).digest("hex")}`);
   }
-  identities.add(`result:sha256:${crypto.createHash("sha256").update(digestSource).digest("hex")}`);
   return [...identities].slice(0, OWNER_EVIDENCE_IDENTITY_MAX);
 }
 
@@ -1577,6 +1600,7 @@ function recordOwnerModelControlNotice(session, toolName, notice = {}) {
  *   toolName?: string,
  *   toolArgs?: Record<string, any>,
  *   result?: any,
+ *   evidenceResult?: any,
  *   error?: any,
  *   durationMs?: number | null,
  *   queueWaitMs?: number | null,
@@ -1588,6 +1612,7 @@ function recordOwnerToolObservation({
   toolName,
   toolArgs,
   result = null,
+  evidenceResult = null,
   error = null,
   durationMs = null,
   queueWaitMs = null,
@@ -1603,7 +1628,7 @@ function recordOwnerToolObservation({
     session,
     toolName,
     toolArgs,
-    result,
+    result: evidenceResult || result,
     outcome,
   });
   try {
@@ -3357,7 +3382,10 @@ export class PersistentMcpOwner {
           type: "text",
           text: gateText,
         }],
-        isError: true,
+        // Closeout and final-fetch gates are terminal admission decisions, not
+        // execution failures. A normal MCP result prevents provider tool-error
+        // recovery from reopening the exploration tail.
+        isError: false,
       }, gateText, {
         kind: synthesisAdmission.citationFetch
           ? "research_citation_fetch_gate"
@@ -3494,6 +3522,7 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      const evidenceResult = result;
       const executorCompletedAt = Date.now();
       const transformStartedAt = Date.now();
       if (memoryAction && result?.isError === true) {
@@ -3533,6 +3562,7 @@ export class PersistentMcpOwner {
         toolName,
         toolArgs,
         result,
+        evidenceResult,
         durationMs: Date.now() - startedAt,
         queueWaitMs,
         executor: executorDiagnostics,

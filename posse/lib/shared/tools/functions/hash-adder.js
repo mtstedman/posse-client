@@ -68,6 +68,8 @@ const RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS = 32000;
 const RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS = 40000;
 const RESEARCH_FETCH_REF_ENVELOPE_BASE_RESERVE = 4096;
 const RESEARCH_FETCH_REF_ENVELOPE_PER_REF_RESERVE = 1024;
+const RESEARCH_FETCH_REF_VISIBLE_METADATA_CHARS = 240;
+const RESEARCH_FETCH_REF_NESTED_METADATA_CHARS = 512;
 const TREE_SCOPE_INLINE_CANDIDATES = 10;
 const TREE_SCOPE_DEFERRED_PAGES = Object.freeze([
   Object.freeze({ start: 10, end: 20 }),
@@ -1637,7 +1639,33 @@ export function appendHashRefIfMajor(toolName, result, {
   return stamped;
 }
 
-function fetchResultText(result, args = {}) {
+function boundedResearchFetchString(value) {
+  if (value == null) return value;
+  const text = String(value);
+  return text.length <= RESEARCH_FETCH_REF_VISIBLE_METADATA_CHARS
+    ? text
+    : `${text.slice(0, RESEARCH_FETCH_REF_VISIBLE_METADATA_CHARS - 1)}…`;
+}
+
+function boundedResearchFetchMetadata(value) {
+  if (value == null) return value;
+  let serialized;
+  try { serialized = JSON.stringify(value); } catch { serialized = String(value); }
+  if (serialized.length <= RESEARCH_FETCH_REF_NESTED_METADATA_CHARS) return value;
+  const summary = /** @type {Record<string, any>} */ ({
+    omitted: true,
+    serialized_chars: serialized.length,
+    sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
+  });
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const key of ["kind", "tool", "source_ref"]) {
+      if (value[key] != null) summary[key] = boundedResearchFetchString(value[key]);
+    }
+  }
+  return summary;
+}
+
+function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
   if (!result?.ok || !result?.found || !result.entry) {
     return JSON.stringify({
       ok: false,
@@ -1655,8 +1683,8 @@ function fetchResultText(result, args = {}) {
       ok: true,
       ref: entry.ref,
       object_type: entry.object_type,
-      source: entry.source,
-      note: entry.note,
+      source: researchDelivery ? boundedResearchFetchString(entry.source) : entry.source,
+      note: researchDelivery ? boundedResearchFetchString(entry.note) : entry.note,
       content_hash: entry.content_hash,
       size_chars: entry.size_chars,
       handoff_line_count: handoffLines.length,
@@ -1672,13 +1700,13 @@ function fetchResultText(result, args = {}) {
     ok: true,
     ref: entry.ref,
     object_type: entry.object_type,
-    source: entry.source,
-    note: entry.note,
+    source: researchDelivery ? boundedResearchFetchString(entry.source) : entry.source,
+    note: researchDelivery ? boundedResearchFetchString(entry.note) : entry.note,
     content_hash: entry.content_hash,
     size_chars: entry.size_chars,
     degraded: true,
-    descriptor: entry.descriptor,
-    fingerprint_map: entry.fingerprint_map,
+    descriptor: researchDelivery ? boundedResearchFetchMetadata(entry.descriptor) : entry.descriptor,
+    fingerprint_map: researchDelivery ? boundedResearchFetchMetadata(entry.fingerprint_map) : entry.fingerprint_map,
     notice: entry.metadata?.retention_exceeded
       ? "Payload unavailable: bounded retention cap exceeded."
       : "Payload unavailable: descriptor-backed ref cannot be recomputed in this runtime.",
@@ -1886,6 +1914,24 @@ function researchFetchDeliveryBudget(refCount) {
   };
 }
 
+function enforceResearchFetchSerializedBudget(renderedText, deliveryBudget, refs) {
+  if (!deliveryBudget || String(renderedText || "").length <= deliveryBudget.max_serialized_chars) {
+    return renderedText;
+  }
+  // The normal path fits because researcher-visible strings and nested
+  // metadata are bounded before serialization. Fail compactly if a future
+  // response field escapes that accounting instead of sending an unbounded
+  // payload to the model.
+  return JSON.stringify({
+    ok: false,
+    code: "fetch_ref_delivery_budget_exceeded",
+    error: "fetch_ref could not serialize the requested refs inside the researcher delivery budget",
+    requested: refs.length,
+    max_serialized_chars: deliveryBudget.max_serialized_chars,
+    retryable: true,
+  });
+}
+
 function recordFetchObservation(hashContext, ref, result, renderedText = null, policy = {}) {
   const delivery = fetchDeliveryDetail(renderedText);
   const admitted = policy.allowed !== false;
@@ -2018,7 +2064,9 @@ export function fetchHashRefTool(args = {}, {
         message: policy.message,
       }, null, 2);
     } else {
-      rendered = fetchResultText(result, policy.args || deliveryArgs);
+      rendered = fetchResultText(result, policy.args || deliveryArgs, {
+        researchDelivery: deliveryBudget != null,
+      });
       rendered = attachFetchedViewRef(rendered, {
         hashContext,
         sourceEntry: result?.entry || null,
@@ -2034,7 +2082,7 @@ export function fetchHashRefTool(args = {}, {
   };
 
   if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
-    const rendered = fetchOne(refs[0]);
+    const rendered = enforceResearchFetchSerializedBudget(fetchOne(refs[0]), deliveryBudget, refs);
     recordFetchBatchDeliveryObservation(hashContext, refs, rendered, {
       researchPhase,
       enforcePolicy,
@@ -2046,14 +2094,14 @@ export function fetchHashRefTool(args = {}, {
   const results = refs.map((ref) => parseFetchPayload(fetchOne(ref)));
   const found = results.filter((entry) => entry?.ok === true).length;
   const rejected = results.filter((entry) => entry?.retryable === false && entry?.classification).length;
-  const rendered = JSON.stringify({
+  const rendered = enforceResearchFetchSerializedBudget(JSON.stringify({
     ok: found === refs.length,
     count: refs.length,
     found,
     missing: refs.length - found,
     rejected,
     refs: results,
-  });
+  }), deliveryBudget, refs);
   recordFetchBatchDeliveryObservation(hashContext, refs, rendered, {
     researchPhase,
     enforcePolicy,

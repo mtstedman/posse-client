@@ -5,8 +5,9 @@ export const DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS = 1600;
 export const TRAVERSAL_COMPLETION_LANES = Object.freeze([
   Object.freeze({
     id: "default_precedence",
-    terms: Object.freeze(["default", "precedence", "ordering", "override", "winning", "first", "last"]),
-    minimum: 1,
+    terms: Object.freeze(["default", "precedence", "order", "ordering", "override", "winning", "first", "last"]),
+    minimum: 2,
+    requiredAny: Object.freeze(["default", "precedence", "ordering", "override", "winning"]),
   }),
   Object.freeze({
     id: "ordered_control_flow",

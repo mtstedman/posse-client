@@ -3185,7 +3185,7 @@ async function handleRequest(msg) {
       });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: citationGateText }],
-        isError: true,
+        isError: false,
       }));
       return;
     }
@@ -3208,7 +3208,7 @@ async function handleRequest(msg) {
       });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: errorText }],
-        isError: true,
+        isError: false,
       }));
       return;
     }
@@ -3363,7 +3363,7 @@ async function handleRequest(msg) {
       });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: errorText }],
-        isError: true,
+        isError: false,
       }));
       return;
     }
