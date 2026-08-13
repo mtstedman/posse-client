@@ -1052,14 +1052,38 @@ export function buildNativeToolDescriptor(schema) {
   };
 }
 
-export function buildFoldedAtlasToolDescriptor(schema = {}) {
+export function buildFoldedAtlasToolDescriptor(schema = {}, {
+  role = null,
+} = {}) {
   const annotations = schema.annotations && typeof schema.annotations === "object"
     ? schema.annotations
     : {};
   const name = String(schema.name || "");
   const mutating = isBlockedFoldedAtlasTool(name);
-  const canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
-  const inputSchema = schema.inputSchema;
+  let canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
+  let inputSchema = schema.inputSchema;
+  // Keep researcher calls scalar at the advertised boundary for every
+  // provider. The canonical multi-selection contract remains available to
+  // other roles and internal callers, while researchers can issue independent
+  // top-level calls that provider runtimes are able to schedule concurrently.
+  if (
+    String(role || "").trim().toLowerCase() === "researcher"
+    && stripAtlasPrefix(name) === "code.window"
+    && inputSchema?.properties?.items
+    && Array.isArray(inputSchema.anyOf)
+  ) {
+    const properties = { ...inputSchema.properties };
+    delete properties.items;
+    inputSchema = {
+      ...inputSchema,
+      properties,
+      required: [],
+      // Project the scalar modes from the canonical contract itself so file
+      // and symbol requirements cannot drift at this provider boundary.
+      anyOf: inputSchema.anyOf.filter((mode) => !mode?.required?.includes("items")),
+    };
+    canonicalDescription = "Bounded exact code for one symbol or anchored file region. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections.";
+  }
   return {
     ...schema,
     description: canonicalDescription || schema.description,

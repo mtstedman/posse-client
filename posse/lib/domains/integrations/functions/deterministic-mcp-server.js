@@ -3084,7 +3084,7 @@ async function handleRequest(msg) {
       .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
       .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
       .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name)))
-      .map((tool) => buildFoldedAtlasToolDescriptor(tool));
+      .map((tool) => buildFoldedAtlasToolDescriptor(tool, { role: roleName }));
     if (isGateActive({ scopeKey: gateScopeKey }) && atlasTools.length === 0) {
       unlockForAtlasUnavailable({ reason: "atlas_tools_unavailable", scopeKey: gateScopeKey });
       appendToolLog({
