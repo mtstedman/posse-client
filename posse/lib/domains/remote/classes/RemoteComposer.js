@@ -479,15 +479,15 @@ function renderLocalPolicyOverlay(packet, { localPolicy = null } = {}) {
   if (shouldRenderAssessorReadOnlyShell(packet, policy)) {
     sections.push([
       "LOCAL EXECUTION POLICY NOTE:",
-      "- Assessor shell policy: read-only bash is allowed for inspection and verification commands only.",
-      "- Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through bash.",
-      "- Assessors have no write permission. Bash must not modify files.",
+      "- The issued read-only shell is allowed for inspection and verification commands only.",
+      "- Use the issued scoped-check tool for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through the shell.",
+      "- Assessors have no write permission. The shell must not modify files.",
     ].join("\n"));
   }
   if (policy?.allow_tests === false && ["dev", "assessor"].includes(role)) {
     sections.push([
       "LOCAL TEST EXECUTION POLICY:",
-      "- Test execution is not issued for this attempt. Do not invoke a test command, test runner, run_scoped_checks, registered-test tool, or shell-based test route.",
+      "- Test execution is not issued for this attempt. Do not invoke a test command, test runner, scoped-check tool, registered-test tool, or shell-based test route.",
       "- Do not spend turns requesting test permission or retrying an unavailable test route.",
       role === "dev"
         ? "- Complete finished product work as COMPLETE and use verification_unavailable to report the exact unrun check; unavailable tests alone must not degrade the result to PARTIAL or BLOCKED."

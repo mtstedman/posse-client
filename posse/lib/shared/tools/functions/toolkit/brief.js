@@ -380,7 +380,7 @@ export function createGetBriefExecutor() {
     }
     if (!fastDir) {
       return `Error: get_brief found no staged research brief for work item ${workItemId}. `
-        + "Plan from the work item description and use read_file/search_files for additional context.";
+        + "Plan from the work item description and use the issued exact-file read/search tools for additional context.";
     }
 
     const sections = {};

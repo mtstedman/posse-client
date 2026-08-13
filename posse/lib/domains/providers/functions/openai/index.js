@@ -12,6 +12,7 @@ import { getSetting } from "../../../queue/functions/index.js";
 import { getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { composeRemoteAssessorPromptForProvider } from "../shared/remote-assessor-prompt.js";
 import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { issuedToolSurfaceForProviderPolicy, narrowProviderOptionsToRemoteIssuance } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildDisabledAtlasAttachment, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
@@ -437,6 +438,8 @@ export async function callProvider(promptText, {
     projectDir: workingDir,
   });
   executionContract = appendExecutionTools(executionContract, atlasAttachment.tools);
+  const tools = getToolsForRole(executionContract);
+  executionContract = projectFunctionToolSurface(executionContract, tools);
   const contractBlock = renderExecutionContractBlock(executionContract);
   const omitSessionPreamble = recyclingMode === "resume";
   const remoteSystemPromptText = omitSessionPreamble ? null : (String(remoteSystemPrompt || "").trim() || null);
@@ -445,7 +448,6 @@ export async function callProvider(promptText, {
     omitSessionPreamble ? null : contractBlock,
     omitSessionPreamble ? null : stableContext,
   ].filter(Boolean).join("\n\n") || null;
-  const tools = getToolsForRole(executionContract);
   const directOutput = !onLine && !silent;
 
   // Build scope predicates for tool execution

@@ -453,7 +453,7 @@ function dedupeAtlasSummaryFromInstructions(instructions, rawAtlasSummary, sanit
 function assessorShellPolicyHint(role, packet = {}) {
   if (String(role || "").toLowerCase() !== "assessor") return null;
   if (packet?.tool_policy?.allow_shell !== true && packet?.capabilities?.tools?.shell !== true) return null;
-  return "Assessor shell policy: read-only bash is allowed for inspection/verification only. Use run_scoped_checks for lint/typecheck, including PHP syntax checks; do not run php -l through bash.";
+  return "Assessor shell policy: the issued read-only shell is allowed for inspection/verification only. Use the issued scoped-check tool for lint/typecheck, including PHP syntax checks; do not run php -l through the shell.";
 }
 
 // The remote renderer trims each insight field to ~240 chars anyway, so cap

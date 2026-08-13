@@ -1052,40 +1052,14 @@ export function buildNativeToolDescriptor(schema) {
   };
 }
 
-export function buildFoldedAtlasToolDescriptor(schema = {}, {
-  providerName = null,
-  role = null,
-} = {}) {
+export function buildFoldedAtlasToolDescriptor(schema = {}) {
   const annotations = schema.annotations && typeof schema.annotations === "object"
     ? schema.annotations
     : {};
   const name = String(schema.name || "");
   const mutating = isBlockedFoldedAtlasTool(name);
-  let canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
-  let inputSchema = schema.inputSchema;
-  // The multi-selection executor remains available, but the first follow-up
-  // Codex researcher surface stays scalar. Separate independent tool calls can
-  // then be emitted concurrently instead of being collapsed into one large,
-  // nested result that suppresses top-level provider concurrency.
-  if (
-    String(providerName || "").toLowerCase() === "codex"
-    && String(role || "").toLowerCase() === "researcher"
-    && stripAtlasPrefix(name) === "code.window"
-    && inputSchema?.properties?.items
-  ) {
-    const properties = { ...inputSchema.properties };
-    delete properties.items;
-    inputSchema = {
-      ...inputSchema,
-      properties,
-      required: [],
-      anyOf: [
-        { required: ["reason", "symbolId"] },
-        { required: ["reason", "file", "identifiersToFind"] },
-      ],
-    };
-    canonicalDescription = "Bounded exact code for one symbol or anchored file region. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections.";
-  }
+  const canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
+  const inputSchema = schema.inputSchema;
   return {
     ...schema,
     description: canonicalDescription || schema.description,

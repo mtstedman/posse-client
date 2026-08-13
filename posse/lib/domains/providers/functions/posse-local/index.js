@@ -17,6 +17,7 @@ import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-i
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { buildExecutionContract } from "../../../../shared/tools/functions/contract.js";
+import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import {
   issuedToolSurfaceForProviderPolicy,
   narrowProviderOptionsToRemoteIssuance,
@@ -603,7 +604,7 @@ export async function callProvider(promptText, opts = {}) {
     && LOCAL_MODEL_IDS.includes(selected)
     && typeof mcpGate?.callTool === "function"
     && issuedToolSurface.length > 0;
-  const executionContract = toolEligible
+  let executionContract = toolEligible
     ? buildExecutionContract({
       provider: "posse-local",
       role: executionRole,
@@ -660,6 +661,9 @@ export async function callProvider(promptText, opts = {}) {
       const priority = (tool) => LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || "")) ? 0 : 1;
       return priority(left) - priority(right);
     });
+  if (executionContract) {
+    executionContract = projectFunctionToolSurface(executionContract, toolDefinitions);
+  }
   const terminalHandoffIssued = toolDefinitions.some((tool) => String(tool?.name || "") === "agent_handoff");
   // Terminal local calls may need one bounded protocol correction plus the
   // final handoff after the ordinary tool budget. These are coordination

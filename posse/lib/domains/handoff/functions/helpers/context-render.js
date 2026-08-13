@@ -293,9 +293,9 @@ function renderPacketContextString(packet, {
       if (meta.reason === "outside_project_scope") return `=== ${p} === (outside project scope - verify path)`;
       return `=== ${p} === (file not found - verify path)`;
     }
-    if (meta.reason === "preload_capped") return `=== ${p} === (contents not preloaded - preload cap; use read_file before editing)`;
-    if (meta.truncated) return `=== ${p} === (contents not preloaded - file too large; use read_file slices before editing)`;
-    return `=== ${p} === (contents not preloaded - use read_file before editing)`;
+    if (meta.reason === "preload_capped") return `=== ${p} === (contents not preloaded - preload cap; use the issued exact-file reader before editing)`;
+    if (meta.truncated) return `=== ${p} === (contents not preloaded - file too large; use bounded slices from the issued exact-file reader before editing)`;
+    return `=== ${p} === (contents not preloaded - use the issued exact-file reader before editing)`;
   };
   const buildEditableFileParts = () => {
     const fileParts = [];
@@ -323,7 +323,7 @@ function renderPacketContextString(packet, {
       }
 
       if (sp.toc.length > 0) {
-        parts.push("\nOTHER FUNCTIONS (use Read tool with line range to view):");
+        parts.push("\nOTHER FUNCTIONS (use the issued exact-file reader with a line range to view):");
         for (const fn of sp.toc) {
           parts.push(`  ${fn.name} [lines ${fn.startLine}-${fn.endLine}] - ${fn.signature.slice(0, 100)}`);
         }
@@ -358,9 +358,9 @@ function renderPacketContextString(packet, {
       const atlasLabel = atlasBackendLabel(packet.atlas);
       const atlasExactAccess = packet.atlas?.active && !packet.atlas?.prefetchFailed
         ? (atlasGateEnabled
-          ? `Use ${atlasLabel} prefetch plus focused ${atlasLabel} code retrieval first for scoped source files; native read_file/search_files are fallback only when ${atlasLabel} cannot provide remaining exact content or you have mutated files and need current worktree state.`
-          : `Use ${atlasLabel} code retrieval first for scoped source files when possible; use read_file/search_files when ${atlasLabel} cannot provide remaining exact content or you have mutated files and need current worktree state.`)
-        : "Use read_file/search_files to inspect exact content before editing.";
+          ? `Use ${atlasLabel} prefetch plus focused ${atlasLabel} code retrieval first for scoped source files; issued exact-file read/search tools are fallback only when ${atlasLabel} cannot provide remaining exact content or you have mutated files and need current worktree state.`
+          : `Use ${atlasLabel} code retrieval first for scoped source files when possible; use the issued exact-file read/search tools when ${atlasLabel} cannot provide remaining exact content or you have mutated files and need current worktree state.`)
+        : "Use the issued exact-file read/search tools to inspect exact content before editing.";
       const accessNote = [
         "EDITABLE FILE CONTENT ACCESS:",
         packet.editable_file_preload_mode === "off"
@@ -460,7 +460,7 @@ function renderPacketContextString(packet, {
   // Dropped files warning (optional)
   if (includeDynamic && packet.dropped_files && packet.dropped_files.length > 0) {
     queueOptional(
-      `WARNING - FILES TOO LARGE TO PRELOAD (you may need to use read_file for these):\n${packet.dropped_files.map((f) => `- ${f}`).join("\n")}`,
+      `WARNING - FILES TOO LARGE TO PRELOAD (you may need the issued exact-file reader for these):\n${packet.dropped_files.map((f) => `- ${f}`).join("\n")}`,
       { key: "dropped_files" },
     );
   }

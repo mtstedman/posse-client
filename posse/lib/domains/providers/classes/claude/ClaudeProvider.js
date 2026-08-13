@@ -2,7 +2,7 @@ import { BaseProvider } from "../BaseProvider.js";
 
 export class ClaudeProvider extends BaseProvider {
   static name = "claude";
-  static capabilities = Object.freeze({ images: false, sessionResume: true });
+  static capabilities = Object.freeze({ images: false, sessionResume: true, toolAttachment: "mcp" });
 
   constructor({ module } = {}) {
     super({ name: ClaudeProvider.name, module });
@@ -28,4 +28,3 @@ export class ClaudeProvider extends BaseProvider {
     return result;
   }
 }
-

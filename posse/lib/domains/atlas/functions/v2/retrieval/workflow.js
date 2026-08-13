@@ -270,7 +270,7 @@ async function executeActionStep({ step, resolvedArgs, params, runAction }) {
   if (!step.action) throw new Error(`Unknown ATLAS action for workflow step: ${step.fn}`);
   if (step.action === "workflow") throw new Error("workflow steps cannot recursively call workflow");
   if (step.action === "file.write" || step.fn === "fileWrite") {
-    throw new Error("file.write is not exposed in native ATLAS v2; use write_file/edit_file outside workflow");
+    throw new Error("file.write is not exposed in native ATLAS v2; use an issued workspace file-mutation tool outside workflow");
   }
   const call = /** @type {ToolCall} */ ({
     action: step.action,

@@ -693,18 +693,18 @@ export class MutationPolicy {
       }
     }
     if (BLOCKED_MUTATING_COMMAND.test(cmd) || BLOCKED_INLINE_SCRIPT_WRITE.test(cmd)) {
-      return { ok: false, error: `Error: Mutating command blocked - bash is limited to read-only inspection and test/build runners. Use write_file/edit_file or scoped file tools for workspace changes: ${cmd.slice(0, 100)}` };
+      return { ok: false, error: `Error: Mutating command blocked - the shell is limited to read-only inspection and test/build runners. Use an issued scoped file-mutation tool for workspace changes: ${cmd.slice(0, 100)}` };
     }
 
     for (const sub of subcommands) {
       const blockedArgReason = blockedBashArgumentReason(sub);
       if (blockedArgReason) {
-        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - bash is limited to read-only inspection and test/build runners. Use scoped file tools for workspace changes: ${sub.slice(0, 100)}` };
+        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - the shell is limited to read-only inspection and test/build runners. Use an issued scoped file-mutation tool for workspace changes: ${sub.slice(0, 100)}` };
       }
       const syntax = scopedSyntaxCommand(this, sub);
       if (syntax.recognized) {
         if (syntax.error) {
-          return { ok: false, error: `Error: ${syntax.error}. Use run_scoped_checks for the declared scope.` };
+          return { ok: false, error: `Error: ${syntax.error}. Use the issued scoped-check tool for the declared scope.` };
         }
         continue;
       }

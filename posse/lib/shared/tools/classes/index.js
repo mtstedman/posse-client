@@ -6,6 +6,7 @@ export * from "./NativeBinary.js";
 export * from "./PersistentMcpOwner.js";
 export * from "./ToolCatalog.js";
 export * from "./ToolContract.js";
+export * from "./ProviderToolRenderer.js";
 export * from "./ToolExecutor.js";
 export * from "./ToolGate.js";
 export * from "./ToolRegistry.js";

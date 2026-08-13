@@ -1,4 +1,5 @@
 import { extractJson as defaultExtractJson } from "../../../shared/format/functions/json.js";
+import { ProviderToolRenderer } from "../../../shared/tools/classes/ProviderToolRenderer.js";
 
 import { classifyProviderError } from "../functions/shared/api-resilience.js";
 
@@ -18,6 +19,7 @@ export class BaseProvider {
     this.module = module || {};
     this.call = this.call.bind(this);
     this.callProvider = this.callProvider.bind(this);
+    this.renderTool = this.renderTool.bind(this);
   }
 
   get MODEL_TIERS() {
@@ -29,7 +31,10 @@ export class BaseProvider {
   }
 
   get capabilities() {
-    return this.module.capabilities || this.constructor.capabilities || {};
+    return {
+      ...(this.constructor.capabilities || {}),
+      ...(this.module.capabilities || {}),
+    };
   }
 
   getModelTierConfig(tier = "standard") {
@@ -112,6 +117,18 @@ export class BaseProvider {
       return this.module.getToolAttachmentMode();
     }
     return this.capabilities?.toolAttachment || null;
+  }
+
+  createToolRenderer(issuedSurface = []) {
+    return new ProviderToolRenderer({
+      providerName: this.name,
+      toolAttachmentMode: this.getToolAttachmentMode(),
+      issuedSurface,
+    });
+  }
+
+  renderTool(reference, issuedSurface = []) {
+    return this.createToolRenderer(issuedSurface).render(reference);
   }
 
   // Construct a provider-specific image-generation client (currently an

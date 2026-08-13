@@ -1689,8 +1689,8 @@ export const TOOL_BASH = {
   description:
     "Execute a read-only inspection command or test/build runner and return stdout+stderr. " +
     "On Windows this runs through PowerShell when shell features are needed; prefer repo-native test commands and PowerShell-compatible syntax over Unix-only filters. " +
-    "Do not use this for lint/typecheck when run_scoped_checks can cover the declared scope. " +
-    "Do not use this to modify files; use write_file/edit_file or scoped file tools for workspace changes.",
+    "Do not use this for lint/typecheck when the issued scoped-check tool can cover the declared scope. " +
+    "Do not use this to modify files; use issued scoped file-mutation tools for workspace changes.",
   parameters: {
     type: "object",
     properties: {
@@ -1967,16 +1967,16 @@ export const TOOL_CHAIN_READ = {
   description:
     "Read exact missing file context through the deterministic fallback. When ATLAS is active, " +
     "successful ATLAS source retrieval already counts as file-content evidence; do not " +
-    "repeat it with chain_read merely to audit, verify, or cite it. Use chain_read only " +
+    "repeat it with this fallback reader merely to audit, verify, or cite it. Use this reader only " +
     "for remaining ATLAS evidence gaps, exact mutated or non-indexed state, an " +
     "unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you " +
-    "call chain_verdict to issue your verdict. Large files may be paged with " +
+    "call the issued verdict companion to classify it. Large files may be paged with " +
     "offset/limit; after the file is tagged relevant, later continuation pages inherit " +
-    "that verdict and do not require another chain_verdict. When ATLAS already returned " +
+    "that verdict and do not require another verdict call. When ATLAS already returned " +
     "source content for an indexed file, request an explicit slice of at most 250 lines " +
     "or use search/jsonPath. " +
     "If a previously relevant file is restored from the audit ledger, its verdict carries over and no new verdict is needed. " +
-    "Optional search/jsonPath/maxBytes uses the same structured extraction as read_file.",
+    "Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.",
   parameters: {
     type: "object",
     properties: {

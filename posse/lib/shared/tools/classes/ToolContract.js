@@ -1,5 +1,7 @@
 import { normPath, normalizeRoots } from "../../scope/functions/path.js";
+import { TOOL_REFS } from "../../../catalog/tool-references.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
+import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
@@ -80,27 +82,8 @@ function stripWebToolsFromList(listStr) {
     .join(",");
 }
 
-function renderedToolName(tool = {}, contract = {}) {
-  const surfaceName = String(tool?.providerSurfaceName || tool?.surfaceName || "").trim();
-  if (surfaceName) return surfaceName;
-  const name = String(tool?.name || "").trim();
-  if (!name || tool?.access !== "atlas") return name;
-  if (name.startsWith("atlas.") || name.startsWith("atlas_")) return name;
-  const provider = String(contract?.provider || "").trim().toLowerCase();
-  if (provider === "openai" || provider === "grok") {
-    return ToolCatalog.getSchema(name)?.name || `atlas_${name.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
-  }
-  return `atlas.${name}`;
-}
-
 function canonicalToolName(tool = {}) {
   return String(tool?.canonicalName || tool?.name || "").trim();
-}
-
-function renderedNameForCanonicalTool(contract = {}, toolName = "") {
-  const canonicalName = String(toolName || "").trim();
-  const tool = (contract.tools || []).find((candidate) => canonicalToolName(candidate) === canonicalName);
-  return tool ? renderedToolName(tool, contract) : null;
 }
 
 function normalizeToolAppendSpec(toolLike, catalog = ToolCatalog) {
@@ -200,6 +183,10 @@ export class ToolContract {
 
   renderBlock() {
     const contract = this.contract;
+    const toolRenderer = new ProviderToolRenderer({
+      providerName: contract.provider,
+      issuedSurface: contract,
+    });
     const lines = [
       "RUNTIME CAPABILITY MANIFEST / EXECUTION CONTRACT:",
       `- Provider: ${contract.provider || "generic"}`,
@@ -240,20 +227,8 @@ export class ToolContract {
       return lines.join("\n");
     }
     lines.push("- Tool interface: the provider-exposed tool schemas are exhaustive; call their exact exposed names.");
-    const aliasedTools = (contract.tools || []).filter((tool) => {
-      const explicitSurfaceName = String(tool?.providerSurfaceName || tool?.surfaceName || "").trim();
-      const renderedName = renderedToolName(tool, contract);
-      const canonicalName = canonicalToolName(tool);
-      return explicitSurfaceName && canonicalName && renderedName && canonicalName !== renderedName;
-    });
-    if (aliasedTools.length > 0) {
-      lines.push("- Provider tool map (call the left-hand name exactly; canonical labels are explanatory only):");
-      for (const tool of aliasedTools) {
-        lines.push(`  - ${renderedToolName(tool, contract)} (canonical: ${canonicalToolName(tool)})`);
-      }
-    }
     if (contract.role === "dev" && contract.allowWrite) {
-      const editFile = renderedNameForCanonicalTool(contract, "edit_file");
+      const editFile = toolRenderer.tryRender(TOOL_REFS.tools.editFile);
       if (editFile) {
         lines.push(`- Dev mutation route: use ${editFile} for scoped file changes. Native apply_patch and shell writes are unavailable unless they are explicitly listed in this manifest.`);
         lines.push("- Exact files_to_create are materialized before provider execution; populate those files through the same edit route.");
@@ -262,23 +237,23 @@ export class ToolContract {
       }
     }
     if (contract.role === "researcher") {
-      const chainRead = renderedNameForCanonicalTool(contract, "chain_read");
-      const chainVerdict = renderedNameForCanonicalTool(contract, "chain_verdict");
-      const readFile = renderedNameForCanonicalTool(contract, "read_file");
+      const chainRead = toolRenderer.tryRender(TOOL_REFS.tools.chainRead);
+      const chainVerdict = toolRenderer.tryRender(TOOL_REFS.tools.chainVerdict);
+      const readFile = toolRenderer.tryRender(TOOL_REFS.tools.readFile);
       if (chainRead && chainVerdict) {
         const readFileRule = readFile ? `, not ${readFile}` : "";
         lines.push(`- Exact-source fallback: use ${chainRead}${readFileRule}. When ATLAS is active, successful ATLAS retrieval is sufficient; use fallback only for exact context still missing. Pair the first page of a new file with ${chainVerdict}; relevant continuation pages inherit that verdict.`);
       }
     } else if (contract.role === "planner") {
-      const readFile = renderedNameForCanonicalTool(contract, "read_file");
-      const listFiles = renderedNameForCanonicalTool(contract, "list_files");
-      const searchFiles = renderedNameForCanonicalTool(contract, "search_files");
+      const readFile = toolRenderer.tryRender(TOOL_REFS.tools.readFile);
+      const listFiles = toolRenderer.tryRender(TOOL_REFS.tools.listFiles);
+      const searchFiles = toolRenderer.tryRender(TOOL_REFS.tools.searchFiles);
       if (readFile && listFiles && searchFiles) {
         lines.push(`- File content path: use ${readFile}/${listFiles}/${searchFiles} for exact missing context.`);
       }
     } else if (contract.role === "assessor") {
-      const bash = renderedNameForCanonicalTool(contract, "bash");
-      const scopedChecks = renderedNameForCanonicalTool(contract, "run_scoped_checks");
+      const bash = toolRenderer.tryRender(TOOL_REFS.tools.bash);
+      const scopedChecks = toolRenderer.tryRender(TOOL_REFS.tools.runScopedChecks);
       if (bash) {
         lines.push(`- Assessor shell policy: ${bash} is read-only and only for inspection or verification commands. Assessors must not modify files.`);
       }

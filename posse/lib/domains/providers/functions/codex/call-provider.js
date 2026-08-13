@@ -3,6 +3,8 @@
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { TOOL_REFS } from "../../../../catalog/tool-references.js";
+import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
 import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
@@ -45,15 +47,13 @@ export function buildCodexRuntimeContractBlock(executionContract, {
   // only provider-local delta the model needs is the mutation route because
   // Codex's ambient apply_patch/shell writes are deliberately unavailable.
   if (executionContract?.allowWrite !== true) return "";
-  const tools = Array.isArray(executionContract?.tools) ? executionContract.tools : [];
-  const surfaceName = (canonicalName) => {
-    const tool = tools.find((candidate) => (
-      String(candidate?.canonicalName || candidate?.name || "").trim() === canonicalName
-    ));
-    return String(tool?.providerSurfaceName || tool?.surfaceName || "").trim() || null;
-  };
-  const editFile = surfaceName("edit_file");
-  const writeFile = surfaceName("write_file");
+  const tools = new ProviderToolRenderer({
+    providerName: "codex",
+    toolAttachmentMode: "deterministic-bridge",
+    issuedSurface: executionContract,
+  });
+  const editFile = tools.tryRender(TOOL_REFS.tools.editFile);
+  const writeFile = tools.tryRender(TOOL_REFS.tools.writeFile);
   const routes = [
     editFile ? `${editFile} for scoped edits` : null,
     writeFile ? `${writeFile} for full-file output` : null,
