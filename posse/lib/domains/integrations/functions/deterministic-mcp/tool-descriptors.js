@@ -469,6 +469,74 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "file.write": { access: "atlas", summary: "Intentionally not exposed in native ATLAS v2. Use scoped edit_file for code changes; deprecated write_file remains only for dynamic artifact compatibility." },
 });
 
+export const TOOL_BATCHING_CLASSES = Object.freeze({
+  PARALLEL_READ: "parallel-read",
+  NATIVE_BATCH: "native-batch",
+  SERIAL_PROTOCOL: "serial-protocol",
+  ORDERED: "ordered",
+});
+
+const PARALLEL_READ_TOOLS = new Set([
+  "read_file",
+  "list_files",
+  "search_files",
+  "git_history",
+  "hash_file",
+  "read_image_metadata",
+  "validate_artifact_output",
+  "extract_image_text",
+  "query",
+  "code",
+  "repo",
+  "action.search",
+  "manual",
+  "symbol.search",
+  "symbol.overview",
+  "tree.branch",
+  "tree.expand",
+  "code.skeleton",
+  "code.lens",
+  "code.window",
+  "code.structure",
+  "review.delta",
+  "review.analyze",
+  "review.risk",
+  "file.read",
+]);
+
+const NATIVE_BATCH_TOOLS = new Set([
+  "sub_agent",
+  "inspect_file",
+  "create_test",
+  "run_test",
+  "fetch_ref",
+  "create_ref",
+  "symbol.card",
+  "code.survey",
+  "memory.surface",
+  "memory.get",
+]);
+
+const SERIAL_PROTOCOL_TOOLS = new Set([
+  "agent_handoff",
+  "sub_agent_next_input",
+  "chain_read",
+  "chain_verdict",
+  "get_operator_feedback",
+  "ack_operator_feedback",
+  "agent.feedback",
+  "memory.store",
+  "memory.feedback",
+]);
+
+export function getToolBatchingClass(name) {
+  const canonicalName = String(name || "").trim();
+  if (PARALLEL_READ_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.PARALLEL_READ;
+  if (NATIVE_BATCH_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.NATIVE_BATCH;
+  if (SERIAL_PROTOCOL_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.SERIAL_PROTOCOL;
+  return TOOL_BATCHING_CLASSES.ORDERED;
+}
+
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "fetch_ref",
   "create_ref",
@@ -754,6 +822,7 @@ export const TOOL_CATALOG = Object.freeze({
       schema,
       access: spec.access,
       summary: spec.summary,
+      batching: getToolBatchingClass(name),
       observation: Object.freeze({ ...spec.observation }),
       roleAllowlist: roleAllowlistForTool(name),
       gateTier: GATED_NATIVE_TOOLS.has(name) ? "native-atlas-gated" : "native",
@@ -771,6 +840,7 @@ export const TOOL_CATALOG = Object.freeze({
       schema,
       access: spec.access,
       summary: spec.summary,
+      batching: getToolBatchingClass(name),
       observation: null,
       roleAllowlist: atlasRoleAllowlistForTool(name),
       gateTier: "atlas",
@@ -796,7 +866,8 @@ export function getToolSchemaForRole(name, role, {
 }
 
 export function getToolExecutionSpec(name) {
-  return TOOL_EXECUTION_SPECS[name] || null;
+  const spec = TOOL_EXECUTION_SPECS[name];
+  return spec ? { ...spec, batching: getToolBatchingClass(name) } : null;
 }
 
 export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false } = {}) {

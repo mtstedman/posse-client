@@ -18,6 +18,7 @@ function freezeEntry(entry = {}) {
     schema: entry.schema || null,
     access: String(entry.access || "unknown"),
     summary: String(entry.summary || ""),
+    batching: String(entry.batching || "ordered"),
     budgetExempt: !!entry.budgetExempt,
     deprecated: entry.deprecated === true,
     deprecationReason: entry.deprecationReason ? String(entry.deprecationReason) : null,
@@ -71,6 +72,7 @@ export class ToolCatalog {
       return {
         access: entry.access || "unknown",
         summary: entry.summary || "",
+        batching: entry.batching || "ordered",
         budgetExempt: !!entry.budgetExempt,
         deprecated: entry.deprecated === true,
         deprecationReason: entry.deprecationReason || null,
@@ -138,6 +140,7 @@ export class ToolCatalog {
       schema: descriptor.schema || null,
       access,
       summary,
+      batching: descriptor.batching || "ordered",
       budgetExempt: !!descriptor.budgetExempt,
       deprecated: descriptor.deprecated === true,
       deprecationReason: descriptor.deprecationReason || null,

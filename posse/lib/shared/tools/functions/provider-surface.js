@@ -48,3 +48,45 @@ export function projectFunctionToolSurface(contract = {}, toolDefinitions = []) 
     shellMode: shellAllowed ? (contract?.shellMode || "guarded-exception") : "none",
   };
 }
+
+function pushUnique(values, value) {
+  if (value && !values.includes(value)) values.push(value);
+}
+
+export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
+  if (!toolRenderer || typeof toolRenderer.tryRenderIssued !== "function") return [];
+
+  const parallelAtlas = [];
+  const parallelDeterministic = [];
+  const nativeBatch = [];
+  for (const tool of Array.isArray(contract?.tools) ? contract.tools : []) {
+    const rendered = toolRenderer.tryRenderIssued(tool);
+    if (!rendered) continue;
+    if (tool?.batching === "parallel-read") {
+      const destination = String(tool?.suite || "").trim() === "atlas"
+        || String(tool?.access || "").trim() === "atlas"
+        ? parallelAtlas
+        : parallelDeterministic;
+      pushUnique(destination, rendered);
+    } else if (tool?.batching === "native-batch") {
+      pushUnique(nativeBatch, rendered);
+    }
+  }
+
+  if (parallelAtlas.length + parallelDeterministic.length + nativeBatch.length === 0) return [];
+
+  const lines = [
+    "- Parallel tool-call rule: when two or more independent calls are ready, emit every ready call together in one assistant response before awaiting results. This applies to every role, not only research.",
+  ];
+  if (parallelAtlas.length > 0) {
+    lines.push(`- Parallel Atlas reads issued this run: ${parallelAtlas.join(", ")}.`);
+  }
+  if (parallelDeterministic.length > 0) {
+    lines.push(`- Parallel deterministic/MCP repository reads issued this run: ${parallelDeterministic.join(", ")}.`);
+  }
+  if (nativeBatch.length > 0) {
+    lines.push(`- Schema-native batch tools issued this run: ${nativeBatch.join(", ")}. Combine ready items in one call only through array fields present in that tool's schema.`);
+  }
+  lines.push("- For parallel-read tools, batching means multiple top-level tool calls in the same response; do not invent an items field. Serialize only when one result is required to choose or parameterize the next call, or when a stateful, mutating, or terminal action has no schema-defined atomic batch.");
+  return lines;
+}

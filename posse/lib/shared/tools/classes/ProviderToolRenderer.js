@@ -74,4 +74,26 @@ export class ProviderToolRenderer {
       throw error;
     }
   }
+
+  renderIssued(tool = {}) {
+    const canonicalName = canonicalNameFor(tool);
+    if (!canonicalName) {
+      throw new TypeError("Issued tool rendering requires a canonical name");
+    }
+    return this.render({ suite: suiteFor(tool), canonicalName });
+  }
+
+  tryRenderIssued(tool = {}) {
+    try {
+      return this.renderIssued(tool);
+    } catch (error) {
+      if (
+        error instanceof TypeError
+        || ["PROVIDER_TOOL_NOT_ISSUED", "PROVIDER_TOOL_NAME_UNRESOLVED"].includes(error?.code)
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
 }

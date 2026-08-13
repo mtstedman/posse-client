@@ -568,11 +568,11 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "One section of the terminal research report. Put the substantive answer in claim and summary; ordinary repository path:line citations are allowed there. Evidence refs are optional.",
+    "One section of the terminal research report. Put the complete substantive section in claim. For researcher.report.v1 omit the optional summary instead of restating the claim; researcher.pipeline.v1 may use it for distinct planning synthesis. Ordinary repository path:line citations are allowed in narrative text. Evidence refs are optional.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
-    summary: { type: "string" },
+    summary: { type: "string", description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
   },
 };
 
@@ -854,6 +854,22 @@ const V2_HANDOFF_CLAIMS = {
   items: V2_HANDOFF_CLAIM,
 };
 
+const V2_RESEARCHER_HANDOFF_CLAIM = {
+  ...V2_HANDOFF_CLAIM,
+  description:
+    "One specific research claim with optional evidence. For researcher.report.v1 put the complete answer section in claim and omit summary/prose; researcher.pipeline.v1 may use summary for distinct planning synthesis.",
+  properties: {
+    ...V2_HANDOFF_CLAIM.properties,
+    summary: { ...V2_HANDOFF_CLAIM.properties.summary, description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
+    prose: { ...V2_HANDOFF_CLAIM.properties.prose, description: "Deprecated pipeline-only alias for summary. Omit for researcher.report.v1." },
+  },
+};
+
+const V2_RESEARCHER_HANDOFF_CLAIMS = {
+  ...V2_HANDOFF_CLAIMS,
+  items: V2_RESEARCHER_HANDOFF_CLAIM,
+};
+
 const V2_RESEARCHER_SCOPE = {
   type: "object",
   description: "Verified downstream seed files. These are research seeds, not write authority.",
@@ -869,7 +885,10 @@ const V2_RESEARCHER_REPORT = exactReport({
   constraints: HANDOFF_STRING_LIST,
   questions: HANDOFF_STRING_LIST,
   research: AGENT_HANDOFF_RESEARCH_DATA,
-}, ["summary"], { claims: V2_HANDOFF_CLAIMS });
+}, ["summary"], {
+  claims: V2_RESEARCHER_HANDOFF_CLAIMS,
+  summaryDescription: "Brief report introduction only. Put the substantive answer in claims and do not duplicate claim text here.",
+});
 
 const V2_PLANNER_COMPACT_TASK = {
   ...PLANNER_COMPACT_TASK_V3,
@@ -902,7 +921,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. Use named claim objects with summary for optional synthesis. In report mode, target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Prefer 40-line evidence slices when refs add value. Do not submit confidence or payload. The receipt ends provider generation.",
+    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. In report mode put each complete answer section in claim, omit each claim's optional summary/prose, and use report.summary only as a brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Prefer 40-line evidence slices when refs add value. Do not submit confidence or payload. The receipt ends provider generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -964,7 +983,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode, claims must contain the substantive terminal report; target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional transport: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Follow the schema exactly. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode, claims must contain the substantive terminal report, each claim's optional summary must be omitted, and the top-level summary is only a brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional transport: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Follow the schema exactly. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -976,7 +995,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         enum: ["success", "gap", "input_required", "complete"],
       },
-      summary: { type: "string", minLength: 1 },
+      summary: { type: "string", minLength: 1, description: "For researcher.report.v1 this is only a brief introduction; do not duplicate claim text." },
       claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
         type: "array",

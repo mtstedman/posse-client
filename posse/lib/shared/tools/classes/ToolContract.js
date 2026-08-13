@@ -1,6 +1,7 @@
 import { normPath, normalizeRoots } from "../../scope/functions/path.js";
 import { TOOL_REFS } from "../../../catalog/tool-references.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
+import { renderToolBatchingGuidance } from "../functions/provider-surface.js";
 import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
@@ -227,6 +228,7 @@ export class ToolContract {
       return lines.join("\n");
     }
     lines.push("- Tool interface: the provider-exposed tool schemas are exhaustive; call their exact exposed names.");
+    lines.push(...renderToolBatchingGuidance(contract, toolRenderer));
     if (contract.role === "dev" && contract.allowWrite) {
       const editFile = toolRenderer.tryRender(TOOL_REFS.tools.editFile);
       if (editFile) {
@@ -590,6 +592,7 @@ export class ToolContract {
         canonicalName,
         access: tool?.access || "unknown",
         summary: tool?.summary || "",
+        batching: tool?.batching || "ordered",
         ...(tool?.mcpName ? { mcpName: tool.mcpName } : {}),
         ...(providerSurfaceName ? { providerSurfaceName, surfaceName: providerSurfaceName } : {}),
         ...(tool?.transport ? { transport: tool.transport } : {}),
