@@ -315,7 +315,16 @@ export function validatePlannerTestCommand(command) {
   } else if (/^(?:phpunit|phpunit\.bat)$/.test(executable)) {
     ok = true;
   } else if (["php", "php.exe"].includes(executable)) {
-    ok = args.some((arg) => /(?:^|[/\\])(?:phpunit|[^/\\]*tests?[^/\\]*)\.php$/.test(arg));
+    // Accept a test-named script anywhere, or any .php script under a
+    // tests/ directory. Real projects keep smoke/regression scripts like
+    // tests/api-smoke.php or tests/chess-rules.php; the directory conveys
+    // the same intent as a "test" filename, and rejecting them starves the
+    // assessor of the executable evidence the confidence policy assumes.
+    ok = args.some((arg) => (
+      /(?:^|[/\\])(?:phpunit|[^/\\]*tests?[^/\\]*)\.php$/.test(arg)
+      || (/(?:^|[/\\])tests?[/\\][^\s]*\.php$/.test(arg)
+        && !/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(arg))
+    ));
   } else if (["composer", "composer.bat"].includes(executable)) {
     ok = args[0] === "test" || (args[0] === "run" && /^(?:test|check)(?::|$)/.test(args[1] || ""));
   } else if (["bundle", "bundle.bat"].includes(executable)) {

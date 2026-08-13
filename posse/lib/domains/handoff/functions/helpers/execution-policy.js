@@ -252,6 +252,7 @@ function resolveAssessorPolicy({
   riskScore,
   riskTags,
   taskAbPinnedTestCommand = false,
+  testCommandRejected = false,
 }) {
   let modelTier = "cheap";
   let reasoningEffort = "low";
@@ -278,7 +279,9 @@ function resolveAssessorPolicy({
   if (!facts.has_test_command && facts.is_code_task) {
     modelTier = maxTier(modelTier, "standard");
     reasoningEffort = maxEffort(reasoningEffort, "medium");
-    reasons.push("code task has no registered test command");
+    reasons.push(testCommandRejected
+      ? "declared test command failed runner validation; treated as untested"
+      : "code task has no registered test command");
     // Without an executable verification step, an honest assessor tops out
     // at medium confidence — demanding "high" here just converts every pass
     // into a needs_review human gate. Cap the floor at what is attainable
@@ -315,8 +318,19 @@ export function resolveTaskExecutionPolicy({
   currentModelTier = "standard",
   currentReasoningEffort = "medium",
   taskAbPinnedTestCommand = false,
+  plannerTestCommandValid = null,
 } = {}) {
   const facts = buildTaskStructuralFacts(task, { jobType, taskMode });
+  // A declared test command only counts as executable verification when the
+  // runtime will actually run it. The frozen-test layer validates commands
+  // with an allowlist and rejects the rest, so a policy that trusts the raw
+  // string promises the assessor evidence that never materializes: the floor
+  // stays at "high" while the assessor is left with lint-only signal and
+  // honestly returns "medium", converting every pass into a review gate
+  // (wowiekowie 2026-08-13 jobs #334/#398). Callers pass the validation
+  // outcome; explicit false downgrades the fact.
+  const testCommandRejected = plannerTestCommandValid === false && facts.has_test_command;
+  if (testCommandRejected) facts.has_test_command = false;
   const plannerRiskScore = normalizePolicyScore(task.planner_risk_score ?? task.risk, null);
   const plannerVerificationScore = normalizePolicyScore(task.verification_difficulty, null);
   const scopeConfidence = normalizeScopeConfidence(task.scope_confidence, "medium");
@@ -352,6 +366,7 @@ export function resolveTaskExecutionPolicy({
     riskScore,
     riskTags,
     taskAbPinnedTestCommand,
+    testCommandRejected,
   });
 
   return {

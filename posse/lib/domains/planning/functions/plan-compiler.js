@@ -51,6 +51,7 @@ import {
   normalizeRiskTags,
   resolveTaskExecutionPolicy,
 } from "../../handoff/functions/helpers/execution-policy.js";
+import { validatePlannerTestCommand } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { validateSkillIds } from "../../../shared/skills/functions/registry.js";
 import {
   buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule,
@@ -1638,6 +1639,24 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
 
         const shouldApplyExecutionPolicy = finalJobType === "dev" && taskMode === "code";
+        // Validate the planner's declared test command with the same
+        // allowlist the frozen-test runtime applies. A command the runtime
+        // will reject must not raise the assessor's pass-confidence floor —
+        // it can never produce the executable evidence the floor assumes.
+        let plannerTestCommandValid = null;
+        if (shouldApplyExecutionPolicy && !pinnedTestCommand) {
+          const declaredTestCommand = typeof t.test_command === "string" ? t.test_command.trim() : "";
+          if (declaredTestCommand) {
+            const testCommandValidation = validatePlannerTestCommand(declaredTestCommand);
+            plannerTestCommandValid = testCommandValidation.ok;
+            if (!testCommandValidation.ok) {
+              worker.emit(
+                planJob.id,
+                `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" fails runner validation (${testCommandValidation.reason}) — assessor policy treats the task as untested`,
+              );
+            }
+          }
+        }
         const executionPolicy = shouldApplyExecutionPolicy
           ? resolveTaskExecutionPolicy({
               task: t,
@@ -1646,6 +1665,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               currentModelTier: modelTier,
               currentReasoningEffort: reasoningEffort,
               taskAbPinnedTestCommand: Boolean(pinnedTestCommand),
+              plannerTestCommandValid,
             })
           : null;
         const resolvedModelTier = finalJobType === "promote"
