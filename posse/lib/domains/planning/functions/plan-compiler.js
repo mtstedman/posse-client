@@ -786,18 +786,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           droppedTaskIndexes.add(i);
           continue;
         }
-        const fileKindRepair = reconcilePlannerFileKinds(t, fileKindProjectDir);
-        if (fileKindRepair.changed) {
-          const details = [
-            fileKindRepair.movedToCreate.length > 0
-              ? `${fileKindRepair.movedToCreate.length} missing path(s) to files_to_create`
-              : null,
-            fileKindRepair.movedToModify.length > 0
-              ? `${fileKindRepair.movedToModify.length} existing path(s) to files_to_modify`
-              : null,
-          ].filter(Boolean).join(", ");
-          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: reconciled file kinds for task "${t.title}" (${details})`);
-        }
+        const fileKindValidation = reconcilePlannerFileKinds(t, fileKindProjectDir, {
+          tasks,
+          taskIndex: i,
+        });
         // Exact repo creation files are the complete authority granted to a
         // code-writing handoff. Planner models often redundantly include the
         // files' parent directories in create_roots; retaining those roots
@@ -862,7 +854,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         ) {
           t.job_type = "artificer";
         }
-        const validationErrors = validatePlannedTaskFromModule(t, i, tasks.length);
+        const validationErrors = [
+          ...fileKindValidation.errors,
+          ...validatePlannedTaskFromModule(t, i, tasks.length),
+        ];
         if (validationErrors.length > 0) {
           const title = typeof t.title === "string" && t.title.trim() ? t.title.trim() : `task ${i}`;
           const artifactScopeRejected = String(t.job_type || "").trim().toLowerCase() === "artificer"
@@ -1311,6 +1306,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           if (finalJobType === "dev" && taskMode === "code") {
             const hasModifyScope = Array.isArray(t.files_to_modify) && t.files_to_modify.length > 0;
             const hasCreateScope = Array.isArray(t.files_to_create) && t.files_to_create.length > 0;
+            const hasDeleteScope = Array.isArray(t.files_to_delete) && t.files_to_delete.length > 0;
             const broadNarrowScope = isBroadNarrowScopedCodeTask(t);
             const shouldDropForBroadNarrowScope = underScopedBroadGateMode === "enforce" && broadNarrowScope;
             if (underScopedBroadGateMode !== "off" && broadNarrowScope) {
@@ -1330,6 +1326,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
                     gate_mode: underScopedBroadGateMode,
                     files_to_modify: t.files_to_modify || [],
                     files_to_create: t.files_to_create || [],
+                    files_to_delete: t.files_to_delete || [],
                     create_roots: t.create_roots || [],
                   }),
                 });
@@ -1339,11 +1336,12 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               (researchCandidateCount > 3 || shouldDropForBroadNarrowScope)
               && !hasModifyScope
               && !hasCreateScope
+              && !hasDeleteScope
             ) {
               underScopedDroppedTitles.push(t.title);
               const reason = shouldDropForBroadNarrowScope
                 ? `broad task with narrow writable scope in enforce mode (${underScopedBroadGateMode})`
-                : `research identified ${researchCandidateCount} candidate files but files_to_modify/files_to_create are both empty`;
+                : `research identified ${researchCandidateCount} candidate files but files_to_modify/files_to_create/files_to_delete are all empty`;
               worker.emit(
                 planJob.id,
                 `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped under-scoped code task "${t.title}" — ${reason}`

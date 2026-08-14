@@ -4,6 +4,7 @@
 // deterministic interruptions, retryable interruptions, and catastrophic errors.
 
 import {
+  abandonJobScopeExpansionRequest,
   completeAttempt,
   decrementAttemptCount,
   flagStallResume,
@@ -11,6 +12,7 @@ import {
   getJob,
   getWorkItem,
   incrementAttemptCount,
+  jobHasLivePendingScopeRequest,
   logEvent,
   listJobsByWorkItem,
   setJobError,
@@ -42,6 +44,17 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
+
+export const MAX_LIVE_SCOPE_WAIT_INTERRUPTIONS = 3;
+
+export function liveScopeWaitInterruptionDisposition(payload = {}) {
+  const count = Math.max(0, Number.parseInt(payload?._scope_wait_interruptions, 10) || 0) + 1;
+  return {
+    count,
+    exhausted: count >= MAX_LIVE_SCOPE_WAIT_INTERRUPTIONS,
+    backoffMs: 30_000 * count,
+  };
+}
 
 function deferInterruptedCleanupIfSiblingLocks(job, label) {
   const siblingLocks = activeSiblingWriteLocks(job);
@@ -404,6 +417,111 @@ export async function handleExecuteAttemptError(worker, {
     wtPath,
   })) return;
 
+  let scopeWaitInterruptionExhausted = false;
+
+  // A live scope wait has no provider process left to receive its decision
+  // once execution unwinds here. Retire the gate and refund a bounded number
+  // of attempts so a late approval cannot mutate a future run, while a
+  // deterministically crashing provider still reaches normal failure policy.
+  // Entry checks the raw pending rather than jobHasLivePendingScopeRequest:
+  // that helper reports false once a decision is recorded, which previously
+  // skipped this whole block when the human answered during the provider
+  // unwind — leaving a decided pending permanently stuck in the payload.
+  const scopeWaitPayload = parseJobPayload(currentJob);
+  const scopeWaitPending = scopeWaitPayload?._pending_scope_request;
+  if (scopeWaitPending?.live_wait === true && scopeWaitPending.abandoned !== true) {
+    const currentPayload = scopeWaitPayload;
+    const pending = scopeWaitPending;
+    const interruption = liveScopeWaitInterruptionDisposition(currentPayload);
+    // A recorded decision must be settled, never abandoned; skip straight to
+    // the settle branch instead of asking abandon to reject it.
+    const abandoned = pending.decision
+      ? { ok: false, code: "scope_request_decided" }
+      : abandonJobScopeExpansionRequest({
+        jobId: job.id,
+        requestId: pending?.id || null,
+        attemptId: attempt?.id || null,
+        // This attempt is dead: clear the request and gate even when the
+        // pending belongs to an older attempt, so no gate is orphaned.
+        force: true,
+        code: "scope_wait_interrupted",
+        message: interruption.exhausted
+          ? `The active provider repeatedly exited while waiting for scope approval; job #${job.id} will continue through normal failure accounting.`
+          : `The active provider exited while waiting for scope approval; job #${job.id} will retry without an attempt penalty.`,
+      });
+    if (abandoned?.code === "scope_request_decided") {
+      const settled = settleJobScopeExpansionAttempt({
+        jobId: job.id,
+        attemptId: attempt?.id || null,
+      });
+      // Whatever the settle outcome, a decided pending must not survive this
+      // attempt: nothing later can clear it (abandon refuses decided
+      // requests) and every future scope request would bounce off it.
+      const residual = parseJobPayload(getJob(job.id));
+      if (residual?._pending_scope_request?.decision) {
+        const cleared = { ...residual };
+        delete cleared._pending_scope_request;
+        cleared._scope_request_abandonments = [
+          ...(Array.isArray(residual._scope_request_abandonments) ? residual._scope_request_abandonments : []),
+          {
+            ...residual._pending_scope_request,
+            abandoned: true,
+            abandon_code: "scope_decided_orphaned",
+          },
+        ].slice(-20);
+        updateJobPayload(job.id, JSON.stringify(cleared));
+      }
+      if (settled?.decision === "approved" || residual?._pending_scope_request?.decision === "approved") {
+        completeAttempt(attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: "Provider exited as live scope approval arrived",
+        });
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+          readyAt: new Date().toISOString(),
+        });
+        worker.emit(
+          job.id,
+          `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: scope approval arrived as the provider exited; requeuing with the approved grant${C.reset}`,
+        );
+        return;
+      }
+      scopeWaitInterruptionExhausted = true;
+    } else if (!abandoned?.ok && !["scope_request_stale", "scope_request_job_missing"].includes(abandoned?.code)) {
+      scopeWaitInterruptionExhausted = true;
+    } else {
+      const latest = getJob(job.id);
+      updateJobPayload(job.id, JSON.stringify({
+        ...parseJobPayload(latest),
+        _scope_wait_interruptions: interruption.count,
+      }));
+    }
+    if (scopeWaitInterruptionExhausted || interruption.exhausted) {
+      scopeWaitInterruptionExhausted = true;
+      worker.emit(
+        job.id,
+        `${C.red}[scope] WI#${job.work_item_id} job #${job.id}: active scope wait was interrupted ${interruption.count} times; applying normal failure accounting${C.reset}`,
+      );
+    } else {
+      if (attempt?.id) {
+        completeAttempt(attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: "Active scope approval wait interrupted",
+        });
+      }
+      const hasStash = await stashInterruptedWork(job, wtPath, "scope-wait-interrupted", worker?.projectDir);
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+        readyAt: new Date(Date.now() + interruption.backoffMs).toISOString(),
+      });
+      worker.emit(
+        job.id,
+        `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: active scope wait ended before a decision; gate canceled and attempt refunded with ${Math.ceil(interruption.backoffMs / 1000)}s backoff${hasStash ? " (partial work stashed for resume)" : ""}${C.reset}`,
+      );
+      return;
+    }
+  }
+
   if (err?.code === "HANDOFF_FILE_MATERIALIZATION_FAILED") {
     const message = String(err?.message || "Writing scope could not be materialized");
     completeAttempt(attempt.id, {
@@ -574,7 +692,12 @@ export async function handleExecuteAttemptError(worker, {
   // recover on retry, so they fall through to the handler-error path below which
   // consumes an attempt and eventually dead-letters instead of looping with no
   // penalty. (B7)
-  if (typeof isProviderError === "function" && isProviderError(err) && !isPermanentProviderConfigError(err)) {
+  if (
+    !scopeWaitInterruptionExhausted
+    && typeof isProviderError === "function"
+    && isProviderError(err)
+    && !isPermanentProviderConfigError(err)
+  ) {
     // Cap consecutive penalty-free provider-error requeues. Without an attempt
     // penalty, a persistently failing provider (common with a single configured
     // provider and no working fallback) loops forever — no scheduler/queue-side

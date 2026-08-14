@@ -3,7 +3,13 @@
 
 import fs from "fs";
 import path from "path";
-import { listCrossWiMergeBlockers, logEvent } from "../../queue/functions/index.js";
+import {
+  getWorkItem,
+  getWorkItemMergeDependencies,
+  listCrossWiMergeBlockers,
+  logEvent,
+  updateWorkItemMetadata,
+} from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { runHook } from "./hooks.js";
 import { warmAtlasMergedToMainNow } from "../../integrations/functions/atlas.js";
@@ -15,13 +21,23 @@ import {
 } from "../../atlas/classes/v2/PipelineHooks.js";
 import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
 import {
+  findLegacyWorktreeForWi as nativeFindLegacyWorktreeForWi,
   preserveDirtyWorktreeSnapshot as nativePreserveDirtyWorktreeSnapshot,
   snapshotAndResetDirtyWorktree,
+  worktreePath as nativeWorktreePath,
   withWorktreeLock as nativeWithWorktreeLock,
 } from "./worktree.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { GIT_MERGE_TIMEOUT_MS, firstGitLine, timedOutMergeCommitLanded } from "./workflow-git-utils.js";
+import {
+  DETERMINISTIC_MERGE_FAILURE_KEY,
+  mergeFailureHeadsUnchanged,
+  mergeConflictSummary,
+  resyncHandoffBranchOntoTarget,
+  resolveHandoffSquashConflicts,
+} from "./handoff-conflict-resolution.js";
+import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
 
 export function createMergeWorkflowHelpers(context, {
   ensureCleanTargetBranch,
@@ -32,6 +48,8 @@ export function createMergeWorkflowHelpers(context, {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
   const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
   const preserveDirtyWorktreeSnapshot = context.preserveDirtyWorktreeSnapshot || nativePreserveDirtyWorktreeSnapshot;
+  const canonicalWorktreePath = context.worktreePath || nativeWorktreePath;
+  const findLegacyWorktreeForWi = context.findLegacyWorktree || nativeFindLegacyWorktreeForWi;
 
   function gitDiffStat(mergeBase, branch, cwd) {
     try {
@@ -76,6 +94,49 @@ export function createMergeWorkflowHelpers(context, {
   function expectedSquashSubject(branch, mergeTargetBranch = currentTargetBranch()) {
     const targetBranch = mergeTargetBranch;
     return `Squash merge ${branch} into ${targetBranch}`;
+  }
+
+  function workItemMetadata(wiId) {
+    if (wiId == null) return {};
+    try {
+      const parsed = JSON.parse(getWorkItem(wiId)?.metadata_json || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function mergeHeads(branch, targetBranch, cwd) {
+    try {
+      return {
+        branchHead: gitMergeExec(["rev-parse", branch], cwd),
+        targetHead: gitMergeExec(["rev-parse", targetBranch], cwd),
+      };
+    } catch {
+      return { branchHead: null, targetHead: null };
+    }
+  }
+
+  function recordDeterministicMergeFailure(wiId, branch, targetBranch, heads, error) {
+    if (wiId == null || !heads?.branchHead || !heads?.targetHead) return;
+    const metadata = workItemMetadata(wiId);
+    metadata[DETERMINISTIC_MERGE_FAILURE_KEY] = {
+      branch,
+      target_branch: targetBranch,
+      branch_head: heads.branchHead,
+      target_head: heads.targetHead,
+      error: String(error || "").slice(0, 1000),
+      recorded_at: new Date().toISOString(),
+    };
+    updateWorkItemMetadata(wiId, metadata);
+  }
+
+  function clearDeterministicMergeFailure(wiId) {
+    if (wiId == null) return;
+    const metadata = workItemMetadata(wiId);
+    if (!Object.prototype.hasOwnProperty.call(metadata, DETERMINISTIC_MERGE_FAILURE_KEY)) return;
+    delete metadata[DETERMINISTIC_MERGE_FAILURE_KEY];
+    updateWorkItemMetadata(wiId, metadata);
   }
 
   function emitMergePhase(onPhase, phase, message, data = {}) {
@@ -527,7 +588,11 @@ export function createMergeWorkflowHelpers(context, {
     return withWorktreeLock(cwd, projectDir, () => gitMergeToTargetUnlocked(branch, cwd, options));
   }
 
-  function gitMergeToTargetUnlocked(branch, cwd, { wiId = null, onPhase = null } = {}) {
+  function gitMergeToTargetUnlocked(branch, cwd, {
+    wiId = null,
+    onPhase = null,
+    retryDeterministicConflict = false,
+  } = {}) {
     const targetBranch = currentTargetBranch();
     const log = (msg, extra = {}) => {
       logEvent({
@@ -579,7 +644,66 @@ export function createMergeWorkflowHelpers(context, {
       return { ok: false, deferred: true, message, blockers: mergeBlockers };
     }
 
+    const initialHeads = mergeHeads(branch, targetBranch, cwd);
+    // The retry flag bypasses the unchanged-heads skip below without clearing
+    // the memo: success clears it and deterministic failures overwrite it, so
+    // an eager clear here would only lose the memo when the retry dies on a
+    // transient path.
+    const priorDeterministicFailure = workItemMetadata(wiId)[DETERMINISTIC_MERGE_FAILURE_KEY];
+    if (mergeFailureHeadsUnchanged(priorDeterministicFailure, initialHeads)) {
+      if (retryDeterministicConflict) {
+        log(`Retrying the prior deterministic conflict for ${branch} at the operator's request`, {
+          json: {
+            branch,
+            target: targetBranch,
+            deterministic_conflict_retry: true,
+            branch_head: initialHeads.branchHead,
+            target_head: initialHeads.targetHead,
+          },
+        });
+      } else {
+        const message = `Merge skipped: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict`;
+        log(message, {
+          json: {
+            branch,
+            target: targetBranch,
+            deterministic_conflict_unchanged: true,
+            branch_head: initialHeads.branchHead,
+            target_head: initialHeads.targetHead,
+            prior_error: priorDeterministicFailure.error || null,
+          },
+        });
+        return {
+          ok: false,
+          deterministicConflict: true,
+          unchangedConflict: true,
+          branchHead: initialHeads.branchHead,
+          targetHead: initialHeads.targetHead,
+          message,
+        };
+      }
+    }
+
     const sourceDirty = sourceWorktreeDirtyState(wiId);
+    if (sourceDirty?.verificationFailed) {
+      const message = `Merge refused: could not verify WI#${wiId} worktree state before merging ${branch}`;
+      log(message, {
+        json: {
+          branch,
+          target: targetBranch,
+          source_verification_failed: true,
+          worktree: sourceDirty.wtDir,
+          error: sourceDirty.error || null,
+        },
+      });
+      return {
+        ok: false,
+        infrastructureFailure: true,
+        sourceVerificationFailed: true,
+        message,
+        wtDir: sourceDirty.wtDir,
+      };
+    }
     if (sourceDirty && sourceDirty.trackedFiles.length > 0) {
       const message = `Merge refused: WI#${wiId} worktree has ${sourceDirty.trackedFiles.length} unresolved dirty file(s) before merging ${branch}`;
       log(message, {
@@ -647,6 +771,89 @@ export function createMergeWorkflowHelpers(context, {
           snapshot_ref: String(snapshotRef),
         },
       });
+    }
+
+    const mergedHandoffDependencies = wiId == null
+      ? []
+      : getWorkItemMergeDependencies(wiId)
+        .map((dependency) => ({ ...dependency, source: getWorkItem(dependency.source_work_item_id) }))
+        .filter((dependency) => dependency.source?.merge_state === "merged");
+    const resyncWorktreeDir = (() => {
+      if (wiId == null || mergedHandoffDependencies.length === 0) return null;
+      const canonical = canonicalWorktreePath(projectDir, wiId);
+      if (fs.existsSync(canonical)) return canonical;
+      const legacy = findLegacyWorktreeForWi(projectDir, wiId);
+      return legacy && fs.existsSync(legacy) ? legacy : null;
+    })();
+    if (
+      (sourceDirty == null || sourceDirty.untrackedFiles.length === 0)
+      && mergedHandoffDependencies.length > 0
+      // A pruned/missing worktree is a normal post-completion state, not an
+      // error: skip the resync and let the plain squash merge (plus the
+      // union fallback) handle the branch from the target checkout.
+      && resyncWorktreeDir != null
+    ) {
+      const resync = resyncHandoffBranchOntoTarget({
+        exec: gitMergeExec,
+        cwd,
+        branch,
+        targetBranch,
+        worktreePath: resyncWorktreeDir,
+        dependencyPaths: mergedHandoffDependencies.filter((dependency) => dependency.path),
+        isIgnorableStatusLine: (line) => isRuntimePorcelainLine(line, resyncWorktreeDir),
+      });
+      if (resync.resynced) {
+        log(`Rebased ${branch} onto ${targetBranch} after upstream handoff source merge`, {
+          json: {
+            branch,
+            target: targetBranch,
+            old_base: resync.mergeBase,
+            old_head: resync.branchHead,
+            rebased_head: resync.rebasedHead,
+            dropped_handoff_files: resync.files?.slice(0, 50) || [],
+          },
+        });
+      } else if (resync.infrastructureFailure) {
+        // A resync that cannot run safely (worktree state unverifiable,
+        // branch checked out elsewhere, residual dirt) is not a merge
+        // blocker: the plain squash merge below runs from the target
+        // checkout and never touches the WI worktree, and the union
+        // fallback covers handoff-duplication conflicts. Deferring here
+        // recreated the merge_failed loop for branches that merge cleanly.
+        log(`Handoff resync skipped for ${branch} (${resync.reason}); continuing with the plain squash merge`, {
+          json: {
+            branch,
+            target: targetBranch,
+            handoff_resync_skipped: true,
+            reason: resync.reason,
+          },
+        });
+      } else if (resync.attempted && resync.conflict) {
+        const message = `Merge deferred for manual review: handoff resync of ${branch} onto ${targetBranch} conflicted — ${resync.error}`;
+        log(message, {
+          json: {
+            branch,
+            target: targetBranch,
+            handoff_resync_conflict: true,
+            old_base: resync.mergeBase,
+            branch_head: resync.branchHead,
+            target_head: resync.targetHead,
+            error: resync.error,
+          },
+        });
+        recordDeterministicMergeFailure(wiId, branch, targetBranch, {
+          branchHead: resync.branchHead,
+          targetHead: resync.targetHead,
+        }, resync.error);
+        return {
+          ok: false,
+          deterministicConflict: true,
+          rebaseConflict: true,
+          branchHead: resync.branchHead,
+          targetHead: resync.targetHead,
+          message,
+        };
+      }
     }
 
     let currentBranch = null;
@@ -815,6 +1022,52 @@ export function createMergeWorkflowHelpers(context, {
       let mergeStep = "merge";
       let mergeCreated = false;
 
+      const runProjectedCandidateGate = (stagedFiles) => {
+        mergeStep = "integration_gate";
+        const candidateTests = runRegisteredTestsForMergeCandidate({
+          cwd,
+          workItemId: wiId,
+          scopeFiles: stagedFiles,
+          actor: {
+            role: "assessor_handoff",
+            workItemId: wiId,
+          },
+        });
+        logEvent({
+          work_item_id: wiId,
+          event_type: EVENT_TYPES.GIT_MERGE_CANDIDATE_TESTS,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Projected merge candidate tests: ${candidateTests.summary}`,
+          event_json: JSON.stringify({
+            branch,
+            target_branch: targetBranch,
+            branch_head: mergeHeads(branch, targetBranch, cwd).branchHead,
+            target_head: preMergeHead,
+            staged_files: stagedFiles.slice(0, 100),
+            matched: candidateTests.matched,
+            passed: candidateTests.passed,
+            failed: candidateTests.failed,
+            tests: candidateTests.results.map((result) => ({
+              test_id: result.test?.id || null,
+              name: result.test?.name || null,
+              ok: result.ok === true,
+              run_id: result.run_id || null,
+              failure: result.failure?.message || null,
+            })),
+          }),
+        });
+        if (!candidateTests.ok) {
+          const firstFailure = candidateTests.results.find((result) => !result.ok);
+          const gateError = new Error(
+            `Projected merge candidate failed registered test ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"}: ${firstFailure?.failure?.message || candidateTests.summary}`,
+          );
+          gateError.code = "POSSE_MERGE_CANDIDATE_TEST_FAILED";
+          gateError.integrationGate = candidateTests;
+          throw gateError;
+        }
+        return candidateTests;
+      };
+
       // Execute the squash + (optional) commit sequence and return the new
       // HEAD. Extracted so the untracked-overwrite recovery path can re-run
       // the same body after snapshotting and cleaning blockers.
@@ -826,6 +1079,7 @@ export function createMergeWorkflowHelpers(context, {
         const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
         const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
         if (stagedFiles.length > 0) {
+          runProjectedCandidateGate(stagedFiles);
           log(`Creating squash merge commit for ${branch} into ${targetBranch}`, {
             json: {
               branch,
@@ -852,6 +1106,7 @@ export function createMergeWorkflowHelpers(context, {
         mergeHash = attemptSquashMerge();
       } catch (mergeErr) {
         let finalMergeErr = mergeErr;
+        let resolverTransientFailure = false;
         // `git merge --squash` can fail BEFORE touching the index when an
         // untracked file would be overwritten. The pre-checkout snapshot
         // path doesn't catch this because no checkout occurred (we were
@@ -901,11 +1156,77 @@ export function createMergeWorkflowHelpers(context, {
           }
         }
 
+        // Cross-WI handoff duplication: a dependent branch carries a
+        // pipeline-authored copy of a source WI's edits; after the source
+        // squash-merges, the dependent's squash merge conflicts even though
+        // the branch side is a pure addition. That shape is precisely
+        // recognizable and safe to resolve by union — try it before
+        // aborting. Any gate failure falls through to the normal abort,
+        // which cleans the partially conflicted index.
+        if (mergeHash == null && mergeStep === "merge" && !isGitTimeoutError(finalMergeErr)) {
+          // Only a throw from the resolver itself is environmental; failures
+          // in the post-resolution gate/commit/rev-parse below are
+          // content-determined and must not suppress the deterministic-conflict
+          // memo.
+          let resolution = null;
+          try {
+            resolution = resolveHandoffSquashConflicts({ exec: gitMergeExec, cwd, branch });
+            resolverTransientFailure = resolution.transient === true;
+          } catch (resolveErr) {
+            resolverTransientFailure = true;
+            log(`Handoff conflict auto-resolution failed: ${firstGitLine(resolveErr)}`, {
+              json: { branch, target: targetBranch, error: firstGitLine(resolveErr) },
+            });
+          }
+          try {
+            if (resolution?.resolved) {
+              log(`Auto-resolved ${resolution.files.length} handoff-duplication conflict(s) for ${branch}`, {
+                json: {
+                  branch,
+                  target: targetBranch,
+                  auto_resolved_handoff_files: resolution.files.slice(0, 50),
+                },
+              });
+              const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
+              const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
+              if (stagedFiles.length > 0) runProjectedCandidateGate(stagedFiles);
+              emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
+              mergeStep = "commit";
+              gitMergeExec(["commit", "-m", expectedSquashSubject(branch, targetBranch)], cwd);
+              mergeCreated = true;
+              mergeStep = "postcommit";
+              mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
+            } else if (resolution?.reason && resolution.reason !== "no_conflicted_files") {
+              log(`Handoff conflict auto-resolution declined: ${resolution.reason}`, {
+                json: { branch, target: targetBranch, reason: resolution.reason },
+              });
+            }
+          } catch (commitErr) {
+            finalMergeErr = commitErr;
+            if (commitErr?.code !== "POSSE_MERGE_CANDIDATE_TEST_FAILED") {
+              log(`Handoff conflict auto-resolution failed post-resolution: ${firstGitLine(commitErr)}`, {
+                json: { branch, target: targetBranch, error: firstGitLine(commitErr) },
+              });
+            }
+          }
+        }
+
         if (mergeHash != null) {
           // Recovery succeeded — drop into the post-merge success block.
         } else {
-        const error = firstGitLine(finalMergeErr);
+        // For content conflicts, git's first stderr line is the informational
+        // "Auto-merging <file>" — surface the CONFLICT lines instead so the
+        // review UI names the actual blocker.
+        const conflictError = mergeConflictSummary(finalMergeErr);
+        const error = conflictError || firstGitLine(finalMergeErr);
         const timedOut = isGitTimeoutError(finalMergeErr);
+        let hasUnmergedFiles = false;
+        try {
+          hasUnmergedFiles = gitMergeExec(["diff", "--name-only", "--diff-filter=U"], cwd).trim().length > 0;
+        } catch { /* the merge error remains authoritative */ }
+        const deterministicConflict = !timedOut
+          && !resolverTransientFailure
+          && (!!conflictError || hasUnmergedFiles);
         if (timedOut) {
           const recovered = recoverTimedOutMerge(branch, cwd, log, onPhase, {
             step: mergeStep,
@@ -947,9 +1268,18 @@ export function createMergeWorkflowHelpers(context, {
         const restoreWarning = autoStash
           ? restoreAutoStash(cwd, autoStash, log, `failed merge of ${branch}`)
           : null;
+        const failureHeads = mergeHeads(branch, targetBranch, cwd);
+        if (deterministicConflict) {
+          recordDeterministicMergeFailure(wiId, branch, targetBranch, failureHeads, error);
+        }
         return {
           ok: false,
           timedOut,
+          integrationGateFailed: finalMergeErr?.code === "POSSE_MERGE_CANDIDATE_TEST_FAILED",
+          integrationGate: finalMergeErr?.integrationGate || null,
+          deterministicConflict,
+          branchHead: failureHeads.branchHead,
+          targetHead: failureHeads.targetHead,
           message: `${timedOut ? "Merge timed out" : "Merge failed"}: ${error}${restoreWarning ? `; ${restoreWarning}` : ""}`,
           stashPopWarning: restoreWarning,
         };
@@ -973,6 +1303,7 @@ export function createMergeWorkflowHelpers(context, {
       }
 
       log(`Merged ${branch} into ${targetBranch} at ${mergeHash}`, { json: { branch, target: targetBranch, merge_hash: mergeHash } });
+      clearDeterministicMergeFailure(wiId);
       if (mergeCreated || (preMergeHead && mergeHash && mergeHash !== preMergeHead)) {
         emitAtlasMainAdvancedAfterMerge({
           wiId,
@@ -1009,10 +1340,15 @@ export function createMergeWorkflowHelpers(context, {
   function gitMergeToTargetAsync(branch, cwd, {
     wiId = null,
     onPhase = null,
+    retryDeterministicConflict = false,
     signal = null,
     timeoutMs = GIT_WORKFLOW_TASK_TIMEOUT_MS,
   } = {}) {
-    return runGitWorkflowTaskOffMainThread("gitMergeToTarget", { branch, cwd, wiId }, { onPhase, signal, timeoutMs });
+    return runGitWorkflowTaskOffMainThread(
+      "gitMergeToTarget",
+      { branch, cwd, wiId, retryDeterministicConflict },
+      { onPhase, signal, timeoutMs },
+    );
   }
 
   async function mergeIterativePassToTarget(wi, {

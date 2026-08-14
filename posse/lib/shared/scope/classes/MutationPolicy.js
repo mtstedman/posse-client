@@ -576,6 +576,10 @@ export class MutationPolicy {
     return true;
   }
 
+  grantedWritePaths() {
+    return [...this._grantedWritePaths];
+  }
+
   static fromJob(job = {}, payload = null, { cwd = process.cwd() } = {}) {
     const resolvedPayload = payload ?? job?.payload_json ?? job ?? {};
     return new MutationPolicy({

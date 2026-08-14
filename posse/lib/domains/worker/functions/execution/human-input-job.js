@@ -526,7 +526,9 @@ export async function runHumanInputJob(worker, job, {
           ? `added to active job #${resolved.job.id}; its provider session is continuing`
           : resolved.requeued
             ? `requeued job #${resolved.job.id}`
-            : `job #${resolved.job.id} will requeue as soon as its paused provider call exits`;
+            : resolved.remains_failed
+              ? `job #${resolved.job.id} remains failed because its attempt budget is exhausted`
+              : `job #${resolved.job.id} will requeue as soon as its paused provider call exits`;
         worker.emit(
           job.id,
           `${C.green}[human] Approved ${resolved.request.access} scope for ${resolved.request.path}${batchSize > 1 ? ` (+${batchSize - 1} batched)` : ""}; ${continuation}${C.reset}`,
@@ -537,7 +539,9 @@ export async function runHumanInputJob(worker, job, {
           ? `returned the denial to active job #${resolved.job.id}`
           : resolved.finalized
             ? `job #${resolved.job.id} failed out-of-scope`
-            : `job #${resolved.job.id} will fail as soon as its paused provider call exits`;
+            : resolved.settled
+              ? `left ${resolved.job.status} job #${resolved.job.id} unchanged`
+              : `job #${resolved.job.id} will fail as soon as its paused provider call exits`;
         worker.emit(
           job.id,
           `${C.yellow}[human] Denied scope for ${resolved.request.path}${batchSize > 1 ? ` (+${batchSize - 1} batched)` : ""}; ${consequence}${C.reset}`,

@@ -141,7 +141,7 @@ export class DaemonSupervisor {
   /**
    * Graceful shutdown of everything this process owns:
    *   1. retire() every registered daemon (EOF + grace, no mid-call kills);
-   *   2. wait out the grace window;
+   *   2. await every active and previously retired transport owner;
    *   3. reap any pid STILL on this process's ledger — strays from worker
    *      threads or crashed creators that never registered.
    * Returns a summary for the closeout line.
@@ -167,14 +167,18 @@ export class DaemonSupervisor {
         const pid = daemon.hostPid?.() ?? null;
         if (pid != null) retiringPids.push(pid);
         if (daemon.isHostAlive?.()) { daemon.retire({ graceMs }); retired++; }
-        else daemon.stop();
       } catch { /* best effort */ }
     }
-    // Give retired hosts their drain window before the hard sweep. The retire
-    // timers are unref'd, so this wait is what actually grants the grace.
-    if (retired > 0 && graceMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, graceMs + 100));
-    }
+    // Await the actual host-exit/worker-termination promises. A blind grace
+    // sleep could finish while a retired incarnation was still alive because
+    // Daemon had already dropped the transport that owned it.
+    await Promise.all(entries.map(async ({ daemon }) => {
+      if (typeof daemon.dispose === "function") {
+        try { await daemon.dispose({ graceMs }); } catch { /* best effort */ }
+      } else {
+        try { daemon.stop?.(); } catch { /* best effort */ }
+      }
+    }));
     // Windows birth identity is hydrated off the spawn critical path. Await
     // this module graph's bounded captures before deciding that a live ledger
     // row is unverifiable and must be retained fail-closed.

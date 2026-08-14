@@ -114,7 +114,7 @@ export function onQueueStateChanged(listener) {
   return () => listeners.delete(listener);
 }
 
-export function waitForQueueStateChangeAfter(generation, { signal = null } = {}) {
+export function waitForQueueStateChangeAfter(generation, { signal = null, timeoutMs = null } = {}) {
   const startGeneration = Number(generation || 0);
   const currentGeneration = getQueueWakeGeneration();
   if (currentGeneration !== startGeneration) {
@@ -127,10 +127,12 @@ export function waitForQueueStateChangeAfter(generation, { signal = null } = {})
   return new Promise((resolve) => {
     let done = false;
     let unsubscribe = null;
+    let timeout = null;
     const finish = (result) => {
       if (done) return;
       done = true;
       if (unsubscribe) unsubscribe();
+      if (timeout) clearTimeout(timeout);
       signal?.removeEventListener?.("abort", onAbort);
       resolve(result);
     };
@@ -144,6 +146,12 @@ export function waitForQueueStateChangeAfter(generation, { signal = null } = {})
 
     unsubscribe = onQueueStateChanged(onWake);
     signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
+      timeout = setTimeout(() => finish({
+        reason: "timeout",
+        generation: getQueueWakeGeneration(),
+      }), Number(timeoutMs));
+    }
 
     const afterSubscribeGeneration = getQueueWakeGeneration();
     if (afterSubscribeGeneration !== startGeneration) {

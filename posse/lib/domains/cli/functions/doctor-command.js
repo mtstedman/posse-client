@@ -8,6 +8,10 @@ import {
   formatBootDependencySync,
 } from "../../system/functions/dependency-sync.js";
 import { DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS } from "../../atlas/functions/v2/embeddings/jina-model.js";
+import {
+  formatClientProvenance,
+  resolveClientProvenance,
+} from "../../runtime/functions/client-provenance.js";
 
 function firstLine(value) {
   return String(value || "")
@@ -140,6 +144,7 @@ export async function cmdDoctor({
   runDoctor = doctorRepoDependencies,
   formatResult = formatBootDependencySync,
   getAtlasConfig = getAtlasIntegrationConfig,
+  getClientProvenance = resolveClientProvenance,
   colors = C,
   log = console.log,
 } = {}) {
@@ -192,6 +197,8 @@ export async function cmdDoctor({
     };
   }
 
+  result.client_provenance = getClientProvenance();
+
   if (json) {
     log(JSON.stringify(result, null, 2));
     return result;
@@ -203,6 +210,7 @@ export async function cmdDoctor({
   const statusColor = result.ok ? colors.green : colors.red;
   log(`\n  ${statusColor}[doctor]${colors.reset} ${mode}: ${summary}`);
   log(`  ${colors.dim}project: ${projectDir}${colors.reset}`);
+  log(`  ${colors.dim}client: ${formatClientProvenance(result.client_provenance)}${colors.reset}`);
   log(`  ${colors.dim}timeouts: package commands 30m; Jina download/deploy 2h${colors.reset}`);
 
   renderEntries({ log, colors, projectDir, title: "Repaired", entries: report.repaired, color: colors.green });

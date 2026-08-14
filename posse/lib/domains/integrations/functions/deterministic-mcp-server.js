@@ -69,6 +69,8 @@ import {
   countPendingOperatorFeedbackForJob,
   getIntSetting,
   getOperatorFeedbackForJob,
+  grantApprovedScopeEntries,
+  LIVE_SCOPE_WAIT_TIMEOUT_MS,
   recordAgentActivity,
   requestJobScopeExpansion,
 } from "../../queue/functions/index.js";
@@ -275,7 +277,9 @@ function parseBootConfig(argv = process.argv) {
   }
 }
 
-function bootConfigFromOAuthToken(config = {}) {
+let testOAuthVerificationAttempts = 0;
+
+function bootConfigFromOAuthToken(config = {}, { markInvalid = true } = {}) {
   const token = String(
     config.mcpOAuthToken
     || config.mcpOauthToken
@@ -285,6 +289,15 @@ function bootConfigFromOAuthToken(config = {}) {
   ).trim();
   if (!token) return config;
   try {
+    if (
+      (process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN)
+      && process.env.POSSE_TEST_MCP_OAUTH_FAIL_AFTER_FIRST_VERIFY === "1"
+      && testOAuthVerificationAttempts++ > 0
+    ) {
+      throw Object.assign(new Error("synthetic MCP OAuth expiry during deferred resume"), {
+        code: "token_expired",
+      });
+    }
     const claims = verifyMcpOAuthToken(token);
     return {
       ...config,
@@ -296,7 +309,7 @@ function bootConfigFromOAuthToken(config = {}) {
       },
     };
   } catch (err) {
-    scopeParseState.invalid = true;
+    if (markInvalid) scopeParseState.invalid = true;
     return {
       cwd: String(config.cwd || "").trim(),
       dbPath: String(config.dbPath || "").trim(),
@@ -327,6 +340,7 @@ function bootConfigFromOAuthToken(config = {}) {
 }
 
 let bootConfig = bootConfigFromOAuthToken(parseBootConfig());
+if (bootConfig?.mcpOAuth?.verified === false) scopeParseState.invalid = true;
 const ownerHotProcess = bootConfig.ownerHotGateway === true;
 let ownerHotGateway = ownerHotProcess || bootConfig.ownerHotGateway === true;
 let workspaceCwd = String(bootConfig.cwd || "").trim() || process.cwd();
@@ -1412,8 +1426,15 @@ function resolveMutationPath(toolName, displayPath) {
   }
 }
 
+const LIVE_SCOPE_WAIT = Symbol("posse.mcp-live-scope-wait");
+
+function isPendingLiveScopeResult(result) {
+  return result?.live === true
+    && ["scope_approval_pending", "scope_approval_batched"].includes(result?.code);
+}
+
 async function requestScopeExpansionWithinJob(args = {}) {
-  let result = requestJobScopeExpansion({
+  const result = requestJobScopeExpansion({
     jobId: mcpJobId,
     workItemId: mcpWorkItemId,
     attemptId: mcpAttemptId,
@@ -1425,28 +1446,20 @@ async function requestScopeExpansionWithinJob(args = {}) {
     source: "deterministic_mcp_internal_tool",
     liveWait: true,
   });
-  if (result?.live === true && result?.code === "scope_approval_pending") {
-    result = await awaitJobScopeExpansionDecision({
-      jobId: mcpJobId,
-      requestId: result.request_id,
-      attemptId: mcpAttemptId,
-    });
-  }
   if (result?.approved === true) {
     // Widen the subprocess-local predicates so this same MCP invocation can
     // finish the blocked operation. The queue already persisted the grant.
-    const entries = Array.isArray(result.batch) && result.batch.length > 0
-      ? result.batch
-      : [result];
-    for (const entry of entries) {
-      if (entry?.path) effectiveScopePredicates?.policy?.grantWritePath?.(entry.path);
-    }
+    grantApprovedScopeEntries(result, effectiveScopePredicates);
   }
   return result;
 }
 
 async function requestScopeWithinJob(args = {}) {
-  return JSON.stringify(await requestScopeExpansionWithinJob(args), null, 2);
+  const result = await requestScopeExpansionWithinJob(args);
+  if (isPendingLiveScopeResult(result)) {
+    return { [LIVE_SCOPE_WAIT]: true, request: result, operation: "request_scope", args };
+  }
+  return JSON.stringify(result, null, 2);
 }
 
 async function writeFileWithinScope(args = {}) {
@@ -1469,6 +1482,9 @@ async function writeFileWithinScope(args = {}) {
       operation: "write_file",
       reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
     });
+    if (isPendingLiveScopeResult(scopeResult)) {
+      return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "write_file", args };
+    }
     if (scopeResult?.approved !== true) {
       return JSON.stringify(scopeResult, null, 2);
     }
@@ -1493,6 +1509,9 @@ async function editFileWithinScope(args = {}) {
       operation: "edit_file",
       reason: "edit_file requires this existing file to complete the active job",
     });
+    if (isPendingLiveScopeResult(scopeResult)) {
+      return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "edit_file", args };
+    }
     if (scopeResult?.approved !== true) {
       return JSON.stringify(scopeResult, null, 2);
     }
@@ -2264,6 +2283,7 @@ function executeAgentHandoff(args = {}) {
       agentCallId: mcpAgentCallId,
     },
     role: roleName,
+    projectDir: workspaceCwd,
     maxHandoffs: roleName === "planner" ? getIntSetting("planner_max_tasks", 50) : 1,
   });
   if (receipt.diagnostics) {
@@ -2653,8 +2673,18 @@ function selectResearchStateForCurrentBoot(sessionKey = runtimeSessionKey()) {
   researchState = ledger.state;
 }
 
-function applyRuntimeBootConfig(nextConfig = {}, { sessionId = null } = {}) {
-  let parsedConfig = bootConfigFromOAuthToken(nextConfig && typeof nextConfig === "object" ? nextConfig : {});
+function applyRuntimeBootConfig(nextConfig = {}, {
+  sessionId = null,
+  fallbackVerifiedConfig = null,
+} = {}) {
+  let parsedConfig = bootConfigFromOAuthToken(
+    nextConfig && typeof nextConfig === "object" ? nextConfig : {},
+    { markInvalid: false },
+  );
+  const oauthVerificationFailed = parsedConfig?.mcpOAuth?.verified === false;
+  if (oauthVerificationFailed && fallbackVerifiedConfig?.mcpOAuth?.verified === true) {
+    parsedConfig = fallbackVerifiedConfig;
+  }
   const parsedDbPath = String(parsedConfig.dbPath || "").trim();
   if (parsedDbPath) setRuntimePathOverrides({ dbPath: parsedDbPath });
   agentAuthorityError = null;
@@ -2805,6 +2835,7 @@ function applyRuntimeBootConfig(nextConfig = {}, { sessionId = null } = {}) {
   rebuildNativeToolSchemas();
   rebuildToolExecutors();
   selectResearchStateForCurrentBoot(nextSessionKey);
+  return { applied: true, usedVerifiedFallback: oauthVerificationFailed && parsedConfig === fallbackVerifiedConfig };
 }
 
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
@@ -3004,6 +3035,75 @@ function sendMessage(payload) {
   }
 }
 
+async function completeNativeToolCall({
+  id,
+  requestedToolName,
+  toolName,
+  args,
+  recordInput,
+  start,
+  toolInvocation,
+  result,
+  deferred = false,
+}) {
+  const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
+  let responseText = appendOperatorFeedbackSignal(text, toolName);
+  const outcome = classifyNativeToolResult(text);
+  const ok = isSuccessfulNativeToolResult(text);
+  if (ok) resetEmptyOperatorFeedbackPollsAfterWork(toolName);
+  if (ok && toolName !== "chain_verdict") {
+    noteResearchExplorationStep({ toolName });
+  }
+  if (ok) {
+    responseText = appendResearchExplorationNotice(responseText, toolName);
+  }
+  const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
+  const readStats = ok ? nativeReadResultStats(toolName, text) : null;
+  const registeredTestResult = registeredTestToolResultObservation({
+    tool: toolName,
+    input: recordInput,
+    resultText: text,
+  });
+  const resultDiagnostic = registeredTestResult?.error || capString(text, 300);
+  finishToolInvocation(toolInvocation, {
+    tool: toolName,
+    input: recordInput,
+    cwd: workspaceCwd,
+    ok,
+    outcome,
+    ...(registeredTestResult?.summary ? { resultSummary: registeredTestResult.summary } : {}),
+    ...(outcome === "failed" ? { error: resultDiagnostic } : {}),
+    ...(outcome === "rejected" ? { rejection: resultDiagnostic } : {}),
+    ...(atlasLiveBuffer || readStats || registeredTestResult?.detail ? {
+      extraDetail: {
+        ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
+        ...(readStats || {}),
+        ...(registeredTestResult?.detail ? { registered_test_result: registeredTestResult.detail } : {}),
+      },
+    } : {}),
+  });
+  appendToolLog({
+    event: "tool_result",
+    requestId: id ?? null,
+    tool: requestedToolName,
+    canonicalTool: toolName,
+    ok,
+    durationMs: Date.now() - start,
+    resultPreview: capString(text, 300),
+  });
+  if (
+    deferred
+    && (process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN)
+    && process.env.POSSE_TEST_DEFERRED_SCOPE_COMPLETION_THROW === "1"
+  ) {
+    throw new Error("synthetic deferred scope completion failure");
+  }
+  sendMessage(jsonRpcSuccess(id, {
+    content: [{ type: "text", text: responseText }],
+    ...(!ok ? { isError: true } : {}),
+  }));
+}
+
 async function handleRequest(msg) {
   const privateSession = hiddenSessionFromParams(msg?.params);
   const id = msg && Object.prototype.hasOwnProperty.call(msg, "id") ? msg.id : null;
@@ -3014,6 +3114,7 @@ async function handleRequest(msg) {
   const session = ownerHotProcess ? privateSession : null;
   if (msg?.method === MCP_SESSION_RELEASED_NOTIFICATION) {
     if (ownerHotProcess && session) {
+      abortLiveScopeWaitsForSession(session.sessionId);
       releaseGatewaySessionState(session.bootConfig, { sessionId: session.sessionId });
     }
     return;
@@ -3048,6 +3149,11 @@ async function handleRequest(msg) {
   }
 
   if (method === "notifications/initialized") return;
+
+  if (method === "ping") {
+    sendMessage(jsonRpcSuccess(id, {}));
+    return;
+  }
 
   // Compatibility response for clients that probe every configured MCP
   // server for resources even when initialize advertised only tools. Posse
@@ -3451,55 +3557,41 @@ async function handleRequest(msg) {
     const toolInvocation = beginToolInvocation({ tool: toolName, input: recordInput, cwd: workspaceCwd });
     try {
       const result = await handler(args);
-      const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
-      let responseText = appendOperatorFeedbackSignal(text, toolName);
-      const outcome = classifyNativeToolResult(text);
-      const ok = isSuccessfulNativeToolResult(text);
-      if (ok) resetEmptyOperatorFeedbackPollsAfterWork(toolName);
-      if (ok && toolName !== "chain_verdict") {
-        noteResearchExplorationStep({ toolName });
-      }
-      if (ok) {
-        responseText = appendResearchExplorationNotice(responseText, toolName);
-      }
-      const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
-      const readStats = ok ? nativeReadResultStats(toolName, text) : null;
-      const registeredTestResult = registeredTestToolResultObservation({
-        tool: toolName,
-        input: recordInput,
-        resultText: text,
-      });
-      const resultDiagnostic = registeredTestResult?.error || capString(text, 300);
-      finishToolInvocation(toolInvocation, {
-        tool: toolName,
-        input: recordInput,
-        cwd: workspaceCwd,
-        ok,
-        outcome,
-        ...(registeredTestResult?.summary ? { resultSummary: registeredTestResult.summary } : {}),
-        ...(outcome === "failed" ? { error: resultDiagnostic } : {}),
-        ...(outcome === "rejected" ? { rejection: resultDiagnostic } : {}),
-        ...(atlasLiveBuffer || readStats || registeredTestResult?.detail ? {
-          extraDetail: {
-            ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
-            ...(readStats || {}),
-            ...(registeredTestResult?.detail ? { registered_test_result: registeredTestResult.detail } : {}),
+      if (result?.[LIVE_SCOPE_WAIT] === true) {
+        scheduleDeferredLiveScopeTool({
+          marker: result,
+          id,
+          requestedToolName,
+          toolName,
+          args,
+          recordInput,
+          start,
+          toolInvocation,
+          runtime: {
+            bootConfig: session?.bootConfig || bootConfig,
+            resolvedBootConfig: bootConfig,
+            grantedWritePaths: effectiveScopePredicates?.policy?.grantedWritePaths?.() || [],
+            sessionId: session?.sessionId || null,
+            observation: {
+              work_item_id: mcpWorkItemId,
+              job_id: mcpJobId,
+              attempt_id: mcpAttemptId,
+              agent_call_id: mcpAgentCallId,
+            },
           },
-        } : {}),
+        });
+        return;
+      }
+      await completeNativeToolCall({
+        id,
+        requestedToolName,
+        toolName,
+        args,
+        recordInput,
+        start,
+        toolInvocation,
+        result,
       });
-      appendToolLog({
-        event: "tool_result",
-        requestId: id ?? null,
-        tool: requestedToolName,
-        canonicalTool: toolName,
-        ok,
-        durationMs: Date.now() - start,
-        resultPreview: capString(text, 300),
-      });
-      sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: responseText }],
-        ...(!ok ? { isError: true } : {}),
-      }));
     } catch (err) {
       if (toolName === "agent_handoff") {
         recordAgentHandoffRejection(mcpAgentCallId, err);
@@ -3557,6 +3649,158 @@ let inputBuffer = Buffer.alloc(0);
 let requestQueue = Promise.resolve();
 let capabilityBrokerInstalled = false;
 let mcpTrafficStarted = false;
+const sharedLiveScopeDecisionWaits = new Map();
+const pendingLiveScopeTasks = new Set();
+
+function liveScopeWaitTimeoutMs() {
+  const runningTests = !!(process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN);
+  const testOverride = runningTests ? Number(process.env.POSSE_TEST_SCOPE_WAIT_TIMEOUT_MS) : NaN;
+  return Number.isFinite(testOverride) && testOverride >= 25
+    ? Math.min(LIVE_SCOPE_WAIT_TIMEOUT_MS, testOverride)
+    : LIVE_SCOPE_WAIT_TIMEOUT_MS;
+}
+
+function liveScopeDecisionKey(runtime, request) {
+  return `${Number(runtime?.observation?.job_id) || 0}:${String(request?.request_id || "")}`;
+}
+
+function sharedLiveScopeDecision(runtime, request) {
+  const key = liveScopeDecisionKey(runtime, request);
+  const existing = sharedLiveScopeDecisionWaits.get(key);
+  if (existing) {
+    if (runtime?.sessionId) existing.sessionIds.add(runtime.sessionId);
+    return existing;
+  }
+  const controller = new AbortController();
+  const record = {
+    controller,
+    sessionIds: new Set(runtime?.sessionId ? [runtime.sessionId] : []),
+    promise: null,
+  };
+  record.promise = awaitJobScopeExpansionDecision({
+    jobId: runtime?.observation?.job_id,
+    requestId: request?.request_id,
+    attemptId: runtime?.observation?.attempt_id,
+    signal: controller.signal,
+    timeoutMs: liveScopeWaitTimeoutMs(),
+    // The MCP process has its own memory space, so only durable queue reads
+    // can observe the human answer.
+    useQueueWake: false,
+  }).finally(() => {
+    if (sharedLiveScopeDecisionWaits.get(key) === record) {
+      sharedLiveScopeDecisionWaits.delete(key);
+    }
+  });
+  sharedLiveScopeDecisionWaits.set(key, record);
+  return record;
+}
+
+function abortLiveScopeWaitsForSession(sessionId) {
+  const normalized = String(sessionId || "").trim();
+  if (!normalized) return;
+  for (const record of sharedLiveScopeDecisionWaits.values()) {
+    if (!record.sessionIds.has(normalized)) continue;
+    // Only the LAST member's release may abort the shared wait. A stale
+    // session (e.g. the client reconnected and its batched write joined the
+    // same record) releasing must not abandon the request and force-cancel
+    // the human gate out from under sessions still waiting on the answer.
+    record.sessionIds.delete(normalized);
+    if (record.sessionIds.size === 0) record.controller.abort();
+  }
+}
+
+function abortAllLiveScopeWaits() {
+  for (const record of sharedLiveScopeDecisionWaits.values()) {
+    record.controller.abort();
+  }
+}
+
+async function resumeDeferredLiveScopeTool(call) {
+  let decision;
+  try {
+    decision = await sharedLiveScopeDecision(call.runtime, call.marker.request).promise;
+  } catch (err) {
+    decision = {
+      ok: false,
+      approved: false,
+      code: "scope_wait_failed",
+      message: `The active scope wait failed: ${capString(err?.message || String(err), 240)}`,
+    };
+  }
+
+  const completion = requestQueue.then(() => runWithObservationContext(
+    call.runtime.observation,
+    async () => {
+      try {
+        mcpMessageSessionScoped = !!call.runtime.sessionId;
+        if (call.runtime.sessionId) {
+          applyRuntimeBootConfig(call.runtime.bootConfig, {
+            sessionId: call.runtime.sessionId,
+            fallbackVerifiedConfig: call.runtime.resolvedBootConfig,
+          });
+        }
+        for (const grantedPath of call.runtime.grantedWritePaths || []) {
+          effectiveScopePredicates?.policy?.grantWritePath?.(grantedPath);
+        }
+        let result;
+        if (decision?.approved === true) {
+          grantApprovedScopeEntries(decision, effectiveScopePredicates);
+          if (call.marker.operation === "write_file") {
+            result = await writeFileWithinScope(call.marker.args || {});
+          } else if (call.marker.operation === "edit_file") {
+            result = await editFileWithinScope(call.marker.args || {});
+          } else {
+            result = JSON.stringify(decision, null, 2);
+          }
+        } else {
+          result = JSON.stringify(decision, null, 2);
+        }
+        await completeNativeToolCall({ ...call, result, deferred: true });
+      } catch (err) {
+        const safeError = capString(err?.message || String(err), 300);
+        let displayError = safeError;
+        try { displayError = sanitizeAbsolutePathsInText(safeError, workspaceCwd) || safeError; } catch { /* use capped raw error */ }
+        if (call.id != null) {
+          try {
+            sendMessage(jsonRpcError(
+              call.id,
+              -32603,
+              displayError || "Deferred scope tool completion failed",
+            ));
+          } catch {
+            // stdout may already be closed; the outer guard still records it.
+          }
+        }
+        try {
+          appendToolLog({
+            event: "deferred_scope_tool_error",
+            requestId: call.id ?? null,
+            tool: call.requestedToolName,
+            canonicalTool: call.toolName,
+            error: safeError,
+          });
+        } catch { /* protocol response takes precedence over telemetry */ }
+      }
+    },
+  ));
+  const guarded = completion.catch((err) => {
+    appendToolLog({
+      event: "deferred_scope_tool_error",
+      requestId: call.id ?? null,
+      tool: call.requestedToolName,
+      canonicalTool: call.toolName,
+      error: capString(err?.message || String(err), 300),
+    });
+  });
+  requestQueue = guarded;
+  await guarded;
+}
+
+function scheduleDeferredLiveScopeTool(call) {
+  const task = resumeDeferredLiveScopeTool(call);
+  pendingLiveScopeTasks.add(task);
+  void task.finally(() => pendingLiveScopeTasks.delete(task));
+}
 
 function dispatchParsed(parsed) {
   if (parsed?.__posse_control === "capabilityBroker") {
@@ -3705,6 +3949,8 @@ let shuttingDown = false;
 async function shutdownAndExit(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  abortAllLiveScopeWaits();
+  try { await Promise.allSettled([...pendingLiveScopeTasks]); } catch { /* best-effort live wait teardown */ }
   try { await requestQueue; } catch { /* requestQueue is best-effort guarded */ }
   try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
   process.exit(code);

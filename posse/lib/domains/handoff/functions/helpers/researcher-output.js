@@ -35,6 +35,7 @@ export function parseResearcherStructuredOutput(output) {
     Array.isArray(parsed.constraints) ||
     (parsed.patterns && typeof parsed.patterns === "object") ||
     (parsed.scope_estimate && typeof parsed.scope_estimate === "object" && !Array.isArray(parsed.scope_estimate)) ||
+    Array.isArray(parsed.absence_checks) ||
     typeof parsed.questions_for_human === "boolean" ||
     Array.isArray(parsed.questions);
   if (hasRecognizedFields) return parsed;

@@ -31,6 +31,7 @@ import {
   awaitJobScopeExpansionDecision,
   countPendingOperatorFeedbackForJob,
   getOperatorFeedbackForJob,
+  grantApprovedScopeEntries,
   recordAgentActivity,
   requestJobScopeExpansion,
   getIntSetting,
@@ -39,6 +40,27 @@ import { signalPendingOperatorFeedbackForJob } from "../../../queue/functions/ag
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
 const LIVE_SCOPE_WAIT = Symbol("posse.live-scope-wait");
+
+// Concurrent embedded tool calls can wait on the SAME scope request (the
+// initiator plus batched joiners that received scope_approval_batched with
+// the original request_id). Each independent waiter would race in
+// awaitJobScopeExpansionDecision: the winner's transaction consumes the
+// pending and the loser reads scope_request_stale despite the approval.
+// Mirror the MCP server's shared-wait map: one waiter per (job, request),
+// every caller receives the same decision.
+const sharedEmbeddedScopeWaits = new Map();
+
+function awaitSharedEmbeddedScopeDecision({ jobId, requestId, attemptId, signal }) {
+  const key = `${jobId}:${requestId}`;
+  const existing = sharedEmbeddedScopeWaits.get(key);
+  if (existing) return existing;
+  const wait = awaitJobScopeExpansionDecision({ jobId, requestId, attemptId, signal })
+    .finally(() => {
+      if (sharedEmbeddedScopeWaits.get(key) === wait) sharedEmbeddedScopeWaits.delete(key);
+    });
+  sharedEmbeddedScopeWaits.set(key, wait);
+  return wait;
+}
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "Bash",
   "Edit",
@@ -356,14 +378,12 @@ export function createStandardToolHandlerMap({
       liveWait: true,
     });
     if (result?.approved === true) {
-      const entries = Array.isArray(result.batch) && result.batch.length > 0
-        ? result.batch
-        : [result];
-      for (const entry of entries) {
-        if (entry?.path) ctx?.scopePredicates?.policy?.grantWritePath?.(entry.path);
-      }
+      grantApprovedScopeEntries(result, ctx?.scopePredicates);
     }
-    if (result?.live === true && result?.code === "scope_approval_pending") {
+    if (
+      result?.live === true
+      && ["scope_approval_pending", "scope_approval_batched"].includes(result?.code)
+    ) {
       return { [LIVE_SCOPE_WAIT]: true, request: result, resume: null };
     }
     return result;
@@ -377,6 +397,7 @@ export function createStandardToolHandlerMap({
         const receipt = stageAgentHandoff(args || {}, {
           context: ambient,
           role: ctx?.role || ctx?.declaredScope?.role || "",
+          projectDir: ctx?.cwd || null,
           maxHandoffs: (ctx?.role || ctx?.declaredScope?.role) === "planner"
             ? getIntSetting("planner_max_tasks", 50)
             : 1,
@@ -704,7 +725,7 @@ export async function executeToolWithMap(name, argsStr, context, {
         : await PROVIDER_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
       if (result?.[LIVE_SCOPE_WAIT] === true) {
         const ambientJob = getObservationContext() || {};
-        const decision = await awaitJobScopeExpansionDecision({
+        const decision = await awaitSharedEmbeddedScopeDecision({
           jobId: ambientJob.job_id,
           requestId: result.request?.request_id,
           attemptId: ambientJob.attempt_id,

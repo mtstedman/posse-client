@@ -260,7 +260,7 @@ export function extractResearchRetryContext(logArtifacts = []) {
       summaryMatch ? `Previous failure: ${summaryMatch[1].trim()}` : "Previous failure: provider exited before returning a final answer.",
     ];
     if (turnBudgetExhausted) {
-      lines.push("The previous attempt appears to have exhausted Claude's turn budget on tool calls before producing a final summary.");
+      lines.push("The previous attempt appears to have exhausted the provider turn budget on tool calls before producing a final summary.");
       lines.push("Be much more selective: avoid broad exploratory reads, synthesize earlier, and stop once you can answer the task.");
     }
     if (toolSectionMatch) {

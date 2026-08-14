@@ -8,6 +8,10 @@ import { ACTIVE_LEASE_STATUSES, FAILED_JOB_STATUSES, PARKED_JOB_STATUSES } from 
 import { listWorkItems, listJobs } from "../../queue/functions/index.js";
 import { getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeRoot, normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
+import {
+  formatClientProvenance,
+  resolveClientProvenance,
+} from "../../runtime/functions/client-provenance.js";
 
 const PENDING_MERGE_STATES = new Set(UNMERGED_WORK_ITEM_MERGE_STATES);
 
@@ -176,11 +180,15 @@ export function buildStartupDigest(projectDir) {
   const snapshots = _latestRecoverySnapshots(projectDir, 6);
   const humanAnswers = _recentHumanAnswers(jobs, 6);
   const failures = _recentFailures(jobs, 8);
+  const clientProvenance = resolveClientProvenance();
 
   const digest = [
     "# Posse Startup Context",
     "",
     `Generated: ${new Date().toISOString()}`,
+    "",
+    "## Posse Client Provenance",
+    `- ${formatClientProvenance(clientProvenance)}`,
     "",
     "## Current Status",
     `- Work items: ${workItems.length}`,
@@ -217,6 +225,7 @@ export function buildStartupDigest(projectDir) {
       blockedJobs: blockedJobs.length,
       pendingMerges: pendingMerges.length,
       dirtySnapshots: snapshots.length,
+      clientProvenance,
     },
     blockedJobs,
     pendingMerges,
@@ -260,7 +269,7 @@ export function refreshProjectContext(projectDir, { writeDigest = true } = {}) {
       updated_at = excluded.updated_at
   `).run(
     "default",
-    `work_items=${built.stats.workItems}; blocked_jobs=${built.stats.blockedJobs}; pending_merges=${built.stats.pendingMerges}; dirty_snapshots=${built.stats.dirtySnapshots}`,
+    `work_items=${built.stats.workItems}; blocked_jobs=${built.stats.blockedJobs}; pending_merges=${built.stats.pendingMerges}; dirty_snapshots=${built.stats.dirtySnapshots}; ${formatClientProvenance(built.stats.clientProvenance)}`,
     _buildSummaryLines(built.blockedJobs, (job) => `WI#${job.work_item_id} JOB#${job.id} [${job.status}] ${job.title}`),
     _buildSummaryLines(built.pendingMerges, (wi) => `WI#${wi.id} [${wi.merge_state}] ${wi.title}`),
     _buildSummaryLines(built.snapshots, (snapshot) => `${snapshot.name}${snapshot.wiId ? ` WI#${snapshot.wiId}` : ""}`),

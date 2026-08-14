@@ -138,16 +138,24 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     const wtDir = legacy || canonical;
     if (!fs.existsSync(wtDir)) return null;
     let status = "";
-    try {
-      status = gitExec(["status", "--porcelain", "--untracked-files=all"], wtDir, { timeoutMs: 5000 }).trim();
-    } catch (err) {
+    let statusError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        status = gitExec(["status", "--porcelain", "--untracked-files=all"], wtDir, { timeoutMs: 5000 }).trim();
+        statusError = null;
+        break;
+      } catch (err) {
+        statusError = err;
+      }
+    }
+    if (statusError) {
       return {
         wtDir,
         dirtyFiles: [],
         trackedFiles: [],
         untrackedFiles: [],
         verificationFailed: true,
-        error: String(err?.message || err || "unknown Git error").slice(0, 500),
+        error: String(statusError?.message || statusError || "unknown Git error").slice(0, 500),
       };
     }
     const dirtyFiles = status

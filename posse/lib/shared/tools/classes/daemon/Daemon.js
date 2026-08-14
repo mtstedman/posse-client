@@ -65,6 +65,9 @@ export class Daemon {
 
     /** @type {import("./transport.js").Transport | null} */
     this._transport = null;
+    /** Detached transport incarnations retained until their hosts terminate. */
+    /** @type {Set<import("./transport.js").Transport>} */
+    this._retiredTransports = new Set();
     this._runningKey = null;
     this._nextId = 1;
     /** @type {Map<number, { finish: (response: Record<string, unknown>) => void, onProgress: ((event: unknown) => void) | null }>} */
@@ -112,6 +115,22 @@ export class Daemon {
       this._exitHandler = null;
     }
     this._exitHookInstalled = false;
+  }
+
+  /**
+   * Retain a detached transport until it proves every incarnation terminated.
+   * Transports without an awaitable lifecycle stay retained for stop/dispose.
+   * @param {import("./transport.js").Transport | null} transport
+   */
+  #trackDetachedTransport(transport) {
+    if (!transport) return;
+    this._retiredTransports.add(transport);
+    if (typeof transport.whenTerminated !== "function") return;
+    let terminal;
+    try { terminal = transport.whenTerminated(); } catch { return; }
+    void Promise.resolve(terminal)
+      .catch(() => {})
+      .finally(() => this._retiredTransports.delete(transport));
   }
 
   /**
@@ -188,7 +207,7 @@ export class Daemon {
       // Guard handlers on identity: a torn-down transport's delayed exit/message
       // events must not clobber the transport that replaced it.
       transport.onMessage((message) => { if (this._transport === transport) this.#onMessage(message); });
-      transport.onExit(() => { if (this._transport === transport) this.#onExit(); });
+      transport.onExit(() => { if (this._transport === transport) this.#onExit(transport); });
       // A retire-replacement is deliberate (probe verdict, supervisor recycle),
       // not crash-loop evidence: counting it would let repeated retires open
       // the crash breaker with zero crashes and force 5 minutes of per-call
@@ -245,8 +264,9 @@ export class Daemon {
     entry.finish(message);
   }
 
-  #onExit() {
+  #onExit(transport = this._transport) {
     this._transport = null;
+    this.#trackDetachedTransport(transport);
     this._lastExitAt = this._now();
     this.#failPending("daemon transport exited");
   }
@@ -266,6 +286,7 @@ export class Daemon {
     this._runningKey = null;
     this.#failPending("daemon transport recycled");
     try { transport?.kill(); } catch { /* ignore */ }
+    this.#trackDetachedTransport(transport);
   }
 
   /**
@@ -364,6 +385,7 @@ export class Daemon {
     } else {
       try { transport.kill(); } catch { /* best effort */ }
     }
+    this.#trackDetachedTransport(transport);
   }
 
   /**
@@ -411,12 +433,19 @@ export class Daemon {
   }
 
   stop() {
-    // Capture before #onExit(), which clears this._transport.
-    const transport = this._transport;
+    const transports = new Set([
+      ...this._retiredTransports,
+      ...(this._transport ? [this._transport] : []),
+    ]);
+    this._transport = null;
+    this._retiredTransports.clear();
     this._runningKey = null;
     this.#removeExitHook();
-    this.#onExit();
-    try { transport?.kill(); } catch { /* ignore */ }
+    this._lastExitAt = this._now();
+    this.#failPending("daemon transport exited");
+    for (const transport of transports) {
+      try { transport.kill(); } catch { /* ignore */ }
+    }
   }
 
   /**
@@ -426,19 +455,25 @@ export class Daemon {
    * communication MessagePort as an active handle until terminate() resolves.
    * `stop()` remains the sync best-effort variant for the process-exit hook.
    */
-  async dispose() {
-    // Capture the transport BEFORE releasing pending waiters — #onExit() nulls
-    // this._transport, so reading it afterwards would lose the handle and skip
-    // the terminate (leaving the MessagePort pinned).
-    const transport = this._transport;
+  /** @param {{ graceMs?: number, waitMs?: number }} [opts] */
+  async dispose(opts = {}) {
+    const transports = new Set([
+      ...this._retiredTransports,
+      ...(this._transport ? [this._transport] : []),
+    ]);
+    this._transport = null;
+    this._retiredTransports.clear();
     this._runningKey = null;
     this.#removeExitHook();
-    this.#onExit();
-    if (transport?.dispose) {
-      try { await transport.dispose(); } catch { /* ignore */ }
-    } else {
-      try { transport?.kill(); } catch { /* ignore */ }
-    }
+    this._lastExitAt = this._now();
+    this.#failPending("daemon transport exited");
+    await Promise.all([...transports].map(async (transport) => {
+      if (transport.dispose) {
+        try { await transport.dispose(opts); } catch { /* ignore */ }
+      } else {
+        try { transport.kill(); } catch { /* ignore */ }
+      }
+    }));
   }
 }
 

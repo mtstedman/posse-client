@@ -12,6 +12,7 @@ export * from "./openai/OpenAIProvider.js";
 export * from "./posse-local/PosseLocalProvider.js";
 export * from "./ProviderRegistry.js";
 export * from "./ProviderRuntimeState.js";
+export * from "./ProviderTurnBudget.js";
 export * from "./ProviderUsageRuntimeCache.js";
 export * from "./registry-singleton.js";
 export * from "./runtime-state-singleton.js";

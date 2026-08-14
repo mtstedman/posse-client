@@ -84,6 +84,19 @@ import {
   renderTestExecutionEvidence,
   testReceiptObservationDetail,
 } from "./test-execution-receipt.js";
+import {
+  buildAssessmentTaskBoundary,
+  classifySiblingOnlyAssessmentFailure,
+  recordAssessmentBoundaryEvent,
+  renderAssessmentTaskBoundary,
+} from "./assessment-task-boundary.js";
+
+export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
+export {
+  buildAssessmentTaskBoundary,
+  classifySiblingOnlyAssessmentFailure,
+  renderAssessmentTaskBoundary,
+} from "./assessment-task-boundary.js";
 
 function readSettingText(key) {
   try {
@@ -600,6 +613,18 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
   return stripped;
 }
 
+function _buildAssessmentBoundaryBlock(job) {
+  const taskBoundary = buildAssessmentTaskBoundary(job);
+  return [
+    `ASSESSMENT BOUNDARY:`,
+    `Judge this job against the assigned TASK SPECIFICATION and its success criteria.`,
+    `Use the original work-item objective to interpret and constrain the assigned task, but do not require this job to complete work assigned to other planned tasks.`,
+    `Do not fail, block, or lower confidence because pending sibling or downstream jobs have not completed.`,
+    `Only spawn a fix for a defect in the assigned task; missing work owned by other planned tasks is not this job's fix scope.`,
+    taskBoundary ? renderAssessmentTaskBoundary(taskBoundary) : null,
+  ].filter(Boolean).join("\n");
+}
+
 function _buildRemoteAssessmentInstructions({
   job,
   workItem,
@@ -617,6 +642,7 @@ function _buildRemoteAssessmentInstructions({
     `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
+    _buildAssessmentBoundaryBlock(job),
     ``,
     `ORIGINAL WORK ITEM OBJECTIVE:`,
     promptLiteral("TITLE", workItem?.title || ""),
@@ -996,7 +1022,7 @@ export function __testBuildAssessmentProviderScope(options) {
  * @param {boolean} opts.autoApprove - Pass through to callProvider
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
-export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null } = {}) {
+export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0 } = {}) {
   const assessorProvider = String(
     routedProviderName
     || await agentDispatcher?.selectProvider?.({ role: "assessor" })
@@ -1292,6 +1318,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     verificationCapabilityBlock,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
+    _buildAssessmentBoundaryBlock(job),
     ``,
     `ORIGINAL WORK ITEM OBJECTIVE:`,
     promptLiteral("TITLE", workItem?.title || ""),
@@ -1509,7 +1536,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   // Coerce text arrays — LLMs may return numbers, objects, or null.
   const reasons = _normalizeAssessmentTextList(verdict.reasons);
 
-  return {
+  const normalizedVerdict = {
     verdict: parsedVerdict,
     confidence: normalizeAssessorConfidence(verdict.confidence, { fallback: "medium", allowNone: true }) || "none",
     reasons,
@@ -1519,6 +1546,48 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     raw: response,
     ...(verdict._disable_internal_retry ? { _disable_internal_retry: true } : {}),
   };
+  const taskBoundary = buildAssessmentTaskBoundary(job);
+  const boundaryViolation = classifySiblingOnlyAssessmentFailure(normalizedVerdict, taskBoundary);
+  if (boundaryViolation && Number(taskBoundaryRetryDepth) < 1) {
+    recordAssessmentBoundaryEvent(job, boundaryViolation);
+    const correction = [
+      `TASK-BOUNDARY CORRECTION: The prior fail cited only exact paths assigned to pending sibling task(s): ${boundaryViolation.cited_paths.join(", ")}.`,
+      `Reassess only the current task. Do not require or propose changes to those sibling-owned paths.`,
+    ].join("\n");
+    return await assessResult(job, output, {
+      silent,
+      autoApprove,
+      modelTier,
+      reasoningEffort,
+      cwd,
+      routedProviderName: assessorProvider,
+      agentDispatcher,
+      assessmentContext,
+      abortSignal,
+      fallbackReads,
+      priorAssessmentFindings: [priorAssessmentFindings, correction].filter(Boolean).join("\n\n"),
+      trackedCall,
+      disableAtlas,
+      remoteComposer,
+      taskBoundaryRetryDepth: 1,
+    });
+  }
+  if (boundaryViolation) {
+    recordAssessmentBoundaryEvent(job, boundaryViolation, { repeated: true });
+    return {
+      verdict: "needs_review",
+      confidence: "none",
+      reasons: [
+        `Assessor contract failure: two assessments failed this task only for pending sibling-owned path(s): ${boundaryViolation.cited_paths.join(", ")}. No fix was dispatched.`,
+      ],
+      spawn_jobs: [],
+      human_questions: [],
+      suggestions: [],
+      raw: normalizedVerdict.raw,
+      _disable_internal_retry: true,
+    };
+  }
+  return normalizedVerdict;
 }
 
 export function shouldRunPreAssessCommand({

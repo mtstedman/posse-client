@@ -272,6 +272,23 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
       required: ["confidence", "likely_touch_count", "unknowns", "scope_reasons"],
       additionalProperties: false,
     },
+    absence_checks: {
+      type: "array",
+      maxItems: 20,
+      description: "Repository-absence claims backed by one exact repository-wide search receipt. Omit when making no absence claim.",
+      items: {
+        type: "object",
+        properties: {
+          claim: { type: "string", minLength: 1, maxLength: 500 },
+          query: { type: "string", minLength: 1, maxLength: 500 },
+          scope_roots: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 500 } },
+          evidence_ref: { type: "string", pattern: "^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$" },
+          result_count: { type: "integer", minimum: 0, maximum: 0, description: "Must be zero; a nonzero search cannot prove repository absence." },
+        },
+        required: ["claim", "query", "scope_roots", "evidence_ref", "result_count"],
+        additionalProperties: false,
+      },
+    },
     question_details: {
       type: "array",
       maxItems: 50,
@@ -1059,6 +1076,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
           additionalProperties: false,
         },
       },
+      absence_checks: AGENT_HANDOFF_RESEARCH_DATA.properties.absence_checks,
       questions: {
         type: "array",
         maxItems: 5,

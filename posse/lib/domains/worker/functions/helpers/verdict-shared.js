@@ -33,6 +33,7 @@ import { validateScopedPath } from "../../../../shared/scope/functions/validatio
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { latestTestReceiptDelta } from "./test-execution-receipt.js";
 
 const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard", "strong"];
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
@@ -62,6 +63,25 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
   }
 
   return fallback;
+}
+
+export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
+  const postChange = testRun?.postChange || testRun?.post_change || null;
+  if (testRun?.delta !== "regression" || verdict?.verdict !== "pass") return verdict;
+  const outputTail = [postChange?.stdout, postChange?.stderr]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(-1600);
+  return {
+    ...verdict,
+    verdict: "needs_review",
+    _disable_internal_retry: true,
+    reasons: [
+      `Deterministic frozen test regressed from passing at baseline to ${postChange?.status || "failing"} after the change; a terminal pass is not allowed.${outputTail ? `\nPost-change receipt tail:\n${outputTail}` : ""}`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
 }
 
 function _nextAssessmentRetryTier(currentTier) {
@@ -361,10 +381,41 @@ export function prepareVerdictForDispatch(job, verdict) {
     };
   }
 
-  const passConfidenceFloor = normalizeAssessorConfidence(payload?._assess_pass_confidence_floor, {
+  // Scope the receipt lookup to the assessed commit: stale receipts from
+  // earlier attempts must not describe this attempt's reworked code.
+  const assessedCommitHash = [...getAttempts(job.id)].reverse()
+    .find((attempt) => attempt.commit_hash)?.commit_hash || null;
+  const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
+  prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
+
+  const configuredPassConfidenceFloor = normalizeAssessorConfidence(payload?._assess_pass_confidence_floor, {
     fallback: null,
     allowNone: true,
   });
+  let passConfidenceFloor = configuredPassConfidenceFloor;
+  if (prepared.verdict === "pass" && configuredPassConfidenceFloor === "high") {
+    // delta null means NO deterministic receipts exist for this commit —
+    // that is the case with the least machine-checkable evidence, so the
+    // high floor (needs_review / strong-tier escalation) must stand, not be
+    // capped away. Only known non-discriminating receipt shapes cap the floor:
+    // questionable or future deltas must retain strong-tier scrutiny.
+    const mediumConfidenceDeltas = new Set([
+      "pass_to_pass",
+      "persistent_failure",
+      "post_only",
+      "baseline_only",
+    ]);
+    if (mediumConfidenceDeltas.has(assessedReceipt.delta)) {
+      passConfidenceFloor = "medium";
+      prepared = {
+        ...prepared,
+        reasons: [
+          `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the pass confidence floor is capped at medium.`,
+          ...(prepared.reasons || []),
+        ],
+      };
+    }
+  }
   if (prepared.verdict === "pass" && passConfidenceFloor) {
     const confidence = normalizeAssessorConfidence(prepared.confidence, { fallback: "medium", allowNone: true }) || "none";
     if ((ASSESSOR_CONFIDENCE_RANK[confidence] ?? -1) < ASSESSOR_CONFIDENCE_RANK[passConfidenceFloor]) {

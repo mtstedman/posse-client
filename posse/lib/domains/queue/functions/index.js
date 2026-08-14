@@ -28,7 +28,11 @@ import { flushEventsNow, logDurableEvent, logEvent } from "./events.js";
 import { getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
-import { notifyQueueStateChanged } from "./wakeups.js";
+import {
+  getQueueWakeGeneration,
+  notifyQueueStateChanged,
+  waitForQueueStateChangeAfter,
+} from "./wakeups.js";
 import { listUnresolvedActionableFailures } from "./failure-actionability.js";
 import {
   releaseJobLocksForStatus,
@@ -52,6 +56,11 @@ import {
   findActiveHumanGateForPayload,
   registerHumanGate,
 } from "./human-gates.js";
+import {
+  LIVE_SCOPE_WAIT_TIMEOUT_MS,
+  jobHasLivePendingScopeRequest,
+  scopeRequestBatchEntries,
+} from "./scope-expansion.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -119,6 +128,14 @@ export {
 } from "./attempts.js";
 
 export { isLeaseValid };
+export {
+  LIVE_SCOPE_WAIT_EXEMPTION_SLACK_MS,
+  LIVE_SCOPE_WAIT_MAX_EXEMPTION_MS,
+  LIVE_SCOPE_WAIT_TIMEOUT_MS,
+  grantApprovedScopeEntries,
+  jobHasLivePendingScopeRequest,
+  scopeRequestBatchEntries,
+} from "./scope-expansion.js";
 
 // Public transaction wrapper for callers that need to make multiple queue
 // writes atomic. Short-circuits when already inside a transaction so it can
@@ -1448,6 +1465,7 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
             updated_at = ?
         WHERE gate_job_id = ? AND gate_state IN ('open','resolving')
       `).run(now(), now(), id);
+      abandonScopeRequestForCanceledGate(job);
     }
     logEvent({
       work_item_id: job?.work_item_id, job_id: id,
@@ -1745,14 +1763,6 @@ function parseJobPayloadObject(job) {
   }
 }
 
-function scopeRequestBatchEntries(request = {}) {
-  const batch = Array.isArray(request.batch) ? request.batch.filter((entry) => entry?.path) : [];
-  if (batch.length > 0) return batch;
-  return request.path
-    ? [{ path: request.path, access: request.access, operation: request.operation, reason: request.reason }]
-    : [];
-}
-
 function scopeGateQuestionText(job, request) {
   const entries = scopeRequestBatchEntries(request);
   const approvalAction = request?.live_wait === true
@@ -1928,6 +1938,24 @@ export function requestJobScopeExpansion({
     }
 
     if (pending) {
+      // A recorded decision freezes the request contents. The gate job can
+      // still be parked open while the answer is being applied, so gateOpen
+      // alone is not sufficient: appending a new path onto a decided request
+      // would let the consuming waiter grant a path the human never saw.
+      // Mirror abandonJobScopeExpansionRequest's scope_request_decided guard.
+      if (pending.decision) {
+        return {
+          ok: false,
+          approved: false,
+          code: "scope_request_decided",
+          paused: false,
+          live: pending.live_wait === true,
+          waiting: false,
+          request_id: pending.id || null,
+          path: pending.path || null,
+          message: `Job #${normalizedJobId} has a prior scope request that was already ${pending.decision}; that decision is still being applied. Retry this ${normalizedOperation} shortly to open a fresh request.`,
+        };
+      }
       // Batch a further out-of-scope path onto the open gate instead of
       // bouncing it: the paused provider call can surface several missing
       // paths while it unwinds, and each bounced path would cost another
@@ -1940,10 +1968,14 @@ export function requestJobScopeExpansion({
         return {
           ok: false,
           code: "scope_approval_already_pending",
-          paused: true,
+          paused: pending.live_wait !== true,
+          live: pending.live_wait === true,
+          waiting: false,
           request_id: pending.id || null,
           path: pending.path || null,
-          message: `Job #${normalizedJobId} is already paused for a scope decision on ${pending.path || "another path"}.`,
+          message: pending.live_wait === true
+            ? `Job #${normalizedJobId} has a prior live scope request for ${pending.path || "another path"}, but its approval gate is no longer open. The active operation cannot wait on that gate and should return before retrying.`
+            : `Job #${normalizedJobId} is already paused for a scope decision on ${pending.path || "another path"}.`,
         };
       }
       const entry = {
@@ -1976,7 +2008,9 @@ export function requestJobScopeExpansion({
       return {
         ok: false,
         code: "scope_approval_batched",
-        paused: true,
+        paused: pending.live_wait !== true,
+        live: pending.live_wait === true,
+        waiting: true,
         request_id: pending.id || null,
         approval_job_id: gateJob.id,
         path: normalizedPath,
@@ -2050,6 +2084,91 @@ export function requestJobScopeExpansion({
   });
 }
 
+export function abandonJobScopeExpansionRequest({
+  jobId,
+  requestId = null,
+  attemptId = null,
+  code = "scope_wait_aborted",
+  message = "The active scope wait was abandoned.",
+  cancelGate = true,
+  // force: abandon even when the pending request belongs to a different
+  // attempt. Attempt-end cleanup must use this — its attempt is dead, and
+  // an early bounce here would leave an open gate asking about a dead
+  // attempt while the stale pending keeps watchdog/stall exemptions alive.
+  // The decided guard below still applies: a recorded decision is never
+  // silently discarded.
+  force = false,
+} = {}) {
+  return runInTransaction(() => {
+    const original = getJob(Number(jobId));
+    if (!original) return { ok: false, code: "scope_request_job_missing" };
+    const payload = parseJobPayloadObject(original);
+    const pending = payload._pending_scope_request;
+    if (!pending || (requestId && pending.id !== String(requestId))) {
+      return { ok: false, code: "scope_request_stale", job: original };
+    }
+    if (!force && attemptId && pending.attempt_id && Number(pending.attempt_id) !== Number(attemptId)) {
+      return { ok: false, code: "scope_request_attempt_mismatch", job: original, request: pending };
+    }
+    if (pending.decision) {
+      return { ok: false, code: "scope_request_decided", job: original, request: pending };
+    }
+
+    const abandoned = {
+      ...pending,
+      abandoned: true,
+      abandoned_at: now(),
+      abandon_code: String(code || "scope_wait_aborted"),
+      abandon_message: String(message || "The active scope wait was abandoned.").slice(0, 500),
+    };
+    const nextPayload = {
+      ...payload,
+      _scope_request_abandonments: [
+        ...(Array.isArray(payload._scope_request_abandonments) ? payload._scope_request_abandonments : []),
+        abandoned,
+      ].slice(-20),
+    };
+    delete nextPayload._pending_scope_request;
+    updateJobPayload(original.id, JSON.stringify(nextPayload));
+
+    const gate = pending.approval_job_id ? getJob(pending.approval_job_id) : null;
+    if (cancelGate && gate && !TERMINAL_JOB_STATUS_SET.has(gate.status)) {
+      forceUpdateJobStatus(gate.id, "canceled", { expectedStatuses: [gate.status] });
+    }
+    logEvent({
+      work_item_id: original.work_item_id,
+      job_id: original.id,
+      event_type: EVENT_TYPES.JOB_SCOPE_REQUEST_ABANDONED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: abandoned.abandon_message,
+      event_json: JSON.stringify({
+        request_id: pending.id || null,
+        approval_job_id: pending.approval_job_id || null,
+        code: abandoned.abandon_code,
+      }),
+    });
+    return {
+      ok: true,
+      code: abandoned.abandon_code,
+      job: getJob(original.id),
+      request: abandoned,
+    };
+  });
+}
+
+function abandonScopeRequestForCanceledGate(gateJob) {
+  const gatePayload = parseJobPayloadObject(gateJob);
+  if (gatePayload.review_type !== SCOPE_REQUEST_REVIEW_TYPE) return false;
+  const result = abandonJobScopeExpansionRequest({
+    jobId: gatePayload.original_job_id,
+    requestId: gatePayload.scope_request?.id || null,
+    code: "scope_gate_canceled",
+    message: `Scope approval gate #${gateJob.id} was canceled; the pending live scope request was abandoned.`,
+    cancelGate: false,
+  });
+  return result.ok === true;
+}
+
 /** Resolve a human answer for a request created by requestJobScopeExpansion. */
 export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" } = {}) {
   const humanJob = getJob(Number(approvalJobId));
@@ -2091,8 +2210,16 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
       const executionSettled = pending.execution_settled === true || (pending.live_wait === true && !liveActive);
       if (executionSettled) delete nextPayload._pending_scope_request;
       updateJobPayload(original.id, JSON.stringify(nextPayload));
+      let requeued = false;
       if (executionSettled && original.status === "waiting_on_human") {
-        updateJobStatus(original.id, "queued", { expectedStatuses: ["waiting_on_human"], force: true });
+        requeued = updateJobStatus(original.id, "queued", { expectedStatuses: ["waiting_on_human"], force: true });
+      } else if (
+        executionSettled
+        && original.status === "failed"
+        && Number(original.attempt_count || 0) < Math.max(1, Number(original.max_attempts || 3))
+      ) {
+        requeued = updateJobStatus(original.id, "queued", { expectedStatuses: ["failed"], force: true });
+        if (requeued) setJobError(original.id, null);
       }
       logEvent({
         work_item_id: original.work_item_id,
@@ -2106,7 +2233,8 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
         ok: true,
         approved: true,
         live: liveActive,
-        requeued: executionSettled && original.status === "waiting_on_human",
+        requeued,
+        remains_failed: original.status === "failed" && !requeued,
         job: getJob(original.id),
         request: pending,
       };
@@ -2121,10 +2249,11 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
     const executionSettled = pending.execution_settled === true || (pending.live_wait === true && !liveActive);
     if (executionSettled) delete nextPayload._pending_scope_request;
     updateJobPayload(original.id, JSON.stringify(nextPayload));
-    if (executionSettled) {
+    let finalized = false;
+    if (executionSettled && original.status === "waiting_on_human") {
       setJobError(original.id, error);
-      updateJobStatus(original.id, "failed", {
-        expectedStatuses: ["waiting_on_human", "queued", "running"],
+      finalized = updateJobStatus(original.id, "failed", {
+        expectedStatuses: ["waiting_on_human"],
         force: true,
       });
     }
@@ -2140,7 +2269,8 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
       ok: true,
       approved: false,
       live: liveActive,
-      finalized: executionSettled,
+      finalized,
+      settled: executionSettled,
       job: getJob(original.id),
       request: pending,
       error,
@@ -2159,49 +2289,91 @@ export async function awaitJobScopeExpansionDecision({
   attemptId = null,
   signal = null,
   pollMs = 200,
+  timeoutMs = LIVE_SCOPE_WAIT_TIMEOUT_MS,
+  useQueueWake = true,
 } = {}) {
   const normalizedJobId = Number(jobId);
   const normalizedRequestId = String(requestId || "");
   const delayMs = Math.max(25, Math.min(2000, Number(pollMs) || 200));
-  const abortResult = () => ({
+  const deadline = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Date.now() + Number(timeoutMs)
+    : null;
+  const stopResult = (code, message) => ({
     ok: false,
     approved: false,
     live: true,
-    code: "scope_wait_aborted",
-    message: "The active scope wait was aborted before a human decision arrived.",
+    paused: false,
+    code,
+    message,
   });
 
-  while (true) {
-    if (signal?.aborted) return abortResult();
-    const decision = runInTransaction(() => {
-      const job = getJob(normalizedJobId);
-      if (!job) {
-        return { ok: false, approved: false, live: true, code: "scope_request_job_missing", message: `Job #${normalizedJobId} no longer exists.` };
-      }
-      const payload = parseJobPayloadObject(job);
-      const pending = payload._pending_scope_request;
-      if (!pending || pending.id !== normalizedRequestId) {
-        return { ok: false, approved: false, live: true, code: "scope_request_stale", message: "The scope request is no longer active." };
-      }
-      if (pending.attempt_id && attemptId && Number(pending.attempt_id) !== Number(attemptId)) {
-        return { ok: false, approved: false, live: true, code: "scope_request_attempt_mismatch", message: "The scope request belongs to a different job attempt." };
-      }
-      if (!pending.decision) return null;
+  const abandon = (code, message) => {
+    const result = abandonJobScopeExpansionRequest({
+      jobId: normalizedJobId,
+      requestId: normalizedRequestId,
+      attemptId,
+      code,
+      message,
+    });
+    if (result?.code === "scope_request_decided") return null;
+    return stopResult(code, message);
+  };
 
-      const nextPayload = { ...payload };
-      delete nextPayload._pending_scope_request;
-      updateJobPayload(job.id, JSON.stringify(nextPayload));
-      const entries = scopeRequestBatchEntries(pending);
-      if (pending.decision === "approved") {
+  while (true) {
+    // Capture the wake generation before the read so an approval racing this
+    // probe is observed by waitForQueueStateChangeAfter instead of sleeping
+    // past it. The probe itself is deliberately read-only: no BEGIN IMMEDIATE
+    // lock is taken on undecided polling iterations.
+    const wakeGeneration = useQueueWake ? getQueueWakeGeneration() : null;
+    const job = getJob(normalizedJobId);
+    if (!job) {
+      return stopResult("scope_request_job_missing", `Job #${normalizedJobId} no longer exists.`);
+    }
+    const payload = parseJobPayloadObject(job);
+    const pending = payload._pending_scope_request;
+    if (!pending || pending.id !== normalizedRequestId) {
+      return stopResult("scope_request_stale", "The scope request is no longer active.");
+    }
+
+    const decision = pending.decision ? runInTransaction(() => {
+      const freshJob = getJob(normalizedJobId);
+      const freshPayload = parseJobPayloadObject(freshJob);
+      const freshPending = freshPayload._pending_scope_request;
+      if (!freshPending || freshPending.id !== normalizedRequestId) {
+        return stopResult("scope_request_stale", "The scope request is no longer active.");
+      }
+      if (!freshPending.decision) return null;
+      // A superseded waiter must never consume a decision recorded for the
+      // rebound live attempt. Exit terminally here: falling through with null
+      // would reach the rebind block, whose "decided" branch continues and
+      // spins this waiter (decision tx refuses, rebind says decided) until
+      // timeout.
+      const decisionWaiterAttempt = Number(attemptId);
+      const decisionBoundAttempt = Number(freshPending.attempt_id);
+      if (
+        Number.isFinite(decisionWaiterAttempt)
+        && Number.isFinite(decisionBoundAttempt)
+        && decisionWaiterAttempt < decisionBoundAttempt
+      ) {
+        return stopResult(
+          "scope_request_attempt_mismatch",
+          "The scope request belongs to a newer job attempt.",
+        );
+      }
+
+      delete freshPayload._pending_scope_request;
+      updateJobPayload(freshJob.id, JSON.stringify(freshPayload));
+      const entries = scopeRequestBatchEntries(freshPending);
+      if (freshPending.decision === "approved") {
         return {
           ok: true,
           approved: true,
           live: true,
           paused: false,
           code: "scope_approved_live",
-          path: pending.path || null,
-          access: pending.access || null,
-          operation: pending.operation || null,
+          path: freshPending.path || null,
+          access: freshPending.access || null,
+          operation: freshPending.operation || null,
           batch: entries,
           message: `Writable scope approved for ${entries.map((entry) => entry.path).join(", ")}; continuing the active agent session.`,
         };
@@ -2212,25 +2384,140 @@ export async function awaitJobScopeExpansionDecision({
         live: true,
         paused: false,
         code: "scope_request_denied",
-        path: pending.path || null,
-        access: pending.access || null,
-        operation: pending.operation || null,
+        path: freshPending.path || null,
+        access: freshPending.access || null,
+        operation: freshPending.operation || null,
         batch: entries,
-        message: scopeRequestDeniedError(pending),
+        message: scopeRequestDeniedError(freshPending),
       };
-    });
+    }) : null;
     if (decision) return decision;
 
-    await new Promise((resolve) => {
-      let timer = null;
-      const finish = () => {
-        if (timer) clearTimeout(timer);
-        signal?.removeEventListener?.("abort", finish);
-        resolve();
-      };
-      timer = setTimeout(finish, delayMs);
-      signal?.addEventListener?.("abort", finish, { once: true });
-    });
+    if (pending.attempt_id && attemptId && Number(pending.attempt_id) !== Number(attemptId)) {
+      const rebound = runInTransaction(() => {
+        const freshJob = getJob(normalizedJobId);
+        const freshPayload = parseJobPayloadObject(freshJob);
+        const freshPending = freshPayload._pending_scope_request;
+        if (!freshPending || freshPending.id !== normalizedRequestId) return "stale";
+        if (freshPending.decision) return "decided";
+        const waiterAttemptId = Number(attemptId);
+        const pendingAttemptId = Number(freshPending.attempt_id);
+        if (!Number.isFinite(waiterAttemptId) || waiterAttemptId < pendingAttemptId) {
+          return "superseded";
+        }
+        // Equal attempt ids mean a concurrent duplicate waiter already
+        // rebound the request to this waiter's own attempt — keep polling.
+        if (waiterAttemptId === pendingAttemptId) return "rebound";
+        const gate = freshPending.approval_job_id ? getJob(freshPending.approval_job_id) : null;
+        const gateOpen = !!gate
+          && gate.job_type === "human_input"
+          && ["queued", "waiting_on_human"].includes(gate.status);
+        if (!gateOpen) return "gate_closed";
+        freshPayload._pending_scope_request = {
+          ...freshPending,
+          attempt_id: Number(attemptId) || null,
+          execution_settled: false,
+          rebound_at: now(),
+        };
+        updateJobPayload(freshJob.id, JSON.stringify(freshPayload));
+        return "rebound";
+      });
+      if (rebound === "rebound" || rebound === "decided") continue;
+      if (rebound === "stale") {
+        return stopResult("scope_request_stale", "The scope request is no longer active.");
+      }
+      if (rebound === "superseded") {
+        return stopResult(
+          "scope_request_attempt_mismatch",
+          "The scope request belongs to a newer job attempt.",
+        );
+      }
+
+      // Re-read before cleanup: a decision or newer waiter may have won after
+      // the failed rebind. Never let this stale waiter cancel an open gate.
+      const freshJob = getJob(normalizedJobId);
+      if (!freshJob) {
+        return stopResult("scope_request_job_missing", `Job #${normalizedJobId} no longer exists.`);
+      }
+      const freshPending = parseJobPayloadObject(freshJob)._pending_scope_request;
+      if (freshPending?.id === normalizedRequestId && freshPending.decision) continue;
+      // A vanished or replaced request is stale, not an attempt mismatch —
+      // the gate checks below would otherwise be derived from a request this
+      // waiter never owned.
+      if (freshPending?.id !== normalizedRequestId) {
+        return stopResult("scope_request_stale", "The scope request is no longer active.");
+      }
+      if (Number(attemptId) === Number(freshPending.attempt_id)) continue;
+      if (
+        !Number.isFinite(Number(attemptId))
+        || Number(attemptId) < Number(freshPending.attempt_id)
+      ) {
+        return stopResult(
+          "scope_request_attempt_mismatch",
+          "The scope request belongs to a newer job attempt.",
+        );
+      }
+      const gate = freshPending.approval_job_id ? getJob(freshPending.approval_job_id) : null;
+      const gateOpen = !!gate
+        && gate.job_type === "human_input"
+        && ["queued", "waiting_on_human"].includes(gate.status);
+      if (gateOpen) {
+        // The rebind saw the gate closed but it is open at this re-read —
+        // a torn read; retry the rebind rather than stopping a live waiter.
+        continue;
+      }
+      abandonJobScopeExpansionRequest({
+        jobId: normalizedJobId,
+        requestId: normalizedRequestId,
+        code: "scope_request_attempt_mismatch",
+        message: "The scope request belonged to an older attempt and its approval gate is closed.",
+      });
+      return stopResult(
+        "scope_request_attempt_mismatch",
+        "The scope request belongs to a different job attempt and its approval gate is no longer open.",
+      );
+    }
+
+    if (signal?.aborted) {
+      const stopped = abandon(
+        "scope_wait_aborted",
+        "The active scope wait was aborted before a human decision arrived.",
+      );
+      if (stopped) return stopped;
+      continue;
+    }
+    if (deadline != null && Date.now() >= deadline) {
+      // Timing out must not destroy a review in progress: the operator may
+      // be seconds from answering, and abandoning here force-canceled the
+      // gate so the answer landed scope_request_stale. Return control to the
+      // caller but leave the request and gate intact — a later decision is
+      // consumed by the attempt-end settle path (requeue-with-grant), and
+      // the watchdog exemption ages out via the pending's requested_at, so
+      // nothing leaks if no answer ever comes.
+      return stopResult(
+        "scope_wait_timeout",
+        `The active scope wait timed out after ${Math.ceil(Number(timeoutMs) / 1000)}s; the approval gate stays open and a later decision is applied when the job retries.`,
+      );
+    }
+
+    const remainingMs = deadline == null ? delayMs : Math.max(1, deadline - Date.now());
+    if (useQueueWake) {
+      await waitForQueueStateChangeAfter(wakeGeneration, {
+        signal,
+        timeoutMs: Math.min(2000, remainingMs),
+      });
+    } else {
+      await new Promise((resolve) => {
+        let timer = null;
+        const finish = () => {
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener?.("abort", finish);
+          resolve();
+        };
+        timer = setTimeout(finish, Math.min(delayMs, remainingMs));
+        signal?.addEventListener?.("abort", finish, { once: true });
+      });
+    }
   }
 }
 

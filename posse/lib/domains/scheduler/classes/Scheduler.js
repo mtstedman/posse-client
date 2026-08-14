@@ -52,6 +52,7 @@ import {
   crossWiMergeDependencyWouldCycle,
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
+  jobHasLivePendingScopeRequest,
   onQueueStateChanged,
   reconcileFileLaneWaits,
   recordFileLaneWait,
@@ -231,29 +232,52 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   const sourceBranch = String(sourceWi?.branch_name || "").trim();
   if (!sourceWi || !sourceBranch) return false;
 
-  const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind);
-  if (!releaseCheck.ok) {
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: ownerId,
-      message: `Cross-WI handoff skipped for ${path}; WI#${sourceWiId} still has ${releaseCheck.blockers.length} unresolved writer(s)`,
-      event_json: JSON.stringify({
-        source_work_item_id: sourceWiId,
-        path,
-        lock_kind: lockKind,
-        reason: releaseCheck.reason,
-        blockers: releaseCheck.blockers.slice(0, 10).map((blocker) => ({
+  const recordBlocked = (message, eventDetail) => {
+    const normalizedBlockers = Array.isArray(eventDetail?.blockers)
+      ? eventDetail.blockers.slice(0, 10).map((blocker) => ({
           job_id: blocker.job_id ?? blocker.id ?? null,
           status: blocker.job_status ?? blocker.status ?? null,
           job_type: blocker.job_type ?? null,
           path: blocker.path ?? null,
-        })),
-      }),
+        })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+      : [];
+    const detail = {
+      source_work_item_id: sourceWiId,
+      path,
+      lock_kind: lockKind,
+      ...eventDetail,
+      ...(normalizedBlockers.length > 0 ? { blockers: normalizedBlockers } : {}),
+    };
+    const wait = recordFileLaneWait({
+      waiter_job_id: job.id,
+      waiter_work_item_id: job.work_item_id,
+      holder_type: "work_item",
+      holder_job_id: conflict.lock?.job_id || null,
+      holder_work_item_id: sourceWiId,
+      path,
+      lock_kind: lockKind,
+      wait_state: detail,
     });
+    if (wait?.transition === "created" || wait?.transition === "changed") {
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        actor_id: ownerId,
+        message,
+        event_json: JSON.stringify(detail),
+      });
+    }
     return false;
+  };
+
+  const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind);
+  if (!releaseCheck.ok) {
+    return recordBlocked(
+      `Cross-WI handoff skipped for ${path}; WI#${sourceWiId} still has ${releaseCheck.blockers.length} unresolved writer(s)`,
+      { reason: releaseCheck.reason, blockers: releaseCheck.blockers },
+    );
   }
 
   const mergeOrderCheck = crossWiMergeDependencyWouldCycle(job.work_item_id, sourceWiId);
@@ -266,23 +290,14 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
         `cross_wi_existing_order_to_wi_${job.work_item_id}_job_${job.id}`,
       );
       if (released <= 0) {
-        logEvent({
-          work_item_id: job.work_item_id,
-          job_id: job.id,
-          event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
-          actor_type: EVENT_ACTORS.SCHEDULER,
-          actor_id: ownerId,
-          message: `Cross-WI handoff skipped for ${path}; existing-order lock release found no active lock`,
-          event_json: JSON.stringify({
-            source_work_item_id: sourceWiId,
-            path,
-            lock_kind: lockKind,
+        return recordBlocked(
+          `Cross-WI handoff skipped for ${path}; existing-order lock release found no active lock`,
+          {
             reason: "lock_release_failed",
             existing_merge_order: true,
             merge_order_path: mergeOrderCheck.path,
-          }),
-        });
-        return false;
+          },
+        );
       }
       logEvent({
         work_item_id: job.work_item_id,
@@ -305,22 +320,10 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       return true;
     }
 
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: ownerId,
-      message: `Cross-WI handoff skipped for ${path}; merge order would become cyclic`,
-      event_json: JSON.stringify({
-        source_work_item_id: sourceWiId,
-        path,
-        lock_kind: lockKind,
-        reason: mergeOrderCheck.reason,
-        merge_order_path: mergeOrderCheck.path,
-      }),
-    });
-    return false;
+    return recordBlocked(
+      `Cross-WI handoff skipped for ${path}; merge order would become cyclic`,
+      { reason: mergeOrderCheck.reason, merge_order_path: mergeOrderCheck.path },
+    );
   }
 
   const db = getDb();
@@ -340,6 +343,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
 
     const dependency = addCrossWiMergeDependency(job.work_item_id, sourceWiId, {
       path,
+      lock_kind: lockKind,
       source_branch: sourceBranch,
       source_lock_id: conflict.lock?.id ?? null,
       via_job_id: job.id,
@@ -382,39 +386,16 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     // still-held lock) or drop a real one on an unrelated rollback.
     handoff = runImmediateTransaction(db, applyHandoff);
   } catch (err) {
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: ownerId,
-      message: `Cross-WI handoff skipped for ${path}; ${err?.message || err}`,
-      event_json: JSON.stringify({
-        source_work_item_id: sourceWiId,
-        path,
-        lock_kind: lockKind,
-        reason: "handoff_record_failed",
-        error: err?.message || String(err),
-      }),
-    });
-    return false;
+    return recordBlocked(
+      `Cross-WI handoff skipped for ${path}; ${err?.message || err}`,
+      { reason: "handoff_record_failed", error: err?.message || String(err) },
+    );
   }
   if (!handoff.ok) {
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: ownerId,
-      message: `Cross-WI handoff skipped for ${path}; ${handoff.reason || "source lock was no longer releasable"}`,
-      event_json: JSON.stringify({
-        source_work_item_id: sourceWiId,
-        path,
-        lock_kind: lockKind,
-        reason: handoff.reason || "lock_release_failed",
-      }),
-    });
-    return false;
+    return recordBlocked(
+      `Cross-WI handoff skipped for ${path}; ${handoff.reason || "source lock was no longer releasable"}`,
+      { reason: handoff.reason || "lock_release_failed" },
+    );
   }
 
   logEvent({
@@ -2242,7 +2223,10 @@ export class Scheduler {
         if (onKillJob) {
           const now = Date.now();
           for (const [jobId, entry] of activeWorkers) {
-            if (entry.job.job_type === "human_input") continue;
+            // Re-kill/wedged handling must run before the live-scope
+            // exemption: a worker already killed for runtime that opens a
+            // fresh scope request must keep receiving RUNTIME_KILL_RETRY_MS
+            // re-kills and wedged logging, not earn a new exemption.
             const killState = killedForRuntime.get(jobId);
             if (killState) {
               // Kill was sent but the worker promise hasn't settled. There is
@@ -2269,7 +2253,9 @@ export class Scheduler {
               }
               continue;
             }
-            const runtimeSec = (now - entry.startTime) / 1000;
+            const runtimeElapsedMs = runtimeWatchdogElapsedMs(entry, getJob(jobId) || entry.job, now);
+            if (runtimeElapsedMs == null) continue;
+            const runtimeSec = runtimeElapsedMs / 1000;
             const runtimeLimitSec = maxJobRuntimeSecFor(entry.job);
             if (runtimeSec > runtimeLimitSec) {
               killedForRuntime.set(jobId, { firstKillAt: now, lastKillAt: now, wedgedLogged: false });
@@ -2559,4 +2545,51 @@ export function __testPrepareCrossWiFileSyncHandoff(job, conflict, ownerId = "te
 
 export function __testMaxJobRuntimeSecFor(job) {
   return maxJobRuntimeSecFor(job);
+}
+
+export function __testRuntimeWatchdogExempt(job, { nowMs = Date.now() } = {}) {
+  return job?.job_type === "human_input" || jobHasLivePendingScopeRequest(job, { nowMs });
+}
+
+// Total watchdog credit a single dispatch may earn from live-scope waits.
+// Each new scope request carries a fresh requested_at, so an uncapped
+// exemption is indefinitely renewable by a scope-spamming agent; several
+// sequential human-answered gates fit comfortably under this ceiling while
+// a runaway worker still reaches the runtime cap.
+const RUNTIME_EXEMPT_CREDIT_CAP_MS = 10 * 60_000;
+
+function runtimeWatchdogElapsedMs(entry, job, nowMs = Date.now()) {
+  // An open human prompt is exempt without a credit cap (the prompt's own
+  // DISPLAY_TIMEOUT_MS bounds it), but a human_input worker wedged before or
+  // after the prompt parks still needs the last-resort runtime reap, so the
+  // unconditional exemption is scoped to the parked status. Parked time is
+  // credited back to startTime so the post-answer phase is not charged for it.
+  if (job?.job_type === "human_input" && job.status === "waiting_on_human") {
+    if (entry.humanGateExemptSince == null) entry.humanGateExemptSince = nowMs;
+    return null;
+  }
+  if (entry.humanGateExemptSince != null) {
+    entry.startTime += Math.max(0, nowMs - entry.humanGateExemptSince);
+    entry.humanGateExemptSince = null;
+  }
+  const creditUsedMs = entry.runtimeExemptCreditMs || 0;
+  if (__testRuntimeWatchdogExempt(job, { nowMs })) {
+    if (entry.runtimeExemptSince == null) entry.runtimeExemptSince = nowMs;
+    const accruingMs = creditUsedMs + Math.max(0, nowMs - entry.runtimeExemptSince);
+    // Exemption is honored only while cumulative credit remains; past the
+    // ceiling the wait counts as runtime again so the cap still binds.
+    if (accruingMs < RUNTIME_EXEMPT_CREDIT_CAP_MS) return null;
+  }
+  if (entry.runtimeExemptSince != null) {
+    const pauseMs = Math.max(0, nowMs - entry.runtimeExemptSince);
+    const appliedMs = Math.min(pauseMs, Math.max(0, RUNTIME_EXEMPT_CREDIT_CAP_MS - creditUsedMs));
+    entry.startTime += appliedMs;
+    entry.runtimeExemptCreditMs = creditUsedMs + appliedMs;
+    entry.runtimeExemptSince = null;
+  }
+  return Math.max(0, nowMs - entry.startTime);
+}
+
+export function __testRuntimeWatchdogElapsedMs(entry, job, nowMs) {
+  return runtimeWatchdogElapsedMs(entry, job, nowMs);
 }

@@ -40,54 +40,137 @@ function resolveRepoScopePath(projectDir, value) {
   return resolved;
 }
 
+function isRepository(projectDir) {
+  return !!projectDir && pathEntryExists(path.join(path.resolve(projectDir), ".git"));
+}
+
+function legacyTaskNode(task, index) {
+  return {
+    index,
+    id: String(index),
+    role: String(task?.job_type || "dev").trim().toLowerCase(),
+    taskMode: String(task?.task_mode || "code").trim().toLowerCase(),
+    dependsOn: Array.isArray(task?.depends_on_index)
+      ? task.depends_on_index.filter(Number.isInteger).map(String)
+      : [],
+    scope: task || {},
+  };
+}
+
+function handoffNode(handoff, index) {
+  return {
+    index,
+    id: String(handoff?.id || index),
+    role: String(handoff?.target?.role || "").trim().toLowerCase(),
+    taskMode: String(handoff?.report?.scope?.task_mode || "code").trim().toLowerCase(),
+    dependsOn: Array.isArray(handoff?.depends_on) ? handoff.depends_on.map(String) : [],
+    scope: handoff?.report?.scope || {},
+  };
+}
+
+function ancestorNodes(node, byId) {
+  const result = [];
+  const seen = new Set();
+  const visit = (id) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    const ancestor = byId.get(id);
+    if (!ancestor) return;
+    result.push(ancestor);
+    for (const parentId of ancestor.dependsOn) visit(parentId);
+  };
+  for (const id of node.dependsOn) visit(id);
+  return result;
+}
+
+function repoCodeTask(node) {
+  return ["dev", "code"].includes(node.role) && ["code", "dev"].includes(node.taskMode);
+}
+
+function validateNodes(nodes, projectDir) {
+  if (!isRepository(projectDir)) return [];
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const issues = [];
+
+  for (const node of nodes) {
+    if (!repoCodeTask(node)) continue;
+    const ancestors = ancestorNodes(node, byId);
+    const ancestorCreates = new Set(
+      ancestors.flatMap((ancestor) => uniqueScopePaths(ancestor.scope.files_to_create)).map(scopePathKey),
+    );
+    const ancestorDeletes = new Set(
+      ancestors.flatMap((ancestor) => uniqueScopePaths(ancestor.scope.files_to_delete)).map(scopePathKey),
+    );
+    const filesToModify = uniqueScopePaths(node.scope.files_to_modify);
+    const filesToCreate = uniqueScopePaths(node.scope.files_to_create);
+    const modifyKeys = new Set(filesToModify.map(scopePathKey));
+
+    for (const filePath of filesToModify) {
+      const key = scopePathKey(filePath);
+      if (filesToCreate.some((candidate) => scopePathKey(candidate) === key)) {
+        issues.push({
+          taskIndex: node.index,
+          taskId: node.id,
+          path: filePath,
+          declaredKind: "modify_and_create",
+          reason: "the same task declares the path in both files_to_modify and files_to_create",
+        });
+        continue;
+      }
+      const resolved = resolveRepoScopePath(projectDir, filePath);
+      if (resolved && !pathEntryExists(resolved) && !ancestorCreates.has(key)) {
+        issues.push({
+          taskIndex: node.index,
+          taskId: node.id,
+          path: filePath,
+          declaredKind: "files_to_modify",
+          reason: "the path does not exist and no prerequisite task creates it",
+        });
+      }
+    }
+
+    for (const filePath of filesToCreate) {
+      const key = scopePathKey(filePath);
+      if (modifyKeys.has(key)) continue;
+      const resolved = resolveRepoScopePath(projectDir, filePath);
+      if (resolved && pathEntryExists(resolved) && !ancestorDeletes.has(key)) {
+        issues.push({
+          taskIndex: node.index,
+          taskId: node.id,
+          path: filePath,
+          declaredKind: "files_to_create",
+          reason: "the path already exists and no prerequisite task deletes it",
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+export function validatePlannerTaskFileKinds(tasks, projectDir) {
+  const nodes = Array.isArray(tasks) ? tasks.map(legacyTaskNode) : [];
+  return validateNodes(nodes, projectDir);
+}
+
+export function validatePlannerPacketFileKinds(packet, projectDir) {
+  if (packet?.profile !== "planner.plan.v1" || packet?.outcome !== "success") return [];
+  const nodes = Array.isArray(packet?.handoffs) ? packet.handoffs.map(handoffNode) : [];
+  return validateNodes(nodes, projectDir);
+}
+
 /**
- * Correct planner file-kind mistakes against the checked-out repository.
- * This runs only when a real Git worktree marker is present; isolated planner
- * fixtures and non-repository artifact roots retain their declared scope.
- *
- * @param {Record<string, any>} task
- * @param {string} projectDir
- * @returns {{ changed: boolean, movedToCreate: string[], movedToModify: string[] }}
+ * Legacy compiler guard. This intentionally does not repair planner scope: a
+ * missing modify path may be a typo, and silently turning it into creation
+ * authority can materialize an unrelated file. Callers must reject `issues`.
  */
-export function reconcilePlannerFileKinds(task, projectDir) {
-  const jobType = task?.job_type || "dev";
-  const taskMode = task?.task_mode || "code";
-  const repoCodeTask = (jobType === "dev" || jobType === "code")
-    && (taskMode === "code" || taskMode === "dev");
-  if (!repoCodeTask || !projectDir || !pathEntryExists(path.join(path.resolve(projectDir), ".git"))) {
-    return { changed: false, movedToCreate: [], movedToModify: [] };
-  }
-
-  const originalModify = Array.isArray(task.files_to_modify) ? task.files_to_modify : [];
-  const originalCreate = Array.isArray(task.files_to_create) ? task.files_to_create : [];
-  const filesToModify = [];
-  const filesToCreate = [];
-  const movedToCreate = [];
-  const movedToModify = [];
-
-  for (const filePath of originalModify) {
-    const resolved = resolveRepoScopePath(projectDir, filePath);
-    if (resolved && !pathEntryExists(resolved)) {
-      filesToCreate.push(filePath);
-      movedToCreate.push(filePath);
-    } else {
-      filesToModify.push(filePath);
-    }
-  }
-
-  for (const filePath of originalCreate) {
-    const resolved = resolveRepoScopePath(projectDir, filePath);
-    if (resolved && pathEntryExists(resolved)) {
-      filesToModify.push(filePath);
-      movedToModify.push(filePath);
-    } else {
-      filesToCreate.push(filePath);
-    }
-  }
-
-  task.files_to_modify = uniqueScopePaths(filesToModify);
-  task.files_to_create = uniqueScopePaths(filesToCreate);
-  const changed = JSON.stringify(task.files_to_modify) !== JSON.stringify(originalModify)
-    || JSON.stringify(task.files_to_create) !== JSON.stringify(originalCreate);
-  return { changed, movedToCreate, movedToModify };
+export function reconcilePlannerFileKinds(task, projectDir, { tasks = [task], taskIndex = 0 } = {}) {
+  const allIssues = validatePlannerTaskFileKinds(tasks, projectDir);
+  const issues = allIssues.filter((issue) => issue.taskIndex === taskIndex);
+  return {
+    changed: false,
+    movedToCreate: [],
+    movedToModify: [],
+    issues,
+    errors: issues.map((issue) => `${issue.declaredKind} path "${issue.path}" is invalid: ${issue.reason}`),
+  };
 }

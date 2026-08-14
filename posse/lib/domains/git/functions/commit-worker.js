@@ -41,6 +41,7 @@ function errorPayload(err) {
 }
 
 async function runCommit() {
+  let outcome;
   try {
     if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
       nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
@@ -48,10 +49,14 @@ async function runCommit() {
     nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
     const { message, cwd, scope, opts } = workerData || {};
     const result = gitCommitAll(message, cwd, scope, opts);
-    post({ type: "result", result });
+    outcome = { type: "result", result };
   } catch (err) {
-    post({ type: "error", error: errorPayload(err) });
+    outcome = { type: "error", error: errorPayload(err) };
   }
+  // The parent may terminate the worker immediately after its terminal frame,
+  // so child-process teardown must finish before that frame is observable.
+  try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
+  post(outcome);
 }
 
 // This module is a worker-thread entrypoint, not a library: importing it runs

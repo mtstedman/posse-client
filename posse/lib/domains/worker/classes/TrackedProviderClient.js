@@ -1320,7 +1320,11 @@ export class TrackedProviderClient {
         );
       } catch (error) {
         providerReturnedAt = Date.now();
-        if (!terminalHandoffStop || abortSignal?.aborted) throw error;
+        if (
+          !terminalHandoffStop
+          || abortSignal?.aborted
+          || error?.terminalHandoffStopCompatible === false
+        ) throw error;
         terminalProviderError = error;
         providerResult = { output: "", stats: error?.stats || {} };
       }

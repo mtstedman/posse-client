@@ -48,6 +48,7 @@ async function main() {
   if (task === "gitMergeToTarget") {
     return helpers.gitMergeToTarget(args.branch, args.cwd || projectDir, {
       wiId: args.wiId ?? null,
+      retryDeterministicConflict: args.retryDeterministicConflict === true,
       onPhase: (event = {}) => post({ type: "progress", event }),
     });
   }
@@ -98,6 +99,17 @@ async function main() {
   throw new Error(`Unknown git workflow worker task: ${task}`);
 }
 
-main()
-  .then((result) => post({ type: "result", result }))
-  .catch((err) => post({ type: "error", error: errorPayload(err) }));
+async function run() {
+  let outcome;
+  try {
+    outcome = { type: "result", result: await main() };
+  } catch (err) {
+    outcome = { type: "error", error: errorPayload(err) };
+  }
+  // Dispose before publishing the terminal frame: the parent is allowed to
+  // terminate this one-shot worker as soon as it receives that frame.
+  try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
+  post(outcome);
+}
+
+void run();

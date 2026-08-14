@@ -7,6 +7,7 @@ import {
   getJob,
   getWorkItem,
   isLeaseValid,
+  abandonJobScopeExpansionRequest,
   listActiveFileLocks,
   logEvent,
   rewireDependency,
@@ -237,6 +238,21 @@ export async function handlePostExecutionForWorker({
           refreshAndExtractInsightsFromModule(job.work_item_id);
           this._cleanupWorktreeIfDone(job.work_item_id);
           return;
+        }
+        // An undecided scope request that survives past the pause boundary has
+        // no consumer left: this attempt is completing without waiting on it
+        // (timed-out wait, or a request still bound to a crashed prior
+        // attempt). Close it — and its open approval gate — instead of leaving
+        // the gate surfaced to the operator against a dead attempt. The
+        // decided guard inside abandon keeps a racing human answer intact.
+        if (pendingScopeRequest && !pendingScopeRequest.decision) {
+          abandonJobScopeExpansionRequest({
+            jobId: job.id,
+            requestId: pendingScopeRequest.id,
+            force: true,
+            code: "scope_request_job_finished",
+            message: "The provider call finished without consuming the pending scope request; closing its approval gate.",
+          });
         }
         const agentCompletionLog = MUTATING_JOB_TYPES.has(job.job_type)
           ? parseAgentCompletionLogFromModule(output)

@@ -2,6 +2,7 @@ import { extractJson as defaultExtractJson } from "../../../shared/format/functi
 import { ProviderToolRenderer } from "../../../shared/tools/classes/ProviderToolRenderer.js";
 
 import { classifyProviderError } from "../functions/shared/api-resilience.js";
+import { ProviderTurnBudget } from "./ProviderTurnBudget.js";
 
 export class BaseProvider {
   static name = null;
@@ -64,7 +65,12 @@ export class BaseProvider {
     if (typeof this.module.callProvider !== "function") {
       throw new Error(`Provider "${this.name}" does not implement callProvider()`);
     }
-    return await this.module.callProvider(promptText, opts);
+    const turnBudget = new ProviderTurnBudget({
+      providerName: this.name,
+      requestedMaxTurns: opts?.maxTurns,
+    });
+    const result = await this.module.callProvider(promptText, opts);
+    return turnBudget.finalize(result);
   }
 
   parseErrorBackoff(err) {

@@ -694,6 +694,32 @@ export function testExecutionDelta(baseline, postChange) {
   return "indeterminate";
 }
 
+export function latestTestReceiptDelta(jobId, { commitHash = null } = {}) {
+  const receipts = storedReceipts(jobId)
+    .sort((left, right) => Number(right.artifact_id || 0) - Number(left.artifact_id || 0));
+  // Receipts accumulate across attempts. Without a commit filter, a stale
+  // post_change receipt from an earlier attempt (e.g. a 'regression' pair)
+  // would be paired against a later attempt's reworked code and poison its
+  // verdict. When the caller names the assessed commit, only a post_change
+  // receipt for that exact commit counts; older receipts yield delta null.
+  const postChange = receipts.find((receipt) => (
+    receipt.phase === "post_change"
+    && (!commitHash || receipt.commit_hash === commitHash)
+  )) || null;
+  if (commitHash && !postChange) {
+    return { delta: null, baseline: null, postChange: null };
+  }
+  const baseline = receipts.find((receipt) => (
+    receipt.phase === "baseline"
+    && (!postChange?.plan_id || receipt.plan_id === postChange.plan_id)
+  )) || null;
+  return {
+    delta: baseline || postChange ? testExecutionDelta(baseline, postChange) : null,
+    baseline,
+    postChange,
+  };
+}
+
 export function renderTestExecutionEvidence({
   baseline = null,
   post_change: postChange = null,

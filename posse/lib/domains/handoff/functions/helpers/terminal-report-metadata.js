@@ -30,6 +30,7 @@ const RESEARCH_USEFULNESS = new Set(["primary", "supporting", "context", "low"])
 const RESEARCH_EVIDENCE = new Set(["audited_file_read", "atlas", "search", "prior_research", "web"]);
 const CONFIDENCE = new Set(["high", "medium", "low"]);
 const QUESTION_CATEGORIES = new Set(["data-handling", "security", "convention", "config", "unclear-pattern"]);
+const HASH_REF_SELECTOR_RE = /^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$/;
 function fail(code, message) {
   const err = new Error(message);
   err.code = code;
@@ -91,7 +92,7 @@ export function normalizeResearchData(value, label, profile) {
   }
   const source = exactKeys(
     value,
-    ["key_symbols", "memories", "planner_file_priorities", "patterns", "scope_estimate", "question_details"],
+    ["key_symbols", "memories", "planner_file_priorities", "patterns", "scope_estimate", "absence_checks", "question_details"],
     label,
   );
   const keySymbols = stringArray(source.key_symbols, `${label}.key_symbols`, 12, 80);
@@ -169,6 +170,29 @@ export function normalizeResearchData(value, label, profile) {
   }
 
   let questionDetails = [];
+  let absenceChecks = [];
+  if (source.absence_checks != null) {
+    if (!Array.isArray(source.absence_checks) || source.absence_checks.length > 20) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.absence_checks must be an array with at most 20 entries`);
+    }
+    absenceChecks = source.absence_checks.map((raw, index) => {
+      const entry = exactKeys(raw, ["claim", "query", "scope_roots", "evidence_ref", "result_count"], `${label}.absence_checks[${index}]`);
+      const evidenceRef = boundedString(entry.evidence_ref, `${label}.absence_checks[${index}].evidence_ref`, 80);
+      if (!HASH_REF_SELECTOR_RE.test(evidenceRef)) {
+        fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.absence_checks[${index}].evidence_ref must be a hash-ref selector`);
+      }
+      if (entry.result_count !== 0) {
+        fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.absence_checks[${index}].result_count must be 0 for a repository-absence claim`);
+      }
+      return {
+        claim: boundedString(entry.claim, `${label}.absence_checks[${index}].claim`, 500),
+        query: boundedString(entry.query, `${label}.absence_checks[${index}].query`, 500),
+        scope_roots: stringArray(entry.scope_roots, `${label}.absence_checks[${index}].scope_roots`, 20, 500),
+        evidence_ref: evidenceRef,
+        result_count: entry.result_count,
+      };
+    });
+  }
   if (source.question_details != null) {
     if (!Array.isArray(source.question_details) || source.question_details.length > 50) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.question_details must be an array with at most 50 entries`);
@@ -191,6 +215,7 @@ export function normalizeResearchData(value, label, profile) {
     planner_file_priorities: plannerFilePriorities,
     patterns,
     ...(scopeEstimate == null ? {} : { scope_estimate: scopeEstimate }),
+    ...(absenceChecks.length === 0 ? {} : { absence_checks: absenceChecks }),
     ...(questionDetails.length === 0 ? {} : { question_details: questionDetails }),
   };
 }

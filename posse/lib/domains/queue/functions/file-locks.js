@@ -180,6 +180,48 @@ function waitDescriptorForConflict(job, conflict) {
   });
 }
 
+function canonicalWaitState(value) {
+  if (Array.isArray(value)) return value.map(canonicalWaitState);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, canonicalWaitState(value[key])]),
+  );
+}
+
+function waitStateForDetail(detail, descriptor, existing = null) {
+  // The scheduler records special cross-WI state before its generic lock-wait
+  // bookkeeping runs. A later generic record in the same poll must preserve
+  // that richer state instead of toggling the fingerprint back and re-emitting.
+  if (detail.wait_state == null && existing?.state_fingerprint) {
+    return {
+      fingerprint: existing.state_fingerprint,
+      detailJson: existing.detail_json ?? null,
+    };
+  }
+  const state = canonicalWaitState({
+    waiter_job_id: descriptor.waiter_job_id,
+    waiter_work_item_id: descriptor.waiter_work_item_id,
+    holder_type: descriptor.holder_type,
+    holder_key: descriptor.holder_key,
+    path: descriptor.path,
+    lock_kind: descriptor.lock_kind,
+    ...(detail.wait_state && typeof detail.wait_state === "object"
+      ? { wait_state: detail.wait_state }
+      : {}),
+  });
+  const serialized = JSON.stringify(state);
+  const fingerprint = crypto.createHash("sha256").update(serialized, "utf8").digest("hex");
+  if (serialized.length <= 16_000) return { fingerprint, detailJson: serialized };
+  return {
+    fingerprint,
+    detailJson: JSON.stringify({
+      truncated: true,
+      state_sha256: fingerprint,
+      preview: serialized.slice(0, 15_000),
+    }),
+  };
+}
+
 export function recordFileLaneWait(detail = {}) {
   const descriptor = normalizedWaitDescriptor(detail);
   if (!descriptor) return null;
@@ -191,17 +233,26 @@ export function recordFileLaneWait(detail = {}) {
     SELECT * FROM file_lane_waits
     WHERE waiter_job_id = ? AND lane_id = ? AND holder_key = ?
   `).get(descriptor.waiter_job_id, descriptor.lane_id, descriptor.holder_key);
+  const state = waitStateForDetail(detail, descriptor, existing);
+  const transition = !existing
+    ? "created"
+    : existing.state_fingerprint !== state.fingerprint
+      ? "changed"
+      : "unchanged";
   const ts = now();
   db.prepare(`
     INSERT INTO file_lane_waits (
       lane_id, waiter_job_id, waiter_work_item_id, holder_type, holder_key,
-      holder_job_id, holder_work_item_id, path, lock_kind, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      holder_job_id, holder_work_item_id, path, lock_kind, state_fingerprint,
+      detail_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(waiter_job_id, lane_id, holder_key) DO UPDATE SET
       holder_job_id = excluded.holder_job_id,
       holder_work_item_id = excluded.holder_work_item_id,
       path = excluded.path,
       lock_kind = excluded.lock_kind,
+      state_fingerprint = excluded.state_fingerprint,
+      detail_json = excluded.detail_json,
       updated_at = excluded.updated_at
   `).run(
     descriptor.lane_id,
@@ -213,6 +264,8 @@ export function recordFileLaneWait(detail = {}) {
     descriptor.holder_work_item_id,
     descriptor.path,
     descriptor.lock_kind,
+    state.fingerprint,
+    state.detailJson,
     existing?.created_at || ts,
     ts,
   );
@@ -234,10 +287,11 @@ export function recordFileLaneWait(detail = {}) {
       }),
     });
   }
-  return db.prepare(`
+  const row = db.prepare(`
     SELECT * FROM file_lane_waits
     WHERE waiter_job_id = ? AND lane_id = ? AND holder_key = ?
   `).get(descriptor.waiter_job_id, descriptor.lane_id, descriptor.holder_key);
+  return row ? { ...row, transition } : null;
 }
 
 export function recordFileLaneConflict(job, conflict) {

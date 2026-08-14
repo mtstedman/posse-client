@@ -375,7 +375,7 @@ export async function finalizeApprovedReview(workItemId, {
       const result = await workflow.gitMergeToTargetAsync(
         lockedWi.branch_name,
         projectDir,
-        { wiId: wi.id },
+        { wiId: wi.id, retryDeterministicConflict: true },
       );
       if (!result?.ok) {
         if (!result?.deferred) markWorkItemMergeFailed(wi.id);

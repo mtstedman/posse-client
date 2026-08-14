@@ -251,6 +251,7 @@ export class ReviewSession {
         }
         const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
           wiId: wi.id,
+          retryDeterministicConflict: true,
           onPhase(event = {}) {
             if (event.phase === "commit") console.log(`     ${C.cyan}Committing....${C.reset}`);
             else if (event.phase === "retry") console.log(`     ${C.yellow}Retrying merge...${C.reset}`);
@@ -968,6 +969,7 @@ export class ReviewSession {
           }
           const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
             wiId,
+            retryDeterministicConflict: true,
             onPhase(event = {}) {
               if (event.phase === "commit") phase("Committing....", event);
               else if (event.phase === "merge") phase("Merging....", event);

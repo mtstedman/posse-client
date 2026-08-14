@@ -16,6 +16,7 @@ import { recordObservation } from "../../observability/functions/observations.js
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
 import { hashRefModelVisibleScope } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
+import { validatePlannerPacketFileKinds } from "../../planning/functions/scope-reconciliation.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
   detectSensitiveAgentHandoffText,
@@ -664,6 +665,28 @@ function materializeClaim(
     counters.narrative += out.prose.length;
   }
   return [claim, out];
+}
+
+function validateResearchAbsenceClaims(research, claims, label) {
+  const checks = research?.absence_checks;
+  if (!Array.isArray(checks) || checks.length === 0) return;
+  for (const [index, check] of checks.entries()) {
+    if (check.result_count !== 0) {
+      fail(
+        "AGENT_HANDOFF_SCHEMA_INVALID",
+        `${label}.absence_checks[${index}].result_count must be 0 for a repository-absence claim`,
+      );
+    }
+    const expectedRef = parseAgentHandoffEvidenceSelector(check.evidence_ref).ref;
+    const matchingClaim = claims.find((claim) => String(claim?.[0] || "").trim() === check.claim);
+    const proof = matchingClaim?.[1]?.proof || [];
+    if (!matchingClaim || !proof.some((evidence) => evidence?.ref === expectedRef)) {
+      fail(
+        "AGENT_HANDOFF_SCHEMA_INVALID",
+        `${label}.absence_checks[${index}] must match a claim with the same text and a proof selector for ${expectedRef}`,
+      );
+    }
+  }
 }
 
 function plannerPromoteMappings(handoff) {
@@ -1430,6 +1453,13 @@ function normalizeResearcherTerminalArgs(source, context) {
         .slice(0, 12),
     }];
   }).slice(0, 2);
+  const absenceChecks = [
+    first.absence_checks,
+    first.absenceChecks,
+    research.absence_checks,
+    research.absenceChecks,
+    source.absence_checks,
+  ].find((value) => Array.isArray(value)) || [];
   const claims = researcherClaims(
     first.claims ?? report.claims ?? research.claims ?? source.claims,
     {
@@ -1478,6 +1508,7 @@ function normalizeResearcherTerminalArgs(source, context) {
           memories,
           planner_file_priorities: researcherFilePriorities(priorities, keyFiles),
           patterns,
+          absence_checks: absenceChecks,
         },
         payload: {},
       },
@@ -1508,6 +1539,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
     "memories",
     "file_priorities",
     "patterns",
+    "absence_checks",
     "questions",
   ];
   if (normalizedRole === "researcher"
@@ -1554,6 +1586,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
             memories: compact.memories ?? [],
             planner_file_priorities: priorities,
             patterns: compact.patterns ?? [],
+            absence_checks: compact.absence_checks ?? [],
           },
           payload: {},
         },
@@ -2081,6 +2114,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       reportListMaxChars,
     );
     const research = normalizeResearchData(report.research, `${reportLabel}.research`, profile);
+    validateResearchAbsenceClaims(research, claims, `${reportLabel}.research`);
     const plannerMetadata = normalizePlannerReportMetadata(report, reportLabel, profile);
     entryCounters.narrative += [...constraints, ...successCriteria, ...questions].reduce((sum, text) => sum + text.length, 0);
     const structuredMetadataLength = structuredStringLength(research) + structuredStringLength(plannerMetadata);
@@ -2344,7 +2378,13 @@ function parseStoredAgentHandoffPacket(materializedJson) {
   return packet;
 }
 
-export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs = null, db = getDb() } = {}) {
+export function stageAgentHandoff(args, {
+  context = {},
+  role = "",
+  maxHandoffs = null,
+  projectDir = null,
+  db = getDb(),
+} = {}) {
   const agentCallId = positiveInt(context.agentCallId ?? context.agent_call_id);
   if (!agentCallId) fail("AGENT_HANDOFF_CONTEXT_INVALID", "agent_handoff requires an active agent call");
   const database = ensureSchema(db);
@@ -2377,6 +2417,15 @@ export function stageAgentHandoff(args, { context = {}, role = "", maxHandoffs =
     ? database.prepare("SELECT metadata_json FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
     : null;
   validatePlannerPacketAgainstWorkItem(packet, workItem);
+  const fileKindIssues = validatePlannerPacketFileKinds(packet, projectDir);
+  if (fileKindIssues.length > 0) {
+    fail(
+      "AGENT_HANDOFF_SCOPE_KIND_INVALID",
+      `planner file-kind validation failed: ${fileKindIssues.map((issue) => (
+        `task "${issue.taskId}" ${issue.declaredKind} path "${issue.path}" is invalid: ${issue.reason}`
+      )).join("; ")}. Correct the path or declared file kind, then retry agent_handoff`,
+    );
+  }
   packet.agent_call_id = agentCallId;
   packet.work_item_id = resolvedContext.workItemId;
   packet.job_id = resolvedContext.jobId;
@@ -2778,6 +2827,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
       patterns,
       constraints: first.report.constraints,
       ...(research.scope_estimate ? { scope_estimate: research.scope_estimate } : {}),
+      ...(Array.isArray(research.absence_checks) ? { absence_checks: research.absence_checks } : {}),
       questions_for_human: packet.outcome === "input_required",
       questions,
     }, null, 2)}\n\`\`\``;

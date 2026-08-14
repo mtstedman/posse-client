@@ -27,6 +27,7 @@ export class ClaudeInteractiveSession {
     directOutput = false,
     color = C.cyan,
     startTime = Date.now(),
+    pauseTimeoutWhile = null,
   } = {}) {
     const resolvedBackend = backend || getDefaultInteractiveCliBackend();
     if (!resolvedBackend) throw new InteractiveCliUnavailableError();
@@ -54,6 +55,7 @@ export class ClaudeInteractiveSession {
     this.directOutput = !!directOutput;
     this.color = color;
     this.startTime = startTime;
+    this.pauseTimeoutWhile = typeof pauseTimeoutWhile === "function" ? pauseTimeoutWhile : null;
     this.aborted = false;
     this.abortError = null;
     this.lastOutputLen = 0;
@@ -262,7 +264,8 @@ export class ClaudeInteractiveSession {
     initialOffset = 0,
   } = {}) {
     const waitLoop = async () => {
-      const deadline = Date.now() + Math.max(1, Number(this.timeoutMs) || 1);
+      let deadline = Date.now() + Math.max(1, Number(this.timeoutMs) || 1);
+      let lastDeadlineCheck = Date.now();
       let logInfo = initialLog || null;
       let logPath = logInfo?.file || null;
       let logOffset = logPath ? Math.max(0, Number(initialOffset) || 0) : 0;
@@ -271,7 +274,13 @@ export class ClaudeInteractiveSession {
       let lastParsed = null;
       let lastState = null;
 
-      while (Date.now() <= deadline) {
+      while (true) {
+        const now = Date.now();
+        if (this.pauseTimeoutWhile?.()) {
+          deadline += Math.max(0, now - lastDeadlineCheck);
+        }
+        lastDeadlineCheck = now;
+        if (now > deadline) break;
         const foundLog = findClaudeProjectLogFile(this.session.cwd, { sinceMs, sessionId });
         if (!logPath && foundLog) {
           logInfo = foundLog;

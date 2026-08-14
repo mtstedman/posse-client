@@ -47,7 +47,7 @@ import {
 } from "./session-handles.js";
 import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvider } from "../shared/turns.js";
 import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
-import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
+import { liveScopeWaitPausesProviderStall, resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { classifyProviderError } from "../shared/api-resilience.js";
 import {
@@ -767,6 +767,7 @@ export async function callProvider(promptText, {
             directOutput,
             color,
             startTime,
+            pauseTimeoutWhile: () => liveScopeWaitPausesProviderStall(jobId),
           }).runProviderCall(finalPrompt);
           const mcpCleanup = cleanupSetupFiles({
             deterministicReadMcp,
@@ -1156,6 +1157,10 @@ export async function callProvider(promptText, {
     let heartbeat;
     if (directOutput) {
       heartbeat = setInterval(() => {
+        if (liveScopeWaitPausesProviderStall(jobId)) {
+          lastActivity = Date.now();
+          return;
+        }
         if (!gotFirstOutput) {
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
           const frame = spinFrames[spinIdx++ % spinFrames.length];
@@ -1173,6 +1178,10 @@ export async function callProvider(promptText, {
       }, 500);
     } else if (onLine) {
       heartbeat = setInterval(() => {
+        if (liveScopeWaitPausesProviderStall(jobId)) {
+          lastActivity = Date.now();
+          return;
+        }
         if (Date.now() - lastActivity > STALL_TIMEOUT) {
           clearInterval(heartbeat);
           killedByStallDetector = true;
@@ -1186,6 +1195,10 @@ export async function callProvider(promptText, {
       // Silent mode (no display, no direct output) — still need stall detection
       // or the process can hang forever with no way to recover.
       heartbeat = setInterval(() => {
+        if (liveScopeWaitPausesProviderStall(jobId)) {
+          lastActivity = Date.now();
+          return;
+        }
         if (Date.now() - lastActivity > STALL_TIMEOUT) {
           clearInterval(heartbeat);
           killedByStallDetector = true;

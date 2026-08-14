@@ -1232,6 +1232,63 @@ export function runRegisteredTest(options = {}) {
   };
 }
 
+export function runRegisteredTestsForMergeCandidate({
+  cwd,
+  workItemId = null,
+  scopeFiles = [],
+  actor = {},
+  db = getDb(),
+} = {}) {
+  ensureRegisteredTestTables(db);
+  const normalizedScopeFiles = normalizeScopeFiles(cwd, scopeFiles);
+  if (normalizedScopeFiles.length === 0) {
+    return {
+      ok: true,
+      summary: "merge candidate has no changed files",
+      matched: 0,
+      passed: 0,
+      failed: 0,
+      results: [],
+    };
+  }
+  const candidateWorkItemId = Number(workItemId);
+  const rows = db.prepare(`
+    SELECT t.*
+    FROM posse_tests t
+    LEFT JOIN work_items wi ON wi.id = t.created_by_work_item_id
+    WHERE t.status = 'active'
+      AND (
+        t.created_by_work_item_id IS NULL
+        OR t.created_by_work_item_id = ?
+        OR wi.merge_state = 'merged'
+      )
+    ORDER BY t.created_at, t.id
+  `).all(Number.isInteger(candidateWorkItemId) && candidateWorkItemId > 0 ? candidateWorkItemId : -1)
+    .filter((test) => targetFilesOverlapScope(test, normalizedScopeFiles));
+
+  const results = rows.map((test) => runRegisteredTestSingle({
+    args: { test_id: test.id },
+    cwd,
+    actor,
+    scopeFiles: normalizedScopeFiles,
+    db,
+  }));
+  const passed = results.filter((result) => result.ok).length;
+  const failed = results.length - passed;
+  return {
+    ok: failed === 0,
+    summary: rows.length === 0
+      ? "no active registered tests match the merge candidate"
+      : failed === 0
+        ? `all ${passed} matching registered tests passed`
+        : `${failed} of ${results.length} matching registered tests failed`,
+    matched: rows.length,
+    passed,
+    failed,
+    results,
+  };
+}
+
 export function runRegisteredTestSuite({ args = {}, cwd, actor = {}, scopeFiles = [], db = getDb() } = {}) {
   ensureRegisteredTestTables(db);
   const suite = resolveSuite(db, args);

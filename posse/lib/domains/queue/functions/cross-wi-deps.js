@@ -52,6 +52,7 @@ function normalizeCrossWiMergeDependency(dep = {}) {
   return {
     source_work_item_id: sourceId,
     path: normalizeRepoPath(dep.path) || null,
+    ...(dep.lock_kind === "root" || dep.lock_kind === "file" ? { lock_kind: dep.lock_kind } : {}),
     source_branch: typeof dep.source_branch === "string" && dep.source_branch.trim()
       ? dep.source_branch.trim()
       : null,
@@ -212,7 +213,19 @@ export function addCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId, de
       Number(dep.source_work_item_id) === sourceId
       && normalizeRepoPath(dep.path) === normalizeRepoPath(nextDep.path)
     );
-    if (existing) return { ok: true, added: false, dependency: existing };
+    if (existing) {
+      // Backfill lock_kind on rows persisted before kinds were recorded so a
+      // re-prepared handoff repairs root-coverage matching for the stored
+      // row. Absent-only: never flip an already-recorded kind.
+      if (nextDep.lock_kind && !existing.lock_kind) {
+        const repaired = { ...existing, lock_kind: nextDep.lock_kind };
+        metadata[CROSS_WI_MERGE_DEPENDENCIES_KEY] = deps.map((dep) => (dep === existing ? repaired : dep));
+        db.prepare(`UPDATE work_items SET metadata_json = ?, updated_at = ? WHERE id = ?`)
+          .run(JSON.stringify(metadata), now(), targetId);
+        return { ok: true, added: false, dependency: repaired };
+      }
+      return { ok: true, added: false, dependency: existing };
+    }
 
     metadata[CROSS_WI_MERGE_DEPENDENCIES_KEY] = [...deps, nextDep];
     db.prepare(`UPDATE work_items SET metadata_json = ?, updated_at = ? WHERE id = ?`)
@@ -413,17 +426,21 @@ export function listCrossWiMergeBlockers(workItemOrId) {
     const source = readWorkItem(entry.source_work_item_id);
     if (source?.status === "canceled") {
       logStaleCrossWiDependencyOnce(workItem.id, entry.source_work_item_id, "upstream_canceled", source);
-      continue;
     }
     if (source?.status === "failed" && !hasUnresolvedJobsForWorkItem(source.id)) {
       logStaleCrossWiDependencyOnce(workItem.id, entry.source_work_item_id, "upstream_failed", source);
-      continue;
     }
     if (!source || source.merge_state !== "merged") {
       blockers.push({
         ...entry,
         source_work_item: source || null,
-        reason: source ? "upstream_not_merged" : "upstream_missing",
+        reason: !source
+          ? "upstream_missing"
+          : source.status === "canceled"
+            ? "upstream_canceled"
+            : source.status === "failed" && !hasUnresolvedJobsForWorkItem(source.id)
+              ? "upstream_failed"
+              : "upstream_not_merged",
       });
     }
   }

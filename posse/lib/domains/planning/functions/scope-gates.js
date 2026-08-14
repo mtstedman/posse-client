@@ -13,7 +13,9 @@ export function isBroadNarrowScopedCodeTask(task = {}) {
   const filesToModify = Array.isArray(task.files_to_modify) ? task.files_to_modify : [];
   const filesToCreate = Array.isArray(task.files_to_create) ? task.files_to_create : [];
   const createRoots = Array.isArray(task.create_roots) ? task.create_roots : [];
-  const scopeCount = filesToModify.length + filesToCreate.length + createRoots.length;
+  const filesToDelete = Array.isArray(task.files_to_delete) ? task.files_to_delete : [];
+  const scopeCount = filesToModify.length + filesToCreate.length + createRoots.length
+    + filesToDelete.length;
   if (scopeCount === 0 || scopeCount > 2 || createRoots.includes(".")) return false;
 
   const text = [

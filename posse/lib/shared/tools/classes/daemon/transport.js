@@ -17,6 +17,8 @@
 //   retire(graceMs): void              graceful stop: signal end-of-input, give the
 //                                      host graceMs to drain and exit on its own,
 //                                      then kill. Never blocks the caller.
+//   dispose(opts):  Promise<void>      await every active/retired incarnation
+//                                      owned by this transport.
 //   isAlive():      boolean
 //
 // Two host kinds, one interface:
@@ -75,9 +77,30 @@ function killProcessTree(proc, { force = true, platform = process.platform, spaw
  * @property {() => void} kill
  * @property {(graceMs?: number) => void} [retire]
  * @property {() => boolean} isAlive
- * @property {() => Promise<void>} [dispose]
+ * @property {(opts?: { graceMs?: number, waitMs?: number }) => Promise<void>} [dispose]
+ * @property {() => Promise<void>} [whenTerminated]
  * @property {() => number | null} [hostPid]
  */
+
+/**
+ * Await a snapshot of terminal promises without trusting unref'd host handles
+ * to keep the event loop alive. The timeout is intentionally referenced while
+ * awaited; transport retire timers and their child/worker handles are unref'd.
+ * @param {Array<{ terminalPromise: Promise<void> }>} records
+ * @param {number} timeoutMs
+ */
+async function waitForTerminalRecords(records, timeoutMs) {
+  if (records.length === 0) return true;
+  let timer = null;
+  const completed = await Promise.race([
+    Promise.all(records.map((record) => record.terminalPromise)).then(() => true),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return completed;
+}
 
 /**
  * Child-process transport: spawns a binary and exchanges newline-delimited JSON
@@ -98,8 +121,12 @@ export function ProcessTransport(opts) {
   const spawnImpl = opts.spawnImpl || spawn;
   const platform = opts.platform || process.platform;
   const maxBufferChars = opts.maxBufferChars ?? JSONL_BUFFER_MAX_CHARS;
-  /** @type {{ proc: import("node:child_process").ChildProcess, pid: number | null, buffer: string, scanFrom: number, exited: boolean, exitConfirmed: boolean, retireTimer: ReturnType<typeof setTimeout> | null } | null} */
+  /** @typedef {{ proc: import("node:child_process").ChildProcess, pid: number | null, buffer: string, scanFrom: number, exited: boolean, exitConfirmed: boolean, retireTimer: ReturnType<typeof setTimeout> | null, retireDeadline: number, terminalPromise: Promise<void>, resolveTerminal: () => void }} ProcessRecord */
+  /** @type {ProcessRecord | null} */
   let active = null;
+  /** Detached incarnations remain owned until the OS confirms their exit. */
+  /** @type {Set<ProcessRecord>} */
+  const retiringRecords = new Set();
   /** @type {Array<(m: Record<string, unknown>) => void>} */
   const messageHandlers = [];
   /** @type {Array<() => void>} */
@@ -107,10 +134,13 @@ export function ProcessTransport(opts) {
 
   const emitExit = (record, { confirmed = false } = {}) => {
     if (confirmed && !record.exitConfirmed) {
+      retiringRecords.add(record);
       record.exitConfirmed = true;
       if (record.retireTimer) clearTimeout(record.retireTimer);
       record.retireTimer = null;
       if (record.pid != null) forgetDaemonSpawn(record.pid);
+      retiringRecords.delete(record);
+      record.resolveTerminal();
     }
     if (record.exited) return;
     const shouldNotify = active == null || active === record;
@@ -124,6 +154,7 @@ export function ProcessTransport(opts) {
 
   const failAndKill = (record) => {
     if (active !== record || record.exited) return;
+    retiringRecords.add(record);
     emitExit(record);
     try { record.proc.stdin?.end(); } catch { /* ignore */ }
     killProcessTree(record.proc, { force: true, platform, spawnImpl });
@@ -145,6 +176,10 @@ export function ProcessTransport(opts) {
       } catch {
         return false;
       }
+      /** @type {() => void} */
+      let resolveTerminal = () => {};
+      const terminalPromise = new Promise((resolve) => { resolveTerminal = () => resolve(); });
+      /** @type {ProcessRecord} */
       const record = {
         proc,
         pid: proc.pid ?? null,
@@ -153,6 +188,9 @@ export function ProcessTransport(opts) {
         exited: false,
         exitConfirmed: false,
         retireTimer: null,
+        retireDeadline: 0,
+        terminalPromise,
+        resolveTerminal,
       };
       active = record;
       // Attach terminal listeners before any optional stream setup. If setup
@@ -163,6 +201,7 @@ export function ProcessTransport(opts) {
       // Notify waiters once while retaining the ledger until the OS "exit".
       proc.on("error", () => failAndKill(record));
       proc.on("exit", () => emitExit(record, { confirmed: true }));
+      proc.on("close", () => emitExit(record, { confirmed: true }));
       recordDaemonSpawn(record.pid, bin, { label: opts.label });
       // Don't let an idle daemon pin the event loop: unref the child and its
       // pipes so the host process can exit when its real work is done (an
@@ -226,6 +265,8 @@ export function ProcessTransport(opts) {
       const record = active;
       active = null;
       if (!record) return;
+      retiringRecords.add(record);
+      record.retireDeadline = Date.now();
       try { record.proc.stdin?.end(); } catch { /* ignore */ }
       // Do not forget the ledger row until an OS-confirmed exit. taskkill or
       // child.kill can fail, and deleting first converts a live orphan into an
@@ -246,10 +287,13 @@ export function ProcessTransport(opts) {
       // Detach now: this transport reports dead, late events are ignored by
       // the Daemon's identity guard, and a fresh host can spawn immediately.
       active = null;
+      retiringRecords.add(record);
       try { record.proc.stdin?.end(); } catch { /* ignore */ }
+      const maxGraceMs = Math.max(0, Number(graceMs) || 0);
+      record.retireDeadline = Date.now() + maxGraceMs;
       record.retireTimer = setTimeout(() => {
         killProcessTree(record.proc, { force: true, platform, spawnImpl });
-      }, Math.max(0, graceMs));
+      }, maxGraceMs);
       // Never hold the loop open for a draining host.
       record.retireTimer.unref?.();
     },
@@ -259,6 +303,28 @@ export function ProcessTransport(opts) {
     /** Current host pid (for shutdown reap exclusion), null when not running. */
     hostPid() {
       return active?.proc.pid ?? null;
+    },
+    whenTerminated() {
+      const records = [...retiringRecords, ...(active ? [active] : [])];
+      return Promise.all(records.map((record) => record.terminalPromise)).then(() => {});
+    },
+    async dispose(disposeOpts = {}) {
+      if (active) transport.retire(disposeOpts.graceMs ?? 0);
+      let records = [...retiringRecords];
+      if (records.length === 0) return;
+      const remainingGraceMs = records.reduce(
+        (max, record) => Math.max(max, record.retireDeadline - Date.now()),
+        0,
+      );
+      const waitMs = disposeOpts.waitMs ?? Math.max(250, remainingGraceMs + 250);
+      if (await waitForTerminalRecords(records, waitMs)) return;
+      // A host that ignored EOF or whose retire timer failed gets one explicit
+      // hard-kill retry. Keep its ledger row fail-closed if no OS exit follows.
+      records = records.filter((record) => !record.exitConfirmed);
+      for (const record of records) {
+        killProcessTree(record.proc, { force: true, platform, spawnImpl });
+      }
+      await waitForTerminalRecords(records, 250);
     },
   };
   return transport;
@@ -280,8 +346,11 @@ export function ProcessTransport(opts) {
  * @returns {Transport}
  */
 export function ThreadTransport(opts) {
-  /** @type {{ worker: Worker, bridgeDispose: null | (() => unknown | Promise<unknown>), bridgePorts: MessageChannel | null, retireTimer: ReturnType<typeof setTimeout> | null, exited: boolean, releasePromise: Promise<void> | null } | null} */
+  /** @typedef {{ worker: Worker, bridgeDispose: null | (() => unknown | Promise<unknown>), bridgePorts: MessageChannel | null, retireTimer: ReturnType<typeof setTimeout> | null, retireDeadline: number, exited: boolean, exitConfirmed: boolean, releasePromise: Promise<void> | null, terminalPromise: Promise<void>, resolveTerminal: () => void }} ThreadRecord */
+  /** @type {ThreadRecord | null} */
   let active = null;
+  /** @type {Set<ThreadRecord>} */
+  const retiringRecords = new Set();
   /** @type {Array<(m: Record<string, unknown>) => void>} */
   const messageHandlers = [];
   /** @type {Array<() => void>} */
@@ -301,14 +370,21 @@ export function ThreadTransport(opts) {
     return record.releasePromise;
   };
 
-  const emitExit = (record) => {
+  const emitExit = (record, { confirmed = false } = {}) => {
+    if (confirmed && !record.exitConfirmed) {
+      retiringRecords.add(record);
+      record.exitConfirmed = true;
+      if (record.retireTimer) clearTimeout(record.retireTimer);
+      record.retireTimer = null;
+      void releaseBridge(record).finally(() => {
+        retiringRecords.delete(record);
+        record.resolveTerminal();
+      });
+    }
     if (record.exited) return;
     const shouldNotify = active == null || active === record;
     record.exited = true;
     if (active === record) active = null;
-    if (record.retireTimer) clearTimeout(record.retireTimer);
-    record.retireTimer = null;
-    void releaseBridge(record);
     if (!shouldNotify) return;
     for (const cb of exitHandlers) cb();
   };
@@ -335,21 +411,33 @@ export function ThreadTransport(opts) {
           transferList,
           execArgv: sanitizeWorkerExecArgv(),
         });
+        /** @type {() => void} */
+        let resolveTerminal = () => {};
+        const terminalPromise = new Promise((resolve) => { resolveTerminal = () => resolve(); });
+        /** @type {ThreadRecord} */
         const record = {
           worker,
           bridgeDispose,
           bridgePorts,
           retireTimer: null,
+          retireDeadline: 0,
           exited: false,
+          exitConfirmed: false,
           releasePromise: null,
+          terminalPromise,
+          resolveTerminal,
         };
         active = record;
         worker.on("message", (message) => {
           if (active !== record || record.exited) return;
           for (const cb of messageHandlers) cb(message);
         });
-        worker.on("error", () => emitExit(record));
-        worker.on("exit", () => emitExit(record));
+        worker.on("error", () => {
+          retiringRecords.add(record);
+          emitExit(record);
+          try { void record.worker.terminate().finally(() => emitExit(record, { confirmed: true })); } catch { /* exit event remains authoritative */ }
+        });
+        worker.on("exit", () => emitExit(record, { confirmed: true }));
         // Adding a Worker message listener starts (and references) its
         // underlying MessagePort. Unref only after all transport listeners are
         // attached so an idle daemon cannot pin short-lived processes.
@@ -375,16 +463,19 @@ export function ThreadTransport(opts) {
       const record = active;
       active = null;
       if (!record) return;
-      try { void record.worker.terminate().finally(() => emitExit(record)); } catch { emitExit(record); }
-      void releaseBridge(record);
+      retiringRecords.add(record);
+      record.retireDeadline = Date.now();
+      try { void record.worker.terminate().finally(() => emitExit(record, { confirmed: true })); } catch { emitExit(record); }
     },
     retire(graceMs = 2000) {
       const record = active;
       active = null;
       if (!record) return;
+      retiringRecords.add(record);
       const maxGraceMs = Math.max(0, Number(graceMs) || 0);
+      record.retireDeadline = Date.now() + maxGraceMs;
       record.retireTimer = setTimeout(() => {
-        try { void record.worker.terminate().finally(() => emitExit(record)); } catch { emitExit(record); }
+        try { void record.worker.terminate().finally(() => emitExit(record, { confirmed: true })); } catch { emitExit(record); }
       }, maxGraceMs);
       record.retireTimer.unref?.();
       try {
@@ -393,7 +484,7 @@ export function ThreadTransport(opts) {
           ...(opts.retirePayload && typeof opts.retirePayload === "object" ? { payload: opts.retirePayload } : {}),
         });
       } catch {
-        try { void record.worker.terminate().finally(() => emitExit(record)); } catch { emitExit(record); }
+        try { void record.worker.terminate().finally(() => emitExit(record, { confirmed: true })); } catch { emitExit(record); }
       }
     },
     // Fully release the worker AND its communication MessagePort. In Node,
@@ -402,13 +493,27 @@ export function ThreadTransport(opts) {
     // so a short-lived process that used the daemon won't exit until this is
     // awaited. `kill()` is the sync best-effort variant (process-exit hook);
     // `dispose()` is for callers that need the loop to drain (tests, one-shots).
-    async dispose() {
-      const record = active;
-      active = null;
-      if (!record) return;
-      try { await record.worker.terminate(); } catch { /* ignore */ }
-      emitExit(record);
-      await releaseBridge(record);
+    async dispose(disposeOpts = {}) {
+      if (active) this.retire(disposeOpts.graceMs ?? 0);
+      let records = [...retiringRecords];
+      if (records.length === 0) return;
+      const remainingGraceMs = records.reduce(
+        (max, record) => Math.max(max, record.retireDeadline - Date.now()),
+        0,
+      );
+      const waitMs = disposeOpts.waitMs ?? Math.max(250, remainingGraceMs + 250);
+      if (!(await waitForTerminalRecords(records, waitMs))) {
+        records = records.filter((record) => !record.exitConfirmed);
+        await Promise.all(records.map(async (record) => {
+          try { await record.worker.terminate(); } catch { /* ignore */ }
+          emitExit(record, { confirmed: true });
+        }));
+        await waitForTerminalRecords(records, 250);
+      }
+    },
+    whenTerminated() {
+      const records = [...retiringRecords, ...(active ? [active] : [])];
+      return Promise.all(records.map((record) => record.terminalPromise)).then(() => {});
     },
     isAlive() {
       return !!active;

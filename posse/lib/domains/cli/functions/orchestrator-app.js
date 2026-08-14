@@ -153,6 +153,7 @@ import { inferWiMode } from "../../intake/functions/mode-inference.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import { atlasV2UsageSummary } from "./atlas-v2-help.js";
 import { buildRuntimeEnv, getRuntimeDbPath } from "../../runtime/functions/paths.js";
+import { formatClientProvenance, resolveClientProvenance } from "../../runtime/functions/client-provenance.js";
 import { clearColdIndex as clearColdIndexImpl } from "./cold-index.js";
 import {
   createReviewSession as createReviewSessionImpl,
@@ -1761,6 +1762,7 @@ async function cmdRun() {
 
 async function cmdGo() {
   clearColdIndexFromCliFlagOnce();
+  console.log(`\n  ${C.dim}Client: ${formatClientProvenance(resolveClientProvenance())}${C.reset}`);
   const queued = listWorkItems("queued");
   const activeJobs = listJobs(["queued", ...ACTIVE_LEASE_STATUSES]);
 
@@ -2066,7 +2068,12 @@ async function cmdMerge() {
       markWorkItemMergeFailed(wi.id);
       return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
     }
-    const result = await helpers.gitMergeToTarget(lockedWi.branch_name, PROJECT_DIR, { wiId: wi.id });
+    // The operator confirmed the merge prompt above — honor it past a
+    // recorded deterministic conflict, matching ReviewSession's approve paths.
+    const result = await helpers.gitMergeToTarget(lockedWi.branch_name, PROJECT_DIR, {
+      wiId: wi.id,
+      retryDeterministicConflict: true,
+    });
     if (result.ok) setMergeState(wi.id, "merged");
     else if (!result.deferred) markWorkItemMergeFailed(wi.id);
     return { ...result, branchName: lockedWi.branch_name };

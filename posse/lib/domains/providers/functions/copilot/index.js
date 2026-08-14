@@ -47,6 +47,7 @@ import { buildCopilotArgs, buildCopilotChildEnv, buildCopilotSpawn } from "./lau
 import { classifyCopilotFailure, parseCopilotErrorBackoff } from "./failure-classification.js";
 import { buildCopilotCloseStats, resolveCopilotStallTimeoutMs } from "./close-stats.js";
 import { terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
+import { liveScopeWaitPausesProviderStall } from "../shared/stall-timeout.js";
 import { buildDeterministicReadMcpServerConfigAsync } from "../../../integrations/functions/deterministic-mcp.js";
 import {
   consumeCopilotLine,
@@ -132,6 +133,7 @@ export async function callProvider(promptText, opts = {}) {
     stallTimeout = null,
     maxOutputTokens = null,
     mcpGate = null,
+    jobId = null,
   } = opts || {};
 
   if (!mcpGate) {
@@ -252,6 +254,10 @@ export async function callProvider(promptText, opts = {}) {
       if (stallTimer) clearTimeout(stallTimer);
       if (stallTimeoutMs > 0) {
         stallTimer = setTimeout(() => {
+          if (liveScopeWaitPausesProviderStall(jobId)) {
+            resetStallTimer();
+            return;
+          }
           killedByStall = true;
           requestCopilotChildTermination(child, { scheduleForceKill });
         }, stallTimeoutMs);

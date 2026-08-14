@@ -19,7 +19,7 @@ import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProvi
 import { buildWindowsSpawn, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import { ProviderProcessTerminator } from "../../classes/ProviderProcessTerminator.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
-import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
+import { liveScopeWaitPausesProviderStall, resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { getMaxOutputTokensForProvider } from "../shared/turns.js";
 import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
@@ -562,6 +562,11 @@ export async function callProvider(promptText, {
 
     const heartbeat = setInterval(() => {
       const now = Date.now();
+      if (liveScopeWaitPausesProviderStall(jobId)) {
+        lastActivity = now;
+        lastMeaningfulActivity = now;
+        return;
+      }
       const noByteOutput = now - lastActivity > stallMs;
       const noMeaningfulProgress = role === "assessor" && now - lastMeaningfulActivity > semanticStallMs;
       if (noByteOutput || noMeaningfulProgress) {

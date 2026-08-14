@@ -1375,6 +1375,8 @@ export function getDb() {
       holder_work_item_id INTEGER,
       path TEXT NOT NULL,
       lock_kind TEXT NOT NULL CHECK (lock_kind IN ('file','root')),
+      state_fingerprint TEXT NOT NULL DEFAULT '',
+      detail_json TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (waiter_job_id) REFERENCES jobs(id) ON DELETE CASCADE,
@@ -1415,6 +1417,14 @@ export function getDb() {
       ON job_terminal_transitions(occurred_at, outcome, job_id);
 
   `);
+
+  const fileLaneWaitColumns = new Set(_db.pragma("table_info(file_lane_waits)").map((col) => col.name));
+  if (!fileLaneWaitColumns.has("state_fingerprint")) {
+    _db.exec(`ALTER TABLE file_lane_waits ADD COLUMN state_fingerprint TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!fileLaneWaitColumns.has("detail_json")) {
+    _db.exec(`ALTER TABLE file_lane_waits ADD COLUMN detail_json TEXT`);
+  }
 
   // ── Migration: branch lifecycle columns ──────────────────────────────────
   const hasBranchName = _db.prepare(
