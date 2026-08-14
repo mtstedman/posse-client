@@ -251,15 +251,55 @@ function jobHasSetupCleanupPrecedence(job, siblingLocks = []) {
   return Number.isFinite(jobId) && winnerId != null && jobId === winnerId;
 }
 
-function markCrossWiSyncsApplied(job, payload, appliedPaths) {
-  const applied = new Set([...appliedPaths].map((value) => normalizeRepoPath(value)));
+function markCrossWiSyncsApplied(job, payload, appliedSyncs) {
+  const normalizedSyncs = appliedSyncs
+    .map((entry) => Object.assign(entry, {
+      path: normalizeRepoPath(entry?.sync?.path ?? entry?.path),
+      source_work_item_id: Number(entry?.sync?.source_work_item_id ?? entry?.source_work_item_id),
+      source_branch: String(entry?.sync?.source_branch ?? entry?.source_branch ?? "").trim(),
+    }))
+    .filter((entry) => entry.path);
+  const applied = new Set(normalizedSyncs.map((entry) => entry.path));
   const remaining = (Array.isArray(payload._cross_wi_file_syncs) ? payload._cross_wi_file_syncs : [])
     .filter((entry) => !applied.has(normalizeRepoPath(entry?.path)));
   if (remaining.length > 0) payload._cross_wi_file_syncs = remaining;
   else delete payload._cross_wi_file_syncs;
+
+  const priorApplied = Array.isArray(payload._cross_wi_file_syncs_applied)
+    ? payload._cross_wi_file_syncs_applied
+    : [];
+  const appliedByIdentity = new Map(priorApplied.map((entry) => [
+    `${Number(entry?.source_work_item_id)}:${normalizeRepoPath(entry?.path)}`,
+    entry,
+  ]));
+  for (const entry of normalizedSyncs) {
+    const reconciledFields = [];
+    if (entry.change_kind === "delete") {
+      for (const field of ["files_to_modify", "must_modify"]) {
+        if (!Array.isArray(payload[field])) continue;
+        const before = payload[field];
+        const after = before.filter((value) => normalizeRepoPath(value) !== entry.path);
+        if (after.length !== before.length) {
+          payload[field] = after;
+          reconciledFields.push(field);
+        }
+      }
+    }
+    entry.reconciled_fields = reconciledFields;
+    appliedByIdentity.set(`${entry.source_work_item_id}:${entry.path}`, {
+      path: entry.path,
+      source_work_item_id: entry.source_work_item_id,
+      source_branch: entry.source_branch,
+      change_kind: entry.change_kind || "update",
+      reconciled_fields: reconciledFields,
+      applied_at: new Date().toISOString(),
+    });
+  }
+  payload._cross_wi_file_syncs_applied = [...appliedByIdentity.values()].slice(-100);
   const payloadJson = JSON.stringify(payload);
   updateJobPayload(job.id, payloadJson);
   job.payload_json = payloadJson;
+  return normalizedSyncs;
 }
 
 async function assertCrossWiSyncSourceBranchAsync(sourceBranch, projectDir, { signal = null } = {}) {
@@ -294,20 +334,7 @@ async function gitLsFilesIncludesPathAsync(cwd, repoPath, { signal = null } = {}
 async function crossWiSyncTargetGuardAsync(wtPath, sync, { signal = null } = {}) {
   const headObject = await gitObjectHashAsync(wtPath, "HEAD", sync.path, { signal });
   const sourceObject = await gitObjectHashAsync(wtPath, sync.source_branch, sync.path, { signal });
-  if (headObject == null && sourceObject == null) {
-    if (await gitLsFilesIncludesPathAsync(wtPath, sync.path, { signal })) {
-      throw new Error(`Cross-WI sync could not resolve tracked path in HEAD or ${sync.source_branch}: ${sync.path}`);
-    }
-    return {
-      clobbers: false,
-      head_object: null,
-      source_object: null,
-      base_object: null,
-      merge_base: null,
-      absent_in_both_refs: true,
-    };
-  }
-  if (headObject === sourceObject) {
+  if (headObject === sourceObject && headObject != null) {
     return { clobbers: false, head_object: headObject, source_object: sourceObject, base_object: null, merge_base: null };
   }
   let mergeBase = null;
@@ -317,6 +344,19 @@ async function crossWiSyncTargetGuardAsync(wtPath, sync, { signal = null } = {})
     if (isAbortError(err)) throw err;
   }
   const baseObject = mergeBase ? await gitObjectHashAsync(wtPath, mergeBase, sync.path, { signal }) : null;
+  if (headObject == null && sourceObject == null) {
+    if (baseObject == null && await gitLsFilesIncludesPathAsync(wtPath, sync.path, { signal })) {
+      throw new Error(`Cross-WI sync could not resolve tracked path in HEAD or ${sync.source_branch}: ${sync.path}`);
+    }
+    return {
+      clobbers: false,
+      head_object: null,
+      source_object: null,
+      base_object: baseObject,
+      merge_base: mergeBase,
+      absent_in_both_refs: true,
+    };
+  }
   return {
     clobbers: headObject !== baseObject,
     head_object: headObject,
@@ -438,6 +478,7 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
   }
 
   const skippedSyncs = [];
+  const appliedSyncs = [];
   await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
     const branchName = String(await gitExecAsync(["branch", "--show-current"], wtPath, { signal }) || "").trim();
     const runSync = async () => {
@@ -459,6 +500,12 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
             skippedSyncs.push({ sync, guard });
             continue;
           }
+          const changeKind = guard.source_object == null && guard.base_object != null
+            ? "delete"
+            : guard.source_object === guard.base_object
+              ? "unchanged"
+              : "update";
+          appliedSyncs.push({ sync, guard, change_kind: changeKind });
           paths.push(sync.path);
           if (guard.source_object != null) {
             await gitExecAsync(["checkout", sync.source_branch, "--", sync.path], wtPath, { signal });
@@ -499,7 +546,10 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
       // Skipped syncs are cleared from the pending list too: the target's own
       // content is deliberately kept, and retrying the copy later would still
       // clobber it. The cross-WI merge dependency stays recorded.
-      markCrossWiSyncsApplied(job, payload, [...paths, ...skippedSyncs.map((entry) => entry.sync.path)]);
+      markCrossWiSyncsApplied(job, payload, [
+        ...appliedSyncs,
+        ...skippedSyncs.map(({ sync, guard }) => ({ sync, guard, change_kind: "skipped" })),
+      ]);
     };
     if (branchName && branchName !== "HEAD") {
       await withBranchLockAsync(wtPath, branchName, worker.projectDir, runSync, { signal });
@@ -510,6 +560,10 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
   const skippedPathSet = new Set(skippedSyncs.map((entry) => entry.sync.path));
   for (const sync of syncs) {
     if (skippedPathSet.has(sync.path)) continue;
+    const applied = appliedSyncs.find((entry) => entry.sync.path === sync.path);
+    if (applied?.change_kind === "delete") {
+      worker.emit(job.id, `${C.cyan}[system] WI#${job.work_item_id} accepted upstream deletion of ${sync.path} from WI#${sync.source_work_item_id}; removed stale modify authority${C.reset}`);
+    }
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -520,6 +574,8 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
         source_work_item_id: sync.source_work_item_id,
         source_branch: sync.source_branch,
         path: sync.path,
+        change_kind: applied?.change_kind || "update",
+        reconciled_fields: applied?.reconciled_fields || [],
       }),
     });
   }

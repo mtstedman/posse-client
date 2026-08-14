@@ -6,6 +6,7 @@ import path from "path";
 import fs from "fs";
 import { spawn, spawnSync } from "child_process";
 import {
+  acquireAssessmentBarrier,
   beginAttachedAssessmentAttempt,
   completeAttempt,
   createJob,
@@ -66,7 +67,10 @@ import {
 import { isInsideRoot, isUnderRoot, normPath, normalizeRoots } from "../../../../shared/scope/functions/path.js";
 import { processVerdict } from "./process-verdict.js";
 import { normalizeAssessorConfidence } from "./verdict-shared.js";
-import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
+import {
+  activeSiblingWriteLocks,
+  siblingLockSummary,
+} from "../../../queue/functions/sibling-locks.js";
 import {
   emitResearchComplete as emitAtlasV2ResearchComplete,
   getAtlasWarmJobCompletion,
@@ -1911,6 +1915,38 @@ export async function runPostExecutionAssessment(worker, {
   const shouldRunAssessment = ASSESSABLE_JOB_TYPES.has(job.job_type)
     && !worker.dryRun
     && !worker._shouldSkipAssessment(job);
+  if (shouldRunAssessment && !skipAssessForFileRequest && !skipAssessForSatisfiedNoop) {
+    const barrier = acquireAssessmentBarrier(job.id, leaseToken);
+    if (!barrier.ok) {
+      const siblingLocks = barrier.blockers || [];
+      setAssessmentLifecycle(job.id, "implementation_complete");
+      markAssessmentRetryAssessOnly(job, pendingFileRequests);
+      completeAttempt(attempt.id, {
+        status: "succeeded",
+        duration_ms: Date.now() - startTime,
+        output_chars: output.length,
+      });
+      const summary = siblingLockSummary(siblingLocks);
+      worker.emit(
+        job.id,
+        `${C.dim}[assessor] WI#${job.work_item_id} job #${job.id}: deferred until ${siblingLocks.length} same-WI writer lock(s) drain${summary ? ` (${summary})` : ""}${C.reset}`,
+      );
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.id,
+        event_type: EVENT_TYPES.JOB_ASSESSMENT_DEFERRED_FOR_SIBLING_WRITES,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Deferred assessment before budget consumption; ${siblingLocks.length} same-WI writer lock(s) remain`,
+        event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
+      });
+      worker._releaseLease(job, leaseToken, "queued", {
+        readyAt: new Date(Date.now() + 1_000).toISOString(),
+      });
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
+  }
   if (shouldRunAssessment && !skipAssessForFileRequest) {
     setAssessmentLifecycle(job.id, "implementation_complete");
     beginAttachedAssessmentAttempt(job.id, leaseToken);
@@ -1972,8 +2008,8 @@ export async function runPostExecutionAssessment(worker, {
     return;
   }
   if (shouldRunAssessment && !skipAssessForFileRequest && !skipAssessForSatisfiedNoop) {
-    // Keep the scoped job lock active while the committed work is being assessed.
-    updateJobStatus(job.id, "awaiting_assessment", leaseToken != null ? { leaseToken } : {});
+    // acquireAssessmentBarrier already moved the job to awaiting_assessment
+    // while atomically proving the WI had no live sibling writers.
     worker.emit(job.id, `${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: assessing ${shortJobTitle(job).slice(0, 50)}`);
     syncAssessorWorkerDisplay(worker.display, job, {
       tier: "cheap",

@@ -63,6 +63,10 @@ import {
   flattenPendingAssessmentFileRequests,
   readPendingAssessmentFileRequests,
 } from "../../functions/helpers/assessment-file-requests.js";
+import {
+  activeLiveSiblingWriteLocks,
+  siblingLockSummary,
+} from "../../../queue/functions/sibling-locks.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -249,6 +253,16 @@ export class AssessmentHandoffAdapter {
 
     worker.emit(job.id, `${C.cyan}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: orphaned assessment — skipping dev, re-assessing prior commit ${lastWithCommit.commit_hash.slice(0, 8)}`);
 
+    const siblingLocks = activeLiveSiblingWriteLocks(job);
+    if (siblingLocks.length > 0) {
+      const summary = siblingLockSummary(siblingLocks);
+      worker.emit(job.id, `${C.dim}[assess-only] Waiting for ${siblingLocks.length} same-WI writer lock(s) to drain${summary ? ` (${summary})` : ""}${C.reset}`);
+      worker._releaseLease(job, leaseToken, "queued", {
+        readyAt: new Date(Date.now() + 1_000).toISOString(),
+      });
+      return { handled: true };
+    }
+
     const assessAttempt = incrementAndCreateAssessmentAttempt(
       job.id,
       leaseToken,
@@ -259,23 +273,6 @@ export class AssessmentHandoffAdapter {
       _logAttemptSkippedStaleLease(job, "assessor", "Skipped assess-only attempt because the lease was stale or expired");
       worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before assess-only execution${C.reset}`);
       return { handled: true };
-    }
-
-    // Clean the assess-only flags only after the lease-backed assessor
-    // attempt is claimed. If the lease is stale, the next owner should
-    // still see the orphaned-assessment optimization.
-    if (cleanPayload && (
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_only") ||
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_tier") ||
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_reasoning_effort") ||
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_name")
-    )) {
-      delete cleanPayload._assess_only;
-      delete cleanPayload._assess_model_tier;
-      delete cleanPayload._assess_reasoning_effort;
-      delete cleanPayload._assess_model_name;
-      job.payload_json = JSON.stringify(cleanPayload);
-      updateJobPayload(job.id, job.payload_json);
     }
 
     // Re-run assessment with the stored output (reuse the existing attempt).
@@ -290,6 +287,22 @@ export class AssessmentHandoffAdapter {
     const internalAssessRetries = countInternalAssessmentRetries(job.id);
     const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
     await wrappedJob.setStatus("awaiting_assessment", { leaseToken });
+    // Keep _assess_only set until awaiting_assessment itself owns the WI-local
+    // barrier. Clearing it before provider routing used to open an unprotected
+    // window where a sibling writer could lease into this assessment.
+    if (cleanPayload && (
+      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_only") ||
+      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_tier") ||
+      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_reasoning_effort") ||
+      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_name")
+    )) {
+      delete cleanPayload._assess_only;
+      delete cleanPayload._assess_model_tier;
+      delete cleanPayload._assess_reasoning_effort;
+      delete cleanPayload._assess_model_name;
+      job.payload_json = JSON.stringify(cleanPayload);
+      updateJobPayload(job.id, job.payload_json);
+    }
     _syncAssessorWorkerDisplay(worker.display, job, {
       tier: effectiveTier,
       effort: assessmentReasoningEffort,

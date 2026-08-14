@@ -423,6 +423,17 @@ function renderPacketContextString(packet, {
       { required: true, key: "deleted_files_absent" },
     );
   }
+  if (includeStable && (packet.cross_wi_deletions_applied || []).length > 0) {
+    addSection(
+      [
+        "UPSTREAM WORK-ITEM DELETIONS ALREADY APPLIED:",
+        ...packet.cross_wi_deletions_applied.map((entry) => (
+          `- ${entry.path} (from WI#${entry.source_work_item_id || "unknown"}; do not recreate without explicit create authority)`
+        )),
+      ].join("\n"),
+      { required: true, key: "cross_wi_deletions_applied" },
+    );
+  }
   if (includeStable && (packet.delete_failures || []).length > 0) {
     addSection(
       `DELETE FAILURES (system could not remove these paths):\n${packet.delete_failures.map((entry) => `- ${entry.path}: ${entry.reason}`).join("\n")}`,

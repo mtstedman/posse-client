@@ -19,6 +19,7 @@ const RECEIPT_SCHEMA_VERSION = 1;
 const MAX_STREAM_CHARS = 256 * 1024;
 const MAX_EVIDENCE_OUTPUT_CHARS = 1600;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const REUSABLE_RECEIPT_STATUSES = new Set(["passed", "failed", "rejected", "timed_out"]);
 
 function sha256(value) {
   return createHash("sha256").update(String(value || ""), "utf8").digest("hex");
@@ -363,7 +364,8 @@ export function resolveFrozenTestPlan(job = {}, payload = {}) {
 
 export function findFrozenTestBaseline(jobId) {
   return storedReceipts(jobId)
-    .find((receipt) => receipt.phase === "baseline") || null;
+    .find((receipt) => receipt.phase === "baseline"
+      && REUSABLE_RECEIPT_STATUSES.has(receipt.status)) || null;
 }
 
 function findPostChangeReceipt(jobId, planId, commitHash) {
@@ -372,6 +374,7 @@ function findPostChangeReceipt(jobId, planId, commitHash) {
       receipt.phase === "post_change"
       && receipt.plan_id === planId
       && receipt.commit_hash === commitHash
+      && REUSABLE_RECEIPT_STATUSES.has(receipt.status)
     )) || null;
 }
 

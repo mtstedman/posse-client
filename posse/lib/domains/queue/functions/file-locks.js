@@ -8,7 +8,13 @@ import { Scope } from "../../../shared/scope/classes/Scope.js";
 import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
-import { LOCK_HOLDING_JOB_STATUSES, now, runImmediateTransaction, TERMINAL_JOB_STATUSES } from "./common.js";
+import {
+  LEASE_HOLDING_STATUSES,
+  LOCK_HOLDING_JOB_STATUSES,
+  now,
+  runImmediateTransaction,
+  TERMINAL_JOB_STATUSES,
+} from "./common.js";
 import { logEvent, flushEventsNow } from "./events.js";
 import { leaseNowMs } from "./lease-clock.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
@@ -71,6 +77,11 @@ function jobIsAssessOnly(job = {}) {
     || payload?._assess_only === "1";
 }
 
+export function jobNeedsAssessmentBarrier(job = {}) {
+  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type)
+    && (jobIsAssessOnly(job) || job?.status === "awaiting_assessment");
+}
+
 // DB-only jobs (task_mode:"db") mutate the project database, never worktree
 // files. File locks exist to prevent cross-branch merge conflicts; DB writes
 // don't merge through git, so these jobs take no file locks — and must not
@@ -81,7 +92,7 @@ function jobIsDbOnly(job = {}) {
 }
 
 export function jobNeedsWriteLocks(job = {}) {
-  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type) && !jobIsAssessOnly(job) && !jobIsDbOnly(job);
+  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type) && !jobIsDbOnly(job);
 }
 
 export function jobHasWritePermission(job = {}) {
@@ -89,6 +100,9 @@ export function jobHasWritePermission(job = {}) {
 }
 
 export function getJobWriteScope(job = {}) {
+  if (jobNeedsAssessmentBarrier(job)) {
+    return { files: [], roots: ["*"], unknown: false, assessmentBarrier: true };
+  }
   const scope = normalizeScopeFromPayload(parseJobPayload(job));
   if (jobNeedsWriteLocks(job) && !hasWriteScope(scope)) {
     return { files: [], roots: ["*"], unknown: true };
@@ -97,6 +111,9 @@ export function getJobWriteScope(job = {}) {
 }
 
 export async function getJobWriteScopeAsync(job = {}) {
+  if (jobNeedsAssessmentBarrier(job)) {
+    return { files: [], roots: ["*"], unknown: false, assessmentBarrier: true };
+  }
   const scope = await normalizeScopeFromPayloadAsync(parseJobPayload(job));
   if (jobNeedsWriteLocks(job) && !hasWriteScope(scope)) {
     return { files: [], roots: ["*"], unknown: true };
@@ -501,7 +518,7 @@ function activeJobLocks(db, { workItemId = null } = {}) {
   `).all(...QUEUE_LOCKING_JOB_TYPES_LIST, ...(scopedToWorkItem ? [wiId] : []));
 
   const isActiveInnerLockJob = (job) => {
-    if (jobIsAssessOnly(job)) return false;
+    if (jobNeedsAssessmentBarrier(job)) return ACTIVE_INNER_LOCK_STATUSES.has(job.status);
     if (ACTIVE_INNER_LOCK_STATUSES.has(job.status)) return true;
     if (job.status === "queued") {
       return QUEUED_REPAIR_LOCK_JOB_TYPES.has(job.job_type)
@@ -539,11 +556,13 @@ function activeJobLocks(db, { workItemId = null } = {}) {
 export function findWriteLockConflict(job, scope = getJobWriteScope(job)) {
   if (!jobNeedsWriteLocks(job) || !hasWriteScope(scope)) return null;
   const db = getDb();
-  const wiConflict = locksConflict(scope, activeWiLocks(db), {
-    allowWorkItemId: job.work_item_id,
-    ignoreSameWorkItemLocks: true,
-  });
-  if (wiConflict) return { type: "work_item", ...wiConflict };
+  if (!jobNeedsAssessmentBarrier(job)) {
+    const wiConflict = locksConflict(scope, activeWiLocks(db), {
+      allowWorkItemId: job.work_item_id,
+      ignoreSameWorkItemLocks: true,
+    });
+    if (wiConflict) return { type: "work_item", ...wiConflict };
+  }
   const sameWorkItemJobLocks = activeJobLocks(db, { workItemId: job.work_item_id });
   const allowJobIds = new Set([
     ...ancestorJobIdsForJob(job, db),
@@ -556,6 +575,67 @@ export function findWriteLockConflict(job, scope = getJobWriteScope(job)) {
   });
   if (jobConflict) return { type: "job", ...jobConflict };
   return null;
+}
+
+/**
+ * Atomically widen a leased job to the WI-local assessment barrier and move it
+ * into awaiting_assessment. Queued siblings are allowed to remain queued; any
+ * live same-WI writer makes the acquisition fail so the caller can defer
+ * without consuming assessment budget.
+ */
+export function acquireAssessmentBarrier(jobId, leaseToken) {
+  const db = getDb();
+  const id = Number(jobId);
+  const result = runImmediateTransaction(db, () => {
+    const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id);
+    if (!fresh
+      || fresh.lease_token !== leaseToken
+      || !LEASE_HOLDING_STATUSES.includes(fresh.status)) {
+      return { ok: false, reason: "lease_invalid", blockers: [] };
+    }
+    const blockers = activeJobLocks(db, { workItemId: fresh.work_item_id }).filter((lock) => (
+      Number(lock.job_id) !== id && lock.job_status !== "queued"
+    ));
+    if (blockers.length > 0) {
+      return { ok: false, reason: "sibling_writers", blockers };
+    }
+
+    const ts = now();
+    const updated = db.prepare(`
+      UPDATE jobs
+      SET status = 'awaiting_assessment',
+          updated_at = ?,
+          state_version = state_version + 1
+      WHERE id = ?
+        AND lease_token = ?
+        AND status IN (${LEASE_HOLDING_STATUSES.map(() => "?").join(",")})
+    `).run(ts, id, leaseToken, ...LEASE_HOLDING_STATUSES);
+    if (updated.changes !== 1) {
+      return { ok: false, reason: "lease_invalid", blockers: [] };
+    }
+    insertJobLocks(
+      db,
+      { ...fresh, status: "awaiting_assessment" },
+      { files: [], roots: ["*"] },
+      ts,
+      "assessment_barrier",
+    );
+    logEvent({
+      work_item_id: fresh.work_item_id,
+      job_id: id,
+      event_type: EVENT_TYPES.JOB_STATUS_CHANGED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: "Status -> awaiting_assessment",
+    });
+    return { ok: true, reason: null, blockers: [] };
+  });
+  if (result.ok) {
+    notifyQueueStateChanged({
+      reason: "job_status_awaiting_assessment",
+      jobId: id,
+    });
+  }
+  return result;
 }
 
 export function ancestorJobIdsForJob(job, db = getDb()) {
@@ -765,13 +845,15 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
       : getJobWriteScope(job))
     : null;
   const hasScope = hasWriteScope(scope);
-  const skipConflictCheck = !!opts?.skipConflictCheck;
-
   return runImmediateTransaction(db, () => {
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(job.id);
     if (!fresh || fresh.status !== "queued") return null;
 
-    if (needsWriteLocks && hasScope && !skipConflictCheck) {
+    const assessmentBarrier = jobNeedsAssessmentBarrier(fresh);
+    // The in-memory scheduler scan is advisory. Recheck transactionally even
+    // when it passes skipConflictCheck so a same-WI assessment barrier cannot
+    // race with a disjoint writer between the scan and lease mutation.
+    if (needsWriteLocks && hasScope) {
       let conflict = findWriteLockConflict(fresh, scope);
       if (conflict) {
         const cleaned = cleanupStaleFileLocks();
@@ -804,7 +886,7 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
     clearFileLaneWaitsForJob(fresh.id, "lane_acquired");
 
     if (needsWriteLocks && hasScope) {
-      insertMissingWiLocks(db, fresh, scope, ts);
+      if (!assessmentBarrier) insertMissingWiLocks(db, fresh, scope, ts);
       insertJobLocks(db, fresh, scope, ts);
     }
 

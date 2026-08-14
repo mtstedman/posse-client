@@ -417,9 +417,14 @@ function evidenceProvenance(entry, context, seen = new Set()) {
   };
 }
 
-export function materializeAgentHandoffEvidenceSelector(selectorValue, context) {
+export function materializeAgentHandoffEvidenceSelector(selectorValue, context, {
+  expectedLineSemantics = null,
+} = {}) {
+  const coordinateSpace = ["materialized", "source"].includes(expectedLineSemantics)
+    ? expectedLineSemantics
+    : null;
   let selector = parseAgentHandoffEvidenceSelector(selectorValue);
-  const cacheKey = `${selector.ref}:${selector.start ?? "all"}-${selector.end ?? "all"}`;
+  const cacheKey = `${selector.ref}:${selector.start ?? "all"}-${selector.end ?? "all"}:${coordinateSpace || "infer"}`;
   const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
   const fetched = fetchHashRefForContext(context, selector.ref);
@@ -456,11 +461,21 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context) 
   const start = selector.start ?? 1;
   const end = selector.end ?? Math.max(1, lines.length);
   const materializedRangeFits = start <= lines.length && end <= lines.length;
-  const sourceSlice = selector.start == null
+  const sourceSlice = selector.start == null || coordinateSpace === "materialized"
     ? null
     : materializedSourceLineSlice(entry, start, end);
-  const useSourceLines = sourceSlice?.matched === true
-    && (sourceSlice.preferSourceLines === true || !materializedRangeFits);
+  const useSourceLines = coordinateSpace === "source"
+    ? sourceSlice?.matched === true
+    : coordinateSpace === "materialized"
+      ? false
+      : sourceSlice?.matched === true
+        && (sourceSlice.preferSourceLines === true || !materializedRangeFits);
+  if (coordinateSpace === "source" && !useSourceLines) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+      `Evidence ${selector.ref}:${start}-${end} no longer resolves in the staged source coordinate space`,
+    );
+  }
   if (!useSourceLines && (end > lines.length || start > lines.length)) {
     const sourceRange = sourceSlice
       ? `; embedded source ranges are ${(sourceSlice.sourceRanges || [{
@@ -2659,7 +2674,11 @@ function verifyPacketEvidenceAtCommit(packet) {
     agentCallId: positiveInt(packet.agent_call_id),
   };
   for (const evidence of packetEvidence(packet)) {
-    const verified = materializeAgentHandoffEvidenceSelector({ ref: evidence.ref, lines: evidence.lines }, context);
+    const verified = materializeAgentHandoffEvidenceSelector(
+      { ref: evidence.ref, lines: evidence.lines },
+      context,
+      { expectedLineSemantics: evidence.line_semantics },
+    );
     if (verified.source_content_sha256 !== evidence.source_content_sha256
       || verified.excerpt_sha256 !== evidence.excerpt_sha256
       || verified.excerpt !== evidence.excerpt

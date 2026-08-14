@@ -3,6 +3,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { listActiveFileLocks } from "../../queue/functions/index.js";
 import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { parseFileScope, scopeToSchedulerLocks } from "../functions/file-scope.js";
+import { parseJobPayload } from "../../queue/functions/payload.js";
 
 const WORKTREE_TYPES = WORKTREE_JOB_TYPES;
 const ROOT_LOCKING_JOB_TYPES = WORKTREE_JOB_TYPES;
@@ -17,6 +18,14 @@ const LOCK_HOLDING_STATUSES = new Set([
   "blocked",
 ]);
 
+function isAssessmentBarrierJob(job = {}) {
+  const payload = parseJobPayload(job);
+  return job?.status === "awaiting_assessment"
+    || payload?._assess_only === true
+    || payload?._assess_only === 1
+    || payload?._assess_only === "1";
+}
+
 // Aggregate queue mutations (orphan sweep, expired-lease sweep, deadlock
 // cancel) emit a single wake without a specific jobId / workItemId. The
 // in-memory index has no way to selectively reconcile those changes, so it
@@ -30,6 +39,7 @@ const FULL_REFRESH_WAKE_REASONS = new Set([
 
 function jobContributesQueueLock(job = {}) {
   if (!job || !QUEUE_LOCKING_JOB_TYPES.has(job.job_type)) return false;
+  if (isAssessmentBarrierJob(job) && job.status === "queued") return false;
   if (LOCK_HOLDING_STATUSES.has(job.status)) return true;
   if (job.status === "queued") {
     return QUEUED_REPAIR_LOCK_JOB_TYPES.has(job.job_type)
@@ -40,7 +50,9 @@ function jobContributesQueueLock(job = {}) {
 
 function lockRowsForJob(job = {}) {
   if (!jobContributesQueueLock(job)) return [];
-  const scope = job._schedulerWriteScope || parseFileScope(job);
+  const scope = isAssessmentBarrierJob(job)
+    ? { files: [], createRoots: ["*"], workItemId: job.work_item_id, jobId: job.id }
+    : (job._schedulerWriteScope || parseFileScope(job));
   const rows = (scope.files.length === 0 && scope.createRoots.length === 0)
     ? [{
       path: "*",
@@ -60,6 +72,7 @@ function lockRowsForJob(job = {}) {
 
 function workItemLockRowsForJob(job = {}, scope = null) {
   if (!job || !QUEUE_LOCKING_JOB_TYPES.has(job.job_type)) return [];
+  if (isAssessmentBarrierJob(job)) return [];
   const jobScope = scope || job._schedulerWriteScope || parseFileScope(job);
   const rows = (jobScope.files.length === 0 && jobScope.createRoots.length === 0)
     ? [{
@@ -157,6 +170,7 @@ export class HeldQueueLockIndex {
   }
 
   addWorkItemLocksForJob(job) {
+    if (isAssessmentBarrierJob(job)) return;
     const scope = this.scopeForJob(job);
     for (const lock of workItemLockRowsForJob(job, scope)) this.addWorkItemLock(lock);
   }
@@ -173,7 +187,9 @@ export class HeldQueueLockIndex {
       this._jobScopes.delete(Number(job.id));
       return null;
     }
-    const parsed = parseFileScope(job);
+    const parsed = isAssessmentBarrierJob(job)
+      ? { files: [], createRoots: ["*"], workItemId: job.work_item_id, jobId: job.id }
+      : parseFileScope(job);
     const scope = parsed.files.length === 0 && parsed.createRoots.length === 0
       ? { ...parsed, createRoots: ["*"] }
       : parsed;

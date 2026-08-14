@@ -234,6 +234,7 @@ export {
 } from "./settings.js";
 
 export {
+  acquireAssessmentBarrier,
   acquireLeaseWithWriteLocksAsync,
   acquireLeaseWithWriteLocks,
   ancestorJobIdsForJob,
@@ -245,6 +246,7 @@ export {
   getJobWriteScope,
   jobHasWritePermission,
   jobHoldsWriteLockForPath,
+  jobNeedsAssessmentBarrier,
   jobNeedsWriteLocks,
   listActiveFileLocks,
   listFileLaneWaits,

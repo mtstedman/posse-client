@@ -40,9 +40,12 @@ export function isZeroEditCodeTask(scope = {}) {
 export function assertHandoffScopePreflight(packet) {
   if (!isZeroEditCodeTask(packet)) return;
   const label = packet.title ? ` "${packet.title}"` : "";
-  throw new Error(
+  const error = new Error(
     `handoff preflight failed: ${packet.job_type} code task${label} has no writable scope; reroute this verification-only work to artificer/report`
   );
+  error.code = "HANDOFF_ZERO_WRITABLE_SCOPE";
+  error.handoffNeedsReplan = true;
+  throw error;
 }
 
 export function buildScopePlausibilityWarning(packet = {}) {

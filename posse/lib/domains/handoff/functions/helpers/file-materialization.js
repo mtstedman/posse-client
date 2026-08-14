@@ -18,6 +18,7 @@ function uniquePaths(values = []) {
 function materializationError(message, details = {}) {
   const error = new Error(message);
   error.code = "HANDOFF_FILE_MATERIALIZATION_FAILED";
+  error.handoffNeedsReplan = true;
   error.assessmentRetryable = false;
   Object.assign(error, details);
   return error;

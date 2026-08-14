@@ -1028,6 +1028,15 @@ export function buildHandoffPacket(job, opts) {
       : sanitizedPayload.dev_brief?.hash_ref_packet && typeof sanitizedPayload.dev_brief.hash_ref_packet === "object"
         ? sanitizedPayload.dev_brief.hash_ref_packet
         : null,
+    cross_wi_deletions_applied: (Array.isArray(sanitizedPayload._cross_wi_file_syncs_applied)
+      ? sanitizedPayload._cross_wi_file_syncs_applied
+      : [])
+      .filter((entry) => entry?.change_kind === "delete" && entry?.path)
+      .map((entry) => ({
+        path: entry.path,
+        source_work_item_id: entry.source_work_item_id ?? null,
+        reconciled_fields: Array.isArray(entry.reconciled_fields) ? entry.reconciled_fields : [],
+      })),
 
     // ── Risk (deterministic) ──
     risk: {

@@ -522,7 +522,7 @@ export async function handleExecuteAttemptError(worker, {
     }
   }
 
-  if (err?.code === "HANDOFF_FILE_MATERIALIZATION_FAILED") {
+  if (err?.handoffNeedsReplan === true || err?.code === "HANDOFF_FILE_MATERIALIZATION_FAILED") {
     const message = String(err?.message || "Writing scope could not be materialized");
     completeAttempt(attempt.id, {
       status: "interrupted",
