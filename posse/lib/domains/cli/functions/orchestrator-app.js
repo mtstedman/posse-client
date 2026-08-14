@@ -1239,7 +1239,8 @@ async function cmdAdd() {
   const parsedResearchBudget = parseResearchBudgetFromArgv();
   const defaultDeepthink = isResearchBudgetDeep(parsedResearchBudget.budget);
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
-  const workflowRedTeamPlan = workflowMode ? shouldPersistIterativeRedTeamPlan() : false;
+  const requestedRedTeamPlan = RED_TEAM_PLAN || (workflowMode ? ITERATE_RED_TEAM_PLAN : false);
+  const workflowRedTeamPlan = workflowMode ? requestedRedTeamPlan : false;
   const guidedScope = process.argv.includes("--guided") || (!hasExplicitOneshotIntent(description) && !hasIntakeHintFlags())
     ? await promptForScopedAdd(description, mode, defaultDeepthink, workflowMode)
     : { intakeHints: parseIntakeHintsFromArgv(description, mode), deepthink: defaultDeepthink || !!workflowMode };
@@ -1257,6 +1258,7 @@ async function cmdAdd() {
     metadata: researchBudgetMetadata({
       research_budget_explicit: parsedResearchBudget.explicit,
       intake_hints: intakeHints,
+      ...(requestedRedTeamPlan ? { red_team_plan: true } : {}),
       workflow_mode: workflowMode,
       iterate: !!workflowMode,
       iteration: workflowMode ? {
@@ -1280,7 +1282,7 @@ async function cmdAdd() {
   const tierTag = tier !== "mvp" ? ` ${C.yellow}[${tier}]${C.reset}` : "";
   const modeTag = mode !== "build" ? ` ${C.cyan}[${mode}]${C.reset}` : "";
   const workflowTag = workflowMode ? ` ${C.blue}[iterate:${workflowMode}]${C.reset}` : "";
-  const redTeamTag = workflowRedTeamPlan ? ` ${C.magenta}[red-team-plan]${C.reset}` : "";
+  const redTeamTag = requestedRedTeamPlan ? ` ${C.magenta}[red-team-plan]${C.reset}` : "";
   const deepthinkTag = isResearchBudgetDeep(deepthinkBudget) ? ` ${C.magenta}[budget:${deepthinkBudget}]${C.reset}` : "";
   const recycleTag = sessionRecycle === "on" ? ` ${C.green}[session-recycle]${C.reset}` : sessionRecycle === "off" ? ` ${C.dim}[no-session-recycle]${C.reset}` : "";
   console.log(`\n  ${C.green}Added WI#${item.id}${C.reset}${modeTag}${tierTag}${workflowTag}${redTeamTag}${deepthinkTag}${recycleTag}`);
@@ -1316,7 +1318,8 @@ async function cmdInject() {
   const title = description.split("\n")[0].slice(0, 100);
   const mode = parseModeFlagFromArgv() || inferWiMode(description) || "build";
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
-  const workflowRedTeamPlan = workflowMode ? shouldPersistIterativeRedTeamPlan() : false;
+  const requestedRedTeamPlan = RED_TEAM_PLAN || (workflowMode ? ITERATE_RED_TEAM_PLAN : false);
+  const workflowRedTeamPlan = workflowMode ? requestedRedTeamPlan : false;
   const intakeHintsBase = parseIntakeHintsFromArgv(description, mode);
   const intakeHints = workflowMode
     ? applyIterativeWorkflowProfile(intakeHintsBase, workflowMode, mode)
@@ -1334,6 +1337,7 @@ async function cmdInject() {
     metadata: researchBudgetMetadata({
       research_budget_explicit: parsedResearchBudget.explicit,
       intake_hints: intakeHints,
+      ...(requestedRedTeamPlan ? { red_team_plan: true } : {}),
       workflow_mode: workflowMode,
       iterate: !!workflowMode,
       iteration: workflowMode ? {

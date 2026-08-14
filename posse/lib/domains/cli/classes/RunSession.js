@@ -502,7 +502,7 @@ export class RunSession {
   const setBootEnterAction = (handler = null) => boot.setEnterAction(handler);
   const updateBootFooter = (text) => boot.updateFooter(text);
   const updateBootAtlasNotice = (text) => boot.updateAtlasNotice(text);
-  const bootCanPromptForBackground = () => boot.canPromptForBackground();
+  const bootCanPromptForBackground = () => !nonInteractive && boot.canPromptForBackground();
   const stopBootMonitor = (opts) => boot.stop(opts);
   const handleSchedulerBootEvent = (event = {}) => boot.handleSchedulerBootEvent(event);
   const requestAtlasBootBackground = (reason = "user-enter") => {

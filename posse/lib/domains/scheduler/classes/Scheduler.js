@@ -52,6 +52,7 @@ import {
   crossWiMergeDependencyWouldCycle,
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
+  jobNeedsAssessmentBarrier,
   jobHasLivePendingScopeRequest,
   onQueueStateChanged,
   reconcileFileLaneWaits,
@@ -2004,7 +2005,18 @@ export class Scheduler {
                 let blockedByLock = false;
                 const conflictResolveCap = jobScope.files.length + jobScope.createRoots.length + 1;
                 for (let resolveAttempt = 0; ; resolveAttempt++) {
-                  const conflict = findFileConflict(jobScope, heldLocks, { allowJobIds });
+                  // Assessment barriers are deliberately WI-local. The DB
+                  // acquisition path already ignores work-item-tier locks for
+                  // them; mirror that rule in this advisory scheduler scan so
+                  // a queued assess-only job cannot serialize against either
+                  // lock tier from an unrelated WI.
+                  const candidateHeldLocks = jobNeedsAssessmentBarrier(job)
+                    ? heldLocks.filter((lock) => (
+                      lock?.lock_tier === "job"
+                      && Number(lock?.work_item_id) === Number(job.work_item_id)
+                    ))
+                    : heldLocks;
+                  const conflict = findFileConflict(jobScope, candidateHeldLocks, { allowJobIds });
                   if (!conflict) break;
                   const conflictType = conflict.lock?.lock_tier === "work_item" ? "work_item" : "job";
                   if (conflictType === "work_item"
