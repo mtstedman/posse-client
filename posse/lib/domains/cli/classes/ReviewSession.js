@@ -3,7 +3,12 @@
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { orderWorkItemsByMergeDependencies } from "../../queue/functions/cross-wi-deps.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
-import { computeJobProgressStats, jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
+import {
+  computeJobProgressStats,
+  jobIsBackgroundAtlasWarm,
+  jobIsWriteStep,
+  reviewVisibleJobs,
+} from "../../ui/functions/display/helpers/job-status.js";
 import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-dirty-state.js";
 import { finalAssessmentFor } from "../functions/review-report.js";
 import { applyMemoryReviewAction } from "../functions/memory-feedback.js";
@@ -163,7 +168,7 @@ export class ReviewSession {
 
   let mergedCount = 0;
   for (const wi of workItems) {
-    const jobs = listJobsByWorkItem(wi.id);
+    const jobs = reviewVisibleJobs(listJobsByWorkItem(wi.id));
     const { succeeded, recovered, failed } = computeJobProgressStats(jobs);
 
     const statusIcon = failed > 0 ? `${C.yellow}!` :
@@ -466,11 +471,21 @@ export class ReviewSession {
 
   cleanupRunningAgentCalls();
   const allJobs = listJobs();
-  const { succeeded, recovered, failed, blocked } = computeJobProgressStats(allJobs);
+  const visibleJobs = reviewVisibleJobs(allJobs);
+  const backgroundJobs = allJobs.filter(jobIsBackgroundAtlasWarm);
+  const { succeeded, recovered, failed, blocked } = computeJobProgressStats(visibleJobs);
+  const background = computeJobProgressStats(backgroundJobs);
+  const unfinishedBackground = background.total - background.resolved;
+  const backgroundDetails = [];
+  if (unfinishedBackground > 0) backgroundDetails.push(`${unfinishedBackground} still finishing`);
+  if (background.failed > 0) backgroundDetails.push(`${background.failed} failed`);
+  const backgroundSuffix = backgroundDetails.length > 0
+    ? `; context background: ${background.resolved}/${background.total} done, ${backgroundDetails.join(", ")}`
+    : "";
 
   cmdDashboard();
 
-  console.log(`  ${C.bold}Execution complete: ${succeeded} succeeded${recovered > 0 ? ` (${recovered} recovered)` : ""}, ${failed} failed, ${blocked} blocked of ${allJobs.length} total${C.reset}`);
+  console.log(`  ${C.bold}Execution complete: ${succeeded} succeeded${recovered > 0 ? ` (${recovered} recovered)` : ""}, ${failed} failed, ${blocked} blocked of ${visibleJobs.length} total${backgroundSuffix}${C.reset}`);
 
   // Notify about dirty worktrees/branches before review/push decisions
   await notifyDirtyState();

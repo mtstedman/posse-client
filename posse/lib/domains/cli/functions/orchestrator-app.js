@@ -106,7 +106,11 @@ import {
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { ACTIVE_LEASE_STATUSES } from "../../queue/functions/common.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
-import { jobLabel } from "../../ui/functions/display/helpers/job-status.js";
+import {
+  jobIsBackgroundAtlasWarm,
+  jobLabel,
+  reviewVisibleJobs,
+} from "../../ui/functions/display/helpers/job-status.js";
 import { modelTierColor, statusColor, statusIcon } from "../../ui/functions/display/status-palette.js";
 import { computeJobProgressStats } from "../../ui/functions/display/helpers/job-status.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
@@ -1852,8 +1856,10 @@ function cmdDashboard(highlightJobId = null) {
     return;
   }
 
-  const { total, failed, resolved, fraction } = computeJobProgressStats(allJobs);
-  const blocked = allJobs.filter((j) => j.status === "blocked").length;
+  const visibleJobs = reviewVisibleJobs(allJobs);
+  const backgroundJobs = allJobs.filter(jobIsBackgroundAtlasWarm);
+  const { total, failed, resolved, fraction } = computeJobProgressStats(visibleJobs);
+  const blocked = visibleJobs.filter((j) => j.status === "blocked").length;
 
   // Progress bar
   const barWidth = 40;
@@ -1866,7 +1872,7 @@ function cmdDashboard(highlightJobId = null) {
 
   // Group jobs by work item
   const byWi = {};
-  for (const j of allJobs) {
+  for (const j of visibleJobs) {
     const key = j.work_item_id;
     if (!byWi[key]) byWi[key] = [];
     byWi[key].push(j);
@@ -1885,6 +1891,15 @@ function cmdDashboard(highlightJobId = null) {
       const arrow = isActive ? ` ${C.yellow}${C.bold}<< ACTIVE${C.reset}` : "";
       console.log(`${C.dim}|${C.reset}   ${icon} #${j.id}${C.reset} ${j.job_type}: ${jobLabel(j.job_type, j.title).slice(0, 40)}${tier}${arrow}`);
     }
+  }
+
+  if (backgroundJobs.length > 0) {
+    const background = computeJobProgressStats(backgroundJobs);
+    const unfinished = background.total - background.resolved;
+    const details = [];
+    if (unfinished > 0) details.push(`${unfinished} still finishing`);
+    if (background.failed > 0) details.push(`${background.failed} failed`);
+    console.log(`${C.dim}|${C.reset} ${C.cyan}Context background${C.reset} ${C.dim}${background.resolved}/${background.total} done${details.length > 0 ? `, ${details.join(", ")}` : ""}${C.reset}`);
   }
 
   console.log(`${C.dim}+${"---".repeat(21)}+${C.reset}\n`);
