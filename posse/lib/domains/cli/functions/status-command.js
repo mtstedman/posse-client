@@ -1,7 +1,13 @@
 import { statusColor, statusIcon } from "../../ui/functions/display/status-palette.js";
-import { jobLabel } from "../../ui/functions/display/helpers/job-status.js";
+import {
+  computeJobProgressStats,
+  jobDisplayStatus,
+  jobIsBackgroundAtlasWarm,
+  jobLabel,
+  reviewVisibleJobs,
+} from "../../ui/functions/display/helpers/job-status.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
-import { getJobStats, getPipelineHealth, getSetting, listJobsByWorkItem, listWorkItems } from "../../queue/functions/index.js";
+import { getPipelineHealth, getSetting, listJobStatusRows, listWorkItems } from "../../queue/functions/index.js";
 import { C as defaultColors } from "../../../shared/format/functions/colors.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
@@ -18,16 +24,24 @@ function countBy(rows, keyFn) {
   return counts;
 }
 
-function normalizeStatsMap(stats) {
-  const counts = {};
-  for (const row of stats || []) {
-    counts[row.status] = Number(row.count || 0);
-  }
-  return counts;
-}
-
 function formatStatsRows(counts) {
   return Object.entries(counts).map(([status, count]) => ({ status, count }));
+}
+
+function summarizeJobs(jobs = []) {
+  const all = Array.isArray(jobs) ? jobs : [];
+  const foreground = reviewVisibleJobs(all);
+  const background = all.filter(jobIsBackgroundAtlasWarm);
+  return {
+    all,
+    foreground,
+    background,
+    rawCounts: countBy(all, job => job.status),
+    foregroundCounts: countBy(foreground, job => jobDisplayStatus(job, foreground)),
+    backgroundCounts: countBy(background, job => jobDisplayStatus(job, background)),
+    progress: computeJobProgressStats(foreground),
+    backgroundProgress: computeJobProgressStats(background),
+  };
 }
 
 function parseLimit(raw) {
@@ -92,23 +106,27 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
   const visibleWorkItems = options.limit == null
     ? sortedWorkItems
     : sortedWorkItems.slice(0, options.limit);
+  const allJobs = listJobStatusRows();
+  const filteredWorkItemIds = new Set(filteredWorkItems.map(wi => wi.id));
   const filteredJobs = options.active
-    ? filteredWorkItems.flatMap(wi => listJobsByWorkItem(wi.id))
-    : null;
+    ? allJobs.filter(job => filteredWorkItemIds.has(job.work_item_id))
+    : allJobs;
+  const jobsByWorkItem = new Map();
+  for (const job of allJobs) {
+    if (!jobsByWorkItem.has(job.work_item_id)) jobsByWorkItem.set(job.work_item_id, []);
+    jobsByWorkItem.get(job.work_item_id).push(job);
+  }
 
   const visibleDetails = visibleWorkItems.map((wi) => {
-    const jobs = listJobsByWorkItem(wi.id);
+    const jobs = jobsByWorkItem.get(wi.id) || [];
+    const summary = summarizeJobs(jobs);
     return {
       workItem: wi,
-      jobs,
-      jobCounts: countBy(jobs, job => job.status),
-      succeededJobs: jobs.filter(job => job.status === "succeeded").length,
+      ...summary,
     };
   });
 
-  const jobCounts = options.active
-    ? countBy(filteredJobs, job => job.status)
-    : normalizeStatsMap(getJobStats());
+  const jobSummary = summarizeJobs(filteredJobs);
 
   return {
     generated_at: new Date().toISOString(),
@@ -127,7 +145,13 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
       truncated: visibleWorkItems.length < filteredWorkItems.length,
     },
     jobs: {
-      by_status: jobCounts,
+      by_status: jobSummary.foregroundCounts,
+      raw_by_status: jobSummary.rawCounts,
+      progress: jobSummary.progress,
+      background: {
+        by_status: jobSummary.backgroundCounts,
+        progress: jobSummary.backgroundProgress,
+      },
     },
     details: visibleDetails,
   };
@@ -144,7 +168,7 @@ function renderJsonStatus(data) {
       shown: data.work_items.shown,
       truncated: data.work_items.truncated,
       by_status: data.work_items.by_status,
-      items: data.details.map(({ workItem, jobs, jobCounts, succeededJobs }) => ({
+      items: data.details.map(({ workItem, foreground, background, rawCounts, foregroundCounts, progress, backgroundCounts, backgroundProgress }) => ({
         id: workItem.id,
         title: workItem.title,
         status: workItem.status,
@@ -153,22 +177,45 @@ function renderJsonStatus(data) {
         created_at: workItem.created_at,
         updated_at: workItem.updated_at,
         jobs: {
-          total: jobs.length,
-          succeeded: succeededJobs,
-          by_status: jobCounts,
-          items: jobs.map(job => ({
+          total: foreground.length,
+          succeeded: progress.succeeded,
+          recovered: progress.recovered,
+          by_status: foregroundCounts,
+          raw_by_status: rawCounts,
+          items: foreground.map(job => ({
             id: job.id,
             type: job.job_type,
             title: job.title,
             status: job.status,
+            display_status: jobDisplayStatus(job, foreground),
             model_tier: job.model_tier,
             provider: job.provider || null,
             updated_at: job.updated_at,
           })),
+          background: {
+            total: background.length,
+            resolved: backgroundProgress.resolved,
+            failed: backgroundProgress.failed,
+            by_status: backgroundCounts,
+            items: background.map(job => ({
+              id: job.id,
+              type: job.job_type,
+              title: job.title,
+              status: job.status,
+              model_tier: job.model_tier,
+              provider: job.provider || null,
+              updated_at: job.updated_at,
+            })),
+          },
         },
       })),
     },
-    jobs: data.jobs,
+    jobs: {
+      by_status: data.jobs.by_status,
+      raw_by_status: data.jobs.raw_by_status,
+      progress: data.jobs.progress,
+      background: data.jobs.background,
+    },
   }, null, 2);
 }
 
@@ -194,14 +241,29 @@ function renderHumanStatus(data, { C }) {
   }
 
   write(`\n  ${C.bold}Jobs:${C.reset}`);
-  const jobStats = formatStatsRows(data.jobs.by_status);
+  const recoveredJobs = Number(data.jobs.by_status.recovered || 0);
+  const succeededJobs = Number(data.jobs.by_status.succeeded || 0) + recoveredJobs;
+  const jobStats = formatStatsRows(data.jobs.by_status)
+    .filter(({ status }) => status !== "succeeded" && status !== "recovered");
+  if (succeededJobs > 0) {
+    write(`    ${C.green}succeeded: ${succeededJobs}${recoveredJobs > 0 ? ` (${recoveredJobs} recovered)` : ""}${C.reset}`);
+  }
   if (jobStats.length === 0) {
-    write(`    ${C.dim}none${C.reset}`);
+    if (succeededJobs === 0) write(`    ${C.dim}none${C.reset}`);
   } else {
     for (const { status, count } of jobStats) {
       const color = statusColor(status, C);
       write(`    ${color}${status}: ${count}${C.reset}`);
     }
+  }
+
+  const backgroundProgress = data.jobs.background.progress;
+  if (backgroundProgress.total > 0) {
+    const unfinished = backgroundProgress.total - backgroundProgress.resolved;
+    const details = [];
+    if (unfinished > 0) details.push(`${unfinished} still finishing`);
+    if (backgroundProgress.failed > 0) details.push(`${backgroundProgress.failed} failed`);
+    write(`    ${C.cyan}Context background: ${backgroundProgress.resolved}/${backgroundProgress.total} done${details.length > 0 ? `, ${details.join(", ")}` : ""}${C.reset}`);
   }
 
   const pendingMerges = data.details.filter(({ workItem }) => workItem.merge_state === "pending_review");
@@ -220,17 +282,26 @@ function renderHumanStatus(data, { C }) {
     write(`\n  ${C.bold}Details:${C.reset}`);
     const scope = data.filter.active ? "active work items" : "newest work items";
     write(`  ${C.dim}Showing ${data.work_items.shown} of ${data.work_items.total} ${scope}.${data.work_items.truncated ? " Use --limit all to show everything." : ""}${C.reset}`);
-    for (const { workItem, jobs, succeededJobs } of data.details) {
+    for (const { workItem, foreground, background, progress, backgroundProgress: wiBackgroundProgress } of data.details) {
       const wiIcon = statusIcon(workItem.status, { kind: "work_item", colors: C });
       const mergeTag = workItem.merge_state === "pending_review" ? ` ${C.yellow}[PENDING MERGE]${C.reset}` :
         workItem.merge_state === "merged" ? ` ${C.green}[MERGED]${C.reset}` :
           workItem.merge_state === "merge_failed" ? ` ${C.red}[MERGE FAILED]${C.reset}` : "";
-      write(`\n    ${wiIcon} WI#${workItem.id}${C.reset} ${String(workItem.title || "").slice(0, 50)} ${C.dim}(${succeededJobs}/${jobs.length} jobs)${C.reset}${mergeTag}`);
+      write(`\n    ${wiIcon} WI#${workItem.id}${C.reset} ${String(workItem.title || "").slice(0, 50)} ${C.dim}(${progress.succeeded}/${foreground.length} jobs${progress.recovered > 0 ? `; ${progress.recovered} recovered` : ""})${C.reset}${mergeTag}`);
 
-      for (const job of jobs) {
-        const icon = statusIcon(job.status, { kind: "job", colors: C });
+      for (const job of foreground) {
+        const displayStatus = jobDisplayStatus(job, foreground);
+        const icon = statusIcon(displayStatus, { kind: "job", colors: C });
         const tier = ` [${statusTierModelName(job.model_tier, { jobType: job.job_type })}]`;
-        write(`      ${icon} #${job.id}${C.reset} ${job.job_type}:${tier} ${jobLabel(job.job_type, job.title).slice(0, 45)}`);
+        const recoveredTag = displayStatus === "recovered" ? ` ${C.dim}(recovered)${C.reset}` : "";
+        write(`      ${icon} #${job.id}${C.reset} ${job.job_type}:${tier} ${jobLabel(job.job_type, job.title).slice(0, 45)}${recoveredTag}`);
+      }
+      if (background.length > 0) {
+        const unfinished = wiBackgroundProgress.total - wiBackgroundProgress.resolved;
+        const details = [];
+        if (unfinished > 0) details.push(`${unfinished} still finishing`);
+        if (wiBackgroundProgress.failed > 0) details.push(`${wiBackgroundProgress.failed} failed`);
+        write(`      ${C.cyan}Context background: ${wiBackgroundProgress.resolved}/${wiBackgroundProgress.total} done${details.length > 0 ? `, ${details.join(", ")}` : ""}${C.reset}`);
       }
     }
   }
