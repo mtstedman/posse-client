@@ -3,12 +3,11 @@
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { orderWorkItemsByMergeDependencies } from "../../queue/functions/cross-wi-deps.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
-import { jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
+import { computeJobProgressStats, jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
 import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-dirty-state.js";
 import { finalAssessmentFor } from "../functions/review-report.js";
 import { applyMemoryReviewAction } from "../functions/memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 import {
   askSingleKeyChoice,
   createRunWrapUpTracker,
@@ -165,15 +164,14 @@ export class ReviewSession {
   let mergedCount = 0;
   for (const wi of workItems) {
     const jobs = listJobsByWorkItem(wi.id);
-    const succeeded = jobs.filter((j) => j.status === "succeeded").length;
-    const failed = jobs.filter((j) => FAILED_JOB_STATUSES.includes(j.status)).length;
+    const { succeeded, recovered, failed } = computeJobProgressStats(jobs);
 
     const statusIcon = failed > 0 ? `${C.yellow}!` :
                        succeeded === jobs.length ? `${C.green}+` :
                        `${C.cyan}~`;
 
     console.log(`  ${statusIcon} ${C.bold}[WI#${wi.id}]${C.reset} ${wi.title.slice(0, 50)}`);
-    console.log(`     ${C.dim}${succeeded}/${jobs.length} jobs succeeded${failed > 0 ? `, ${failed} failed` : ""}${C.reset}`);
+    console.log(`     ${C.dim}${succeeded}/${jobs.length} jobs succeeded${recovered > 0 ? ` (${recovered} recovered)` : ""}${failed > 0 ? `, ${failed} failed` : ""}${C.reset}`);
     const report = textReportsByWi.get(Number(wi.id));
     if (report?.finalAssessment) {
       const assessment = report.finalAssessment;
@@ -468,13 +466,11 @@ export class ReviewSession {
 
   cleanupRunningAgentCalls();
   const allJobs = listJobs();
-  const succeeded = allJobs.filter((j) => j.status === "succeeded").length;
-  const failed = allJobs.filter((j) => FAILED_JOB_STATUSES.includes(j.status)).length;
-  const blocked = allJobs.filter((j) => j.status === "blocked").length;
+  const { succeeded, recovered, failed, blocked } = computeJobProgressStats(allJobs);
 
   cmdDashboard();
 
-  console.log(`  ${C.bold}Execution complete: ${succeeded} succeeded, ${failed} failed, ${blocked} blocked of ${allJobs.length} total${C.reset}`);
+  console.log(`  ${C.bold}Execution complete: ${succeeded} succeeded${recovered > 0 ? ` (${recovered} recovered)` : ""}, ${failed} failed, ${blocked} blocked of ${allJobs.length} total${C.reset}`);
 
   // Notify about dirty worktrees/branches before review/push decisions
   await notifyDirtyState();

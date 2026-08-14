@@ -167,6 +167,7 @@ export function workItemDisplayStatus(wi, jobs = []) {
 export function computeJobProgressStats(jobs = []) {
   const allJobs = Array.isArray(jobs) ? jobs : [];
   const total = allJobs.length;
+  const recovered = allJobs.filter((job) => jobDisplayStatus(job, allJobs) === "recovered").length;
   const succeeded = allJobs.filter((job) => jobIsDisplaySuccess(job, allJobs)).length;
   const failed = allJobs.filter((job) => jobIsDisplayFailure(job, allJobs)).length;
   const canceled = allJobs.filter((job) => job?.status === "canceled").length;
@@ -181,6 +182,7 @@ export function computeJobProgressStats(jobs = []) {
   return {
     total,
     succeeded,
+    recovered,
     failed,
     canceled,
     running,
