@@ -95,10 +95,6 @@ cleanupFallbackProject(fallbackProject);
 
 function bootstrapComposerAutoload({ cwd, vendorDir }) {
   const composerJson = path.join(cwd, "composer.json");
-  if (!fs.existsSync(composerPhar)) {
-    console.error(`Posse Composer runtime is not installed: ${composerPhar}`);
-    process.exit(127);
-  }
   fs.mkdirSync(vendorDir, { recursive: true });
   const composerCwd = fs.existsSync(composerJson)
     ? cwd
@@ -107,11 +103,19 @@ function bootstrapComposerAutoload({ cwd, vendorDir }) {
   // Keep the target repo's dependencies out of the PHP process by default.
   // Project vendors can register versions of nikic/php-parser (and friends)
   // that shadow scip-php's pinned runtime classes.
-  const command = ["dump-autoload", "--no-interaction", "--no-scripts"];
+  const command = ["dump-autoload", "--no-interaction", "--no-plugins", "--no-scripts"];
+  const hasBundledComposer = fs.existsSync(composerPhar);
+  const composerCommand = hasBundledComposer
+    ? { file: "php", args: [composerPhar, ...command] }
+    : process.platform === "win32"
+      ? { file: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", `composer ${command.join(" ")}`] }
+      : { file: "composer", args: command };
   console.error(`scip-php preparing Composer autoload in ${vendorDir}`);
-  const run = spawnSync("php", [composerPhar, ...command], {
+  const run = spawnSync(composerCommand.file, composerCommand.args, {
     cwd: composerCwd,
-    stdio: "inherit",
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     env: {
       ...process.env,
@@ -119,10 +123,22 @@ function bootstrapComposerAutoload({ cwd, vendorDir }) {
     },
   });
   if (run.error) {
-    console.error(run.error.message || String(run.error));
+    const detail = run.error.message || String(run.error);
+    if (!hasBundledComposer && run.error.code === "ENOENT") {
+      console.error(`Composer is unavailable; install it on PATH or provide ${composerPhar}`);
+      process.exit(127);
+    }
+    console.error(detail);
     process.exit(1);
   }
-  if (run.status !== 0) process.exit(run.status ?? 1);
+  if (run.status !== 0) {
+    const detail = [run.stderr, run.stdout]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .join("\n");
+    console.error(detail || `Composer exited with status ${run.status ?? "unknown"}`);
+    process.exit(run.status ?? 1);
+  }
   const autoload = path.join(vendorDir, "autoload.php");
   if (!fs.existsSync(autoload)) {
     console.error(`Composer completed but did not write ${autoload}`);

@@ -28,6 +28,7 @@ package-lock.json
 scip/node/node_modules/
 scip/php/vendor/
 scip/bin/*
+!scip/bin/scip-php
 !scip/bin/*.cmd
 !scip/bin/*.sh
 !scip/bin/*.mjs
