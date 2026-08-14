@@ -3,6 +3,7 @@ import { validateScopedPath } from "../functions/validation.js";
 import fs from "fs";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
+import { isSafeDirectNodeTestScriptArgs } from "../functions/test-command.js";
 
 const BLOCKED_ALWAYS = /^\s*(rm\s+-rf\s+[\/~]|shutdown|reboot|mkfs|dd\s|format\s|del\s+\/[sq]|:(){ :|curl\s.*\|\s*sh|wget\s.*\|\s*sh)/i;
 const BLOCKED_MUTATING_COMMAND = new RegExp(
@@ -710,6 +711,10 @@ export class MutationPolicy {
         if (syntax.error) {
           return { ok: false, error: `Error: ${syntax.error}. Use the issued scoped-check tool for the declared scope.` };
         }
+        continue;
+      }
+      const words = shellWords(sub);
+      if (shellCommandName(words[0]) === "node" && isSafeDirectNodeTestScriptArgs(words.slice(1))) {
         continue;
       }
       if (!READONLY_BASH_ALLOWLIST.test(sub)) {

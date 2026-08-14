@@ -13,6 +13,7 @@ import {
 } from "../../../queue/functions/index.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
+import { isSafeDirectNodeTestScriptArgs } from "../../../../shared/scope/functions/test-command.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
 const RECEIPT_SCHEMA_VERSION = 1;
@@ -301,7 +302,9 @@ export function validatePlannerTestCommand(command) {
     ok = safeTaskPattern.test(taskArgs[0] || "")
       || (taskArgs[0] === "run" && safeTaskPattern.test(taskArgs[1] || ""));
   } else if (["node", "node.exe"].includes(executable)) {
-    ok = hasArg("--test") || args.some((arg) => arg.startsWith("--test="));
+    ok = hasArg("--test")
+      || args.some((arg) => arg.startsWith("--test="))
+      || isSafeDirectNodeTestScriptArgs(args);
   } else if (/^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/.test(executable)) {
     const moduleIndex = args.indexOf("-m");
     ok = moduleIndex >= 0 && ["pytest", "unittest"].includes(args[moduleIndex + 1]);
