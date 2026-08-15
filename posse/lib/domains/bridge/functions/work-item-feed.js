@@ -684,7 +684,7 @@ function projectedAgentActivity(row, event, db) {
     detail: safeText(metadata.detail, 360),
     state: status,
     role: safeText(activity.call_role || activity.job_type || row.actor_type, 80),
-    source: safeText(activity.source || "agent_feedback", 80),
+    origin: safeText(activity.source || "agent_feedback", 80),
     attempt_id: decimalId(activity.attempt_id),
     agent_call_id: decimalId(activity.agent_call_id),
     relationships: [{ kind: "interaction", target_id: `interaction:${interactionId}` }],
@@ -933,7 +933,7 @@ function projectedNudge(row, event, db) {
     detail: null,
     state,
     role: "human",
-    source: safeText(nudge.source || "operator", 80),
+    origin: safeText(nudge.source || "operator", 80),
     attempt_id: attemptId,
     agent_call_id: agentCallId,
     relationships: [
@@ -982,7 +982,7 @@ export function projectFeedEvent(row, { db = getDb() } = {}) {
     attempt_id: semantic?.attempt_id || decimalId(row.attempt_id),
     agent_call_id: semantic?.agent_call_id || decimalId(event.agent_call_id),
     role: safeText(semanticEvent.role || row.actor_type, 80),
-    source: safeText(semanticEvent.source || row.actor_type, 80),
+    origin: safeText(semanticEvent.origin || semanticEvent.source || row.actor_type, 80),
     state,
     summary: eventSummary(kind, row, semanticEvent),
     detail: safeText(semanticEvent.detail, WORK_ITEM_BOUNDS.FEED_DETAIL_CHARS),
@@ -1025,7 +1025,11 @@ export function sanitizeProjectedFeedEvent(value, { durableId = null } = {}) {
     attempt_id: safeText(event.attempt_id, 128),
     agent_call_id: safeText(event.agent_call_id, 128),
     role: safeText(event.role, 80),
-    source: safeText(event.source, 80),
+    // Wire name is `origin`, not `source`: the relay's source policy rejects
+    // any payload containing a key named `source`, which silently broke every
+    // events.tail replay that included a feed event (2026-08-11..15). Durable
+    // rows written before the rename still carry `source`; accept both.
+    origin: safeText(event.origin ?? event.source, 80),
     state: safeText(event.state, 80) || "unknown",
     summary,
     detail: safeText(event.detail, WORK_ITEM_BOUNDS.FEED_DETAIL_CHARS),

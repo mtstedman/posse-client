@@ -27,6 +27,58 @@ function safeJsonParse(text) {
   }
 }
 
+// Mirror of the relay's control source policy (posse-remote
+// rust/domains/control/functions/source_policy.rs). The relay rejects any
+// ack or gate payload containing one of these KEYS anywhere in the tree, and
+// a rejected events.tail ack takes the whole phone reconcile down with it —
+// that is exactly how the feed's `source` field silently broke replays from
+// 2026-08-11 to 2026-08-15. Emitters must never produce these keys on the
+// relay wire; this scrub is the safety net that turns a future regression
+// into a dropped field plus a warning instead of a dead command surface.
+const RELAY_PROHIBITED_PAYLOAD_KEYS = new Set([
+  "content",
+  "source",
+  "source_text",
+  "file_contents",
+  "diff",
+  "patch",
+  "stdout",
+  "stderr",
+  "secret",
+]);
+const warnedProhibitedKeys = new Set();
+
+function findRelayProhibitedKey(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = findRelayProhibitedKey(item);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, nested] of Object.entries(value)) {
+      if (RELAY_PROHIBITED_PAYLOAD_KEYS.has(key.toLowerCase())) return key;
+      const hit = findRelayProhibitedKey(nested);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+function omitRelayProhibitedKeys(value) {
+  if (Array.isArray(value)) return value.map(omitRelayProhibitedKeys);
+  if (value && typeof value === "object") {
+    const next = {};
+    for (const [key, nested] of Object.entries(value)) {
+      if (RELAY_PROHIBITED_PAYLOAD_KEYS.has(key.toLowerCase())) continue;
+      next[key] = omitRelayProhibitedKeys(nested);
+    }
+    return next;
+  }
+  return value;
+}
+
 export class RelayClient extends EventEmitter {
   constructor({
     url = "wss://app.yourposseai.com/v1/instance",
@@ -340,7 +392,20 @@ export class RelayClient extends EventEmitter {
     const socket = this.socket;
     const generation = this.connectionGeneration;
     try {
-      const payload = JSON.stringify(frame);
+      let outbound = frame;
+      const offending = findRelayProhibitedKey(frame);
+      if (offending) {
+        outbound = omitRelayProhibitedKeys(frame);
+        if (!warnedProhibitedKeys.has(offending)) {
+          warnedProhibitedKeys.add(offending);
+          try {
+            console.warn(
+              `[posse][bridge] stripped relay-prohibited key "${offending}" from an outbound ${frame?.type || "unknown"} frame — fix the emitter`,
+            );
+          } catch { /* observability only */ }
+        }
+      }
+      const payload = JSON.stringify(outbound);
       const bufferedBytes = Math.max(0, Number(socket.bufferedAmount) || 0);
       if (bufferedBytes + Buffer.byteLength(payload) > this.maxBufferedBytes) {
         this.failSocket(
