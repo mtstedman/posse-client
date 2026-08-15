@@ -1675,9 +1675,8 @@ export const TOOL_GET_OPERATOR_FEEDBACK = {
   type: "function",
   name: "get_operator_feedback",
   description:
-    "Retrieve pending live operator feedback only after a tool result signals operator_feedback_available. " +
-    "Feedback pending before provider startup is included directly in the assembled prompt; never poll this tool at startup or without that signal. " +
-    "Every returned item must be acknowledged with ack_operator_feedback before normal task work continues.",
+    "Internal recovery endpoint for re-reading direct operator-feedback deliveries after an interrupted transport. " +
+    "This tool is not issued to models and must never be polled.",
   parameters: {
     type: "object",
     properties: {
@@ -1695,7 +1694,7 @@ export const TOOL_ACK_OPERATOR_FEEDBACK = {
   type: "function",
   name: "ack_operator_feedback",
   description:
-    "Acknowledge one retrieved operator feedback item. " +
+    "Acknowledge one operator feedback item attached directly to a tool result. " +
     "The default decision is accepted, so the usual case only needs interaction_id. " +
     "Use rejected or deferred only when you cannot apply the feedback now; those decisions require a short reason.",
   parameters: {
@@ -1703,7 +1702,7 @@ export const TOOL_ACK_OPERATOR_FEEDBACK = {
     properties: {
       interaction_id: {
         type: "integer",
-        description: "The id returned by get_operator_feedback.",
+        description: "The item id in the direct operator-feedback delivery.",
       },
       decision: {
         type: "string",

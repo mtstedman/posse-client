@@ -79,6 +79,7 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
+import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../../catalog/registered-tests.js";
 import {
   persistPendingAssessmentFileRequests,
   shouldDeferAssessmentToFileRequestContinuation,
@@ -664,7 +665,7 @@ function _buildVerificationCapabilityBlock(payload = {}) {
   return [
     `VERIFICATION CAPABILITY CONTRACT:`,
     `Your issued tools plus the deterministic evidence attached to this prompt are the complete set of available verification methods for this attempt.`,
-    `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by registered test evidence.`,
+    `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by deterministic verification evidence.`,
     `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
     `A configured test command is a verification recipe, not product behavior, unless the objective explicitly requires that literal invocation to work. If its launcher is unavailable, one obvious equivalent launcher or targeted invocation may establish the same criterion.`,
     `When a DETERMINISTIC TEST EXECUTION RECEIPT or DETERMINISTIC ASSESSOR TEST EXECUTION is attached, the orchestration layer already ran that frozen command outside model context. Treat the receipt as ground truth and do not rerun the command.`,
@@ -1249,16 +1250,18 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   );
 
   let registeredTestRunEvidence = "";
-  try {
-    const assessmentDb = getDb();
-    _rerunFailedRegisteredTestsForAssessment({ job, cwd, scopeFiles: registeredTestScopeFiles, db: assessmentDb });
-    registeredTestRunEvidence = __testBuildRegisteredTestRunEvidence({
-      jobId: job.id,
-      scopeFiles: registeredTestScopeFiles,
-      db: assessmentDb,
-    });
-  } catch {
-    registeredTestRunEvidence = "";
+  if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
+    try {
+      const assessmentDb = getDb();
+      _rerunFailedRegisteredTestsForAssessment({ job, cwd, scopeFiles: registeredTestScopeFiles, db: assessmentDb });
+      registeredTestRunEvidence = __testBuildRegisteredTestRunEvidence({
+        jobId: job.id,
+        scopeFiles: registeredTestScopeFiles,
+        db: assessmentDb,
+      });
+    } catch {
+      registeredTestRunEvidence = "";
+    }
   }
 
   // Resolve the assessor handoff packet before prompt composition. The packet
@@ -1918,6 +1921,18 @@ export async function runPostExecutionAssessment(worker, {
   if (shouldRunAssessment && !skipAssessForFileRequest && !skipAssessForSatisfiedNoop) {
     const barrier = acquireAssessmentBarrier(job.id, leaseToken);
     if (!barrier.ok) {
+      if (barrier.reason === "lease_invalid") {
+        const errorText = "Lease expired before assessment barrier acquisition — result discarded";
+        completeAttempt(attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: errorText,
+        });
+        worker.emit(job.id, `${C.yellow}[lease] WI#${job.work_item_id} job #${job.id} — lease expired before assessment barrier acquisition${C.reset}`);
+        refreshAndExtractInsights(job.work_item_id);
+        worker._cleanupWorktreeIfDone(job.work_item_id);
+        return;
+      }
       const siblingLocks = barrier.blockers || [];
       setAssessmentLifecycle(job.id, "implementation_complete");
       markAssessmentRetryAssessOnly(job, pendingFileRequests);
@@ -2008,8 +2023,9 @@ export async function runPostExecutionAssessment(worker, {
     return;
   }
   if (shouldRunAssessment && !skipAssessForFileRequest && !skipAssessForSatisfiedNoop) {
-    // acquireAssessmentBarrier already moved the job to awaiting_assessment
-    // while atomically proving the WI had no live sibling writers.
+    // acquireAssessmentBarrier already moved the job to awaiting_assessment;
+    // for worktree writers it also atomically proved there were no live sibling
+    // writers and installed the WI-local assessment barrier.
     worker.emit(job.id, `${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: assessing ${shortJobTitle(job).slice(0, 50)}`);
     syncAssessorWorkerDisplay(worker.display, job, {
       tier: "cheap",

@@ -26,7 +26,10 @@ import {
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
-import { operatorFeedbackSignalTextForJob } from "../../../domains/providers/functions/shared/tool-runtime.js";
+import {
+  operatorFeedbackDeliveryForJob,
+  operatorFeedbackDeliveryText,
+} from "../../../domains/providers/functions/shared/tool-runtime.js";
 import {
   getAgentHandoffRecord,
   recordAgentHandoffRejection,
@@ -1351,20 +1354,36 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
 }
 
 /**
- * Append the operator-feedback availability signal to an ATLAS MCP result's
- * text. Advisory: any failure (or a non-text result) leaves the result
- * untouched — a signal lookup must never break a successful ATLAS call.
+ * Attach pending operator feedback directly to an ATLAS MCP result. The text
+ * notice is model-visible; the mirrored _meta envelope preserves structured
+ * custody for clients and telemetry. Delivery failures never break ATLAS.
  */
-function appendOwnerOperatorFeedbackSignal(result, session) {
+function appendOwnerOperatorFeedbackDelivery(result, session, toolName = "") {
   try {
-    const signal = operatorFeedbackSignalTextForJob(session?.bootConfig?.jobId ?? null);
-    if (!signal) return result;
     const first = result?.content?.[0];
     if (!first || first.type !== "text" || typeof first.text !== "string") return result;
-    return appendOwnerModelControlNotice(result, signal, {
-      kind: "operator_feedback_signal",
+    const delivery = operatorFeedbackDeliveryForJob(session?.bootConfig?.jobId ?? null, {
+      attemptId: session?.bootConfig?.attemptId ?? null,
+      agentCallId: session?.bootConfig?.agentCallId ?? null,
+      toolName,
+    });
+    if (!delivery) return result;
+    const delivered = appendOwnerModelControlNotice(result, `\n\n${operatorFeedbackDeliveryText(delivery)}`, {
+      kind: "operator_feedback_delivery",
       trigger: "pending_operator_feedback",
     });
+    const next = {
+      ...delivered,
+      _meta: {
+        ...(delivered?._meta && typeof delivered._meta === "object" ? delivered._meta : {}),
+        posseOperatorFeedback: delivery,
+      },
+    };
+    Object.defineProperty(next, OWNER_MODEL_CONTROL_NOTICES, {
+      value: delivered?.[OWNER_MODEL_CONTROL_NOTICES] || [],
+      enumerable: false,
+    });
+    return next;
   } catch {
     return result;
   }
@@ -3414,7 +3433,7 @@ export class PersistentMcpOwner {
     try {
       const skeletonRedirect = surveyAwareSkeletonRedirect(session, requested, toolArgs || {});
       if (skeletonRedirect) {
-        let result = appendOwnerOperatorFeedbackSignal(skeletonRedirect, session);
+        let result = appendOwnerOperatorFeedbackDelivery(skeletonRedirect, session, toolName);
         result = appendOwnerResearchSynthesisNotice(
           result,
           session,
@@ -3459,7 +3478,7 @@ export class PersistentMcpOwner {
               researchPhase: synthesisAdmission.researchPhase || null,
               enforcePolicy: String(session?.bootConfig?.role || "") === "researcher",
             }));
-        result = appendOwnerOperatorFeedbackSignal(result, session);
+        result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
         result = appendOwnerResearchEarlyFetchNotice(
           result,
           session,
@@ -3536,10 +3555,9 @@ export class PersistentMcpOwner {
       });
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
-      // without the signal here (the gateway only appends it to native
-      // tools), an MCP-transport agent deep in an ATLAS-only phase learns
-      // about pending operator feedback late or never.
-      result = appendOwnerOperatorFeedbackSignal(result, session);
+      // attaching here ensures an Atlas-only phase receives pending operator
+      // feedback at its next result boundary.
+      result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
       result = appendOwnerResearchSynthesisNotice(
         result,
         session,

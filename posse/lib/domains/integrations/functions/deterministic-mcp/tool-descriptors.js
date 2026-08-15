@@ -3,6 +3,7 @@ import { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
 import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
 import { atlasBackendLabel } from "../atlas-label.js";
 import { atlasDescriptorSchemaForAction } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
+import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../../catalog/registered-tests.js";
 
 // Static data table mirroring each provider's capabilities.toolAttachment.
 // Defined here rather than imported via getProvider() so this module stays
@@ -403,7 +404,7 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   },
   get_operator_feedback: {
     access: "read",
-    summary: "Retrieve pending live operator feedback after a tool result signals availability.",
+    summary: "Internal recovery endpoint for interrupted direct operator-feedback delivery.",
     observation: { type: "tool.get_operator_feedback", label: "GetFeedback", format: "generic", targetKeys: ["limit"] },
     budgetExempt: true,
   },
@@ -573,16 +574,16 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // allowWrite:false): read/inspect tools plus project_db_query — whose
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
-      read: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
       // Exact files_to_create are materialized as empty files before a code
       // dev/fix provider starts, then moved into files_to_modify. write_file
       // remains registered for compatibility/artificer output but must not be
       // issued on this surface; edit_file can populate the empty file.
-      write: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
     }),
     artificer: Object.freeze({
-      read: ["get_operator_feedback", "ack_operator_feedback"],
-      write: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
+      read: ["ack_operator_feedback"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
       imageGeneration: ["generate_image"],
     }),
     // Assessor carries project_db_query on the READ lane so it can verify the
@@ -590,20 +591,20 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // execution capability cap keeps it read-only regardless of the operator
     // grant, and the contract gate drops the tool when no read grant exists.
     assessor: Object.freeze({
-      read: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash", "project_db_query"],
-      write: ["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", "run_test", "run_test_suite", "bash", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
     }),
     // researcher/planner carry project_db_query as a READ-lane tool: the
     // execution capability cap limits them to SELECT/inspection regardless of
     // the operator grant, and the contract gate drops the tool entirely when
     // the repo grants no read permission.
     researcher: Object.freeze({
-      read: ["get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
-      write: ["get_operator_feedback", "ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      write: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
     }),
     planner: Object.freeze({
-      read: ["get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
-      write: ["get_operator_feedback", "ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool
@@ -617,7 +618,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     }),
   }),
   deterministicMcp: Object.freeze({
-    read: Object.freeze(["get_operator_feedback", "ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
+    read: Object.freeze(["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
     write: Object.freeze(["write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output"]),
     // Read-only image inspection (dev/artificer/assessor). clean_image is a
     // mutation and is gated to artificer separately — keep it out of this set.
@@ -708,9 +709,9 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
 //     is governed by scope/policy, never by ATLAS-first ordering, and
 //   - git_history — Git state/history is not mirrored in ATLAS, so ATLAS
 //     retrieval cannot substitute for it, and
-//   - inbound operator-feedback tools (get_operator_feedback and
-//     ack_operator_feedback) — the live operator channel must stay reachable
-//     regardless of ATLAS readiness. Outbound status uses native commentary.
+//   - ack_operator_feedback — direct feedback delivery must remain
+//     acknowledgeable regardless of ATLAS readiness. The recovery getter is
+//     internal and never issued. Outbound status uses native commentary.
 // Only the read/discovery tools below are gated.
 export const GATED_NATIVE_TOOLS = new Set([
   "chain_read",
@@ -931,9 +932,12 @@ export function getDeterministicMcpToolNames(role, {
   if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);
   if (roleUsesDeterministicImageMcp(role) && needsImageGeneration) tools.push(...DETERMINISTIC_IMAGE_TOOLS);
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
-  // Test execution belongs to the assessor. Dev can still author test source
-  // through its normal scoped file tools, but receives no test runner surface.
-  if (role === "assessor") tools.push("run_scoped_checks", "run_test", "run_test_suite");
+  // Scoped lint/typecheck belongs to the assessor. The separate DB-backed
+  // registered-test experiment remains deferred and is not issued.
+  if (role === "assessor") {
+    tools.push("run_scoped_checks");
+    if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) tools.push("run_test", "run_test_suite");
+  }
   if (TOOL_ROLE_LIBRARY.deterministicMcp.shellRoles.includes(role)) tools.push("bash");
   if (role === "planner") tools.push("get_brief");
   // Opt-in project DB access: write-lane roles (dev/artificer) use the full

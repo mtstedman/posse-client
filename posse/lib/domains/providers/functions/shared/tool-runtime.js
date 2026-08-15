@@ -7,6 +7,7 @@ import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-
 import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { ToolRegistry } from "../../../../shared/tools/classes/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
+import { OPERATOR_FEEDBACK_DELIVERY_MARKER } from "../../../../catalog/operator-feedback.js";
 import { assertAdvertisedHaveExecutors } from "../../../../shared/tools/functions/tool-parity.js";
 import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, compactTreeScopeResult } from "../../../../shared/tools/functions/hash-adder.js";
 import { createChainLedger } from "../../../../shared/tools/functions/chain-ledger.js";
@@ -35,8 +36,8 @@ import {
   recordAgentActivity,
   requestJobScopeExpansion,
   getIntSetting,
+  takeOperatorFeedbackDeliveryForToolResult,
 } from "../../../queue/functions/index.js";
-import { signalPendingOperatorFeedbackForJob } from "../../../queue/functions/agent-interactions.js";
 
 const PROVIDER_TOOL_GATE = new AsyncResourceGate({ name: "provider native tool" });
 const LIVE_SCOPE_WAIT = Symbol("posse.live-scope-wait");
@@ -89,56 +90,89 @@ function isAsyncGateError(err) {
   return err?.code === "ASYNC_GATE_BUSY" || err?.code === "ASYNC_GATE_TIMEOUT";
 }
 
-function liveChannelSignalForAmbient(toolName) {
-  if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
+const OPERATOR_FEEDBACK_DELIVERY_EXCLUDED_TOOLS = new Set([
+  "get_operator_feedback",
+  "ack_operator_feedback",
+]);
+
+function operatorFeedbackDeliveryForAmbient(toolName) {
+  if (OPERATOR_FEEDBACK_DELIVERY_EXCLUDED_TOOLS.has(toolName)) return null;
   const ambient = getObservationContext() || {};
-  if (ambient.job_id == null) return "";
-  return operatorFeedbackSignalTextForJob(ambient.job_id, toolName);
+  if (ambient.job_id == null) return null;
+  return operatorFeedbackDeliveryForJob(ambient.job_id, {
+    attemptId: ambient.attempt_id,
+    agentCallId: ambient.agent_call_id,
+    toolName,
+  });
 }
 
 /**
- * The signal suffix for a specific job — shared with owner-side result paths
+ * Claim a direct feedback envelope for a specific job. Shared with owner-side
+ * result paths
  * (PersistentMcpOwner ATLAS results) that carry an explicit session job id
  * instead of ambient observation context.
  *
  * @param {number | string | null} jobId
- * @param {string} [toolName]
- * @returns {string}
+ * @param {{attemptId?: number|null, agentCallId?: number|null, toolName?: string}} [options]
+ * @returns {object|null}
  */
-export function operatorFeedbackSignalTextForJob(jobId, toolName = "") {
-  if (toolName && LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
+export function operatorFeedbackDeliveryForJob(jobId, {
+  attemptId = null,
+  agentCallId = null,
+  toolName = "",
+} = {}) {
+  if (toolName && OPERATOR_FEEDBACK_DELIVERY_EXCLUDED_TOOLS.has(toolName)) return null;
   const normalized = Number(jobId);
-  if (!Number.isFinite(normalized) || normalized <= 0) return "";
-  const pendingCount = countPendingOperatorFeedbackForJob(normalized);
-  if (pendingCount <= 0) return "";
-  signalPendingOperatorFeedbackForJob(normalized);
+  if (!Number.isFinite(normalized) || normalized <= 0) return null;
+  return takeOperatorFeedbackDeliveryForToolResult({
+    job_id: normalized,
+    attempt_id: attemptId,
+    agent_call_id: agentCallId,
+    // Keep the trusted control envelope comfortably below provider result
+    // clipping thresholds. Further pending items attach to a later result.
+    limit: 8,
+  });
+}
+
+export function operatorFeedbackDeliveryText(delivery) {
+  if (!delivery) return "";
   return [
-    "",
-    "OPERATOR_FEEDBACK_SIGNAL:",
-    JSON.stringify({
-      operator_feedback_available: true,
-      pending_count: pendingCount,
-      next_tool: "get_operator_feedback",
-      ack_tool: "ack_operator_feedback",
-    }),
+    `${OPERATOR_FEEDBACK_DELIVERY_MARKER}:`,
+    JSON.stringify(delivery),
+    "Apply these operator instructions now. Acknowledge every item with ack_operator_feedback before normal work continues.",
   ].join("\n");
 }
 
-function appendLiveChannelSignal(result, toolName) {
-  // The signal is advisory: a DB hiccup while counting pending feedback must
-  // never convert a SUCCESSFUL tool result into an error, and non-string
-  // results must pass through untouched (String() would turn structured
-  // results into "[object Object]").
+export function truncateToolResultPreservingFeedback(result, maxChars = 100000) {
+  const text = String(result ?? "");
+  const limit = Math.max(1, Number(maxChars) || 100000);
+  if (text.length <= limit) return text;
+  const marker = `\n\n${OPERATOR_FEEDBACK_DELIVERY_MARKER}:`;
+  const deliveryIndex = text.lastIndexOf(marker);
+  const truncationNotice = "\n... (tool result truncated; operator feedback preserved)";
+  if (deliveryIndex < 0) return `${text.slice(0, limit)}\n... (truncated at ${Math.round(limit / 1000)} KB)`;
+  const delivery = text.slice(deliveryIndex);
+  const headChars = Math.max(0, limit - delivery.length - truncationNotice.length);
+  return `${text.slice(0, headChars)}${truncationNotice}${delivery}`;
+}
+
+function appendOperatorFeedbackDelivery(result, toolName) {
+  // Direct delivery is advisory to tool execution: a DB hiccup while claiming
+  // pending feedback must never convert a successful tool result into an
+  // error. Non-string results pass through untouched (String() would turn
+  // structured results into "[object Object]").
   if (typeof result !== "string") return result;
-  let signal = "";
+  let deliveryText = "";
   try {
-    const ambient = getObservationContext() || {};
-    signal = `${liveChannelSignalForAmbient(toolName)}${subAgentCompletionSignal(ambient.agent_call_id, toolName)}`;
+    deliveryText = operatorFeedbackDeliveryText(operatorFeedbackDeliveryForAmbient(toolName));
   } catch {
     return result;
   }
-  if (!signal) return result;
-  return `${result}${signal}`;
+  const ambient = getObservationContext() || {};
+  const completionSignal = subAgentCompletionSignal(ambient.agent_call_id, toolName);
+  const suffix = `${deliveryText ? `\n\n${deliveryText}` : ""}${completionSignal}`;
+  if (!suffix) return result;
+  return `${result}${suffix}`;
 }
 
 export function parseToolArgs(argsStr) {
@@ -698,6 +732,16 @@ export async function executeToolWithMap(name, argsStr, context, {
 
   try {
     const ambient = getObservationContext() || {};
+    if (
+      name === "agent_handoff"
+      && ambient.job_id != null
+      && countPendingOperatorFeedbackForJob(ambient.job_id) > 0
+    ) {
+      return appendOperatorFeedbackDelivery(
+        "Error: agent_handoff paused: acknowledge pending operator feedback with ack_operator_feedback before terminal handoff.",
+        name,
+      );
+    }
     const violatesTerminalHandoff = () => name !== "agent_handoff"
       && rejectAgentHandoffForLaterTool(ambient.agent_call_id, name);
     if (violatesTerminalHandoff()) {
@@ -716,7 +760,7 @@ export async function executeToolWithMap(name, argsStr, context, {
         if (violatesTerminalHandoff()) {
           return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
         }
-        return appendLiveChannelSignal(result, name);
+        return appendOperatorFeedbackDelivery(result, name);
       }
       const label = `tool.${name}`;
       const key = nativeToolGateKey(context?.cwd);
@@ -752,19 +796,22 @@ export async function executeToolWithMap(name, argsStr, context, {
           result = JSON.stringify(decision, null, 2);
         }
       }
-      if (name === "agent_handoff" || name === "sub_agent" || name === "sub_agent_next_input") return result;
+      if (name === "agent_handoff") return result;
+      if (name === "sub_agent" || name === "sub_agent_next_input") {
+        return appendOperatorFeedbackDelivery(result, name);
+      }
       if (violatesTerminalHandoff()) {
         return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
       }
       const treeCompacted = compactTreeScopeResult(name, result, { args, context });
       if (treeCompacted.compacted) {
         const anchored = appendHashRefIfMajor(name, treeCompacted.result, { args, context, minChars: 1 });
-        return appendLiveChannelSignal(anchored, name);
+        return appendOperatorFeedbackDelivery(anchored, name);
       }
       const surveyCompacted = compactCodeSurveyResult(name, result, { args, context });
       if (surveyCompacted.compacted) {
         const anchored = appendHashRefIfMajor(name, surveyCompacted.result, { args, context, minChars: 1 });
-        return appendLiveChannelSignal(anchored, name);
+        return appendOperatorFeedbackDelivery(anchored, name);
       }
       // Window/lens ref-paging (flag-gated) runs after survey compaction and
       // before the ambient stamp so the stamp covers the compacted inline head.
@@ -774,14 +821,14 @@ export async function executeToolWithMap(name, argsStr, context, {
         context,
         ...(refPaged.compacted ? { minChars: 1 } : {}),
       });
-      return appendLiveChannelSignal(withHashRef, name);
+      return appendOperatorFeedbackDelivery(withHashRef, name);
     }
     if (typeof onUnknown === "function") {
       const result = await onUnknown(name, args, context);
       if (violatesTerminalHandoff()) {
         return "Error: agent_handoff was staged while this tool was running; the terminal report was invalidated";
       }
-      return appendLiveChannelSignal(result, name);
+      return appendOperatorFeedbackDelivery(result, name);
     }
     return `Error: Unknown tool "${name}"`;
   } catch (err) {

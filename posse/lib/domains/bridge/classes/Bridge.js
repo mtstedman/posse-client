@@ -76,7 +76,11 @@ export class Bridge {
       clearInterval(this.presenceTimer);
       this.presenceTimer = null;
     }
-    clearRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
+    try {
+      clearRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
+    } catch {
+      // A locked/corrupt runtime DB must not abort teardown mid-sequence.
+    }
   }
 
   async start() {
@@ -209,13 +213,22 @@ export class Bridge {
     };
   }
 
+  /**
+   * Tear everything down, tolerating per-component failures. References are
+   * nulled FIRST: `start()` keys its idempotency on `this.localServer`, so a
+   * component that throws mid-teardown must never leave a stale ref behind —
+   * a later restart would then return early against a half-dead bridge.
+   */
   async stop() {
-    this.stopPresenceHeartbeat();
-    this.relayClient?.stop();
+    const relayClient = this.relayClient;
+    const changeStream = this.changeStream;
+    const localServer = this.localServer;
     this.relayClient = null;
-    this.changeStream?.close();
     this.changeStream = null;
-    await this.localServer?.close();
     this.localServer = null;
+    this.stopPresenceHeartbeat();
+    try { relayClient?.stop(); } catch { /* already torn down */ }
+    try { changeStream?.close(); } catch { /* already torn down */ }
+    try { await localServer?.close(); } catch { /* already torn down */ }
   }
 }

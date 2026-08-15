@@ -40,6 +40,7 @@ import {
 } from "../../../shared/tools/functions/toolkit/index.js";
 import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
+import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   recordAgentHandoffRejection,
@@ -61,6 +62,10 @@ import { createChainLedger } from "../../../shared/tools/functions/chain-ledger.
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
+import {
+  operatorFeedbackDeliveryForJob,
+  operatorFeedbackDeliveryText,
+} from "../../providers/functions/shared/tool-runtime.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { registeredTestToolResultObservation } from "../../observability/functions/registered-test-tool-result.js";
 import {
@@ -74,7 +79,6 @@ import {
   recordAgentActivity,
   requestJobScopeExpansion,
 } from "../../queue/functions/index.js";
-import { signalPendingOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
 import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
@@ -364,13 +368,11 @@ let mcpWorkItemId = Number(bootConfig.workItemId) || null;
 // True while handling a message that carried its own hidden session param
 // (owner-hot per-message scoping). See handleRequest.
 let mcpMessageSessionScoped = false;
-// Attempt scoping for the live operator channel: with it, get_operator_feedback
-// takes the transactional once-per-attempt delivery branch with audit rows —
-// the same semantics as the embedded transport (they used to diverge:
-// unbounded re-delivery and zero delivery audit on MCP).
+// Attempt scoping for the live operator channel makes automatic result
+// attachment transactional and once-per-attempt, with the same audit semantics
+// as the embedded transport.
 let mcpAttemptId = Number(bootConfig.attemptId) || null;
 let mcpAgentCallId = Number(bootConfig.agentCallId) || null;
-const emptyOperatorFeedbackPolls = new Map();
 let agentAuthorityError = null;
 let mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
 let atlasAvailable = bootConfig.atlasAvailable === true;
@@ -1350,10 +1352,12 @@ if (allowBash) {
 }
 if (ownerHotGateway || roleName === "assessor") {
   addToolSchema(TOOL_RUN_SCOPED_CHECKS);
-  addToolSchema(TOOL_CREATE_TEST_SUITE);
-  addToolSchema(TOOL_CREATE_TEST);
-  addToolSchema(TOOL_RUN_TEST);
-  addToolSchema(TOOL_RUN_TEST_SUITE);
+  if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
+    addToolSchema(TOOL_CREATE_TEST_SUITE);
+    addToolSchema(TOOL_CREATE_TEST);
+    addToolSchema(TOOL_RUN_TEST);
+    addToolSchema(TOOL_RUN_TEST_SUITE);
+  }
 }
 
 function recordAtlasLiveObservation(entry = {}) {
@@ -1555,7 +1559,7 @@ function blockedAtlasMutationMessage(toolName) {
     return `ATLAS tool ${toolName} is not exposed through the Posse MCP gateway. Index refreshes are scheduled by Posse after scoped file edits; continue with deterministic file/test tools.`;
   }
   if (action === "runtime.execute") {
-    return `ATLAS tool ${toolName} is not exposed through the Posse MCP gateway. Use deterministic bash/run_test tools only when shell execution is allowed for this role.`;
+    return `ATLAS tool ${toolName} is not exposed through the Posse MCP gateway. Use only the deterministic verification tools issued for this role.`;
   }
   if (action === "policy.set") {
     return `ATLAS tool ${toolName} is not exposed through the Posse MCP gateway. Policy changes are operator-controlled and cannot be made from this job.`;
@@ -2173,62 +2177,28 @@ function agentFeedback(args = {}) {
   return "Agent feedback recorded for Monitor Agents.";
 }
 
-function operatorFeedbackSignalText(toolName) {
-  if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return "";
-  if (!mcpJobId) return "";
-  const pendingCount = countPendingOperatorFeedbackForJob(mcpJobId);
-  if (pendingCount <= 0) return "";
-  signalPendingOperatorFeedbackForJob(mcpJobId);
-  return [
-    "",
-    "OPERATOR_FEEDBACK_SIGNAL:",
-    JSON.stringify({
-      operator_feedback_available: true,
-      pending_count: pendingCount,
-      next_tool: "get_operator_feedback",
-      ack_tool: "ack_operator_feedback",
-    }),
-  ].join("\n");
-}
-
-function appendOperatorFeedbackSignal(text, toolName) {
-  const signal = operatorFeedbackSignalText(toolName);
-  if (!signal) return text;
+function appendOperatorFeedbackDelivery(text, toolName) {
+  const delivery = operatorFeedbackDeliveryForJob(mcpJobId, {
+    attemptId: mcpAttemptId,
+    agentCallId: mcpAgentCallId,
+    toolName,
+  });
+  if (!delivery) return { text, delivery: null };
+  const deliveryText = `\n\n${operatorFeedbackDeliveryText(delivery)}`;
   recordEmbeddedModelControlNotice(toolName, {
-    kind: "operator_feedback",
-    text: signal,
+    kind: "operator_feedback_delivery",
+    text: deliveryText,
     trigger: "operator_feedback_pending",
   });
-  return `${text}${signal}`;
-}
-
-function operatorFeedbackPollKey() {
-  if (!mcpJobId) return null;
-  return `${mcpJobId}:${mcpAttemptId || `call-${mcpAgentCallId || "job"}`}`;
-}
-
-function setEmptyOperatorFeedbackPolls(key, count) {
-  if (!key) return;
-  if (count <= 0) emptyOperatorFeedbackPolls.delete(key);
-  else emptyOperatorFeedbackPolls.set(key, count);
-  if (emptyOperatorFeedbackPolls.size > 1000) {
-    emptyOperatorFeedbackPolls.delete(emptyOperatorFeedbackPolls.keys().next().value);
-  }
-}
-
-function resetEmptyOperatorFeedbackPollsAfterWork(toolName) {
-  if (LIVE_CHANNEL_TOOL_NAMES.has(toolName)) return;
-  setEmptyOperatorFeedbackPolls(operatorFeedbackPollKey(), 0);
+  return { text: `${text}${deliveryText}`, delivery };
 }
 
 function getOperatorFeedback(args = {}) {
   const scopeError = liveChannelSessionScopeError("get_operator_feedback");
   if (scopeError) return scopeError;
   if (!mcpJobId) return "No active job context is available for get_operator_feedback.";
-  const pollKey = operatorFeedbackPollKey();
-  const priorEmptyPolls = emptyOperatorFeedbackPolls.get(pollKey) || 0;
-  if (priorEmptyPolls >= 1 && countPendingOperatorFeedbackForJob(mcpJobId) <= 0) {
-    const error = new Error("POSSE_FEEDBACK_POLL_LIMIT: no operator feedback is pending. Stop polling; use an issued work tool or finish with the appropriate result.");
+  if (countPendingOperatorFeedbackForJob(mcpJobId) <= 0) {
+    const error = new Error("POSSE_FEEDBACK_RECOVERY_UNAVAILABLE: no unacknowledged operator feedback is pending. This internal recovery endpoint must not be polled.");
     error.code = "POSSE_FEEDBACK_POLL_LIMIT";
     throw error;
   }
@@ -2238,7 +2208,6 @@ function getOperatorFeedback(args = {}) {
     agent_call_id: mcpAgentCallId,
     limit: args.limit,
   });
-  setEmptyOperatorFeedbackPolls(pollKey, feedback.length === 0 ? priorEmptyPolls + 1 : 0);
   return JSON.stringify({
     ok: true,
     acknowledgement_required: feedback.length > 0,
@@ -2547,10 +2516,12 @@ function rebuildNativeToolSchemas() {
   if (allowBash) addToolSchema(TOOL_BASH);
   if (ownerHotGateway || roleName === "assessor") {
     addToolSchema(TOOL_RUN_SCOPED_CHECKS);
-    addToolSchema(TOOL_CREATE_TEST_SUITE);
-    addToolSchema(TOOL_CREATE_TEST);
-    addToolSchema(TOOL_RUN_TEST);
-    addToolSchema(TOOL_RUN_TEST_SUITE);
+    if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
+      addToolSchema(TOOL_CREATE_TEST_SUITE);
+      addToolSchema(TOOL_CREATE_TEST);
+      addToolSchema(TOOL_RUN_TEST);
+      addToolSchema(TOOL_RUN_TEST_SUITE);
+    }
   }
   if (allowImageHelpers) {
     for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT]) {
@@ -3047,10 +3018,17 @@ async function completeNativeToolCall({
   deferred = false,
 }) {
   const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
-  let responseText = appendOperatorFeedbackSignal(text, toolName);
+  let feedbackResult;
+  try {
+    feedbackResult = appendOperatorFeedbackDelivery(text, toolName);
+  } catch {
+    // Feedback delivery is additive; storage trouble cannot rewrite an
+    // otherwise valid tool outcome.
+    feedbackResult = { text, delivery: null };
+  }
+  let responseText = feedbackResult.text;
   const outcome = classifyNativeToolResult(text);
   const ok = isSuccessfulNativeToolResult(text);
-  if (ok) resetEmptyOperatorFeedbackPollsAfterWork(toolName);
   if (ok && toolName !== "chain_verdict") {
     noteResearchExplorationStep({ toolName });
   }
@@ -3100,6 +3078,9 @@ async function completeNativeToolCall({
   }
   sendMessage(jsonRpcSuccess(id, {
     content: [{ type: "text", text: responseText }],
+    ...(feedbackResult.delivery ? {
+      _meta: { posseOperatorFeedback: feedbackResult.delivery },
+    } : {}),
     ...(!ok ? { isError: true } : {}),
   }));
 }
@@ -3556,6 +3537,19 @@ async function handleRequest(msg) {
     // success/failure are captured — not just successful completions.
     const toolInvocation = beginToolInvocation({ tool: toolName, input: recordInput, cwd: workspaceCwd });
     try {
+      if (toolName === "agent_handoff" && countPendingOperatorFeedbackForJob(mcpJobId) > 0) {
+        await completeNativeToolCall({
+          id,
+          requestedToolName,
+          toolName,
+          args,
+          recordInput,
+          start,
+          toolInvocation,
+          result: "Error: agent_handoff paused: acknowledge pending operator feedback with ack_operator_feedback before terminal handoff.",
+        });
+        return;
+      }
       const result = await handler(args);
       if (result?.[LIVE_SCOPE_WAIT] === true) {
         scheduleDeferredLiveScopeTool({

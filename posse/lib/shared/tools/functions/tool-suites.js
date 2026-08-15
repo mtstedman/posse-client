@@ -16,6 +16,7 @@
 // catalog; `advertise` replaces the per-provider hand-lists entirely.
 
 import { ToolCatalog } from "../classes/ToolCatalog.js";
+import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
 import { ToolRegistry } from "../classes/ToolRegistry.js";
 import { assertMutationRoleSafety } from "./tool-parity.js";
 
@@ -27,7 +28,9 @@ const TOOLS_SUITE = [
   { name: "read_file", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "get_brief", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "agent_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
-  { name: "get_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
+  // Recovery executor retained for interrupted transports, but never issued to
+  // a model. Live feedback is attached directly to a normal tool result.
+  { name: "get_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: [] },
   { name: "ack_operator_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "write_file", mutatesWorktree: true, advertise: ["function", "mcp"] },
   { name: "edit_file", mutatesWorktree: true, advertise: ["function", "mcp"] },
@@ -55,10 +58,12 @@ const TOOLS_SUITE = [
   { name: "copy_file", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "make_dir", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "run_scoped_checks", mutatesWorktree: false, advertise: ["function", "mcp"] },
-  { name: "create_test", mutatesWorktree: true, advertise: ["mcp"] },
-  { name: "create_test_suite", mutatesWorktree: true, advertise: ["mcp"] },
-  { name: "run_test", mutatesWorktree: false, advertise: ["mcp"] },
-  { name: "run_test_suite", mutatesWorktree: false, advertise: ["mcp"] },
+  // Deferred/unfinished DB-backed registered-test experiment. Keep schemas and
+  // executors registered internally, but advertise them on no agent transport.
+  { name: "create_test", mutatesWorktree: true, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
+  { name: "create_test_suite", mutatesWorktree: true, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
+  { name: "run_test", mutatesWorktree: false, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
+  { name: "run_test_suite", mutatesWorktree: false, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
   // Embedded-executable helpers, advertised on no transport today.
   { name: "pull_brief", mutatesWorktree: false, advertise: [] },
   { name: "request_scope", mutatesWorktree: false, advertise: [] },

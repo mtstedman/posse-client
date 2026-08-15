@@ -23,6 +23,7 @@ import {
   resolveJobScopeExpansion,
   rewireDependency,
   reopenHumanGateResolution,
+  requestParkedJobResumeAfterGate,
   supersedeHumanGate,
   setAssessorVerdict,
   setAssessmentLifecycle,
@@ -1027,9 +1028,20 @@ export async function runHumanInputJob(worker, job, {
           setAssessmentLifecycle(origJob.id, "assessment_unavailable", {
             error: `Human requested another assessment via gate #${job.id}`,
           });
-          await worker._setJobRowStatus(origJob, "queued");
+          const resume = requestParkedJobResumeAfterGate({
+            gateJobId: job.id,
+            originalJobId: origJob.id,
+            operationKey: `${resolutionClaim.idempotency_key}:resume_original`,
+            reason: "retry_assessment",
+          });
+          if (!resume.ok) throw new Error(`Assessment retry resume failed: ${resume.reason}`);
           handledReviewDecision = true;
-          worker.emit(job.id, `${C.cyan}[human] Queued assessment-only retry #${nextAssessmentAttempt} for job #${origJob.id}${C.reset}`);
+          worker.emit(
+            job.id,
+            resume.pending
+              ? `${C.cyan}[human] Recorded assessment-only retry #${nextAssessmentAttempt} for job #${origJob.id}; it will requeue after the old lease settles${C.reset}`
+              : `${C.cyan}[human] Queued assessment-only retry #${nextAssessmentAttempt} for job #${origJob.id}${C.reset}`,
+          );
           logEvent({
             work_item_id: job.work_item_id,
             job_id: origJob.id,
@@ -1117,15 +1129,19 @@ export async function runHumanInputJob(worker, job, {
         delete origPayload._assess_only;
         updateJobPayload(origJob.id, JSON.stringify(origPayload));
         extendJobMaxAttempts(origJob.id, Number(origJob.attempt_count || 0) + 1);
-        await worker._setJobRowStatus(origJob, "queued");
-        worker.emit(job.id, `${C.cyan}[human] Unblocked job #${origJob.id} - requeued${C.reset}`);
-        logEvent({
-          work_item_id: job.work_item_id,
-          job_id: origJob.id,
-          event_type: EVENT_TYPES.JOB_UNBLOCKED,
-          actor_type: EVENT_ACTORS.WORKER,
-          message: `Requeued after human input (job #${job.id})`,
+        const resume = requestParkedJobResumeAfterGate({
+          gateJobId: job.id,
+          originalJobId: origJob.id,
+          operationKey: `${resolutionClaim.idempotency_key}:resume_original`,
+          reason: "human_clarification",
         });
+        if (!resume.ok) throw new Error(`Human clarification resume failed: ${resume.reason}`);
+        worker.emit(
+          job.id,
+          resume.pending
+            ? `${C.cyan}[human] Recorded resume for job #${origJob.id}; it will requeue after the old lease settles${C.reset}`
+            : `${C.cyan}[human] Unblocked job #${origJob.id} - requeued${C.reset}`,
+        );
       }
     }
     if (

@@ -1,14 +1,22 @@
-import { TERMINAL_JOB_STATUSES, WORKTREE_JOB_TYPES } from "../../../catalog/job.js";
+import {
+  ACTIVE_LEASE_STATUSES,
+  QUEUE_LOCKING_JOB_TYPES,
+  TERMINAL_JOB_STATUSES,
+  WORKTREE_JOB_TYPES,
+} from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { listActiveFileLocks } from "../../queue/functions/index.js";
-import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { parseFileScope, scopeToSchedulerLocks } from "../functions/file-scope.js";
-import { parseJobPayload } from "../../queue/functions/payload.js";
+import {
+  jobNeedsAssessmentBarrier,
+  jobNeedsWriteLocks,
+} from "../../queue/functions/file-locks.js";
 
 const WORKTREE_TYPES = WORKTREE_JOB_TYPES;
 const ROOT_LOCKING_JOB_TYPES = WORKTREE_JOB_TYPES;
 const QUEUED_REPAIR_LOCK_JOB_TYPES = new Set(["fix", "promote"]);
 const TERMINAL_JOB_STATUSES_SET = new Set(TERMINAL_JOB_STATUSES);
+const ACTIVE_ASSESSMENT_BARRIER_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
 const LOCK_HOLDING_STATUSES = new Set([
   "leased",
   "running",
@@ -17,14 +25,6 @@ const LOCK_HOLDING_STATUSES = new Set([
   "waiting_on_review",
   "blocked",
 ]);
-
-function isAssessmentBarrierJob(job = {}) {
-  const payload = parseJobPayload(job);
-  return job?.status === "awaiting_assessment"
-    || payload?._assess_only === true
-    || payload?._assess_only === 1
-    || payload?._assess_only === "1";
-}
 
 // Aggregate queue mutations (orphan sweep, expired-lease sweep, deadlock
 // cancel) emit a single wake without a specific jobId / workItemId. The
@@ -38,8 +38,10 @@ const FULL_REFRESH_WAKE_REASONS = new Set([
 ]);
 
 function jobContributesQueueLock(job = {}) {
-  if (!job || !QUEUE_LOCKING_JOB_TYPES.has(job.job_type)) return false;
-  if (isAssessmentBarrierJob(job) && job.status === "queued") return false;
+  if (!job || !jobNeedsWriteLocks(job)) return false;
+  if (jobNeedsAssessmentBarrier(job)) {
+    return ACTIVE_ASSESSMENT_BARRIER_STATUSES.has(job.status);
+  }
   if (LOCK_HOLDING_STATUSES.has(job.status)) return true;
   if (job.status === "queued") {
     return QUEUED_REPAIR_LOCK_JOB_TYPES.has(job.job_type)
@@ -50,7 +52,7 @@ function jobContributesQueueLock(job = {}) {
 
 function lockRowsForJob(job = {}) {
   if (!jobContributesQueueLock(job)) return [];
-  const scope = isAssessmentBarrierJob(job)
+  const scope = jobNeedsAssessmentBarrier(job)
     ? { files: [], createRoots: ["*"], workItemId: job.work_item_id, jobId: job.id }
     : (job._schedulerWriteScope || parseFileScope(job));
   const rows = (scope.files.length === 0 && scope.createRoots.length === 0)
@@ -71,8 +73,8 @@ function lockRowsForJob(job = {}) {
 }
 
 function workItemLockRowsForJob(job = {}, scope = null) {
-  if (!job || !QUEUE_LOCKING_JOB_TYPES.has(job.job_type)) return [];
-  if (isAssessmentBarrierJob(job)) return [];
+  if (!job || !jobNeedsWriteLocks(job)) return [];
+  if (jobNeedsAssessmentBarrier(job)) return [];
   const jobScope = scope || job._schedulerWriteScope || parseFileScope(job);
   const rows = (jobScope.files.length === 0 && jobScope.createRoots.length === 0)
     ? [{
@@ -170,7 +172,7 @@ export class HeldQueueLockIndex {
   }
 
   addWorkItemLocksForJob(job) {
-    if (isAssessmentBarrierJob(job)) return;
+    if (!jobNeedsWriteLocks(job) || jobNeedsAssessmentBarrier(job)) return;
     const scope = this.scopeForJob(job);
     for (const lock of workItemLockRowsForJob(job, scope)) this.addWorkItemLock(lock);
   }
@@ -187,10 +189,12 @@ export class HeldQueueLockIndex {
       this._jobScopes.delete(Number(job.id));
       return null;
     }
-    const parsed = isAssessmentBarrierJob(job)
+    const parsed = jobNeedsAssessmentBarrier(job)
       ? { files: [], createRoots: ["*"], workItemId: job.work_item_id, jobId: job.id }
       : parseFileScope(job);
-    const scope = parsed.files.length === 0 && parsed.createRoots.length === 0
+    const scope = jobNeedsWriteLocks(job)
+      && parsed.files.length === 0
+      && parsed.createRoots.length === 0
       ? { ...parsed, createRoots: ["*"] }
       : parsed;
     this._jobScopes.set(Number(job.id), scope);

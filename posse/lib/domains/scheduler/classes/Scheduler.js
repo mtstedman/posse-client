@@ -53,6 +53,7 @@ import {
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
   jobNeedsAssessmentBarrier,
+  jobNeedsWriteLocks,
   jobHasLivePendingScopeRequest,
   onQueueStateChanged,
   reconcileFileLaneWaits,
@@ -92,7 +93,7 @@ import {
   providerAuthLivenessProbe,
   workspaceHealthProbeAsync,
 } from "../../system/functions/preflight-probes.js";
-import { BACKGROUND_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
@@ -1962,7 +1963,7 @@ export class Scheduler {
             }
 
             // File-level conflict check for repo/worktree queue-locking jobs.
-            if (QUEUE_LOCKING_JOB_TYPES.has(job.job_type)) {
+            if (jobNeedsWriteLocks(job)) {
               // Optional activation cap: when enabled, a new WI worktree can only
               // start if there is a free worktree slot. This is a scheduler
               // predicate, not a worker-side counter, so skipped jobs do not lease
@@ -2071,7 +2072,7 @@ export class Scheduler {
               }
             }
 
-          const leaseScope = QUEUE_LOCKING_JOB_TYPES.has(job.job_type)
+          const leaseScope = jobNeedsWriteLocks(job)
             ? queueLockIndex.scopeForJob(job)
             : null;
           let lease = this.leaseManager.acquireWithLocks(job, this.ownerId, leaseScope, this.leaseSec, { skipConflictCheck: true });
@@ -2098,7 +2099,7 @@ export class Scheduler {
 
           // Track file scope AFTER successful lease — prevents polluting
           // the lock set when lease acquisition fails (race with another scheduler).
-          if (QUEUE_LOCKING_JOB_TYPES.has(job.job_type)) {
+          if (jobNeedsWriteLocks(job)) {
             queueLockIndex.addLeasedJob({ ...job, status: "leased" });
             ({ lockedFiles, lockedRoots, activeWorktreeWIs, heldLocks } = queueLockIndex.snapshot());
           }

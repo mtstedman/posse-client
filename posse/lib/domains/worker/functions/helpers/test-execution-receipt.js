@@ -371,6 +371,12 @@ export function findFrozenTestBaseline(jobId) {
       && REUSABLE_RECEIPT_STATUSES.has(receipt.status)) || null;
 }
 
+function findLatestFrozenTestBaseline(jobId) {
+  return storedReceipts(jobId)
+    .filter((receipt) => receipt.phase === "baseline")
+    .sort((left, right) => Number(right.artifact_id || 0) - Number(left.artifact_id || 0))[0] || null;
+}
+
 function findPostChangeReceipt(jobId, planId, commitHash) {
   return storedReceipts(jobId)
     .find((receipt) => (
@@ -613,6 +619,17 @@ export async function ensurePreDevelopmentTestBaseline({
   if (existing) return { ...existing, reused: true };
   const plan = resolveFrozenTestPlan(job, payload);
   if (!plan || !cwd) return null;
+  const prior = findLatestFrozenTestBaseline(job?.id);
+  if (prior) {
+    const headCommit = await currentCommit(cwd);
+    // A non-reusable baseline may be retried only while the worktree is still
+    // at the same pre-development commit. Once implementation has committed,
+    // recording a new "baseline" would test the changed tree and can disguise
+    // a regression as a persistent pre-existing failure.
+    if (!prior.commit_hash || !headCommit || prior.commit_hash !== headCommit) {
+      return null;
+    }
+  }
   return await executeReceipt({
     job,
     plan,

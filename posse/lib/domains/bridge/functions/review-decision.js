@@ -224,6 +224,28 @@ function logDeferredCleanupFailure(wi, error) {
   }
 }
 
+/**
+ * A bridge approval that merges leaves fresh unpushed commits, but until now
+ * only run boot/wrap-up sweeps created the push-offer gate — so in phone-only
+ * operation approved work could never surface a deploy gate until the next
+ * run happened to boot. Refresh the singleton offer after every successful
+ * bridge merge. Best-effort like branch cleanup: the approval ACK never
+ * waits on it, and the next run sweep supersedes it anyway.
+ */
+function scheduleBridgeReviewPushOffer(workflow, wiId) {
+  if (!workflow || typeof workflow.refreshPushOfferGate !== "function") return false;
+  void Promise.resolve()
+    .then(() => workflow.refreshPushOfferGate(1, { createdBy: "bridge_review_approve" }))
+    .catch((err) => {
+      try {
+        console.warn(
+          `[posse][bridge] push-offer refresh after WI#${wiId} approval failed: ${err?.message || err}`,
+        );
+      } catch { /* observability only */ }
+    });
+  return true;
+}
+
 function scheduleBridgeReviewCleanup(workflow, wi) {
   if (!workflow || typeof workflow.cleanupWiBranchAsync !== "function") return false;
   let cleanup;
@@ -332,6 +354,7 @@ export async function finalizeApprovedReview(workItemId, {
       };
     }
     const cleanupPending = scheduleBridgeReviewCleanup(workflow, fresh);
+    scheduleBridgeReviewPushOffer(workflow, wi.id);
     fresh = getWorkItem(wi.id) || fresh;
     return {
       ok: true,
@@ -433,6 +456,7 @@ export async function finalizeApprovedReview(workItemId, {
     }
     const mergedWi = getWorkItem(wi.id) || fresh;
     const cleanupPending = scheduleBridgeReviewCleanup(workflow, mergedWi);
+    scheduleBridgeReviewPushOffer(workflow, wi.id);
     return {
       ok: true,
       work_item_id: wi.id,
@@ -532,6 +556,7 @@ export async function finalizeApprovedReview(workItemId, {
   // briefly holds a worktree file. Do not withhold the approval ACK while it
   // runs; startup GC can retry it without reopening human review.
   const cleanupPending = scheduleBridgeReviewCleanup(workflow, fresh);
+  scheduleBridgeReviewPushOffer(workflow, wi.id);
   fresh = getWorkItem(wi.id) || fresh;
   return {
     ok: true,

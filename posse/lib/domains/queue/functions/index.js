@@ -46,6 +46,7 @@ import {
 } from "./cross-wi-deps.js";
 import {
   __registerRequeueExpiredLeases,
+  consumePendingHumanGateResume as _consumePendingHumanGateResume,
   graceCutoff as _graceCutoff,
   leaseNowMs as _leaseNowMs,
   leaseRequeueGraceSec,
@@ -347,6 +348,8 @@ const STALL_RESUME_CLEAR_PAYLOAD_SQL = `
 export {
   __testSetLeaseClockForTests,
   acquireLease,
+  consumePendingHumanGateResume,
+  requestParkedJobResumeAfterGate,
   renewLease,
   releaseLease,
   releaseLeaseWithoutAttemptPenalty,
@@ -2613,6 +2616,9 @@ export function requeueForShutdown(jobId) {
         WHERE id = ?
       `).run(jobId);
     }
+    if (update.changes > 0) {
+      _consumePendingHumanGateResume(jobId, { db });
+    }
 
     return { changes: update.changes, wasAssessing };
   });
@@ -2779,8 +2785,9 @@ const PARKED_LEASE_STATUSES_SQL = LEASE_HOLDING_STATUSES
  * lease immediately afterwards. Parked jobs are deliberately excluded from
  * the requeue sweeps (they may wait indefinitely on a human), so a lease
  * token retained across that crash would otherwise stick forever. Clear the
- * lease fields once the lease expires; status and file locks stay untouched —
- * parked statuses hold their locks by design.
+ * lease fields once the lease expires; status and file locks stay untouched
+ * unless a resolved human gate left a durable pending resume. That resume is
+ * consumed here after the stale owner can no longer write.
  */
 function clearExpiredParkedLeaseTokens(db, ts, cutoff) {
   const parkedStale = db.prepare(`
@@ -2807,6 +2814,15 @@ function clearExpiredParkedLeaseTokens(db, ts, cutoff) {
       const res = clearParked.run(ts, id, lease_token);
       if ((res?.changes || 0) < 1) continue;
       cleared += 1;
+      const pendingResume = _consumePendingHumanGateResume(id, { db });
+      if (pendingResume.resumed) {
+        releaseJobLocksForStatus(id, "queued");
+        notifyQueueStateChanged({
+          reason: "human_gate_resume_after_parked_lease_expiry",
+          jobId: id,
+          workItemId: pendingResume.job?.work_item_id,
+        });
+      }
       logEvent({
         job_id: id,
         event_type: EVENT_TYPES.JOB_LEASE_EXPIRED,
@@ -2952,6 +2968,7 @@ export function requeueOrphanedJobs({ force = false } = {}) {
       });
       continue;
     }
+    _consumePendingHumanGateResume(id, { db });
     releaseJobLocksForStatus(id, "queued");
     const wasAssessing = status === "awaiting_assessment";
     logEvent({
@@ -3117,6 +3134,7 @@ export function requeueExpiredLeases() {
       if ((res?.changes || 0) < 1) continue;
       requeuedCount += 1;
       changedCount += 1;
+      _consumePendingHumanGateResume(id, { db });
       releaseJobLocksForStatus(id, "queued");
       affectedWIs.add(work_item_id);
       const wasAssessing = status === "awaiting_assessment";
@@ -3508,6 +3526,7 @@ export {
   listActiveAgentGuidanceForJob,
   listAgentInteractions,
   recordAgentActivity,
+  takeOperatorFeedbackDeliveryForToolResult,
 } from "./agent-interactions.js";
 
 

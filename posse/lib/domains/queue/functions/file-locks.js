@@ -9,9 +9,11 @@ import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/jo
 import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
 import {
+  ACTIVE_LEASE_STATUSES,
   LEASE_HOLDING_STATUSES,
   LOCK_HOLDING_JOB_STATUSES,
   now,
+  PARKED_JOB_STATUSES,
   runImmediateTransaction,
   TERMINAL_JOB_STATUSES,
 } from "./common.js";
@@ -30,6 +32,8 @@ const COMPLETE_WI_LOCK_HOLDING_MERGE_STATES = new Set(COMPLETE_WI_LOCK_HOLDING_M
 const COMPLETE_WI_LOCK_HOLDING_MERGE_STATES_SQL = `(${UNMERGED_WORK_ITEM_MERGE_STATES_SQL})`;
 const ACTIVE_INNER_LOCK_STATUSES_LIST = LOCK_HOLDING_JOB_STATUSES;
 const ACTIVE_INNER_LOCK_STATUSES = new Set(ACTIVE_INNER_LOCK_STATUSES_LIST);
+const ACTIVE_ASSESSMENT_BARRIER_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
+const PARKED_JOB_STATUS_SET = new Set(PARKED_JOB_STATUSES);
 const ACTIVE_INNER_LOCK_STATUSES_SQL = ACTIVE_INNER_LOCK_STATUSES_LIST.map(() => "?").join(",");
 const QUEUED_REPAIR_LOCK_JOB_TYPES = new Set(["fix", "promote"]);
 const UNRESOLVED_SCOPE_STATUSES = new Set([
@@ -77,8 +81,15 @@ function jobIsAssessOnly(job = {}) {
     || payload?._assess_only === "1";
 }
 
+// DB-only jobs mutate the project database, never worktree files. Artifact
+// jobs are already absent from QUEUE_LOCKING_JOB_TYPES. Neither kind benefits
+// from freezing the WI worktree during assessment.
+function jobCanUseAssessmentBarrier(job = {}) {
+  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type) && !jobIsDbOnly(job);
+}
+
 export function jobNeedsAssessmentBarrier(job = {}) {
-  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type)
+  return jobCanUseAssessmentBarrier(job)
     && (jobIsAssessOnly(job) || job?.status === "awaiting_assessment");
 }
 
@@ -92,7 +103,7 @@ function jobIsDbOnly(job = {}) {
 }
 
 export function jobNeedsWriteLocks(job = {}) {
-  return QUEUE_LOCKING_JOB_TYPES.has(job?.job_type) && !jobIsDbOnly(job);
+  return jobCanUseAssessmentBarrier(job);
 }
 
 export function jobHasWritePermission(job = {}) {
@@ -115,6 +126,17 @@ export async function getJobWriteScopeAsync(job = {}) {
     return { files: [], roots: ["*"], unknown: false, assessmentBarrier: true };
   }
   const scope = await normalizeScopeFromPayloadAsync(parseJobPayload(job));
+  if (jobNeedsWriteLocks(job) && !hasWriteScope(scope)) {
+    return { files: [], roots: ["*"], unknown: true };
+  }
+  return scope;
+}
+
+// Cross-WI handoff checks ask which paths this job may still touch, not which
+// WI-local lease barrier it currently projects. Keep unknown payload scope
+// conservative while avoiding a synthetic '*' veto for every declared path.
+function getJobPathTouchScope(job = {}) {
+  const scope = normalizeScopeFromPayload(parseJobPayload(job));
   if (jobNeedsWriteLocks(job) && !hasWriteScope(scope)) {
     return { files: [], roots: ["*"], unknown: true };
   }
@@ -404,7 +426,7 @@ function lockRowsTouchPath(rows = [], path, lockKind = "file") {
 
 function jobScopeTouchesPath(job, path, lockKind = "file") {
   if (!jobNeedsWriteLocks(job)) return false;
-  const scope = getJobWriteScope(job);
+  const scope = getJobPathTouchScope(job);
   if (!hasWriteScope(scope)) return false;
   return lockRowsTouchPath(scopeToLockRows(scope), path, lockKind);
 }
@@ -483,7 +505,10 @@ export function workItemCanReleaseFileLock(workItemId, path, lockKind = "file") 
     return { ok: false, blockers: [], reason: "unsupported_lock" };
   }
 
-  const activeBlockers = activeJobLocks(db, { workItemId: wiId }).filter((lock) =>
+  const activeBlockers = activeJobLocks(db, {
+    workItemId: wiId,
+    usePathTouchScope: true,
+  }).filter((lock) =>
     Number(lock.work_item_id) === wiId
     && lockRowsTouchPath([lock], normalizedPath, lockKind)
   );
@@ -507,7 +532,10 @@ export function workItemCanReleaseFileLock(workItemId, path, lockKind = "file") 
   return { ok: true, blockers: [], reason: "idle_path" };
 }
 
-function activeJobLocks(db, { workItemId = null } = {}) {
+function activeJobLocks(db, {
+  workItemId = null,
+  usePathTouchScope = false,
+} = {}) {
   const wiId = Number(workItemId);
   const scopedToWorkItem = workItemId != null && Number.isFinite(wiId);
   const jobs = db.prepare(`
@@ -518,7 +546,10 @@ function activeJobLocks(db, { workItemId = null } = {}) {
   `).all(...QUEUE_LOCKING_JOB_TYPES_LIST, ...(scopedToWorkItem ? [wiId] : []));
 
   const isActiveInnerLockJob = (job) => {
-    if (jobNeedsAssessmentBarrier(job)) return ACTIVE_INNER_LOCK_STATUSES.has(job.status);
+    if (!jobNeedsWriteLocks(job)) return false;
+    // An assess-only retry owns the WI barrier from lease acquisition through
+    // assessment. Parked states do not execute and must not freeze the WI.
+    if (jobNeedsAssessmentBarrier(job)) return ACTIVE_ASSESSMENT_BARRIER_STATUSES.has(job.status);
     if (ACTIVE_INNER_LOCK_STATUSES.has(job.status)) return true;
     if (job.status === "queued") {
       return QUEUED_REPAIR_LOCK_JOB_TYPES.has(job.job_type)
@@ -530,7 +561,9 @@ function activeJobLocks(db, { workItemId = null } = {}) {
   const rows = [];
   for (const job of jobs) {
     if (!isActiveInnerLockJob(job)) continue;
-    const scope = getJobWriteScope(job);
+    const scope = usePathTouchScope
+      ? getJobPathTouchScope(job)
+      : getJobWriteScope(job);
     if (!hasWriteScope(scope)) continue;
     for (const lock of scopeToLockRows(scope)) {
       rows.push({
@@ -578,26 +611,35 @@ export function findWriteLockConflict(job, scope = getJobWriteScope(job)) {
 }
 
 /**
- * Atomically widen a leased job to the WI-local assessment barrier and move it
- * into awaiting_assessment. Queued siblings are allowed to remain queued; any
- * live same-WI writer makes the acquisition fail so the caller can defer
- * without consuming assessment budget.
+ * Atomically move a leased job into awaiting_assessment. Worktree-locking code
+ * writers also widen to the WI-local assessment barrier; queued and parked
+ * siblings may remain, but another live same-WI writer makes acquisition fail.
+ * DB-only and non-worktree jobs transition without creating a file barrier.
  */
 export function acquireAssessmentBarrier(jobId, leaseToken) {
   const db = getDb();
   const id = Number(jobId);
   const result = runImmediateTransaction(db, () => {
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id);
+    const leaseCutoff = new Date(leaseNowMs()).toISOString();
     if (!fresh
       || fresh.lease_token !== leaseToken
-      || !LEASE_HOLDING_STATUSES.includes(fresh.status)) {
+      || !LEASE_HOLDING_STATUSES.includes(fresh.status)
+      || !fresh.lease_expires_at
+      || fresh.lease_expires_at < leaseCutoff) {
       return { ok: false, reason: "lease_invalid", blockers: [] };
     }
-    const blockers = activeJobLocks(db, { workItemId: fresh.work_item_id }).filter((lock) => (
-      Number(lock.job_id) !== id && lock.job_status !== "queued"
-    ));
-    if (blockers.length > 0) {
-      return { ok: false, reason: "sibling_writers", blockers };
+
+    const needsBarrier = jobCanUseAssessmentBarrier(fresh);
+    if (needsBarrier) {
+      const blockers = activeJobLocks(db, { workItemId: fresh.work_item_id }).filter((lock) => (
+        Number(lock.job_id) !== id
+        && lock.job_status !== "queued"
+        && !PARKED_JOB_STATUS_SET.has(lock.job_status)
+      ));
+      if (blockers.length > 0) {
+        return { ok: false, reason: "sibling_writers", blockers };
+      }
     }
 
     const ts = now();
@@ -613,13 +655,15 @@ export function acquireAssessmentBarrier(jobId, leaseToken) {
     if (updated.changes !== 1) {
       return { ok: false, reason: "lease_invalid", blockers: [] };
     }
-    insertJobLocks(
-      db,
-      { ...fresh, status: "awaiting_assessment" },
-      { files: [], roots: ["*"] },
-      ts,
-      "assessment_barrier",
-    );
+    if (needsBarrier) {
+      insertJobLocks(
+        db,
+        { ...fresh, status: "awaiting_assessment" },
+        { files: [], roots: ["*"] },
+        ts,
+        "assessment_barrier",
+      );
+    }
     logEvent({
       work_item_id: fresh.work_item_id,
       job_id: id,
@@ -627,7 +671,7 @@ export function acquireAssessmentBarrier(jobId, leaseToken) {
       actor_type: EVENT_ACTORS.SYSTEM,
       message: "Status -> awaiting_assessment",
     });
-    return { ok: true, reason: null, blockers: [] };
+    return { ok: true, reason: null, blockers: [], barrier: needsBarrier };
   });
   if (result.ok) {
     notifyQueueStateChanged({

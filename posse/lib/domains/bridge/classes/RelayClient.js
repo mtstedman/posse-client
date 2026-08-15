@@ -13,6 +13,11 @@ const DEFAULT_RECONNECT_BASE_MS = 1000;
 const DEFAULT_RECONNECT_MAX_MS = 30000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+// The relay pings every 15s and drops peers idle past 45s, but on a half-open
+// socket (laptop sleep/resume, NAT expiry, network switch) that close never
+// reaches us — without a local deadline the bridge sits "online" forever while
+// the relay reports it offline. Four missed relay pings force a reconnect.
+const DEFAULT_IDLE_TIMEOUT_MS = 60000;
 
 function safeJsonParse(text) {
   try {
@@ -38,6 +43,7 @@ export class RelayClient extends EventEmitter {
     reconnectMaxMs = DEFAULT_RECONNECT_MAX_MS,
     handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
     maxBufferedBytes = DEFAULT_MAX_BUFFERED_BYTES,
+    idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   } = {}) {
     super();
     this.url = url;
@@ -54,12 +60,15 @@ export class RelayClient extends EventEmitter {
     this.reconnectMaxMs = Math.max(this.reconnectBaseMs, Number(reconnectMaxMs) || DEFAULT_RECONNECT_MAX_MS);
     this.handshakeTimeoutMs = Math.max(10, Number(handshakeTimeoutMs) || DEFAULT_HANDSHAKE_TIMEOUT_MS);
     this.maxBufferedBytes = Math.max(1024, Number(maxBufferedBytes) || DEFAULT_MAX_BUFFERED_BYTES);
+    this.idleTimeoutMs = Math.max(50, Number(idleTimeoutMs) || DEFAULT_IDLE_TIMEOUT_MS);
     this.socket = null;
     this.stopped = true;
     this.reconnectTimer = null;
     this.reconnectAttempt = 0;
     this.connectionGeneration = 0;
     this.handshakeTimer = null;
+    this.idleTimer = null;
+    this.lastFrameAt = 0;
     this.connectionStatus = {
       state: this.token ? "idle" : "disabled",
       authenticated: false,
@@ -112,6 +121,8 @@ export class RelayClient extends EventEmitter {
 
   handleOpen(ws, generation) {
     if (!this.ownsSocket(ws, generation)) return;
+    this.lastFrameAt = Date.now();
+    this.armIdleWatchdog(ws, generation);
     this.updateStatus("authenticating", {
       authenticated: false,
       connected_at: new Date().toISOString(),
@@ -133,6 +144,7 @@ export class RelayClient extends EventEmitter {
 
   async handleMessage(data, ws = this.socket, generation = this.connectionGeneration) {
     if (!this.ownsSocket(ws, generation)) return;
+    this.lastFrameAt = Date.now();
     const text = typeof data === "string" ? data : Buffer.from(data || "").toString("utf8");
     const frame = safeJsonParse(text);
     if (!frame || typeof frame !== "object") {
@@ -149,6 +161,7 @@ export class RelayClient extends EventEmitter {
         this.markAuthenticated();
       } else {
         this.clearHandshakeTimeout();
+        this.clearIdleWatchdog();
         this.updateStatus("unauthorized", {
           authenticated: false,
           last_error: frame.error?.message || "relay authentication failed",
@@ -196,6 +209,7 @@ export class RelayClient extends EventEmitter {
   handleClose(ws = this.socket, generation = this.connectionGeneration) {
     if (!this.ownsSocket(ws, generation)) return;
     this.clearHandshakeTimeout();
+    this.clearIdleWatchdog();
     this.socket = null;
     this.updateStatus("offline", {
       authenticated: false,
@@ -214,6 +228,7 @@ export class RelayClient extends EventEmitter {
   failSocket(ws, generation, err) {
     if (!this.ownsSocket(ws, generation)) return;
     this.clearHandshakeTimeout();
+    this.clearIdleWatchdog();
     this.socket = null;
     this.updateStatus("error", {
       authenticated: false,
@@ -272,6 +287,36 @@ export class RelayClient extends EventEmitter {
     this.handshakeTimer = null;
   }
 
+  /**
+   * Liveness deadline for an established connection. We never originate
+   * pings — the relay does — so "no frame of any kind for idleTimeoutMs"
+   * is the only local signal that the socket has gone half-open. Retiring
+   * it re-enters the normal bounded-backoff reconnect path.
+   */
+  armIdleWatchdog(ws, generation) {
+    this.clearIdleWatchdog();
+    const period = Math.max(25, Math.floor(this.idleTimeoutMs / 4));
+    this.idleTimer = setInterval(() => {
+      if (!this.ownsSocket(ws, generation)) {
+        this.clearIdleWatchdog();
+        return;
+      }
+      if (Date.now() - this.lastFrameAt < this.idleTimeoutMs) return;
+      this.failSocket(
+        ws,
+        generation,
+        new Error("relay connection went silent past the idle timeout"),
+      );
+    }, period);
+    this.idleTimer.unref?.();
+  }
+
+  clearIdleWatchdog() {
+    if (!this.idleTimer) return;
+    clearInterval(this.idleTimer);
+    this.idleTimer = null;
+  }
+
   scheduleReconnect({ preserveStatus = false } = {}) {
     if (this.stopped || this.reconnectTimer) return;
     const delay = Math.min(
@@ -320,6 +365,7 @@ export class RelayClient extends EventEmitter {
   stop() {
     this.stopped = true;
     this.clearHandshakeTimeout();
+    this.clearIdleWatchdog();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

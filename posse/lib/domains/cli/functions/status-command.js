@@ -109,7 +109,10 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
   const allJobs = listJobStatusRows();
   const filteredWorkItemIds = new Set(filteredWorkItems.map(wi => wi.id));
   const filteredJobs = options.active
-    ? allJobs.filter(job => filteredWorkItemIds.has(job.work_item_id))
+    ? allJobs.filter(job => (
+        filteredWorkItemIds.has(job.work_item_id)
+        || (job.work_item_id == null && jobIsBackgroundAtlasWarm(job))
+      ))
     : allJobs;
   const jobsByWorkItem = new Map();
   for (const job of allJobs) {

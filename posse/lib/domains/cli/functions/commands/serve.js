@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 
+import { scrubSecrets } from "../../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { Bridge } from "../../../bridge/classes/Bridge.js";
 import {
   getBridgeConfig,
@@ -343,6 +346,190 @@ async function waitForRelayOutcome(bridge, timeoutMs = 10_000, pollMs = 250) {
   return status;
 }
 
+const SERVE_RESTART_BASE_MS = 1_000;
+const SERVE_RESTART_MAX_MS = 30_000;
+const SERVE_MAX_RAPID_FAILURES = 5;
+// A restart only counts as a recovery once the bridge stays up this long;
+// crashes inside the window accumulate strikes toward the exit(1) rail so a
+// deterministically recurring crash cannot flap the relay forever.
+const SERVE_STABLE_RUN_MS = 60_000;
+const SERVE_MAX_CRASH_LOG_BYTES = 5 * 1024 * 1024;
+const BENIGN_STREAM_CODES = new Set([
+  "EPIPE",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_WRITE_AFTER_END",
+  // A torn-down controlling tty (window closed, ssh dropped) surfaces as
+  // EIO on write. For a long-lived serve that is detachment, not a crash.
+  "EIO",
+]);
+
+/**
+ * Keep the bridge alive across uncaught errors. orchestrator.js installs
+ * process-wide fatal handlers that log and exit(1) — the right policy for a
+ * batch run, where dying loudly beats a corrupt wrap-up, but fatal for serve:
+ * one stray unhandled rejection silently takes the phone/web bridge offline
+ * until someone restarts it at the desktop. Serve replaces those handlers
+ * (and the orchestrator's stdout/stderr error listeners, which also exit)
+ * with a restart guard: record the crash to the same fatal-crashes log, tear
+ * the bridge down, and start it again with bounded backoff. Five failures in
+ * rapid succession fall back to the old exit(1) so a truly broken
+ * environment still dies loudly instead of looping. Ctrl-C and the phone's
+ * relay-disable toggle are untouched — this guards crashes only. After
+ * release() the handlers stay installed but revert to log-and-exit(1), so
+ * shutdown wrap-up keeps the orchestrator's crash observability.
+ */
+export function installServeCrashGuard(bridge, {
+  projectDir = process.cwd(),
+  proc = process,
+  restartBaseMs = SERVE_RESTART_BASE_MS,
+  restartMaxMs = SERVE_RESTART_MAX_MS,
+  maxRapidFailures = SERVE_MAX_RAPID_FAILURES,
+  stableRunMs = SERVE_STABLE_RUN_MS,
+} = {}) {
+  let released = false;
+  let restarting = false;
+  let restartQueued = false;
+  let strikes = 0;
+  let lastStartAt = Date.now();
+  let retryTimer = null;
+  let brokenPipeNoted = false;
+
+  const appendCrashLog = (line) => {
+    try {
+      const dir = path.join(projectDir, ".posse", "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "fatal-crashes.log");
+      try {
+        if (fs.statSync(file).size > SERVE_MAX_CRASH_LOG_BYTES) return;
+      } catch { /* missing file is fine */ }
+      fs.appendFileSync(file, line);
+    } catch { /* best effort */ }
+  };
+
+  const recordCrash = (kind, err) => {
+    const stack = err && err.stack ? err.stack : String(err);
+    const code = err && err.code ? ` code=${err.code}` : "";
+    const line = scrubSecrets(
+      `\n[${new Date().toISOString()}] FATAL ${kind}${code} (serve restart guard)\n${stack}\n`,
+    );
+    try { proc.stderr.write(line); } catch { /* consumer may be gone */ }
+    appendCrashLog(line);
+  };
+
+  const noteDetachedConsumerOnce = (kind) => {
+    if (brokenPipeNoted) return;
+    brokenPipeNoted = true;
+    appendCrashLog(
+      `\n[${new Date().toISOString()}] NOTE broken-pipe swallowed (serve ${kind}) — output consumer detached; bridge continues\n`,
+    );
+  };
+
+  const strike = (kind, err) => {
+    if (restarting) {
+      // The bridge is mid-bounce; queue exactly one follow-up so a crash
+      // thrown from the fresh bridge's own startup is not silently dropped.
+      restartQueued = true;
+      return;
+    }
+    if (retryTimer) return;
+    if (Date.now() - lastStartAt >= stableRunMs) strikes = 0;
+    strikes += 1;
+    if (strikes >= maxRapidFailures) {
+      recordCrash(
+        "serve_restart_exhausted",
+        new Error(`giving up after ${strikes} rapid bridge failures (last: ${kind}: ${err?.message || err})`),
+      );
+      proc.exit(1);
+      return;
+    }
+    const delay = Math.min(restartMaxMs, restartBaseMs * 2 ** (strikes - 1));
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void restart();
+    }, delay);
+    // Deliberately ref'd: mid-backoff this timer may be the only handle
+    // keeping the event loop alive — unref'ing it would let serve exit 0
+    // silently instead of retrying.
+  };
+
+  const restart = async () => {
+    if (released || restarting) return;
+    restarting = true;
+    restartQueued = false;
+    try { await bridge.stop(); } catch { /* stop() is defensive */ }
+    if (released) {
+      restarting = false;
+      return;
+    }
+    try {
+      await bridge.start();
+      lastStartAt = Date.now();
+    } catch (err) {
+      restarting = false;
+      recordCrash("serve_restart_failed", err);
+      strike("serve_restart_failed", err);
+      return;
+    }
+    restarting = false;
+    if (released) {
+      // Shutdown won the race while start() was in flight; the main path's
+      // bridge.stop() may have run against a half-built bridge. Tear the
+      // fresh one down so no ref'd server handle outlives "bridge stopped".
+      try { await bridge.stop(); } catch { /* best effort */ }
+      return;
+    }
+    if (restartQueued) strike("crash_during_restart", null);
+  };
+
+  const onFatal = (kind) => (err) => {
+    if (err && BENIGN_STREAM_CODES.has(err.code)) {
+      noteDetachedConsumerOnce(kind);
+      return;
+    }
+    recordCrash(kind, err);
+    if (released) {
+      // Post-shutdown crashes revert to the orchestrator's policy: die
+      // loudly with the log entry above instead of resurrecting the bridge.
+      proc.exit(1);
+      return;
+    }
+    strike(kind, err);
+  };
+  const onUncaught = onFatal("uncaughtException");
+  const onUnhandled = onFatal("unhandledRejection");
+  proc.removeAllListeners?.("uncaughtException");
+  proc.removeAllListeners?.("unhandledRejection");
+  proc.on("uncaughtException", onUncaught);
+  proc.on("unhandledRejection", onUnhandled);
+
+  // Take over the orchestrator's stdout/stderr error listeners too — they
+  // exit(1) on any non-broken-pipe write error, and restarting the bridge
+  // cannot fix an output stream, so these are log-only.
+  const onStreamError = (err) => {
+    if (err && BENIGN_STREAM_CODES.has(err.code)) {
+      noteDetachedConsumerOnce("stream");
+      return;
+    }
+    recordCrash("stream", err);
+  };
+  for (const stream of [proc.stdout, proc.stderr]) {
+    if (!stream?.on) continue;
+    try {
+      stream.removeAllListeners?.("error");
+      stream.on("error", onStreamError);
+    } catch { /* best effort */ }
+  }
+
+  return () => {
+    released = true;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    // Handlers stay installed on purpose — see the docblock.
+  };
+}
+
 function waitForShutdown() {
   const signals = process.platform === "win32"
     ? ["SIGINT", "SIGTERM", "SIGBREAK"]
@@ -423,7 +610,9 @@ export async function runServeCommand(argv = [], {
 
   if (!wait) return { ok: true, bridge, info };
 
+  const releaseCrashGuard = installServeCrashGuard(bridge, { projectDir });
   const signal = await waitForShutdown();
+  releaseCrashGuard();
   await bridge.stop();
   console.log(`\n  ${C.yellow}Posse bridge stopped${signal ? ` (${signal})` : ""}.${C.reset}\n`);
   return { ok: true, signal };

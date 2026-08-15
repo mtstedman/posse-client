@@ -1,5 +1,6 @@
 import path from "path";
 import {
+  acquireAssessmentBarrier,
   completeAttempt,
   createJob,
   getArtifacts,
@@ -64,7 +65,6 @@ import {
   readPendingAssessmentFileRequests,
 } from "../../functions/helpers/assessment-file-requests.js";
 import {
-  activeLiveSiblingWriteLocks,
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
 
@@ -192,7 +192,7 @@ export class AssessmentHandoffAdapter {
     this.worker = worker;
   }
 
-  async runIfNeeded({ job, leaseToken, wtPath = null, wrappedJob } = {}) {
+  async runIfNeeded({ job, leaseToken, wtPath = null } = {}) {
     const worker = this.worker;
     const assessOnly = worker.parsePayload(job)._assess_only;
     if (!assessOnly || !ASSESSABLE_JOB_TYPES.has(job.job_type)) {
@@ -253,8 +253,14 @@ export class AssessmentHandoffAdapter {
 
     worker.emit(job.id, `${C.cyan}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: orphaned assessment — skipping dev, re-assessing prior commit ${lastWithCommit.commit_hash.slice(0, 8)}`);
 
-    const siblingLocks = activeLiveSiblingWriteLocks(job);
-    if (siblingLocks.length > 0) {
+    const barrier = acquireAssessmentBarrier(job.id, leaseToken);
+    if (!barrier.ok) {
+      if (barrier.reason === "lease_invalid") {
+        _logAttemptSkippedStaleLease(job, "assessor", "Skipped assess-only barrier because the lease was stale or expired");
+        worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before assess-only execution${C.reset}`);
+        return { handled: true };
+      }
+      const siblingLocks = barrier.blockers || [];
       const summary = siblingLockSummary(siblingLocks);
       worker.emit(job.id, `${C.dim}[assess-only] Waiting for ${siblingLocks.length} same-WI writer lock(s) to drain${summary ? ` (${summary})` : ""}${C.reset}`);
       worker._releaseLease(job, leaseToken, "queued", {
@@ -286,10 +292,9 @@ export class AssessmentHandoffAdapter {
     );
     const internalAssessRetries = countInternalAssessmentRetries(job.id);
     const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
-    await wrappedJob.setStatus("awaiting_assessment", { leaseToken });
-    // Keep _assess_only set until awaiting_assessment itself owns the WI-local
-    // barrier. Clearing it before provider routing used to open an unprotected
-    // window where a sibling writer could lease into this assessment.
+    // Keep _assess_only set until acquireAssessmentBarrier atomically moves the
+    // job into awaiting_assessment. Clearing it earlier opens an unprotected
+    // window where a sibling writer can lease into this assessment.
     if (cleanPayload && (
       Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_only") ||
       Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_tier") ||

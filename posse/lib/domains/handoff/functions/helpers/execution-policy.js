@@ -281,7 +281,7 @@ function resolveAssessorPolicy({
     reasoningEffort = maxEffort(reasoningEffort, "medium");
     reasons.push(testCommandRejected
       ? "declared test command failed runner validation; treated as untested"
-      : "code task has no registered test command");
+      : "code task has no repository-declared test command");
     // Without an executable verification step, an honest assessor tops out
     // at medium confidence — demanding "high" here just converts every pass
     // into a needs_review human gate. Cap the floor at what is attainable

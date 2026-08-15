@@ -6,6 +6,7 @@
 // and must be explicitly acknowledged by the agent.
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { OPERATOR_FEEDBACK_DELIVERY_PROTOCOL } from "../../../catalog/operator-feedback.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { logAgentActivity, logEvent } from "./events.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -125,7 +126,7 @@ function formatGuidanceRows(rows) {
 
   return [
     "OPERATOR GUIDANCE (available at startup; apply before continuing):",
-    "These items were delivered in this prompt. Do not call get_operator_feedback for them; use that tool only after a later OPERATOR_FEEDBACK_SIGNAL.",
+    "These startup items are already recorded as delivered. Mid-run feedback is attached directly to a later tool result and must be acknowledged there.",
     ...lines,
     "",
   ].join("\n");
@@ -346,8 +347,8 @@ export function createOperatorNudge({
   if (scalarLength(boundedBody) > OPERATOR_NUDGE_BODY_MAX_CHARS) {
     throw new Error(`createOperatorNudge body exceeds ${OPERATOR_NUDGE_BODY_MAX_CHARS} characters`);
   }
-  // Insert + supersede atomically: a concurrent get_operator_feedback in the
-  // gap would deliver BOTH the old and new guidance ("latest correction
+  // Insert + supersede atomically: a concurrent result delivery in the gap
+  // would attach BOTH the old and new guidance ("latest correction
   // wins" briefly violated), and a crash mid-supersede leaves two actives.
   const row = runImmediateTransaction(getDb(), () => {
     const created = createAgentInteraction({
@@ -540,6 +541,7 @@ export function applyActiveAgentInteractionsForAttempt({
   attempt_id = null,
   agent_call_id = null,
   limit = 20,
+  first_delivery_only = false,
 } = {}) {
   const jobId = normalizePositiveInt(job_id);
   if (!jobId) return [];
@@ -570,7 +572,24 @@ export function applyActiveAgentInteractionsForAttempt({
   }
 
   const applied = runImmediateTransaction(db, () => {
-    const candidates = selectPendingOperatorFeedback(db, { job_id: jobId, nowIso, limit });
+    let candidates = selectPendingOperatorFeedback(db, {
+      job_id: jobId,
+      nowIso,
+      // Direct delivery must advance past already-delivered, unacknowledged
+      // items when more than one result-sized batch is pending.
+      limit: first_delivery_only ? 100 : limit,
+    });
+    if (first_delivery_only) {
+      const alreadyDelivered = new Set(db.prepare(`
+        SELECT interaction_id
+        FROM agent_interaction_applications
+        WHERE attempt_id = ?
+      `).all(attemptId).map((row) => Number(row.interaction_id)));
+      const safeLimit = Math.min(100, Math.max(1, Number.parseInt(String(limit), 10) || 20));
+      candidates = candidates
+        .filter((row) => !alreadyDelivered.has(row.id))
+        .slice(0, safeLimit);
+    }
     const insert = db.prepare(`
       INSERT OR IGNORE INTO agent_interaction_applications (
         interaction_id, work_item_id, job_id, attempt_id, agent_call_id, applied_at, result
@@ -589,10 +608,9 @@ export function applyActiveAgentInteractionsForAttempt({
     const rows = [];
     for (const row of candidates) {
       // The application row is a delivery AUDIT, not a delivery gate: an item
-      // stays retrievable until it is acknowledged. The pending-count signal
-      // keys on ack_state='pending', so hiding retrieved-but-unacked items
-      // here would leave the agent chasing a signal that get_operator_feedback
-      // can never clear (guidance silently undeliverable for the attempt).
+      // stays recoverable until it is acknowledged. Direct delivery filters
+      // this audit state separately so normal tool results get one copy while
+      // the internal recovery getter can still re-read an unacked item.
       const info = insert.run(row.id, row.work_item_id, row.job_id, attemptId, agentCallId, nowIso);
       update.run(nowIso, nowIso, nowIso, row.id);
       updateMetadata.run(retrievedMetadataJson(row, nowIso), row.id);
@@ -621,7 +639,9 @@ export function applyActiveAgentInteractionsForAttempt({
   if (applied.some((entry) => entry.firstDelivery)) {
     notifyQueueStateChanged({ reason: "agent_interactions_applied", jobId, workItemId: applied[0]?.row?.work_item_id ?? null });
   }
-  return applied.map((entry) => entry.row);
+  return applied
+    .filter((entry) => !first_delivery_only || entry.firstDelivery)
+    .map((entry) => entry.row);
 }
 
 function applyOperatorGuidanceToPrompt({
@@ -772,6 +792,38 @@ export function getOperatorFeedbackForJob({
     limit,
   });
   return delivered.map(feedbackToolPayload);
+}
+
+/**
+ * Claim feedback for automatic attachment to one tool result. Unlike the
+ * recovery getter, this returns each pending item at most once per attempt so
+ * parallel/batched tool results do not repeat the same operator message.
+ */
+export function takeOperatorFeedbackDeliveryForToolResult({
+  job_id,
+  attempt_id = null,
+  agent_call_id = null,
+  limit = 20,
+} = {}) {
+  const jobId = normalizePositiveInt(job_id);
+  if (!jobId) return null;
+  const attemptId = normalizePositiveInt(attempt_id);
+  const feedback = applyActiveAgentInteractionsForAttempt({
+    job_id: jobId,
+    attempt_id: attemptId,
+    agent_call_id,
+    limit,
+    first_delivery_only: true,
+  }).map(feedbackToolPayload);
+  if (feedback.length === 0) return null;
+  return {
+    protocol: OPERATOR_FEEDBACK_DELIVERY_PROTOCOL,
+    delivery_id: `job:${jobId}/attempt:${attemptId || 0}/items:${feedback.map((item) => item.id).join(",")}`,
+    acknowledgement_required: true,
+    default_ack_decision: "accepted",
+    ack_tool: "ack_operator_feedback",
+    items: feedback,
+  };
 }
 
 export function acknowledgeOperatorFeedback({

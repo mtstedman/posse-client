@@ -34,6 +34,7 @@ import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvide
 import { buildOutputLimitError, normalizeMaxOutputTokens, responseOutputLimitReason, withMaxOutputTokens } from "../shared/output-limits.js";
 import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { DEFAULT_FALLBACK_READS, createOpenAiCompatibleTooling } from "../shared/response-tooling.js";
+import { truncateToolResultPreservingFeedback } from "../shared/tool-runtime.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
@@ -757,9 +758,7 @@ export async function callProvider(promptText, {
         const result = typeof rawResult === "string" ? rawResult : String(rawResult ?? "");
 
         // Truncate very large tool results to stay within context budget
-        const truncated = result.length > 100000
-          ? result.slice(0, 100000) + "\n... (truncated at 100 KB)"
-          : result;
+        const truncated = truncateToolResultPreservingFeedback(result, 100000);
 
         toolResults.push({
           type: "function_call_output",

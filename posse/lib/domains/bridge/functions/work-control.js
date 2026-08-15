@@ -102,15 +102,15 @@ export function stopBridgeRun(args = {}, context = {}) {
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const NUDGE_BODY_MAX_CHARS = 4000;
-// Job types that never run a provider agent, so they never call
-// get_operator_feedback. A nudge written against one is accepted, sits
+// Job types that never run a provider agent, so they never produce a tool
+// result that can carry direct feedback. A nudge written against one sits
 // unread forever, and is silently expired at finalize — worse than an
 // honest refusal.
 const NUDGE_INELIGIBLE_JOB_TYPES = new Set(["human_input", "atlas_warm"]);
 
 /**
  * Deliver operator guidance to a live job. Running agents pick the nudge up
- * at their next checkpoint via get_operator_feedback; latest nudge wins
+ * on their next tool result as a direct delivery; latest nudge wins
  * (createOperatorNudge supersedes prior actives atomically).
  */
 export function nudgeBridgeJob(args = {}, context = {}) {
