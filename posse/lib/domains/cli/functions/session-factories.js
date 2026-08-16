@@ -125,6 +125,7 @@ export async function createReviewSessionDeps(bootDeps) {
     cleanupWiBranchAsync: helpers.cleanupWiBranchAsync,
     requeueWorkItemAfterRejection,
     offerPush: helpers.offerPush,
+    refreshPushOfferGate: helpers.refreshPushOfferGate,
     drainPostMergeAtlasWarmJobs: (options = {}) => drainPostMergeAtlasWarmJobs({
       projectDir,
       ...options,
@@ -312,5 +313,6 @@ export async function createRunSessionDeps(bootDeps) {
     wrapUpTui: (display) => reviewSession.wrapUpTui(display),
     wrapUp: () => reviewSession.wrapUp(),
     offerPush: helpers.offerPush,
+    refreshPushOfferGate: helpers.refreshPushOfferGate,
   };
 }

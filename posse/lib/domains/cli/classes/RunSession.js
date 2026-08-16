@@ -237,6 +237,7 @@ export class RunSession {
       wrapUpTui,
       wrapUp,
       offerPush,
+      refreshPushOfferGate,
       exitProcess = process.exit,
     } = this;
 
@@ -424,6 +425,14 @@ export class RunSession {
       return;
     }
     const autoMergedNow = await autoMergeCompletedWorkItems({ reason: "run start" });
+    // Boot superseded any open push-offer gate promising a wrap-up re-offer,
+    // but the offer below only ran when this pass auto-merged something —
+    // otherwise starting a run silently destroyed the phone's deploy gate.
+    // Refresh from real push state first: it recreates the gate whenever
+    // unpushed commits exist and cancels it when there is nothing to push.
+    try {
+      await refreshPushOfferGate?.(autoMergedNow, { createdBy: "run_wrapup" });
+    } catch { /* the deploy offer is best-effort; never block wrap-up */ }
     // No active jobs — but if there are reviewable work items, go straight to review
     const reviewable = listWorkItems(["complete", "failed"]).filter(isReviewableWorkItem);
     if (reviewable.length > 0) {

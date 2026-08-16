@@ -1789,6 +1789,11 @@ async function cmdGo() {
       return;
     }
     const autoMergedNow = mergeOutcome.result;
+    // Mirror of RunSession's wrap-up refresh: a boot-time supersede must
+    // never destroy the deploy gate without re-offering from current state.
+    try {
+      await helpers.refreshPushOfferGate(autoMergedNow, { createdBy: "run_wrapup" });
+    } catch { /* the deploy offer is best-effort */ }
     // Nothing to plan/run — but if there are reviewable work items, go to review
     const reviewable = listWorkItems(["complete", "failed"]).filter(isReviewableWorkItem);
     if (reviewable.length > 0) {
