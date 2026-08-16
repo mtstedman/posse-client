@@ -31,6 +31,16 @@ export class Job {
       },
       set(target, prop, value, receiver) {
         if (prop in target) return Reflect.set(target, prop, value, receiver);
+        // Underscore-prefixed fields are the established convention for
+        // ephemeral per-attempt scratch state (worker roles attach
+        // _atlasConfig, _jobDir, _executionProvider, ...). They are not row
+        // columns and never persist; store them on the wrapper instance so
+        // the row itself stays untouched. Everything else stays read-only —
+        // that guard exists so nobody writes a row field expecting it to
+        // reach the database.
+        if (typeof prop === "string" && prop.startsWith("_")) {
+          return Reflect.set(target, prop, value, receiver);
+        }
         throw new Error(`Job row field "${String(prop)}" is read-only; use an explicit Job mutation method`);
       },
     });
