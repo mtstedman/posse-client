@@ -349,19 +349,62 @@ export function tailEventsEnvelope({
   since_event_id = null,
   sinceId = null,
   since_id = null,
+  headId = null,
+  head_id = null,
+  bridgeEpoch = null,
+  expectedBridgeEpoch = null,
   limit = DEFAULT_LIMIT,
 } = {}) {
-  return {
-    events: tailEvents({
+  if (
+    expectedBridgeEpoch != null &&
+    bridgeEpoch != null &&
+    String(expectedBridgeEpoch) !== String(bridgeEpoch)
+  ) {
+    return {
+      ok: false,
+      reason: "bridge_epoch_changed",
+      bridge_epoch: String(bridgeEpoch),
+      head_event_id: getHeadEventId(),
+    };
+  }
+  const liveHead = getHeadEventId();
+  const requestedHead = headId ?? head_id;
+  const fixedHead = requestedHead == null || requestedHead === ""
+    ? liveHead
+    : Math.min(liveHead, Math.max(0, Number(requestedHead) || 0));
+  const since = sinceEventId ?? since_event_id ?? sinceId ?? since_id ?? 0;
+  const capped = boundedLimit(limit);
+  const candidates = tailEvents({
+    workItemId: workItemId ?? work_item_id,
+    sinceId: since,
+    limit: Math.min(MAX_LIMIT, capped + 1),
+  }).filter((event) => Number(event.id) <= fixedHead);
+  const events = candidates.slice(0, capped);
+  const nextEventId = Number(events.at(-1)?.id ?? since ?? 0) || 0;
+  let hasMore = candidates.length > events.length;
+  if (!hasMore && events.length === capped && nextEventId < fixedHead) {
+    hasMore = tailEvents({
       workItemId: workItemId ?? work_item_id,
-      sinceId: sinceEventId ?? since_event_id ?? sinceId ?? since_id,
-      limit,
-    }),
-    head_event_id: getHeadEventId(),
+      sinceId: nextEventId,
+      limit: 1,
+    }).some((event) => Number(event.id) <= fixedHead);
+  }
+  return {
+    events,
+    ...(bridgeEpoch ? { bridge_epoch: String(bridgeEpoch) } : {}),
+    head_event_id: fixedHead,
+    live_head_event_id: liveHead,
+    next_event_id: nextEventId,
+    has_more: hasMore,
+    replay_complete: !hasMore,
   };
 }
 
-export function collectStateSnapshot({ limit = DEFAULT_LIMIT, headEventId = 0 } = {}) {
+export function collectStateSnapshot({
+  limit = DEFAULT_LIMIT,
+  headEventId = 0,
+  bridgeEpoch = null,
+} = {}) {
   const capped = boundedLimit(limit);
   const workItems = listWorkItems().slice(0, capped).map(summarizeWorkItem);
   const activeJobs = listJobs().filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status));
@@ -376,6 +419,7 @@ export function collectStateSnapshot({ limit = DEFAULT_LIMIT, headEventId = 0 } 
   return {
     generated_at: new Date().toISOString(),
     head_event_id: Number(headEventId || 0),
+    ...(bridgeEpoch ? { bridge_epoch: String(bridgeEpoch) } : {}),
     work_items: workItems,
     jobs,
     open_gates: openGates,

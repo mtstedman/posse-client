@@ -8,7 +8,22 @@ PRAGMA foreign_keys = ON;
 --   1 = pre-ATLAS-v2 schema (implicit; older DBs return 0 by default).
 --   7 = + bridge change tracking for read-only stream cursors.
 --   8 = + durable human-gate and assessment lifecycle state.
-PRAGMA user_version = 9;
+--  10 = + durable bridge command idempotency results.
+PRAGMA user_version = 10;
+
+CREATE TABLE IF NOT EXISTS bridge_command_results (
+  command_id TEXT PRIMARY KEY,
+  command_name TEXT NOT NULL,
+  args_json TEXT NOT NULL CHECK (json_valid(args_json)),
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','completed')),
+  ack_json TEXT CHECK (ack_json IS NULL OR json_valid(ack_json)),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bridge_command_results_state_updated
+  ON bridge_command_results(state, updated_at);
 
 CREATE TABLE IF NOT EXISTS work_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

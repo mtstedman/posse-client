@@ -121,15 +121,7 @@ export async function runLocalModelsCommand(argv = [], {
     });
     assertSelectedPackage(result, artifact);
     writeLine(output, `  ${colors.cyan}Installing verified package for local generation...${colors.reset}`);
-    const installed = await installModel(ML_MODEL_PACKAGE_INSTALL_METHOD, {
-      modelId: result.modelId,
-      version: result.version,
-      archiveFormat: result.archiveFormat,
-      archiveRoot: result.archiveRoot,
-      packagePath: result.filePath,
-      expectedBytes: result.bytes,
-      expectedSha256: result.sha256,
-    }, {
+    const installed = await installModel(ML_MODEL_PACKAGE_INSTALL_METHOD, result, {
       modelRoot: path.resolve(modelRoot),
       manager: client.manager,
       timeoutMs: 24 * 60 * 60 * 1000,

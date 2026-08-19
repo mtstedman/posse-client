@@ -166,6 +166,7 @@ export class LocalServer {
     projectDir = process.cwd(),
     dispatch = dispatchBridgeCommandFrame,
     getHeadEventId = () => 0,
+    getBridgeEpoch = () => null,
     tailBridgeEvents = null,
     getRelayStatus = null,
     startPosse = null,
@@ -182,6 +183,7 @@ export class LocalServer {
     this.projectDir = projectDir;
     this.dispatch = dispatch;
     this.getHeadEventId = getHeadEventId;
+    this.getBridgeEpoch = getBridgeEpoch;
     this.tailBridgeEvents = tailBridgeEvents;
     this.getRelayStatus = getRelayStatus;
     this.startPosse = startPosse;
@@ -235,6 +237,7 @@ export class LocalServer {
         ok: true,
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         instance_id: this.instanceId,
+        ...(this.getBridgeEpoch?.() ? { bridge_epoch: this.getBridgeEpoch() } : {}),
       };
       if (typeof this.getRelayStatus === "function") {
         body.relay = this.getRelayStatus();
@@ -272,6 +275,7 @@ export class LocalServer {
         label: this.label,
         project_dir: this.projectDir,
         commands: listAllowedBridgeCommands(),
+        ...(this.getBridgeEpoch?.() ? { bridge_epoch: this.getBridgeEpoch() } : {}),
       });
       return;
     }
@@ -280,7 +284,11 @@ export class LocalServer {
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/state") {
-      sendJson(res, 200, collectStateSnapshot(queryObject(url)));
+      sendJson(res, 200, collectStateSnapshot({
+        ...queryObject(url),
+        headEventId: this.getHeadEventId?.() || 0,
+        bridgeEpoch: this.getBridgeEpoch?.() || null,
+      }));
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/events") {
@@ -288,12 +296,17 @@ export class LocalServer {
       if (typeof this.tailBridgeEvents === "function") {
         sendJson(res, 200, this.tailBridgeEvents({
           sinceEventId: query.since_event_id ?? query.sinceEventId ?? query.since_id ?? query.sinceId ?? null,
+          headEventId: query.head_event_id ?? query.headEventId ?? null,
+          bridgeEpoch: query.bridge_epoch ?? query.bridgeEpoch ?? null,
           limit: query.limit,
         }));
       } else {
         sendJson(res, 200, tailEventsEnvelope({
           workItemId: query.work_item_id ?? query.workItemId ?? null,
           sinceId: query.since_event_id ?? query.sinceEventId ?? query.since_id ?? query.sinceId ?? null,
+          headId: query.head_event_id ?? query.headEventId ?? null,
+          bridgeEpoch: this.getBridgeEpoch?.() || null,
+          expectedBridgeEpoch: query.bridge_epoch ?? query.bridgeEpoch ?? null,
           limit: query.limit,
         }));
       }
@@ -444,6 +457,7 @@ export class LocalServer {
       instanceId: this.instanceId,
       tailBridgeEvents: typeof this.tailBridgeEvents === "function" ? this.tailBridgeEvents : null,
       getHeadEventId: typeof this.getHeadEventId === "function" ? this.getHeadEventId : null,
+      getBridgeEpoch: typeof this.getBridgeEpoch === "function" ? this.getBridgeEpoch : null,
       startPosse: typeof this.startPosse === "function" ? this.startPosse : null,
     };
   }
@@ -512,6 +526,7 @@ export class LocalServer {
       role: "bridge",
       instance_id: this.instanceId,
       label: this.label,
+      ...(this.getBridgeEpoch?.() ? { bridge_epoch: this.getBridgeEpoch() } : {}),
     });
     this.sendSnapshot(client);
   }
@@ -522,10 +537,12 @@ export class LocalServer {
 
   sendSnapshot(client) {
     const headEventId = Number(this.getHeadEventId?.() || 0);
-    const payload = collectStateSnapshot({ headEventId });
+    const bridgeEpoch = this.getBridgeEpoch?.() || null;
+    const payload = collectStateSnapshot({ headEventId, bridgeEpoch });
     const frame = createBridgeEventFrame(BRIDGE_EVENT_KINDS.SNAPSHOT, payload, {
       instanceId: this.instanceId,
       eventId: 0,
+      bridgeEpoch,
     });
     this.sendWs(client, frame);
   }

@@ -89,6 +89,7 @@ export class RelayClient extends EventEmitter {
     dispatch = dispatchBridgeCommandFrame,
     tailBridgeEvents = null,
     getHeadEventId = null,
+    getBridgeEpoch = null,
     startPosse = null,
     WebSocketImpl = globalThis.WebSocket,
     reconnectBaseMs = DEFAULT_RECONNECT_BASE_MS,
@@ -106,6 +107,7 @@ export class RelayClient extends EventEmitter {
     this.dispatch = dispatch;
     this.tailBridgeEvents = tailBridgeEvents;
     this.getHeadEventId = getHeadEventId;
+    this.getBridgeEpoch = getBridgeEpoch;
     this.startPosse = startPosse;
     this.WebSocketImpl = WebSocketImpl;
     this.reconnectBaseMs = Math.max(100, Number(reconnectBaseMs) || DEFAULT_RECONNECT_BASE_MS);
@@ -250,6 +252,7 @@ export class RelayClient extends EventEmitter {
         actor: "bridge-relay",
         tailBridgeEvents: this.tailBridgeEvents,
         getHeadEventId: this.getHeadEventId,
+        getBridgeEpoch: this.getBridgeEpoch,
         startPosse: this.startPosse,
       });
       this.send(ack);

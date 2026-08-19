@@ -32,7 +32,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 9;
+export const HOST_SCHEMA_VERSION = 10;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -628,4 +628,28 @@ export function repairQueueForeignKeyOrphans(db) {
 
 export function __testRepairQueueForeignKeyOrphans(db) {
   return repairQueueForeignKeyOrphans(db);
+}
+
+export function needsBridgeCommandResultsSchema(db) {
+  return !tableExists(db, "bridge_command_results");
+}
+
+export function installBridgeCommandResultsSchema(db) {
+  const missing = needsBridgeCommandResultsSchema(db);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS bridge_command_results (
+      command_id TEXT PRIMARY KEY,
+      command_name TEXT NOT NULL,
+      args_json TEXT NOT NULL CHECK (json_valid(args_json)),
+      state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','completed')),
+      ack_json TEXT CHECK (ack_json IS NULL OR json_valid(ack_json)),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_bridge_command_results_state_updated
+      ON bridge_command_results(state, updated_at);
+  `);
+  return missing;
 }

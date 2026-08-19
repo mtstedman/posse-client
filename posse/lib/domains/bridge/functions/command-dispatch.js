@@ -49,6 +49,10 @@ import {
   stopBridgeRun,
   warmBridgeAtlas,
 } from "./work-control.js";
+import {
+  CommandResultStore,
+  validDurableCommandId,
+} from "../classes/CommandResultStore.js";
 
 const ALLOWED_COMMAND_SET = new Set(BRIDGE_ALLOWED_COMMANDS);
 // Commands whose success typically requeues follow-up work. `posse serve`
@@ -102,6 +106,7 @@ export function normalizeCommandFrame(frame = {}) {
 
 function errorCodeFromReason(reason) {
   const code = String(reason || "command_failed");
+  if (code === "invalid_command_id") return code;
   if (/^invalid_|^missing_/.test(code)) return "invalid_args";
   if (/^no_such_|not_found|^no_pending_/.test(code)) return "not_found";
   if (code === "job_not_claimable") return "gate_closed";
@@ -229,12 +234,20 @@ function reviewPassAlreadyApplied(resolved) {
 
 async function executeAllowedCommand(name, args = {}, context = {}) {
   switch (name) {
+    case BRIDGE_COMMANDS.COMMAND_STATUS:
+      return context.commandResultStore.status(
+        args.command_id ?? args.commandId ?? args.id ?? null,
+      );
+
     case BRIDGE_COMMANDS.STATE_SNAPSHOT: {
       const headEventId =
         typeof context.getHeadEventId === "function"
           ? Number(context.getHeadEventId() || 0)
           : Number(args.headEventId || args.head_event_id || 0);
-      return collectStateSnapshot({ ...args, headEventId });
+      const bridgeEpoch = typeof context.getBridgeEpoch === "function"
+        ? context.getBridgeEpoch()
+        : args.bridge_epoch ?? args.bridgeEpoch ?? null;
+      return collectStateSnapshot({ ...args, headEventId, bridgeEpoch });
     }
 
     case BRIDGE_COMMANDS.QUEUE_LIST:
@@ -257,12 +270,19 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
       if (typeof context.tailBridgeEvents === "function") {
         return context.tailBridgeEvents({
           sinceEventId: args.since_event_id ?? args.sinceEventId ?? args.since_id ?? args.sinceId ?? null,
+          headEventId: args.head_event_id ?? args.headEventId ?? null,
+          bridgeEpoch: args.bridge_epoch ?? args.bridgeEpoch ?? null,
           limit: args.limit,
         });
       }
       return tailEventsEnvelope({
         workItemId: args.work_item_id ?? args.workItemId ?? null,
         sinceId: args.since_event_id ?? args.sinceEventId ?? args.since_id ?? args.sinceId ?? null,
+        headId: args.head_event_id ?? args.headEventId ?? null,
+        bridgeEpoch: typeof context.getBridgeEpoch === "function"
+          ? context.getBridgeEpoch()
+          : null,
+        expectedBridgeEpoch: args.bridge_epoch ?? args.bridgeEpoch ?? null,
         limit: args.limit,
       });
 
@@ -460,18 +480,42 @@ export async function dispatchBridgeCommandFrame(frame, context = {}) {
   }
   if (!name) return createErrorAck(commandId, "missing_command_name");
   if (!ALLOWED_COMMAND_SET.has(name)) return createErrorAck(commandId, "command_not_allowed");
-  try {
-    let result = await executeAllowedCommand(name, args, context);
-    if (GATE_RESOLUTION_COMMAND_SET.has(name)) {
-      result = await maybeKickRunAfterGateResolution(result, context);
+  if (!validDurableCommandId(commandId)) {
+    return createErrorAck(commandId, "invalid_command_id");
+  }
+  const commandResultStore = context.commandResultStore || new CommandResultStore();
+  const executionContext = { ...context, commandResultStore };
+  if (MUTATING_COMMAND_SET.has(name)) {
+    let claim;
+    try {
+      claim = commandResultStore.claim(commandId, name, args);
+    } catch (err) {
+      try {
+        console.error(`[posse][bridge] durable command claim failed: ${err?.stack || err}`);
+      } catch {}
+      return createErrorAck(commandId, "idempotency_unavailable");
     }
-    auditMutatingCommand(name, args, context, result);
-    return createAckFrame(commandId, result);
+    if (claim.state === "completed") return claim.ack;
+    if (claim.state === "conflict") {
+      return createErrorAck(commandId, "idempotency_conflict");
+    }
+    if (claim.state === "pending") {
+      return createErrorAck(commandId, "command_in_progress");
+    }
+  }
+  let ack;
+  try {
+    let result = await executeAllowedCommand(name, args, executionContext);
+    if (GATE_RESOLUTION_COMMAND_SET.has(name)) {
+      result = await maybeKickRunAfterGateResolution(result, executionContext);
+    }
+    auditMutatingCommand(name, args, executionContext, result);
+    ack = createAckFrame(commandId, result);
   } catch (err) {
     // Keep the wire ack opaque (protocol: internal messages SHOULD not leak
     // detail to clients) but never swallow the cause: log it in the serve
     // console and carry it in the audit event so failures are diagnosable.
-    auditMutatingCommand(name, args, context, {
+    auditMutatingCommand(name, args, executionContext, {
       ok: false,
       reason: "internal",
       message: String(err?.message || err),
@@ -481,8 +525,19 @@ export async function dispatchBridgeCommandFrame(frame, context = {}) {
     } catch {
       // Logging is best-effort.
     }
-    return createErrorAck(commandId, "internal");
+    ack = createErrorAck(commandId, "internal");
   }
+  if (MUTATING_COMMAND_SET.has(name)) {
+    try {
+      commandResultStore.complete(commandId, ack);
+    } catch (err) {
+      try {
+        console.error(`[posse][bridge] durable command completion failed: ${err?.stack || err}`);
+      } catch {}
+      return createErrorAck(commandId, "command_result_persist_failed");
+    }
+  }
+  return ack;
 }
 
 export function listAllowedBridgeCommands() {

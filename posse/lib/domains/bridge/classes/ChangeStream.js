@@ -231,6 +231,7 @@ function stripBridgeFrame(frame) {
 export function createBridgeEventFrame(kind, payload, {
   instanceId = null,
   eventId = 0,
+  bridgeEpoch = null,
   ts = new Date().toISOString(),
 } = {}) {
   return {
@@ -238,6 +239,7 @@ export function createBridgeEventFrame(kind, payload, {
     type: BRIDGE_FRAME_TYPES.EVENT,
     instance_id: instanceId,
     event_id: Number(eventId || 0),
+    ...(bridgeEpoch ? { bridge_epoch: String(bridgeEpoch) } : {}),
     kind,
     payload,
     ts,
@@ -249,6 +251,7 @@ export class ChangeStream extends EventEmitter {
     dbPath = getRuntimeDbPath(),
     pollMs = 500,
     instanceId = null,
+    bridgeEpoch = crypto.randomUUID(),
     replayLimit = DEFAULT_REPLAY_LIMIT,
     instanceStatusMinIntervalMs = 2_000,
     jobProgressScanIntervalMs = 5_000,
@@ -258,6 +261,7 @@ export class ChangeStream extends EventEmitter {
     this.dbPath = dbPath;
     this.pollMs = Math.max(50, Number(pollMs) || 500);
     this.instanceId = String(instanceId || crypto.randomUUID());
+    this.bridgeEpochId = String(bridgeEpoch || crypto.randomUUID());
     this.replayLimit = Math.max(1, Number(replayLimit) || DEFAULT_REPLAY_LIMIT);
     this.db = null;
     this.timer = null;
@@ -362,6 +366,7 @@ export class ChangeStream extends EventEmitter {
     const frame = createBridgeEventFrame(kind, payload, {
       instanceId: this.instanceId,
       eventId: this.eventId,
+      bridgeEpoch: this.bridgeEpochId,
     });
     this.replay.push(frame);
     if (this.replay.length > this.replayLimit) {
@@ -383,9 +388,13 @@ export class ChangeStream extends EventEmitter {
   }
 
   snapshotFrame(payload) {
-    return createBridgeEventFrame(BRIDGE_EVENT_KINDS.SNAPSHOT, payload, {
+    return createBridgeEventFrame(BRIDGE_EVENT_KINDS.SNAPSHOT, {
+      ...payload,
+      bridge_epoch: this.bridgeEpochId,
+    }, {
       instanceId: this.instanceId,
       eventId: 0,
+      bridgeEpoch: this.bridgeEpochId,
     });
   }
 
@@ -393,18 +402,49 @@ export class ChangeStream extends EventEmitter {
     return this.eventId;
   }
 
-  tailFrames({ sinceEventId = 0, limit = DEFAULT_TAIL_LIMIT } = {}) {
-    const since = Number(sinceEventId || 0);
+  bridgeEpoch() {
+    return this.bridgeEpochId;
+  }
+
+  tailFrames({
+    sinceEventId = 0,
+    headEventId = null,
+    bridgeEpoch = null,
+    limit = DEFAULT_TAIL_LIMIT,
+  } = {}) {
+    if (bridgeEpoch != null && String(bridgeEpoch) !== this.bridgeEpochId) {
+      return {
+        ok: false,
+        reason: "bridge_epoch_changed",
+        bridge_epoch: this.bridgeEpochId,
+        head_event_id: this.headEventId(),
+      };
+    }
+    const since = Math.max(0, Number(sinceEventId) || 0);
     const capped = boundedLimit(limit);
-    const firstReplayId = Number(this.replay[0]?.event_id || this.headEventId() + 1);
+    const liveHead = this.headEventId();
+    const requestedHead = headEventId == null || headEventId === ""
+      ? liveHead
+      : Math.max(0, Number(headEventId) || 0);
+    const fixedHead = Math.min(liveHead, requestedHead);
+    const firstReplayId = Number(this.replay[0]?.event_id || liveHead + 1);
+    const eligible = this.replay.filter((frame) => {
+      const eventId = Number(frame.event_id);
+      return eventId > since && eventId <= fixedHead;
+    });
+    const events = eligible.slice(0, capped).map(stripBridgeFrame);
+    const nextEventId = Number(events.at(-1)?.event_id ?? since);
+    const hasMore = eligible.length > events.length;
+    const retainedFromCursor = since >= fixedHead || since >= firstReplayId - 1;
     return {
-      events: this.replay
-        .filter((frame) => Number(frame.event_id) > since)
-        .slice(-capped)
-        .map(stripBridgeFrame),
-      head_event_id: this.headEventId(),
+      events,
+      bridge_epoch: this.bridgeEpochId,
+      head_event_id: fixedHead,
+      live_head_event_id: liveHead,
+      next_event_id: nextEventId,
+      has_more: hasMore,
       replay_start_event_id: firstReplayId,
-      replay_complete: since >= firstReplayId - 1,
+      replay_complete: retainedFromCursor && !hasMore && nextEventId >= fixedHead,
     };
   }
 

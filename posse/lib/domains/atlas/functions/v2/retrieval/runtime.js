@@ -12,6 +12,8 @@ import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { getEffectivePolicy } from "./policy.js";
 import { redactSecrets } from "./redaction.js";
 import { ATLAS_RUNTIME_SPECS } from "../contracts/runtimes.js";
+import { SpawnedProcessTerminator } from "../../../../../shared/platform/classes/SpawnedProcessTerminator.js";
+import { trackSpawnedProcess } from "../../../../../shared/platform/functions/spawned-process.js";
 
 /** @typedef {import("../contracts/tool-params.js").RuntimeExecuteParams} RuntimeExecuteParams */
 /** @typedef {import("../contracts/tool-params.js").RuntimeQueryOutputParams} RuntimeQueryOutputParams */
@@ -336,13 +338,20 @@ function normalizePathForCompare(value) {
 
 function runProcess({ executable, args, cwd, timeoutMs, env }) {
   return new Promise((resolve) => {
+    const processGroup = process.platform !== "win32";
     const child = spawn(executable, args, {
       cwd,
       env,
       windowsHide: true,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: processGroup,
     });
+    const forgetTrackedProcess = trackSpawnedProcess(child, executable, {
+      label: "atlas:runtime.execute",
+      cwd,
+    });
+    const terminator = new SpawnedProcessTerminator(child, { processGroup });
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -351,9 +360,29 @@ function runProcess({ executable, args, cwd, timeoutMs, env }) {
     let stderrStoredBytes = 0;
     const truncated = { stdout: false, stderr: false };
     let timedOut = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      terminator.cancel();
+      forgetTrackedProcess();
+      resolve(result);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill(); } catch { /* no-op */ }
+      void terminator.terminateAndWait().then((termination) => {
+        finish({
+          exitCode: child.exitCode,
+          signal: child.signalCode || termination.signal,
+          timedOut: true,
+          stdout,
+          stderr,
+          stdoutBytes,
+          stderrBytes,
+          truncated,
+        });
+      });
     }, timeoutMs);
     child.stdout?.on("data", (chunk) => {
       stdoutBytes += chunk.length;
@@ -370,7 +399,6 @@ function runProcess({ executable, args, cwd, timeoutMs, env }) {
       truncated.stderr ||= appended.truncated;
     });
     child.on("error", (err) => {
-      clearTimeout(timer);
       const errChunk = Buffer.from(`${stderr ? "\n" : ""}${err.message}`, "utf8");
       stderrBytes += errChunk.length;
       const appended = appendLimited(stderr, stderrStoredBytes, errChunk);
@@ -382,7 +410,7 @@ function runProcess({ executable, args, cwd, timeoutMs, env }) {
         stderrStoredBytes = Buffer.byteLength(stderr, "utf8");
         truncated.stderr = true;
       }
-      resolve({
+      finish({
         exitCode: 127,
         signal: null,
         timedOut: false,
@@ -394,8 +422,8 @@ function runProcess({ executable, args, cwd, timeoutMs, env }) {
       });
     });
     child.on("close", (exitCode, signal) => {
-      clearTimeout(timer);
-      resolve({
+      terminator.noteClose();
+      finish({
         exitCode,
         signal,
         timedOut,

@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from "child_process";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
+import { SpawnedProcessTerminator } from "../../../../shared/platform/classes/SpawnedProcessTerminator.js";
+import { trackSpawnedProcess } from "../../../../shared/platform/functions/spawned-process.js";
 import { buildWindowsSpawn } from "../shared/windows-spawn.js";
 import { InteractiveCliSession, InteractiveCliUnavailableError } from "../../classes/InteractiveCliSession.js";
 import { getDefaultInteractiveCliBackend, stripTerminalControls } from "../shared/interactive-cli-session.js";
@@ -25,6 +27,9 @@ function normalizeClaudeOauthWarmupResult(result = {}) {
     classification: failure?.classification || null,
     retryable: failure?.retryable ?? null,
     detail: failure?.detail || null,
+    terminationConfirmed: typeof result.terminationConfirmed === "boolean"
+      ? result.terminationConfirmed
+      : null,
   };
 }
 
@@ -144,42 +149,89 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
   }
 }
 
+let activeClaudeWarmup = null;
+
 function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
-  return new Promise((resolve) => {
+  if (activeClaudeWarmup) return activeClaudeWarmup.promise;
+
+  const active = { child: null, promise: null };
+  activeClaudeWarmup = active;
+  active.promise = new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const resolvedClaude = getClaudeCommand();
-    const launch = buildWindowsSpawn(resolvedClaude.command, [...resolvedClaude.args, "-p", "--max-turns", "1", "--output-format", "text"]);
-    const child = spawn(
-      launch.command,
-      launch.args,
-      {
+    let timedOut = false;
+    let timer = null;
+    const processGroup = process.platform !== "win32";
+    let launch;
+    let child;
+    try {
+      const resolvedClaude = getClaudeCommand();
+      launch = buildWindowsSpawn(resolvedClaude.command, [...resolvedClaude.args, "-p", "--max-turns", "1", "--output-format", "text"]);
+      child = spawn(launch.command, launch.args, {
         cwd: resolvedCwd,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         shell: false,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
-      },
-    );
-    const finish = (result) => {
+        detached: processGroup,
+      });
+    } catch (error) {
+      if (activeClaudeWarmup === active) activeClaudeWarmup = null;
+      resolve({ stdout, stderr, status: null, signal: null, error });
+      return;
+    }
+    active.child = child;
+    const forgetTrackedProcess = trackSpawnedProcess(child, launch.command, {
+      label: "claude:oauth-warmup",
+      cwd: resolvedCwd,
+    });
+    const terminator = new SpawnedProcessTerminator(child, { processGroup });
+    const clearActive = () => {
+      if (activeClaudeWarmup === active) activeClaudeWarmup = null;
+      forgetTrackedProcess();
+    };
+    const finish = (result, { terminationComplete = true } = {}) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (terminationComplete) {
+        terminator.cancel();
+        clearActive();
+      }
       resolve({ stdout, stderr, ...result });
     };
-    const timer = setTimeout(() => {
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
-      finish({ status: null, signal: "SIGTERM", error: new Error("Claude OAuth warmup timed out") });
+    timer = setTimeout(() => {
+      timedOut = true;
+      void terminator.terminateAndWait().then((termination) => {
+        const error = new Error(termination.confirmed
+          ? "Claude OAuth warmup timed out"
+          : "Claude OAuth warmup timed out and process termination was not confirmed");
+        if (!termination.confirmed) error.code = "CLAUDE_OAUTH_WARMUP_TERMINATION_UNCONFIRMED";
+        finish({
+          status: child.exitCode,
+          signal: child.signalCode || termination.signal,
+          error,
+          terminationConfirmed: termination.confirmed,
+        }, { terminationComplete: termination.confirmed });
+      });
     }, resolvedTimeoutMs);
     child.stdout?.setEncoding?.("utf8");
     child.stderr?.setEncoding?.("utf8");
     child.stdout?.on("data", (chunk) => { stdout = appendBoundedText(stdout, chunk); });
     child.stderr?.on("data", (chunk) => { stderr = appendBoundedText(stderr, chunk); });
     child.on("error", (error) => finish({ status: null, signal: null, error }));
-    child.on("exit", (status, signal) => finish({ status, signal: signal || null, error: null }));
+    child.on("close", (status, signal) => {
+      terminator.noteClose();
+      if (settled) {
+        clearActive();
+        return;
+      }
+      if (!timedOut) finish({ status, signal: signal || null, error: null });
+    });
     child.stdin?.end(prompt);
   });
+  return active.promise;
 }
 
 export async function warmOauthSessionInteractive({ cwd = null, timeoutMs = 20_000, interactiveBackend = null } = {}) {
@@ -262,4 +314,3 @@ export async function warmOauthSessionAsync({
 }
 
 export const __testRunClaudeWarmupViaInteractiveCli = runClaudeWarmupViaInteractiveCli;
-

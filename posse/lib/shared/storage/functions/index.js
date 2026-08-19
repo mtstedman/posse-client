@@ -23,6 +23,7 @@ import {
   needsRunInsightsPromotionSchemaRepair,
   needsAtlasV2HostSchemaRepair,
   needsHumanGateAssessmentSchemaRepair,
+  needsBridgeCommandResultsSchema,
   needsQueueForeignKeyOrphanRepair,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
@@ -30,6 +31,7 @@ import {
   repairAtlasV2HostSchema,
   repairHumanGateAssessmentSchema,
   repairQueueForeignKeyOrphans,
+  installBridgeCommandResultsSchema,
   repairWorkItemsGovernanceTierSchema,
   runHostMigration,
 } from "./migrations.js";
@@ -2507,6 +2509,12 @@ export function getDb() {
     name: "queue_foreign_key_orphans",
     needs: needsQueueForeignKeyOrphanRepair,
     migrate: repairQueueForeignKeyOrphans,
+  });
+  runHostMigration(_db, {
+    version: 10,
+    name: "bridge_command_results",
+    needs: needsBridgeCommandResultsSchema,
+    migrate: installBridgeCommandResultsSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

@@ -34,6 +34,7 @@ export const BRIDGE_COMMANDS = Object.freeze({
   WORK_ITEM_GET: "work_item.get",
   JOBS_LIST: "jobs.list",
   EVENTS_TAIL: "events.tail",
+  COMMAND_STATUS: "command.status",
   GATES_LIST: "gates.list",
   STATE_SNAPSHOT: "state.snapshot",
   RUN_START: "run.start",

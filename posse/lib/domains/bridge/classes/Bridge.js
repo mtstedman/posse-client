@@ -102,6 +102,7 @@ export class Bridge {
           projectDir: this.projectDir,
           tailBridgeEvents: (args) => this.changeStream?.tailFrames(args) || { events: [], head_event_id: 0 },
           getHeadEventId: () => this.changeStream?.headEventId() || 0,
+          getBridgeEpoch: () => this.changeStream?.bridgeEpoch() || null,
           startPosse: () => this.runLauncher.start(),
         });
         this.relayClient.on("operator_activity", () => this.noteOperatorActivity());
@@ -151,6 +152,7 @@ export class Bridge {
         label: this.config.label,
         projectDir: this.projectDir,
         getHeadEventId: () => this.changeStream?.headEventId() || 0,
+        getBridgeEpoch: () => this.changeStream?.bridgeEpoch() || null,
         tailBridgeEvents: (args) => this.changeStream?.tailFrames(args) || { events: [], head_event_id: 0 },
         getRelayStatus: () => this.relayClient?.status() || {
           state: this.config.relayToken ? "connecting" : "disabled",

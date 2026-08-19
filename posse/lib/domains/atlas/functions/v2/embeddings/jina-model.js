@@ -188,15 +188,7 @@ export async function pullJinaModel({
     modelId: ATLAS_JINA_MODEL.mlModelId,
     bytes: downloaded.bytes,
   });
-  const installed = await installPackage(ML_MODEL_PACKAGE_INSTALL_METHOD, {
-    modelId: downloaded.modelId,
-    version: downloaded.version,
-    archiveFormat: downloaded.archiveFormat,
-    archiveRoot: downloaded.archiveRoot,
-    packagePath: downloaded.filePath,
-    expectedBytes: downloaded.bytes,
-    expectedSha256: downloaded.sha256,
-  }, {
+  const installed = await installPackage(ML_MODEL_PACKAGE_INSTALL_METHOD, downloaded, {
     modelRoot,
     manager,
     timeoutMs: remainingTimeoutMs(),
