@@ -21,6 +21,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { composeInstanceStatus } from "./instance-status.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "./gate-contract.js";
+import { buildReviewBrief } from "./review-brief.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -229,14 +230,25 @@ export function normalizeGate(job) {
     ? null
     : Number(contract.original_job_id);
   const createdMs = Date.parse(job.created_at || job.updated_at || "");
+  const kind = bridgeGateKindForJob(job, payload);
+  // Review gates carry a bounded files-changed + assessor-verdict brief so
+  // an operator can judge the work from the phone without any raw code
+  // crossing the relay. Other gate kinds skip the git lookup entirely.
+  let reviewBrief = null;
+  if (kind === "review") {
+    try {
+      reviewBrief = buildReviewBrief(job);
+    } catch { /* a brief is advisory; never break the gate list */ }
+  }
   return {
     job_id: Number(job.id),
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
-    kind: bridgeGateKindForJob(job, payload),
+    kind,
     title: job.title || "",
     prompt: promptFromGatePayload(payload),
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
+    ...(reviewBrief ? { review_brief: reviewBrief } : {}),
     identity: {
       work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
       original_job_id: originalJobId,

@@ -12,6 +12,8 @@
 import path from "path";
 import fs from "fs";
 import { C } from "../../../shared/format/functions/colors.js";
+import { EVENT_ACTORS } from "../../../catalog/event.js";
+import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import {
   appendReviewRejectionDescription,
   canCompleteWorkItem,
@@ -49,6 +51,7 @@ import {
 import { contextDir, wiScopeId, artifactsDir, ensureArtifactDirs } from "../../artifacts/functions/index.js";
 import { getRecentToolInvocations, getToolInvocationCountsByJob } from "../../observability/functions/observations.js";
 import { getIterativeState } from "../../planning/functions/state.js";
+import { approvePlan, findPendingGate } from "../../planning/functions/plan-approval.js";
 import {
   collectHandledSuggestionKeys,
   createApprovedSuggestionFollowUp,
@@ -63,6 +66,7 @@ import {
 } from "./review-report.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { inferWiMode } from "../../intake/functions/mode-inference.js";
+import { nonInteractiveHumanInputAnswerForPayload } from "../../../catalog/human-input.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import {
   defaultResearchModelTier,
@@ -73,6 +77,39 @@ import {
   checkRemotePromptCompilerReadiness,
 } from "../../remote/functions/readiness.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
+
+export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) {
+  const scopedIds = new Set(
+    (Array.isArray(workItemIds) ? workItemIds : [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isSafeInteger(id) && id > 0),
+  );
+  const inScope = (workItemId) => scopedIds.size === 0 || scopedIds.has(Number(workItemId));
+  const eligibleWorkItemIds = new Set();
+  const approvedPlanGateIds = [];
+  for (const item of listWorkItems()) {
+    if (!inScope(item.id)) continue;
+    if (TERMINAL_WORK_ITEM_STATUSES.includes(item.status)) continue;
+    eligibleWorkItemIds.add(Number(item.id));
+    const gate = findPendingGate(item.id);
+    if (!gate) continue;
+    const approved = approvePlan(item.id, {
+      actor: "non_interactive_policy",
+      actorType: EVENT_ACTORS.SYSTEM,
+    });
+    if (approved.ok) approvedPlanGateIds.push(approved.gateJobId);
+  }
+  const requeued = requeueWaitingHumanInputJobs({
+    filter: (job) => {
+      if (!eligibleWorkItemIds.has(Number(job.work_item_id))) return false;
+      let payload = {};
+      try { payload = JSON.parse(job.payload_json || "{}"); } catch { return false; }
+      return nonInteractiveHumanInputAnswerForPayload(payload) != null;
+    },
+    reason: "non-interactive automatic-resolution policy became available",
+  });
+  return { approvedPlanGateIds, requeued };
+}
 
 export async function createReviewSessionDeps(bootDeps) {
   const {
@@ -274,6 +311,7 @@ export async function createRunSessionDeps(bootDeps) {
     RUN_WORK_ITEM_IDS,
     requeueForShutdown,
     requeueWaitingHumanInputJobs,
+    prepareNonInteractiveHumanInputGates,
     reconcileHumanGates,
     reconcileMergedWorkItemReviewStates,
     refreshWorkItemStatus,

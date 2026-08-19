@@ -201,6 +201,7 @@ export class RunSession {
       RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
+      prepareNonInteractiveHumanInputGates = null,
       reconcileHumanGates,
       reconcileMergedWorkItemReviewStates,
       refreshWorkItemStatus,
@@ -357,6 +358,17 @@ export class RunSession {
     }
     return created;
   };
+  if (nonInteractive && typeof prepareNonInteractiveHumanInputGates === "function") {
+    const prepared = prepareNonInteractiveHumanInputGates({ workItemIds: scopedWorkItemIds });
+    const approvedPlans = prepared?.approvedPlanGateIds?.length || 0;
+    const requeuedGates = prepared?.requeued?.length || 0;
+    if (approvedPlans + requeuedGates > 0) {
+      log?.info?.("run", "Prepared human gates for non-interactive automatic resolution", {
+        approved_plan_gates: approvedPlans,
+        requeued_human_gates: requeuedGates,
+      });
+    }
+  }
   try { reconcileMergedWorkItemReviewStates?.(); } catch { /* best-effort repair of legacy merged review rows */ }
   refreshRunVisibleWorkItems();
   const seedableRunItems = isScopedRun

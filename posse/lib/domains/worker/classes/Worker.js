@@ -421,12 +421,12 @@ function atlasFreshnessGateDelayMs(config = {}) {
 
 export class Worker {
   constructor(opts = {}) {
-    this.autoApprove = opts.autoApprove || false;
+    this.nonInteractive = opts.nonInteractive || false;
+    this.autoApprove = opts.autoApprove || this.nonInteractive;
     this.projectDir = opts.projectDir || process.cwd();
     this.display = opts.display || null;
     this.silent = opts.silent || false;
     this.dryRun = opts.dryRun || false;
-    this.nonInteractive = opts.nonInteractive || false;
     this.stallTimeout = opts.stallTimeout || null;
     this.leaseSec = opts.leaseSec || 900;
     this.renewLease = opts.renewLease || renewLease;

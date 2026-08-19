@@ -255,17 +255,16 @@ import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpO
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const AUTO_APPROVE = process.argv.includes("--auto-approve");
-if (process.argv.includes("--approve-plan")) {
-  setPlanApprovalOverrideForRun(true);
-}
-if (process.argv.includes("--auto-approve-plan")) {
-  setPlanApprovalOverrideForRun(false);
-}
-const NO_TUI = process.argv.includes("--no-tui");
 const NON_INTERACTIVE = process.argv.includes("--non-interactive") ||
   process.argv.includes("--yes") ||
   process.argv.includes("-y");
+const AUTO_APPROVE = process.argv.includes("--auto-approve") || NON_INTERACTIVE;
+if (process.argv.includes("--approve-plan")) {
+  setPlanApprovalOverrideForRun(true);
+} else if (process.argv.includes("--auto-approve-plan") || NON_INTERACTIVE) {
+  setPlanApprovalOverrideForRun(false);
+}
+const NO_TUI = process.argv.includes("--no-tui");
 const DRY_RUN = process.argv.includes("--dry-run");
 const ITERATE_FLAG = process.argv.includes("--iterate");
 const RED_TEAM_PLAN = process.argv.includes("--red-team-plan");

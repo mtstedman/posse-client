@@ -22,6 +22,7 @@ import {
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { composeInstanceStatus } from "../functions/instance-status.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "../functions/gate-contract.js";
+import { buildReviewBrief } from "../functions/review-brief.js";
 import {
   projectBridgeGateDetail,
   projectBridgeJob,
@@ -111,14 +112,25 @@ function promptFromGatePayload(payload) {
 
 function gatePayloadForJob(job) {
   const payload = parseJsonField(job.payload_json) || {};
+  const kind = bridgeGateKindForJob(job, payload);
+  // Live gate_opened frames carry the same review brief as snapshot
+  // projections so a freshly opened review gate is judgeable on the phone
+  // without waiting for the next reconcile. Best-effort, like the snapshot.
+  let reviewBrief = null;
+  if (kind === "review") {
+    try {
+      reviewBrief = buildReviewBrief(job);
+    } catch { /* advisory only */ }
+  }
   return {
     job_id: Number(job.id),
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
-    kind: bridgeGateKindForJob(job, payload),
+    kind,
     title: job.title || "",
     prompt: promptFromGatePayload(payload),
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
+    ...(reviewBrief ? { review_brief: reviewBrief } : {}),
     ...bridgeGateAnswerContract(payload),
     payload: projectBridgeGateDetail(payload),
   };

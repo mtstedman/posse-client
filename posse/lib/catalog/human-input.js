@@ -13,6 +13,7 @@ import {
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
+export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
 const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
   JOB_STATUSES.filter((status) => !["leased", "awaiting_assessment", "canceled"].includes(status)),
 );
@@ -254,6 +255,52 @@ export function humanInputChoicesForPayload(payload = {}) {
     return ["approve", "reject"];
   }
   return [];
+}
+
+const NON_INTERACTIVE_REVIEW_ACTIONS = Object.freeze({
+  scope_expansion_request: "approve",
+  scope_expansion_required: "approve",
+  partial_work_recovery: "commit",
+  blocked_recovery: "fail",
+  assessment: "fail",
+  needs_review: "fail",
+  assessment_parse_error: "fail",
+  unknown_verdict: "fail",
+  assessment_transport_error: "fail",
+  assessment_retry_limit: "fail",
+  replan_limit: "fail",
+  unexecuted_replan_limit: "fail",
+  artifact_routing_admin: "acknowledge",
+});
+
+/**
+ * Return the bounded action a production non-interactive run may take without
+ * inventing human judgment. Approval gates proceed, partial work is preserved
+ * for assessment, and assessment/capability reviews fail closed. Recovery
+ * contracts whose only escape is an explicit waiver remain human-owned.
+ */
+export function nonInteractiveHumanInputAnswerForPayload(payload = {}) {
+  if (payload.subtype === "push_offer" || payload.subtype === "plan_approval") return null;
+  if (
+    payload.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
+    || payload.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
+  ) return "plan";
+
+  const reviewType = String(payload.review_type || "").trim();
+  const reviewAction = NON_INTERACTIVE_REVIEW_ACTIONS[reviewType];
+  if (reviewAction) return reviewAction;
+
+  if (
+    Array.isArray(payload.file_requests)
+    && payload.file_requests.length > 0
+    && reviewType !== "blocked_recovery"
+  ) return "approve";
+
+  // Unknown closed-choice contracts are deliberately not guessed. Generic
+  // clarification prompts can safely resume the agent with an explicit
+  // best-judgment instruction because no privileged action is selected.
+  if (humanInputChoicesForPayload(payload).length > 0 || reviewType) return null;
+  return HUMAN_INPUT_BEST_JUDGMENT_ANSWER;
 }
 
 export function isHumanInputCoordinationPayload(payload = {}) {

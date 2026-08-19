@@ -5,13 +5,17 @@
 
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
+  HUMAN_INPUT_BEST_JUDGMENT_ANSWER,
+  humanInputChoicesForPayload,
+  nonInteractiveHumanInputAnswerForPayload,
+} from "../../../../catalog/human-input.js";
+import {
   getHumanGate,
   getJob,
   updateJobStatus,
 } from "../../../queue/functions/index.js";
-import { humanInputChoicesForPayload } from "../../../../catalog/human-input.js";
 
-export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
+export { HUMAN_INPUT_BEST_JUDGMENT_ANSWER };
 
 const HARNESS_REVIEW_ANSWERS = Object.freeze({
   partial_work_recovery: "commit",
@@ -153,19 +157,22 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
   const promptIdentity = buildHumanPromptIdentity(job, payload);
   promptOptions.promptIdentity = promptIdentity;
 
-  if (worker.nonInteractive && isAbHarnessEnvironment()) {
-    const answer = unattendedHarnessAnswerForPayload(payload, { autoApprove: worker.autoApprove });
+  if (worker.nonInteractive) {
+    const harness = isAbHarnessEnvironment();
+    const answer = harness
+      ? unattendedHarnessAnswerForPayload(payload, { autoApprove: worker.autoApprove || worker.nonInteractive })
+      : nonInteractiveHumanInputAnswerForPayload(payload);
     if (answer) {
       worker.emit(
         job.id,
-        `${C.cyan}[human] Harness resolved unattended input with "${answer}"${C.reset}`,
+        `${C.cyan}[human] ${harness ? "Harness" : "Non-interactive policy"} resolved unattended input with "${answer}"${C.reset}`,
       );
       return JSON.stringify({
         questions,
         answers: questions.map((question) => ({ question, answer })),
         prompt_identity: promptIdentity,
         unattended: true,
-        source: "ab_harness",
+        source: harness ? "ab_harness" : "non_interactive_policy",
       });
     }
   }

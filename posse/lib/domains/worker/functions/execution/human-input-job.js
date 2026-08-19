@@ -351,6 +351,7 @@ export async function runHumanInputJob(worker, job, {
       worker._cleanupWorktreeIfDone(job.work_item_id);
       return;
     }
+    const outputEnvelope = payloadObject(output);
     const actionChoices = humanInputChoicesForPayload(payload);
     const uncataloguedReview = isHumanInputReviewPayload(payload) && actionChoices.length === 0;
     if (actionChoices.length > 0 || uncataloguedReview) {
@@ -1192,6 +1193,8 @@ export async function runHumanInputJob(worker, job, {
         action: resolutionClaim.action,
         answer: String(resolutionAnswer || "").slice(0, 4000),
         attempt_id: attempt.attempt.id,
+        unattended: outputEnvelope.unattended === true,
+        source: outputEnvelope.source || "human",
       },
     });
     if (!resolutionCompleted.ok) {

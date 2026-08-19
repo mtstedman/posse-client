@@ -2643,14 +2643,19 @@ export function requeueForShutdown(jobId) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-export function requeueWaitingHumanInputJobs() {
+export function requeueWaitingHumanInputJobs({
+  filter = null,
+  reason = "interactive display became available",
+} = {}) {
   const db = getDb();
   const execute = () => {
     const parked = db.prepare(`
       SELECT id, work_item_id, job_type, payload_json
       FROM jobs
       WHERE status = 'waiting_on_human' AND job_type = 'human_input'
-    `).all().filter((job) => !isPushOfferJob(job));
+    `).all()
+      .filter((job) => !isPushOfferJob(job))
+      .filter((job) => typeof filter !== "function" || filter(job));
 
     if (parked.length === 0) return [];
 
@@ -2676,7 +2681,8 @@ export function requeueWaitingHumanInputJobs() {
         job_id: job.id,
         event_type: EVENT_TYPES.JOB_HUMAN_PROMPT_REQUEUED,
         actor_type: EVENT_ACTORS.SYSTEM,
-        message: "Requeued parked human_input job after interactive display became available",
+        message: `Requeued parked human_input job after ${reason}`,
+        event_json: JSON.stringify({ reason }),
       });
       notifyQueueStateChanged({
         reason: "job_human_prompt_requeued",

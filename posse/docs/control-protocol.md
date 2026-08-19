@@ -374,8 +374,9 @@ already-queued work items will start too.
 ### `job.nudge` — steer a live job
 
 Delivers operator guidance to a running job. The agent picks it up at its
-next checkpoint (`get_operator_feedback`); the latest active nudge wins —
-sending a new one supersedes any prior undelivered nudge for the job.
+next tool-result checkpoint as a direct `OPERATOR_FEEDBACK_DELIVERY`; the
+latest active nudge wins — sending a new one supersedes any prior undelivered
+nudge for the job. The item remains pending until the agent acknowledges it.
 Rejected with `not_found` for unknown jobs and `job_not_active` once the
 job is terminal.
 
@@ -550,9 +551,34 @@ Fires on every job state transition.
       { "job_id": 9800, "job_type": "dev", "title": "Implement change" }
     ]
   },
+  "review_brief": { /* review gates only */ },  // optional; see below
   "payload": { /* kind-specific detail */ }     // optional, nullable
 }
 ```
+
+For `review` gates, `review_brief` summarizes the work under review without
+carrying any source content (file paths and line counts only, per the
+source-safe payload policy):
+
+```jsonc
+{
+  "verdict": "pass",                 // "pass" | "fail"; omitted if unassessed
+  "confidence": "medium",            // assessor confidence, free-form short text
+  "assessed_job_id": 9800,
+  "files": [                          // bounded at 24 entries
+    { "path": "src/app.ts", "additions": 12, "deletions": 3 },
+    { "path": "logo.png", "additions": null, "deletions": null }  // binary
+  ],
+  "total_files": 2,
+  "truncated": false,                 // true when files was capped
+  "additions": 12,                    // whole-diff totals
+  "deletions": 3
+}
+```
+
+Every field is optional: a missing branch degrades the brief to verdict-only,
+and an unassessed work item degrades it to files-only. Clients must treat an
+absent or unparseable brief as "no brief", never as a dropped gate.
 
 Typed gate choices use canonical action names. Legacy prose aliases may be
 accepted by the local TUI, but bridge clients must send the advertised enum.

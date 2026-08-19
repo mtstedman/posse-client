@@ -238,7 +238,10 @@ export function findPendingGate(wiId) {
  *
  * @returns {object} { ok, gate_job_id } | { ok: false, reason }
  */
-export function approvePlan(wiId, { actor = "operator" } = {}) {
+export function approvePlan(wiId, {
+  actor = "operator",
+  actorType = EVENT_ACTORS.HUMAN,
+} = {}) {
   const wi = getWorkItem(wiId);
   if (!wi) return { ok: false, reason: "no_such_wi" };
   const gate = findPendingGate(wiId);
@@ -249,7 +252,7 @@ export function approvePlan(wiId, { actor = "operator" } = {}) {
     work_item_id: wiId,
     job_id: gate.id,
     event_type: EVENT_TYPES.PLAN_APPROVED,
-    actor_type: EVENT_ACTORS.HUMAN,
+    actor_type: actorType,
     actor_id: actor,
     message: `Plan approved; downstream jobs may proceed`,
   });
