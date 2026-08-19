@@ -13,6 +13,7 @@ import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
 import { surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
+import { planLifecycleSurveyExpansion } from "./lifecycle-survey.js";
 import { detectUnavailableDependencySources } from "./dependency-source-preflight.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
@@ -42,6 +43,9 @@ const LEXICAL_PREFETCH_SCAN_LIMIT = 120_000;
 const LEXICAL_PREFETCH_RG_MAX_BUFFER = 16 * 1024 * 1024;
 const LEXICAL_PREFETCH_CACHE = new Map();
 const ATLAS_AREA_MAP_PREFETCH_TIMEOUT_MS = 5_000;
+const LIFECYCLE_SURVEY_MAX_BODIES = 3;
+const LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS = 2400;
+const LIFECYCLE_SURVEY_ITEM_MAX_TOKENS = 800;
 
 const ATLAS_DB_PREFETCH_RG_PATTERN = [
   "\\bselect\\b",
@@ -1951,6 +1955,10 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       }, startedAt);
     }
     const evidenceRef = _surfaceAtlasSurveyRef(packet, data);
+    const lifecycleExpansion = await _prefetchLifecycleSurveyBodies(packet, {
+      taskText,
+      files: data.files,
+    });
     const dependencyBoundaries = detectUnavailableDependencySources({
       repoRoot: packet.cwd,
       taskText,
@@ -1966,6 +1974,7 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       granularity: data.granularity || null,
       truncated: !!data.truncated,
       evidenceRef,
+      lifecycleExpansion,
       dependencyBoundaries,
       retries,
     }, startedAt);
@@ -1976,6 +1985,76 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
       scope,
       error: String(err?.message || err).slice(0, 200),
     }, startedAt);
+  }
+}
+
+async function _prefetchLifecycleSurveyBodies(packet, { taskText, files }) {
+  const plan = planLifecycleSurveyExpansion(taskText, files, {
+    maxBodies: LIFECYCLE_SURVEY_MAX_BODIES,
+  });
+  const base = {
+    active: plan.active,
+    reason: plan.reason,
+    taskFamilies: plan.taskFamilies || [],
+    maxBodies: LIFECYCLE_SURVEY_MAX_BODIES,
+    totalMaxTokens: LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS,
+    selected: plan.targets.map(({ file, symbol, kind, families }) => ({ file, symbol, kind, families })),
+    bodies: [],
+    succeeded: 0,
+    failed: 0,
+  };
+  if (!plan.active) return base;
+
+  const items = plan.targets.map((target) => ({
+    file: target.file,
+    identifiersToFind: [target.identifier],
+    reason: `Prefetch the task-matched ${target.families.join("/") || "lifecycle"} body for ${target.symbol}`,
+    granularity: "symbol",
+    maxTokens: LIFECYCLE_SURVEY_ITEM_MAX_TOKENS,
+  }));
+  const args = items.length === 1
+    ? { ...items[0], maxTokens: LIFECYCLE_SURVEY_ITEM_MAX_TOKENS }
+    : { items, maxTokens: LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS };
+
+  try {
+    const raw = await executeEmbeddedAtlasTool("code.window", args, {
+      cwd: packet.cwd,
+      config: packet.atlas_config || undefined,
+      origin: "prefetch",
+    });
+    if (String(raw || "").startsWith("Error:")) {
+      return { ...base, failed: items.length, error: String(raw).slice(0, 240) };
+    }
+    const parsed = extractAtlasJsonPayload(raw);
+    let data = parsed?.result ?? parsed?.data ?? parsed;
+    if (!data || typeof data !== "object") {
+      return { ...base, failed: items.length, error: "code.window returned no structured payload" };
+    }
+    const results = data.batch === true && Array.isArray(data.items)
+      ? data.items.map((item) => item?.data || null)
+      : [data];
+    const bodies = plan.targets.map((target, index) => {
+      const item = results[index];
+      const content = typeof item?.content === "string" ? item.content : "";
+      return {
+        file: target.file,
+        symbol: target.symbol,
+        families: target.families,
+        ok: content.length > 0,
+        content,
+        bytes: Buffer.byteLength(content, "utf8"),
+        truncated: item?.truncated === true,
+        error: content ? null : "exact body unavailable",
+      };
+    });
+    return {
+      ...base,
+      bodies,
+      succeeded: bodies.filter((item) => item.ok).length,
+      failed: bodies.filter((item) => !item.ok).length,
+    };
+  } catch (err) {
+    return { ...base, failed: items.length, error: String(err?.message || err).slice(0, 240) };
   }
 }
 
@@ -2058,6 +2137,9 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     dependencyBoundaries: Array.isArray(result.dependencyBoundaries)
       ? result.dependencyBoundaries.slice(0, 6)
       : [],
+    lifecycleExpansion: result.lifecycleExpansion && typeof result.lifecycleExpansion === "object"
+      ? result.lifecycleExpansion
+      : null,
     fullPayloadOmitted: true,
   };
 }
@@ -2198,6 +2280,22 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
             version: entry?.version || null,
             source_status: entry?.sourceStatus || null,
           })),
+        lifecycle_expansion: result?.lifecycleExpansion ? {
+          active: result.lifecycleExpansion.active === true,
+          reason: result.lifecycleExpansion.reason || null,
+          task_families: Array.isArray(result.lifecycleExpansion.taskFamilies)
+            ? result.lifecycleExpansion.taskFamilies.slice(0, 16)
+            : [],
+          selected: (Array.isArray(result.lifecycleExpansion.selected) ? result.lifecycleExpansion.selected : [])
+            .slice(0, LIFECYCLE_SURVEY_MAX_BODIES)
+            .map((item) => ({ file: item.file, symbol: item.symbol, families: item.families })),
+          succeeded: Number(result.lifecycleExpansion.succeeded || 0),
+          failed: Number(result.lifecycleExpansion.failed || 0),
+          total_max_tokens: Number(result.lifecycleExpansion.totalMaxTokens || 0),
+          returned_bytes: (Array.isArray(result.lifecycleExpansion.bodies) ? result.lifecycleExpansion.bodies : [])
+            .reduce((sum, item) => sum + Math.max(0, Number(item?.bytes) || 0), 0),
+          error: result.lifecycleExpansion.error || null,
+        } : null,
         file_count: fileCount,
         internal_edge_count: internalEdgeCount,
         error: result?.error ? String(result.error).slice(0, 500) : null,
@@ -2824,6 +2922,25 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
   if (fileCount > 0) {
     lines.push("  structure already visible: do not call code.skeleton for surveyed files unless a named omitted/bounded fact requires surveyGap; go directly to code.window for exact code and issue independent exact-code calls together.");
+  }
+  const lifecycleExpansion = sc?.lifecycleExpansion;
+  if (lifecycleExpansion?.active) {
+    const selected = Array.isArray(lifecycleExpansion.selected) ? lifecycleExpansion.selected : [];
+    lines.push(`  lifecycle expansion: ${Number(lifecycleExpansion.succeeded || 0)}/${selected.length} task-matched bodies prefetched within ${Number(lifecycleExpansion.totalMaxTokens || 0)} tokens`);
+    const bodies = Array.isArray(lifecycleExpansion.bodies) ? lifecycleExpansion.bodies : [];
+    for (const body of bodies) {
+      const label = `${body.file || ATLAS_MISSING_VALUE}#${body.symbol || ATLAS_MISSING_VALUE}`;
+      if (!body.ok) {
+        lines.push(`    - ${label} (exact body unavailable)`);
+        continue;
+      }
+      lines.push(`    - ${label}${body.truncated ? " (bounded)" : ""}`);
+      if (trim < 2) {
+        lines.push(..._renderIndentedPrefetchContent(body.content, {
+          maxChars: trim >= 1 ? 1400 : 2200,
+        }).map((line) => `  ${line}`));
+      }
+    }
   }
   for (const boundary of Array.isArray(sc.dependencyBoundaries) ? sc.dependencyBoundaries : []) {
     lines.push(`  source boundary: ${boundary.dependency}${boundary.version ? ` (${boundary.version})` : ""} is declared in ${boundary.manifest || "the dependency manifest"} but its source is absent from this checkout; stop at the local call boundary and do not reconstruct dependency internals.`);

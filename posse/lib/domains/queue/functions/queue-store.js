@@ -1397,7 +1397,7 @@ export function listJobStatusRows() {
   const db = getDb();
   return db.prepare(`
     SELECT id, work_item_id, parent_job_id, job_type, title, status,
-           model_tier, provider, created_at, updated_at
+           model_tier, model_name, provider, created_at, updated_at
     FROM jobs
     ORDER BY created_at
   `).all();

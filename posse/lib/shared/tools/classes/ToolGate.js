@@ -217,7 +217,8 @@ export class ToolGate {
       if (gatedTargets.length === 0) {
         return { allowed: true, reason: "indexed_file_empty", targets: indexedReadTargets };
       }
-      if (toolName === "chain_read" && !isUnavailableUnlockReason(this.unlockReason)) {
+      if (["read_file", "chain_read"].includes(toolName)
+        && !isUnavailableUnlockReason(this.unlockReason)) {
         const evidence = this.sourceEvidenceFiles.get(gatedTargets[0].toLowerCase());
         if (evidence) {
           const currentVersion = sourceFileVersionForGate(evidence.path, { cwd });

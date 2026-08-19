@@ -29,6 +29,17 @@ export class ReviewSession {
     return this.TARGET_BRANCH;
   }
 
+  jobsInRunScope(jobs = []) {
+    const scopedIds = new Set(
+      (Array.isArray(this.scopedWorkItemIds) ? this.scopedWorkItemIds : [])
+        .map(Number)
+        .filter((id) => Number.isSafeInteger(id) && id > 0),
+    );
+    if (scopedIds.size === 0) return Array.isArray(jobs) ? jobs : [];
+    return (Array.isArray(jobs) ? jobs : [])
+      .filter((job) => scopedIds.has(Number(job?.work_item_id)));
+  }
+
   async finalizeMergeOffers(mergedCount, offerPush, {
     display = null,
     beforePush = null,
@@ -470,7 +481,7 @@ export class ReviewSession {
     } = this;
 
   cleanupRunningAgentCalls();
-  const allJobs = listJobs();
+  const allJobs = this.jobsInRunScope(listJobs());
   const visibleJobs = reviewVisibleJobs(allJobs);
   const backgroundJobs = allJobs.filter(jobIsBackgroundAtlasWarm);
   const { succeeded, recovered, failed, blocked } = computeJobProgressStats(visibleJobs);
@@ -483,7 +494,7 @@ export class ReviewSession {
     ? `; context background: ${background.resolved}/${background.total} done, ${backgroundDetails.join(", ")}`
     : "";
 
-  cmdDashboard();
+  cmdDashboard(null, { workItemIds: this.scopedWorkItemIds || [] });
 
   console.log(`  ${C.bold}Execution complete: ${succeeded} succeeded${recovered > 0 ? ` (${recovered} recovered)` : ""}, ${failed} failed, ${blocked} blocked of ${visibleJobs.length} total${backgroundSuffix}${C.reset}`);
 

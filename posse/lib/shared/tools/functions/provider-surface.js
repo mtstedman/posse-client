@@ -75,18 +75,12 @@ export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
 
   if (parallelAtlas.length + parallelDeterministic.length + nativeBatch.length === 0) return [];
 
-  const lines = [
-    "- Parallel tool-call rule: when two or more independent calls are ready, emit every ready call together in one assistant response before awaiting results. This applies to every role, not only research.",
-  ];
-  if (parallelAtlas.length > 0) {
-    lines.push(`- Parallel Atlas reads issued this run: ${parallelAtlas.join(", ")}.`);
-  }
-  if (parallelDeterministic.length > 0) {
-    lines.push(`- Parallel deterministic/MCP repository reads issued this run: ${parallelDeterministic.join(", ")}.`);
+  const lines = [];
+  if (parallelAtlas.length + parallelDeterministic.length > 0) {
+    lines.push("Turn batching: Batch two to four independent, ready read only tool calls together in the same assistant response. All read only tools issued this run, Atlas and standard, support turn batching.");
   }
   if (nativeBatch.length > 0) {
-    lines.push(`- Schema-native batch tools issued this run: ${nativeBatch.join(", ")}. Combine ready items in one call only through array fields present in that tool's schema.`);
+    lines.push("Schema batching: Tools with schema defined batch fields can combine items in one call within their declared limits.");
   }
-  lines.push("- For parallel-read tools, batching means multiple top-level tool calls in the same response; do not invent an items field. Serialize only when one result is required to choose or parameterize the next call, or when a stateful, mutating, or terminal action has no schema-defined atomic batch.");
   return lines;
 }

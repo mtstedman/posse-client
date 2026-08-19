@@ -841,6 +841,7 @@ export function getDeterministicMcpToolNames(role, {
   needsImageGeneration = false,
   agentHandoff = false,
   subAgent = false,
+  atlasAvailable = false,
 } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   if (!roleUsesDeterministicReadMcp(role)) return [];
@@ -869,7 +870,7 @@ export function getDeterministicMcpToolNames(role, {
   // at execution. The MCP gateway's runtimeToolAvailable() hides the tool
   // unless this repo's admin config enables it with a usable grant.
   if (["dev", "artificer", "assessor", "researcher", "planner"].includes(role)) tools.push("project_db_query");
-  if (role === "researcher") {
+  if (role === "researcher" && !atlasAvailable) {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);
     tools.push("chain_read", "chain_verdict");

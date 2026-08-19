@@ -442,7 +442,7 @@ function _editableFilePreloadMode() {
 //   allow_read=true   → skip bulk source preload (agent has read tools at runtime)
 // Must match actual runtime tool grants in the Claude and OpenAI providers.
 const TOOL_POLICIES = {
-  researcher: { allow_read: true,  allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // chain_read/chain_verdict
+  researcher: { allow_read: true,  allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // Gateway owns the Atlas read_file or non-Atlas chain protocol.
   planner:    { allow_read: true,  allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // read-only deterministic tools
   assessor:   { allow_read: true,  allow_write: false, allow_shell: true,  allow_tests: true,  fallback_reads: 4 },  // has verification/test tools and read-only Bash
   delegator:  { allow_read: false, allow_write: false, allow_shell: false, allow_tests: false, fallback_reads: 0 },  // single-call, receives queue state

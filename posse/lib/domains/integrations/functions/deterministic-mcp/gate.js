@@ -227,10 +227,9 @@ export function unlockGateForDeadAtlasResult(resultText, { scopeKey = null, reas
   if (!gate.isActive()) return null;
   gate.unlockForAtlasUnavailable({ reason });
   const label = gate.atlasLabel || "ATLAS";
-  const readTool = gate.role === "researcher" ? "chain_read" : "read_file";
   return [
     `[${label} unavailable] Continue with deterministic research tools`,
-    `(${readTool}, search_files, list_files, inspect_file, ...), including for files without prior ${label} discovery.`,
+    `(read_file, search_files, list_files, inspect_file, ...), including for files without prior ${label} discovery.`,
     `Do not retry ${label} first.`,
   ].join(" ");
 }

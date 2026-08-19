@@ -1852,9 +1852,15 @@ async function cmdHealth() {
 // COMMAND: dashboard
 // ═════════════════════════════════════════════════════════════════════════════
 
-function cmdDashboard(highlightJobId = null) {
-  const workItems = listWorkItems();
-  const allJobs = listJobs();
+function cmdDashboard(highlightJobId = null, { workItemIds = [] } = {}) {
+  const scopedIds = new Set(
+    (Array.isArray(workItemIds) ? workItemIds : [])
+      .map(Number)
+      .filter((id) => Number.isSafeInteger(id) && id > 0),
+  );
+  const inScope = (workItemId) => scopedIds.size === 0 || scopedIds.has(Number(workItemId));
+  const workItems = listWorkItems().filter((wi) => inScope(wi.id));
+  const allJobs = listJobs().filter((job) => inScope(job.work_item_id));
 
   if (allJobs.length === 0) {
     console.log(`\n  ${C.dim}No jobs. Use 'plan' or 'go' to create jobs.${C.reset}\n`);
@@ -1892,7 +1898,11 @@ function cmdDashboard(highlightJobId = null) {
     for (const j of jobs) {
       const isActive = j.id === highlightJobId;
       const icon = statusIcon(j.status, { kind: "job", colors: C });
-      const tier = ` ${modelTierColor(j.model_tier, C)}[${tierModelName(j.model_tier, { jobType: j.job_type })}]${C.reset}`;
+      const effectiveModel = j.model_name || tierModelName(j.model_tier, {
+        providerName: j.provider,
+        jobType: j.job_type,
+      });
+      const tier = ` ${modelTierColor(j.model_tier, C)}[${effectiveModel}]${C.reset}`;
       const arrow = isActive ? ` ${C.yellow}${C.bold}<< ACTIVE${C.reset}` : "";
       console.log(`${C.dim}|${C.reset}   ${icon} #${j.id}${C.reset} ${j.job_type}: ${jobLabel(j.job_type, j.title).slice(0, 40)}${tier}${arrow}`);
     }

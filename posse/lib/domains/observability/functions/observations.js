@@ -17,6 +17,10 @@ import {
   INTERNAL_BACKGROUND_OBSERVATION_TYPES,
   isInternalBackgroundObservationType,
 } from "../../../catalog/observation.js";
+import {
+  getToolBatchingClass,
+  TOOL_BATCHING_CLASSES,
+} from "../../../catalog/tool-surface/batching.js";
 
 let _fd = null;
 let _currentDate = "";
@@ -1659,7 +1663,16 @@ export function finishToolInvocation(invocation, {
 export function filterProviderToolUseReplay(toolUses = [], { skipToolkitDeterministic = false } = {}) {
   if (!Array.isArray(toolUses) || toolUses.length === 0) return [];
   if (!skipToolkitDeterministic) return toolUses;
-  return toolUses.filter((toolUse) => !CATALOG_DETERMINISTIC_TOOL_NAMES.has(_normalizeCatalogToolName(toolUse?.tool)));
+  return toolUses.filter((toolUse) => {
+    const rawTool = String(toolUse?.tool || "").trim();
+    const atlasAction = _resolveAtlasAction(rawTool, toolUse?.input || {});
+    const atlasOwnedByToolkit = !!atlasAction && (
+      isPosseMcpGatewaySurfaceName(rawTool)
+      || /^atlas[._]/i.test(rawTool)
+    );
+    return !CATALOG_DETERMINISTIC_TOOL_NAMES.has(_normalizeCatalogToolName(rawTool))
+      && !atlasOwnedByToolkit;
+  });
 }
 
 export function recordProviderToolBatchObservations({
@@ -1699,6 +1712,11 @@ export function recordProviderToolBatchObservations({
         reportedWidth: 0,
         toolNames: [],
         toolUseIds: [],
+        canonicalToolNames: [],
+        batchingClassCounts: {},
+        resultCharCalls: 0,
+        resultChars: 0,
+        truncatedResultCalls: 0,
         seenTools: new Set(),
       };
       batches.set(groupKey, batch);
@@ -1713,7 +1731,20 @@ export function recordProviderToolBatchObservations({
     if (batch.seenTools.has(toolKey)) continue;
     batch.seenTools.add(toolKey);
     if (toolName) batch.toolNames.push(toolName);
+    if (toolName) {
+      const canonicalToolName = _resolveAtlasAction(toolName, toolUse?.input || {})
+        || _normalizeCatalogToolName(toolName);
+      const batchingClass = getToolBatchingClass(canonicalToolName);
+      batch.canonicalToolNames.push(canonicalToolName);
+      batch.batchingClassCounts[batchingClass] = Number(batch.batchingClassCounts[batchingClass] || 0) + 1;
+    }
     if (toolUseId) batch.toolUseIds.push(toolUseId);
+    const resultChars = Number(toolUse?.resultChars);
+    if (toolUse?.resultChars != null && Number.isFinite(resultChars) && resultChars >= 0) {
+      batch.resultCharCalls += 1;
+      batch.resultChars += resultChars;
+    }
+    if (toolUse?.resultTruncated === true) batch.truncatedResultCalls += 1;
     const reportedWidth = Number(toolUse?.providerBatchSize);
     if (Number.isFinite(reportedWidth) && reportedWidth > batch.reportedWidth) {
       batch.reportedWidth = Math.floor(reportedWidth);
@@ -1724,6 +1755,12 @@ export function recordProviderToolBatchObservations({
     const capturedWidth = batch.seenTools.size;
     const batchWidth = Math.max(capturedWidth, batch.reportedWidth);
     if (batchWidth <= 0) continue;
+    const parallelReadCalls = Number(
+      batch.batchingClassCounts[TOOL_BATCHING_CLASSES.PARALLEL_READ] || 0,
+    );
+    const nativeBatchCalls = Number(
+      batch.batchingClassCounts[TOOL_BATCHING_CLASSES.NATIVE_BATCH] || 0,
+    );
     const turnLabel = batch.providerTurnId
       || (batch.providerTurnIndex != null ? `#${batch.providerTurnIndex}` : "unknown");
     recordObservation({
@@ -1740,7 +1777,15 @@ export function recordProviderToolBatchObservations({
         batch_width: batchWidth,
         captured_tool_uses: capturedWidth,
         tool_names: batch.toolNames,
+        canonical_tool_names: batch.canonicalToolNames,
         tool_use_ids: batch.toolUseIds,
+        batching_class_counts: batch.batchingClassCounts,
+        parallel_read_calls: parallelReadCalls,
+        native_batch_calls: nativeBatchCalls,
+        realized_parallel_batch: parallelReadCalls >= 2,
+        result_char_calls: batch.resultCharCalls,
+        result_chars: batch.resultChars,
+        truncated_result_calls: batch.truncatedResultCalls,
         ...(resolvedAgentCallId != null ? { agent_call_id: resolvedAgentCallId } : {}),
       },
     });

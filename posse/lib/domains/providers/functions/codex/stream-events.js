@@ -213,6 +213,7 @@ function _extractCodexMcpToolUse(body = {}) {
     tool: toolName,
     input: (args && typeof args === "object") ? args : _parseCodexToolArguments(args),
     call_id: invocation?.call_id || invocation?.callId || invocation?.id || body.call_id || body.callId || body.id || null,
+    status: invocation?.status || body.status || null,
   };
 }
 
@@ -262,6 +263,10 @@ export function _extractCodexToolUse(msg) {
   const body = _extractCodexEventBody(msg);
   if (!body) return null;
   const type = String(body.type || "").toLowerCase();
+  if (["item.started", "item.completed", "item.updated"].includes(type)
+    && body.item && typeof body.item === "object") {
+    return _extractCodexToolUse(body.item);
+  }
   if (type === "exec_command_begin" || type === "exec_command_start") {
     const command = _stringifyCodexCommand(body.command ?? body.cmd ?? body.argv);
     if (!command) return null;
@@ -331,6 +336,23 @@ export function _appendCodexToolUse(toolUses, extracted) {
         existing.status = entry.status || existing.status || null;
         existing.error = entry.error || existing.error || null;
         existing.output = entry.output || existing.output || null;
+      }
+      continue;
+    }
+    const callId = entry.call_id || entry.callId || null;
+    const existing = callId
+      ? [...toolUses].reverse().find((toolUse) => (toolUse.call_id || toolUse.callId || null) === callId)
+      : null;
+    if (existing) {
+      if ((!existing.input || Object.keys(existing.input).length === 0) && entry.input) {
+        existing.input = entry.input;
+      }
+      existing.status = entry.status || existing.status || null;
+      existing.error = entry.error || existing.error || null;
+      existing.output = entry.output || existing.output || null;
+      if (entry.providerTurnId && !existing.providerTurnId) existing.providerTurnId = entry.providerTurnId;
+      if (entry.providerTurnIndex != null && existing.providerTurnIndex == null) {
+        existing.providerTurnIndex = entry.providerTurnIndex;
       }
       continue;
     }

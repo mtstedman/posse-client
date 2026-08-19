@@ -343,6 +343,7 @@ function expectedMcpToolNames(role, bootPayload = {}) {
       needsImageGeneration: bootPayload.allowImageGeneration === true,
       agentHandoff: bootPayload.agentHandoff === true,
       subAgent: bootPayload.subAgent === true,
+      atlasAvailable: bootPayload.atlasAvailable === true,
     });
   } catch {
     return [];
@@ -647,6 +648,7 @@ function buildDeterministicMcpBootPayload(role, {
     needsImageGeneration: allowImageGeneration,
     agentHandoff: agentHandoff === true,
     subAgent: subAgent === true,
+    atlasAvailable: atlasEnabled,
   });
   const allowShell = expectedTools.includes("bash");
   const requestedProjectDbCapability = normalizeProjectDbCapability(

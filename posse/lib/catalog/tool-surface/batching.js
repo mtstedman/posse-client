@@ -25,6 +25,23 @@ const SERIAL_PROTOCOL_TOOLS = new Set([
   "ack_operator_feedback", "agent.feedback", "memory.store", "memory.feedback",
 ]);
 
+export function canonicalToolNameForBatching(name) {
+  let canonicalName = String(name || "").trim().toLowerCase();
+  if (!canonicalName) return "";
+  if (canonicalName.startsWith("mcp__")) {
+    const parts = canonicalName.split("__");
+    canonicalName = parts.at(-1) || canonicalName;
+  }
+  canonicalName = canonicalName.replaceAll("-", "_");
+  if (/^tools[._]/.test(canonicalName)) {
+    return canonicalName.replace(/^tools[._]/, "");
+  }
+  if (/^atlas[._]/.test(canonicalName)) {
+    return canonicalName.replace(/^atlas[._]/, "").replaceAll("_", ".");
+  }
+  return canonicalName;
+}
+
 export function getToolBatchingClass(name) {
   const canonicalName = String(name || "").trim();
   if (PARALLEL_READ_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.PARALLEL_READ;

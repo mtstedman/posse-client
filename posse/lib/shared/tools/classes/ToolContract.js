@@ -211,9 +211,9 @@ export class ToolContract {
     if (contract.roleMode) {
       lines.splice(3, 0, `- Role mode: ${contract.roleMode}`);
     }
-    // Researcher exact-source fallback is issued through chain_read, while
-    // this provider budget governs read_file. Rendering it for researchers
-    // advertised a limit that did not apply to their actual tool surface.
+    // Researcher exact-source fallback is gateway-owned: Atlas runs receive a
+    // bounded read_file and non-Atlas runs receive the chain protocol. This
+    // provider budget does not govern either route.
     if (contract.fallbackReads != null && contract.role !== "researcher") {
       lines.push(`- Fallback read budget: ${contract.fallbackReads}`);
     }

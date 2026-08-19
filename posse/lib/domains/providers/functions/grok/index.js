@@ -542,6 +542,7 @@ export async function callProvider(promptText, {
   const maxReads = fallbackReads ?? DEFAULT_FALLBACK_READS;
   let allText = "";
   const toolUses = [];
+  let providerToolTurnIndex = 0;
   let outputTruncated = false;
   let outputLimitReason = null;
 
@@ -726,9 +727,20 @@ export async function callProvider(promptText, {
 
       // Execute each tool call (with fallback read budget)
       const toolResults = [];
-      for (const call of functionCalls) {
+      const providerTurnIndex = ++providerToolTurnIndex;
+      const providerTurnId = String(response.id || `grok-tool-turn-${providerTurnIndex}`);
+      for (const [providerBatchIndex, call] of functionCalls.entries()) {
         const callInput = _parseToolInput(call.arguments);
-        toolUses.push({ tool: call.name, input: callInput });
+        const recordedToolUse = {
+          id: call.call_id || null,
+          tool: call.name,
+          input: callInput,
+          providerTurnId,
+          providerTurnIndex,
+          providerBatchIndex,
+          providerBatchSize: functionCalls.length,
+        };
+        toolUses.push(recordedToolUse);
 
         // -- Enforce read budget --
         if (call.name === "read_file") {
@@ -759,6 +771,8 @@ export async function callProvider(promptText, {
 
         // Truncate very large tool results to stay within context budget
         const truncated = truncateToolResultPreservingFeedback(result, 100000);
+        recordedToolUse.resultChars = result.length;
+        recordedToolUse.resultTruncated = truncated.length < result.length;
 
         toolResults.push({
           type: "function_call_output",

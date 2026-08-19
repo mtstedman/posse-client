@@ -114,6 +114,7 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) 
 export async function createReviewSessionDeps(bootDeps) {
   const {
     projectDir,
+    RUN_WORK_ITEM_IDS = [],
     NO_TUI,
     nonInteractive,
     ask,
@@ -140,6 +141,7 @@ export async function createReviewSessionDeps(bootDeps) {
     isReviewableWorkItem,
     NO_TUI,
     nonInteractive: !!nonInteractive,
+    scopedWorkItemIds: RUN_WORK_ITEM_IDS,
     Display,
     cmdDashboard,
     C,

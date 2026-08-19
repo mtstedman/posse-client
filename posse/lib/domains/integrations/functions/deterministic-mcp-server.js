@@ -400,6 +400,7 @@ let remoteToolCatalogPreload = bootConfig.remoteToolSurface && typeof bootConfig
   ? bootConfig.remoteToolSurface
   : null;
 const RESEARCH_NATIVE_EXPLORATION_TOOLS = new Set([
+  "read_file",
   "chain_verdict",
   "list_files",
   "search_files",
@@ -408,6 +409,7 @@ const RESEARCH_NATIVE_EXPLORATION_TOOLS = new Set([
   "hash_file",
 ]);
 const RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS = new Set([
+  "read_file",
   "chain_read",
   "chain_verdict",
   "list_files",
@@ -1295,7 +1297,10 @@ let DECLARED_NATIVE_TOOL_NAMES = (ownerHotGateway
   : (hasTokenToolAllowlist()
     ? [...(tokenToolAllowlistForSuite("tools") || new Set())]
   : (roleName
-    ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
+    ? getDeterministicMcpToolNames(roleName, {
+      needsImageGeneration: allowImageGeneration,
+      atlasAvailable,
+    })
     : legacyToolNamesForUnscopedRole()))
 ).filter(runtimeToolAvailable);
 let DECLARED_NATIVE_TOOL_NAME_SET = new Set(DECLARED_NATIVE_TOOL_NAMES);
@@ -1307,6 +1312,17 @@ function addToolSchema(schema) {
   if (DECLARED_NATIVE_TOOL_NAME_SET.has(toolName) && runtimeToolAvailable(toolName)) {
     TOOL_SCHEMAS.push(schema);
   }
+}
+
+function readFileSchemaForCurrentBoot() {
+  if (!atlasAvailable) return TOOL_READ_FILE;
+  const atlasUseDescription = writeEnabled
+    ? "Use this tool only for documentation, configuration, manifests, other non source artifacts, content that Atlas cannot access, or verification after a file has been modified during this run."
+    : "Use this tool only for documentation, configuration, manifests, other non source artifacts, or content that Atlas cannot access.";
+  return {
+    ...TOOL_READ_FILE,
+    description: `${TOOL_READ_FILE.description} ${atlasUseDescription}`,
+  };
 }
 
 function compactAgentHandoffIssued() {
@@ -1326,18 +1342,19 @@ addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
 
-// Researcher gets chain_read + chain_verdict instead of read_file — enforces the audit ledger.
+// Atlas-active researchers use the ordinary bounded read_file fallback. The
+// chain ledger remains available only when Atlas is absent.
 // Owner-hot mode keeps every tool implementation loaded; per-session shims/owner
 // gates decide which of these schemas an agent sees and may call.
 if (ownerHotGateway) {
-  addToolSchema(TOOL_READ_FILE);
+  addToolSchema(readFileSchemaForCurrentBoot());
   addToolSchema(TOOL_CHAIN_READ);
   addToolSchema(TOOL_CHAIN_VERDICT);
-} else if (isResearcherRole) {
+} else if (isResearcherRole && !atlasAvailable) {
   addToolSchema(TOOL_CHAIN_READ);
   addToolSchema(TOOL_CHAIN_VERDICT);
 } else {
-  addToolSchema(TOOL_READ_FILE);
+  addToolSchema(readFileSchemaForCurrentBoot());
 }
 for (const schema of [TOOL_LIST_FILES, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL_INSPECT_FILE, TOOL_HASH_FILE]) {
   addToolSchema(schema);
@@ -2480,7 +2497,10 @@ function computeDeclaredNativeToolNamesForCurrentBoot() {
     : (hasTokenToolAllowlist()
       ? [...(tokenToolAllowlistForSuite("tools") || new Set())]
     : (roleName
-      ? getDeterministicMcpToolNames(roleName, { needsImageGeneration: allowImageGeneration })
+      ? getDeterministicMcpToolNames(roleName, {
+        needsImageGeneration: allowImageGeneration,
+        atlasAvailable,
+      })
       : legacyToolNamesForUnscopedRole()))
   ).filter(runtimeToolAvailable);
 }
@@ -2496,14 +2516,14 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
   if (ownerHotGateway) {
-    addToolSchema(TOOL_READ_FILE);
+    addToolSchema(readFileSchemaForCurrentBoot());
     addToolSchema(TOOL_CHAIN_READ);
     addToolSchema(TOOL_CHAIN_VERDICT);
-  } else if (isResearcherRole) {
+  } else if (isResearcherRole && !atlasAvailable) {
     addToolSchema(TOOL_CHAIN_READ);
     addToolSchema(TOOL_CHAIN_VERDICT);
   } else {
-    addToolSchema(TOOL_READ_FILE);
+    addToolSchema(readFileSchemaForCurrentBoot());
   }
   for (const schema of [TOOL_LIST_FILES, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL_INSPECT_FILE, TOOL_HASH_FILE]) {
     addToolSchema(schema);
@@ -3369,7 +3389,7 @@ async function handleRequest(msg) {
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS tool ${toolName} is intentionally not exposed. Use deterministic ${isResearcherRole ? "chain_read" : "read_file"} as the raw-read fallback after ATLAS discovery, or when ATLAS is unavailable or insufficient.`,
+            text: `ATLAS tool ${toolName} is intentionally not exposed. Use deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} as the raw-read fallback after ATLAS discovery, or when ATLAS is unavailable or insufficient.`,
           }],
           isError: true,
         }));
@@ -3479,11 +3499,12 @@ async function handleRequest(msg) {
     // the rule and redirects to an ATLAS call.
     if (!delegatedEvidenceCursor && isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
       let gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
-      // chain_read's ordinary default is intentionally broad. When an exact
+      // Ordinary native-read defaults are intentionally broad. When an exact
       // ATLAS result already covered the file, turn an omitted limit into the
       // gate's bounded fallback rather than rejecting a recoverable call and
       // making the model spend another turn restating it.
-      if (toolName === "chain_read" && gateDecision.reason === "atlas_source_range_required") {
+      if (["read_file", "chain_read"].includes(toolName)
+        && gateDecision.reason === "atlas_source_range_required") {
         args.limit = gateDecision.maxLines;
         gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
       }
