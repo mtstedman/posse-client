@@ -21,6 +21,8 @@ import { spawn, spawnSync } from "node:child_process";
 
 import {
   ATLAS_VECTOR_NATIVE_ROUTE,
+  GIT_READ_ROUTE,
+  NATIVE_DAEMON_PROTOCOL,
   nativeBinaryExactVersion,
   nativeBinaryEntry,
   nativeBinaryIsKeyGated,
@@ -379,7 +381,7 @@ export class NativeBinary {
     if (this.name === "vector") return [ATLAS_VECTOR_NATIVE_ROUTE];
     // Worker-routed git methods are the read-only set; mutating calls thread
     // `git:mutate` explicitly from the invoke boundary.
-    if (this.name === "git") return ["git:read"];
+    if (this.name === "git") return [GIT_READ_ROUTE];
     return [`${this.name}:methods`];
   }
 
@@ -575,7 +577,7 @@ export class NativeBinary {
     try {
       const daemon = this.#daemon();
       const verdict = await daemon.probe({
-        protocol: "posse.daemon.v1",
+        protocol: NATIVE_DAEMON_PROTOCOL,
         method: "daemon.ping",
         payload: null,
       });
@@ -911,7 +913,7 @@ export class NativeBinary {
         && opts.idempotent !== false
         && !opts.signal
         && typeof opts.onProgress !== "function"
-        && (!opts.requiredRoute || opts.requiredRoute === "git:read")) {
+        && (!opts.requiredRoute || opts.requiredRoute === GIT_READ_ROUTE)) {
         const input = typeof opts.input === "string"
           ? opts.input
           : Buffer.isBuffer(opts.input)

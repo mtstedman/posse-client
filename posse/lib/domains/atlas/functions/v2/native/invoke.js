@@ -7,11 +7,17 @@
 // an invalid response, the call fails. During migration, Node implementations
 // are used only as explicit parity oracles outside this boundary.
 
+import {
+  ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+  ATLAS_NATIVE_PROTOCOL,
+} from "../../../../../catalog/binary.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 
-export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
-export const ATLAS_EXECUTE_TOOL_CONTRACT_VERSION = 1;
+export {
+  ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+  ATLAS_NATIVE_PROTOCOL,
+} from "../../../../../catalog/binary.js";
 
 /** @type {NativeMethodRunOptions | null} */
 let atlasNativeOptionsForTests = null;

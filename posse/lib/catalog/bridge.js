@@ -1,5 +1,32 @@
 export const BRIDGE_PROTOCOL_VERSION = 1;
 export const BRIDGE_HEALTH_PROOF_CONTEXT = `posse-bridge-health-v${BRIDGE_PROTOCOL_VERSION}`;
+export const BOSSY_LOCAL_STREAM_PROTOCOL = "posse.local_stream.v1";
+
+export const BRIDGE_PORT_SCAN_START = 7531;
+export const BRIDGE_PORT_SCAN_END = 7551;
+
+export const WORK_ITEM_FEED_EVENT_PROTOCOL = "posse.work_item_feed_event.v1";
+export const WORK_ITEM_HISTORY_PROTOCOL = "posse.work_item_history.v1";
+export const WORK_ITEM_OVERVIEW_PROTOCOL = "posse.work_item_overview.v1";
+export const WORK_ITEM_STATS_PROTOCOL = "posse.work_item_stats.v1";
+export const WORK_ITEM_ACTION_PROTOCOL = "posse.work_item_action.v1";
+
+export const WORK_ITEM_BOUNDS = Object.freeze({
+  ACTIVE: 100,
+  QUEUED: 100,
+  AGENTS: 64,
+  LANES: 128,
+  WAITERS: 32,
+  QUESTIONS: 20,
+  HISTORY_PAGE: 100,
+  HISTORY_TAIL: 20,
+  FEED_SUMMARY_CHARS: 500,
+  FEED_DETAIL_CHARS: 16_000,
+  STREAM_PAYLOAD_BYTES: 64 * 1024,
+});
+
+export const BRIDGE_OPEN_GATE_STATUSES = Object.freeze(["queued", "waiting_on_human"]);
+export const BRIDGE_NON_AGENT_JOB_TYPES = Object.freeze(["human_input", "atlas_warm"]);
 
 export const BRIDGE_COMMANDS = Object.freeze({
   QUEUE_LIST: "queue.list",

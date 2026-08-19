@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ATLAS_SOURCE_LANGUAGE_ORDER } from "../../../../../catalog/atlas.js";
 import { decodeScipIndex } from "./decode.js";
 import { scipIndexToRowsBatchedNative, scipIndexToRowsNative } from "./native-rows.js";
 import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "./to-rows.js";
@@ -1175,7 +1176,7 @@ function sourceLanguageForDocument(doc) {
   return rawDocLang ? normalizeLangFromScip(rawDocLang) : "";
 }
 
-const SOURCE_LANGUAGE_ORDER = ["ts", "js", "py", "php", "go", "rs", "java", "kt", "cs", "c", "cpp", "sh"];
+const SOURCE_LANGUAGE_ORDER = ATLAS_SOURCE_LANGUAGE_ORDER;
 function sortLanguageTags(values) {
   return values.sort((a, b) => {
     const ai = SOURCE_LANGUAGE_ORDER.indexOf(a);

@@ -4,22 +4,14 @@ import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
 import { atlasBackendLabel } from "../atlas-label.js";
 import { atlasDescriptorSchemaForAction } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../../catalog/registered-tests.js";
-
-// Static data table mirroring each provider's capabilities.toolAttachment.
-// Defined here rather than imported via getProvider() so this module stays
-// out of the provider-registry import cycle (tool-descriptors is loaded
-// during provider module initialization). A contract test asserts this
-// table stays in sync with the per-provider capability declarations.
-const TOOL_ATTACHMENT_BY_PROVIDER = Object.freeze({
-  claude: "mcp",
-  openai: "function",
-  grok: "function",
-  codex: "deterministic-bridge",
-  copilot: "mcp",
-  "posse-local": "function",
-});
+import { TOOL_ATTACHMENT_BY_PROVIDER } from "../../../../catalog/tool-surface/provider-attachments.js";
+import {
+  getToolBatchingClass,
+  TOOL_BATCHING_CLASSES,
+} from "../../../../catalog/tool-surface/batching.js";
 
 export { TOOL_ATTACHMENT_BY_PROVIDER };
+export { getToolBatchingClass, TOOL_BATCHING_CLASSES };
 
 export { TOOL_INSPECT_FILE } from "../../../worker/functions/helpers/file-inspector.js";
 export { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
@@ -469,74 +461,6 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
   "scip.ingest": { access: "atlas", summary: "Ingest a prebuilt SCIP index into the native ATLAS v2 ledger." },
   "file.write": { access: "atlas", summary: "Intentionally not exposed in native ATLAS v2. Use scoped edit_file for code changes; deprecated write_file remains only for dynamic artifact compatibility." },
 });
-
-export const TOOL_BATCHING_CLASSES = Object.freeze({
-  PARALLEL_READ: "parallel-read",
-  NATIVE_BATCH: "native-batch",
-  SERIAL_PROTOCOL: "serial-protocol",
-  ORDERED: "ordered",
-});
-
-const PARALLEL_READ_TOOLS = new Set([
-  "read_file",
-  "list_files",
-  "search_files",
-  "git_history",
-  "hash_file",
-  "read_image_metadata",
-  "validate_artifact_output",
-  "extract_image_text",
-  "query",
-  "code",
-  "repo",
-  "action.search",
-  "manual",
-  "symbol.search",
-  "symbol.overview",
-  "tree.branch",
-  "tree.expand",
-  "code.skeleton",
-  "code.lens",
-  "code.window",
-  "code.structure",
-  "review.delta",
-  "review.analyze",
-  "review.risk",
-  "file.read",
-]);
-
-const NATIVE_BATCH_TOOLS = new Set([
-  "sub_agent",
-  "inspect_file",
-  "create_test",
-  "run_test",
-  "fetch_ref",
-  "create_ref",
-  "symbol.card",
-  "code.survey",
-  "memory.surface",
-  "memory.get",
-]);
-
-const SERIAL_PROTOCOL_TOOLS = new Set([
-  "agent_handoff",
-  "sub_agent_next_input",
-  "chain_read",
-  "chain_verdict",
-  "get_operator_feedback",
-  "ack_operator_feedback",
-  "agent.feedback",
-  "memory.store",
-  "memory.feedback",
-]);
-
-export function getToolBatchingClass(name) {
-  const canonicalName = String(name || "").trim();
-  if (PARALLEL_READ_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.PARALLEL_READ;
-  if (NATIVE_BATCH_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.NATIVE_BATCH;
-  if (SERIAL_PROTOCOL_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.SERIAL_PROTOCOL;
-  return TOOL_BATCHING_CLASSES.ORDERED;
-}
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "fetch_ref",

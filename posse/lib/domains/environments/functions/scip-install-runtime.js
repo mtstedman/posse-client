@@ -3,57 +3,19 @@
 import fs from "fs";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
+import {
+  DEPENDENCY_INSTALL_ENV_PREFIXES,
+  SCIP_DEPENDENCY_INSTALL_ENV_KEYS,
+} from "../../../catalog/process.js";
+import {
+  filterProcessEnv,
+  isUnboundedCommandTimeout,
+} from "../../../shared/platform/functions/process-env.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 
 export { DEFAULT_POSSE_ROOT };
 
 export const DEFAULT_SCIP_COMMAND_TIMEOUT_MS = 600_000;
-
-const UNBOUNDED_TIMEOUT_VALUES = new Set(["", "0", "false", "none", "off", "unbounded", "unlimited", "infinite"]);
-const SCIP_DEPENDENCY_INSTALL_ENV_ALLOWLIST = new Set([
-  "all_proxy",
-  "appdata",
-  "comspec",
-  "curl_ca_bundle",
-  "home",
-  "homedrive",
-  "homepath",
-  "http_proxy",
-  "https_proxy",
-  "lang",
-  "lc_all",
-  "lc_ctype",
-  "localappdata",
-  "no_proxy",
-  "npm_config_cafile",
-  "npm_config_https_proxy",
-  "npm_config_noproxy",
-  "npm_config_proxy",
-  "path",
-  "pathext",
-  "programdata",
-  "programfiles",
-  "programfiles(x86)",
-  "requests_ca_bundle",
-  "shell",
-  "ssl_cert_dir",
-  "ssl_cert_file",
-  "systemroot",
-  "temp",
-  "term",
-  "tmp",
-  "tmpdir",
-  "userprofile",
-  "windir",
-  "cargo_home",
-  "goprivate",
-  "gonoproxy",
-  "gonosumdb",
-  "goproxy",
-  "gosumdb",
-  "rustup_home",
-]);
-const SCIP_DEPENDENCY_INSTALL_ENV_PREFIXES = ["pip_"];
 
 /**
  * Narrow process-local cache: command PATH probes are stable within one
@@ -67,8 +29,7 @@ const commandOnPathCache = new Map();
  * @returns {number | null}
  */
 export function normalizeCommandTimeoutMs(value, fallback = DEFAULT_SCIP_COMMAND_TIMEOUT_MS) {
-  if (value === null || value === false) return null;
-  if (typeof value === "string" && UNBOUNDED_TIMEOUT_VALUES.has(value.trim().toLowerCase())) return null;
+  if (isUnboundedCommandTimeout(value)) return null;
   const parsed = Number(value);
   if (Number.isFinite(parsed) && parsed > 0) return Math.max(1000, Math.floor(parsed));
   return fallback;
@@ -79,18 +40,10 @@ export function normalizeCommandTimeoutMs(value, fallback = DEFAULT_SCIP_COMMAND
  * @returns {NodeJS.ProcessEnv}
  */
 export function scipDependencyInstallEnv(sourceEnv = process.env) {
-  /** @type {NodeJS.ProcessEnv} */
-  const env = {};
-  for (const [key, value] of Object.entries(sourceEnv || {})) {
-    if (value == null) continue;
-    const normalizedKey = String(key).toLowerCase();
-    if (
-      !SCIP_DEPENDENCY_INSTALL_ENV_ALLOWLIST.has(normalizedKey)
-      && !SCIP_DEPENDENCY_INSTALL_ENV_PREFIXES.some((prefix) => normalizedKey.startsWith(prefix))
-    ) continue;
-    env[key] = String(value);
-  }
-  return env;
+  return filterProcessEnv(sourceEnv, {
+    allowedKeys: SCIP_DEPENDENCY_INSTALL_ENV_KEYS,
+    allowedPrefixes: DEPENDENCY_INSTALL_ENV_PREFIXES,
+  });
 }
 
 /**

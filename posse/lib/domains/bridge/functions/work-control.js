@@ -3,6 +3,7 @@ import {
   ATLAS_WARM_JOB_TYPE,
 } from "../../atlas/functions/v2/contracts/jobs.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { BRIDGE_NON_AGENT_JOB_TYPES } from "../../../catalog/bridge.js";
 import {
   createOperatorNudge,
   createWorkItem,
@@ -106,7 +107,7 @@ const NUDGE_BODY_MAX_CHARS = 4000;
 // result that can carry direct feedback. A nudge written against one sits
 // unread forever, and is silently expired at finalize — worse than an
 // honest refusal.
-const NUDGE_INELIGIBLE_JOB_TYPES = new Set(["human_input", "atlas_warm"]);
+const NUDGE_INELIGIBLE_JOB_TYPES = new Set(BRIDGE_NON_AGENT_JOB_TYPES);
 
 /**
  * Deliver operator guidance to a live job. Running agents pick the nudge up

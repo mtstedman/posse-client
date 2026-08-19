@@ -89,6 +89,14 @@ import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { PulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { ParentPulseTokenManager } from "../../../shared/native/classes/ParentPulseTokenManager.js";
 import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  MCP_OAUTH_AUDIENCE,
+  MCP_OAUTH_TOKEN_TYPE,
+  POSSE_MCP_GATEWAY_SERVER_INFO_NAME,
+} from "../../../catalog/mcp.js";
+import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
+import { REMOTE_CATALOG_READ_ROUTE } from "../../../catalog/binary.js";
+import {
   buildAtlasGateScopeKey,
   configureGate,
   isGateActive,
@@ -103,9 +111,6 @@ import {
 } from "./deterministic-mcp/gate.js";
 import { resolveAtlasGatewayDedupAdvertise } from "./deterministic-mcp/gate-settings.js";
 import {
-  DEFAULT_MCP_OAUTH_TTL_SECONDS,
-  MCP_OAUTH_AUDIENCE,
-  MCP_OAUTH_TOKEN_TYPE,
   bootConfigFromMcpOAuthClaims,
   buildMcpOAuthClaimsFromBootConfig,
   verifyMcpOAuthToken,
@@ -125,7 +130,7 @@ import {
   isFallbackOnlyAtlasTool,
 } from "./deterministic-mcp/tool-descriptors.js";
 import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-params.js";
-import { POSSE_MCP_GATEWAY_SERVER_INFO_NAME, stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
+import { stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
@@ -857,7 +862,7 @@ async function fetchRemoteToolCatalog() {
       try {
         const headers = { "content-type": "application/json" };
         const tokens = remotePulseTokens();
-        const pulseToken = await tokens.getPulseToken({ requiredRoute: "catalog:read" });
+        const pulseToken = await tokens.getPulseToken({ requiredRoute: REMOTE_CATALOG_READ_ROUTE });
         if (pulseToken) {
           tokens.assertTrustedResourceUrl(url, "remote tool catalog");
           headers.authorization = `Bearer ${pulseToken}`;
@@ -2294,7 +2299,7 @@ function executeAgentHandoff(args = {}) {
   if (preparedSubAgentHandoff) sealSubAgentHandoff(mcpAgentCallId);
   return JSON.stringify({
     ok: true,
-    protocol: "posse.agent_handoff.v1",
+    protocol: AGENT_HANDOFF_PROTOCOL,
     status: receipt.status,
     digest: receipt.digest,
     call_count: receipt.callCount,

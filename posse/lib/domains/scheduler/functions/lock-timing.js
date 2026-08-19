@@ -5,7 +5,7 @@
 // (no class/this access, no concurrency state) so they live alongside the
 // other scheduler `functions/` modules. The Scheduler class imports them back.
 
-import { parseJobPayload } from "../../queue/functions/payload.js";
+import { parseJobPayload } from "../../queue/functions/index.js";
 
 export function schedulerLockTiming(lockInfo, lockDurationMs, nowMs = Date.now()) {
   const acquiredMs = Date.parse(lockInfo?.acquired_at || "");

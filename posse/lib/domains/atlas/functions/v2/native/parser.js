@@ -3,6 +3,7 @@
 // Strict native implementation of parser/adapter parseBuffer.
 
 import { sha256Hex } from "../hash.js";
+import { ATLAS_NATIVE_PARSE_BUFFER_METHOD } from "../../../../../catalog/binary.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import {
   __atlasNativeManagerForTests,
@@ -11,7 +12,7 @@ import {
 
 /** @typedef {import("../contracts/schemas.js").ParseResult} ParseResult */
 
-export const ATLAS_NATIVE_PARSE_BUFFER_METHOD = "parser.parseBuffer";
+export { ATLAS_NATIVE_PARSE_BUFFER_METHOD } from "../../../../../catalog/binary.js";
 
 /** @type {import("./invoke.js").NativeMethodRunOptions | null} */
 let parserNativeOptionsForTests = null;

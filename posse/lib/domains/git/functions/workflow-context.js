@@ -2,6 +2,7 @@
 // Shared context for git workflow helper factories.
 
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { gitExec as nativeGitExec, gitExecAsync as nativeGitExecAsync } from "./utils.js";
@@ -68,8 +69,8 @@ export function createGitWorkflowContext({
         ? parsedTimeoutMs
         : GIT_WORKFLOW_TASK_TIMEOUT_MS;
     const routes = MUTATING_GIT_WORKFLOW_TASKS.has(task)
-      ? ["git:read", "git:mutate"]
-      : ["git:read"];
+      ? [GIT_READ_ROUTE, GIT_MUTATE_ROUTE]
+      : [GIT_READ_ROUTE];
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
       routesByBinary: { git: routes },
     });

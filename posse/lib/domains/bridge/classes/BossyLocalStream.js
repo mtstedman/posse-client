@@ -3,11 +3,15 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
-import { BRIDGE_FRAME_TYPES, BRIDGE_PROTOCOL_VERSION } from "../../../catalog/bridge.js";
+import {
+  BOSSY_LOCAL_STREAM_PROTOCOL,
+  BRIDGE_FRAME_TYPES,
+  BRIDGE_PROTOCOL_VERSION,
+} from "../../../catalog/bridge.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { ChangeStream } from "./ChangeStream.js";
 
-export const BOSSY_LOCAL_STREAM_PROTOCOL = "posse.local_stream.v1";
+export { BOSSY_LOCAL_STREAM_PROTOCOL } from "../../../catalog/bridge.js";
 const MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_CLIENT_BUFFER_BYTES = 2 * MAX_FRAME_BYTES;
 const LOCAL_REPLAY_LIMIT = 256;

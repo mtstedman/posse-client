@@ -1,6 +1,10 @@
 import path from "path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "url";
+import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  POSSE_MCP_GATEWAY_SERVER_NAME,
+} from "../../../catalog/mcp.js";
 import { getAtlasIntegrationConfig } from "../../../domains/integrations/functions/atlas.js";
 import {
   getRuntimeDbPath,
@@ -13,7 +17,6 @@ import {
   roleUsesDeterministicReadMcp,
   roleUsesDeterministicWriteMcp,
 } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
-import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../domains/integrations/functions/mcp-gateway.js";
 import {
   getPosseRemoteMode,
   getPosseRemoteTimeoutMs,
@@ -21,7 +24,6 @@ import {
 } from "../../../domains/remote/functions/mode.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import {
-  DEFAULT_MCP_OAUTH_TTL_SECONDS,
   mintMcpOAuthTokenForBootConfig,
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";

@@ -6,6 +6,7 @@
 // out at merge time.
 
 import fs from "fs";
+import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
 import { gitCommitAll } from "./commit-scope.js";
 import { gitExec } from "./utils.js";
@@ -31,8 +32,8 @@ const MUTATING_WORKTREE_STATUS_TASKS = new Set([
 
 async function runWorktreeStatusTaskOffMainThread(task, args = {}) {
   const routes = MUTATING_WORKTREE_STATUS_TASKS.has(task)
-    ? ["git:read", "git:mutate"]
-    : ["git:read"];
+    ? [GIT_READ_ROUTE, GIT_MUTATE_ROUTE]
+    : [GIT_READ_ROUTE];
   const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
     routesByBinary: { git: routes },
   });

@@ -31,7 +31,7 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 // (a finished job's key is simply never consulted again).
 const setupDeferNoticeLastSeen = new Map();
 import { MUTATING_JOB_TYPES, WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
-import { jobNeedsGitWorktree } from "../../../git/functions/policy.js";
+import { jobNeedsGitWorktreeAsync } from "../../../git/functions/policy.js";
 import {
   disposeWorkItemAtlasGraph,
   ensureWorkItemAtlasJoinAsync,
@@ -90,6 +90,13 @@ import {
   targetedSetupDirtyRecoveryEligible,
 } from "./worktree-dirty-classification.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
+import {
+  jobHasSetupCleanupPrecedence,
+  nextTransientSetupRetryPayload,
+  setupCleanupPrecedenceJobId,
+  transientSetupRetryCountFromPayload,
+} from "./worktree-setup-policy.js";
+import { pendingCrossWiFileSyncs } from "./cross-wi-sync.js";
 
 // Re-exported for external importers (Worker.js, tests) that previously
 // imported these sentinel helpers from this module before the extraction into
@@ -156,35 +163,17 @@ function logTerminalCleanupFailure(worker, wi, wtDir, message, extra = {}) {
 
 function transientSetupRetryCount(worker, job) {
   try {
-    const payload = worker.parsePayload(job) || {};
-    const value = Number(payload?._transient_infra_retries?.worktree_setup || 0);
-    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    return transientSetupRetryCountFromPayload(worker.parsePayload(job) || {});
   } catch {
     return 0;
   }
 }
 
 function bumpTransientSetupRetry(worker, job) {
-  const payload = worker.parsePayload(job) || {};
-  const current = Number(payload?._transient_infra_retries?.worktree_setup || 0);
-  const next = (Number.isFinite(current) && current > 0 ? Math.floor(current) : 0) + 1;
-  payload._transient_infra_retries = {
-    ...(payload._transient_infra_retries || {}),
-    worktree_setup: next,
-  };
+  const payload = nextTransientSetupRetryPayload(worker.parsePayload(job) || {});
+  const next = payload._transient_infra_retries.worktree_setup;
   updateJobPayload(job.id, JSON.stringify(payload));
   return next;
-}
-
-function pendingCrossWiFileSyncs(payload = {}) {
-  return (Array.isArray(payload?._cross_wi_file_syncs) ? payload._cross_wi_file_syncs : [])
-    .map((entry) => ({
-      ...entry,
-      path: normalizeRepoPath(entry?.path),
-      source_branch: String(entry?.source_branch || "").trim(),
-      source_work_item_id: Number(entry?.source_work_item_id),
-    }))
-    .filter((entry) => entry.path && entry.source_branch && Number.isFinite(entry.source_work_item_id));
 }
 
 function logToleratedUntrackedResidual(worker, job, wi, residuals, phase) {
@@ -235,20 +224,6 @@ function logSiblingSetupDirtyReuse(worker, job, wi, dirty, phase) {
       entries: entries.slice(0, 20),
     }),
   });
-}
-
-function setupCleanupPrecedenceJobId(job, siblingLocks = []) {
-  const ids = [
-    Number(job?.id),
-    ...siblingLocks.map((lock) => Number(lock?.job_id)),
-  ].filter((id) => Number.isFinite(id));
-  return ids.length > 0 ? Math.min(...ids) : null;
-}
-
-function jobHasSetupCleanupPrecedence(job, siblingLocks = []) {
-  const jobId = Number(job?.id);
-  const winnerId = setupCleanupPrecedenceJobId(job, siblingLocks);
-  return Number.isFinite(jobId) && winnerId != null && jobId === winnerId;
 }
 
 function markCrossWiSyncsApplied(job, payload, appliedSyncs) {
@@ -650,7 +625,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
   let toleratedResidualLogged = false;
   let toleratedSiblingDirtyLogged = false;
   try {
-    if (!jobNeedsGitWorktree(job)) {
+    if (!await jobNeedsGitWorktreeAsync(job, { signal })) {
       return { ok: true, wtPath: null, branchName: null, sentinelPath: null };
     }
     const wi = getWorkItem(job.work_item_id);

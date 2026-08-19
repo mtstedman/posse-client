@@ -1,6 +1,8 @@
-export const POSSE_MCP_GATEWAY_SERVER_NAME = "posse-gateway";
-export const POSSE_MCP_GATEWAY_SERVER_INFO_NAME = "posse-gateway-mcp";
-export const POSSE_MCP_GATEWAY_TRANSPORT = "mcp-gateway";
+export {
+  POSSE_MCP_GATEWAY_SERVER_INFO_NAME,
+  POSSE_MCP_GATEWAY_SERVER_NAME,
+  POSSE_MCP_GATEWAY_TRANSPORT,
+} from "../../../catalog/mcp.js";
 
 const POSSE_MCP_GATEWAY_SURFACE_PREFIXES = Object.freeze([
   "mcp__posse-gateway__",

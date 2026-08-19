@@ -1,6 +1,14 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
+import {
+  WORK_ITEM_ACTION_PROTOCOL,
+  WORK_ITEM_BOUNDS,
+  WORK_ITEM_FEED_EVENT_PROTOCOL,
+  WORK_ITEM_HISTORY_PROTOCOL,
+  WORK_ITEM_OVERVIEW_PROTOCOL,
+  WORK_ITEM_STATS_PROTOCOL,
+} from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -11,25 +19,14 @@ import {
 import { getSetting } from "../../queue/functions/settings.js";
 import { redactBridgeValue } from "./redaction.js";
 
-export const WORK_ITEM_FEED_EVENT_PROTOCOL = "posse.work_item_feed_event.v1";
-export const WORK_ITEM_HISTORY_PROTOCOL = "posse.work_item_history.v1";
-export const WORK_ITEM_OVERVIEW_PROTOCOL = "posse.work_item_overview.v1";
-export const WORK_ITEM_STATS_PROTOCOL = "posse.work_item_stats.v1";
-export const WORK_ITEM_ACTION_PROTOCOL = "posse.work_item_action.v1";
-
-export const WORK_ITEM_BOUNDS = Object.freeze({
-  ACTIVE: 100,
-  QUEUED: 100,
-  AGENTS: 64,
-  LANES: 128,
-  WAITERS: 32,
-  QUESTIONS: 20,
-  HISTORY_PAGE: 100,
-  HISTORY_TAIL: 20,
-  FEED_SUMMARY_CHARS: 500,
-  FEED_DETAIL_CHARS: 16_000,
-  STREAM_PAYLOAD_BYTES: 64 * 1024,
-});
+export {
+  WORK_ITEM_ACTION_PROTOCOL,
+  WORK_ITEM_BOUNDS,
+  WORK_ITEM_FEED_EVENT_PROTOCOL,
+  WORK_ITEM_HISTORY_PROTOCOL,
+  WORK_ITEM_OVERVIEW_PROTOCOL,
+  WORK_ITEM_STATS_PROTOCOL,
+} from "../../../catalog/bridge.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETENTION_DAYS = 90;

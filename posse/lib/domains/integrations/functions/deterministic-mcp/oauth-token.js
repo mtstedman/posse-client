@@ -7,6 +7,12 @@
 // signed bearer instead of trusting model-controlled tool arguments.
 
 import crypto from "crypto";
+import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  MCP_OAUTH_AUDIENCE,
+  MCP_OAUTH_ISSUER,
+  MCP_OAUTH_TOKEN_TYPE,
+} from "../../../../catalog/mcp.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import {
   claimAccountSettingIfAbsent,
@@ -18,10 +24,12 @@ import {
   normalizeSuiteToolAllowlist,
 } from "../../../../shared/tools/functions/issued-tool-policy.js";
 
-export const MCP_OAUTH_ISSUER = "posse";
-export const MCP_OAUTH_AUDIENCE = "posse-mcp-gateway";
-export const MCP_OAUTH_TOKEN_TYPE = "posse.mcp.oauth.v1";
-export const DEFAULT_MCP_OAUTH_TTL_SECONDS = 8 * 60 * 60;
+export {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  MCP_OAUTH_AUDIENCE,
+  MCP_OAUTH_ISSUER,
+  MCP_OAUTH_TOKEN_TYPE,
+} from "../../../../catalog/mcp.js";
 
 const TOKEN_PART_RE = /^[A-Za-z0-9_-]+$/;
 

@@ -15,10 +15,13 @@
 
 import path from "node:path";
 import {
+  ATLAS_NATIVE_PROTOCOL,
   ATLAS_VECTOR_NATIVE_PROTOCOL,
   ATLAS_VECTOR_NATIVE_ROUTE,
   BINARY_NAMES,
+  GIT_READ_ROUTE,
   REQUIRED_ATLAS_BINARY_NAMES,
+  REMOTE_ARTIFACTS_READ_ROUTE,
   VALID_BINARY_NAMES,
   nativeBinaryEntry,
   nativeBinaryExactVersion,
@@ -292,14 +295,14 @@ export class BinaryManager {
     if (!available?.available) return available;
     try {
       const protocol = name === "atlas"
-        ? "posse.atlas.native.v1"
+        ? ATLAS_NATIVE_PROTOCOL
         : name === "vector"
           ? ATLAS_VECTOR_NATIVE_PROTOCOL
           : `posse.${name}.native.v1`;
       const requiredRoute = name === "atlas"
         ? "atlas:methods"
         : name === "git"
-          ? "git:read"
+          ? GIT_READ_ROUTE
           : name === "vector"
             ? ATLAS_VECTOR_NATIVE_ROUTE
             : `${name}:methods`;
@@ -511,7 +514,7 @@ export class BinaryManager {
         this._artifactPulseTokens = pulseTokens;
         const pulse = await pulseTokens.getPulseEnvelope({
           refresh,
-          requiredRoute: "artifacts:read",
+          requiredRoute: REMOTE_ARTIFACTS_READ_ROUTE,
         });
         issuedVersion = String(pulse?.nativeArtifacts?.[nativeBinaryEntry(name)?.package] || "").trim() || null;
         if (issuedVersion) version = issuedVersion;

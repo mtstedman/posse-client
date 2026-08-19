@@ -1,9 +1,9 @@
 // lib/domains/providers/functions/codex/request-builders.js
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
+import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp } from "../../../integrations/functions/deterministic-mcp.js";
-import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../integrations/functions/mcp-gateway.js";
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;

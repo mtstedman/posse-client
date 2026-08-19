@@ -6,10 +6,16 @@
 import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import { log } from "../../telemetry/functions/logging/logger.js";
 import { getRuntimeDbPath } from "../../../domains/runtime/functions/paths.js";
 import { bumpRunTelemetryEpoch } from "../../telemetry/functions/run-telemetry.js";
+import {
+  installBridgeChangeTracking,
+  installJsonValidityTriggers,
+  installTerminalTransitionTracking,
+  isJsonValidityColumn as isKnownJsonValidityColumn,
+} from "./installers.js";
+import { bootstrapFreshDatabase } from "./fresh-bootstrap.js";
 import {
   HOST_SCHEMA_VERSION,
   ensureHostSchemaVersion,
@@ -42,14 +48,6 @@ export {
   runHostMigration as __testRunHostMigration,
 } from "./migrations.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Portable defaults:
-//   DB:     ./.posse/db/orchestrator.db  (relative to project root, auto-created)
-//   Schema: ../../../../schema.sql (ships with the project)
-// DB path is resolved by runtime-paths.js.
-const SCHEMA_PATH = path.resolve(__dirname, "..", "..", "..", "..", "schema.sql");
 
 // Domain enums and their SQL forms now live in `lib/catalog/`. They are
 // re-exported here so existing `import { JOB_TYPES } from "./index.js"`
@@ -68,7 +66,6 @@ import {
   JOB_REASONING_EFFORT_LIST_SQL,
   JOB_STATUSES,
   JOB_STATUS_LIST_SQL,
-  TERMINAL_JOB_STATUSES_SQL,
   JOB_TYPES,
   JOB_TYPE_LIST_SQL,
 } from "../../../catalog/job.js";
@@ -115,35 +112,6 @@ export {
   WORK_ITEM_STATUS_LIST_SQL,
   ARTIFACT_TYPES,
 };
-const JSON_VALIDITY_COLUMNS = [
-  ["work_items", "metadata_json"],
-  ["jobs", "payload_json"],
-  ["jobs", "result_json"],
-  ["job_attempts", "metadata_json"],
-  ["artifacts", "content_json"],
-  ["events", "event_json"],
-  ["scheduler_locks", "metadata_json"],
-  ["work_item_file_locks", "metadata_json"],
-  ["job_file_locks", "metadata_json"],
-  ["run_insights", "evidence"],
-  ["run_insights", "file_paths"],
-  ["job_observations", "detail_json"],
-  ["work_item_hash_refs", "descriptor_json"],
-  ["work_item_hash_refs", "fingerprint_json"],
-  ["work_item_hash_refs", "metadata_json"],
-  ["job_hash_refs", "descriptor_json"],
-  ["job_hash_refs", "fingerprint_json"],
-  ["job_hash_refs", "metadata_json"],
-  ["agent_run_hash_refs", "descriptor_json"],
-  ["agent_run_hash_refs", "fingerprint_json"],
-  ["agent_run_hash_refs", "metadata_json"],
-  ["posse_test_suites", "metadata_json"],
-  ["posse_tests", "last_run_json"],
-  ["posse_test_runs", "failure_json"],
-];
-const JSON_VALIDITY_COLUMN_KEYS = new Set(
-  JSON_VALIDITY_COLUMNS.map(([tableName, columnName]) => `${tableName}.${columnName}`),
-);
 
 let _db = null;
 let _dbPath = null;
@@ -201,112 +169,6 @@ export function getTableColumnNames(db, tableName) {
   return db.pragma(`table_info(${quoteIdent(tableName)})`).map((c) => c.name);
 }
 
-function jsonValidityTriggerName(tableName, columnName, op) {
-  return `posse_json_valid_${tableName}_${columnName}_${op}`.replace(/[^A-Za-z0-9_]/g, "_");
-}
-
-function installJsonValidityTriggers(db) {
-  const tables = new Set(db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table'`
-  ).all().map((row) => row.name));
-  for (const [tableName, columnName] of JSON_VALIDITY_COLUMNS) {
-    if (!tables.has(tableName)) continue;
-    const cols = new Set(getTableColumnNames(db, tableName));
-    if (!cols.has(columnName)) continue;
-    const table = quoteIdent(tableName);
-    const column = quoteIdent(columnName);
-    const label = `${tableName}.${columnName}`;
-    db.exec(`
-      CREATE TRIGGER IF NOT EXISTS ${quoteIdent(jsonValidityTriggerName(tableName, columnName, "insert"))}
-      BEFORE INSERT ON ${table}
-      FOR EACH ROW
-      WHEN NEW.${column} IS NOT NULL AND json_valid(NEW.${column}) = 0
-      BEGIN
-        SELECT RAISE(ABORT, 'invalid JSON in ${label}');
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS ${quoteIdent(jsonValidityTriggerName(tableName, columnName, "update"))}
-      BEFORE UPDATE OF ${column} ON ${table}
-      FOR EACH ROW
-      WHEN NEW.${column} IS NOT NULL AND json_valid(NEW.${column}) = 0
-      BEGIN
-        SELECT RAISE(ABORT, 'invalid JSON in ${label}');
-      END;
-    `);
-  }
-}
-
-const BRIDGE_CHANGE_TRACKED_TABLES = ["work_items", "jobs"];
-
-function bridgeChangeTriggerName(tableName, op) {
-  return `posse_bridge_change_${tableName}_${op}`.replace(/[^A-Za-z0-9_]/g, "_");
-}
-
-function installBridgeChangeTracking(db) {
-  const tables = new Set(db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table'`
-  ).all().map((row) => row.name));
-  if (!BRIDGE_CHANGE_TRACKED_TABLES.some((tableName) => tables.has(tableName))) return false;
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS bridge_change_sequence (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      seq INTEGER NOT NULL DEFAULT 0
-    )
-  `);
-
-  let changed = false;
-  let maxSeq = 0;
-  for (const tableName of BRIDGE_CHANGE_TRACKED_TABLES) {
-    if (!tables.has(tableName)) continue;
-    let cols = new Set(getTableColumnNames(db, tableName));
-    if (!cols.has("bridge_change_seq")) {
-      db.exec(`ALTER TABLE ${quoteIdent(tableName)} ADD COLUMN bridge_change_seq INTEGER NOT NULL DEFAULT 0`);
-      cols = new Set(getTableColumnNames(db, tableName));
-      changed = true;
-    }
-    db.exec(`CREATE INDEX IF NOT EXISTS ${quoteIdent(`idx_${tableName}_bridge_change_seq`)} ON ${quoteIdent(tableName)}(bridge_change_seq)`);
-    const row = db.prepare(`SELECT COALESCE(MAX(bridge_change_seq), 0) AS seq FROM ${quoteIdent(tableName)}`).get();
-    maxSeq = Math.max(maxSeq, Number(row?.seq || 0));
-  }
-
-  db.prepare(`
-    INSERT INTO bridge_change_sequence (id, seq)
-    VALUES (1, ?)
-    ON CONFLICT(id) DO UPDATE SET seq = max(bridge_change_sequence.seq, excluded.seq)
-  `).run(maxSeq);
-
-  for (const tableName of BRIDGE_CHANGE_TRACKED_TABLES) {
-    if (!tables.has(tableName)) continue;
-    const cols = new Set(getTableColumnNames(db, tableName));
-    if (!cols.has("bridge_change_seq")) continue;
-    const table = quoteIdent(tableName);
-    db.exec(`
-      CREATE TRIGGER IF NOT EXISTS ${quoteIdent(bridgeChangeTriggerName(tableName, "insert"))}
-      AFTER INSERT ON ${table}
-      FOR EACH ROW
-      BEGIN
-        UPDATE bridge_change_sequence SET seq = seq + 1 WHERE id = 1;
-        UPDATE ${table}
-        SET bridge_change_seq = (SELECT seq FROM bridge_change_sequence WHERE id = 1)
-        WHERE id = NEW.id;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS ${quoteIdent(bridgeChangeTriggerName(tableName, "update"))}
-      AFTER UPDATE ON ${table}
-      FOR EACH ROW
-      WHEN NEW.bridge_change_seq <= OLD.bridge_change_seq
-      BEGIN
-        UPDATE bridge_change_sequence SET seq = seq + 1 WHERE id = 1;
-        UPDATE ${table}
-        SET bridge_change_seq = (SELECT seq FROM bridge_change_sequence WHERE id = 1)
-        WHERE id = NEW.id;
-      END;
-    `);
-  }
-
-  return changed;
-}
 
 export function artifactsCreateSql(tableName = "artifacts") {
   return `
@@ -867,10 +729,7 @@ export function copyCompatibleColumns(db, fromTable, toTable, aliases = {}) {
 }
 
 function isJsonValidityColumn(fromTable, sourceCol, targetCol) {
-  return (
-    JSON_VALIDITY_COLUMN_KEYS.has(`${fromTable}.${targetCol}`) ||
-    JSON_VALIDITY_COLUMN_KEYS.has(`${fromTable}.${sourceCol}`)
-  );
+  return isKnownJsonValidityColumn(fromTable, targetCol) || isKnownJsonValidityColumn(fromTable, sourceCol);
 }
 
 function recordJsonRepairCount(db, fromTable, sourceCol, targetCol, out) {
@@ -993,83 +852,6 @@ function ensureRuntimeDbDir(dir) {
   try { fs.chmodSync(dir, 0o700); } catch { /* Windows/best-effort */ }
 }
 
-function installTerminalTransitionTracking(db) {
-  db.exec(`
-    INSERT OR IGNORE INTO work_item_terminal_transitions (work_item_id, outcome, occurred_at, source)
-    SELECT id,
-           CASE status WHEN 'complete' THEN 'completed' ELSE status END,
-           completed_at,
-           'legacy_current'
-    FROM work_items
-    WHERE status IN ('complete','failed','canceled') AND completed_at IS NOT NULL;
-
-    INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
-    SELECT id,
-           CASE WHEN status = 'dead_letter' THEN 'failed' ELSE status END,
-           finished_at,
-           'legacy_current'
-    FROM jobs
-    WHERE status IN (${TERMINAL_JOB_STATUSES_SQL}) AND finished_at IS NOT NULL;
-
-    DROP TRIGGER IF EXISTS trg_work_item_terminal_transition_insert;
-    DROP TRIGGER IF EXISTS trg_work_item_terminal_transition_update;
-    DROP TRIGGER IF EXISTS trg_job_terminal_transition_insert;
-    DROP TRIGGER IF EXISTS trg_job_terminal_transition_update;
-
-    CREATE TRIGGER trg_work_item_terminal_transition_insert
-    AFTER INSERT ON work_items
-    WHEN NEW.status IN ('complete','failed','canceled') AND NEW.completed_at IS NOT NULL
-    BEGIN
-      INSERT OR IGNORE INTO work_item_terminal_transitions (work_item_id, outcome, occurred_at, source)
-      VALUES (
-        NEW.id,
-        CASE NEW.status WHEN 'complete' THEN 'completed' ELSE NEW.status END,
-        NEW.completed_at,
-        'owner_transition'
-      );
-    END;
-
-    CREATE TRIGGER trg_work_item_terminal_transition_update
-    AFTER UPDATE OF status, completed_at ON work_items
-    WHEN NEW.status IN ('complete','failed','canceled') AND NEW.completed_at IS NOT NULL
-    BEGIN
-      INSERT OR IGNORE INTO work_item_terminal_transitions (work_item_id, outcome, occurred_at, source)
-      VALUES (
-        NEW.id,
-        CASE NEW.status WHEN 'complete' THEN 'completed' ELSE NEW.status END,
-        NEW.completed_at,
-        'owner_transition'
-      );
-    END;
-
-    CREATE TRIGGER trg_job_terminal_transition_insert
-    AFTER INSERT ON jobs
-    WHEN NEW.status IN (${TERMINAL_JOB_STATUSES_SQL}) AND NEW.finished_at IS NOT NULL
-    BEGIN
-      INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
-      VALUES (
-        NEW.id,
-        CASE WHEN NEW.status = 'dead_letter' THEN 'failed' ELSE NEW.status END,
-        NEW.finished_at,
-        'owner_transition'
-      );
-    END;
-
-    CREATE TRIGGER trg_job_terminal_transition_update
-    AFTER UPDATE OF status, finished_at ON jobs
-    WHEN NEW.status IN (${TERMINAL_JOB_STATUSES_SQL}) AND NEW.finished_at IS NOT NULL
-    BEGIN
-      INSERT OR IGNORE INTO job_terminal_transitions (job_id, outcome, occurred_at, source)
-      VALUES (
-        NEW.id,
-        CASE WHEN NEW.status = 'dead_letter' THEN 'failed' ELSE NEW.status END,
-        NEW.finished_at,
-        'owner_transition'
-      );
-    END;
-  `);
-}
-
 export function getDb() {
   const dbPath = path.resolve(getRuntimeDbPath());
   if (_db) {
@@ -1121,17 +903,7 @@ export function getDb() {
     `SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'`
   ).get();
 
-  if (!hasJobs) {
-    if (fs.existsSync(SCHEMA_PATH)) {
-      const schema = fs.readFileSync(SCHEMA_PATH, "utf-8");
-      _db.exec(schema);
-    } else {
-      throw new Error(
-        `Database has no tables and schema file not found at ${SCHEMA_PATH}. ` +
-        `Create the database first or check the configured runtime database path.`
-      );
-    }
-  }
+  if (!hasJobs) bootstrapFreshDatabase(_db);
 
   // ── Migrations for existing databases ──────────────────────────────────────
 

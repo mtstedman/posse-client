@@ -7,7 +7,6 @@
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
-import { getSchedulerLockInfo } from "../../queue/functions/locks.js";
 import {
   cleanupStaleFileLocks,
   expireStaleSessionLeases,
@@ -15,6 +14,7 @@ import {
   reconcileOrphanedAgentCalls,
   reconcileOrphanedAttempts,
   requeueOrphanedJobs,
+  getSchedulerLockInfo,
 } from "../../queue/functions/index.js";
 
 function post(message) {

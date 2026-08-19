@@ -1,4 +1,5 @@
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
+import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
 import {
   buildDisabledAtlasAttachment,
   buildAtlasMcpServerConfig,
@@ -10,7 +11,6 @@ import {
   buildDeterministicReadMcpServerConfigAsync,
   roleUsesDeterministicReadMcp,
 } from "../../../integrations/functions/deterministic-mcp.js";
-import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../integrations/functions/mcp-gateway.js";
 
 export async function buildClaudeAtlasMcpConfigPayloadAsync(role, cwd, { assignmentUnit = null, workItemId = null, disableAtlas = false, atlasConfig = null } = {}) {
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();

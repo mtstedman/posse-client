@@ -13,6 +13,7 @@ import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensRes
 import { createChainLedger } from "../../../../shared/tools/functions/chain-ledger.js";
 import { canonicalAtlasToolUseActionName, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { atlasSummaryHint, getObservationContext } from "../../../observability/functions/observations.js";
+import { AGENT_HANDOFF_PROTOCOL } from "../../../../catalog/handoff.js";
 import {
   recordAgentHandoffRejection,
   rejectAgentHandoffForLaterTool,
@@ -439,7 +440,7 @@ export function createStandardToolHandlerMap({
         if (preparedSubAgentHandoff) sealSubAgentHandoff(ambient.agent_call_id);
         return JSON.stringify({
           ok: true,
-          protocol: "posse.agent_handoff.v1",
+          protocol: AGENT_HANDOFF_PROTOCOL,
           status: receipt.status,
           digest: receipt.digest,
           call_count: receipt.callCount,

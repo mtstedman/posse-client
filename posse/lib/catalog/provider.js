@@ -5,6 +5,9 @@
 
 export const PROVIDER_OPTIONS = Object.freeze(["claude", "openai", "codex", "grok", "copilot", "posse-local"]);
 
+export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
+export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
+
 export const PROVIDER_LABELS = Object.freeze({
   claude: "Claude",
   openai: "OpenAI",

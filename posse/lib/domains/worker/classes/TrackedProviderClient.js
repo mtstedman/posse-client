@@ -6,6 +6,7 @@
 
 import crypto from "crypto";
 import path from "path";
+import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 import {
   completeAgentCall,
   createAgentCall,
@@ -1388,7 +1389,7 @@ export class TrackedProviderClient {
           summary: `Committed terminal agent handoff (${handoffFinalization.digest.slice(0, 12)})`,
           detail: {
             agent_call_id: agentCallId,
-            protocol: "posse.agent_handoff.v1",
+            protocol: AGENT_HANDOFF_PROTOCOL,
             digest: handoffFinalization.digest,
             packet_profile: handoffFinalization.packet?.profile || null,
             packet_outcome: handoffFinalization.packet?.outcome || null,

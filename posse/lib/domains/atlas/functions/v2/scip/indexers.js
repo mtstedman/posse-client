@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
 import { fileURLToPath } from "url";
+import { ATLAS_SOURCE_LANGUAGE_ORDER } from "../../../../../catalog/atlas.js";
 import { gitExecBuffer } from "../../../../git/functions/utils.js";
 import { languageForPath } from "../parse/language-buckets.js";
 import { normalizeScipLanguages } from "./languages.js";
@@ -863,7 +864,7 @@ function repoSourceLanguagesForExtensions(repoRoot, extensions) {
   return sortLanguageTags([...languages]);
 }
 
-const LANGUAGE_ORDER = ["ts", "js", "py", "php", "go", "rs", "java", "kt", "cs", "c", "cpp", "sh"];
+const LANGUAGE_ORDER = ATLAS_SOURCE_LANGUAGE_ORDER;
 function sortLanguageTags(values) {
   return values.sort((a, b) => {
     const ai = LANGUAGE_ORDER.indexOf(a);

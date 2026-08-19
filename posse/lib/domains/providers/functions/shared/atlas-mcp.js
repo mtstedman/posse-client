@@ -1,5 +1,5 @@
 import { isFallbackAtlasPrefetchStatus } from "../../../integrations/functions/deterministic-mcp/gate.js";
-import { POSSE_MCP_GATEWAY_TRANSPORT } from "../../../integrations/functions/mcp-gateway.js";
+import { POSSE_MCP_GATEWAY_TRANSPORT } from "../../../../catalog/mcp.js";
 
 const PROVIDER_VISIBLE_ATLAS_MCP_TRANSPORTS = new Set([
   "mcp",

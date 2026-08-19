@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  REMOTE_ARTIFACTS_READ_ROUTE,
   VALID_BINARY_NAMES,
   nativeBinaryEntry,
 } from "../../../catalog/binary.js";
@@ -18,7 +19,7 @@ import {
 } from "./artifact-layout.js";
 
 export const NATIVE_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
-const ARTIFACT_ROUTE_GRANT = "artifacts:read";
+const ARTIFACT_ROUTE_GRANT = REMOTE_ARTIFACTS_READ_ROUTE;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const ERROR_RESPONSE_MAX_BYTES = 4 * 1024;
 

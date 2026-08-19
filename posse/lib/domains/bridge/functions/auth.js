@@ -2,7 +2,11 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
-import { BRIDGE_HEALTH_PROOF_CONTEXT } from "../../../catalog/bridge.js";
+import {
+  BRIDGE_HEALTH_PROOF_CONTEXT,
+  BRIDGE_PORT_SCAN_END,
+  BRIDGE_PORT_SCAN_START,
+} from "../../../catalog/bridge.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   claimAccountSettingIfAbsent,
@@ -19,8 +23,7 @@ const DEFAULT_RELAY_WS_URL = "wss://app.yourposseai.com/v1/instance";
 // Port scan range when no repo port is persisted. Two repos serving
 // concurrently land on consecutive ports; the winner is persisted so the
 // port stays stable for LAN clients across restarts.
-export const BRIDGE_PORT_SCAN_START = 7531;
-export const BRIDGE_PORT_SCAN_END = 7551;
+export { BRIDGE_PORT_SCAN_END, BRIDGE_PORT_SCAN_START } from "../../../catalog/bridge.js";
 
 function randomToken() {
   return crypto.randomBytes(TOKEN_BYTES).toString("base64url");

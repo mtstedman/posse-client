@@ -9,11 +9,16 @@
 //      the Rust method and the matching Node body is deleted in the same change.
 
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
+import {
+  GIT_MUTATE_ROUTE,
+  GIT_NATIVE_PROTOCOL,
+  GIT_READ_ROUTE,
+} from "../../../../catalog/binary.js";
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 
-export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
+export { GIT_NATIVE_PROTOCOL } from "../../../../catalog/binary.js";
 
 /**
  * Resolve the heartbeat auth envelope for FAILURE TELEMETRY only. The request
@@ -234,8 +239,7 @@ const WORKER_ELIGIBLE_METHODS = new Set([
   "git.history",
 ]);
 
-export const GIT_READ_ROUTE = "git:read";
-export const GIT_MUTATE_ROUTE = "git:mutate";
+export { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../../catalog/binary.js";
 
 // This allowlist mirrors every statically read-only arm in posse-git's
 // dispatch_git_method. Payload-sensitive methods are handled separately and

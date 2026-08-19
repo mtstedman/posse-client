@@ -4,7 +4,6 @@
 
 import path from "path";
 import fs from "fs";
-import { spawn, spawnSync } from "child_process";
 import {
   acquireAssessmentBarrier,
   beginAttachedAssessmentAttempt,
@@ -95,6 +94,10 @@ import {
   recordAssessmentBoundaryEvent,
   renderAssessmentTaskBoundary,
 } from "./assessment-task-boundary.js";
+import {
+  killShellCommandProcessTree as killShellCommandProcessTreeImpl,
+  runShellCommandAsync as runShellCommandAsyncImpl,
+} from "./assessment-runner.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -1721,72 +1724,16 @@ function getWorkerProviderCall(worker) {
   return call.bind(worker.providerClient);
 }
 
-function killShellCommandProcessTree(child, { platform = process.platform, spawnSyncImpl = spawnSync } = {}) {
-  if (platform === "win32" && child?.pid) {
-    try {
-      const result = spawnSyncImpl("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      if (!result || result.status === 0) return true;
-    } catch {
-      // Fall back to killing the shell wrapper below.
-    }
-  }
-  try { return !!child?.kill?.(); } catch { return false; }
+function killShellCommandProcessTree(child, options = {}) {
+  return killShellCommandProcessTreeImpl(child, options);
 }
 
 export function __testKillShellCommandProcessTree(child, opts = {}) {
   return killShellCommandProcessTree(child, opts);
 }
 
-function runShellCommandAsync(command, { cwd, timeoutMs = 120000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      killShellCommandProcessTree(child);
-      const err = new Error(`Command timed out after ${timeoutMs}ms`);
-      err.code = "ETIMEDOUT";
-      err.stdout = stdout;
-      err.stderr = stderr;
-      reject(err);
-    }, Math.max(1000, Number(timeoutMs) || 120000));
-
-    child.stdout?.on("data", (chunk) => { stdout += String(chunk || ""); });
-    child.stderr?.on("data", (chunk) => { stderr += String(chunk || ""); });
-    child.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      err.stdout = stdout;
-      err.stderr = stderr;
-      reject(err);
-    });
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ stdout, stderr, code });
-      } else {
-        const err = new Error(`Command exited with code ${code}${stderr.trim() ? `: ${stderr.trim().split("\n")[0]}` : ""}`);
-        err.code = code;
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
-      }
-    });
-  });
+function runShellCommandAsync(command, options = {}) {
+  return runShellCommandAsyncImpl(command, options);
 }
 
 export async function runPinnedTaskAbAssessmentCommand(payload = {}, {

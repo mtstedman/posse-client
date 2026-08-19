@@ -15,12 +15,14 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
-import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
+import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  MCP_SESSION_RELEASED_NOTIFICATION,
+} from "../../../catalog/mcp.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
-  DEFAULT_MCP_OAUTH_TTL_SECONDS,
   mintMcpOAuthTokenForBootConfig,
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";

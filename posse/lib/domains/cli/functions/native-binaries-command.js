@@ -1,11 +1,15 @@
 // Machine-facing native artifact reconciliation for Bossy's boot window.
 // One JSON object is emitted per line so progress remains streamable while all
 // catalog binaries reconcile concurrently inside the shared manager.
-import { BINARY_NAMES, nativeBinaryEntry } from "../../../catalog/binary.js";
+import {
+  BINARY_NAMES,
+  NATIVE_UPDATE_PROTOCOL,
+  nativeBinaryEntry,
+} from "../../../catalog/binary.js";
 import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
 
 function writeEvent(event, log) {
-  log(JSON.stringify({ protocol: "posse.native_update.v1", ...event }));
+  log(JSON.stringify({ protocol: NATIVE_UPDATE_PROTOCOL, ...event }));
 }
 
 export async function cmdNativeBinaries({

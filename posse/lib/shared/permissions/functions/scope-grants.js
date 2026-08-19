@@ -1,5 +1,7 @@
 // @ts-check
 
+import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
+
 /**
  * Whether one parent scope authorizes one requested child scope. This is the
  * canonical implication rule used by both pulse validation and capability
@@ -14,7 +16,7 @@ export function scopeGrants(parentScope, requestedScope) {
   if (!parent || !requested) return false;
   return parent === "*"
     || parent === requested
-    || (parent === "git:mutate" && requested === "git:read");
+    || (parent === GIT_MUTATE_ROUTE && requested === GIT_READ_ROUTE);
 }
 
 /** @param {readonly string[]} parentScopes @param {string} requestedScope */

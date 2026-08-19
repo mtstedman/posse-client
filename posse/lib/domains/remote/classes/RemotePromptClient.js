@@ -1,5 +1,10 @@
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import {
+  REMOTE_CATALOG_READ_ROUTE,
+  REMOTE_PROMPTS_BUNDLE_ROUTE,
+  REMOTE_PROMPTS_COMPILE_ROUTE,
+} from "../../../catalog/binary.js";
+import {
   HeartbeatAuthManager,
   heartbeatAuthManager,
 } from "../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -328,14 +333,14 @@ function sleep(ms) {
 
 function requiredRouteFor(path, method, body = undefined) {
   const key = `${String(method || "GET").toUpperCase()} ${String(path || "")}`;
-  if (key === "POST /v1/prompts/compile") return "prompts:compile";
-  if (key === "GET /v1/prompts/bundle") return "prompts:bundle";
+  if (key === "POST /v1/prompts/compile") return REMOTE_PROMPTS_COMPILE_ROUTE;
+  if (key === "GET /v1/prompts/bundle") return REMOTE_PROMPTS_BUNDLE_ROUTE;
   if (key === "POST /v1/catalog/tool-surface") {
-    return body?.mcp_oauth?.requested === true ? "prompts:compile" : "catalog:read";
+    return body?.mcp_oauth?.requested === true ? REMOTE_PROMPTS_COMPILE_ROUTE : REMOTE_CATALOG_READ_ROUTE;
   }
   if (key === "GET /v1/catalog/tool-suites"
     || key === "GET /v1/catalog/tools"
-    || key === "GET /v1/catalog/models") return "catalog:read";
+    || key === "GET /v1/catalog/models") return REMOTE_CATALOG_READ_ROUTE;
   return null;
 }
 

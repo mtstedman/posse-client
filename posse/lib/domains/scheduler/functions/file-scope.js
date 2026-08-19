@@ -1,5 +1,4 @@
-import { getWorkItem } from "../../queue/functions/index.js";
-import { parseJobPayload } from "../../queue/functions/payload.js";
+import { getWorkItem, parseJobPayload } from "../../queue/functions/index.js";
 import { Scope } from "../../../shared/scope/classes/Scope.js";
 import { isUnderRoot, normPath, rootsOverlap } from "../../../shared/scope/functions/path.js";
 

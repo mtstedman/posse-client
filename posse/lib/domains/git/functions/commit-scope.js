@@ -20,6 +20,7 @@ import { MutationPolicy } from "../../../shared/scope/classes/MutationPolicy.js"
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { UNSCOPED_GIT_ADD_TASK_MODES } from "../../../catalog/artifact.js";
+import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { runGitNativeMethod } from "./native/invoke.js";
 import {
   classifyScopedCommit,
@@ -325,7 +326,7 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
   const style = getGitCommitStyle(opts?.projectDir || cwd);
   const runWorker = async (workerOpts) => {
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
-      routesByBinary: { git: ["git:read", "git:mutate"] },
+      routesByBinary: { git: [GIT_READ_ROUTE, GIT_MUTATE_ROUTE] },
     });
     return await GIT_COMMIT_THREAD_MANAGER.run(new URL("./commit-worker.js", import.meta.url), {
       label: "git commit worker",

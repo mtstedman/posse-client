@@ -7,17 +7,30 @@
 // a worker host lost mid-write reports instead of transparently retrying a
 // write that may already have committed.
 
+import {
+  ATLAS_LEDGER_ENSURE_METHOD,
+  ATLAS_LEDGER_WRITE_METHOD,
+  ATLAS_STORAGE_CACHE_INVALIDATE_METHOD,
+  ATLAS_STORAGE_CACHE_STATS_METHOD,
+  ATLAS_STORAGE_CONTRACT_VERSION,
+  ATLAS_VIEW_APPLY_METHOD,
+  ATLAS_VIEW_BUILD_METHOD,
+  ATLAS_VIEW_CLONE_METHOD,
+  ATLAS_VIEW_PATCH_META_METHOD,
+} from "../../../../../catalog/atlas.js";
 import { runAtlasNativeMethodAsync } from "./invoke.js";
 
-export const ATLAS_STORAGE_CONTRACT_VERSION = 1;
-export const ATLAS_LEDGER_ENSURE_METHOD = "ledger-ensure";
-export const ATLAS_LEDGER_WRITE_METHOD = "ledger-write";
-export const ATLAS_VIEW_BUILD_METHOD = "view-build";
-export const ATLAS_VIEW_APPLY_METHOD = "view-apply";
-export const ATLAS_VIEW_CLONE_METHOD = "view-clone";
-export const ATLAS_VIEW_PATCH_META_METHOD = "view-patch-meta";
-export const ATLAS_STORAGE_CACHE_STATS_METHOD = "storage-cache-stats";
-export const ATLAS_STORAGE_CACHE_INVALIDATE_METHOD = "storage-cache-invalidate";
+export {
+  ATLAS_LEDGER_ENSURE_METHOD,
+  ATLAS_LEDGER_WRITE_METHOD,
+  ATLAS_STORAGE_CACHE_INVALIDATE_METHOD,
+  ATLAS_STORAGE_CACHE_STATS_METHOD,
+  ATLAS_STORAGE_CONTRACT_VERSION,
+  ATLAS_VIEW_APPLY_METHOD,
+  ATLAS_VIEW_BUILD_METHOD,
+  ATLAS_VIEW_CLONE_METHOD,
+  ATLAS_VIEW_PATCH_META_METHOD,
+} from "../../../../../catalog/atlas.js";
 
 export function ensureLedgerNativeAsync(ledgerPath, opts = {}) {
   return runAtlasNativeMethodAsync(ATLAS_LEDGER_ENSURE_METHOD, { ledger_path: ledgerPath }, {

@@ -12,19 +12,10 @@
 import crypto from "crypto";
 import { spawn } from "child_process";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
-import { parseJobPayload } from "../../queue/functions/payload.js";
-import {
-  DEADLOCK_TERMINAL_STATUSES,
-  LOCK_HOLDING_JOB_STATUSES,
-  TERMINAL_JOB_STATUSES,
-  isPushOfferJob,
-  runImmediateTransaction,
-} from "../../queue/functions/common.js";
 import {
   addCrossWiMergeDependency,
   ancestorJobIdsForJob,
   queuedCohortJobIdsForJob,
-  findRunnableJob,
   findRunnableJobsBatch,
   getLeaseManager,
   cancelDeadlockedJobsAtomic,
@@ -58,6 +49,13 @@ import {
   onQueueStateChanged,
   reconcileFileLaneWaits,
   recordFileLaneWait,
+  parseJobPayload,
+  runImmediateTransaction,
+  RUNTIME_STATUS_KEYS,
+  clearRuntimeStatus,
+  isBridgePresenceFresh,
+  readRuntimeStatus,
+  writeRuntimeStatus,
   waitForQueueStateChangeAfter,
 } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -76,13 +74,6 @@ import {
 import { maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { describeModelCatalogWarning } from "../../providers/functions/model-catalog-validate.js";
-import {
-  RUNTIME_STATUS_KEYS,
-  clearRuntimeStatus,
-  isBridgePresenceFresh,
-  readRuntimeStatus,
-  writeRuntimeStatus,
-} from "../../queue/functions/runtime-status.js";
 import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.js";
 import { yieldNow } from "../../runtime/functions/yield.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
@@ -93,7 +84,12 @@ import {
   providerAuthLivenessProbe,
   workspaceHealthProbeAsync,
 } from "../../system/functions/preflight-probes.js";
-import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
+import {
+  BACKGROUND_JOB_TYPES,
+  DEADLOCK_TERMINAL_STATUSES,
+  LOCK_HOLDING_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES,
+} from "../../../catalog/job.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
@@ -133,6 +129,8 @@ import {
   recoverOrphanedReviewJobs,
 } from "../functions/headless-recovery.js";
 import { SchedulerLockLease } from "./SchedulerLockLease.js";
+import { SchedulerDispatchPlanner } from "./SchedulerDispatchPlanner.js";
+import { SchedulerLockController } from "./SchedulerLockController.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const SCHEDULER_BOOT_MAINTENANCE_WORKER_URL = new URL("../functions/boot-maintenance-worker.js", import.meta.url);
@@ -186,6 +184,12 @@ const SYSTEM_HOLD_HOLDER_TYPES = new Set(["atlas_indexing", "atlas_warm"]);
 
 function isRunBackgroundJob(job) {
   return RUN_BACKGROUND_JOB_TYPES.has(job?.job_type);
+}
+
+function isPushOfferJob(job) {
+  return job?.job_type === "human_input"
+    && typeof job.payload_json === "string"
+    && job.payload_json.includes('"subtype":"push_offer"');
 }
 
 function atlasIndexingPauseEnabledFromEnv() {
@@ -509,6 +513,11 @@ export class Scheduler {
     // entirely when nothing in the queue has changed.
     this._nextReadyAtCacheGeneration = -1;
     this._nextReadyAtCacheMs = null;
+
+    // These collaborators own substantive lock and dispatch policy; boot and
+    // loop orchestration stay here until they have independent behavior.
+    this._lockController = new SchedulerLockController(this);
+    this._dispatchPlanner = new SchedulerDispatchPlanner(this);
   }
 
   _isJobInRunScope(job) {
@@ -708,59 +717,23 @@ export class Scheduler {
   }
 
   _maybeLogSchedulerLockStarvation(nowMs = Date.now()) {
-    this.schedulerLock.maybeLogStarvation(nowMs);
+    this._lockController.maybeLogStarvation(nowMs);
   }
 
   _stopForSchedulerLockLoss(message, { eventType = null, eventJson = null } = {}) {
-    this._log(message, "red");
-    this._lockLost = true;
-    this._running = false;
-    this.schedulerLock.stopRenewal();
-    if (eventType) {
-      logEvent({
-        event_type: eventType,
-        actor_type: EVENT_ACTORS.SCHEDULER,
-        actor_id: this.ownerId,
-        message,
-        ...(eventJson ? { event_json: eventJson } : {}),
-      });
-    }
-    this._abortActiveWorkersForLockLoss();
-    this._wakeSleeps();
+    this._lockController.stopForLoss(message, { eventType, eventJson });
   }
 
   _renewSchedulerLock() {
-    if (!this._running) return false;
-    return this.schedulerLock.renewNow();
+    return this._lockController.renew();
   }
 
   _abortActiveWorkersForLockLoss() {
-    const activeWorkers = this._activeRunWorkers;
-    if (!activeWorkers || activeWorkers.size === 0) return;
-
-    const abortedIds = [];
-    for (const [jobId, entry] of activeWorkers) {
-      if (this._lockLostKilledJobIds.has(jobId)) continue;
-      this._lockLostKilledJobIds.add(jobId);
-      abortedIds.push(jobId);
-      logEvent({
-        job_id: jobId,
-        work_item_id: entry?.job?.work_item_id || null,
-        event_type: EVENT_TYPES.SCHEDULER_LOCK_LOST_WORKER_ABORT,
-        actor_type: EVENT_ACTORS.SCHEDULER,
-        actor_id: this.ownerId,
-        message: "Scheduler lock lost; aborting active worker to avoid duplicate execution",
-      });
-      this._invokeCallback("onKillJob", this._lockLossKillCallback, jobId, "scheduler_lock_lost");
-    }
-
-    if (abortedIds.length > 0) {
-      this._log(`Lock lost — sent abort to ${abortedIds.length} active worker(s): ${abortedIds.join(", ")}`, "red");
-    }
+    this._lockController.abortActiveWorkers();
   }
 
   _startLockRenewal() {
-    return this.schedulerLock.startRenewal();
+    return this._lockController.startRenewal();
   }
 
   _invokeCallback(name, fn, ...args) {
@@ -779,29 +752,7 @@ export class Scheduler {
    * null if dispatch is currently held.
    */
   _nextDispatchableJobForTick() {
-    this._refreshRuntimeSettings();
-    // 1. Requeue any expired leases
-    const requeued = this.leaseManager.requeueExpired();
-    if (requeued > 0) {
-      this._log(`Requeued ${requeued} expired lease(s)`);
-    }
-    const expiredSessionLeases = expireStaleSessionLeases();
-    if (expiredSessionLeases > 0) {
-      this._log(`Released ${expiredSessionLeases} stale session lease(s)`);
-    }
-
-    // 2. Deadlock detection
-    this._cancelDeadlockedJobs();
-
-    // 2b. Hold non-warm dispatch while the ATLAS conductor is mid-(re)index.
-    const atlasIndexingHold = this._atlasIndexingDispatchHold();
-
-    // 3. Find next runnable job
-    const job = findRunnableJob();
-    if (!job) return null;
-    if (atlasIndexingHold && !ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES.has(job.job_type)) return null;
-
-    return job;
+    return this._dispatchPlanner.nextJob();
   }
 
   /**
@@ -809,18 +760,7 @@ export class Scheduler {
    * Returns a leased job or null.
    */
   tick() {
-    const job = this._nextDispatchableJobForTick();
-    if (!job) return null;
-
-    // 4. Lease it
-    const lease = this.leaseManager.acquireWithLocks(job, this.ownerId, null, this.leaseSec);
-    if (!lease) {
-      // Race condition: someone else got it
-      return null;
-    }
-
-    // Return the job with lease info attached
-    return { ...job, _leaseToken: lease.leaseToken };
+    return this._dispatchPlanner.tick();
   }
 
   /**
@@ -829,12 +769,7 @@ export class Scheduler {
    * The long-running scheduler loop already passes explicit parsed scopes.
    */
   async tickAsync() {
-    const job = this._nextDispatchableJobForTick();
-    if (!job) return null;
-
-    const lease = await this.leaseManager.acquireWithLocksAsync(job, this.ownerId, null, this.leaseSec);
-    if (!lease) return null;
-    return { ...job, _leaseToken: lease.leaseToken };
+    return this._dispatchPlanner.tickAsync();
   }
 
   /**

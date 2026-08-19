@@ -20,6 +20,7 @@ import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/revi
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { composeInstanceStatus } from "./instance-status.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
+import { BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "./gate-contract.js";
 import { buildReviewBrief } from "./review-brief.js";
 
@@ -30,7 +31,7 @@ const MAX_GATE_OPTIONS = 20;
 const MAX_GATE_OPTION_VALUE_CHARS = 128;
 const MAX_GATE_OPTION_LABEL_CHARS = 200;
 const MAX_UNMERGED_WORK_ITEMS = 20;
-const OPEN_GATE_STATUSES = new Set(["queued", "waiting_on_human"]);
+const OPEN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 

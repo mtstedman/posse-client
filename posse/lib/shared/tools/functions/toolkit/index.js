@@ -3,13 +3,7 @@ import fs from "fs";
 import path from "path";
 import { execSync, spawnSync } from "child_process";
 
-import { nativeReadResultStats, recordToolInvocation } from "../../../../domains/observability/functions/observations.js";
 import { guardToolWriteLock } from "../../../../domains/queue/functions/write-lock-guard.js";
-import { isInsideRoot, realpathExistingPrefix } from "../../../../domains/runtime/functions/fs-safety.js";
-import {
-  isSensitiveEnvFileOrTargetPath,
-  isSensitiveEnvFilePath,
-} from "../../../../domains/runtime/functions/sensitive-paths.js";
 import { createInspectFileExecutor } from "../../../../domains/worker/functions/helpers/file-inspector.js";
 import { createGitHistoryExecutor } from "../../../../domains/git/functions/history.js";
 import { createPullBriefExecutor, createGetBriefExecutor } from "./brief.js";
@@ -37,17 +31,24 @@ import {
   parseRipgrepJsonMatches,
   resolveRipgrepCommand,
 } from "./ripgrep.js";
+import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
 import {
-  declaredScopeFiles,
-  runScopedChecks,
-} from "./scoped-runners.js";
-import { normalizeDisplaySlashes, sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
+  agentHiddenPathError,
+  agentHiddenPathReasonForAbsolute,
+  buildScopePredicates,
+  isSensitiveEnvFileOrTargetPath,
+  isSensitiveEnvFilePath,
+  safePath,
+  splitShellSubcommands,
+} from "./path-policy.js";
+import { createTestExecutionExecutors } from "./test-execution.js";
+import { createObservationWrapper } from "./factory.js";
+import { createTextMutationHelpers } from "./edits-mutations.js";
 import {
-  createRegisteredTest,
-  createRegisteredTestSuite,
-  runRegisteredTest,
-  runRegisteredTestSuite,
-} from "./registered-tests.js";
+  buildStructuredReadResult as buildStructuredReadResultFromModule,
+  hasStructuredReadOptions as hasStructuredReadOptionsFromModule,
+  splitEditableLines as splitEditableLinesFromModule,
+} from "./structured-read.js";
 import {
   TOOL_CREATE_TEST,
   TOOL_CREATE_TEST_SUITE,
@@ -77,8 +78,6 @@ import {
   validateManifestAgainstContract,
 } from "../../../../domains/artifacts/functions/index.js";
 import { normPath, resolvePathWithin } from "../../../scope/functions/path.js";
-import { MutationPolicy, splitShellSubcommands as policySplitShellSubcommands } from "../../../scope/classes/MutationPolicy.js";
-import { agentHiddenReadablePathReason } from "../../../scope/functions/agent-hidden-paths.js";
 
 const READ_FILE_DEFAULT_LIMIT = 2000;
 const READ_FILE_MAX_SIZE_BYTES = 5 * 1024 * 1024;
@@ -434,72 +433,12 @@ const SEARCH_DEFAULT_HEAD_LIMIT = 100;
 const SEARCH_MAX_HEAD_LIMIT = 500;
 const SEARCH_RIPGREP_MAX_BUFFER = 32 * 1024 * 1024;
 const SEARCH_RIPGREP_TIMEOUT_MS = 30_000;
-const PRIVATE_WORKSPACE_DOT_DIRS = new Set([".git", ".claude", ".codex", ".posse-worktrees", ".posse-test-suites"]);
-const PRIVATE_POSSE_ROOTS = new Set([
-  "agent-loaders",
-  "db",
-  "logs",
-  "mcp",
-  "research-state",
-  "atlas",
-]);
-
-
-
-export function safePath(cwd, filePath, scopePredicates = null) {
-  const resolved = path.resolve(cwd, filePath);
-  const realCwd = realpathExistingPrefix(cwd);
-  const realResolved = realpathExistingPrefix(resolved);
-  const withinCwd = isInsideRoot(realResolved, realCwd, { followSymlinks: false });
-  if (!withinCwd && !scopePredicates?.isWithinScopeRoot(realResolved)) {
-    throw new Error(`Path escapes working directory: ${filePath}`);
-  }
-  if (withinCwd && isPrivateWorkspacePath(realCwd, realResolved)) {
-    throw new Error(`Access to private workspace metadata is blocked: ${filePath}`);
-  }
-  return resolved;
-}
-
-function isPrivateWorkspacePath(realCwd, resolvedPath) {
-  const rel = normalizeDisplaySlashes(path.relative(realCwd, resolvedPath));
-  if (!rel || rel === ".") return false;
-  const parts = rel.split("/").filter(Boolean);
-  const first = parts[0];
-  if (PRIVATE_WORKSPACE_DOT_DIRS.has(first)) return true;
-  if (first === ".posse") {
-    // Artifact/resources paths are explicit job outputs. Runtime metadata is not
-    // part of the agent-visible workspace.
-    if (parts[1] === "resources") return false;
-    if (!parts[1] || PRIVATE_POSSE_ROOTS.has(parts[1])) return true;
-    return true;
-  }
-  return false;
-}
-
-function agentHiddenPathReasonForAbsolute(cwd, resolvedPath) {
-  const rel = normalizeDisplaySlashes(path.relative(cwd, resolvedPath));
-  return agentHiddenReadablePathReason(rel);
-}
-
-function agentHiddenPathError(cwd, resolvedPath, displayPath) {
-  const reason = agentHiddenPathReasonForAbsolute(cwd, resolvedPath);
-  return reason ? `Access to hidden workspace path is blocked: ${displayPath} (${reason}).` : null;
-}
-
-export function buildScopePredicates(cwd, scope) {
-  return MutationPolicy.fromScopeSpec(scope, { cwd }).toToolkitPredicates();
-}
-
-export function splitShellSubcommands(command) {
-  return policySplitShellSubcommands(command);
-}
-
-
-
-
 export {
+  buildScopePredicates,
   isSensitiveEnvFileOrTargetPath,
   isSensitiveEnvFilePath,
+  safePath,
+  splitShellSubcommands,
 };
 
 function toNonNegativeInt(value, fallback = 0) {
@@ -530,25 +469,10 @@ export function createDeterministicToolkit({
   if (typeof spawnSyncImpl !== "function") {
     throw new Error("createDeterministicToolkit requires a spawnSync function");
   }
+  const testExecution = createTestExecutionExecutors();
+  const { writeTextFileAtomic, setFileExecutable } = createTextMutationHelpers();
 
-  function wrapDeterministicExecutor(toolName, execFn) {
-    if (skipObservationLogging) return execFn;
-    return function wrappedDeterministicExecutor(args, cwd, scopePredicates, ...rest) {
-      const result = execFn(args, cwd, scopePredicates, ...rest);
-      if (result && typeof result.then === "function") {
-        return result.then((resolved) => {
-          if (isSuccessfulToolResult(resolved)) {
-            recordToolInvocation({ tool: toolName, input: args, cwd, extraDetail: nativeReadResultStats(toolName, resolved) });
-          }
-          return resolved;
-        });
-      }
-      if (isSuccessfulToolResult(result)) {
-        recordToolInvocation({ tool: toolName, input: args, cwd, extraDetail: nativeReadResultStats(toolName, result) });
-      }
-      return result;
-    };
-  }
+  const wrapDeterministicExecutor = createObservationWrapper({ skipObservationLogging });
 
   function execReadFile(args, cwd, scopePredicates) {
     let filePath;
@@ -571,7 +495,7 @@ export function createDeterministicToolkit({
     }
 
     const content = fs.readFileSync(filePath, "utf-8");
-    const { lines } = splitEditableLines(content);
+    const { lines } = splitEditableLinesFromModule(content);
     const offset = Math.max(0, toPositiveInt(args.offset, 1) - 1);
     const limit = toPositiveInt(args.limit, READ_FILE_DEFAULT_LIMIT);
     const selected = lines.slice(offset, offset + limit);
@@ -579,8 +503,8 @@ export function createDeterministicToolkit({
       return `File has ${lines.length} lines. Requested offset ${offset + 1} is beyond end of file.`;
     }
     const remaining = lines.length - offset - limit;
-    if (hasStructuredReadOptions(args)) {
-      return buildStructuredReadResult({
+    if (hasStructuredReadOptionsFromModule(args)) {
+      return buildStructuredReadResultFromModule({
         args,
         displayPath: args.path,
         content,
@@ -593,28 +517,6 @@ export function createDeterministicToolkit({
     }
     const numbered = formatNumberedLines(selected, offset + 1);
     return numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : "");
-  }
-
-  function writeTextFileAtomic(filePath, content) {
-    const tempPath = tempSiblingPath(filePath, "");
-    try {
-      const existing = fs.statSync(filePath, { throwIfNoEntry: false });
-      fs.writeFileSync(tempPath, content, "utf-8");
-      if (existing) fs.chmodSync(tempPath, existing.mode);
-      fs.renameSync(tempPath, filePath);
-    } catch {
-      // Rename can fail when the target is open/locked (Windows); fall back
-      // to the in-place write so the failure mode is no worse than before.
-      removeFileBestEffort(tempPath);
-      fs.writeFileSync(filePath, content, "utf-8");
-    }
-  }
-
-  function setFileExecutable(filePath, executable) {
-    const stat = fs.statSync(filePath);
-    const permissions = stat.mode & 0o7777;
-    const nextPermissions = executable ? permissions | 0o111 : permissions & ~0o111;
-    if (nextPermissions !== permissions) fs.chmodSync(filePath, nextPermissions);
   }
 
   function execWriteFile(args, cwd, scopePredicates) {
@@ -2053,73 +1955,6 @@ export function createDeterministicToolkit({
     }, null, 2);
   }
 
-  function execRunScopedChecks(args, cwd, _scopePredicates, declaredScope = {}) {
-    try {
-      return JSON.stringify(runScopedChecks({ args: args || {}, cwd, declaredScope }), null, 2);
-    } catch (err) {
-      return `Error: run_scoped_checks failed - ${err?.message || String(err)}`;
-    }
-  }
-
-  function actorFromOptions(options = {}) {
-    return {
-      role: options.role || null,
-      jobId: options.jobId || null,
-      workItemId: options.workItemId || null,
-    };
-  }
-
-  function execCreateTestSuite(args, cwd, _scopePredicates, _declaredScope = {}, options = {}) {
-    try {
-      return JSON.stringify(createRegisteredTestSuite({
-        args: args || {},
-        cwd,
-        actor: actorFromOptions(options),
-      }), null, 2);
-    } catch (err) {
-      return `Error: create_test_suite failed - ${err?.message || String(err)}`;
-    }
-  }
-
-  function execCreateTest(args, cwd, _scopePredicates, _declaredScope = {}, options = {}) {
-    try {
-      return JSON.stringify(createRegisteredTest({
-        args: args || {},
-        cwd,
-        actor: actorFromOptions(options),
-        scopeFiles: declaredScopeFiles(cwd, _declaredScope),
-      }), null, 2);
-    } catch (err) {
-      return `Error: create_test failed - ${err?.message || String(err)}`;
-    }
-  }
-
-  function execRunTest(args, cwd, _scopePredicates, _declaredScope = {}, options = {}) {
-    try {
-      return JSON.stringify(runRegisteredTest({
-        args: args || {},
-        cwd,
-        actor: actorFromOptions(options),
-        scopeFiles: declaredScopeFiles(cwd, _declaredScope),
-      }), null, 2);
-    } catch (err) {
-      return `Error: run_test failed - ${err?.message || String(err)}`;
-    }
-  }
-
-  function execRunTestSuite(args, cwd, _scopePredicates, _declaredScope = {}, options = {}) {
-    try {
-      return JSON.stringify(runRegisteredTestSuite({
-        args: args || {},
-        cwd,
-        actor: actorFromOptions(options),
-        scopeFiles: declaredScopeFiles(cwd, _declaredScope),
-      }), null, 2);
-    } catch (err) {
-      return `Error: run_test_suite failed - ${err?.message || String(err)}`;
-    }
-  }
-
   return {
     execReadFile: wrapDeterministicExecutor("read_file", execReadFile),
     execWriteFile: wrapDeterministicExecutor("write_file", execWriteFile),
@@ -2142,11 +1977,11 @@ export function createDeterministicToolkit({
     execReencodeImage: wrapDeterministicExecutor("reencode_image", execReencodeImage),
     execCleanImage: wrapDeterministicExecutor("clean_image", execCleanImage),
     execExtractImageText: wrapDeterministicExecutor("extract_image_text", execExtractImageText),
-    execRunScopedChecks: wrapDeterministicExecutor("run_scoped_checks", execRunScopedChecks),
-    execCreateTestSuite: wrapDeterministicExecutor("create_test_suite", execCreateTestSuite),
-    execCreateTest: wrapDeterministicExecutor("create_test", execCreateTest),
-    execRunTest: wrapDeterministicExecutor("run_test", execRunTest),
-    execRunTestSuite: wrapDeterministicExecutor("run_test_suite", execRunTestSuite),
+    execRunScopedChecks: wrapDeterministicExecutor("run_scoped_checks", testExecution.execRunScopedChecks),
+    execCreateTestSuite: wrapDeterministicExecutor("create_test_suite", testExecution.execCreateTestSuite),
+    execCreateTest: wrapDeterministicExecutor("create_test", testExecution.execCreateTest),
+    execRunTest: wrapDeterministicExecutor("run_test", testExecution.execRunTest),
+    execRunTestSuite: wrapDeterministicExecutor("run_test_suite", testExecution.execRunTestSuite),
     execPullBrief: wrapDeterministicExecutor("pull_brief", createPullBriefExecutor(safePathImpl, { skipDirs })),
     execGetBrief: wrapDeterministicExecutor("get_brief", createGetBriefExecutor()),
   };

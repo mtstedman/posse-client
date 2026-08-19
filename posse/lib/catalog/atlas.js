@@ -74,6 +74,20 @@ export const ATLAS_SCIP_LANGUAGE_VALUES = Object.freeze(ATLAS_SCIP_LANGUAGE_OPTI
 export const ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES = Object.freeze(["typescript", "python", "php"]);
 export const VALID_ATLAS_SCIP_LANGUAGES = new Set(ATLAS_SCIP_LANGUAGE_VALUES);
 
+export const ATLAS_SOURCE_LANGUAGE_ORDER = Object.freeze([
+  "ts", "js", "py", "php", "go", "rs", "java", "kt", "cs", "c", "cpp", "sh",
+]);
+
+export const ATLAS_STORAGE_CONTRACT_VERSION = 1;
+export const ATLAS_LEDGER_ENSURE_METHOD = "ledger-ensure";
+export const ATLAS_LEDGER_WRITE_METHOD = "ledger-write";
+export const ATLAS_VIEW_BUILD_METHOD = "view-build";
+export const ATLAS_VIEW_APPLY_METHOD = "view-apply";
+export const ATLAS_VIEW_CLONE_METHOD = "view-clone";
+export const ATLAS_VIEW_PATCH_META_METHOD = "view-patch-meta";
+export const ATLAS_STORAGE_CACHE_STATS_METHOD = "storage-cache-stats";
+export const ATLAS_STORAGE_CACHE_INVALIDATE_METHOD = "storage-cache-invalidate";
+
 export const ATLAS_ROLE_ORDER = Object.freeze([
   "researcher",
   "planner",

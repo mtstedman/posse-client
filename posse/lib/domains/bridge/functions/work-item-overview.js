@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { BRIDGE_NON_AGENT_JOB_TYPES } from "../../../catalog/bridge.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
@@ -27,7 +28,7 @@ const FAILED_JOB_SET = new Set(FAILED_JOB_STATUSES);
 const PRODUCTIVE_JOB_TYPES = new Set(["delegate", "dev", "assess", "fix", "summarize", "artificer", "promote"]);
 const PLANNING_JOB_TYPES = new Set(["plan"]);
 const RESEARCH_JOB_TYPES = new Set(["research", "preflight"]);
-const CURRENT_AGENT_EXCLUDED_JOB_TYPES = new Set(["human_input", "atlas_warm"]);
+const CURRENT_AGENT_EXCLUDED_JOB_TYPES = new Set(BRIDGE_NON_AGENT_JOB_TYPES);
 
 function workItemState(status) {
   const mapped = {

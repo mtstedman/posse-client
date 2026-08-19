@@ -1,4 +1,5 @@
 import { installCliWarningFilter } from "./warnings.js";
+import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
 installCliWarningFilter();
 
@@ -914,7 +915,7 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
         // call. Warm both route grants on the live handle before readiness or
         // command dispatch so sync compatibility helpers never race a cold
         // heartbeat cache (git:read alone cannot authorize create/mutate work).
-        await nativeBinaries.binary("git").ensureNativeAuth(["git:read", "git:mutate"]);
+        await nativeBinaries.binary("git").ensureNativeAuth([GIT_READ_ROUTE, GIT_MUTATE_ROUTE]);
         const active = await nativeBinaries.ensureActive("git");
         if (!active?.active) {
           throw new Error(`posse-git inactive (${active?.reason || "unknown"})`);

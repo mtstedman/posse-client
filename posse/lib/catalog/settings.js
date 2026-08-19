@@ -10,6 +10,13 @@
 // falling back to a default. New settings should be added here first, then
 // referenced by name in SETTINGS_CATALOG and consumers.
 
+export const ADMIN_PROTOCOL = "posse.admin.v1";
+export const ADMIN_MAX_SETTINGS = 2048;
+export const ADMIN_MAX_OPTIONS_PER_SETTING = 256;
+export const ADMIN_MAX_TEXT_CHARS = 2048;
+export const ADMIN_MAX_VALUE_CHARS = 16384;
+export const ADMIN_MAX_JSON_BYTES = 2 * 1024 * 1024;
+
 export const SETTING_KEYS = Object.freeze({
   ASSESSMENT_SCOPE_MODE: "assessment_scope_mode",
   ASSESSMENT_SCOPE_MAX_GROUP_JOBS: "assessment_scope_max_group_jobs",

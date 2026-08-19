@@ -1,17 +1,29 @@
 // @ts-check
 
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
+import {
+  REMOTE_ARTIFACT_CATALOG_METHOD,
+  REMOTE_ARTIFACT_DOWNLOAD_METHOD,
+  REMOTE_ARTIFACT_STATUS_METHOD,
+  REMOTE_ARTIFACTS_READ_ROUTE,
+  REMOTE_CATALOG_READ_ROUTE,
+  REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD,
+  REMOTE_NATIVE_PROTOCOL,
+  REMOTE_PROMPTS_BUNDLE_ROUTE,
+  REMOTE_PROMPTS_COMPILE_ROUTE,
+} from "../../../catalog/binary.js";
 
-export const REMOTE_NATIVE_PROTOCOL = "posse.remote.native.v1";
-export const REMOTE_PROMPTS_COMPILE_ROUTE = "prompts:compile";
-export const REMOTE_PROMPTS_BUNDLE_ROUTE = "prompts:bundle";
-export const REMOTE_CATALOG_READ_ROUTE = "catalog:read";
-export const REMOTE_ARTIFACTS_READ_ROUTE = "artifacts:read";
-
-export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
-export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
-export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";
-export const REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD = "remote.modelPackageDownload";
+export {
+  REMOTE_ARTIFACT_CATALOG_METHOD,
+  REMOTE_ARTIFACT_DOWNLOAD_METHOD,
+  REMOTE_ARTIFACT_STATUS_METHOD,
+  REMOTE_ARTIFACTS_READ_ROUTE,
+  REMOTE_CATALOG_READ_ROUTE,
+  REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD,
+  REMOTE_NATIVE_PROTOCOL,
+  REMOTE_PROMPTS_BUNDLE_ROUTE,
+  REMOTE_PROMPTS_COMPILE_ROUTE,
+} from "../../../catalog/binary.js";
 
 const REMOTE_ARTIFACT_METHODS = new Set([
   REMOTE_ARTIFACT_CATALOG_METHOD,

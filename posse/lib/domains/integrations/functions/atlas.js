@@ -12,7 +12,8 @@ import { Worker as NodeWorker } from "node:worker_threads";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { isExternallyRoutedAtlasTool } from "./deterministic-mcp/tool-descriptors.js";
-import { POSSE_MCP_GATEWAY_TRANSPORT } from "./mcp-gateway.js";
+import { POSSE_MCP_GATEWAY_TRANSPORT } from "../../../catalog/mcp.js";
+import { GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
@@ -775,7 +776,7 @@ async function runAtlasV2BootWarmWorkerThread({
     : ["git", "atlas", "vector", "ml"];
   const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(nativeNames, {
     routesByBinary: {
-      git: ["git:read"],
+      git: [GIT_READ_ROUTE],
       atlas: ["atlas:methods"],
       vector: ["atlas:vector"],
       ml: ["ml:methods"],

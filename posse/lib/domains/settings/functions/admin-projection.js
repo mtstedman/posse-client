@@ -26,6 +26,14 @@ import {
   toDisplaySettingKey,
 } from "./admin-catalog.js";
 import {
+  ADMIN_MAX_JSON_BYTES,
+  ADMIN_MAX_OPTIONS_PER_SETTING,
+  ADMIN_MAX_SETTINGS,
+  ADMIN_MAX_TEXT_CHARS,
+  ADMIN_MAX_VALUE_CHARS,
+  ADMIN_PROTOCOL,
+} from "../../../catalog/settings.js";
+import {
   SETTINGS_CATALOG,
   getCatalogNumericRule,
   getCatalogOptions,
@@ -34,12 +42,14 @@ import {
   isCatalogBooleanSetting,
 } from "./catalog.js";
 
-export const ADMIN_PROTOCOL = "posse.admin.v1";
-export const ADMIN_MAX_SETTINGS = 2048;
-export const ADMIN_MAX_OPTIONS_PER_SETTING = 256;
-export const ADMIN_MAX_TEXT_CHARS = 2048;
-export const ADMIN_MAX_VALUE_CHARS = 16384;
-export const ADMIN_MAX_JSON_BYTES = 2 * 1024 * 1024;
+export {
+  ADMIN_MAX_JSON_BYTES,
+  ADMIN_MAX_OPTIONS_PER_SETTING,
+  ADMIN_MAX_SETTINGS,
+  ADMIN_MAX_TEXT_CHARS,
+  ADMIN_MAX_VALUE_CHARS,
+  ADMIN_PROTOCOL,
+} from "../../../catalog/settings.js";
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
 const IMAGE_PROVIDER_VALUES = new Set(IMAGE_PROVIDER_OPTIONS.map((option) => option.value));

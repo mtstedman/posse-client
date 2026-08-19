@@ -1,9 +1,12 @@
 // Versioned, bounded provider-usage projection consumed by fleet clients.
 
+import {
+  PROVIDER_USAGE_MAX_BYTES,
+  PROVIDER_USAGE_PROTOCOL,
+} from "../../../catalog/provider.js";
 import { PROVIDER_USAGE_BUDGET_DEFS } from "../../../catalog/settings.js";
 
-export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
-export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
+export { PROVIDER_USAGE_MAX_BYTES, PROVIDER_USAGE_PROTOCOL } from "../../../catalog/provider.js";
 
 const MAX_PROVIDERS = 32;
 const MAX_WINDOWS_PER_PROVIDER = 16;

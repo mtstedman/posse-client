@@ -6,6 +6,7 @@
 // conflict-marker check run exactly as they do for a terminal-initiated push.
 
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
+import { BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import {
@@ -17,7 +18,7 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { closePushOfferGate } from "../../queue/functions/push-offer.js";
 import { redactBridgeValue } from "./redaction.js";
 
-const OPEN_GATE_STATUSES = new Set(["queued", "waiting_on_human"]);
+const OPEN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const MAX_OUTPUT_CHARS = 2000;
 
 function truncatedRedactedOutput(output) {

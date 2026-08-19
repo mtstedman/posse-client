@@ -1,8 +1,9 @@
 // @ts-check
 
 import { scopeGrantedBy } from "../functions/scope-grants.js";
+import { CAPABILITY_HANDSHAKE_PROTOCOL } from "../../../catalog/capability.js";
 
-export const CAPABILITY_HANDSHAKE_PROTOCOL = "posse.capability-handshake.v1";
+export { CAPABILITY_HANDSHAKE_PROTOCOL } from "../../../catalog/capability.js";
 const MAX_SCOPES = 128;
 const MAX_GRANT_BYTES = 256 * 1024;
 const SCOPE_RE = /^[A-Za-z0-9._:/-]{1,160}$/;

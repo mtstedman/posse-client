@@ -9,14 +9,16 @@
 
 import { RemotePromptClient } from "../../../remote/classes/RemotePromptClient.js";
 import {
+  DEFAULT_MCP_OAUTH_TTL_SECONDS,
+  MCP_OAUTH_AUDIENCE,
+  MCP_OAUTH_TOKEN_TYPE,
+} from "../../../../catalog/mcp.js";
+import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
 } from "../../../remote/functions/mode.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 import {
-  DEFAULT_MCP_OAUTH_TTL_SECONDS,
-  MCP_OAUTH_AUDIENCE,
-  MCP_OAUTH_TOKEN_TYPE,
   buildMcpOAuthClaimsFromBootConfig,
 } from "./oauth-token.js";
 

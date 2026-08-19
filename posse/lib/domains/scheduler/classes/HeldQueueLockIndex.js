@@ -5,12 +5,12 @@ import {
   WORKTREE_JOB_TYPES,
 } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { listActiveFileLocks } from "../../queue/functions/index.js";
-import { parseFileScope, scopeToSchedulerLocks } from "../functions/file-scope.js";
 import {
   jobNeedsAssessmentBarrier,
   jobNeedsWriteLocks,
-} from "../../queue/functions/file-locks.js";
+  listActiveFileLocks,
+} from "../../queue/functions/index.js";
+import { parseFileScope, scopeToSchedulerLocks } from "../functions/file-scope.js";
 
 const WORKTREE_TYPES = WORKTREE_JOB_TYPES;
 const ROOT_LOCKING_JOB_TYPES = WORKTREE_JOB_TYPES;

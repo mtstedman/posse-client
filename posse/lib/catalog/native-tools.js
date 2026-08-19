@@ -1,30 +1,19 @@
 // Native deterministic-MCP tool schema definitions (pure data).
 //
 // Canonical JSON Schemas for the in-tree deterministic tools. Per the catalog
-// contract this file holds pure data only: no imports, no logic. The assembled
+// contract this file holds pure data only. Its protocol enum values are
+// imported from sibling catalogs so schemas and runtime validation cannot
+// drift. The assembled
 // catalog, role allowlists, and contract rendering that consume these schemas
 // live in
 // lib/domains/integrations/functions/deterministic-mcp/tool-descriptors.js.
 
-// Canonical structured-question choice identities. The owner projection and
-// every static producer consume this single pure-data vocabulary; rendered
-// labels and compatibility parser synonyms are deliberately absent.
-export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
-  plan_approval: Object.freeze(["approve", "reject"]),
-  file_scope_approval: Object.freeze(["approve", "reject"]),
-  assessment_review: Object.freeze(["pass", "fail", "skip", "replan"]),
-  assessment_transport_recovery: Object.freeze(["retry", "pass", "fail", "skip", "replan"]),
-  assessment_retry_limit: Object.freeze(["pass", "fail", "skip", "replan"]),
-  blocked_recovery: Object.freeze(["retry", "skip", "replan", "pass", "fail"]),
-  partial_work_recovery: Object.freeze(["extend", "commit", "revert"]),
-  dead_letter_recovery: Object.freeze([
-    "retry", "retry:claude", "retry:openai", "retry:codex", "retry:grok", "skip", "fail",
-  ]),
-  pipeline_head_recovery: Object.freeze(["pass", "fail", "skip", "replan"]),
-  one_shot_file_scope: Object.freeze(["plan", "cancel"]),
-  push_offer: Object.freeze(["push", "decline"]),
-  legacy_unstructured: Object.freeze([]),
-});
+import { AGENT_HANDOFF_PROTOCOL } from "./handoff.js";
+import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
+
+// Compatibility facade. Existing consumers retain this path while catalog
+// families can be imported directly by new, bounded owners.
+export { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
 
 export const TOOL_READ_FILE = {
   type: "function",
@@ -166,18 +155,8 @@ export const TOOL_REQUEST_SCOPE = {
   },
 };
 
-export const DEV_COMPLETION_STATUSES = Object.freeze([
-  "COMPLETE",
-  "VERIFIED_NO_CHANGE",
-  "PARTIAL",
-  "BLOCKED",
-]);
-
-export const ARTIFICER_COMPLETION_STATUSES = Object.freeze([
-  "COMPLETE",
-  "PARTIAL",
-  "BLOCKED",
-]);
+export { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "./tools/interaction.js";
+import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "./tools/interaction.js";
 
 const COMPLETION_FILE_REQUEST = {
   type: "object",
@@ -332,7 +311,7 @@ export const TOOL_AGENT_HANDOFF = {
   name: "agent_handoff",
   description:
     "Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. " +
-    "Other roles submit posse.agent_handoff.v1 with hash-ref selectors. Posse ends provider generation after acknowledging the receipt.",
+    `Other roles submit ${AGENT_HANDOFF_PROTOCOL} with hash-ref selectors. Posse ends provider generation after acknowledging the receipt.`,
   parameters: {
     oneOf: [
       TERMINAL_COMPLETION_PARAMETERS,
@@ -340,7 +319,7 @@ export const TOOL_AGENT_HANDOFF = {
         type: "object",
         description: "Semantic report form for researcher, planner, assessor, and citation-synthesis roles. Legacy dev/artificer reports remain accepted during migration.",
         properties: {
-      protocol: { type: "string", enum: ["posse.agent_handoff.v1"] },
+      protocol: { type: "string", enum: [AGENT_HANDOFF_PROTOCOL] },
       profile: {
         type: "string",
         enum: [
@@ -710,7 +689,7 @@ function semanticRoleTool({ description, profile, profiles = [profile], outcomes
     parameters: {
       type: "object",
       properties: {
-        protocol: { type: "string", enum: ["posse.agent_handoff.v1"] },
+        protocol: { type: "string", enum: [AGENT_HANDOFF_PROTOCOL] },
         profile: { type: "string", enum: profiles },
         outcome: { type: "string", enum: outcomes },
         ...(confidence ? {
@@ -1280,7 +1259,7 @@ export const TOOL_SUB_AGENT = {
         type: "object",
         properties: {
           op: { type: "string", enum: ["dispatch"] },
-          protocol: { type: "string", enum: ["posse.sub_agent.v1"] },
+          protocol: { type: "string", enum: [SUB_AGENT_PROTOCOL] },
           requests: { type: "array", minItems: 1, maxItems: 3, items: SUB_AGENT_REQUEST },
           completion: {
             type: "object",
@@ -1296,7 +1275,7 @@ export const TOOL_SUB_AGENT = {
         type: "object",
         properties: {
           op: { type: "string", enum: ["status"] },
-          protocol: { type: "string", enum: ["posse.sub_agent.v1"] },
+          protocol: { type: "string", enum: [SUB_AGENT_PROTOCOL] },
           batch_id: { type: "string", minLength: 12, maxLength: 80 },
           wait_ms: { type: "integer", minimum: 0, maximum: 5000 },
         },
@@ -1307,7 +1286,7 @@ export const TOOL_SUB_AGENT = {
         type: "object",
         properties: {
           op: { type: "string", enum: ["cancel"] },
-          protocol: { type: "string", enum: ["posse.sub_agent.v1"] },
+          protocol: { type: "string", enum: [SUB_AGENT_PROTOCOL] },
           batch_id: { type: "string", minLength: 12, maxLength: 80 },
         },
         required: ["op", "protocol", "batch_id"],
@@ -1951,51 +1930,7 @@ export const TOOL_RUN_TEST_SUITE = {
   },
 };
 
-export const TOOL_MOVE_FILE = {
-  type: "function",
-  name: "move_file",
-  description: "Move or rename a file within allowed workspace scope.",
-  parameters: {
-    type: "object",
-    properties: {
-      source: { type: "string", description: "Existing file path to move." },
-      destination: { type: "string", description: "Destination file path." },
-      overwrite: { type: "boolean", description: "When true, replace destination if it exists." },
-    },
-    required: ["source", "destination"],
-    additionalProperties: false,
-  },
-};
-
-export const TOOL_COPY_FILE = {
-  type: "function",
-  name: "copy_file",
-  description: "Copy a file within allowed workspace scope.",
-  parameters: {
-    type: "object",
-    properties: {
-      source: { type: "string", description: "Existing file path to copy." },
-      destination: { type: "string", description: "Destination file path." },
-      overwrite: { type: "boolean", description: "When true, replace destination if it exists." },
-    },
-    required: ["source", "destination"],
-    additionalProperties: false,
-  },
-};
-
-export const TOOL_MAKE_DIR = {
-  type: "function",
-  name: "make_dir",
-  description: "Create a directory (and parent directories) inside allowed scope.",
-  parameters: {
-    type: "object",
-    properties: {
-      path: { type: "string", description: "Directory path to create." },
-    },
-    required: ["path"],
-    additionalProperties: false,
-  },
-};
+export { TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_MOVE_FILE } from "./tools/filesystem-mutations.js";
 
 export const TOOL_CHAIN_READ = {
   type: "function",

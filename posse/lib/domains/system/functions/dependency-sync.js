@@ -9,6 +9,10 @@ import fs from "fs";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
 
+import {
+  DEPENDENCY_INSTALL_ENV_PREFIXES,
+  DEPENDENCY_SYNC_INSTALL_ENV_KEYS,
+} from "../../../catalog/process.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
@@ -26,6 +30,10 @@ import {
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
+import {
+  filterProcessEnv,
+  isUnboundedCommandTimeout,
+} from "../../../shared/platform/functions/process-env.js";
 
 const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import.meta.url);
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
@@ -36,72 +44,15 @@ const COMMAND_TIMEOUT_FORCE_KILL_GRACE_MS = 1000;
 const COMMAND_TIMEOUT_SETTLE_GRACE_MS = 1000;
 const NODE_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
 const COMPOSER_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
-const UNBOUNDED_TIMEOUT_VALUES = new Set(["", "0", "false", "none", "off", "unbounded", "unlimited", "infinite"]);
-const DEPENDENCY_INSTALL_ENV_ALLOWLIST = new Set([
-  "all_proxy",
-  "appdata",
-  "comspec",
-  "curl_ca_bundle",
-  "home",
-  "homedrive",
-  "homepath",
-  "http_proxy",
-  "https_proxy",
-  "lang",
-  "lc_all",
-  "lc_ctype",
-  "localappdata",
-  "node_extra_ca_certs",
-  "no_proxy",
-  "npm_config_cafile",
-  "npm_config_https_proxy",
-  "npm_config_noproxy",
-  "npm_config_proxy",
-  "npm_config_registry",
-  "npm_config_strict_ssl",
-  "path",
-  "pathext",
-  "programdata",
-  "programfiles",
-  "programfiles(x86)",
-  "requests_ca_bundle",
-  "shell",
-  "ssl_cert_dir",
-  "ssl_cert_file",
-  "systemroot",
-  "temp",
-  "term",
-  "tmp",
-  "tmpdir",
-  "userprofile",
-  "windir",
-  "cargo_home",
-  "goprivate",
-  "gonoproxy",
-  "gonosumdb",
-  "goproxy",
-  "gosumdb",
-  "rustup_home",
-]);
-const DEPENDENCY_INSTALL_ENV_PREFIXES = ["pip_"];
-
 /**
  * @param {NodeJS.ProcessEnv} [sourceEnv]
  * @returns {NodeJS.ProcessEnv}
  */
 function dependencyInstallEnv(sourceEnv = process.env) {
-  /** @type {NodeJS.ProcessEnv} */
-  const env = {};
-  for (const [key, value] of Object.entries(sourceEnv || {})) {
-    const normalizedKey = String(key).toLowerCase();
-    if (
-      !DEPENDENCY_INSTALL_ENV_ALLOWLIST.has(normalizedKey)
-      && !DEPENDENCY_INSTALL_ENV_PREFIXES.some((prefix) => normalizedKey.startsWith(prefix))
-    ) continue;
-    if (value == null) continue;
-    env[key] = String(value);
-  }
-  return env;
+  return filterProcessEnv(sourceEnv, {
+    allowedKeys: DEPENDENCY_SYNC_INSTALL_ENV_KEYS,
+    allowedPrefixes: DEPENDENCY_INSTALL_ENV_PREFIXES,
+  });
 }
 
 function fileExists(filePath) {
@@ -669,8 +620,7 @@ function summarizeComposerFailure(value) {
 }
 
 function normalizeCommandTimeoutMs(value, fallback = DEFAULT_COMMAND_TIMEOUT_MS) {
-  if (value === null || value === false) return null;
-  if (typeof value === "string" && UNBOUNDED_TIMEOUT_VALUES.has(value.trim().toLowerCase())) return null;
+  if (isUnboundedCommandTimeout(value)) return null;
   const parsed = Number(value);
   if (Number.isFinite(parsed) && parsed > 0) return Math.max(1000, parsed);
   return fallback;

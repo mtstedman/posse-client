@@ -3,6 +3,27 @@
 // canonical tool names but do not trust remote-provided access labels, so both
 // native and Atlas evidence safety must be explicit closed sets.
 
+export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
+export const SUB_AGENT_LIMITS = Object.freeze({
+  maxBatch: 3,
+  maxInputs: 3,
+  maxActiveChildren: 3,
+  defaultTimeoutMs: 60_000,
+  maxTimeoutMs: 60_000,
+  maxStatusWaitMs: 5_000,
+  maxCursorAttempts: 5,
+  maxInputArgumentBytes: 8 * 1024,
+  maxInputDepth: 6,
+  maxInputArrayItems: 32,
+  maxInputStringChars: 4000,
+  maxIntentChars: 2000,
+  maxEvidenceLines: 80,
+  maxEvidenceChars: 4000,
+  targetTerminalEvidenceLines: 30,
+  maxAtlasWindowTokens: 900,
+  maxRequestBytes: 32 * 1024,
+});
+
 export const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS = Object.freeze([
   "tools.read_file",
   "tools.pull_brief",

@@ -14,14 +14,31 @@
 // exported here.
 
 export const REQUIRED_ATLAS_BINARY_NAMES = Object.freeze(["atlas", "vector"]);
+export const NATIVE_DAEMON_PROTOCOL = "posse.daemon.v1";
+export const NATIVE_UPDATE_PROTOCOL = "posse.native_update.v1";
+export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
+export const ATLAS_EXECUTE_TOOL_CONTRACT_VERSION = 1;
+export const ATLAS_NATIVE_PARSE_BUFFER_METHOD = "parser.parseBuffer";
 export const ATLAS_VECTOR_NATIVE_PROTOCOL = "posse.atlas.vector.native.v1";
 export const ATLAS_VECTOR_NATIVE_ROUTE = "atlas:vector";
+export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
+export const GIT_READ_ROUTE = "git:read";
+export const GIT_MUTATE_ROUTE = "git:mutate";
 export const ML_NATIVE_PROTOCOL = "posse.ml.native.v1";
 export const ML_NATIVE_ROUTE = "ml:methods";
 export const ML_CAPABILITIES_METHOD = "ml.capabilities";
 export const ML_EMBED_METHOD = "ml.embed";
 export const ML_GENERATE_METHOD = "ml.generate";
 export const ML_MODEL_PACKAGE_INSTALL_METHOD = "ml.installModelPackage";
+export const REMOTE_NATIVE_PROTOCOL = "posse.remote.native.v1";
+export const REMOTE_PROMPTS_COMPILE_ROUTE = "prompts:compile";
+export const REMOTE_PROMPTS_BUNDLE_ROUTE = "prompts:bundle";
+export const REMOTE_CATALOG_READ_ROUTE = "catalog:read";
+export const REMOTE_ARTIFACTS_READ_ROUTE = "artifacts:read";
+export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
+export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
+export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";
+export const REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD = "remote.modelPackageDownload";
 
 // Folder + manifest keys. These are OUR canonical os/arch tokens — distinct
 // from node's process.platform / process.arch, which the maps below translate.

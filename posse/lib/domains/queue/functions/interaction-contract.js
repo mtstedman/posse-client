@@ -1,4 +1,5 @@
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
+import { WORK_ITEM_ACTION_PROTOCOL } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -8,7 +9,7 @@ import { createOperatorNudge } from "./agent-interactions.js";
 import { logEvent } from "./events.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 
-const ACTION_PROTOCOL = "posse.work_item_action.v1";
+const ACTION_PROTOCOL = WORK_ITEM_ACTION_PROTOCOL;
 const ACTION_METADATA_KEY = "work_item_action";
 const QUESTION_CAPABILITY = "question.answer";
 const MAX_QUESTIONS = 20;

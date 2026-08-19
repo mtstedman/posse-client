@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import {
   BRIDGE_EVENT_KINDS,
   BRIDGE_FRAME_TYPES,
+  BRIDGE_OPEN_GATE_STATUSES,
   BRIDGE_PROTOCOL_VERSION,
 } from "../../../catalog/bridge.js";
 import {
@@ -39,7 +40,7 @@ const DEFAULT_REPLAY_LIMIT = 1000;
 const DEFAULT_TAIL_LIMIT = 100;
 const MAX_TAIL_LIMIT = 500;
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
-const OPEN_GATE_STATUSES = new Set(["queued", "waiting_on_human"]);
+const OPEN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const NONTERMINAL_GATE_CLOSE_STATUSES = new Set(["waiting_on_review"]);
 const PLAN_GATE_EVENT_TYPES = new Set([
   EVENT_TYPES.PLAN_APPROVAL_GATE_CREATED,
