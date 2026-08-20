@@ -85,11 +85,11 @@ import {
   workspaceHealthProbeAsync,
 } from "../../system/functions/preflight-probes.js";
 import {
-  BACKGROUND_JOB_TYPES,
   DEADLOCK_TERMINAL_STATUSES,
   LOCK_HOLDING_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
 } from "../../../catalog/job.js";
+import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
@@ -128,6 +128,12 @@ import {
   recoverHeadlessHumanTimeouts,
   recoverOrphanedReviewJobs,
 } from "../functions/headless-recovery.js";
+import {
+  readWaitingLanePreparationConcurrency,
+  reconcileWaitingLaneJobCompletion,
+  reconcileWaitingLanePreparationsOnBoot,
+  scheduleWaitingLaneBacklog,
+} from "../functions/waiting-lane-coordinator.js";
 import { SchedulerLockLease } from "./SchedulerLockLease.js";
 import { SchedulerDispatchPlanner } from "./SchedulerDispatchPlanner.js";
 import { SchedulerLockController } from "./SchedulerLockController.js";
@@ -160,15 +166,18 @@ function runSchedulerBootMaintenanceInWorker({ ownerId = null, lockName = "main"
 // Keep this short: ATLAS is a freshness accelerator, not a global run gate.
 const ATLAS_INDEXING_HOLD_MAX_MS = 30 * 1000;
 const ATLAS_INDEXING_PAUSE_OFF_VALUES = new Set(["off", "false", "0", "no"]);
-const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set(["atlas_warm", "human_input"]);
-const RUN_BACKGROUND_JOB_TYPES = BACKGROUND_JOB_TYPES;
-const RUN_BACKGROUND_JOB_TYPES_LIST = [...RUN_BACKGROUND_JOB_TYPES];
+const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set([
+  "atlas_warm",
+  WAITING_LANE_JOB_TYPE,
+  "human_input",
+]);
+const RUN_BACKGROUND_JOB_TYPES = new Set(["atlas_warm", WAITING_LANE_JOB_TYPE]);
 
 // Background maintenance runs on its own small budget so it never consumes one
 // of the N agent compute slots. Warm is fail-silent, per-key serialized, and
 // deterministic, so a single background slot bounds its CPU without starving
 // agent work. A constant, derived from runtime state — NOT a user setting.
-const BACKGROUND_JOB_CONCURRENCY = 1;
+const ATLAS_BACKGROUND_JOB_CONCURRENCY = 1;
 const RUN_LOOP_KEEPALIVE_INTERVAL_MS = 30_000;
 
 // Runtime-watchdog escalation. After the first runtime kill the worker owns
@@ -180,10 +189,22 @@ const RUNTIME_KILL_WEDGED_MS = 5 * 60_000;
 
 // Holder types that represent SYSTEM holds, not agent-vs-agent contention.
 // They must never be counted as the agent pipeline being "on lock".
-const SYSTEM_HOLD_HOLDER_TYPES = new Set(["atlas_indexing", "atlas_warm"]);
+const SYSTEM_HOLD_HOLDER_TYPES = new Set([
+  "atlas_indexing",
+  "atlas_warm",
+  "waiting_lane_prepare",
+]);
 
 function isRunBackgroundJob(job) {
   return RUN_BACKGROUND_JOB_TYPES.has(job?.job_type);
+}
+
+function isAtlasBackgroundJob(job) {
+  return job?.job_type === "atlas_warm";
+}
+
+function isWaitingLanePreparationJob(job) {
+  return job?.job_type === WAITING_LANE_JOB_TYPE;
 }
 
 function isPushOfferJob(job) {
@@ -482,6 +503,27 @@ export class Scheduler {
     this._atlasDriftCheckIntervalMs = opts.atlasDriftCheckIntervalMs || null;
     this._atlasDriftReindexFailsafeMs = opts.atlasDriftReindexFailsafeMs || null;
 
+    // Waiting-lane state admission is synchronous, while physical eviction
+    // may wait on repository/worktree locks. Keep the latter off the scheduler
+    // critical path and rescan the durable backlog both periodically and after
+    // a physical slot is released.
+    this._scheduleWaitingLaneBacklog = typeof opts.scheduleWaitingLaneBacklog === "function"
+      ? opts.scheduleWaitingLaneBacklog
+      : scheduleWaitingLaneBacklog;
+    this._evictWaitingLanePreparationsAsync = typeof opts.evictWaitingLanePreparationsAsync === "function"
+      ? opts.evictWaitingLanePreparationsAsync
+      : null;
+    this._waitingLaneBacklogIntervalMs = opts.waitingLaneBacklogIntervalMs == null
+      ? 5_000
+      : Math.max(1, Number(opts.waitingLaneBacklogIntervalMs) || 1);
+    this._waitingLaneEvictionIntervalMs = opts.waitingLaneEvictionIntervalMs == null
+      ? 60_000
+      : Math.max(1, Number(opts.waitingLaneEvictionIntervalMs) || 1);
+    this._waitingLaneLastBacklogAt = 0;
+    this._waitingLaneLastEvictionAt = 0;
+    this._waitingLaneMaintenanceInFlight = null;
+    this._waitingLaneMaintenanceController = null;
+
     // Incremental-warm dispatch hold (see ATLAS_INDEXING_HOLD_MAX_MS above).
     // Complements the cold-boot gate: this one reacts to live conductor
     // indexing activity during the run rather than the one-shot boot build.
@@ -527,6 +569,63 @@ export class Scheduler {
 
   _reconcileFileLaneWaits() {
     return reconcileFileLaneWaits();
+  }
+
+  _runWaitingLaneMaintenance(nowMs = Date.now()) {
+    const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+    if (now - this._waitingLaneLastBacklogAt >= this._waitingLaneBacklogIntervalMs) {
+      this._waitingLaneLastBacklogAt = now;
+      try {
+        const backlog = this._scheduleWaitingLaneBacklog({ limit: 100 });
+        if (backlog?.scheduled > 0) {
+          this._log(`Waiting lanes: scheduled ${backlog.scheduled} queued preparation(s)`);
+        }
+      } catch (error) {
+        this._log(`Waiting-lane backlog rescan failed: ${error?.message || error}`, "yellow");
+      }
+    }
+
+    if (this._waitingLaneMaintenanceInFlight
+      || now - this._waitingLaneLastEvictionAt < this._waitingLaneEvictionIntervalMs) {
+      return this._waitingLaneMaintenanceInFlight;
+    }
+    this._waitingLaneLastEvictionAt = now;
+    const controller = new AbortController();
+    this._waitingLaneMaintenanceController = controller;
+    const maintenance = Promise.resolve().then(async () => {
+      const evict = this._evictWaitingLanePreparationsAsync
+        || (await import("../../git/functions/worktree-gc.js")).evictWaitingLanePreparationsAsync;
+      const eviction = await evict(
+        this.projectDir,
+        (message) => this._log(message),
+        { signal: controller.signal },
+      );
+      if (!controller.signal.aborted) {
+        const backlog = this._scheduleWaitingLaneBacklog({ limit: 100 });
+        if (eviction?.removed > 0 || backlog?.scheduled > 0) {
+          this._log(
+            `Waiting lanes: evicted ${eviction?.removed || 0}, preserved ${eviction?.preserved || 0}, scheduled ${backlog?.scheduled || 0}`,
+          );
+        }
+      }
+      return eviction;
+    }).catch((error) => {
+      if (!controller.signal.aborted) {
+        this._log(`Waiting-lane maintenance failed: ${error?.message || error}`, "yellow");
+      }
+      return null;
+    }).finally(() => {
+      if (this._waitingLaneMaintenanceInFlight === maintenance) {
+        this._waitingLaneMaintenanceInFlight = null;
+        this._waitingLaneMaintenanceController = null;
+      }
+    });
+    this._waitingLaneMaintenanceInFlight = maintenance;
+    return maintenance;
+  }
+
+  _stopWaitingLaneMaintenance() {
+    this._waitingLaneMaintenanceController?.abort();
   }
 
   /**
@@ -1105,6 +1204,20 @@ export class Scheduler {
       this._log(`Boot: released ${staleSessionLeases} stale session lease(s)`);
     }
 
+    // Physical waiting-lane recovery/inspection runs before this scheduler
+    // phase. Reconcile only the durable observations and terminal job proof it
+    // left behind; never infer a successful checkout from a terminal Git job.
+    try {
+      const waitingLane = reconcileWaitingLanePreparationsOnBoot();
+      if (waitingLane.scheduled > 0 || waitingLane.retired > 0 || waitingLane.atlasSettled > 0) {
+        this._log(
+          `Boot: waiting lanes reconciled (${waitingLane.scheduled} scheduled, ${waitingLane.atlasSettled} Atlas settled, ${waitingLane.retired} retired)`,
+        );
+      }
+    } catch (waitingLaneError) {
+      this._log(`Boot: waiting-lane reconciliation failed: ${waitingLaneError.message}`, "yellow");
+    }
+
     // Log any jobs stuck in awaiting_assessment — these look like "running" in the
     // UI but no worker is executing them. Helps diagnose "looks active but idle" states.
     const assessingJobs = Number(bootMaintenance?.awaitingAssessmentCount || 0);
@@ -1560,6 +1673,11 @@ export class Scheduler {
           }
         }
 
+        // Admission is cheap and bounded; physical cap/TTL eviction runs in a
+        // single abortable background task so long-lived sessions make
+        // progress without blocking dispatch or waiting for closeout GC.
+        this._runWaitingLaneMaintenance();
+
         const retention = maybeRunRuntimeRetention();
         if (retention.attempted && retention.ok && retention.totalDeleted > 0) {
           this._log(`Runtime retention pruned ${retention.totalDeleted} old DB row(s)`);
@@ -1711,10 +1829,10 @@ export class Scheduler {
           }
           this._invokeCallback("onSlotStatus", onSlotStatus, {
             // Background work runs off the agent budget, so every agent slot is
-            // idle while only ATLAS warming remains.
+            // idle while only optional accelerator work remains.
             idle: this.concurrency,
             blockedByLock: 0,
-            blockedLockDetails: [{ message: "ATLAS background work is finishing" }],
+            blockedLockDetails: [{ message: "Background accelerator work is finishing" }],
           });
           await this._interruptibleSleep(this.pollMs, { requireRunning: true });
           continue;
@@ -1793,13 +1911,15 @@ export class Scheduler {
         const skipJobIds = new Set();
         let launched = false;
         // Lane accounting. Agent compute jobs are metered against this.concurrency.
-        // human_input only waits on user I/O (unmetered). Background maintenance
-        // (atlas_warm) runs on its own BACKGROUND_JOB_CONCURRENCY budget so it
-        // never consumes one of the N agent slots.
+        // human_input only waits on user I/O (unmetered). Atlas and repository
+        // preparation each have an independent background budget, so neither
+        // consumes an agent slot and Git preparation cannot starve Atlas.
         let computeWorkerCount = [...activeWorkers.values()]
           .filter(e => e.job.job_type !== "human_input" && !isRunBackgroundJob(e.job)).length;
-        let backgroundWorkerCount = [...activeWorkers.values()]
-          .filter(e => isRunBackgroundJob(e.job)).length;
+        let atlasBackgroundWorkerCount = [...activeWorkers.values()]
+          .filter(e => isAtlasBackgroundJob(e.job)).length;
+        let preparationWorkerCount = [...activeWorkers.values()]
+          .filter(e => isWaitingLanePreparationJob(e.job)).length;
 
         // Batched lookahead keeps each query bounded while allowing the
         // scheduler to scan past a blocked head-of-queue batch.
@@ -1833,9 +1953,15 @@ export class Scheduler {
           // has room). This keeps a full agent pool from starving the background
           // lane — and vice versa.
           const computeFull = computeWorkerCount >= this.concurrency;
-          const backgroundFull = backgroundWorkerCount >= BACKGROUND_JOB_CONCURRENCY;
+          const atlasBackgroundFull = atlasBackgroundWorkerCount >= ATLAS_BACKGROUND_JOB_CONCURRENCY;
+          const preparationConcurrency = readWaitingLanePreparationConcurrency();
+          const preparationFull = preparationWorkerCount >= preparationConcurrency;
           const onlyJobTypes = computeFull
-            ? ["human_input", ...(backgroundFull ? [] : RUN_BACKGROUND_JOB_TYPES_LIST)]
+            ? [
+                "human_input",
+                ...(atlasBackgroundFull ? [] : ["atlas_warm"]),
+                ...(preparationFull ? [] : [WAITING_LANE_JOB_TYPE]),
+              ]
             : [];
           const candidates = findRunnableJobsBatch(fetchLimit, {
             excludeJobIds: [...scanExcludeJobIds],
@@ -1877,13 +2003,18 @@ export class Scheduler {
               skipJobIds.add(job.id);
               continue;
             }
-            // Lane-based concurrency. Background maintenance (atlas_warm) runs on
-            // its own budget so it never takes an agent slot; agent compute jobs
-            // are metered against this.concurrency; human_input always passes
-            // through since it only waits for user I/O.
-            const isBackground = isRunBackgroundJob(job);
-            if (isBackground) {
-              if (backgroundWorkerCount >= BACKGROUND_JOB_CONCURRENCY) {
+            // Lane-based concurrency. Atlas and waiting-lane Git preparation
+            // have separate budgets; agent compute uses this.concurrency;
+            // human_input remains unmetered.
+            const isAtlasBackground = isAtlasBackgroundJob(job);
+            const isPreparation = isWaitingLanePreparationJob(job);
+            if (isAtlasBackground) {
+              if (atlasBackgroundWorkerCount >= ATLAS_BACKGROUND_JOB_CONCURRENCY) {
+                skipJobIds.add(job.id);
+                continue;
+              }
+            } else if (isPreparation) {
+              if (preparationWorkerCount >= preparationConcurrency) {
                 skipJobIds.add(job.id);
                 continue;
               }
@@ -2100,6 +2231,14 @@ export class Scheduler {
                 activeWorkers.delete(job.id);
                 killedForRuntime.delete(job.id);
               }
+              try {
+                reconcileWaitingLaneJobCompletion(getJob(job.id) || leasedJob);
+              } catch (waitingLaneError) {
+                this._log(
+                  `Waiting-lane completion reconcile failed for job #${job.id}: ${waitingLaneError.message}`,
+                  "yellow",
+                );
+              }
               lastProgressTime = Date.now(); // job completion counts as progress
               this._invokeCallback("onJobEnd", onJobEnd, leasedJob);
               this._wakeSleeps();
@@ -2111,7 +2250,8 @@ export class Scheduler {
             .catch(() => {});
 
           activeWorkers.set(job.id, { promise: workerPromise, job: leasedJob, startTime: Date.now() });
-          if (isBackground) backgroundWorkerCount++;
+          if (isAtlasBackground) atlasBackgroundWorkerCount++;
+          else if (isPreparation) preparationWorkerCount++;
           else if (job.job_type !== "human_input") computeWorkerCount++;
           if (computeWorkerCount >= this.concurrency) {
             await yieldNow();
@@ -2380,6 +2520,7 @@ export class Scheduler {
   requestStop() {
     this._stopRequested = true;
     this._running = false;
+    this._stopWaitingLaneMaintenance();
     // Interrupt the poll sleep so the loop exits immediately
     this._wakeSleeps();
     this.schedulerLock.stopRenewal();

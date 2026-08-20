@@ -444,6 +444,7 @@ export async function handlePostExecutionForWorker({
         let filesCommittedUnknown = false;
         let filesCommittedError = null;
         let committedHash = null;
+        let commitBaseHash = null;
         let branchNetDiff = null;
         let skippedStaleModifyFiles = [];
         let preAssessAlreadyVerified = false;
@@ -550,6 +551,7 @@ export async function handlePostExecutionForWorker({
             );
             const activeLocksForCommit = listActiveFileLocks();
             const headBefore = await gitCurrentHashAsync(wtPath);
+            commitBaseHash = headBefore;
             const commitMsg = `posse: ${job.job_type} job #${job.id} - ${job.title}`;
             // Retry the commit step in place when the failure is a transient
             // identity/heartbeat fault. The agent's work is already correct;
@@ -916,6 +918,7 @@ export async function handlePostExecutionForWorker({
                     await runPostExecutionAssessmentFromModule(this, {
                       attempt,
                       committedHash,
+                      commitBaseHash,
                       filesCommitted,
                       filesCommittedUnknown,
                       filesCommittedError,
@@ -1014,6 +1017,7 @@ export async function handlePostExecutionForWorker({
                     await runPostExecutionAssessmentFromModule(this, {
                       attempt,
                       committedHash,
+                      commitBaseHash,
                       filesCommitted,
                       filesCommittedUnknown,
                       filesCommittedError,
@@ -1647,6 +1651,7 @@ export async function handlePostExecutionForWorker({
         await runPostExecutionAssessmentFromModule(this, {
           attempt,
           committedHash,
+          commitBaseHash,
           filesCommitted,
           filesCommittedUnknown,
           filesCommittedError,

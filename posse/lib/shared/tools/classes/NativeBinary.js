@@ -23,11 +23,13 @@ import {
   ATLAS_VECTOR_NATIVE_ROUTE,
   GIT_READ_ROUTE,
   NATIVE_DAEMON_PROTOCOL,
+  NATIVE_WORKER_MAX_REQUEST_BYTES,
   nativeBinaryExactVersion,
   nativeBinaryEntry,
   nativeBinaryIsKeyGated,
   nativeBinaryIsWorkerCapable,
   nativeBinaryPlatform,
+  nativeWorkerMaxRequestBytes,
 } from "../../../catalog/binary.js";
 import { osKey, archKey } from "../../platform/functions/native-platform.js";
 import { buildRuntimeEnv } from "../../../domains/runtime/functions/paths.js";
@@ -60,6 +62,22 @@ const PULSE_REFRESH_RETRY_MS = 5_000;
 const PULSE_REFRESH_MIN_DELAY_MS = 250;
 const WORKER_PULL_BOOTSTRAP_WAIT_MS = 500;
 const WORKER_PULL_GRANT_WAIT_MS = 30_000;
+// Daemon.request adds a numeric `id` after NativeBinary has prepared the
+// envelope. Reserve enough bytes for that field and the trailing newline.
+const NATIVE_WORKER_REQUEST_FRAME_HEADROOM_BYTES = 64;
+
+function nativeWorkerRequestByteLength(input) {
+  if (Buffer.isBuffer(input)) return input.byteLength;
+  return Buffer.byteLength(String(input || ""), "utf8");
+}
+
+function nativeWorkerRequestFits(input, maxBytes = NATIVE_WORKER_MAX_REQUEST_BYTES) {
+  return nativeWorkerRequestByteLength(input) + NATIVE_WORKER_REQUEST_FRAME_HEADROOM_BYTES <= maxBytes;
+}
+
+export function __testNativeWorkerRequestFits(input, maxBytes) {
+  return nativeWorkerRequestFits(input, maxBytes);
+}
 
 // Manager-owned request fields at the final stdin boundary. Whatever a caller
 // supplies for these is deleted before the manager attaches its own pulse, so
@@ -608,6 +626,13 @@ export class NativeBinary {
         ? this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer)
         : parsed.input,
     };
+    const maxRequestBytes = nativeWorkerMaxRequestBytes(this.name);
+    if (!nativeWorkerRequestFits(requestOpts.input, maxRequestBytes)) {
+      return this.#nativeWorkerRequestTooLargeResult(
+        nativeWorkerRequestByteLength(requestOpts.input),
+        maxRequestBytes,
+      );
+    }
     let envelope = parsed.request;
     if (!envelope) {
       try {
@@ -1611,6 +1636,24 @@ export class NativeBinary {
       new Error(`native pulse token heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`)
     );
     error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
+    return {
+      ok: false,
+      code: null,
+      signal: null,
+      stdout: "",
+      stderr: error.message,
+      error,
+    };
+  }
+
+  /** @param {number} requestBytes @param {number} maxRequestBytes @returns {RunResult} */
+  #nativeWorkerRequestTooLargeResult(requestBytes, maxRequestBytes) {
+    const error = /** @type {NativeBinaryError} */ (
+      new Error(
+        `native ${this.name} worker request is ${requestBytes} bytes; maximum framed request is ${maxRequestBytes} bytes`,
+      )
+    );
+    error.code = "POSSE_NATIVE_WORKER_REQUEST_TOO_LARGE";
     return {
       ok: false,
       code: null,

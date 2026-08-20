@@ -23,6 +23,16 @@ import { getAtlasIntegrationConfig } from "../../../integrations/functions/atlas
 import { normalizeAtlasV2Mode } from "../../../integrations/functions/atlas-v2-mode.js";
 import { getRetrievalCache } from "./RetrievalCache.js";
 import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
+import {
+  WAITING_LANE_ATLAS_PURPOSES,
+  WAITING_LANE_ATLAS_PURPOSE_VALUES,
+  normalizeWaitingLaneGeneration,
+} from "../../../../catalog/waiting-lane.js";
+import {
+  createJob,
+  runImmediateTransaction,
+  updateJobPayload,
+} from "../../../queue/functions/index.js";
 
 /** @typedef {import("../../functions/v2/contracts/events.js").AtlasEventName} AtlasEventName */
 /** @typedef {import("../../functions/v2/contracts/events.js").ResearchCompletePayload} ResearchCompletePayload */
@@ -38,6 +48,11 @@ import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 
 const ATLAS_ACTOR_TYPE = "atlas";
 const ATLAS_WARM_TERMINAL_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
+const WAITING_LANE_ATLAS_PURPOSE_SET = new Set(WAITING_LANE_ATLAS_PURPOSE_VALUES);
+const WAITING_LANE_PREPARATION_PURPOSE_SET = new Set([
+  WAITING_LANE_ATLAS_PURPOSES.SNAPSHOT,
+  WAITING_LANE_ATLAS_PURPOSES.CATCHUP,
+]);
 /** @type {ReadonlySet<AtlasEventName>} */
 const CACHE_INVALIDATING_EVENTS = new Set([
   ATLAS_EVENTS.DEV_COMMITTED,
@@ -142,7 +157,10 @@ function purposeForEvent(eventType) {
 }
 
 function isWiScopedPurpose(purpose) {
-  return purpose === "wi" || purpose === "wi-cleanup" || purpose === "main-merge";
+  return purpose === "wi"
+    || purpose === "wi-cleanup"
+    || purpose === "main-merge"
+    || WAITING_LANE_ATLAS_PURPOSE_SET.has(purpose);
 }
 
 function warmJobPriority(eventType) {
@@ -174,6 +192,12 @@ function strongerPriority(left, right) {
 
 function warmTargetKey(payload) {
   const purpose = String(payload?.purpose || "wi");
+  if (WAITING_LANE_ATLAS_PURPOSE_SET.has(/** @type {any} */ (purpose))) {
+    const workItemId = Number(payload?.work_item_id);
+    return Number.isSafeInteger(workItemId) && workItemId > 0
+      ? `${purpose}:${workItemId}`
+      : null;
+  }
   const target = String(
     payload?.branch
     || (payload?.work_item_id != null ? ledgerBranchForWi(payload.work_item_id) : "")
@@ -183,6 +207,124 @@ function warmTargetKey(payload) {
   ).trim();
   if (!target) return null;
   return `${purpose}:${target}`;
+}
+
+/**
+ * Transactionally enqueue (or update) the one queued target-local Atlas child
+ * for a preparation. The caller's state commit runs in the same transaction,
+ * so a crash cannot leave an Atlas child without the preparation row naming
+ * it, or publish a state token without its child.
+ *
+ * Running children are history and are never rewritten. A newer preparation
+ * therefore receives a separate child after the old result settles the row
+ * stale; queued children for the same WI/purpose are coalesced to the newest
+ * exact generation and CAS token.
+ *
+ * @param {Object} args
+ * @param {number} [args.workItemId]
+ * @param {number} [args.parentJobId]
+ * @param {"wi-snapshot" | "wi-catchup"} [args.purpose]
+ * @param {import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration} [args.generation]
+ * @param {number} [args.preparationVersion]
+ * @param {"urgent" | "high" | "normal" | "low"} [args.priority]
+ * @param {number | null} [args.tailEntryLimit]
+ * @param {(input: { atlasJobId: number, preparationVersion: number, payload: any }) => any} [args.commitState]
+ * @returns {{ ok: boolean, warmJobId: number | null, coalesced: boolean, stateResult?: any, skipped?: string }}
+ */
+export function enqueueWaitingLaneAtlasWarm({
+  workItemId,
+  parentJobId,
+  purpose,
+  generation,
+  preparationVersion,
+  priority = "low",
+  tailEntryLimit = null,
+  commitState,
+} = {}) {
+  const wiId = Number(workItemId);
+  const parentId = Number(parentJobId);
+  const version = Number(preparationVersion);
+  const normalizedGeneration = normalizeWaitingLaneGeneration(generation);
+  if (
+    !Number.isSafeInteger(wiId)
+    || wiId <= 0
+    || !Number.isSafeInteger(parentId)
+    || parentId <= 0
+    || !Number.isSafeInteger(version)
+    || version <= 0
+    || !WAITING_LANE_PREPARATION_PURPOSE_SET.has(purpose)
+    || !normalizedGeneration
+    || typeof commitState !== "function"
+  ) {
+    return { ok: false, warmJobId: null, coalesced: false, skipped: "invalid_args" };
+  }
+
+  const payload = {
+    purpose,
+    work_item_id: wiId,
+    branch: normalizedGeneration.target_branch,
+    generation: normalizedGeneration,
+    // recordWaitingLaneGitPrepared increments the row exactly once.
+    preparation_version: version + 1,
+  };
+  if (Number.isSafeInteger(tailEntryLimit) && tailEntryLimit >= 0) {
+    payload.tail_entry_limit = tailEntryLimit;
+  }
+
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const existing = findCoalescableQueuedWarm(db, payload);
+    let warmJobId;
+    let coalesced = false;
+    if (existing) {
+      const mergedPayload = mergeWarmPayload(existing.payload, payload);
+      updateJobPayload(existing.row.id, JSON.stringify(mergedPayload));
+      db.prepare(`
+        UPDATE jobs
+        SET priority = ?, parent_job_id = ?, ready_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'queued'
+      `).run(
+        strongerPriority(priority, existing.row.priority),
+        parentId,
+        nowIso(),
+        nowIso(),
+        existing.row.id,
+      );
+      warmJobId = Number(existing.row.id);
+      coalesced = true;
+    } else {
+      const job = /** @type {any} */ (createJob)({
+        work_item_id: wiId,
+        job_type: ATLAS_WARM_JOB_TYPE,
+        title: purpose === WAITING_LANE_ATLAS_PURPOSES.SNAPSHOT
+          ? `ATLAS waiting lane snapshot: WI#${wiId}`
+          : `ATLAS waiting lane catch-up: WI#${wiId}`,
+        parent_job_id: parentId,
+        priority,
+        max_attempts: ATLAS_WARM_JOB_POLICY.maxAttempts,
+        payload_json: payload,
+      });
+      warmJobId = Number(job?.id);
+    }
+    if (!Number.isSafeInteger(warmJobId) || warmJobId <= 0) {
+      throw new Error("Waiting-lane Atlas child could not be enqueued");
+    }
+    const stateResult = commitState({
+      atlasJobId: warmJobId,
+      preparationVersion: version,
+      payload,
+    });
+    if (stateResult?.outcome !== "promoted") {
+      const error = Object.assign(new Error(
+        `Waiting-lane Atlas child state commit failed: ${stateResult?.outcome || "missing_outcome"}`,
+      ), {
+        code: "WAITING_LANE_STATE_COMMIT_FAILED",
+        stateResult,
+      });
+      throw error;
+    }
+    return { ok: true, warmJobId, coalesced, stateResult };
+  });
 }
 
 function mergeWarmPayload(existing, incoming) {

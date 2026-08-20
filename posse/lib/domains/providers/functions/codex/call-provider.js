@@ -36,6 +36,7 @@ import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRout
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
+import { reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
@@ -104,6 +105,7 @@ export async function callProvider(promptText, {
   abortSignal = null,
   stallTimeout = null,
   fallbackReads = null,
+  assessorMaxToolCalls = null,
   needsImageGeneration = false,
   jobId = null,
   workItemId = null,
@@ -114,6 +116,8 @@ export async function callProvider(promptText, {
   skipRolePrompt = false,
   priorSessionHandle = null,
   recordFinalPrompt = null,
+  onUsageSegment = null,
+  onUsageProgress = null,
   disableAtlas = false,
   atlasConfig = null,
   _remoteIssuedPolicy = null,
@@ -201,6 +205,8 @@ export async function callProvider(promptText, {
       attemptId,
       agentCallId,
       promptChars,
+      fallbackReads,
+      assessorMaxToolCalls,
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
@@ -434,11 +440,21 @@ export async function callProvider(promptText, {
 
     const launch = buildWindowsSpawn(codexCmd, args);
     const startTime = Date.now();
+    // Capture the durable ordinal boundary before a resumed process can append
+    // to its existing rollout. If this baseline cannot be established, the
+    // call must not account the session's historical cumulative totals.
+    const resumedRolloutBaseline = resumeSessionHandle
+      ? recoverCodexRolloutUsage({
+          codexHome: childEnv.CODEX_HOME,
+          sessionHandle: resumeSessionHandle,
+        })
+      : null;
     let stdout = "";
     let stderr = "";
     let totalInputTokens = null;
     let totalOutputTokens = null;
     let totalCachedInputTokens = null;
+    let reasoningOutputTokens = null;
     let longContextInputTokens = null;
     let latestSessionHandle = resumeSessionHandle || null;
     let latestTurnCount = null;
@@ -457,6 +473,7 @@ export async function callProvider(promptText, {
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
         cachedInputTokens: totalCachedInputTokens,
+        reasoningOutputTokens,
         longContextInputTokens,
         durationMs,
         maxTurns: turnLimit,
@@ -510,6 +527,8 @@ export async function callProvider(promptText, {
     proc.stdin.end();
 
     const usageAccumulator = createCodexUsageAccumulator();
+    let usageProgressSequence = 0;
+    let previousUsageProgress = null;
     let killedByStallDetector = false;
     let stallKillReason = "no_output";
     let lastActivity = Date.now();
@@ -526,12 +545,29 @@ export async function callProvider(promptText, {
         latestSessionHandle = extractCodexSessionHandleFromStreamMessage(msg) || latestSessionHandle;
         const usage = extractUsageFromEvent(msg);
         const totals = usageAccumulator.add(usage, { eventKey: codexUsageEventDedupeKey(msg) });
-        if (totals.inputTokens != null) totalInputTokens = totals.inputTokens;
-        if (totals.outputTokens != null) totalOutputTokens = totals.outputTokens;
-        if (totals.cachedInputTokens != null) totalCachedInputTokens = totals.cachedInputTokens;
-        if (totals.longContextInputTokens != null) longContextInputTokens = totals.longContextInputTokens;
+        if (!resumeSessionHandle) {
+          if (totals.inputTokens != null) totalInputTokens = totals.inputTokens;
+          if (totals.outputTokens != null) totalOutputTokens = totals.outputTokens;
+          if (totals.cachedInputTokens != null) totalCachedInputTokens = totals.cachedInputTokens;
+          if (totals.longContextInputTokens != null) longContextInputTokens = totals.longContextInputTokens;
+        }
         if (usage.inputTokens != null || usage.outputTokens != null || usage.cachedInputTokens != null) {
           terminalUsageFlush.noteUsage();
+        }
+        if (!resumeSessionHandle && (totals.inputTokens != null || totals.outputTokens != null)) {
+          const progressKey = JSON.stringify(totals);
+          if (progressKey !== previousUsageProgress) {
+            previousUsageProgress = progressKey;
+            try {
+              onUsageProgress?.({
+                sequenceId: ++usageProgressSequence,
+                provider: "codex",
+                modelName: modelToUse,
+                ...totals,
+                precision: "aggregate_only",
+              });
+            } catch { /* progress telemetry cannot break provider execution */ }
+          }
         }
         const turnCount = extractTurnCountFromEvent(msg);
         if (turnCount != null) latestTurnCount = Math.max(latestTurnCount ?? 0, turnCount);
@@ -640,6 +676,55 @@ export async function callProvider(promptText, {
         handleStdoutLine(stdoutLineBuffer.trim());
         stdoutLineBuffer = "";
       }
+      let rolloutUsage = null;
+      let rolloutUsageApplied = false;
+      let rolloutUsageMismatches = [];
+      let rolloutUsageSource = null;
+      let rolloutRecoveryIncomplete = false;
+      if (latestSessionHandle) {
+        const currentRolloutUsage = recoverCodexRolloutUsage({
+          codexHome: childEnv.CODEX_HOME,
+          sessionHandle: latestSessionHandle,
+          startedAtMs: startTime,
+        });
+        rolloutUsage = resumeSessionHandle
+          ? sliceCodexResumedSessionUsage(resumedRolloutBaseline, currentRolloutUsage)
+          : currentRolloutUsage;
+        rolloutRecoveryIncomplete = currentRolloutUsage != null && currentRolloutUsage.complete !== true;
+        if (resumeSessionHandle && !rolloutUsage) rolloutRecoveryIncomplete = true;
+        if (rolloutUsage?.usage && rolloutUsage.complete === true) {
+          const reconciled = resumeSessionHandle
+            ? { usage: rolloutUsage.usage, mismatches: [], source: "codex_rollout" }
+            : reconcileCodexFreshSessionUsage({
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            cachedInputTokens: totalCachedInputTokens,
+            reasoningOutputTokens,
+            longContextInputTokens,
+          }, rolloutUsage.usage);
+          totalInputTokens = reconciled.usage.inputTokens;
+          totalOutputTokens = reconciled.usage.outputTokens;
+          totalCachedInputTokens = reconciled.usage.cachedInputTokens;
+          reasoningOutputTokens = reconciled.usage.reasoningOutputTokens;
+          longContextInputTokens = reconciled.usage.longContextInputTokens;
+          rolloutUsageApplied = true;
+          rolloutUsageMismatches = reconciled.mismatches;
+          rolloutUsageSource = reconciled.source;
+          for (const [index, segment] of (rolloutUsage.segments || []).entries()) {
+            try {
+              onUsageSegment?.({
+                ...segment,
+                requestOrdinal: index + 1,
+                provider: "codex",
+                modelName: modelToUse,
+                durationMs: null,
+                usageSource: "rollout_recovered",
+                precision: "recovered_exact",
+              });
+            } catch { /* accounting persistence cannot break provider execution */ }
+          }
+        }
+      }
       let finalOutput = "";
       let mcpCleanup = null;
       try {
@@ -658,6 +743,7 @@ export async function callProvider(promptText, {
         totalInputTokens,
         totalOutputTokens,
         totalCachedInputTokens,
+        reasoningOutputTokens,
         longContextInputTokens,
         durationMs,
         finalOutput,
@@ -682,6 +768,24 @@ export async function callProvider(promptText, {
       stats.mcpAttachProjectionMismatch = mcpCleanup?.attachProofResult?.projectionMismatch === true;
       Object.assign(stats, termination);
       Object.assign(stats, terminalUsageFlush.snapshot());
+      if (rolloutUsageApplied) {
+        stats.tokenUsageSource = rolloutUsageSource;
+        stats.rolloutFile = rolloutUsage.file;
+        stats.providerRequestCount = rolloutUsage.providerRequestCount;
+        stats.usageCapturePrecision = "recovered_exact";
+        if (rolloutUsageMismatches.length > 0) {
+          stats.rolloutUsageMismatches = rolloutUsageMismatches;
+        }
+        // This is durable measured usage through the last flushed token event,
+        // not evidence that Codex emitted its terminal turn.completed event.
+        stats.usageFinalized = stats.inputTokens != null && stats.outputTokens != null;
+      } else if (rolloutRecoveryIncomplete) {
+        stats.usageCapturePrecision = "incomplete";
+      } else if (stats.inputTokens != null && stats.outputTokens != null) {
+        stats.usageCapturePrecision = "aggregate_only";
+      } else {
+        stats.usageCapturePrecision = "unknown";
+      }
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
       // attach-under-load failure leaves a trace even on a clean exit.

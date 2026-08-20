@@ -6,7 +6,6 @@ export * from "./v2/contracts/index.js";
 export * from "./v2/contracts/jobs.js";
 export * from "./v2/contracts/runtimes.js";
 export * from "./v2/contracts/schemas.js";
-export * from "./v2/contracts/tool-inventory.js";
 export * from "./v2/contracts/tool-params.js";
 export * from "./v2/contracts/tool-results.js";
 export * from "./v2/contracts/tool-schemas.js";

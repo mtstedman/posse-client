@@ -4,6 +4,7 @@
 
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import {
   acquireAssessmentBarrier,
   beginAttachedAssessmentAttempt,
@@ -35,7 +36,6 @@ import {
   buildHandoffPacket,
   composePromptRemoteAware,
   buildSmartPreload,
-  extractResearcherFiles,
   handoff,
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
@@ -71,9 +71,7 @@ import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
 import {
-  emitResearchComplete as emitAtlasV2ResearchComplete,
   getAtlasWarmJobCompletion,
-  isAtlasV2EmissionEnabled,
 } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
@@ -98,6 +96,11 @@ import {
   killShellCommandProcessTree as killShellCommandProcessTreeImpl,
   runShellCommandAsync as runShellCommandAsyncImpl,
 } from "./assessment-runner.js";
+import {
+  assessorCallBudgetStatus,
+  getAssessorMaxToolCalls,
+  isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus,
+} from "../execution/assessment-policy.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -233,62 +236,6 @@ export function assessmentTerminalHandoffRetryDecision(
 
 function _mergeUniquePaths(...groups) {
   return [...new Set(groups.flat().filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
-}
-
-function normalizeAtlasResearchFiles(files) {
-  const out = [];
-  const seen = new Set();
-  for (const raw of files || []) {
-    const rel = String(raw || "")
-      .trim()
-      .replace(/\\/g, "/")
-      .replace(/^\.\/+/, "")
-      .replace(/^\/+/, "");
-    if (!rel || rel.includes("\0") || rel.startsWith("../") || rel === "..") continue;
-    if (/^[a-zA-Z]:\//.test(rel)) continue;
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-    out.push(rel);
-  }
-  return out;
-}
-
-function emitAtlasV2ResearchCompleteIfEnabled(job, output) {
-  if (!isAtlasV2EmissionEnabled()) {
-    return { enabled: false, ok: true, warmJobId: null, skipped: "atlas_v2_disabled" };
-  }
-  try {
-    const artifacts = getArtifacts(job.id, "summary");
-    const files = normalizeAtlasResearchFiles(
-      extractResearcherFiles([...artifacts, { content_long: output || "" }]),
-    );
-    const wi = getWorkItem(job.work_item_id);
-    return {
-      enabled: true,
-      ...emitAtlasV2ResearchComplete({
-        payload: {
-          wi_id: Number(job.work_item_id),
-          branch: String(wi?.branch_name || `wi-${job.work_item_id}`),
-          files,
-        },
-        jobId: job.id,
-        onError: (err) => {
-          log.warn("atlas-v2", "Failed to emit research_complete outbox event", {
-            jobId: job.id,
-            wiId: job.work_item_id,
-            error: err?.message || String(err),
-          });
-        },
-      }),
-    };
-  } catch (err) {
-    log.warn("atlas-v2", "Failed to prepare research_complete outbox event", {
-      jobId: job.id,
-      wiId: job.work_item_id,
-      error: err?.message || String(err),
-    });
-    return { enabled: true, ok: false, warmJobId: null, skipped: "outbox_error" };
-  }
 }
 
 function _looksLikeAssessorAccessLimitation(text) {
@@ -516,6 +463,14 @@ function _looksLikeAssessorVerdictObject(value) {
       || Object.prototype.hasOwnProperty.call(value, "assessment")
       || Object.prototype.hasOwnProperty.call(value, "result")
     );
+}
+
+const ASSESSOR_VALID_VERDICTS = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
+
+function _isReusableAssessorVerdict(verdictJson, verdict) {
+  return verdictJson?.repaired !== true
+    && _looksLikeAssessorVerdictObject(verdict)
+    && ASSESSOR_VALID_VERDICTS.has(verdict.verdict);
 }
 
 export function _normalizeAssessorVerdictShape(verdict, raw = "") {
@@ -896,15 +851,36 @@ function _buildLocalAssessmentEvidence({
   workerStatusOutput = "",
 } = {}) {
   const primaryChangeEvidence = assessmentScopedDiff
-    || assessmentFileSnapshots
-    || assessmentDiffNarrative;
+    || assessmentDiffNarrative
+    || assessmentFileSnapshots;
+  const evidenceBudgetChars = 60_000;
+  const sections = [];
+  let usedChars = 0;
+  const appendWhole = (value, label) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    if (usedChars + text.length > evidenceBudgetChars) {
+      sections.push(`[${label} omitted because the bounded assessment evidence packet is full]`);
+      return;
+    }
+    sections.push(text);
+    usedChars += text.length;
+  };
+  // Receipts and the primary change view are indivisible evidence. In
+  // particular, never turn a complete diff into a misleading partial diff at
+  // this final assembly boundary.
+  appendWhole(registeredTestRunEvidence, "registered test evidence");
+  appendWhole(primaryChangeEvidence, "primary change evidence");
+  appendWhole(fileVerification, "scope verification evidence");
+  if (workerStatusOutput && !registeredTestRunEvidence) {
+    const prefix = "WORKER STATUS (context only; never proof):\n";
+    const remaining = Math.max(0, evidenceBudgetChars - usedChars - prefix.length);
+    if (remaining > 0) sections.push(`${prefix}${String(workerStatusOutput).slice(0, remaining)}`);
+  }
   return [
     `LOCAL ASSESSMENT EVIDENCE`,
     `This block was attached by the local client after remote prompt compilation. Treat deterministic receipts and the single primary change view as ground truth. Worker status is context only, never proof.`,
-    fileVerification || null,
-    registeredTestRunEvidence || null,
-    primaryChangeEvidence || null,
-    workerStatusOutput ? `WORKER STATUS (context only; never proof):\n${workerStatusOutput}` : null,
+    sections.join("\n") || null,
   ].filter(Boolean).join("\n");
 }
 
@@ -949,14 +925,33 @@ function _mergeLineRanges(ranges = []) {
 function _buildAssessmentFileSnapshots({ cwd = null, assessmentContext = null, taskSpec = "" } = {}) {
   if (!cwd || !assessmentContext || typeof assessmentContext !== "object") return "";
 
-  const candidatePaths = _mergeUniquePaths(
-    ...(Array.isArray(assessmentContext.allowed_files) ? [assessmentContext.allowed_files] : []),
+  const committedPaths = _mergeUniquePaths(
     ...(Array.isArray(assessmentContext.files_committed) ? [assessmentContext.files_committed] : []),
-  ).slice(0, 6);
+  );
+  // Changed files are the authoritative snapshot set. Fall back to scoped task
+  // targets only when commit discovery was unavailable or empty.
+  const candidatePaths = (committedPaths.length > 0
+    ? committedPaths
+    : _mergeUniquePaths(
+        ...(Array.isArray(assessmentContext.allowed_files) ? [assessmentContext.allowed_files] : []),
+      )).slice(0, 6);
   if (candidatePaths.length === 0) return "";
 
   const lineHints = _extractTaskLineRanges(taskSpec);
   const sections = [];
+  const totalBudgetChars = 48_000;
+  const perFileBudgetChars = 20_000;
+  let usedChars = 0;
+  const addSection = (section) => {
+    const remaining = totalBudgetChars - usedChars;
+    if (remaining <= 0) return false;
+    const bounded = String(section || "").slice(0, Math.min(perFileBudgetChars, remaining));
+    if (bounded) {
+      sections.push(bounded);
+      usedChars += bounded.length;
+    }
+    return usedChars < totalBudgetChars;
+  };
 
   for (const relPath of candidatePaths) {
     const normalizedPath = _normalizeAssessmentScopePath(relPath, cwd);
@@ -966,16 +961,13 @@ function _buildAssessmentFileSnapshots({ cwd = null, assessmentContext = null, t
     try {
       raw = fs.readFileSync(absPath, "utf8");
     } catch {
-      sections.push(`=== ${normalizedPath} === (file not found or unreadable during assessment preload)`);
+      if (!addSection(`=== ${normalizedPath} === (file not found or unreadable during assessment preload)`)) break;
       continue;
     }
 
     const lines = raw.replace(/\r\n/g, "\n").split("\n");
-    if (lines.length <= 450 && raw.length <= 50000) {
-      sections.push(`=== ${normalizedPath} (${lines.length} lines) ===\n${_formatLineNumberedFile(lines.join("\n"))}`);
-      continue;
-    }
-
+    // Prefer focused excerpts even for small files; whole-file snapshots are
+    // resent after every agentic tool round-trip.
     const smart = buildSmartPreload(raw, taskSpec);
     if (smart && Array.isArray(smart.matched) && smart.matched.length > 0) {
       const parts = [`=== ${normalizedPath} (${smart.totalLines} lines) ===`];
@@ -989,7 +981,7 @@ function _buildAssessmentFileSnapshots({ cwd = null, assessmentContext = null, t
           parts.push(`  ${fn.name} [lines ${fn.startLine}-${fn.endLine}]`);
         }
       }
-      sections.push(parts.join("\n"));
+      if (!addSection(parts.join("\n"))) break;
       continue;
     }
 
@@ -1003,12 +995,12 @@ function _buildAssessmentFileSnapshots({ cwd = null, assessmentContext = null, t
         const excerpt = lines.slice(range.start - 1, range.end).join("\n");
         parts.push(`\nLINES ${range.start}-${range.end}:\n${_formatLineNumberedFile(excerpt, range.start)}`);
       }
-      sections.push(parts.join("\n"));
+      if (!addSection(parts.join("\n"))) break;
       continue;
     }
 
-    const head = lines.slice(0, 160).join("\n");
-    sections.push(`=== ${normalizedPath} (${lines.length} lines, head excerpt) ===\n${_formatLineNumberedFile(head)}`);
+    const head = lines.slice(0, 120).join("\n");
+    if (!addSection(`=== ${normalizedPath} (${lines.length} lines, head excerpt) ===\n${_formatLineNumberedFile(head)}`)) break;
   }
 
   return sections.length > 0
@@ -1030,7 +1022,7 @@ export function __testBuildAssessmentProviderScope(options) {
  * @param {boolean} opts.autoApprove - Pass through to callProvider
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
-export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0 } = {}) {
+export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null } = {}) {
   const assessorProvider = String(
     routedProviderName
     || await agentDispatcher?.selectProvider?.({ role: "assessor" })
@@ -1068,12 +1060,22 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   const assessmentScopedDiff = assessmentContext?.scoped_git_diff
-    ? `\nSCOPED GIT DIFF (preferred verification view for this job's changes):\n${assessmentContext.scoped_git_diff}\n`
+    ? `\nSCOPED GIT DIFF (COMPLETE — do not re-derive via git):\n${assessmentContext.scoped_git_diff}\n`
     : "";
-  const assessmentDiffNarrative = assessmentContext?.scoped_diff_narrative
-    ? `\nSCOPED DIFF NARRATIVE (compact summary of changed files and hunks):\n${assessmentContext.scoped_diff_narrative}\n`
+  const diffPrefetchStatus = String(assessmentContext?.scoped_git_diff_status || "");
+  const diffStatusNotice = diffPrefetchStatus === "over_inline_cap"
+    ? [
+        `SCOPED GIT DIFF OMITTED: diff exceeds inline cap (${assessmentContext?.scoped_git_diff_bytes ?? "unknown"} bytes).`,
+        `Pull per-file diffs via git_history op=diff only for files relevant to the task specification.`,
+        assessmentContext?.scoped_git_diff_stat ? `DIFF STAT:\n${assessmentContext.scoped_git_diff_stat}` : null,
+      ].filter(Boolean).join("\n")
+    : diffPrefetchStatus === "prefetch_failed"
+      ? "SCOPED GIT DIFF PREFETCH FAILED. No change body was substituted; use targeted git_history verification if the attached narrative is insufficient."
+      : "";
+  const assessmentDiffNarrative = assessmentContext?.scoped_diff_narrative || diffStatusNotice
+    ? `\nSCOPED DIFF NARRATIVE (compact summary of changed files and hunks):\n${[diffStatusNotice, assessmentContext?.scoped_diff_narrative].filter(Boolean).join("\n")}\n`
     : "";
-  const assessmentFileSnapshots = assessmentScopedDiff
+  const assessmentFileSnapshots = assessmentScopedDiff || diffPrefetchStatus
     ? ""
     : _buildAssessmentFileSnapshots({ cwd, assessmentContext, taskSpec });
 
@@ -1374,12 +1376,63 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   let response;
-  try {
+  const assessorMaxToolCalls = getAssessorMaxToolCalls();
+  const assessorDeepthink = !!parseJobPayload(job).deepthink;
+  const assessmentInputKey = crypto.createHash("sha256").update(JSON.stringify({
+    version: 1,
+    jobId: job.id,
+    provider: assessorProvider,
+    modelTier,
+    reasoningEffort,
+    fallbackReads: Number.isFinite(Number(fallbackReads)) ? Number(fallbackReads) : null,
+    assessorMaxToolCalls,
+    deepthink: assessorDeepthink,
+    taskBoundaryRetryDepth,
+    providerPrompt,
+  })).digest("hex");
+  const reusableReview = getArtifacts(job.id, "review").findLast((artifact) => {
+    if (!artifact?.content_long || !artifact?.content_json) return false;
+    try {
+      const metadata = typeof artifact.content_json === "string"
+        ? JSON.parse(artifact.content_json)
+        : artifact.content_json;
+      return metadata?.assessment_input_key === assessmentInputKey
+        && metadata?.verdict_parse_succeeded === true;
+    } catch {
+      return false;
+    }
+  });
+  if (reusableReview) {
+    response = reusableReview.content_long;
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_ASSESSMENT_REUSED,
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Reused unchanged assessment input ${assessmentInputKey.slice(0, 12)}`,
+      event_json: JSON.stringify({ assessment_input_key: assessmentInputKey }),
+    });
+  } else try {
+    const tokenBudget = assessorTokenBudgetStatus(job.id);
+    const callBudget = assessorCallBudgetStatus(job.id, attemptId);
+    if (tokenBudget.exceeded || callBudget.exceeded) {
+      const reason = callBudget.exceeded
+        ? `Assessment call budget exhausted (${callBudget.used}/${callBudget.cap} calls) for this attempt.`
+        : `Assessment input-token budget exhausted (${tokenBudget.spent}/${tokenBudget.cap} tokens) for this job.`;
+      return {
+        verdict: "needs_review",
+        confidence: "none",
+        reasons: [reason],
+        spawn_jobs: [],
+        human_questions: [],
+        suggestions: [],
+        raw: "",
+        _disable_internal_retry: true,
+      };
+    }
     // Inherit deepthink from the job being assessed: if the task author
     // marked it deepthink, the assessment deserves the same budget so it
     // doesn't rubber-stamp work that took extra time to produce.
-    const assessorDeepthink = !!parseJobPayload(job).deepthink;
-
     const result = await trackedCall(providerPrompt, {
       role: "assessor",
       modelTier,
@@ -1392,6 +1445,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       createFiles: providerScope.createFiles,
       createRoots: providerScope.createRoots,
       fallbackReads,
+      assessorMaxToolCalls,
       abortSignal,
       atlasPrefetchStatus: assessorPacket?.atlas?.prefetchStatus || assessorAtlasPrefetchStatus,
       disableAtlas: artifactAssessmentRoute,
@@ -1405,6 +1459,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     }, {
       job_id: job.id,
       work_item_id: job.work_item_id,
+      attempt_id: attemptId,
       cwd,
       jobProvider: assessorProvider,
       jobModelName: null,
@@ -1413,14 +1468,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   } catch (err) {
     throw err;
   }
-
-  // Store the raw assessment as an artifact
-  storeArtifact({
-    work_item_id: job.work_item_id,
-    job_id: job.id,
-    artifact_type: "review",
-    content_long: response,
-  });
 
   // Parse the verdict (provider-agnostic — extractJsonResult handles sanitisation)
   const verdictJson = extractJsonResult(response);
@@ -1433,6 +1480,19 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   // Unwrap single-element array — LLMs sometimes wrap the verdict object in brackets
   if (Array.isArray(verdict) && verdict.length === 1 && _looksLikeAssessorVerdictObject(verdict[0])) verdict = verdict[0];
   verdict = _normalizeAssessorVerdictShape(verdict, response);
+
+  if (!reusableReview) {
+    storeArtifact({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      artifact_type: "review",
+      content_long: response,
+      content_json: {
+        assessment_input_key: assessmentInputKey,
+        verdict_parse_succeeded: _isReusableAssessorVerdict(verdictJson, verdict),
+      },
+    });
+  }
 
   // Only treat assessor "access limitation" phrasing as a retryable environment
   // error when we could NOT extract a usable verdict. These phrases ("provide
@@ -1530,8 +1590,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   // Validate the verdict value itself
-  const VALID_VERDICTS = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
-  const parsedVerdict = VALID_VERDICTS.has(verdict.verdict) ? verdict.verdict : "parse_error";
+  const parsedVerdict = ASSESSOR_VALID_VERDICTS.has(verdict.verdict) ? verdict.verdict : "parse_error";
   if (parsedVerdict === "parse_error") {
     return {
       verdict: "parse_error",
@@ -1580,6 +1639,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       disableAtlas,
       remoteComposer,
       taskBoundaryRetryDepth: 1,
+      attemptId,
     });
   }
   if (boundaryViolation) {
@@ -1781,6 +1841,7 @@ export async function runPinnedTaskAbAssessmentCommand(payload = {}, {
 export async function runPostExecutionAssessment(worker, {
   attempt,
   committedHash,
+  commitBaseHash = null,
   filesCommitted,
   filesCommittedUnknown = false,
   filesCommittedError = null,
@@ -2369,12 +2430,16 @@ export async function runPostExecutionAssessment(worker, {
         contract_violations: contractViolations,
         contract_warnings: contractWarnings,
         commit_hash: committedHash,
+        commit_base_hash: commitBaseHash,
         branch_net_diff_detected: !!branchNetDiff?.hasDiff,
         branch_net_diff_base: branchNetDiff?.mergeBase || null,
         branch_net_diff_head: branchNetDiff?.head || null,
         branch_net_diff_target: branchNetDiff?.targetBranch || null,
         branch_net_diff_files: branchNetDiff?.files || [],
         branch_net_diff: branchNetDiff?.diff || null,
+        branch_net_diff_bytes: branchNetDiff?.diffBytes ?? null,
+        branch_net_diff_truncated: branchNetDiff?.diffTruncated === true,
+        branch_net_diff_stat: branchNetDiff?.diffStat || null,
         output_root: jobPayloadForAssess.output_root || null,
         verified_no_change: verifiedNoChange,
         allowed_files: jobPayloadForAssess.files_to_modify || [],
@@ -2404,6 +2469,7 @@ export async function runPostExecutionAssessment(worker, {
           ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
           : (wtPath || worker.projectDir),
         assessmentContext,
+        attemptId: attempt.id,
       };
       const trackedCall = getWorkerProviderCall(worker);
       const assessmentTierOrder = ["cheap", "standard", "strong"];
@@ -2424,10 +2490,16 @@ export async function runPostExecutionAssessment(worker, {
       // when a planner independently adjusts the developer job tier.
       const harnessAssessmentTier = taskAbAssessorTier(getWorkItem(job.work_item_id))
         || (process.env.POSSE_AB_HARNESS ? process.env.POSSE_AB_ASSESSOR_TIER : null);
-      const initialAssessmentTier = normalizeAssessmentTier(
+      const requestedAssessmentTier = normalizeAssessmentTier(
         harnessAssessmentTier || jobPayloadForAssess._assess_model_tier,
         "cheap",
       );
+      const initialAssessmentTier = harnessAssessmentTier || jobPayloadForAssess.deepthink === true
+        ? requestedAssessmentTier
+        : requestedAssessmentTier === "strong" ? "standard" : requestedAssessmentTier;
+      if (requestedAssessmentTier === "strong" && initialAssessmentTier === "standard") {
+        worker.emit(job.id, `${C.yellow}[assessor] planner requested strong initial assessment; capped at standard and reserved strong for escalation${C.reset}`);
+      }
       let lastAssessmentTier = initialAssessmentTier;
       let verdict = await assessResult(job, output, {
         ...assessOpts,
@@ -2456,8 +2528,11 @@ export async function runPostExecutionAssessment(worker, {
             snippet: verdict.raw || "",
           });
           const budget = isAssessorParseRetryBudgetExceeded(job.id);
-          if (budget.exceeded) {
-            const message = `Assessment parse-retry budget exceeded (${budget.spent}/${budget.cap} input tokens) before ${retryTier}-tier retry`;
+          const callBudget = assessorCallBudgetStatus(job.id, attempt.id);
+          if (budget.exceeded || callBudget.exceeded) {
+            const message = callBudget.exceeded
+              ? `Assessment retry call budget exhausted (${callBudget.used}/${callBudget.cap} calls) before ${retryTier}-tier retry`
+              : `Assessment retry token budget exceeded (${budget.spent}/${budget.cap} input tokens) before ${retryTier}-tier retry`;
             worker.emit(job.id, `${C.yellow}[assessor] WI#${job.work_item_id} job #${job.id} ${message}${C.reset}`);
             logEvent({
               work_item_id: job.work_item_id,
@@ -2510,8 +2585,11 @@ export async function runPostExecutionAssessment(worker, {
             snippet: verdict.raw || "",
           });
           const budget = isAssessorParseRetryBudgetExceeded(job.id);
-          if (budget.exceeded) {
-            const message = `Assessment parse-retry budget exceeded (${budget.spent}/${budget.cap} input tokens) before ${retryTier}-tier retry`;
+          const callBudget = assessorCallBudgetStatus(job.id, attempt.id);
+          if (budget.exceeded || callBudget.exceeded) {
+            const message = callBudget.exceeded
+              ? `Assessment retry call budget exhausted (${callBudget.used}/${callBudget.cap} calls) before ${retryTier}-tier retry`
+              : `Assessment retry token budget exceeded (${budget.spent}/${budget.cap} input tokens) before ${retryTier}-tier retry`;
           worker.emit(job.id, `${C.yellow}[assessor] WI#${job.work_item_id} job #${job.id} ${message}${C.reset}`);
           logEvent({
             work_item_id: job.work_item_id,
@@ -2783,11 +2861,10 @@ export async function runPostExecutionAssessment(worker, {
   });
 
   if (job.job_type === "research") {
-    const warmEmission = emitAtlasV2ResearchCompleteIfEnabled(job, output);
-    worker._spawnPlanAfterResearch(job, output, {
-      atlasEvidenceWarmJobId: warmEmission?.warmJobId || null,
-      atlasEvidenceWarmRequired: warmEmission?.enabled === true,
-    });
+    // Research has already captured bounded waiting-lane hot paths. Do not
+    // enqueue the legacy full WI warm here: ordinary planning reads main and
+    // does not consume a parked WI view.
+    worker._spawnPlanAfterResearch(job, output);
   } else if (job.job_type === "preflight") {
     worker._spawnResearchAfterPreflight(job, output);
   }

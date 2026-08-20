@@ -95,10 +95,35 @@ export async function writeStagerMeta(outputPath, meta) {
   }
 }
 
-function commandArgsHashPayload(plan, { includeTimeout = false, timeoutMs = 0 } = {}) {
+function canonicalizePlanPath(value, plan) {
+  let result = String(value || "");
+  const replacements = [
+    [plan?.outputPath, "{output}"],
+    [plan?.scipDir, "{scipDir}"],
+    [plan?.repoRoot, "{repoRoot}"],
+  ]
+    .filter(([source]) => String(source || "").trim())
+    .map(([source, token]) => [String(source), token])
+    .sort((left, right) => right[0].length - left[0].length);
+  for (const [source, token] of replacements) {
+    result = result.replaceAll(source, token);
+    const forward = source.replace(/\\/gu, "/");
+    if (forward !== source) result = result.replaceAll(forward, token);
+  }
+  return result;
+}
+
+function commandArgsHashPayload(plan, {
+  includeTimeout = false,
+  timeoutMs = 0,
+  canonicalPaths = true,
+} = {}) {
+  const normalize = canonicalPaths
+    ? (value) => canonicalizePlanPath(value, plan)
+    : (value) => String(value || "");
   const payload = {
-    command: String(plan?.command || ""),
-    args: Array.isArray(plan?.args) ? plan.args.map((arg) => String(arg)) : [],
+    command: normalize(plan?.command),
+    args: Array.isArray(plan?.args) ? plan.args.map((arg) => normalize(arg)) : [],
     label: String(plan?.label || ""),
     indexer_id: String(plan?.indexerId || ""),
     command_source: String(plan?.commandSource || ""),
@@ -123,10 +148,22 @@ function computeLegacyTimeoutCommandArgsHash(plan, timeoutMs) {
   return sha256Json(commandArgsHashPayload(plan, { includeTimeout: true, timeoutMs }));
 }
 
-function commandArgsHashMatches(metaHash, plan) {
+function computeRawCommandArgsHash(plan, { includeTimeout = false, timeoutMs = 0 } = {}) {
+  return sha256Json(commandArgsHashPayload(plan, {
+    includeTimeout,
+    timeoutMs,
+    canonicalPaths: false,
+  }));
+}
+
+export function commandArgsHashMatches(metaHash, plan) {
   const actual = String(metaHash || "");
   if (!actual) return false;
   if (actual === computeCommandArgsHash(plan)) return true;
+  // Same-location compatibility for metadata written before command hashes
+  // normalized repo-owned paths. Portable snapshots rewrite this legacy hash
+  // once, after which future relocations compare the canonical form above.
+  if (actual === computeRawCommandArgsHash(plan)) return true;
   const legacyTimeouts = new Set([
     Number(plan?.commandArgsHashTimeoutMs),
     Number(plan?.timeoutMs),
@@ -134,6 +171,7 @@ function commandArgsHashMatches(metaHash, plan) {
   ].filter((value) => Number.isFinite(value) && value >= 0).map((value) => Math.floor(value)));
   for (const timeoutMs of legacyTimeouts) {
     if (actual === computeLegacyTimeoutCommandArgsHash(plan, timeoutMs)) return true;
+    if (actual === computeRawCommandArgsHash(plan, { includeTimeout: true, timeoutMs })) return true;
   }
   return false;
 }

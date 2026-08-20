@@ -262,6 +262,48 @@ uncommitted, in-flight changes.
 `scripts/run-tests.mjs`. The runner executes `test/core.test.js` plus every
 root-level `test/test-*.test.js` file.
 
+Runs report only what needs reading. A passing file prints nothing (a terminal
+gets one overwriting progress line); a failing file prints the moment it
+finishes, with its failed test names, errors and captured output; and each pass
+closes with the counts and a command that re-runs exactly the files that
+failed:
+
+```text
+FAIL test/test-waiting-lane-demand.test.js  (1 of 12 failed, 0.4s)
+  waiting lane demand > counts only unclaimed jobs
+      Expected values to be strictly equal: 3 !== 2
+      at TestContext.<anonymous> (file:///.../test/test-waiting-lane-demand.test.js:88:12)
+concurrent pass: 1 of 236 files failed: 2913 passed, 1 failed in 61.2s
+failed files:
+  test/test-waiting-lane-demand.test.js
+re-run: node scripts/run-tests.mjs files test/test-waiting-lane-demand.test.js
+```
+
+`node scripts/run-tests.mjs files <file>...` runs just the named files, each in
+the pass (concurrent or serial) it belongs to, with the sandbox environment a
+bare `node --test` would not set. To narrate every passing test again, set
+`POSSE_TEST_REPORTER=spec` (or `tap`, `dot`) for node's own reporters.
+
+Off Windows the two passes run together, and the serial pass runs four files at
+a time rather than one. Measured on this suite (Linux, 16 cores): the serial
+pass alone takes 315s at width 1, 122s at width 4 and 112s at width 8, always
+with identical results; running both passes together as well brings a full run
+from 524s to about 285s. Nothing in the serial list collides with anything else
+in it — sockets and pipes already carry per-process unique names and fixture
+repositories are `mkdtemp`'d — so the pass is capping how many heavy files run
+at once rather than keeping conflicting pairs apart.
+
+Windows keeps the original shape: one serial file at a time, strictly after the
+concurrent pass drains. That is where the EPERM/EBUSY flakiness the split
+exists for was seen, and none of the above was measured there. To try it:
+
+```bash
+POSSE_SERIAL_CONCURRENCY=4 POSSE_OVERLAP_PASSES=1 npm test
+```
+
+Both knobs work everywhere, so `POSSE_OVERLAP_PASSES=0` restores the sequential
+passes on any platform.
+
 Focused suites are available when you only need a specific area:
 
 ```bash

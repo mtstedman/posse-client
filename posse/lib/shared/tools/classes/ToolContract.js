@@ -1,7 +1,8 @@
 import { normPath, normalizeRoots } from "../../scope/functions/path.js";
 import { TOOL_REFS } from "../../../catalog/tool-references.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
-import { renderToolBatchingGuidance } from "../functions/provider-surface.js";
+import { renderAtlasGuidance, renderToolBatchingGuidance } from "../functions/provider-surface.js";
+import { projectAgentToolDefinition } from "../functions/agent-schema.js";
 import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
@@ -191,6 +192,18 @@ export class ToolContract {
     return renderToolBatchingGuidance(contract, renderer).join("\n");
   }
 
+  renderProviderGuidanceBlock(toolRenderer = null) {
+    const contract = this.contract;
+    const renderer = toolRenderer || new ProviderToolRenderer({
+      providerName: contract.provider,
+      issuedSurface: contract,
+    });
+    return [
+      ...renderAtlasGuidance(contract),
+      ...renderToolBatchingGuidance(contract, renderer),
+    ].join("\n");
+  }
+
   renderBlock() {
     const contract = this.contract;
     const toolRenderer = new ProviderToolRenderer({
@@ -237,8 +250,8 @@ export class ToolContract {
       return lines.join("\n");
     }
     lines.push("- Tool interface: the provider-exposed tool schemas are exhaustive; call their exact exposed names.");
-    const batchingGuidance = this.renderProviderBatchingGuidanceBlock(toolRenderer);
-    if (batchingGuidance) lines.push(batchingGuidance);
+    const providerGuidance = this.renderProviderGuidanceBlock(toolRenderer);
+    if (providerGuidance) lines.push(providerGuidance);
     if (contract.role === "dev" && contract.allowWrite) {
       const editFile = toolRenderer.tryRender(TOOL_REFS.tools.editFile);
       if (editFile) {
@@ -489,7 +502,7 @@ export class ToolContract {
     const tools = [];
     for (const tool of (this.contract.tools || [])) {
       const def = toolMap[canonicalToolName(tool)];
-      if (def) tools.push(def);
+      if (def) tools.push(projectAgentToolDefinition(def));
     }
     return tools;
   }

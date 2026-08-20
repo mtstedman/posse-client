@@ -10,6 +10,7 @@ export const ATLAS_PARSER_VERSION = "atlas-v2-parser";
 // bases, JS signature body-boundary fix (encoder parse_extract changes).
 // edge-coverage-v2: Python import edges persist the local binding in to_name
 // and the original imported name in the module#original target.
-// edge-coverage-v3/v4: native parser coverage revisions. v4 is the persisted
-// contract emitted by the current posse-atlas parser and storage worker.
-export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v4";
+// edge-coverage-v3/v4: native parser coverage revisions.
+// edge-coverage-v5: TypeScript ambient signatures and BOM-aware UTF-16 source
+// decoding. This forces existing blobs through the corrected native parser.
+export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v5";

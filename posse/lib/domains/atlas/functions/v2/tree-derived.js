@@ -7,6 +7,7 @@
 import { sha256Hex } from "./hash.js";
 import { normalizeRepoPath } from "./paths.js";
 import { runAtlasNativeMethodAsync } from "./native/invoke.js";
+import { refreshViewTreeNativeAsync } from "./native/storage.js";
 import { atlasTreeNativeTimeoutMs } from "./tree-native-timeout.js";
 
 const TREE_RUN_KIND = "tree-derived";
@@ -190,6 +191,37 @@ export function treeDerivedInputSignature(db) {
 export async function refreshTreeDerivedState(db) {
   ensureTreeDerivedTables(db);
   const started = Date.now();
+  const persistedViewPath = nativeRefreshViewPath(db);
+  if (persistedViewPath) {
+    const symbolCount = tableCount(db, "symbols");
+    try {
+      const counts = /** @type {any} */ (await refreshViewTreeNativeAsync(
+        persistedViewPath,
+        { timeoutMs: atlasTreeNativeTimeoutMs(symbolCount) },
+      ));
+      validateNativeTreeRefresh(db, counts, symbolCount);
+      return {
+        ok: true,
+        durationMs: Date.now() - started,
+        nodes: Number(counts.nodes),
+        refs: Number(counts.refs),
+        files: Number(counts.files),
+        symbols: Number(counts.symbols),
+      };
+    } catch (err) {
+      const durationMs = Date.now() - started;
+      recordRun(db, TREE_RUN_KIND, "error", durationMs, { error: err?.message || String(err) });
+      return {
+        ok: false,
+        durationMs,
+        nodes: 0,
+        refs: 0,
+        files: 0,
+        symbols: 0,
+        error: err?.message || String(err),
+      };
+    }
+  }
   // The native tree-build is awaited BEFORE the savepoint opens so the async
   // worker hop never holds an open write transaction on the view file.
   /** @type {any} */
@@ -252,6 +284,89 @@ export async function refreshTreeDerivedState(db) {
       error: err?.message || String(err),
     };
   }
+}
+
+/**
+ * File-backed views use the compact native storage refresh. In-memory test
+ * databases cannot be opened by the native process and retain the value
+ * `tree-build` path below.
+ *
+ * @param {import("better-sqlite3").Database} db
+ */
+function nativeRefreshViewPath(db) {
+  if (db?.memory === true) return null;
+  const name = String(db?.name || "").trim();
+  if (!name || name === ":memory:" || name.startsWith("file::memory:")) return null;
+  return name;
+}
+
+/**
+ * Cross-check the compact native response against the committed database.
+ * Native performs the same invariants before committing; this second check
+ * catches protocol drift or a response describing a different view.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {any} counts
+ * @param {number} expectedSymbols
+ */
+function validateNativeTreeRefresh(db, counts, expectedSymbols) {
+  if (Number(counts?.contract_version) !== 1) {
+    throw new Error(`tree-derived: unsupported native storage contract ${counts?.contract_version}`);
+  }
+  const expected = {
+    nodes: nonNegativeCount(counts?.nodes, "nodes"),
+    refs: nonNegativeCount(counts?.refs, "refs"),
+    scopeNodes: nonNegativeCount(counts?.scope_nodes, "scope_nodes"),
+    termStats: nonNegativeCount(counts?.term_stats, "term_stats"),
+    symbolFiles: nonNegativeCount(counts?.symbol_files, "symbol_files"),
+    symbols: nonNegativeCount(counts?.symbols, "symbols"),
+  };
+  if (expected.symbols !== expectedSymbols) {
+    throw new Error(`tree-derived: native refresh covered ${expected.symbols}/${expectedSymbols} symbols`);
+  }
+  const actual = db.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM atlas_tree_nodes) AS nodes,
+       (SELECT COUNT(*) FROM atlas_tree_refs) AS refs,
+       (SELECT COUNT(*) FROM atlas_tree_scope_nodes) AS scopeNodes,
+       (SELECT COUNT(*) FROM atlas_tree_scope_term_stats) AS termStats,
+       (SELECT COUNT(*) FROM atlas_tree_scope_symbol_files) AS symbolFiles,
+       (SELECT COUNT(*) FROM atlas_tree_nodes WHERE symbol_ref IS NOT NULL) AS symbols,
+       (SELECT COUNT(*) FROM atlas_tree_nodes WHERE node_id = 'root' AND parent_node_id IS NULL) AS roots,
+       (SELECT COUNT(*) FROM atlas_tree_nodes child
+          LEFT JOIN atlas_tree_nodes parent ON parent.node_id = child.parent_node_id
+         WHERE child.parent_node_id IS NOT NULL AND parent.node_id IS NULL) AS missingParents,
+       (SELECT COUNT(*) FROM atlas_tree_refs ref
+          LEFT JOIN atlas_tree_nodes node ON node.node_id = ref.node_id
+         WHERE node.node_id IS NULL) AS missingRefs`,
+  ).get();
+  for (const key of ["nodes", "refs", "scopeNodes", "termStats", "symbolFiles", "symbols"]) {
+    if (Number(actual?.[key]) !== expected[key]) {
+      throw new Error(`tree-derived: native ${key} count ${expected[key]} does not match persisted ${actual?.[key]}`);
+    }
+  }
+  if (Number(actual?.roots) !== 1) {
+    throw new Error(`tree-derived: expected one persisted root, got ${actual?.roots}`);
+  }
+  if (Number(actual?.missingParents) !== 0) {
+    throw new Error(`tree-derived: persisted tree has ${actual?.missingParents} dangling parents`);
+  }
+  if (Number(actual?.missingRefs) !== 0) {
+    throw new Error(`tree-derived: persisted tree has ${actual?.missingRefs} dangling refs`);
+  }
+}
+
+function nonNegativeCount(value, field) {
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`tree-derived: native ${field} is not a non-negative safe integer`);
+  }
+  return count;
+}
+
+/** @param {import("better-sqlite3").Database} db @param {string} table */
+function tableCount(db, table) {
+  return Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count || 0);
 }
 
 /**

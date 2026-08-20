@@ -41,11 +41,9 @@ export const TOOL_WRITE_FILE = {
   type: "function",
   name: "write_file",
   description:
-    "DEPRECATED for code dev/fix jobs: writing handoff materializes every exact files_to_create path " +
-    "before provider execution, so edit_file can populate the resulting empty file. Retained for " +
-    "compatibility and dynamic artifact creation; do not issue it on the code developer surface. " +
-    "Creates a new file or overwrites an existing file with the given content. Set executable=true " +
-    "when the resulting file must be directly executable.",
+    "Create a file or replace its full contents, with optional executable permissions. This " +
+    "compatibility capability supports dynamic artifact creation. Code dev/fix jobs receive " +
+    "pre-materialized create targets through their scoped mutation surface.",
   parameters: {
     type: "object",
     properties: {
@@ -75,7 +73,7 @@ export const TOOL_EDIT_FILE = {
       new_string: { type: "string", description: "Replacement text" },
       replaceLines: {
         type: "object",
-        description: "Replace a 1-based inclusive line range [start, end] with content. Line numbers match read_file output.",
+        description: "Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention.",
         properties: {
           start: { type: "integer", minimum: 1, description: "1-based start line, inclusive" },
           end: { type: "integer", minimum: 1, description: "1-based end line, inclusive" },
@@ -97,7 +95,7 @@ export const TOOL_EDIT_FILE = {
       },
       insertAt: {
         type: "object",
-        description: "Insert content before a 1-based line number. Line numbers match read_file output; use line_count + 1 to insert after the last line.",
+        description: "Insert content before a 1-based line number. Use line_count + 1 to insert after the last line.",
         properties: {
           line: { type: "integer", minimum: 1, description: "1-based insertion line" },
           content: { type: "string", description: "Content to insert" },
@@ -262,7 +260,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
           query: { type: "string", minLength: 1, maxLength: 500 },
           scope_roots: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", minLength: 1, maxLength: 500 } },
           evidence_ref: { type: "string", pattern: "^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$" },
-          result_count: { type: "integer", minimum: 0, maximum: 0, description: "Must be zero; a nonzero search cannot prove repository absence." },
+          result_count: { type: "integer", minimum: 0, maximum: 0, description: "Zero, confirming that the repository-wide search found no results." },
         },
         required: ["claim", "query", "scope_roots", "evidence_ref", "result_count"],
         additionalProperties: false,
@@ -383,7 +381,7 @@ export const TOOL_AGENT_HANDOFF = {
                     'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
                     "The evidence object is optional. Hash refs are legal in narrative text and remain compact opaque references there. Only proof, support, and decoy selector positions are deterministically resolved, range-validated, and expanded. " +
                     "Proof accepts only storage-owned tool evidence; agent-created prose refs may appear only in support or decoy. " +
-                    "Evidence lanes accept only opaque hash-ref selectors, never file paths or path:line strings.",
+                    "Evidence lanes contain opaque hash-ref selectors. File paths and path:line citations belong in narrative text.",
                   items: {
                     type: "array",
                     minItems: 1,
@@ -408,7 +406,7 @@ export const TOOL_AGENT_HANDOFF = {
                 scope: {
                   type: "object",
                   description:
-                    "Planner task execution scope. Set task_mode to db only for a dev task whose entire write surface is project_db_query; db requires empty file arrays. Other agent task modes require writable file or create-root scope. A system/promote task requires exact destination files in files_to_create or files_to_modify.",
+                    "Planner task execution scope. Set task_mode to db only for a dev task whose entire write surface is the project database; db requires empty file arrays. Other agent task modes require writable file or create-root scope. A system/promote task requires exact destination files in files_to_create or files_to_modify.",
                   properties: {
                     task_mode: {
                       type: "string",
@@ -495,23 +493,23 @@ export const TOOL_AGENT_HANDOFF_ARTIFICER = {
 const HANDOFF_REF = {
   type: "string",
   pattern: "^#[0-9a-z]{4,12}$",
-  description: "Opaque hash ref only; never a file path or path:line citation.",
+  description: "Opaque hash ref such as #a3f9. File paths and path:line citations belong in narrative text.",
 };
 
 const HANDOFF_EVIDENCE_SELECTOR = {
   type: "object",
   description:
     "Select bounded stored evidence. Prefer slices of at most 40 lines and 4000 characters; 300 lines and 24000 characters per selector are compactness recommendations, not rejection gates. " +
-    "For larger refs, first create a tighter server-side source_ref slice when practical. Keep total evidence near 12000 characters; 32000 is the recommended non-child packet target. " +
+    "For larger refs, select a tighter server-side source_ref slice when practical. Keep total evidence near 12000 characters; 32000 is the recommended non-child packet target. " +
     "The runtime accepts complete evidence up to hard safety ceilings of 2000 lines and 131072 characters per selector, and 196608 characters total. " +
-    "Inline authored create_ref chunks are support/decoy only; direct tool refs and verified source_ref slices may be proof.",
+    "Inline authored chunks belong in support or decoy; direct tool refs and verified source_ref slices may be proof.",
   properties: {
     ref: HANDOFF_REF,
     lines: {
       type: "object",
       description:
         "Optional 1-based window into this exact ref. For source-backed refs, start/count use source-file line numbers shown in gutters or source metadata, not lines in a stored JSON/tool envelope; the range must fit wholly within one source window from the same ref. " +
-        "For non-source refs, start/count address materialized ref-text lines. Omit lines only to select the entire stored ref. A citation ref resolves to the exact visible anchor or fetched view. Omitted content uses a separate continuation ref: fetch it, then select the returned view_ref rather than the continuation ref.",
+        "For materialized non-source refs, start/count address ref-text lines. Omitted lines select the entire stored ref. A citation ref resolves to the exact visible anchor or fetched view. Omitted content has a separate continuation ref whose returned view_ref identifies the delivered text.",
       properties: {
         start: { type: "integer", minimum: 1 },
         count: { type: "integer", minimum: 1, maximum: 2000 },
@@ -543,7 +541,7 @@ const HANDOFF_DECOY = {
 const HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One concise claim. Evidence is stored by ref; use line-range selectors instead of copying tool output.",
+    "One concise claim with stored evidence selected by bounded ref line ranges.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 240 },
     proof: { type: "array", maxItems: 4, items: COMPACT_HANDOFF_SELECTOR },
@@ -564,7 +562,7 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "One section of the terminal research report. Put the complete substantive section in claim. For researcher.report.v1 omit the optional summary instead of restating the claim; researcher.pipeline.v1 may use it for distinct planning synthesis. Ordinary repository path:line citations are allowed in narrative text. Evidence refs are optional.",
+    "One section of the terminal research report. Put the complete substantive section in claim. For researcher.report.v1, reserve the optional summary for distinct framing; researcher.pipeline.v1 may use it for planning synthesis. Ordinary repository path:line citations are allowed in narrative text. Evidence refs are optional.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
@@ -589,7 +587,7 @@ const PLANNER_SCOPE = {
   type: "object",
   description:
     "Exact execution scope. db requires target dev and empty file arrays; other agent tasks require at least one exact writable path. " +
-    "Never submit scope:{} for an agent/promote task or a non-db scope containing only task_mode. " +
+    "Agent and promote tasks require concrete writable scope; non-db scope includes more than task_mode. " +
     "system/human_input uses scope:{}; system/promote requires exact destination files in files_to_create or files_to_modify.",
   properties: {
     task_mode: {
@@ -826,8 +824,8 @@ const V2_HANDOFF_DECOY = {
 const V2_HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One specific claim with optional evidence. Use summary for brief synthesis. Hash refs belong only in proof, support, or decoy selectors, never in claim or summary. " +
-    "Proof requires a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs are not proof.",
+    "One specific claim with optional evidence. Use summary for brief synthesis. Place hash refs in proof, support, or decoy selectors, while claim and summary contain narrative text. " +
+    "Proof uses a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs belong in support or decoy.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 1000 },
     name: { type: "string", minLength: 1, maxLength: 1000, description: "Deprecated migration alias for claim." },
@@ -883,7 +881,7 @@ const V2_RESEARCHER_REPORT = exactReport({
   research: AGENT_HANDOFF_RESEARCH_DATA,
 }, ["summary"], {
   claims: V2_RESEARCHER_HANDOFF_CLAIMS,
-  summaryDescription: "Brief report introduction only. Put the substantive answer in claims and do not duplicate claim text here.",
+  summaryDescription: "Brief report introduction with framing distinct from the substantive answer in claims.",
 });
 
 const V2_PLANNER_COMPACT_TASK = {
@@ -910,14 +908,14 @@ const V2_ASSESSOR_CLAIM = {
 
 const V2_ASSESSOR_CLAIMS = {
   type: "array",
-  description: "A JSON array of verdict claims, never an object keyed by claim labels.",
+  description: "A JSON array of verdict claim objects in their evaluation order.",
   maxItems: 12,
   items: V2_ASSESSOR_CLAIM,
 };
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. In report mode put each complete answer section in claim, omit each claim's optional summary/prose, and use report.summary only as a brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Prefer 40-line evidence slices when refs add value. Do not submit confidence or payload. The receipt ends provider generation.",
+    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. In report mode put each complete answer section in claim and use report.summary as a distinct brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional and come from narrow refs already available; 40-line slices are preferred when refs add value. Submit the selected profile's report fields. The receipt ends provider generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -935,9 +933,9 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
     "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
-    "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
+    "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
-    "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
+    "Submit the fields shown in the task schema directly in the tasks array. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -956,13 +954,13 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
 export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
   description:
     "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only visible stored hash-ref strings. Terminal assessor proof may use tool-owned evidence or agent-authored prose refs. " +
-    "Do not use keyed claims, name/prose aliases, or free-form/path/line/tool evidence objects. Do not submit payload or execution scope. The receipt ends provider generation.",
+    "Submit the canonical claim objects and their hash-ref proof selectors, plus the verdict fields present in the schema. The receipt ends provider generation.",
   profile: "assessor.verdict.v1",
   outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
   confidence: true,
   handoff: {
     type: "object",
-    description: "Use exactly one nested target and report; do not flatten report fields or add compatibility aliases.",
+    description: "Supply exactly one nested target and one canonical report object.",
     properties: {
       target: exactTarget("pipeline", "$pipeline"),
       report: exactReport({
@@ -979,7 +977,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode, claims must contain the substantive terminal report, each claim's optional summary must be omitted, and the top-level summary is only a brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional transport: use only narrow refs already available, and never do additional research solely to populate handoff metadata. Follow the schema exactly. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode, claims contain the substantive terminal report and the top-level summary provides a distinct brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional and come from narrow refs already available. Follow the schema exactly. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -991,7 +989,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         enum: ["success", "gap", "input_required", "complete"],
       },
-      summary: { type: "string", minLength: 1, description: "For researcher.report.v1 this is only a brief introduction; do not duplicate claim text." },
+      summary: { type: "string", minLength: 1, description: "For researcher.report.v1 this is a brief introduction with framing distinct from claim text." },
       claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
         type: "array",
@@ -1085,9 +1083,9 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
     "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
-    "Planning is never terminal: if research suggests the requested state already exists, emit a narrow dev task to verify that state so downstream execution and assessment own the no-op decision. Correct example: " +
+    "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
-    "Use only fields shown in the task schema; do not wrap tasks in another report envelope. The receipt ends provider generation.",
+    "Submit the fields shown in the task schema directly in the tasks array. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1105,13 +1103,13 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
 
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
-    "Finish citation synthesis with one parent report. Use named claim objects with summary for optional synthesis; citation-child ceilings remain strict. Report only supported findings; do not inventory absent evidence, unsupported facts, gaps, or limitations. Before the first handoff, narrow every evidence selector and keep the sum of all selected line counts at 30 or fewer. Do not submit confidence, scope, payload, constraints, success criteria, or questions. The receipt ends provider generation.",
+    "Finish citation synthesis with one parent report containing supported findings in named claim objects and optional summaries. Before the first handoff, narrow every evidence selector and keep the sum of all selected line counts at 30 or fewer. Submit the citation report fields present in the schema. The receipt ends provider generation.",
   profile: "citation_synthesis.v1",
   outcomes: ["complete", "partial", "failed"],
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
     summaryMaxLength: 500,
     claims: CITATION_CLAIMS,
-    summaryDescription: "At most 500 characters. Target 350 or fewer; together with intent, claims, claim synthesis, and decoy reasons, total narrative cannot exceed 2000 characters.",
+    summaryDescription: "At most 500 characters. Target 350 or fewer; the total narrative ceiling across intent, claims, synthesis, and decoy reasons is 2000 characters.",
   }), { commonFields: CITATION_HANDOFF_FIELDS }),
   maxHandoffs: 1,
 });
@@ -1124,7 +1122,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish assessment with one verdict and a brief prose proof. Do not create or copy evidence solely for this call. The receipt ends provider generation.",
+    "Finish assessment with one verdict and a brief prose proof drawn from the evidence already available. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1223,7 +1221,7 @@ const SUB_AGENT_REQUEST = {
                 type: "string",
                 minLength: 1,
                 maxLength: 120,
-                description: "Use the exact canonical issued name, for example atlas.code.window. Do not prepend an MCP server namespace or rewrite dots as underscores.",
+                description: "Provide the exact canonical issued name from the current surface, retaining its suite prefix and dotted action name.",
               },
               arguments: { type: "object" },
             },
@@ -1251,8 +1249,8 @@ export const TOOL_SUB_AGENT = {
   name: "sub_agent",
   description:
     "Dispatch or control an admin-gated batch of one to three isolated citation agents. " +
-    "Mandatory routing check: after two parent evidence calls across multiple targets, before another read or materialization call you MUST dispatch one batch when at least two related targets still need synthesis. Continue directly only when current context contains the answers or the remaining question needs one targeted call. Prefetched names, skeletons, and file lists are not answers. Developer parents may use child evidence to guide implementation, but children do not implement. " +
-    "Children receive a private lazy input cursor plus terminal agent_handoff. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
+    "Mandatory routing check: after two parent evidence calls across multiple targets, dispatch one batch before another read or materialization call when at least two related targets still need synthesis. Continue directly when current context contains the answers or the remaining question needs one targeted call. Prefetched names, skeletons, and file lists provide orientation; child agents synthesize evidence while developer parents apply it. " +
+    "Children receive a private lazy input cursor plus a terminal handoff capability. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
   parameters: {
     oneOf: [
       {
@@ -1326,7 +1324,7 @@ export const TOOL_SEARCH_FILES = {
       path: { type: "string", description: "File or directory to search in. Default: working directory" },
       include: { type: "string", description: "Glob pattern to filter files, e.g. '*.js', '*.{ts,tsx}'" },
       case_insensitive: { type: "boolean", description: "Match case-insensitively. Default: false." },
-      literal: { type: "boolean", description: "Treat pattern as literal text instead of regex. Default: false." },
+      literal: { type: "boolean", description: "Treat pattern as literal text. Default: false, which enables regex interpretation." },
       multiline: { type: "boolean", description: "Allow regex to match across newlines. Default: false." },
       output_mode: {
         type: "string",
@@ -1408,8 +1406,7 @@ export const TOOL_VALIDATE_ARTIFACT_OUTPUT = {
   type: "function",
   name: "validate_artifact_output",
   description:
-    "Validate an artifact output directory against the configured artifact contract and optional expected image dimensions. " +
-    "Use this instead of writing ad-hoc checker scripts.",
+    "Validate an artifact output directory against the configured artifact contract and optional expected image dimensions in one structured result.",
   parameters: {
     type: "object",
     properties: {
@@ -1458,8 +1455,7 @@ export const TOOL_PRUNE_ARTIFACT_OUTPUT = {
   type: "function",
   name: "prune_artifact_output",
   description:
-    "Remove non-deliverable sidecar files from a scoped artifact output directory, preserving allowed image files and manifest files. " +
-    "Use this instead of writing cleanup scripts inside output_root.",
+    "Remove non-deliverable sidecar files from a scoped artifact output directory while preserving allowed image files and manifest files.",
   parameters: {
     type: "object",
     properties: {
@@ -1536,8 +1532,7 @@ export const TOOL_CLEAN_IMAGE = {
   type: "function",
   name: "clean_image",
   description:
-    "Inspect, re-encode, resize, or optimize an image through one scoped image cleanup tool. " +
-    "Use this instead of separate resize/optimize/reencode calls.",
+    "Inspect, re-encode, resize, optimize, or remove a solid background from one scoped image in a single operation.",
   parameters: {
     type: "object",
     properties: {
@@ -1675,7 +1670,7 @@ export const TOOL_ACK_OPERATOR_FEEDBACK = {
   description:
     "Acknowledge one operator feedback item attached directly to a tool result. " +
     "The default decision is accepted, so the usual case only needs interaction_id. " +
-    "Use rejected or deferred only when you cannot apply the feedback now; those decisions require a short reason.",
+    "Choose rejected or deferred with a short reason when the feedback will not be applied now.",
   parameters: {
     type: "object",
     properties: {
@@ -1704,8 +1699,7 @@ export const TOOL_BASH = {
   description:
     "Execute a read-only inspection command or test/build runner and return stdout+stderr. " +
     "On Windows this runs through PowerShell when shell features are needed; prefer repo-native test commands and PowerShell-compatible syntax over Unix-only filters. " +
-    "Do not use this for lint/typecheck when the issued scoped-check tool can cover the declared scope. " +
-    "Do not use this to modify files; use issued scoped file-mutation tools for workspace changes.",
+    "Use the declared-scope check capability for covered lint and typecheck work. Workspace changes use scoped mutation capabilities.",
   parameters: {
     type: "object",
     properties: {
@@ -1937,16 +1931,15 @@ export const TOOL_CHAIN_READ = {
   name: "chain_read",
   description:
     "Read exact missing file context through the deterministic fallback. When ATLAS is active, " +
-    "successful ATLAS source retrieval already counts as file-content evidence; do not " +
-    "repeat it with this fallback reader merely to audit, verify, or cite it. Use this reader only " +
-    "for remaining ATLAS evidence gaps, exact mutated or non-indexed state, an " +
+    "successful ATLAS source retrieval already counts as file-content evidence. This reader covers " +
+    "remaining ATLAS evidence gaps, exact mutated or non-indexed state, an " +
     "unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you " +
-    "call the issued verdict companion to classify it. Large files may be paged with " +
+    "classify that file as relevant or irrelevant. Large files may be paged with " +
     "offset/limit; after the file is tagged relevant, later continuation pages inherit " +
-    "that verdict and do not require another verdict call. When ATLAS already returned " +
+    "that verdict. When ATLAS already returned " +
     "source content for an indexed file, request an explicit slice of at most 250 lines " +
     "or use search/jsonPath. " +
-    "If a previously relevant file is restored from the audit ledger, its verdict carries over and no new verdict is needed. " +
+    "A previously relevant file restored from the audit ledger retains its verdict. " +
     "Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.",
   parameters: {
     type: "object",
@@ -1971,13 +1964,11 @@ export const TOOL_CHAIN_VERDICT = {
   type: "function",
   name: "chain_verdict",
   description:
-    "Issue your verdict on a newly read file. You MUST call this after the first " +
-    "chain_read before you can read another file. Relevant continuation pages inherit " +
-    "that verdict without another call. Mark the file relevant or " +
+    "Classify the currently locked file as relevant or irrelevant, unlocking the next file read. Relevant continuation pages inherit " +
+    "that verdict. Mark the file relevant or " +
     "irrelevant. The classification stays in the local audit ledger for duplicate " +
-    "suppression and research telemetry; it does not make raw-read evidence preferable " +
-    "to sufficient ATLAS evidence or automatically add a file to the terminal handoff. " +
-    "Irrelevant files are logged so they are never re-read.",
+    "suppression and research telemetry. ATLAS evidence remains the primary indexed source, and terminal handoff selection remains explicit. " +
+    "Irrelevant files are logged for later read suppression.",
   parameters: {
     type: "object",
     properties: {
@@ -2049,9 +2040,8 @@ export const TOOL_GET_BRIEF = {
   description:
     "Load the research brief already prepared for this work item in one call: the researcher's full analysis, " +
     "structured data (key files, patterns, constraints), the ranked file-priority list, the function/class index, " +
-    "plus a manifest of staged source files. Call this once at the start of planning instead of reading the " +
-    "staged context files one by one. Note: this returns PRE-STAGED handoff context; it does not scan the " +
-    "repository the way pull_brief does.",
+    "plus a manifest of staged source files. One call at the start of planning returns the complete " +
+    "pre-staged handoff context.",
   parameters: {
     type: "object",
     properties: {},
@@ -2104,8 +2094,8 @@ export const TOOL_PROJECT_DB_QUERY = {
     "(sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement " +
     "types you may run depend on the granted permissions (READ→SELECT, WRITE→UPDATE, " +
     "INSERT, DELETE, CREATE, ALTER) plus read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). " +
-    "Read-phase roles are capped to SELECT/inspection regardless of the grant. Anything outside " +
-    "the grant is rejected, and destructive DDL (DROP/TRUNCATE) is never allowed. One statement " +
+    "Read-phase roles are capped to SELECT/inspection regardless of the grant. The capability " +
+    "accepts only granted statement families and excludes destructive DDL such as DROP and TRUNCATE. One statement " +
     "per call; read results are row- and byte-capped.",
   parameters: {
     type: "object",

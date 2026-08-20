@@ -14,6 +14,10 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 5;
+// Atlas137: close at the base ceiling. Eligibility for a future extension may
+// be observed, but it never changes admission in this release.
+export const RESEARCH_SYNTHESIS_CEILING_EXTENSION_STEPS = 0;
+export const RESEARCH_SYNTHESIS_FRESH_NOVELTY_MAX_STALE_STEPS = 1;
 export const RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES = 2;
 // Exploration-time traversal remains available for omitted or bounded stored
 // payloads. The gate only becomes terminal after closeout has admitted one
@@ -49,6 +53,16 @@ export function isResearchAtlasExplorationAction(action) {
     && !NON_EXPLORATION_ATLAS_ACTIONS.has(normalized);
 }
 
+// The effective hard stop for exploration. Atlas137 fixes the extension at
+// zero; staleSteps remains in the signature for compatibility and telemetry.
+export function researchSynthesisExplorationCeiling({ staleSteps = 0 } = {}) {
+  const stale = Math.max(0, Number(staleSteps) || 0);
+  return RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+    + (stale <= RESEARCH_SYNTHESIS_FRESH_NOVELTY_MAX_STALE_STEPS
+      ? RESEARCH_SYNTHESIS_CEILING_EXTENSION_STEPS
+      : 0);
+}
+
 export function researchSynthesisDecision({
   explorationSteps = 0,
   staleSteps = 0,
@@ -56,7 +70,8 @@ export function researchSynthesisDecision({
 } = {}) {
   const steps = Math.max(0, Number(explorationSteps) || 0);
   const stale = Math.max(0, Number(staleSteps) || 0);
-  const absoluteCeilingReached = steps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
+  const explorationCeiling = researchSynthesisExplorationCeiling({ staleSteps: stale });
+  const absoluteCeilingReached = steps >= explorationCeiling;
   const staleCeilingReached = steps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
     && stale >= RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS;
   const required = synthesisRequired === true || absoluteCeilingReached || staleCeilingReached;
@@ -66,9 +81,41 @@ export function researchSynthesisDecision({
     staleCeilingReached,
     explorationSteps: steps,
     staleSteps: stale,
+    explorationCeiling,
     reason: absoluteCeilingReached
       ? "exploration_ceiling"
       : (staleCeilingReached ? "stale_evidence" : (synthesisRequired ? "already_required" : null)),
+  };
+}
+
+// Novelty for native exploration reads (read_file, search_files, ...): the
+// first successful, non-empty call with a given signature counts as novel
+// evidence; empty results and exact repeats advance the stale streak instead. In-memory by design — a
+// gateway restart re-credits at most one duplicate per signature, which errs
+// toward keeping the evidence window open rather than closing it early.
+function nativeExplorationResultHasEvidence(resultText) {
+  const text = String(resultText ?? "").trim();
+  if (!text) return false;
+  return !/^(?:No files found\.|No matches found\.)$/i.test(text);
+}
+
+export function createNativeExplorationNoveltyTracker({ maxEntries = 1024 } = {}) {
+  const seen = new Set();
+  return {
+    isNovel(toolName, args, resultText = undefined) {
+      if (resultText !== undefined && !nativeExplorationResultHasEvidence(resultText)) {
+        return false;
+      }
+      let signature;
+      try {
+        signature = `${String(toolName || "")}|${JSON.stringify(args ?? null)}`;
+      } catch {
+        signature = `${String(toolName || "")}|unserializable`;
+      }
+      if (seen.has(signature)) return false;
+      if (seen.size < maxEntries) seen.add(signature);
+      return true;
+    },
   };
 }
 
@@ -144,16 +191,21 @@ export function buildResearchSynthesisRequiredText({
   explorationSteps = 0,
   staleSteps = 0,
   absoluteCeilingReached = true,
+  explorationCeiling = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   coverage = {},
 } = {}) {
   void coverage;
   const stopReason = absoluteCeilingReached
     ? "deterministic_research_tool_ceiling"
     : "deterministic_synthesize_now_no_novel_evidence";
+  const ceiling = Math.max(
+    RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+    Number(explorationCeiling) || 0,
+  );
   return [
     "RESEARCH CLOSEOUT REQUIRED.",
     absoluteCeilingReached
-      ? `Exploration budget used: ${explorationSteps}/${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}.`
+      ? `Exploration budget used: ${Math.min(Number(explorationSteps) || 0, ceiling)}/${ceiling}.`
       : `No new relevant evidence in the last ${staleSteps} exploration calls.`,
     `No further discovery calls are available. If essential unseen stored evidence remains, issue one final batched atlas.fetch_ref call containing all eligible refs. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");

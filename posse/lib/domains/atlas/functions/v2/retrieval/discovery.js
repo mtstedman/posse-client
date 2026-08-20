@@ -5,7 +5,8 @@
 // old ATLAS sidecar behavior.
 
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
-import { ATLAS_TOOL_DEFS, TOOL_EXECUTION_SPECS, isAtlasActionSurfaced } from "../../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { ATLAS_TOOL_DEFS, isAtlasActionSurfaced } from "../../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { projectAgentToolSchema } from "../../../../../shared/tools/functions/agent-schema.js";
 import { okEnvelope } from "./envelope.js";
 
 const ACTION_SET = new Set(ATLAS_TOOL_ACTIONS);
@@ -26,7 +27,7 @@ export function actionSearch({ versionId, params = {} }) {
     .map((entry) => ({ ...entry, score: scoreEntry(entry, query) }))
     .filter((entry) => !query || entry.score > 0)
     .sort((a, b) => b.score - a.score || a.action.localeCompare(b.action));
-  const page = matches.slice(offset, offset + limit);
+  const page = matches.slice(offset, offset + limit).map(actionSearchEntry);
   return okEnvelope({
     action: "action.search",
     versionId,
@@ -90,14 +91,12 @@ export function manual({ versionId, params = {} }) {
 function actionEntries() {
   return ATLAS_TOOL_ACTIONS.filter(isAtlasActionSurfaced).map((action) => {
     const def = /** @type {any} */ (ATLAS_TOOL_DEFS[action] || {});
-    const schema = def.parameters || {};
-    const spec = /** @type {any} */ (TOOL_EXECUTION_SPECS[action] || {});
+    const schema = projectAgentToolSchema(def.parameters || {});
     return {
       action,
       toolName: def.name || `atlas_${action.replace(/\./g, "_")}`,
       namespace: namespaceOf(action),
-      description: String(def.description || spec.summary || ""),
-      summary: String(spec.summary || def.description || ""),
+      description: String(def.description || ""),
       required: Array.isArray(schema.required) ? schema.required : [],
       parameters: parameterSummary(schema),
       tags: actionTags(action),
@@ -108,8 +107,17 @@ function actionEntries() {
   });
 }
 
+function actionSearchEntry(entry) {
+  const { description, ...rest } = entry;
+  return {
+    ...rest,
+    summary: description,
+  };
+}
+
 function manualEntry(entry, { includeSchemas, includeExamples }) {
   const def = ATLAS_TOOL_DEFS[entry.action] || {};
+  const schema = projectAgentToolSchema(def.parameters || {});
   return {
     action: entry.action,
     toolName: entry.toolName,
@@ -121,7 +129,7 @@ function manualEntry(entry, { includeSchemas, includeExamples }) {
     prerequisites: entry.prerequisites,
     recommendedNextActions: entry.recommendedNextActions,
     ...(includeExamples ? { examples: entry.examples } : {}),
-    ...(includeSchemas ? { schema: def.parameters || null } : {}),
+    ...(includeSchemas ? { schema } : {}),
   };
 }
 
@@ -177,7 +185,6 @@ function scoreEntry(entry, query) {
     entry.toolName,
     entry.namespace,
     entry.description,
-    entry.summary,
     entry.parameters.map((p) => `${p.name} ${p.description}`).join(" "),
   ].map((text) => String(text || "").toLowerCase());
   let score = 0;

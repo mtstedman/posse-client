@@ -13,7 +13,16 @@ import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
 import { surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
-import { planLifecycleSurveyExpansion } from "./lifecycle-survey.js";
+import {
+  planLifecycleSurveyExpansion,
+  resolveLifecycleSurveyTargetSymbolIds,
+} from "./lifecycle-survey.js";
+import {
+  lifecycleBodyInlineDecision,
+  lifecycleBodyRenderBudget,
+  normalizeLifecyclePrefetchBody,
+  stageRenderedLifecycleCoverage,
+} from "./lifecycle-prefetch.js";
 import { detectUnavailableDependencySources } from "./dependency-source-preflight.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
@@ -1988,6 +1997,31 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
   }
 }
 
+async function _resolveLifecycleSurveySymbolIds(packet, targets) {
+  const unresolved = targets.filter((target) => !target.symbolId);
+  if (unresolved.length === 0) return targets;
+  const paths = [...new Set(unresolved.map((target) => target.file).filter(Boolean))];
+  const symbols = [...new Set(unresolved.map((target) => target.surveyName || target.symbol).filter(Boolean))];
+  if (paths.length === 0 || symbols.length === 0) return targets;
+  try {
+    const raw = await executeEmbeddedAtlasTool("code.survey", {
+      paths,
+      symbols,
+      maxFiles: Math.min(MAX_SURVEY_FILES, paths.length),
+    }, {
+      cwd: packet.cwd,
+      config: packet.atlas_config || undefined,
+      origin: "prefetch",
+    });
+    if (String(raw || "").startsWith("Error:")) return targets;
+    const parsed = extractAtlasJsonPayload(raw);
+    const data = parsed?.result ?? parsed?.data ?? parsed;
+    return resolveLifecycleSurveyTargetSymbolIds(targets, data?.files);
+  } catch {
+    return targets;
+  }
+}
+
 async function _prefetchLifecycleSurveyBodies(packet, { taskText, files }) {
   const plan = planLifecycleSurveyExpansion(taskText, files, {
     maxBodies: LIFECYCLE_SURVEY_MAX_BODIES,
@@ -1996,65 +2030,59 @@ async function _prefetchLifecycleSurveyBodies(packet, { taskText, files }) {
     active: plan.active,
     reason: plan.reason,
     taskFamilies: plan.taskFamilies || [],
+    focusLanes: plan.focusLanes || [],
     maxBodies: LIFECYCLE_SURVEY_MAX_BODIES,
     totalMaxTokens: LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS,
-    selected: plan.targets.map(({ file, symbol, kind, families }) => ({ file, symbol, kind, families })),
+    selected: plan.targets.map(({ file, symbol, kind, families, focuses, reason, estimatedLines }) => ({
+      file,
+      symbol,
+      kind,
+      families,
+      focuses,
+      reason,
+      estimatedLines,
+    })),
     bodies: [],
+    fetched: 0,
     succeeded: 0,
     failed: 0,
   };
   if (!plan.active) return base;
 
-  const items = plan.targets.map((target) => ({
-    file: target.file,
-    identifiersToFind: [target.identifier],
-    reason: `Prefetch the task-matched ${target.families.join("/") || "lifecycle"} body for ${target.symbol}`,
+  const plannedTargets = resolveLifecycleSurveyTargetSymbolIds(plan.targets, files);
+  const targets = await _resolveLifecycleSurveySymbolIds(packet, plannedTargets);
+  const items = targets.map((target) => target.symbolId ? ({
+    symbolId: target.symbolId,
+    reason: `Prefetch the task-matched ${target.focuses.join("/") || target.families.join("/") || "lifecycle"} body for ${target.symbol}`,
     granularity: "symbol",
     maxTokens: LIFECYCLE_SURVEY_ITEM_MAX_TOKENS,
-  }));
-  const args = items.length === 1
-    ? { ...items[0], maxTokens: LIFECYCLE_SURVEY_ITEM_MAX_TOKENS }
-    : { items, maxTokens: LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS };
+  }) : null);
 
   try {
-    const raw = await executeEmbeddedAtlasTool("code.window", args, {
-      cwd: packet.cwd,
-      config: packet.atlas_config || undefined,
-      origin: "prefetch",
-    });
-    if (String(raw || "").startsWith("Error:")) {
-      return { ...base, failed: items.length, error: String(raw).slice(0, 240) };
-    }
-    const parsed = extractAtlasJsonPayload(raw);
-    let data = parsed?.result ?? parsed?.data ?? parsed;
-    if (!data || typeof data !== "object") {
-      return { ...base, failed: items.length, error: "code.window returned no structured payload" };
-    }
-    const results = data.batch === true && Array.isArray(data.items)
-      ? data.items.map((item) => item?.data || null)
-      : [data];
-    const bodies = plan.targets.map((target, index) => {
-      const item = results[index];
-      const content = typeof item?.content === "string" ? item.content : "";
-      return {
-        file: target.file,
-        symbol: target.symbol,
-        families: target.families,
-        ok: content.length > 0,
-        content,
-        bytes: Buffer.byteLength(content, "utf8"),
-        truncated: item?.truncated === true,
-        error: content ? null : "exact body unavailable",
-      };
-    });
+    const results = await Promise.all(items.map(async (args) => {
+      if (!args) return null;
+      const raw = await executeEmbeddedAtlasTool("code.window", args, {
+        cwd: packet.cwd,
+        config: packet.atlas_config || undefined,
+        origin: "prefetch",
+      });
+      if (String(raw || "").startsWith("Error:")) return null;
+      const parsed = extractAtlasJsonPayload(raw);
+      const data = parsed?.result ?? parsed?.data ?? parsed;
+      return data && typeof data === "object" ? data : null;
+    }));
+    const bodies = targets.map((target, index) => (
+      normalizeLifecyclePrefetchBody(target, results[index], items[index])
+    ));
     return {
       ...base,
       bodies,
-      succeeded: bodies.filter((item) => item.ok).length,
+      fetched: bodies.filter((item) => item.ok).length,
+      succeeded: bodies.filter((item) => item.complete).length,
       failed: bodies.filter((item) => !item.ok).length,
     };
   } catch (err) {
-    return { ...base, failed: items.length, error: String(err?.message || err).slice(0, 240) };
+    return { ...base, failed: targets.length, error: String(err?.message || err).slice(0, 240) };
   }
 }
 
@@ -2286,14 +2314,32 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
           task_families: Array.isArray(result.lifecycleExpansion.taskFamilies)
             ? result.lifecycleExpansion.taskFamilies.slice(0, 16)
             : [],
+          focus_lanes: Array.isArray(result.lifecycleExpansion.focusLanes)
+            ? result.lifecycleExpansion.focusLanes.slice(0, 16)
+            : [],
           selected: (Array.isArray(result.lifecycleExpansion.selected) ? result.lifecycleExpansion.selected : [])
             .slice(0, LIFECYCLE_SURVEY_MAX_BODIES)
-            .map((item) => ({ file: item.file, symbol: item.symbol, families: item.families })),
+            .map((item) => ({
+              file: item.file,
+              symbol: item.symbol,
+              kind: item.kind,
+              families: item.families,
+              focuses: item.focuses,
+              reason: item.reason,
+              estimated_lines: item.estimatedLines,
+            })),
+          fetched: Number(result.lifecycleExpansion.fetched || 0),
           succeeded: Number(result.lifecycleExpansion.succeeded || 0),
           failed: Number(result.lifecycleExpansion.failed || 0),
           total_max_tokens: Number(result.lifecycleExpansion.totalMaxTokens || 0),
           returned_bytes: (Array.isArray(result.lifecycleExpansion.bodies) ? result.lifecycleExpansion.bodies : [])
             .reduce((sum, item) => sum + Math.max(0, Number(item?.bytes) || 0), 0),
+          native_bounded_bodies: (Array.isArray(result.lifecycleExpansion.bodies) ? result.lifecycleExpansion.bodies : [])
+            .filter((item) => item?.truncated === true).length,
+          complete_bodies: (Array.isArray(result.lifecycleExpansion.bodies) ? result.lifecycleExpansion.bodies : [])
+            .filter((item) => item?.complete === true).length,
+          incomplete_bodies: (Array.isArray(result.lifecycleExpansion.bodies) ? result.lifecycleExpansion.bodies : [])
+            .filter((item) => item?.ok === true && item?.complete !== true).length,
           error: result.lifecycleExpansion.error || null,
         } : null,
         file_count: fileCount,
@@ -2834,10 +2880,10 @@ function _truncatePrefetchText(value, maxChars) {
   return { text: text.slice(0, max - 32), truncated: true };
 }
 
-function _renderIndentedPrefetchContent(value, { maxChars = 2200 } = {}) {
+function _renderIndentedPrefetchContent(value, { maxChars = 2200, startLine = 1 } = {}) {
   const clipped = _truncatePrefetchText(value, maxChars);
   const lines = clipped.text.split(/\r?\n/).slice(0, 120);
-  const rendered = lines.map((line, index) => `  ${String(index + 1).padStart(4, " ")} | ${line}`);
+  const rendered = lines.map((line, index) => `  ${String(startLine + index).padStart(4, " ")} | ${line}`);
   if (clipped.truncated) rendered.push("  ... (ATLAS exact-file prefetch truncated)");
   return rendered;
 }
@@ -2926,20 +2972,34 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   const lifecycleExpansion = sc?.lifecycleExpansion;
   if (lifecycleExpansion?.active) {
     const selected = Array.isArray(lifecycleExpansion.selected) ? lifecycleExpansion.selected : [];
-    lines.push(`  lifecycle expansion: ${Number(lifecycleExpansion.succeeded || 0)}/${selected.length} task-matched bodies prefetched within ${Number(lifecycleExpansion.totalMaxTokens || 0)} tokens`);
+    lines.push(`  lifecycle expansion: ${Number(lifecycleExpansion.succeeded || 0)}/${selected.length} complete task-matched bodies available within ${Number(lifecycleExpansion.totalMaxTokens || 0)} tokens`);
     const bodies = Array.isArray(lifecycleExpansion.bodies) ? lifecycleExpansion.bodies : [];
+    const renderBudget = lifecycleBodyRenderBudget(trim);
     for (const body of bodies) {
       const label = `${body.file || ATLAS_MISSING_VALUE}#${body.symbol || ATLAS_MISSING_VALUE}`;
       if (!body.ok) {
         lines.push(`    - ${label} (exact body unavailable)`);
         continue;
       }
-      lines.push(`    - ${label}${body.truncated ? " (bounded)" : ""}`);
-      if (trim < 2) {
-        lines.push(..._renderIndentedPrefetchContent(body.content, {
-          maxChars: trim >= 1 ? 1400 : 2200,
-        }).map((line) => `  ${line}`));
+      const range = body.startLine && body.endLine ? ` lines ${body.startLine}-${body.endLine}` : "";
+      const kind = body.kind ? ` [${body.kind}]` : "";
+      const inline = lifecycleBodyInlineDecision(body, renderBudget);
+      if (!inline.inline) {
+        const omittedReason = ({
+          truncated: "prefetch result was truncated",
+          output_truncated: "prefetch output was clipped",
+          incomplete_span: "prefetch window did not contain the full executable span",
+          unverified_selection: "requested executable symbol was not verified",
+          unverified_range: "exact repository range was not verified",
+        })[inline.reason] || "complete source exceeds the inline budget";
+        lines.push(`    - ${label}${kind}${range} (source not injected: ${omittedReason})`);
+        continue;
       }
+      lines.push(`    - ${label}${kind}${range}`);
+      lines.push(..._renderIndentedPrefetchContent(body.content, {
+        maxChars: renderBudget.maxChars,
+        startLine: body.startLine,
+      }).map((line) => `  ${line}`));
     }
   }
   for (const boundary of Array.isArray(sc.dependencyBoundaries) ? sc.dependencyBoundaries : []) {
@@ -3385,6 +3445,10 @@ export function renderAtlasHandoffSectionsWithMeta(packet) {
     trimLevel += 1;
     text = _buildAtlasSections(packet, trimLevel);
   }
+  // Rendering is not delivery: the remote compiler may still omit an optional
+  // ATLAS section. Stage the exact final text so prompt composition can record
+  // coverage only after confirming that text survived into the provider prompt.
+  stageRenderedLifecycleCoverage(packet, { text, trim: trimLevel });
   return {
     text,
     charCount: text.length,

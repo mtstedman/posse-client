@@ -15,7 +15,7 @@ import { Ledger } from "../../classes/v2/Ledger.js";
 import { View as AtlasView } from "../../classes/v2/View.js";
 import { LEDGER_SCHEMA_VERSION } from "./contracts/index.js";
 import { isSqliteCorruptionError, ledgerNeedsFormatReset } from "./ledger/schema.js";
-import { openViewWithMeta, viewFreshness } from "./view-health.js";
+import { inspectViewMaterialization, openViewWithMeta, viewFreshness } from "./view-health.js";
 
 /** @param {Record<string, unknown>} message */
 function post(message) {
@@ -59,9 +59,15 @@ function inspectLedgerFormat(ledgerDbPath) {
 }
 
 /**
- * @param {{ viewPath?: string, branch?: string, ledgerDbPath?: string | null, layerMerge?: boolean | null }} [args]
+ * @param {{ viewPath?: string, branch?: string, ledgerDbPath?: string | null, layerMerge?: boolean | null, treeCompressionMode?: string | null }} [args]
  */
-async function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = null } = {}) {
+async function inspect({
+  viewPath,
+  branch,
+  ledgerDbPath = null,
+  layerMerge = null,
+  treeCompressionMode = "off",
+} = {}) {
   const status = {
     exists: false,
     readable: false,
@@ -69,6 +75,8 @@ async function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = nul
     current: false,
     meta: null,
     freshness: null,
+    structure: null,
+    materialization: null,
     ledgerFormat: inspectLedgerFormat(ledgerDbPath),
     error: null,
   };
@@ -81,6 +89,8 @@ async function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = nul
     }
     status.readable = true;
     status.meta = probe.meta || null;
+    status.structure = inspectViewMaterialization(probe.view._unsafeDb(), { treeCompressionMode: "off" });
+    status.materialization = inspectViewMaterialization(probe.view._unsafeDb(), { treeCompressionMode });
     status.branchMatches = probe.meta?.branch === branch;
     if (!status.branchMatches) return status;
     if (status.ledgerFormat?.resetNeeded) {
@@ -88,14 +98,14 @@ async function inspect({ viewPath, branch, ledgerDbPath = null, layerMerge = nul
       return status;
     }
     if (!ledgerDbPath) {
-      status.current = true;
+      status.current = status.structure?.ok === true;
       return status;
     }
     let ledger = null;
     try {
       ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
       status.freshness = viewFreshness(probe.meta, ledger, { layerMerge });
-      status.current = status.freshness.current === true;
+      status.current = status.freshness.current === true && status.structure?.ok === true;
     } catch (err) {
       status.error = err?.message || String(err);
       status.current = false;

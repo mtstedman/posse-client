@@ -59,6 +59,13 @@ const o = (properties = {}, required = [], opts = {}) => ({
 
 const symbolId = () => s({ pattern: ATLAS_SYMBOL_ID_PATTERN });
 const symbolIds = (maxItems = 100) => a(symbolId(), { maxItems });
+const oneOrMany = (singleSchema, itemSchema, opts = {}) => ({
+  ...singleSchema,
+  type: [singleSchema.type, "array"],
+  items: itemSchema,
+  ...opts,
+});
+const symbolIdOrIds = (maxItems = 100) => oneOrMany(symbolId(), symbolId(), { maxItems });
 const repoPaths = (maxItems = 100) => a(s({ minLength: 1 }), { maxItems });
 const sliceBudget = () => o({
   maxCards: i({ minimum: 1, maximum: 500 }),
@@ -70,6 +77,7 @@ const symbolRef = () => o({
   kind: s({ minLength: 1 }),
   exportedOnly: b(),
 }, ["name"]);
+const symbolRefOrRefs = (maxItems = 100) => oneOrMany(symbolRef(), symbolRef(), { maxItems });
 const looseSymbolRef = () => o({
   name: s({ minLength: 1 }),
   file: s({ minLength: 1 }),
@@ -94,16 +102,6 @@ const codeWindowTargetRequired = () => ({
     { required: ["file", "identifiersToFind"] },
   ],
 });
-const codeWindowItem = () => o({
-  symbolId: symbolId(),
-  file: s({ minLength: 1 }),
-  reason: s({ minLength: 3, maxLength: 20_000 }),
-  expectedLines: { type: ["integer", "string"], minimum: 1, maximum: 20_000, maxLength: 20, pattern: "^[0-9]+$" },
-  identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
-  granularity: s({ enum: CODE_GRANULARITIES, default: "symbol" }),
-  maxTokens: i({ minimum: 1, maximum: 200_000 }),
-  sessionId: s({ maxLength: 256 }),
-}, ["reason"], codeWindowTargetRequired());
 const createRefInputMode = () => ({
   oneOf: [
     { required: ["text"] },
@@ -275,13 +273,14 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     includeCounts: b(),
   }),
   fetch_ref: o({
-    ref: s({ maxLength: 512 }),
+    ref: { type: ["string", "array"], items: s({ maxLength: 512 }), maxItems: 100, maxLength: 512 },
     refs: a(s({ maxLength: 512 }), { maxItems: 100 }),
     hashes: a(s({ maxLength: 512 }), { maxItems: 100 }),
     offset: i({ minimum: 0 }),
     limit: i({ minimum: 1, maximum: 60000 }),
     search: s({ maxLength: 512 }),
     search_mode: s({ enum: ["auto", "literal", "regex"] }),
+    reaccessAuthorization: s({ minLength: 16, maxLength: 512 }),
   }),
   create_ref: o({
     text: s({ minLength: 1, maxLength: 60000 }),
@@ -380,8 +379,8 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     semanticQueryNormalization: b(),
   }, ["query"]),
   "symbol.card": o({
-    symbolId: symbolId(),
-    symbolRef: symbolRef(),
+    symbolId: symbolIdOrIds(100),
+    symbolRef: symbolRefOrRefs(100),
     symbolIds: symbolIds(100),
     symbolRefs: a(looseSymbolRef(), { maxItems: 100 }),
     ifNoneMatch: s({ maxLength: 512 }),
@@ -446,16 +445,23 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     siblingNumericFamilyCap: i({ minimum: 1, maximum: 500 }),
   }),
   "tree.expand": o({
-    paths: repoPaths(100),
+    paths: oneOrMany(s({ minLength: 1, maxLength: 4000 }), s({ minLength: 1, maxLength: 4000 }), { maxItems: 100 }),
     editedFiles: repoPaths(100),
     path: s({ minLength: 1, maxLength: 4000 }),
-    symbolIds: symbolIds(100),
+    symbolIds: symbolIdOrIds(100),
     symbolId: symbolId(),
-    nodeIds: a(s({ minLength: 1, maxLength: 2000 }), { maxItems: 100 }),
-    refs: a(o({
-      refType: s({ enum: TREE_REF_TYPES }),
-      refId: s({ minLength: 1, maxLength: 512 }),
-    }, ["refType", "refId"]), { maxItems: 20 }),
+    nodeIds: oneOrMany(s({ minLength: 1, maxLength: 2000 }), s({ minLength: 1, maxLength: 2000 }), { maxItems: 100 }),
+    refs: oneOrMany(
+      o({
+        refType: s({ enum: TREE_REF_TYPES }),
+        refId: s({ minLength: 1, maxLength: 512 }),
+      }, ["refType", "refId"]),
+      o({
+        refType: s({ enum: TREE_REF_TYPES }),
+        refId: s({ minLength: 1, maxLength: 512 }),
+      }, ["refType", "refId"]),
+      { maxItems: 20 },
+    ),
     refType: s({ enum: TREE_REF_TYPES }),
     refId: s({ minLength: 1, maxLength: 512 }),
     maxFiles: i({ minimum: 1, maximum: 500 }),
@@ -479,7 +485,6 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
       default: "compact",
       description: "ATLAS card detail level. Use compact for summary-sized cards.",
     }),
-    adaptiveDetail: b(),
     wireFormat: s({
       enum: WIRE_FORMATS,
       default: "compact",
@@ -526,8 +531,6 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
-    maxLines: i({ minimum: 1, maximum: 5000 }),
-    maxTokens: i({ minimum: 1, maximum: 200_000 }),
     contextLines: i({ minimum: 0, maximum: 100 }),
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
@@ -540,12 +543,10 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
     granularity: s({ enum: CODE_GRANULARITIES, default: "symbol" }),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
-    items: a(codeWindowItem(), { minItems: 2, maxItems: 4 }),
     sliceContext: sliceContextHint(),
     sessionId: s({ maxLength: 256 }),
   }, [], {
     anyOf: [
-      { required: ["items"] },
       { required: ["reason", "symbolId"] },
       { required: ["reason", "file", "identifiersToFind"] },
     ],

@@ -4,11 +4,12 @@ import {
   getBaseToolNamesForRole,
   getDeterministicMcpToolNames,
   getAtlasToolNames,
+  getCanonicalToolCatalogEntry,
+  getCanonicalToolExecutionSpec,
   getToolCatalogEntry,
-  getToolExecutionSpec,
-  getToolSchema,
   getToolSchemaForRole,
 } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { projectAgentToolDefinition } from "../functions/agent-schema.js";
 
 const RUNTIME_TOOL_OVERRIDES = new Map();
 
@@ -55,6 +56,14 @@ export class ToolCatalog {
     return getToolCatalogEntry(key) || null;
   }
 
+  static getCanonical(name) {
+    const key = String(name || "").trim();
+    if (!key) return null;
+    const runtime = RUNTIME_TOOL_OVERRIDES.get(key);
+    if (runtime) return runtime;
+    return getCanonicalToolCatalogEntry(key) || null;
+  }
+
   static getSchema(name, { role = null, compactCompletion = false, compactV3 = false } = {}) {
     const entry = this.get(name);
     if (entry) {
@@ -63,7 +72,12 @@ export class ToolCatalog {
       }
       return entry.schema || null;
     }
-    return getToolSchema(name) || null;
+    return null;
+  }
+
+  static getAgentSchema(name, opts = {}) {
+    const schema = this.getSchema(name, opts);
+    return schema ? projectAgentToolDefinition(schema) : null;
   }
 
   static getExecutionSpec(name) {
@@ -78,8 +92,23 @@ export class ToolCatalog {
         deprecationReason: entry.deprecationReason || null,
       };
     }
-    const spec = getToolExecutionSpec(name);
-    if (!spec) throw new Error(`ToolCatalog missing execution metadata for ${name}`);
+    throw new Error(`ToolCatalog missing surfaced execution metadata for ${name}`);
+  }
+
+  static getCanonicalExecutionSpec(name) {
+    const entry = this.getCanonical(name);
+    if (entry) {
+      return {
+        access: entry.access || "unknown",
+        summary: entry.summary || "",
+        batching: entry.batching || "ordered",
+        budgetExempt: !!entry.budgetExempt,
+        deprecated: entry.deprecated === true,
+        deprecationReason: entry.deprecationReason || null,
+      };
+    }
+    const spec = getCanonicalToolExecutionSpec(name);
+    if (!spec) throw new Error(`ToolCatalog missing canonical execution metadata for ${name}`);
     return spec;
   }
 

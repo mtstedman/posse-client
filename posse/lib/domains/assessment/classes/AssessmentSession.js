@@ -5,6 +5,7 @@ export class AssessmentSession {
     job = null,
     output = "",
     scope = null,
+    attemptId = null,
     providerClient = null,
     worker = null,
     options = {},
@@ -12,6 +13,7 @@ export class AssessmentSession {
     this.job = job || null;
     this.output = output || "";
     this.scope = scope || null;
+    this.attemptId = attemptId;
     this.providerClient = providerClient || null;
     this.worker = worker || null;
     this.options = options || {};
@@ -23,6 +25,7 @@ export class AssessmentSession {
     const trackedCall = this.providerClient?.trackedCall || this.providerClient?.call;
     const result = await assessResult(this.job, this.output, {
       ...this.options,
+      attemptId: this.attemptId,
       ...(typeof trackedCall === "function" ? { trackedCall: trackedCall.bind(this.providerClient) } : {}),
     });
     this._last = result;

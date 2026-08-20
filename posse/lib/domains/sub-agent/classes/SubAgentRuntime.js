@@ -5,11 +5,17 @@ import crypto from "node:crypto";
 import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
+  SUB_AGENT_EVIDENCE_OUTCOMES,
   isSubAgentEvidenceSafeAtlasTool,
   isSubAgentEvidenceSafeNativeTool,
   SUB_AGENT_LIMITS,
   SUB_AGENT_PROTOCOL,
 } from "../../../catalog/sub-agent.js";
+import {
+  classifyDelegatedToolResult,
+  delegatedEvidenceBounds,
+  parseLeadingJsonValue,
+} from "../functions/delegated-evidence.js";
 import { getSetting } from "../../queue/functions/index.js";
 import {
   getAgentHandoffRecord,
@@ -259,37 +265,6 @@ function structuredSourceToolEvidence(parsed, tool, args = {}) {
   };
 }
 
-function parseLeadingJsonValue(text) {
-  const source = String(text ?? "");
-  const start = source.search(/\S/);
-  if (start < 0 || !["{", "["].includes(source[start])) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = start; index < source.length; index += 1) {
-    const char = source[index];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      continue;
-    }
-    if (char === "{" || char === "[") depth += 1;
-    else if (char === "}" || char === "]") depth -= 1;
-    if (depth !== 0) continue;
-    try {
-      return JSON.parse(source.slice(start, index + 1));
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
 function deterministicToolEvidence(raw, tool, args = {}) {
   const rawText = typeof raw === "string" ? raw : JSON.stringify(raw);
   const provenance = { kind: "Tool Result", source: tool, object_type: "tool_result" };
@@ -308,6 +283,18 @@ function deterministicToolEvidence(raw, tool, args = {}) {
   }
   const structuredSource = structuredSourceToolEvidence(parsed, tool, args);
   if (structuredSource) return structuredSource;
+  if (tool === "atlas.fetch_ref" && parsed?.ok === true && typeof parsed.text === "string") {
+    return {
+      text: parsed.text,
+      provenance: {
+        ...provenance,
+        ...(typeof parsed.repo_rel_path === "string" ? { path: parsed.repo_rel_path } : {}),
+        ...(Number.isInteger(parsed.startLine) ? { start_line: parsed.startLine } : {}),
+        ...(Number.isInteger(parsed.returnedLines) ? { returned_lines: parsed.returnedLines } : {}),
+        reaccessed: true,
+      },
+    };
+  }
   if (tool !== "tools.read_file") return { text: rawText, provenance };
 
   const structuredRead = parsed?.ok === true
@@ -370,6 +357,29 @@ function normalizeDelegatedSourceEvidence(evidence) {
       object_type: evidence.provenance?.object_type || normalized.provenance.object_type,
     },
   };
+}
+
+function validateMaterializedCursorEvidence(sourceEvidence, label) {
+  const bounded = delegatedEvidenceBounds(sourceEvidence?.excerpt);
+  if (bounded.empty) {
+    throw runtimeError("SUB_AGENT_INPUT_EMPTY", `${label} returned no evidence`, { stage: "cursor" });
+  }
+  if (!bounded.withinLimits) {
+    throw runtimeError(
+      "SUB_AGENT_INPUT_TOO_LARGE",
+      `${label} returned ${bounded.text.length} characters across ${bounded.lines.length} lines; parent must request a narrower result`,
+      { stage: "cursor" },
+    );
+  }
+  return sourceEvidence;
+}
+
+function delegatedOutcomeError(outcome, tool) {
+  const reason = String(outcome?.reason || outcome?.outcome || "not_evidence").slice(0, 160);
+  const code = outcome?.outcome === SUB_AGENT_EVIDENCE_OUTCOMES.ERROR
+    ? "SUB_AGENT_INPUT_TOOL_ERROR"
+    : "SUB_AGENT_INPUT_NOT_EVIDENCE";
+  return runtimeError(code, `${tool} returned ${reason} instead of evidence`, { stage: "cursor" });
 }
 
 function boundedJsonValue(value, label, depth = 0) {
@@ -788,7 +798,7 @@ export class SubAgentRuntime {
         if (typeof entry.executeInput !== "function") {
           throw runtimeError("SUB_AGENT_INPUT_EXECUTOR_UNAVAILABLE", "Parent deterministic tool executor is unavailable", { stage: "cursor" });
         }
-        const raw = await entry.executeInput({
+        let raw = await entry.executeInput({
           tool: selected.tool,
           arguments: selected.arguments,
           signal: entry.controller.signal,
@@ -797,23 +807,57 @@ export class SubAgentRuntime {
           throw entry.controller.signal.reason
             || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
         }
-        const normalized = deterministicToolEvidence(raw, selected.tool, selected.arguments);
-        const text = normalized.text;
-        const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
-        if (!text.trim()) throw runtimeError("SUB_AGENT_INPUT_EMPTY", `${selected.tool} returned no evidence`, { stage: "cursor" });
-        if (text.length > SUB_AGENT_LIMITS.maxEvidenceChars || lines.length > SUB_AGENT_LIMITS.maxEvidenceLines) {
-          throw runtimeError(
-            "SUB_AGENT_INPUT_TOO_LARGE",
-            `${selected.tool} returned ${text.length} characters across ${lines.length} lines; parent must request a narrower result`,
-            { stage: "cursor" },
-          );
+        let outcome = classifyDelegatedToolResult(raw);
+        let evidenceTool = selected.tool;
+        let evidenceArguments = selected.arguments;
+        let covered = null;
+        if (outcome.outcome === SUB_AGENT_EVIDENCE_OUTCOMES.COVERED) {
+          if (!outcome.recovery) throw delegatedOutcomeError(outcome, selected.tool);
+          covered = outcome.parsed;
+          evidenceTool = "atlas.fetch_ref";
+          evidenceArguments = outcome.recovery;
+          raw = await entry.executeInput({
+            tool: evidenceTool,
+            arguments: evidenceArguments,
+            signal: entry.controller.signal,
+          });
+          if (entry.controller.signal.aborted) {
+            throw entry.controller.signal.reason
+              || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
+          }
+          outcome = classifyDelegatedToolResult(raw);
         }
+        if (outcome.outcome !== SUB_AGENT_EVIDENCE_OUTCOMES.DELIVERED) {
+          throw delegatedOutcomeError(outcome, evidenceTool);
+        }
+        const normalized = deterministicToolEvidence(outcome.text, evidenceTool, evidenceArguments);
+        if (covered) {
+          const startLine = Number(covered.startLine ?? covered.start_line);
+          const endLine = Number(covered.endLine ?? covered.end_line);
+          normalized.provenance = {
+            ...normalized.provenance,
+            source: selected.tool,
+            ...(covered.repo_rel_path || covered.repoRelPath
+              ? { path: covered.repo_rel_path || covered.repoRelPath }
+              : {}),
+            ...(Number.isInteger(startLine) ? { start_line: startLine } : {}),
+            ...(Number.isInteger(startLine) && Number.isInteger(endLine) && endLine >= startLine
+              ? { returned_lines: endLine - startLine + 1 }
+              : {}),
+            reaccessed: true,
+          };
+        }
+        const text = normalized.text;
         sourceEvidence = {
           excerpt: text,
           provenance: normalized.provenance,
           source_content_sha256: crypto.createHash("sha256").update(text).digest("hex"),
         };
       }
+      sourceEvidence = validateMaterializedCursorEvidence(
+        sourceEvidence,
+        selected.kind === "call" ? selected.tool : `Delegated evidence ${selected.id}`,
+      );
 
       const freshRef = `#${crypto.randomBytes(6).toString("hex")}`;
       const sourceProvenanceKind = sourceEvidence.provenance?.kind;

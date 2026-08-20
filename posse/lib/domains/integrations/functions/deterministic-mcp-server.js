@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import process from "process";
 import fs from "fs";
 import path from "path";
@@ -41,6 +42,10 @@ import {
 import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
+import {
+  assessorFallbackReadCallKey,
+  isAssessorFallbackReadKey,
+} from "../../assessment/functions/fallback-read-tools.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   recordAgentHandoffRejection,
@@ -143,6 +148,7 @@ import {
   nonNegativeIntegerOrNull,
 } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
+import { projectAgentToolSchema } from "../../../shared/tools/functions/agent-schema.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
 import {
   RESEARCH_CITATION_FETCH_GATE_ENABLED,
@@ -154,9 +160,11 @@ import {
   buildResearchCurtainCallText,
   buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
+  createNativeExplorationNoveltyTracker,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
   researchSynthesisDecision,
+  researchSynthesisExplorationCeiling,
 } from "./deterministic-mcp/research-synthesis.js";
 import {
   jsonRpcSuccess,
@@ -250,6 +258,7 @@ function envBootConfig(env = process.env) {
     dbPath: String(env.POSSE_DETERMINISTIC_MCP_DB_PATH || "").trim(),
     jobId: String(env.POSSE_DETERMINISTIC_MCP_JOB_ID || "").trim(),
     workItemId: String(env.POSSE_DETERMINISTIC_MCP_WORK_ITEM_ID || "").trim(),
+    attemptId: String(env.POSSE_DETERMINISTIC_MCP_ATTEMPT_ID || "").trim(),
     atlasAvailable: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_ATLAS_AVAILABLE),
     atlasGateEnabled: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_ATLAS_GATE_ENABLED),
     atlasPrefetchStatus: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_PREFETCH_STATUS || "").trim(),
@@ -493,6 +502,8 @@ function gatewayScopeState(scopeKey = gateScopeKey, { gateConfiguration = null }
       gateBootedAtMs: Date.now(),
       gateConfiguration,
       imageGenerationCallCount: 0,
+      assessorToolCallCount: 0,
+      assessorFallbackReadCount: 0,
       lastReadMeta: null,
     };
     gatewayScopeStateByKey.set(key, state);
@@ -502,6 +513,37 @@ function gatewayScopeState(scopeKey = gateScopeKey, { gateConfiguration = null }
     ownerAtlasGateEventSeqByScope.delete(key);
   }
   return state;
+}
+
+function assessorToolBudgetDecision(toolName, args = {}) {
+  if (roleName !== "assessor" || toolName === "agent_handoff") return null;
+  const state = gatewayScopeState(gateScopeKey);
+  const maxToolCalls = Number.isInteger(Number(bootConfig.assessorMaxToolCalls))
+    ? Math.max(1, Number(bootConfig.assessorMaxToolCalls))
+    : 12;
+  state.assessorToolCallCount += 1;
+  if (state.assessorToolCallCount > maxToolCalls) {
+    return {
+      reason: "tool_call_ceiling",
+      text: "Assessor tool-call budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+      used: state.assessorToolCallCount,
+      cap: maxToolCalls,
+    };
+  }
+  if (!isAssessorFallbackReadKey(assessorFallbackReadCallKey(toolName, args))) return null;
+  const fallbackReadCap = Number.isFinite(Number(bootConfig.fallbackReads))
+    ? Math.max(0, Math.floor(Number(bootConfig.fallbackReads)))
+    : 0;
+  if (state.assessorFallbackReadCount >= fallbackReadCap) {
+    return {
+      reason: "fallback_read_ceiling",
+      text: "Assessor read budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+      used: state.assessorFallbackReadCount,
+      cap: fallbackReadCap,
+    };
+  }
+  state.assessorFallbackReadCount += 1;
+  return null;
 }
 
 function assertGatewayScopeCapacity(scopeKey) {
@@ -675,7 +717,7 @@ const STATIC_ATLAS_TOOL_SCHEMAS = Object.freeze(Object.entries(SURFACED_ATLAS_TO
   .map(([action, def]) => Object.freeze({
     name: `atlas.${action}`,
     description: def.description,
-    inputSchema: def.parameters || { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: projectAgentToolSchema(def.parameters || { type: "object", properties: {}, additionalProperties: false }),
     annotations: { title: `ATLAS ${action}` },
   })));
 const STATIC_ATLAS_TOOL_NAMES = new Set(STATIC_ATLAS_TOOL_SCHEMAS.map((tool) => tool.name));
@@ -1317,8 +1359,8 @@ function addToolSchema(schema) {
 function readFileSchemaForCurrentBoot() {
   if (!atlasAvailable) return TOOL_READ_FILE;
   const atlasUseDescription = writeEnabled
-    ? "Use this tool only for documentation, configuration, manifests, other non source artifacts, content that Atlas cannot access, or verification after a file has been modified during this run."
-    : "Use this tool only for documentation, configuration, manifests, other non source artifacts, or content that Atlas cannot access.";
+    ? "Use this tool only for documentation, configuration, manifests, other non source artifacts, content that Atlas cannot access, or verification after a file has been modified during this run. For unmodified source code, use the Atlas tools instead."
+    : "Use this tool only for documentation, configuration, manifests, other non source artifacts, or content that Atlas cannot access. For source code, use the Atlas tools instead.";
   return {
     ...TOOL_READ_FILE,
     description: `${TOOL_READ_FILE.description} ${atlasUseDescription}`,
@@ -1773,9 +1815,9 @@ const RESEARCH_STATE_LIMIT = 5000;
 const researchStatesByKey = new Map();
 
 function researchStatePathForCurrentBoot() {
-  if (!isResearcherRole || !mcpJobId) return null;
+  if (!isResearcherRole || !mcpJobId || !mcpAttemptId) return null;
   const logDir = path.join(workspaceCwd, ".posse", "research-state");
-  return path.join(logDir, `job-${mcpJobId}.json`);
+  return path.join(logDir, `job-${mcpJobId}-attempt-${mcpAttemptId}.json`);
 }
 
 function readResearchState(filePath) {
@@ -1912,6 +1954,7 @@ function recordResearchSynthesisRequiredObservation() {
     _recordObservation({
       work_item_id: mcpWorkItemId ?? undefined,
       job_id: mcpJobId ?? undefined,
+      attempt_id: mcpAttemptId ?? undefined,
       observation_type: "research.synthesis_required",
       summary: `Research synthesis required after ${researchState.explorationSteps} exploration calls with ${researchSynthesisStaleStepCount()} stale calls`,
       detail: {
@@ -1942,7 +1985,7 @@ function maybeMarkResearchSynthesisRequired({ toolName = null } = {}) {
   researchState.synthesisReason = [
     `exploration_steps=${explorationSteps}`,
     `stale_steps=${staleSteps}`,
-    decision.absoluteCeilingReached ? `absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}` : null,
+    decision.absoluteCeilingReached ? `absolute_ceiling=${decision.explorationCeiling}` : null,
     toolName ? `last_tool=${toolName}` : null,
   ].filter(Boolean).join("; ");
   recordResearchSynthesisRequiredObservation();
@@ -2000,6 +2043,7 @@ function buildResearchSynthesisRequiredMessage() {
     explorationSteps: status.exploration_steps || 0,
     staleSteps: status.stale_steps || 0,
     absoluteCeilingReached,
+    explorationCeiling: researchSynthesisExplorationCeiling({ staleSteps: status.stale_steps || 0 }),
   });
 }
 
@@ -2029,12 +2073,33 @@ function recordEmbeddedModelControlNotice(toolName, notice = {}) {
   }
 }
 
+function embeddedControlNoticeMetadata(kind, text, trigger = null) {
+  const value = String(text || "");
+  return {
+    kind: String(kind || "runtime_control"),
+    chars: value.length,
+    sha256: crypto.createHash("sha256").update(value, "utf8").digest("hex"),
+    ...(trigger ? { trigger: String(trigger) } : {}),
+  };
+}
+
+function embeddedControlResult(text, kind, trigger = null) {
+  return {
+    content: [{ type: "text", text }],
+    isError: false,
+    _meta: {
+      posseControlNotices: [embeddedControlNoticeMetadata(kind, text, trigger)],
+    },
+  };
+}
+
 // One-shot notice progress. Exploration steps sync from the shared ledger and
 // can skip numbers (owner-side ATLAS work advances the count between native
 // calls), so equality triggers can silently skip the midpoint/curtain
 // warnings; threshold-crossing flags cannot. In-memory: a gateway restart
 // re-emits at most one already-shown notice.
-const researchNoticeFlags = { midpoint: false, curtain: false, lastSlot: false };
+const researchNoticeFlags = { midpoint: false, curtain: false, lastSlot: false, extension: false };
+const nativeExplorationNovelty = createNativeExplorationNoveltyTracker();
 
 function appendResearchExplorationNotice(text, toolName) {
   if (!isResearcherRole || !isResearchExplorationTool(toolName)) return text;
@@ -3043,6 +3108,7 @@ async function completeNativeToolCall({
   deferred = false,
 }) {
   const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
+  const controlNotices = [];
   let feedbackResult;
   try {
     feedbackResult = appendOperatorFeedbackDelivery(text, toolName);
@@ -3051,14 +3117,39 @@ async function completeNativeToolCall({
     // otherwise valid tool outcome.
     feedbackResult = { text, delivery: null };
   }
+  if (feedbackResult.text !== text && feedbackResult.text.startsWith(text)) {
+    const suffix = feedbackResult.text.slice(text.length);
+    if (suffix) {
+      controlNotices.push(embeddedControlNoticeMetadata(
+        "operator_feedback_delivery",
+        suffix,
+        "operator_feedback_pending",
+      ));
+    }
+  }
   let responseText = feedbackResult.text;
   const outcome = classifyNativeToolResult(text);
   const ok = isSuccessfulNativeToolResult(text);
   if (ok && toolName !== "chain_verdict") {
-    noteResearchExplorationStep({ toolName });
+    // A first successful native read of a given signature is novel evidence;
+    // only exact repeats advance the stale streak. Without this, every native
+    // read scores as stale and can force a spurious mid-traversal closeout.
+    noteResearchExplorationStep({
+      toolName,
+      novelRelevantFile: nativeExplorationNovelty.isNovel(toolName, args, text),
+    });
   }
   if (ok) {
+    const beforeNotice = responseText;
     responseText = appendResearchExplorationNotice(responseText, toolName);
+    const suffix = responseText.slice(beforeNotice.length);
+    if (suffix) {
+      controlNotices.push(embeddedControlNoticeMetadata(
+        "research_exploration_notice",
+        suffix,
+        "research_exploration_notice",
+      ));
+    }
   }
   const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
   const readStats = ok ? nativeReadResultStats(toolName, text) : null;
@@ -3103,8 +3194,11 @@ async function completeNativeToolCall({
   }
   sendMessage(jsonRpcSuccess(id, {
     content: [{ type: "text", text: responseText }],
-    ...(feedbackResult.delivery ? {
-      _meta: { posseOperatorFeedback: feedbackResult.delivery },
+    ...(feedbackResult.delivery || controlNotices.length > 0 ? {
+      _meta: {
+        ...(feedbackResult.delivery ? { posseOperatorFeedback: feedbackResult.delivery } : {}),
+        ...(controlNotices.length > 0 ? { posseControlNotices: controlNotices } : {}),
+      },
     } : {}),
     ...(!ok ? { isError: true } : {}),
   }));
@@ -3277,6 +3371,24 @@ async function handleRequest(msg) {
         : sanitizeForLog(args),
     });
 
+    const assessorBudget = assessorToolBudgetDecision(toolName, args);
+    if (assessorBudget) {
+      appendToolLog({
+        event: "assessor_tool_budget_exhausted",
+        requestId: id ?? null,
+        tool: requestedToolName,
+        canonicalTool: toolName,
+        reason: assessorBudget.reason,
+        used: assessorBudget.used,
+        cap: assessorBudget.cap,
+      });
+      sendMessage(jsonRpcSuccess(id, {
+        content: [{ type: "text", text: assessorBudget.text }],
+        isError: false,
+      }));
+      return;
+    }
+
     if (toolName !== "agent_handoff" && rejectAgentHandoffForLaterTool(mcpAgentCallId, toolName)) {
       const errorText = "agent_handoff was already staged; later tool calls invalidate the terminal report";
       appendToolLog({
@@ -3309,10 +3421,11 @@ async function handleRequest(msg) {
         text: citationGateText,
         trigger: citationFetchGate.reason || "citation_fetch_gate",
       });
-      sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: citationGateText }],
-        isError: false,
-      }));
+      sendMessage(jsonRpcSuccess(id, embeddedControlResult(
+        citationGateText,
+        "citation_fetch_gate",
+        citationFetchGate.reason || "citation_fetch_gate",
+      )));
       return;
     }
 
@@ -3332,10 +3445,11 @@ async function handleRequest(msg) {
         trigger: "research_synthesis_gate",
         explorationStep: Number(researchState.explorationSteps || 0),
       });
-      sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: errorText }],
-        isError: false,
-      }));
+      sendMessage(jsonRpcSuccess(id, embeddedControlResult(
+        errorText,
+        "research_closeout_gate",
+        "research_synthesis_gate",
+      )));
       return;
     }
 
@@ -3487,10 +3601,11 @@ async function handleRequest(msg) {
         trigger: "research_synthesis_gate",
         explorationStep: Number(researchState.explorationSteps || 0),
       });
-      sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: errorText }],
-        isError: false,
-      }));
+      sendMessage(jsonRpcSuccess(id, embeddedControlResult(
+        errorText,
+        "research_closeout_gate",
+        "research_synthesis_gate",
+      )));
       return;
     }
 

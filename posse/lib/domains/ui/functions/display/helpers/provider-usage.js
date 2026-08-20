@@ -20,7 +20,7 @@ import {
   providerBrandColor,
   unlimitedCapacityGauge,
 } from "./brand.js";
-import { estimateBillableInputTokens, estimateCallCost } from "../../../../billing/functions/pricing.js";
+import { resolveCanonicalCallAccounting } from "../../../../billing/functions/usage-segments.js";
 import { EVENT_TYPES } from "../../../../../catalog/event.js";
 
 export const PROVIDER_USAGE_REFRESH_MS = 2 * 60 * 1000;
@@ -114,36 +114,6 @@ export function _taskProviderBudgetLines(data, summaries = null) {
   return lines;
 }
 
-function _estimateRunCallCost(row) {
-  const provider = String(row?.provider || "").trim().toLowerCase();
-  const useKnownCost = provider !== "codex";
-  const est = estimateCallCost({
-    provider,
-    modelName: row?.model_name,
-    modelTier: row?.model_tier,
-    inputTokens: row?.input_tokens,
-    outputTokens: row?.output_tokens,
-    cachedInputTokens: row?.cached_input_tokens,
-    cacheCreationInputTokens: row?.cache_creation_input_tokens,
-    knownCostUsd: useKnownCost ? row?.cost_estimate_usd : null,
-  });
-  return Number.isFinite(est.costUsd) ? Math.max(0, est.costUsd) : 0;
-}
-
-function _estimateRunBillableInputTokens(row) {
-  const est = estimateBillableInputTokens({
-    provider: row?.provider,
-    modelName: row?.model_name,
-    modelTier: row?.model_tier,
-    inputTokens: row?.input_tokens,
-    cachedInputTokens: row?.cached_input_tokens,
-    cacheCreationInputTokens: row?.cache_creation_input_tokens,
-  });
-  return Number.isFinite(est.billableInputTokens)
-    ? Math.max(0, est.billableInputTokens)
-    : Math.max(0, Number(row?.input_tokens) || 0);
-}
-
 function _aggregateProviderUsageRows(rows = []) {
   const byProvider = new Map();
   for (const row of rows) {
@@ -152,7 +122,10 @@ function _aggregateProviderUsageRows(rows = []) {
     const inputTokens = Math.max(0, Number(row?.input_tokens) || 0);
     const outputTokens = Math.max(0, Number(row?.output_tokens) || 0);
     const cachedInputTokens = Math.min(inputTokens, Math.max(0, Number(row?.cached_input_tokens) || 0));
-    const billableInputTokens = _estimateRunBillableInputTokens({ ...row, provider });
+    const accounting = resolveCanonicalCallAccounting({ ...row, provider });
+    const billableInputTokens = Number.isFinite(accounting.billableInputTokens)
+      ? Math.max(0, accounting.billableInputTokens)
+      : null;
     const usedTokens = inputTokens + outputTokens;
     if (usedTokens <= 0) continue;
     const existing = byProvider.get(provider) || {
@@ -164,23 +137,51 @@ function _aggregateProviderUsageRows(rows = []) {
       usedTokens: 0,
       usedBillableTokens: 0,
       costUsd: 0,
+      knownCostUsd: 0,
+      costPrecision: "unknown",
+      exactCostCalls: 0,
+      estimatedCostCalls: 0,
+      unknownCostCalls: 0,
       callCount: 0,
+      exactUsageCalls: 0,
+      inexactUsageCalls: 0,
       firstSeen: row?.created_at || null,
     };
     existing.usedInputTokens += inputTokens;
     existing.usedCachedInputTokens += cachedInputTokens;
-    existing.usedBillableInputTokens += billableInputTokens;
     existing.usedOutputTokens += outputTokens;
     existing.usedTokens += usedTokens;
-    existing.usedBillableTokens += billableInputTokens + outputTokens;
-    existing.costUsd += _estimateRunCallCost({ ...row, provider });
+    if (billableInputTokens == null) {
+      existing.usedBillableInputTokens = null;
+      existing.usedBillableTokens = null;
+    } else if (existing.usedBillableInputTokens != null) {
+      existing.usedBillableInputTokens += billableInputTokens;
+      existing.usedBillableTokens += billableInputTokens + outputTokens;
+    }
+    if (Number.isFinite(accounting.costUsd)) existing.knownCostUsd += Math.max(0, accounting.costUsd);
+    if (accounting.costPrecision === "exact") existing.exactCostCalls += 1;
+    else if (accounting.costPrecision === "estimated") existing.estimatedCostCalls += 1;
+    else existing.unknownCostCalls += 1;
+    if (accounting.exact === false) existing.inexactUsageCalls += 1;
+    else if (accounting.exact === true) existing.exactUsageCalls += 1;
     existing.callCount += 1;
     if (!existing.firstSeen || (row?.created_at && row.created_at < existing.firstSeen)) {
       existing.firstSeen = row.created_at;
     }
     byProvider.set(provider, existing);
   }
-  return [...byProvider.values()].sort((a, b) => {
+  const values = [...byProvider.values()];
+  for (const value of values) {
+    value.costPrecision = value.unknownCostCalls === value.callCount
+      ? "unknown"
+      : value.unknownCostCalls > 0
+        ? "partial"
+        : value.estimatedCostCalls > 0
+          ? "estimated"
+          : "exact";
+    value.costUsd = value.costPrecision === "unknown" ? null : value.knownCostUsd;
+  }
+  return values.sort((a, b) => {
     const first = String(a.firstSeen || "").localeCompare(String(b.firstSeen || ""));
     return first || String(a.provider).localeCompare(String(b.provider));
   });
@@ -205,6 +206,7 @@ export function getProviderUsageSince({ sinceIso = null, untilIso = null } = {})
     }
     const rows = db.prepare(`
       SELECT
+        id,
         LOWER(TRIM(provider)) AS provider,
         model_name,
         model_tier,
@@ -213,6 +215,11 @@ export function getProviderUsageSince({ sinceIso = null, untilIso = null } = {})
         cached_input_tokens,
         cache_creation_input_tokens,
         cost_estimate_usd,
+        billing_precision,
+        exact_billable_input_tokens,
+        long_context_tier_input_tokens,
+        provider_request_duration_ms,
+        usage_segment_count,
         created_at
       FROM agent_calls
       WHERE ${where.join(" AND ")}
@@ -266,8 +273,16 @@ function _normalizeRunUsage(value) {
     .map((entry) => {
       const usedInputTokens = Number(entry?.usedInputTokens ?? entry?.inputTokens ?? 0) || 0;
       const usedOutputTokens = Number(entry?.usedOutputTokens ?? entry?.outputTokens ?? 0) || 0;
-      const usedBillableInputTokens = Number(entry?.usedBillableInputTokens ?? entry?.billableInputTokens ?? 0) || 0;
-      const usedBillableTokens = Number(entry?.usedBillableTokens ?? entry?.billableTokens ?? 0) || 0;
+      const rawBillableInputTokens = entry?.usedBillableInputTokens ?? entry?.billableInputTokens;
+      const rawBillableTokens = entry?.usedBillableTokens ?? entry?.billableTokens;
+      const usedBillableInputTokens = rawBillableInputTokens == null
+        ? null
+        : Math.max(0, Number(rawBillableInputTokens) || 0);
+      const usedBillableTokens = rawBillableTokens == null
+        ? null
+        : Math.max(0, Number(rawBillableTokens) || 0);
+      const rawCost = entry?.costUsd ?? entry?.cost_usd;
+      const knownCost = entry?.knownCostUsd ?? entry?.known_cost_usd ?? rawCost;
       return {
         provider: String(entry?.provider || "").trim().toLowerCase(),
         usedTokens: Number(entry?.usedTokens ?? entry?.tokens ?? 0) || 0,
@@ -275,8 +290,14 @@ function _normalizeRunUsage(value) {
         usedCachedInputTokens: Number(entry?.usedCachedInputTokens ?? entry?.cachedInputTokens ?? 0) || 0,
         usedBillableInputTokens,
         usedOutputTokens,
-        usedBillableTokens: usedBillableTokens || (usedBillableInputTokens > 0 ? usedBillableInputTokens + usedOutputTokens : 0),
-        costUsd: Number(entry?.costUsd ?? entry?.cost_usd ?? 0) || 0,
+        usedBillableTokens: usedBillableTokens ?? (usedBillableInputTokens == null
+          ? null
+          : usedBillableInputTokens + usedOutputTokens),
+        costUsd: rawCost == null ? null : Math.max(0, Number(rawCost) || 0),
+        knownCostUsd: Number.isFinite(Number(knownCost)) ? Math.max(0, Number(knownCost)) : 0,
+        costPrecision: entry?.costPrecision ?? entry?.cost_precision ?? (rawCost == null ? "unknown" : "estimated"),
+        exactUsageCalls: Math.max(0, Number(entry?.exactUsageCalls ?? entry?.exact_usage_calls) || 0),
+        inexactUsageCalls: Math.max(0, Number(entry?.inexactUsageCalls ?? entry?.inexact_usage_calls) || 0),
         callCount: Number(entry?.callCount ?? entry?.call_count ?? 0) || 0,
         firstSeen: entry?.firstSeen || null,
       };
@@ -345,6 +366,8 @@ function _includeActiveProviderPlaceholders(runUsage, summariesByProvider, activ
       usedBillableInputTokens: 0,
       usedOutputTokens: 0,
       costUsd: 0,
+      knownCostUsd: 0,
+      costPrecision: "unknown",
       usedBillableTokens: 0,
       callCount: 0,
       firstSeen: null,
@@ -391,6 +414,21 @@ function _providerCostQualifier(provider) {
   if (value === "claude") return "API-equiv est";
   if (value === "codex") return "CLI est";
   return "billed est";
+}
+
+function _providerCostLabel(usage, { compact = false } = {}) {
+  const precision = String(usage?.costPrecision || "unknown");
+  if (precision === "unknown") return "cost unknown";
+  const known = Number.isFinite(Number(usage?.knownCostUsd))
+    ? Number(usage.knownCostUsd)
+    : Number(usage?.costUsd);
+  if (!Number.isFinite(known)) return "cost unknown";
+  const amount = _fmtUsd(Math.max(0, known));
+  if (precision === "partial") return `${amount} partial`;
+  if (precision === "estimated") return compact
+    ? `${amount} est`
+    : `${amount} ${_providerCostQualifier(usage?.provider)}`;
+  return `${amount} exact`;
 }
 
 function _emptyProviderGauge({ width = 20 } = {}) {
@@ -443,13 +481,15 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
       Math.max(0, Number(usage.usedInputTokens) || 0),
       Math.max(0, Number(usage.usedCachedInputTokens) || 0),
     );
-    const billableTokens = Math.max(0, Number(usage.usedBillableTokens) || 0);
+    const billableTokens = usage.usedBillableTokens == null
+      ? null
+      : Math.max(0, Number(usage.usedBillableTokens) || 0);
     const rawTokens = Math.max(0, Number(usage.usedTokens) || 0);
     // When billing differs from the raw input+output sum (cached reads netted,
     // cache-creation charged), the single headline number is the BILLABLE total —
     // the raw sum double-counts cached reads and reads as an inflated, confusing
     // figure. With no caching the two match, so the plain "tok" label is kept.
-    const usesBillable = billableTokens > 0 && Math.round(billableTokens) !== Math.round(rawTokens);
+    const usesBillable = billableTokens != null && Math.round(billableTokens) !== Math.round(rawTokens);
     const tokens = _fmtTokens(usesBillable ? billableTokens : rawTokens);
     const tokenLabel = usesBillable ? "billable" : "tok";
     const cacheParts = [];
@@ -458,12 +498,8 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
     const cacheSuffix = cacheParts.length > 0 && width >= 64
       ? `  ${C.dim}(${cacheParts.join(", ")})${C.reset}`
       : "";
-    const costSuffix = usage.costUsd > 0
-      ? `  ${C.dim}·${C.reset}  ${C.dim}${_fmtUsd(usage.costUsd)} ${_providerCostQualifier(usage.provider)}${C.reset}`
-      : "";
-    const compactCostSuffix = usage.costUsd > 0
-      ? `  ${C.dim}·${C.reset}  ${C.dim}${_fmtUsd(usage.costUsd)}${C.reset}`
-      : "";
+    const costSuffix = `  ${C.dim}·${C.reset}  ${C.dim}${_providerCostLabel(usage)}${C.reset}`;
+    const compactCostSuffix = `  ${C.dim}·${C.reset}  ${C.dim}${_providerCostLabel(usage, { compact: true })}${C.reset}`;
     let headline = `   ${C.bold}${brand}${tokens}${C.reset} ${C.dim}${tokenLabel}${C.reset}`;
     headline = _appendProviderUsageSuffix(headline, cacheSuffix, rowWidth);
     const withFullCost = _appendProviderUsageSuffix(headline, costSuffix, rowWidth);

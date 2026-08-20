@@ -2489,7 +2489,7 @@ function renderEvidence(evidence, lane) {
   return `${lane}: ${evidence.selector}`;
 }
 
-function renderExpandedEvidence(report) {
+function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommendedEvidenceChars) {
   const bySelector = new Map();
   const add = (evidence, lane, reason = null) => {
     if (!evidence?.selector || !evidence?.excerpt) return;
@@ -2532,7 +2532,10 @@ function renderExpandedEvidence(report) {
       quoted,
     ].join("\n\n"));
   }
-  return `## Expanded evidence\n\n${sections.join("\n\n")}`;
+  const expanded = sections.join("\n\n");
+  if (expanded.length <= maxChars) return `## Expanded evidence\n\n${expanded}`;
+  const omitted = expanded.length - maxChars;
+  return `## Expanded evidence\n\n${expanded.slice(0, maxChars).trimEnd()}\n\n[Expanded evidence truncated: ${omitted} additional characters remain available through the cited proof selectors.]`;
 }
 
 function renderReport(report, { expandEvidence = false } = {}) {

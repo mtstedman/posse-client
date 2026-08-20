@@ -24,6 +24,7 @@ export const SETTING_KEYS = Object.freeze({
   ASSESSOR_FALLBACK_READS: "assessor_fallback_reads",
   ASSESSOR_FALLBACK_READS_RETRY_STEP: "assessor_fallback_reads_retry_step",
   ASSESSOR_INTERNAL_RETRY_LIMIT: "assessor_internal_retry_limit",
+  ASSESSOR_MAX_TOOL_CALLS: "assessor_max_tool_calls",
   ASSESSOR_PARSE_RETRY_INPUT_TOKENS_CAP: "assessor_parse_retry_input_tokens_cap",
   AGENT_COORDINATION_MODE: "agent_coordination_mode",
   AUTO_MERGE_COMPLETED: "auto_merge_completed",
@@ -118,6 +119,15 @@ export const SETTING_KEYS = Object.freeze({
   STALL_TIMEOUT: "stall_timeout",
   TARGET_BRANCH: "target_branch",
   WEB_TOOLS_ENABLED: "web_tools_enabled",
+  WAITING_LANE_SHADOW_MODE: "waiting_lane_shadow_mode",
+  WAITING_LANE_GIT_PREPARATION_ENABLED: "waiting_lane_git_preparation_enabled",
+  WAITING_LANE_ATLAS_SNAPSHOT_ENABLED: "waiting_lane_atlas_snapshot_enabled",
+  WAITING_LANE_ATLAS_CATCHUP_ENABLED: "waiting_lane_atlas_catchup_enabled",
+  WAITING_LANE_ACTIVATION_ENABLED: "waiting_lane_activation_enabled",
+  WAITING_LANE_PREPARATION_CONCURRENCY: "waiting_lane_preparation_concurrency",
+  WAITING_LANE_MAX_PREPARED_LANES: "waiting_lane_max_prepared_lanes",
+  WAITING_LANE_PREPARED_TTL_MS: "waiting_lane_prepared_ttl_ms",
+  WAITING_LANE_MAX_HOT_PATHS: "waiting_lane_max_hot_paths",
   WORKER_LEASE_RENEW_MAX_TRANSIENT_ERRORS: "worker_lease_renew_max_transient_errors",
   WORKER_PROVIDER_CIRCUIT_TTL_MS: "worker_provider_circuit_ttl_ms",
   WORKTREE_LOCK_WAIT_MS: "worktree_lock_wait_ms",
@@ -171,3 +181,4 @@ export const ATLAS_HANDOFF_PREFETCH_MODE_VALUES = Object.freeze(["on", "off"]);
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);
+export const WAITING_LANE_SHADOW_MODE_VALUES = Object.freeze(["off", "shadow"]);

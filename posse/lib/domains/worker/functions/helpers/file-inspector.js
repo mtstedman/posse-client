@@ -9,20 +9,22 @@ export const TOOL_INSPECT_FILE = {
   type: "function",
   name: "inspect_file",
   description:
-    "Inspect one or many file paths and return structured metadata such as existence, size, " +
-    "extension, timestamps, and basic image dimensions for PNG/JPG/WebP. " +
-    "Use this for cross-platform verification on Windows instead of external binaries. " +
-    "Pass `path` for a single file (returns a flat object), or `paths` with an array for a batch " +
-    "(returns { results: [...] } where each item echoes its input as `loc` so callers can correlate). " +
-    "Prefer the batch form to avoid wasting turns on many single-file inspections.",
+    "Structured metadata for one file path or an array of paths, including existence, size, " +
+    "extension, timestamps, and basic PNG, JPEG, or WebP dimensions. A string returns one flat " +
+    "result; an array returns ordered results whose loc fields identify their inputs.",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "File path (absolute or relative to working directory). Use for a single file." },
+      path: {
+        type: ["string", "array"],
+        description: "One file path or an array of file paths, absolute or relative to the working directory.",
+        items: { type: "string" },
+      },
       paths: {
         type: "array",
-        description: "Array of file paths for batch inspection. Each result echoes the input as `loc`. One bad path does not fail the batch.",
+        description: "Compatibility alias for a batch of file paths.",
         items: { type: "string" },
+        internalOnly: true,
       },
     },
     additionalProperties: false,
@@ -156,12 +158,15 @@ function inspectOne(inputLoc, cwd, scopePredicates, safePath, { includeLoc }) {
 
 export function createInspectFileExecutor(safePath) {
   return function execInspectFile(args, cwd, scopePredicates) {
-    if (Array.isArray(args?.paths)) {
-      const results = args.paths.map((p) => inspectOne(p, cwd, scopePredicates, safePath, { includeLoc: true }));
+    const batchPaths = Array.isArray(args?.path)
+      ? args.path
+      : (Array.isArray(args?.paths) ? args.paths : null);
+    if (batchPaths) {
+      const results = batchPaths.map((p) => inspectOne(p, cwd, scopePredicates, safePath, { includeLoc: true }));
       return JSON.stringify({ results }, null, 2);
     }
     if (args?.path == null) {
-      return JSON.stringify({ error: "inspect_file requires either `path` (string) or `paths` (array of strings)" }, null, 2);
+      return JSON.stringify({ error: "inspect_file requires `path` as a string or an array of strings" }, null, 2);
     }
     const payload = inspectOne(args.path, cwd, scopePredicates, safePath, { includeLoc: false });
     return JSON.stringify(payload, null, 2);

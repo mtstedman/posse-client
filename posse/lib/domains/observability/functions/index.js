@@ -1,4 +1,5 @@
 export * from "./event-types.js";
+export * from "./atlas137-report.js";
 export * from "./observations.js";
 export * from "./recovery/job-replay.js";
 export * from "./timeline/index.js";

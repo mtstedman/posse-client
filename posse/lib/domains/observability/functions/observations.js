@@ -43,6 +43,13 @@ const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
   "tool.inspect",
   "tool.hash",
 ]);
+const ATLAS137_ATTEMPT_SCOPED_OBSERVATION_TYPES = new Set([
+  "research.source_selection",
+  "research.exploration_blocked",
+  "source.coverage",
+  "context.headroom_decision",
+  "context.headroom_actual",
+]);
 
 function _trimToolReplayBucket(bucket, now) {
   if (!bucket) return;
@@ -430,6 +437,52 @@ function _resolveObservationScopeForInsert(db, {
   };
 }
 
+function _emitAttemptScopeCompatibilityDiagnostic({
+  requestedScope,
+  resolvedScope,
+  observationType,
+  error,
+  reason = "foreign_key_compatibility_fallback",
+}) {
+  if (!ATLAS137_ATTEMPT_SCOPED_OBSERVATION_TYPES.has(String(observationType || ""))) return;
+  const requestedAttemptId = _nullableIntegerId(requestedScope?.attempt_id);
+  if (reason === "foreign_key_compatibility_fallback"
+    && (requestedAttemptId == null || resolvedScope?.attempt_id != null)) return;
+  if (reason === "missing_attempt_identity" && requestedAttemptId != null) return;
+  const createdAt = nowIso();
+  const diagnostic = {
+    created_at: createdAt,
+    work_item_id: resolvedScope?.work_item_id ?? requestedScope?.work_item_id ?? null,
+    job_id: resolvedScope?.job_id ?? requestedScope?.job_id ?? null,
+    attempt_id: null,
+    observation_type: "observation.attempt_scope_dropped",
+    summary: `Atlas137 observation lost required attempt identity: ${observationType}`,
+    original_type: observationType,
+    requested_attempt_id: requestedAttemptId,
+    requested_job_id: requestedScope?.job_id ?? null,
+    resolved_job_id: resolvedScope?.job_id ?? null,
+    reason,
+    error: error == null ? null : String(error?.message || error).slice(0, 300),
+  };
+  appendRunTelemetry("observations", diagnostic);
+  _writeStreamEntry({
+    t: createdAt,
+    wi: diagnostic.work_item_id,
+    job: diagnostic.job_id,
+    attempt: null,
+    type: diagnostic.observation_type,
+    summary: diagnostic.summary,
+    original_type: observationType,
+    requested_attempt_id: diagnostic.requested_attempt_id,
+    reason: diagnostic.reason,
+  }, "attempt_scope_dropped");
+  log.warn("observability", diagnostic.summary, {
+    requestedAttemptId: diagnostic.requested_attempt_id,
+    requestedJobId: diagnostic.requested_job_id,
+    resolvedJobId: diagnostic.resolved_job_id,
+  });
+}
+
 /**
  * @param {{
  *   work_item_id?: number | null,
@@ -452,6 +505,14 @@ export function recordObservation({
 } = {}) {
   if (!observation_type || !summary) return false;
 
+  _emitAttemptScopeCompatibilityDiagnostic({
+    requestedScope: { work_item_id, job_id, attempt_id },
+    resolvedScope: { work_item_id, job_id, attempt_id },
+    observationType: observation_type,
+    error: null,
+    reason: "missing_attempt_identity",
+  });
+
   try {
     const db = suppliedDb || getDb();
     const detailJson = normalizeJsonText(detail);
@@ -463,7 +524,14 @@ export function recordObservation({
       info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt });
     } catch (err) {
       if (!_isForeignKeyConstraintError(err)) throw err;
+      const requestedScope = { ...scope };
       scope = _resolveObservationScopeForInsert(db, scope);
+      _emitAttemptScopeCompatibilityDiagnostic({
+        requestedScope,
+        resolvedScope: scope,
+        observationType: observation_type,
+        error: err,
+      });
       info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt });
     }
 
@@ -550,7 +618,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   try {
     const db = getDb();
     const scopeWhere = useAttempt && useJob
-      ? "job_id = ? AND (attempt_id = ? OR attempt_id IS NULL)"
+      ? "job_id = ? AND attempt_id = ?"
       : useAttempt ? "attempt_id = ?" : "job_id = ?";
     const scopeParams = useAttempt && useJob
       ? [normalizedJobId, normalizedAttemptId]
@@ -616,6 +684,10 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         explorationCount += 1;
         if (detail?.outcome === "succeeded" || detail?.ok === true) {
           lastSuccessfulOwnerExplorationStep = explorationCount;
+          if (detail?.focus_grace === true) {
+            lastNovelEvidenceStep = explorationCount;
+            continue;
+          }
           const explicitEvidenceContract = Number(detail?.evidence_identity_version) === 1;
           const novel = noteNovelIdentities(detail?.evidence_identities);
           // Before evidence identity v1, success was the only available owner
@@ -816,7 +888,7 @@ function researchObservationScope(jobId, attemptId) {
   const useJob = Number.isInteger(normalizedJobId) && normalizedJobId > 0;
   if (!useAttempt && !useJob) return null;
   return useAttempt && useJob
-    ? { where: "job_id = ? AND (attempt_id = ? OR attempt_id IS NULL)", params: [normalizedJobId, normalizedAttemptId] }
+    ? { where: "job_id = ? AND attempt_id = ?", params: [normalizedJobId, normalizedAttemptId] }
     : useAttempt
       ? { where: "attempt_id = ?", params: [normalizedAttemptId] }
       : { where: "job_id = ?", params: [normalizedJobId] };
@@ -858,7 +930,7 @@ export function hashRefFetchObservationLedger({
   try {
     const db = getDb();
     const scopeWhere = useAttempt && useJob
-      ? "job_id = ? AND (attempt_id = ? OR attempt_id IS NULL)"
+      ? "job_id = ? AND attempt_id = ?"
       : useAttempt ? "attempt_id = ?" : "job_id = ?";
     const scopeParams = useAttempt && useJob
       ? [normalizedJobId, normalizedAttemptId]

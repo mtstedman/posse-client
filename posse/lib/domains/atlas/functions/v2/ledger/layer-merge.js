@@ -67,13 +67,25 @@ function mergeKey(kind, qualifiedOrName) {
   return `${String(kind || "")}\0${String(qualifiedOrName || "")}`;
 }
 
-function locationMergeKey(kind, name, rangeStart, rangeStartLine) {
-  return [
-    String(kind || ""),
-    String(name || ""),
-    String(rangeStart ?? ""),
-    String(rangeStartLine ?? ""),
-  ].join("\0");
+function locationMergeKey(name, rangeStart, rangeStartLine) {
+  // Tree-sitter usually spans the whole declaration while SCIP spans only
+  // its identifier, and the two parsers can disagree on broad kinds (for
+  // example enum/class or let/const). A unique same-name declaration on the
+  // same source line is the stable cross-parser identity. Fall back to the
+  // exact offset only for producers that omit line numbers.
+  const location = Number.isInteger(rangeStartLine)
+    ? `line:${rangeStartLine}`
+    : `offset:${rangeStart ?? ""}`;
+  return [String(name || ""), location].join("\0");
+}
+
+function declarationRangesOverlap(left, right) {
+  const leftStart = num(left?.range_start, 0);
+  const leftEnd = num(left?.range_end, leftStart);
+  const rightStart = num(right?.range_start, 0);
+  const rightEnd = num(right?.range_end, rightStart);
+  if (leftEnd <= leftStart || rightEnd <= rightStart) return leftStart === rightStart;
+  return leftStart < rightEnd && rightStart < leftEnd;
 }
 
 function sourceLocalKey(source, localId) {
@@ -239,7 +251,7 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
   const symbols = [];
   /** mergeKey -> merged local_id (for overlay enrichment matching) */
   const keyToMerged = new Map();
-  /** locationMergeKey -> merged local_id|null, where null means ambiguous. */
+  /** locationMergeKey -> candidate merged local_ids. */
   const locationToMerged = new Map();
   /** "layerId:srcLocalId" -> merged local_id (parent + edge remap) */
   const remap = new Map();
@@ -259,8 +271,10 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
     sourceLocalToMerged.set(sourceLocalKey(baseLayer.source, row.local_id), mergedId);
     const key = mergeKey(sym.kind, sym.qualified_name || sym.name);
     if (!keyToMerged.has(key)) keyToMerged.set(key, mergedId);
-    const locKey = locationMergeKey(sym.kind, sym.name, sym.range_start, sym.range_start_line);
-    locationToMerged.set(locKey, locationToMerged.has(locKey) ? null : mergedId);
+    const locKey = locationMergeKey(sym.name, sym.range_start, sym.range_start_line);
+    const locationCandidates = locationToMerged.get(locKey) || [];
+    locationCandidates.push(mergedId);
+    locationToMerged.set(locKey, locationCandidates);
   }
 
   // Overlay: enrich matching base symbol, else add as new.
@@ -270,13 +284,19 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
       const qualified = row.container ?? detail.qualified_name ?? null;
       const key = mergeKey(row.kind, qualified || row.name);
       const range = parseJson(row.range_json) || {};
+      const overlayRange = {
+        range_start: num(range.range_start, 0),
+        range_end: num(range.range_end, 0),
+      };
       const locKey = locationMergeKey(
-        row.kind,
         row.name,
-        num(range.range_start, 0),
+        overlayRange.range_start,
         nullableInt(range.range_start_line),
       );
-      const matchId = keyToMerged.get(key) ?? locationToMerged.get(locKey);
+      const locationMatches = (locationToMerged.get(locKey) || [])
+        .filter((candidateId) => declarationRangesOverlap(byMerged.get(candidateId), overlayRange));
+      const matchId = keyToMerged.get(key)
+        ?? (locationMatches.length === 1 ? locationMatches[0] : undefined);
       if (matchId != null) {
         const base = byMerged.get(matchId);
         base.name = row.name || base.name;

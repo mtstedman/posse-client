@@ -4,7 +4,9 @@
 // keep its current shape while command execution moves behind Repo.
 
 import path from "node:path";
+import { WAITING_LANE_NATIVE_METHODS } from "../../../catalog/waiting-lane.js";
 import { Repo } from "./Repo.js";
+import { invokePreparedWorktreeNativeMethodAsync } from "../functions/prepared-worktree.js";
 import { runGitNativeMethodAsync } from "../functions/native/invoke.js";
 
 function ensureRepo(repoOrCwd) {
@@ -77,6 +79,59 @@ export class Worktree {
         force: Boolean(force),
         prune: Boolean(prune),
         fallbackRemove: Boolean(fallbackRemove),
+      },
+      { ...nativeParity, signal },
+    );
+  }
+
+  async prepareDetachedAsync({ targetOid, preparationId, signal = undefined, nativeParity = {} } = {}) {
+    return await invokePreparedWorktreeNativeMethodAsync(
+      WAITING_LANE_NATIVE_METHODS.PREPARE,
+      {
+        mainCwd: this.repo.cwd,
+        managedWorktreeRoot: this.path,
+        targetOid: String(targetOid || ""),
+        preparationId: String(preparationId || ""),
+      },
+      { ...nativeParity, signal },
+    );
+  }
+
+  async refreshPreparedAsync({ preparationId, expectedOldOid, targetOid, signal = undefined, nativeParity = {} } = {}) {
+    return await invokePreparedWorktreeNativeMethodAsync(
+      WAITING_LANE_NATIVE_METHODS.REFRESH,
+      {
+        mainCwd: this.repo.cwd,
+        managedWorktreeRoot: this.path,
+        preparationId: String(preparationId || ""),
+        expectedOldOid: String(expectedOldOid || ""),
+        targetOid: String(targetOid || ""),
+      },
+      { ...nativeParity, signal },
+    );
+  }
+
+  async activatePreparedAsync({ preparationId, expectedOid, branchName, signal = undefined, nativeParity = {} } = {}) {
+    return await invokePreparedWorktreeNativeMethodAsync(
+      WAITING_LANE_NATIVE_METHODS.ACTIVATE,
+      {
+        mainCwd: this.repo.cwd,
+        managedWorktreeRoot: this.path,
+        preparationId: String(preparationId || ""),
+        expectedOid: String(expectedOid || ""),
+        branchName: String(branchName || ""),
+      },
+      { ...nativeParity, signal },
+    );
+  }
+
+  async inspectPreparedAsync({ preparationId, signal = undefined, nativeParity = {} } = {}) {
+    return await invokePreparedWorktreeNativeMethodAsync(
+      WAITING_LANE_NATIVE_METHODS.INSPECT,
+      {
+        mainCwd: this.repo.cwd,
+        managedWorktreeRoot: this.path,
+        preparationId: String(preparationId || ""),
       },
       { ...nativeParity, signal },
     );

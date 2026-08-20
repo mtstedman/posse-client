@@ -6,14 +6,13 @@
 
 import fs from "fs";
 import path from "path";
+import { gitExecBufferAsync } from "../../../git/functions/utils.js";
 
 /**
- * Upper bound on paths a single `main-full` warm job will index. Keeps
- * one job from blowing the per-job runtime budget when pointed at a
- * very large repo. main-full is admin-triggered and rare; an operator
- * can chain a few jobs if a repo legitimately exceeds this.
+ * Full warms must be complete to publish an exact generation. Runtime is
+ * bounded by the warm/conductor deadline, not by silently truncating paths.
  */
-export const MAX_FULL_WARM_PATHS = 5000;
+export const MAX_FULL_WARM_PATHS = Number.POSITIVE_INFINITY;
 
 const WALK_SKIP_DIRS = new Set([
   ".git",
@@ -52,6 +51,33 @@ export async function walkRepoFilesAsync(repoRoot, accept, opts = {}) {
     : Infinity;
   /** @type {string[]} */
   const out = [];
+  // Git is the authoritative source manifest for exact warms. It includes
+  // tracked source under generically named build directories (for example a
+  // legitimate `test/.../target/` package) while still excluding untracked,
+  // ignored build output. The filesystem walk remains the non-Git fallback.
+  try {
+    const manifest = await gitExecBufferAsync(
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      repoRoot,
+      { maxBuffer: 64 * 1024 * 1024, timeoutMs: 10 * 60_000 },
+    );
+    const paths = Buffer.from(manifest || "").toString("utf8").split("\0").filter(Boolean)
+      .sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
+    for (const relPath of paths) {
+      if (out.length >= maxPaths) break;
+      const filename = path.posix.basename(relPath);
+      if (!accept(filename, relPath)) continue;
+      try {
+        if (!(await fs.promises.stat(path.join(repoRoot, relPath))).isFile()) continue;
+      } catch {
+        continue;
+      }
+      out.push(relPath);
+    }
+    return out;
+  } catch {
+    // A non-Git directory still gets the historical bounded filesystem walk.
+  }
   /**
    * @param {string} absDir
    * @param {string} relDir

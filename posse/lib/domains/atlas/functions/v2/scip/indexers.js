@@ -29,6 +29,8 @@ const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..", "..", 
  *   timeoutMs: number,
  *   indexerId: string,
  *   commandSource: string,
+ *   repoRoot: string,
+ *   scipDir: string,
  *   sourceLanguages: string[],
  *   sourceExtensions: string[],
  *   markers: string[],
@@ -168,6 +170,8 @@ export function resolveScipStagePlans(input) {
         timeoutMs: timeout,
         indexerId: "configured",
         commandSource: resolution?.source || "configured",
+        repoRoot,
+        scipDir,
         sourceLanguages: [],
         sourceExtensions: [],
         markers: [],
@@ -204,6 +208,8 @@ export function resolveScipStagePlans(input) {
       timeoutMs: timeout,
       indexerId: candidate.id,
       commandSource: resolution.source,
+      repoRoot,
+      scipDir,
       sourceLanguages: candidate.sourceLanguages || [],
       sourceExtensions: candidate.sourceExtensions || [],
       markers: candidate.markers || [],
@@ -331,9 +337,35 @@ function autoCandidates(repoRoot, enabledLanguages) {
     const sourceLanguages = repoSourceLanguagesForExtensions(repoRoot, indexer.sourceExtensions);
     if (sourceLanguages.length === 0) continue;
     if (indexer.requiresMarker && !repoRootHasMarker(repoRoot, indexer.markers)) continue;
-    out.push({ ...indexer, sourceLanguages });
+    out.push({
+      ...indexer,
+      command: indexer.id === "typescript" && needsPortableTypeScriptProject(repoRoot)
+        ? "scip-typescript-portable"
+        : indexer.command,
+      sourceLanguages,
+    });
   }
   return out;
+}
+
+function needsPortableTypeScriptProject(repoRoot) {
+  const tsconfig = path.join(repoRoot, "tsconfig.json");
+  if (!fs.existsSync(tsconfig)) {
+    // Compiler/parser repositories commonly keep intentionally invalid syntax
+    // beneath tests/cases. An inferred whole-repository project asks the
+    // upstream parser to index those fixtures and can crash before producing
+    // any SCIP document.
+    return fs.existsSync(path.join(repoRoot, "tests", "cases"));
+  }
+  let source = "";
+  try { source = fs.readFileSync(tsconfig, "utf8"); } catch { return false; }
+  const match = source.match(/["']extends["']\s*:\s*["']([^"']+)["']/u);
+  const extended = String(match?.[1] || "").trim();
+  if (!extended || extended.startsWith(".") || path.isAbsolute(extended)) return false;
+  const packagePath = path.join(repoRoot, "node_modules", ...extended.split("/"));
+  return !fs.existsSync(packagePath)
+    && !fs.existsSync(`${packagePath}.json`)
+    && !fs.existsSync(path.join(packagePath, "tsconfig.json"));
 }
 
 // Root-level check on purpose: the indexers run with cwd at the repo root and

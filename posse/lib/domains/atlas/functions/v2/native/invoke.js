@@ -21,6 +21,8 @@ export {
 
 /** @type {NativeMethodRunOptions | null} */
 let atlasNativeOptionsForTests = null;
+const NATIVE_BRIDGE_COMPLETION_HEADROOM_MS = 30_000;
+const NATIVE_BRIDGE_COMPLETION_HEADROOM_RATIO = 0.1;
 
 /** Narrow process-local test hook for an injected real debug binary. */
 export function __setAtlasNativeOptionsForTests(opts) {
@@ -29,6 +31,21 @@ export function __setAtlasNativeOptionsForTests(opts) {
 
 export function __atlasNativeManagerForTests() {
   return atlasNativeOptionsForTests?.manager || null;
+}
+
+/** @param {number | undefined} timeoutMs */
+export function __testAtlasNativeBridgeTimeoutMs(timeoutMs) {
+  return atlasNativeBridgeTimeoutMs(timeoutMs);
+}
+
+function atlasNativeBridgeTimeoutMs(timeoutMs) {
+  const operationTimeoutMs = Number(timeoutMs);
+  if (!Number.isFinite(operationTimeoutMs) || operationTimeoutMs <= 0) return undefined;
+  const headroomMs = Math.max(
+    NATIVE_BRIDGE_COMPLETION_HEADROOM_MS,
+    Math.ceil(operationTimeoutMs * NATIVE_BRIDGE_COMPLETION_HEADROOM_RATIO),
+  );
+  return operationTimeoutMs + headroomMs;
 }
 
 function effectiveRunOptions(opts) {
@@ -197,7 +214,15 @@ export async function runAtlasNativeMethodAsync(method, payload, opts = {}) {
     // explicit `auth` would then override the parent manager at the final
     // native boundary. The parent attaches its own pulse before dispatch.
     delete /** @type {Record<string, unknown>} */ (bridgeOpts).auth;
-    return nativeThreadBridgeRequest("atlas", method, payload, bridgeOpts, { signal, timeoutMs: opts.timeoutMs });
+    // The parent-side native operation owns the actual method deadline. Give
+    // it time to reject, restart/clean up its daemon if needed, and post that
+    // result back before the worker-side bridge timer cancels the same request.
+    // Equal timers race under load and can leave later requests queued behind
+    // a transport that is still unwinding the canceled operation.
+    return nativeThreadBridgeRequest("atlas", method, payload, bridgeOpts, {
+      signal,
+      timeoutMs: atlasNativeBridgeTimeoutMs(opts.timeoutMs),
+    });
   }
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("atlas")) {

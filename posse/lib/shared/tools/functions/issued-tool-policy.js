@@ -38,6 +38,7 @@ const WRITE_TOOL_NAMES = new Set([
   "clean_image",
   "generate_image",
 ]);
+const INTERNAL_DETERMINISTIC_TOOL_NAMES = new Set(["copy_file"]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
 const TRUSTED_REMOTE_SURFACE_OBJECTS = new WeakSet();
 
@@ -157,6 +158,7 @@ function canonicalToolEntry(entry, fallbackSuite = "") {
   const name = stripSuitePrefix(raw, suite);
   if (!name) return null;
   if (suite === "atlas" && INTERNAL_ATLAS_SURFACE_ACTION_SET.has(name)) return null;
+  if (suite === "tools" && INTERNAL_DETERMINISTIC_TOOL_NAMES.has(name)) return null;
   return { suite, name, canonical: `${suite}.${name}` };
 }
 
@@ -659,6 +661,8 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     attemptId: attachment.attemptId ?? null,
     agentCallId: attachment.agentCallId ?? null,
     promptChars: Math.max(0, Number(attachment.promptChars) || 0),
+    modelName: String(attachment.modelName || ""),
+    providerSessionId: String(attachment.providerSessionId || ""),
     scopedFiles: [],
     createFiles: [],
     deleteFiles: [],

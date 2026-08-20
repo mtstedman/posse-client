@@ -56,11 +56,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "query": {
     type: "function",
     name: "atlas_query",
-    description: "Gateway. Compact native ATLAS v2 retrieval wrapper for agent-routable symbol, tree, code, review, and memory retrieval actions.",
+    description: "Dispatch one selected symbol, tree, code, review, or memory retrieval action, using the remaining fields as that action's arguments.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: QUERY_GATEWAY_ACTIONS, description: "Agent-routable ATLAS retrieval action to route through this gateway." },
+        action: { type: "string", enum: QUERY_GATEWAY_ACTIONS, description: "Retrieval action to execute." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -69,11 +69,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code": {
     type: "function",
     name: "atlas_code",
-    description: "Gateway. Compact native ATLAS v2 code-inspection wrapper for agent-routable skeleton, hot-path, area survey, structure, edit planning, and gated raw-window actions.",
+    description: "Dispatch one selected code outline, excerpt, survey, structure, window, or edit-planning action, using the remaining fields as that action's arguments.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: CODE_GATEWAY_ACTIONS, description: "Agent-routable ATLAS code action to route through this gateway." },
+        action: { type: "string", enum: CODE_GATEWAY_ACTIONS, description: "Code inspection or planning action to execute." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -82,11 +82,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "repo": {
     type: "function",
     name: "atlas_repo",
-    description: "Gateway. Compact native ATLAS v2 repository discovery wrapper for action lookup and compact manuals.",
+    description: "Dispatch repository capability discovery by search or compact manual lookup, using the remaining fields as the selected action's arguments.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: REPO_GATEWAY_ACTIONS, description: "Agent-routable ATLAS repository discovery action to route through this gateway." },
+        action: { type: "string", enum: REPO_GATEWAY_ACTIONS, description: "Repository discovery action to execute." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -95,11 +95,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "agent": {
     type: "function",
     name: "atlas_agent",
-    description: "Gateway. Compact native ATLAS v2 agent wrapper for agent-routable memory curation actions.",
+    description: "Dispatch one selected repository-memory storage or feedback action, using the remaining fields as that action's arguments.",
     parameters: {
       type: "object",
       properties: {
-        action: { type: "string", enum: AGENT_GATEWAY_ACTIONS, description: "Agent-routable ATLAS agent action to route through this gateway." },
+        action: { type: "string", enum: AGENT_GATEWAY_ACTIONS, description: "Repository-memory action to execute." },
       },
       required: ["action"],
       additionalProperties: true,
@@ -107,8 +107,8 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   [INTERNAL_TOOL_FAMILY]: {
     type: "function",
-    name: INTERNAL_TOOL_FAMILY,
-    description: "Gateway. Internal main-MCP/WI setup wrapper for bookkeeping, prefetch, lifecycle, policy, runtime, and DB inventory actions. Not routed through agent gateways.",
+    name: "atlas_internal",
+    description: "Trusted runtime dispatcher for bookkeeping, prefetch, lifecycle, policy, runtime, and database inventory actions.",
     parameters: {
       type: "object",
       properties: {
@@ -121,7 +121,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "action.search": {
     type: "function",
     name: "atlas_action_search",
-    description: "Discovery. Search the native ATLAS v2 action catalog for the right tool/action to call.",
+    description: "Search indexed capability metadata by query and namespace. Returns matching action names and compact summaries.",
     parameters: {
       type: "object",
       properties: {
@@ -136,7 +136,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "manual": {
     type: "function",
     name: "atlas_manual",
-    description: "Discovery. Return a compact native ATLAS v2 API manual filtered by query or explicit actions.",
+    description: "Return compact capability documentation filtered by query or explicit action names, with optional JSON schemas.",
     parameters: {
       type: "object",
       properties: {
@@ -217,17 +217,18 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Open already-stored content for citable #refs; this never reruns the originating tool. A ref_role=citation/current_fetch=not_needed stub is already visible: cite or hand it off without fetching. Fetch only ref_role=continuation, explicit cursor/survey/continuation fields, omitted or bounded content, or focused matches within stored payloads. Every non-empty fetch returns view_ref, whose payload is exactly the returned text field; cite, slice, or hand off view_ref rather than the continuation ref. The ledger rejects fully visible content, duplicate pages, and repeated empty searches. Re-call the producer only for a materially different scope; do not infer payload type from the ref.",
+    description: "Reference retrieval. Open stored ATLAS #ref content with batching, paging, slicing, and focused search. Each non-empty result includes a view_ref whose payload is the returned text.",
     parameters: {
       type: "object",
       properties: {
-        ref: { type: "string", description: "Single hash ref alias such as #a3f9. May also be a comma/space separated list." },
-        refs: { type: "array", items: { type: "string" }, description: "Batch of hash ref aliases to fetch in one call." },
-        hashes: { type: "array", items: { type: "string" }, description: "Alias for refs." },
+        ref: { type: ["string", "array"], items: { type: "string" }, description: "One hash ref alias such as #a3f9, or an array of aliases for a batch." },
+        refs: { type: "array", items: { type: "string" }, description: "Compatibility alias for a batch of hash refs.", internalOnly: true },
+        hashes: { type: "array", items: { type: "string" }, description: "Alias for refs.", internalOnly: true },
         offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0." },
         limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs." },
-        search: { type: "string", description: "Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. Returns matching numbered lines instead of a raw offset page." },
+        search: { type: "string", description: "Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines." },
         search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax)." },
+        reaccessAuthorization: { type: "string", description: "One-use attempt-scoped authorization returned with a covered source response. It permits one stored ref to be delivered once more." },
       },
       required: [],
       additionalProperties: false,
@@ -236,12 +237,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "create_ref": {
     type: "function",
     name: "atlas_create_ref",
-    description: "Citation-store minting. Store a chunk of evidence and get back a #ref stub. Accepts inline text, a slice of a fully visible materialized ref (source_ref + lines/offset), or a batch via chunks[]. For continuation content, fetch first and use the returned view_ref as source_ref. The optional note is retained with the stored ref.",
+    description: "Citation storage. Store inline text, a materialized ref slice, or a batch of chunks and receive #ref stubs. The optional note remains attached to the stored ref.",
     parameters: {
       type: "object",
       properties: {
-        text: { type: "string", minLength: 1, description: "Inline chunk to store (max 60000 chars). Use for content you authored or assembled; prefer source_ref slicing for material that already exists as a ref." },
-        source_ref: { type: "string", description: "Existing materialized ref alias such as #a3f9 to slice server-side (no payload tokens spent). Combine with lines or offset/limit." },
+        text: { type: "string", minLength: 1, description: "Inline authored or assembled content to store, up to 60000 characters. Existing stored material can be selected with source_ref." },
+        source_ref: { type: "string", description: "Existing materialized ref alias such as #a3f9 for a server-side slice. Combine with lines or offset and limit." },
         lines: { type: "string", description: "1-based line range within source_ref payload, e.g. \"120-180\"." },
         offset: { type: "integer", description: "Character offset within source_ref payload. Default 0." },
         limit: { type: "integer", description: "Maximum characters to take from source_ref payload." },
@@ -342,7 +343,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         directories: { type: "array", items: { type: "string" }, description: "Relative directories to focus on." },
         maxDirectories: { type: "integer", description: "Maximum directories to include." },
         maxExportsPerDirectory: { type: "integer", description: "Maximum exports to include per directory." },
-        ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch." },
+        ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch.", internalOnly: true },
       },
       required: [],
       additionalProperties: false,
@@ -372,7 +373,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         filePath: { type: "string", description: "Canonical repository-relative path for the buffer." },
         content: { type: "string", description: "Full buffer contents." },
-        sessionId: { type: "string", description: "Optional editor/session namespace." },
+        sessionId: { type: "string", description: "Optional editor/session namespace.", internalOnly: true },
         version: { type: "integer", description: "Optional editor buffer version." },
         eventType: { type: "string", enum: ["open", "change", "save", "close", "checkpoint"], description: "Editor event that produced this buffer update." },
         language: { type: "string", description: "Editor language id, when available." },
@@ -412,7 +413,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         filePath: { type: "string", description: "Canonical repository-relative path for the buffer." },
-        sessionId: { type: "string", description: "Optional editor/session namespace." },
+        sessionId: { type: "string", description: "Optional editor/session namespace.", internalOnly: true },
         writeToDisk: { type: "boolean", description: "Write overlay contents to disk before clearing." },
         clear: { type: "boolean", description: "Clear the overlay even when disk contents differ." },
       },
@@ -428,7 +429,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         filePath: { type: "string", description: "Optional canonical repository-relative path filter." },
-        sessionId: { type: "string", description: "Optional editor/session namespace." },
+        sessionId: { type: "string", description: "Optional editor/session namespace.", internalOnly: true },
       },
       required: [],
       additionalProperties: false,
@@ -437,28 +438,32 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Discovery. Search ATLAS's indexed repo-defined symbol graph for relevant project symbols by name, concept, or semantic hint when you do not yet know the symbol ID. Symbols surfaced in a prior symbol.search call will not be surfaced by an identical call in the same agent session; a duplicate-suppressed response means covered, not not-found. Do not use this to resolve language/runtime/library functions such as date, gmdate, password_verify, json_decode, Math.floor, or console.log; use body/code lookup to find repo code that calls them.",
+    description: "Repository symbol discovery. Search indexed project declarations and bodies by name, concept, or semantic hint. Results identify repository-defined symbols and include stable symbol IDs and locations.",
     parameters: {
       type: "object",
       properties: {
         query: { type: "string", description: "Symbol search query." },
         limit: { type: "integer", description: "Maximum number of results to return." },
         semantic: { type: "boolean", description: "Enable semantic reranking when supported." },
-        vectorCandidateLimit: { type: "integer", minimum: 1, maximum: 1000, description: "Experimental exact ANN candidate delivery depth." },
-        filterDeclarationFiles: { type: "boolean", description: "Experimental declaration-file path-prior control." },
-        filterToolingPaths: { type: "boolean", description: "Experimental tooling/test/generated/legacy path-prior control." },
-        genericSymbolFrequencyThreshold: { type: "integer", minimum: 2, maximum: 100, description: "Experimental repeated-name candidate ranking threshold." },
-        hierarchicalFileLimit: { type: "integer", minimum: 1, maximum: 40, description: "Experimental number of files admitted before final symbol interleaving." },
-        withinFileSymbolRerank: { type: "boolean", description: "Experimental within-file symbol reranking that preserves file slots." },
-        fileLexicalOverlapWeight: { type: "number", minimum: 0, maximum: 1, description: "Experimental native lexical file-score overlap weight." },
-        monorepoPackagePriors: { type: "boolean", description: "Experimental generic monorepo package/path priors." },
-        semanticQueryNormalization: { type: "boolean", description: "Experimental normalized secondary semantic query." },
+        vectorCandidateLimit: { type: "integer", minimum: 1, maximum: 1000, description: "Experimental exact ANN candidate delivery depth.", internalOnly: true },
+        filterDeclarationFiles: { type: "boolean", description: "Experimental declaration-file path-prior control.", internalOnly: true },
+        filterToolingPaths: { type: "boolean", description: "Experimental tooling/test/generated/legacy path-prior control.", internalOnly: true },
+        genericSymbolFrequencyThreshold: { type: "integer", minimum: 2, maximum: 100, description: "Experimental repeated-name candidate ranking threshold.", internalOnly: true },
+        hierarchicalFileLimit: { type: "integer", minimum: 1, maximum: 40, description: "Experimental number of files admitted before final symbol interleaving.", internalOnly: true },
+        withinFileSymbolRerank: { type: "boolean", description: "Experimental within-file symbol reranking that preserves file slots.", internalOnly: true },
+        fileLexicalOverlapWeight: { type: "number", minimum: 0, maximum: 1, description: "Experimental native lexical file-score overlap weight.", internalOnly: true },
+        monorepoPackagePriors: { type: "boolean", description: "Experimental generic monorepo package/path priors.", internalOnly: true },
+        semanticQueryNormalization: { type: "boolean", description: "Experimental normalized secondary semantic query.", internalOnly: true },
         scope: { type: "string", enum: ["name", "body", "either"], description: "Search symbol names, symbol-body identifier tokens, or both. Default either." },
         entities: {
           type: "array",
           items: { type: "string", enum: ["symbols", "feedback"] },
           description: "Entity families to include. Default symbols; feedback is returned in a separate entities list.",
+          internalOnly: true,
         },
+        sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
+        taskText: { type: "string", description: "Auxiliary task-ranking context supplied by orchestration.", internalOnly: true },
+        taskType: { type: "string", enum: ["debug", "review", "implement", "explain"], description: "Task classification supplied by orchestration.", internalOnly: true },
       },
       required: ["query"],
       additionalProperties: false,
@@ -467,14 +472,19 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.card": {
     type: "function",
     name: "atlas_symbol_card",
-    description: "Fetch compact symbol cards without loading whole files: one card by symbolId or symbolRef, or a batch via symbolIds/symbolRefs with per-item errors. Cards carry signature, summary, callers/callees, relationship metrics, and location.",
+    description: "Compact symbol details for one symbol or a batch. Each card includes signature, summary, callers, callees, relationship metrics, and source location; batch results include per-item errors.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by symbol.search, symbol.card, slice.build, code.skeleton, or code.lens results. Do not construct this from file paths or names." },
+        symbolId: {
+          type: ["string", "array"],
+          pattern: ATLAS_SYMBOL_ID_PATTERN,
+          items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN },
+          description: "One exact opaque ATLAS symbol ID or an array of IDs for a batch.",
+        },
         symbolRef: {
-          type: "object",
-          description: "Fallback lookup when you do not have a symbolId. Prefer symbol.search first; use this for a concrete name plus optional file.",
+          type: ["object", "array"],
+          description: "One concrete symbol-name lookup or an array of lookups for a batch, each with optional file and kind constraints.",
           properties: {
             name: { type: "string", description: "Symbol name to resolve." },
             file: { type: "string", description: "Optional repository-relative file path containing the symbol." },
@@ -483,11 +493,22 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           },
           required: ["name"],
           additionalProperties: false,
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "Symbol name to resolve." },
+              file: { type: "string", description: "Optional repository-relative file path containing the symbol." },
+              kind: { type: "string", description: "Optional symbol kind hint." },
+              exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
+            },
+            required: ["name"],
+            additionalProperties: false,
+          },
         },
-        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Batch form: opaque ATLAS symbol IDs returned by ATLAS results. Returns batched cards with per-item errors." },
+        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Compatibility alias for a batch of symbol IDs.", internalOnly: true },
         symbolRefs: {
           type: "array",
-          description: "Batch form: fallback lookups when you do not have symbolIds. Each is a concrete name plus optional file/kind. Returns batched cards with per-item errors.",
+          description: "Compatibility alias for a batch of symbol-name lookups.",
           items: {
             type: "object",
             properties: {
@@ -499,10 +520,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
             required: ["name"],
             additionalProperties: true,
           },
+          internalOnly: true,
         },
-        ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch (single-card form only)." },
-        minCallConfidence: { type: "number", description: "Minimum call-confidence threshold." },
-        includeResolutionMetadata: { type: "boolean", description: "Include ATLAS resolution metadata." },
+        ifNoneMatch: { type: "string", description: "Optional ETag for conditional fetch (single-card form only).", internalOnly: true },
+        minCallConfidence: { type: "number", description: "Minimum call-confidence threshold.", internalOnly: true },
+        includeResolutionMetadata: { type: "boolean", description: "Include ATLAS resolution metadata.", internalOnly: true },
+        sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },
       required: [],
       additionalProperties: false,
@@ -518,16 +541,18 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         taskText: { type: "string", description: "Natural-language task description." },
         semantic: { type: "boolean", description: "Enable semantic/vector entry discovery when configured. Defaults on for taskText when semantic dispatch is enabled." },
         taskType: { type: "string", enum: ["debug", "review", "implement", "explain"], description: "Optional task type for feedback-aware ranking." },
-        entrySymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs returned by ATLAS results. Do not construct these from file paths or names." },
+        entrySymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Exact opaque ATLAS symbol IDs returned by indexed results." },
         editedFiles: { type: "array", items: { type: "string" }, description: "Relative edited file paths." },
         stackTrace: { type: "string", description: "Optional stack trace for debugging context." },
         failingTestPath: { type: "string", description: "Optional failing test path." },
-        cardDetail: { type: "string", description: "ATLAS card detail level." },
-        adaptiveDetail: { type: "boolean", description: "Enable adaptive detail selection." },
-        knownCardEtags: { type: "object", additionalProperties: { type: "string" }, description: "Optional map of symbolId to card ETag already held by the agent; matching cards return lightweight refs." },
-        ifNoneMatch: { type: "string", description: "Optional slice ETag for conditional fetch; matching slices return notModified metadata only." },
-        wireFormat: { type: "string", enum: ["standard", "compact", "agent", "packed"], description: "Response wire format. Use packed for columnar token-efficient cards." },
-        wireFormatVersion: { type: "integer", minimum: 1, maximum: 3, description: "Wire format version." },
+        cardDetail: { type: "string", description: "ATLAS card detail level.", internalOnly: true },
+        knownCardEtags: { type: "object", additionalProperties: { type: "string" }, description: "Optional map of symbolId to card ETag already held by the runtime; matching cards return lightweight refs.", internalOnly: true },
+        ifNoneMatch: { type: "string", description: "Optional slice ETag for conditional fetch; matching slices return notModified metadata only.", internalOnly: true },
+        wireFormat: { type: "string", enum: ["standard", "compact", "agent", "packed"], description: "Response wire format selected by the runtime.", internalOnly: true },
+        wireFormatVersion: { type: "integer", minimum: 1, maximum: 3, description: "Wire format version.", internalOnly: true },
+        minConfidence: { type: "number", description: "Minimum slice expansion confidence.", internalOnly: true },
+        minCallConfidence: { type: "number", description: "Minimum call-edge confidence.", internalOnly: true },
+        includeResolutionMetadata: { type: "boolean", description: "Include internal resolution metadata.", internalOnly: true },
         maxCards: { type: "integer", description: "Budget: maximum cards." },
         maxTokens: { type: "integer", description: "Budget: maximum estimated tokens." },
       },
@@ -566,8 +591,8 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "symbol.overview": {
     type: "function",
-    name: "atlas_symbol_usages",
-    description: "Usage tracing. Return compact call/reference sites for an ATLAS symbolId without hydrating full caller cards.",
+    name: "atlas_symbol_overview",
+    description: "Usage tracing for one exact symbol. Returns compact call and reference sites with relationship kinds, confidence, and locations.",
     parameters: {
       type: "object",
       properties: {
@@ -584,7 +609,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.overview": {
     type: "function",
     name: "atlas_tree_overview",
-    description: "Top-level code tree orientation. Returns the root page of the ATLAS containment tree plus the compressed-tree labeled area map. Use tree.branch to drill into a specific branch.",
+    description: "Top-level code tree orientation. Returns the root page of the ATLAS containment tree plus the compressed-tree labeled area map.",
     parameters: {
       type: "object",
       properties: {
@@ -607,8 +632,8 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "tree.branch": {
     type: "function",
-    name: "atlas_tree_walk",
-    description: "Expandable tree discovery in the depth direction. Focus a path, nodeId, symbolId, or cluster/process ref and page through its descendants with aggregate counts and compressed-tree area labels. Revisit only to follow a deeper branch or explicit page; this returns structure (paths, counts, labels), not code evidence.",
+    name: "atlas_tree_branch",
+    description: "Containment-tree exploration for a path, node, symbol, cluster, or process. Returns paged descendants with paths, aggregate counts, and compressed-tree area labels.",
     parameters: {
       type: "object",
       properties: {
@@ -621,9 +646,9 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         limit: { type: "integer", description: "Maximum nodes to return. Optional: when omitted, ATLAS chooses 100-250 from indexed repository size. Max 500." },
         offset: { type: "integer", description: "Page offset into the focused subtree." },
         includeAggregates: { type: "boolean", description: "Include aggregate counts/raw metrics on each node. Default true." },
-        includeTerms: { type: "boolean", description: "Include generated search terms on each node. Default false." },
-        includeRefs: { type: "boolean", description: "Include direct cluster/process refs on returned nodes. Default false." },
-        includeLatestRun: { type: "boolean", description: "Include latest tree-derived build run metadata. Default true." },
+        includeTerms: { type: "boolean", description: "Include generated search terms on each node. Default false.", internalOnly: true },
+        includeRefs: { type: "boolean", description: "Include direct cluster/process refs on returned nodes. Default false.", internalOnly: true },
+        includeLatestRun: { type: "boolean", description: "Include latest tree-derived build run metadata. Default true.", internalOnly: true },
       },
       required: [],
       additionalProperties: false,
@@ -632,7 +657,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Returns the ten highest-ranked candidate files inline. When additional candidates exist, nextCandidateFiles is an opaque atlas.fetch_ref value for the already-stored next ranked page. Traverse pages sequentially while likely candidates remain; this does not rerun tree.scope. Call tree.scope again only for a materially different query or scope.",
+    description: "Ranked task-scope discovery. Returns the ten highest-ranked candidate files inline and stores additional ranked pages in nextCandidateFiles.",
     parameters: {
       type: "object",
       properties: {
@@ -671,19 +696,25 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "tree.expand": {
     type: "function",
-    name: "atlas_tree_grow",
-    description: "Expandable tree discovery in the breadth direction. Grow validated file/area seeds into surrounding branches, sibling files, tests, and entrypoints, with deterministic scope/risk metrics. Revisit only with a genuinely enlarged or different frontier. Use symbol.card/symbol.overview for symbol identity; use this for lateral file/area breadth.",
+    name: "atlas_tree_expand",
+    description: "Breadth expansion around validated file, symbol, node, cluster, or process seeds. Returns surrounding branches, sibling files, tests, entrypoints, and deterministic scope and risk metrics.",
     parameters: {
       type: "object",
       properties: {
-        paths: { type: "array", items: { type: "string" }, description: "Repo-relative file or directory seeds." },
-        editedFiles: { type: "array", items: { type: "string" }, description: "Known or proposed repo-relative file scope seeds." },
-        path: { type: "string", description: "Single repo-relative file or directory seed." },
-        symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs to use as exact seeds." },
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Single opaque ATLAS symbol ID seed." },
-        nodeIds: { type: "array", items: { type: "string" }, description: "Exact tree node ids from tree.overview." },
+        paths: { type: ["string", "array"], items: { type: "string" }, description: "One repo-relative file or directory seed or an array of seeds." },
+        editedFiles: { type: "array", items: { type: "string" }, description: "Compatibility alias for path seeds.", internalOnly: true },
+        path: { type: "string", description: "Compatibility alias for one paths entry.", internalOnly: true },
+        symbolIds: { type: ["string", "array"], pattern: ATLAS_SYMBOL_ID_PATTERN, items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "One opaque ATLAS symbol ID or an array of IDs to use as exact seeds." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Compatibility alias for one symbolIds entry.", internalOnly: true },
+        nodeIds: { type: ["string", "array"], items: { type: "string" }, description: "One exact indexed tree node ID or an array of node IDs." },
         refs: {
-          type: "array",
+          type: ["object", "array"],
+          properties: {
+            refType: { type: "string", enum: ["cluster", "process"] },
+            refId: { type: "string" },
+          },
+          required: ["refType", "refId"],
+          additionalProperties: false,
           items: {
             type: "object",
             properties: {
@@ -693,14 +724,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
             required: ["refType", "refId"],
             additionalProperties: false,
           },
-          description: "Cluster/process refs as weak seeds; broad refs are rejected and reported.",
+          description: "One cluster or process ref or an array of refs to use as weak seeds; broad matches are reported separately.",
         },
-        refType: { type: "string", enum: ["cluster", "process"], description: "Single ref type." },
-        refId: { type: "string", description: "Single cluster/process ref id." },
+        refType: { type: "string", enum: ["cluster", "process"], description: "Compatibility ref selector.", internalOnly: true },
+        refId: { type: "string", description: "Compatibility ref selector.", internalOnly: true },
         maxFiles: { type: "integer", description: "Maximum candidate files returned. Default 40, max 500." },
-        maxBranches: { type: "integer", description: "Maximum accepted containment branches. Default 12." },
-        branchFileCap: { type: "integer", description: "Maximum files under one accepted branch before it is treated as broad. Default 40." },
-        refMatchLimit: { type: "integer", description: "Maximum ref matches to score before treating the ref as broad. Default 50." },
+        maxBranches: { type: "integer", description: "Maximum accepted containment branches. Default 12.", internalOnly: true },
+        branchFileCap: { type: "integer", description: "Maximum files under one accepted branch before it is treated as broad. Default 40.", internalOnly: true },
+        refMatchLimit: { type: "integer", description: "Maximum ref matches to score before treating the ref as broad. Default 50.", internalOnly: true },
       },
       required: [],
       additionalProperties: false,
@@ -727,15 +758,17 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "code.skeleton": {
     type: "function",
-    name: "atlas_code_get_skeleton",
-    description: "Code outline for one file or symbol: signatures and containment without full bodies. A successful prefetched code.survey already supplies this structural orientation for every surveyed file; use code.window for an exact unresolved fact. Set surveyGap only when you can name structure the delivered survey omitted or bounded. Do not repeat the same selection.",
+    name: "atlas_code_skeleton",
+    description: "Structural code outline for one file or symbol. Returns signatures, declarations, and containment relationships with compact body-free orientation.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Optional opaque ATLAS symbol ID returned by ATLAS. Do not pass a file path here; use file for path-based skeletons." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID selecting one indexed symbol. The file field selects a path." },
         file: { type: "string", description: "Optional relative file path to inspect." },
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
-        surveyGap: { type: "string", minLength: 3, description: "Exact structural fact missing from the delivered survey. Supplying it bypasses the survey-aware redirect; do not use it merely to request a second outline." },
+        ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
+        sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
+        surveyGap: { type: "string", minLength: 3, description: "Named structural fact absent from the delivered orientation. Supplying it requests an outline focused on that gap." },
       },
       required: [],
       additionalProperties: false,
@@ -744,14 +777,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the already-stored next ten. Search/fetch the stored pages with atlas.fetch_ref, then follow each returned next cursor until none remains. Search stored pages for the task's exact named concepts before choosing among parallel versions or implementations; rank is candidate order, not a version decision. This traverses the completed survey and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope.",
+    description: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the next stored page. Rank expresses candidate order.",
     parameters: {
       type: "object",
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path — one string or an array of them, e.g. \"src/billing\" or [\"lib/a.js\", \"lib/b.js\"]. Resolves up to 64 indexed files." },
         symbols: { type: "array", items: { type: "string" }, description: "Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16)." },
         maxFiles: { type: "integer", description: "Optional. Cap on files surveyed. Default 64." },
-        sessionId: { type: "string", description: "Optional session namespace shared with related code retrieval calls." },
+        sessionId: { type: "string", description: "Optional session namespace shared with related code retrieval calls.", internalOnly: true },
       },
       required: ["paths"],
       additionalProperties: false,
@@ -760,7 +793,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.structure": {
     type: "function",
     name: "atlas_code_structure",
-    description: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed.",
+    description: "Exact indexed inventory for files, symbols, imports, and fan-in and fan-out edges. Returns structural relationships and optional symbol summaries while leaving source bodies out of the response.",
     parameters: {
       type: "object",
       properties: {
@@ -790,15 +823,17 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "code.lens": {
     type: "function",
-    name: "atlas_code_get_hot_path",
-    description: "Focused code excerpts for named identifiers, usages, or branches. Pass only the identifiers the current question needs. A symbol already surfaced by code.lens will not be surfaced by an identical code.lens call; a duplicate-suppressed response means covered, not not-found. Do not call code.lens more than once for the same symbol or substantially overlapping file/identifier selection; follow tailMatchesRef when present. Use code.window directly for a distinct unresolved exact-code fact.",
+    name: "atlas_code_lens",
+    description: "Focused code excerpts for named identifiers, usages, or branches. Pass only the identifiers the current question needs.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by ATLAS. Do not construct this from a file path, symbol name, or file:symbol pair." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Identifiers to match. Prefer a JSON array; legacy scalar strings are normalized." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "One identifier string or an array of identifiers to match." },
         contextLines: { type: "integer", description: "Context lines around each match." },
+        ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
+        sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },
       required: ["identifiersToFind"],
       anyOf: [
@@ -810,43 +845,23 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "code.window": {
     type: "function",
-    name: "atlas_code_need_window",
-    description: "Bounded exact code for a symbol or anchored file region. The optional items form retrieves two to four known selections under one shared maxTokens cap. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections.",
+    name: "atlas_code_window",
+    description: "Bounded exact code for one symbol or anchored file region, sized to establish a named code fact.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID returned by an ATLAS tool." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path when no symbolId is available." },
         reason: { type: "string", description: "Exact code fact this selection should establish." },
         identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Required file-mode anchors for bounded slices." },
-        expectedLines: { type: "integer", description: "One approximate total line count for file-mode slices; never a range." },
+        expectedLines: { type: "integer", description: "Approximate total line count for a file-mode slice." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Symbol, enclosing block, or containing-file selection." },
-        maxTokens: { type: "integer", description: "Inline token cap; shared across items in multi-selection mode." },
-        items: {
-          type: "array",
-          minItems: 2,
-          maxItems: 4,
-          description: "Two to four known exact selections.",
-          items: {
-            type: "object",
-            properties: {
-              symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN },
-              file: { type: "string" },
-              reason: { type: "string", minLength: 3 },
-              identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
-            },
-            required: ["reason"],
-            anyOf: [
-              { required: ["symbolId"] },
-              { required: ["file", "identifiersToFind"] },
-            ],
-            additionalProperties: false,
-          },
-        },
+        maxTokens: { type: "integer", description: "Inline token cap for this exact selection." },
+        sliceContext: { type: "object", description: "Task-slice accounting context supplied by orchestration.", internalOnly: true },
+        sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },
       required: [],
       anyOf: [
-        { required: ["items"] },
         { required: ["reason", "symbolId"] },
         { required: ["reason", "file", "identifiersToFind"] },
       ],
@@ -929,7 +944,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "review.delta": {
     type: "function",
-    name: "atlas_delta_get",
+    name: "atlas_review_delta",
     description: "Review evidence. Fetch an ATLAS semantic diff and blast-radius delta between two ledger versions.",
     parameters: {
       type: "object",
@@ -945,7 +960,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "review.analyze": {
     type: "function",
-    name: "atlas_pr_risk_analyze",
+    name: "atlas_review_analyze",
     description: "Review evidence. Run ATLAS PR risk analysis with scored findings, blast-radius evidence, and test recommendations.",
     parameters: {
       type: "object",
@@ -960,7 +975,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   },
   "review.risk": {
     type: "function",
-    name: "atlas_pr_risk",
+    name: "atlas_review_risk",
     description: "Assessor-first review. Fetch ATLAS semantic delta, blast radius, risk findings, and test recommendations in one combined call.",
     parameters: {
       type: "object",
@@ -978,13 +993,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.store": {
     type: "function",
     name: "atlas_memory_store",
-    description: "Memory. Store one rare, verified repo lesson linked to exact symbols/files. Skip the write when an anchor already has sufficient memory or the finding is obvious from code. Title max 120 chars; content max 1200 chars.",
+    description: "Durable repository memory. Stores one verified, non-obvious lesson linked to exact symbols or files. Titles accept up to 120 characters and content up to 1200 characters.",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "Short memory title, max 120 chars." },
         content: { type: "string", description: "Memory content, max 1200 chars. Capture why the decision/context matters." },
-        domains: { type: "array", items: { type: "string", enum: ["ux", "schema", "security", "performance"] }, description: "Optional domain tags for scoped retrieval. Omit unless the memory's PRIMARY concern is one of these (omitting files it under the general catch-all)." },
+        domains: { type: "array", items: { type: "string", enum: ["ux", "schema", "security", "performance"] }, description: "Domain tags for scoped retrieval. An absent value files the memory under the general category." },
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Optional linked ATLAS symbol IDs." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Optional linked repo-relative files." },
         memoryId: { type: "string", description: "Optional existing memory ID to update." },
@@ -996,12 +1011,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.feedback": {
     type: "function",
     name: "atlas_memory_feedback",
-    description: "Memory. Optionally issue positive or actionable negative feedback for an existing memory after you actually used or checked it. Do not call merely because a memory exists or was unhelpful. If feedback is rejected or fails, do not retry, invent another ID, or call another memory tool to report the error; continue the primary task.",
+    description: "Evidence-based feedback for one existing memory. Records that the memory was used, stale, wrong, or duplicated, with an optional concise evidence note.",
     parameters: {
       type: "object",
       properties: {
-        memoryId: { type: "string", description: "Exact memory ID returned by memory.get. Never invent or substitute a placeholder ID." },
-        verdict: { type: "string", enum: ["used", "stale", "wrong", "duplicate"], description: "Role-relative verdict. Use 'used' only when the memory materially informed the work; use negative verdicts only with evidence. Do not call feedback for merely unhelpful memories." },
+        memoryId: { type: "string", description: "Exact existing memory ID." },
+        verdict: { type: "string", enum: ["used", "stale", "wrong", "duplicate"], description: "Evidence-backed verdict. Used means the memory materially informed the work; stale, wrong, and duplicate identify a verified defect." },
         detail: { type: "string", description: "Optional short evidence note (one sentence)." },
       },
       required: ["memoryId", "verdict"],
@@ -1011,7 +1026,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.surface": {
     type: "function",
     name: "atlas_memory_surface",
-    description: "Memory. Probe exact symbols/files and return only which anchors have attached memories. No memory IDs, no bodies, no fuzzy search.",
+    description: "Memory-presence probe for exact symbol and file anchors. Returns which anchors have attached memories while keeping memory identifiers and bodies undisclosed.",
     parameters: {
       type: "object",
       properties: {
@@ -1025,7 +1040,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.get": {
     type: "function",
     name: "atlas_memory_get",
-    description: "Memory. Fetch full memory bodies grouped by exact symbol/file anchors, normally only for anchors returned by memory.surface or shown in handoff prefetch.",
+    description: "Full memory retrieval for exact symbol and file anchors. Returns memory bodies grouped by their requested anchors.",
     parameters: {
       type: "object",
       properties: {
@@ -1161,7 +1176,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "file.read": {
     type: "function",
     name: "atlas_file_read",
-    description: "Targeted non-indexed file read. Read markdown, configs, templates, JSON/YAML, or data files through ATLAS with line range, search, or JSON path targeting; use card/skeleton/hot-path for indexed source code first.",
+    description: "Targeted file retrieval for markdown, configuration, templates, JSON, YAML, and data files. Supports line ranges, text search, and JSON-path selection.",
     parameters: {
       type: "object",
       properties: {

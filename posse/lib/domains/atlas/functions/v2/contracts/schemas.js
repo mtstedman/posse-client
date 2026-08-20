@@ -186,6 +186,9 @@
  * @property {string | null} parent_branch    Lineage for delta replay.
  * @property {number | null} parent_seq       Parent seq at fork time.
  * @property {number} ledger_seq              Highest ledger seq applied to this view from `branch`'s partition.
+ * @property {number} layer_revision          Durable ledger layer epoch consumed by this materialization.
+ * @property {string} view_fingerprint        Schema/build-mode fingerprint for materialization compatibility.
+ * @property {string | null} git_oid          Exact source Git OID after joint-generation publication; null while unproven.
  * @property {string} built_at                ISO-8601 of the build that produced the current state.
  * @property {string[] | null} warmed_for_files  Hint paths used for prefetch warming, if any.
  * @property {number | null} prefetched_symbols Count of symbols visited during hint-driven neighborhood prefetch. Null when no hint was supplied at build time.

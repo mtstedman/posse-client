@@ -45,8 +45,12 @@ export function renderExecutionContractBlock(contract = {}, {
 } = {}) {
   const toolContract = new ToolContract(contract);
   return remoteComposed
-    ? toolContract.renderProviderBatchingGuidanceBlock()
+    ? toolContract.renderProviderGuidanceBlock()
     : toolContract.renderBlock();
+}
+
+export function renderProviderGuidanceBlock(contract = {}) {
+  return new ToolContract(contract).renderProviderGuidanceBlock();
 }
 
 export function renderProviderBatchingGuidanceBlock(contract = {}) {

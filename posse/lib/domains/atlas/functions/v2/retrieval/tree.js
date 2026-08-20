@@ -229,13 +229,13 @@ async function runTreeScope({ view, versionId, params = {}, action, config = {},
   const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("tree-scope", {
     tree: readTreeBuildResult(db, { for: "scope" }),
     taskText: params.taskText,
-    paths: params.paths,
+    paths: normalizeScopeList(params.paths),
     widenedPaths,
     editedFiles: params.editedFiles,
     path: params.path,
-    symbolIds: params.symbolIds,
+    symbolIds: normalizeScopeList(params.symbolIds),
     symbolId: params.symbolId,
-    nodeIds: params.nodeIds,
+    nodeIds: normalizeScopeList(params.nodeIds),
     refs: normalizeScopeRefs(params),
     maxFiles: params.maxFiles,
     maxBranches: params.maxBranches,
@@ -508,8 +508,11 @@ function missingTables(db, tableNames) {
 
 function normalizeScopeRefs(params = {}) {
   const refs = [];
-  if (Array.isArray(params.refs)) {
-    for (const ref of params.refs) {
+  const refValues = params.refs == null
+    ? []
+    : (Array.isArray(params.refs) ? params.refs : [params.refs]);
+  if (refValues.length > 0) {
+    for (const ref of refValues) {
       const refType = String(ref?.refType || ref?.ref_type || "").trim();
       const refId = String(ref?.refId || ref?.ref_id || "").trim();
       if (refType && refId) refs.push({ refType, refId });
@@ -525,6 +528,11 @@ function normalizeScopeRefs(params = {}) {
     seen.add(key);
     return true;
   });
+}
+
+function normalizeScopeList(value) {
+  if (value == null || value === "") return undefined;
+  return Array.isArray(value) ? value : [value];
 }
 
 function emptyScopeSeedSummary() {

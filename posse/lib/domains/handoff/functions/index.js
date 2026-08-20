@@ -87,6 +87,7 @@ import {
   renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule,
   resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule,
 } from "./helpers/atlas-context.js";
+import { materializeRenderedLifecycleCoverage } from "./helpers/lifecycle-prefetch.js";
 import { classifyAtlasFailure } from "../../integrations/functions/atlas-embedded.js";
 import { DEFAULT_DEV_MODE, DEFAULT_FIX_DEV_MODE, normalizeDevMode, renderSelectedDevModeContract } from "../../../shared/policies/functions/dev-modes.js";
 import { runWithObservationContext, getObservationContext, recordObservation } from "../../observability/functions/observations.js";
@@ -1928,46 +1929,85 @@ function _applyAtlasShadowGuardrails(packet) {
   return guardrails;
 }
 
+const ASSESSMENT_INLINE_DIFF_MAX_BYTES = 50_000;
+
+function assessmentDiffRange(assessmentContext) {
+  const head = String(assessmentContext?.commit_hash || "").trim();
+  const base = String(assessmentContext?.commit_base_hash || "").trim();
+  if (!head) return "";
+  return base ? `${base}..${head}` : `${head}^!`;
+}
+
+function applyAssessmentInlineDiff(assessmentContext, rawDiff, { stat = "", failed = false } = {}) {
+  const diff = String(rawDiff || "").trim();
+  const bytes = Buffer.byteLength(diff, "utf8");
+  delete assessmentContext.scoped_git_diff;
+  assessmentContext.scoped_git_diff_bytes = bytes || null;
+  assessmentContext.scoped_git_diff_stat = String(stat || "").trim() || null;
+  if (failed) {
+    assessmentContext.scoped_git_diff_status = "prefetch_failed";
+  } else if (diff && bytes <= ASSESSMENT_INLINE_DIFF_MAX_BYTES) {
+    assessmentContext.scoped_git_diff = diff;
+    assessmentContext.scoped_git_diff_status = "complete";
+  } else if (diff || bytes > ASSESSMENT_INLINE_DIFF_MAX_BYTES) {
+    assessmentContext.scoped_git_diff_status = "over_inline_cap";
+  } else {
+    assessmentContext.scoped_git_diff_status = "empty";
+  }
+  return assessmentContext;
+}
+
+export function __testApplyAssessmentInlineDiff(assessmentContext, rawDiff, options = {}) {
+  return applyAssessmentInlineDiff(assessmentContext, rawDiff, options);
+}
+
+export function __testAssessmentDiffRange(assessmentContext) {
+  return assessmentDiffRange(assessmentContext);
+}
+
+function branchAssessmentDiffContext(assessmentContext, branchNetDiff) {
+  const knownBytes = Number(assessmentContext.branch_net_diff_bytes);
+  const overCap = assessmentContext.branch_net_diff_truncated === true
+    || (Number.isFinite(knownBytes) && knownBytes > ASSESSMENT_INLINE_DIFF_MAX_BYTES);
+  applyAssessmentInlineDiff(assessmentContext, overCap ? "" : branchNetDiff, {
+    stat: assessmentContext.branch_net_diff_stat || "",
+  });
+  if (overCap) {
+    assessmentContext.scoped_git_diff_bytes = knownBytes || null;
+    assessmentContext.scoped_git_diff_status = "over_inline_cap";
+  }
+  assessmentContext.scoped_diff_narrative = [
+    `BRANCH NET DIFF: zero-commit attempt found existing committed WI branch changes vs ${assessmentContext.branch_net_diff_target || "target"}.`,
+    Array.isArray(assessmentContext.branch_net_diff_files) && assessmentContext.branch_net_diff_files.length > 0
+      ? `Files: ${assessmentContext.branch_net_diff_files.join(", ")}`
+      : null,
+  ].filter(Boolean).join("\n");
+  return assessmentContext;
+}
+
 export function attachAssessmentDiffContext(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
   const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
-  if (branchNetDiff) {
-    assessmentContext.scoped_git_diff = branchNetDiff.length > 50000
-      ? `${branchNetDiff.slice(0, 50000)}\n...[diff truncated]`
-      : branchNetDiff;
-    assessmentContext.scoped_diff_narrative = [
-      `BRANCH NET DIFF: zero-commit attempt found existing committed WI branch changes vs ${assessmentContext.branch_net_diff_target || "target"}.`,
-      Array.isArray(assessmentContext.branch_net_diff_files) && assessmentContext.branch_net_diff_files.length > 0
-        ? `Files: ${assessmentContext.branch_net_diff_files.slice(0, 40).join(", ")}`
-        : null,
-    ].filter(Boolean).join("\n");
-    return assessmentContext;
+  if (branchNetDiff || assessmentContext.branch_net_diff_truncated === true) {
+    return branchAssessmentDiffContext(assessmentContext, branchNetDiff);
   }
-  const commitHash = String(assessmentContext.commit_hash || "").trim();
+  const diffRange = assessmentDiffRange(assessmentContext);
   const scopedPaths = [...new Set([
     ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
     ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
-  ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))].slice(0, 20);
-  if (!commitHash || scopedPaths.length === 0) return assessmentContext;
+  ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
+  if (!diffRange || scopedPaths.length === 0) return assessmentContext;
   try {
-    const diff = gitExec([
-      "diff",
-      "--unified=6",
-      `${commitHash}^!`,
-      "--",
-      ...scopedPaths,
-    ], cwd, {
+    const diffArgs = ["diff", "--unified=6", diffRange, "--", ...scopedPaths];
+    const statArgs = ["diff", "--stat", "--summary", diffRange, "--", ...scopedPaths];
+    const diff = gitExec(diffArgs, cwd, {
       timeoutMs: 15000,
-      maxBuffer: 1024 * 1024 * 2,
+      maxBuffer: 1024 * 1024 * 8,
     });
-    const trimmed = String(diff || "").trim();
-    if (trimmed) {
-      assessmentContext.scoped_git_diff = trimmed.length > 50000
-        ? `${trimmed.slice(0, 50000)}\n...[diff truncated]`
-        : trimmed;
-    }
+    const stat = gitExec(statArgs, cwd, { timeoutMs: 15000, maxBuffer: 1024 * 1024 * 2 });
+    applyAssessmentInlineDiff(assessmentContext, diff, { stat });
   } catch {
-    // best effort only
+    applyAssessmentInlineDiff(assessmentContext, "", { failed: true });
   }
   attachDiffNarrative(assessmentContext, cwd);
   return assessmentContext;
@@ -1976,43 +2016,29 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
 export async function attachAssessmentDiffContextAsync(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
   const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
-  if (branchNetDiff) {
-    assessmentContext.scoped_git_diff = branchNetDiff.length > 50000
-      ? `${branchNetDiff.slice(0, 50000)}\n...[diff truncated]`
-      : branchNetDiff;
-    assessmentContext.scoped_diff_narrative = [
-      `BRANCH NET DIFF: zero-commit attempt found existing committed WI branch changes vs ${assessmentContext.branch_net_diff_target || "target"}.`,
-      Array.isArray(assessmentContext.branch_net_diff_files) && assessmentContext.branch_net_diff_files.length > 0
-        ? `Files: ${assessmentContext.branch_net_diff_files.slice(0, 40).join(", ")}`
-        : null,
-    ].filter(Boolean).join("\n");
-    return assessmentContext;
+  if (branchNetDiff || assessmentContext.branch_net_diff_truncated === true) {
+    return branchAssessmentDiffContext(assessmentContext, branchNetDiff);
   }
-  const commitHash = String(assessmentContext.commit_hash || "").trim();
+  const diffRange = assessmentDiffRange(assessmentContext);
   const scopedPaths = [...new Set([
     ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
     ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
-  ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))].slice(0, 20);
-  if (!commitHash || scopedPaths.length === 0) return assessmentContext;
+  ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
+  if (!diffRange || scopedPaths.length === 0) return assessmentContext;
   try {
-    const stdout = await gitExecAsync([
-      "diff",
-      "--unified=6",
-      `${commitHash}^!`,
-      "--",
-      ...scopedPaths,
-    ], cwd, {
-      timeoutMs: 15000,
-      maxBuffer: 1024 * 1024 * 2,
-    });
-    const trimmed = String(stdout || "").trim();
-    if (trimmed) {
-      assessmentContext.scoped_git_diff = trimmed.length > 50000
-        ? `${trimmed.slice(0, 50000)}\n...[diff truncated]`
-        : trimmed;
-    }
+    const [stdout, stat] = await Promise.all([
+      gitExecAsync(["diff", "--unified=6", diffRange, "--", ...scopedPaths], cwd, {
+        timeoutMs: 15000,
+        maxBuffer: 1024 * 1024 * 8,
+      }),
+      gitExecAsync(["diff", "--stat", "--summary", diffRange, "--", ...scopedPaths], cwd, {
+        timeoutMs: 15000,
+        maxBuffer: 1024 * 1024 * 2,
+      }),
+    ]);
+    applyAssessmentInlineDiff(assessmentContext, stdout, { stat });
   } catch {
-    // best effort only
+    applyAssessmentInlineDiff(assessmentContext, "", { failed: true });
   }
   await attachDiffNarrativeAsync(assessmentContext, cwd);
   return assessmentContext;
@@ -2083,6 +2109,11 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
     const remote = await timeHandoffStep(packet, "prompt.remote_compile", () => composer.composePrompt(packet, instructions, remoteOpts), {
       timeoutMs: remoteCompileHandoffTimeoutMs(),
     });
+    try {
+      materializeRenderedLifecycleCoverage(packet, { deliveredPrompt: remote.prompt });
+    } catch {
+      // Coverage accounting must never make prompt composition fail.
+    }
     packet.prompt = remote.userPrompt || remote.prompt;
     packet.remote_full_prompt = remote.prompt || null;
     packet.remote_prompt_composed = true;

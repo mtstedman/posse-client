@@ -23,6 +23,7 @@ export function __testBuildCloseStats({
   totalInputTokens,
   totalOutputTokens,
   totalCachedInputTokens = null,
+  reasoningOutputTokens = null,
   longContextInputTokens = null,
   durationMs,
   finalOutput,
@@ -49,6 +50,7 @@ export function __testBuildCloseStats({
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
     cachedInputTokens: totalCachedInputTokens,
+    reasoningOutputTokens,
     longContextInputTokens,
     durationMs,
     outputChars: (finalOutput || stdout.trim()).length,
@@ -468,7 +470,57 @@ export function extractUsageFromEvent(msg) {
   if (!msg || typeof msg !== "object") {
     return { inputTokens: null, outputTokens: null, inputKind: null, outputKind: null };
   }
-  const candidates = [msg.usage, msg.token_usage, msg.tokens, msg.metrics];
+  const body = _extractCodexEventBody(msg);
+  // Current rollout/token_count events can contain both the last provider
+  // request and the cumulative session total. The cumulative snapshot owns
+  // aggregate progress; the last-request fields must not hide it or be added
+  // repeatedly as if the total were a delta.
+  const tokenCountTotal = body?.info?.total_token_usage;
+  if (tokenCountTotal && typeof tokenCountTotal === "object") {
+    const inputTokens = pickUsageValue(tokenCountTotal, ["input_tokens", "inputTokens"]);
+    const outputTokens = pickUsageValue(tokenCountTotal, ["output_tokens", "outputTokens"]);
+    const cachedInputTokens = pickUsageValue(tokenCountTotal, ["cached_input_tokens", "cachedInputTokens"]);
+    if (inputTokens != null || outputTokens != null || cachedInputTokens != null) {
+      return {
+        inputTokens,
+        outputTokens,
+        inputKind: inputTokens == null ? null : "cumulative",
+        outputKind: outputTokens == null ? null : "cumulative",
+        ...(cachedInputTokens == null ? {} : {
+          cachedInputTokens,
+          cachedInputKind: "cumulative",
+        }),
+      };
+    }
+  }
+  const tokenCountLast = body?.info?.last_token_usage;
+  if (tokenCountLast && typeof tokenCountLast === "object") {
+    const inputTokens = pickUsageValue(tokenCountLast, ["input_tokens", "inputTokens"]);
+    const outputTokens = pickUsageValue(tokenCountLast, ["output_tokens", "outputTokens"]);
+    const cachedInputTokens = pickUsageValue(tokenCountLast, ["cached_input_tokens", "cachedInputTokens"]);
+    if (inputTokens != null || outputTokens != null || cachedInputTokens != null) {
+      return {
+        inputTokens,
+        outputTokens,
+        inputKind: inputTokens == null ? null : "delta",
+        outputKind: outputTokens == null ? null : "delta",
+        ...(cachedInputTokens == null ? {} : {
+          cachedInputTokens,
+          cachedInputKind: "delta",
+        }),
+      };
+    }
+  }
+  const candidates = [
+    msg.usage,
+    msg.token_usage,
+    msg.tokens,
+    msg.metrics,
+    body?.usage,
+    body?.token_usage,
+    body?.tokens,
+    body?.metrics,
+  ];
   for (const c of candidates) {
     if (!c || typeof c !== "object") continue;
     const input = pickUsageMetric(

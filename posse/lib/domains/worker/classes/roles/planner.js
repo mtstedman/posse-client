@@ -101,18 +101,19 @@ const DEFAULT_DEPS = {
 };
 
 export async function resolvePlannerReadRoot(projectDir, workItemId, jobWorktreePath = null, {
+  allowWorktreeLookup = false,
   resolveWorktreePath = worktreePathAsync,
 } = {}) {
   const projectRoot = path.resolve(projectDir);
   const candidates = [];
   if (jobWorktreePath) candidates.push(path.resolve(jobWorktreePath));
-  if (workItemId != null) {
+  if (allowWorktreeLookup && workItemId != null) {
     const numericWorkItemId = Number(workItemId);
     if (Number.isInteger(numericWorkItemId) && numericWorkItemId > 0) {
-      // Keep planning usable when the native Git heartbeat is temporarily
-      // unavailable. Posse's canonical WI worktree location is deterministic,
-      // and checking it before the native lookup prevents a silent fallback to
-      // main that would misclassify files created earlier in the same WI.
+      // An established semantic WI branch may use the deterministic location
+      // when the native heartbeat is temporarily unavailable. A branchless
+      // waiting-lane directory is admitted only through the explicit verified
+      // jobWorktreePath above; existence alone is never readiness proof.
       candidates.push(path.join(projectRoot, ".posse-worktrees", `wi-${numericWorkItemId}`));
     }
     try {
@@ -244,15 +245,18 @@ export class PlannerRole extends BaseRole {
 
     const workItem = getWorkItem(job.work_item_id);
     const payload = worker.parsePayload(job);
+    const waitingLanePlannerRead = job._waitingLanePlannerRead || null;
     const plannerReadRoot = await resolveReadRoot(
       worker.projectDir,
       job.work_item_id,
-      job._worktreePath,
+      waitingLanePlannerRead?.projectCwd || job._worktreePath,
+      { allowWorktreeLookup: !!workItem?.branch_name },
     );
     const atlasReadMount = await ensureReadRootMounted({
       projectDir: worker.projectDir,
       readRoot: plannerReadRoot,
       workItemId: job.work_item_id,
+      waitingLanePlannerRead,
       signal: ctx.abortSignal || null,
     });
     if (atlasReadMount.config) job._atlasConfig = atlasReadMount.config;

@@ -2261,7 +2261,7 @@ export class AdminTUI {
     lines.push(`    Tokens:    ${C.bold}${fmtTokens(tok)}${C.reset}  ${C.dim}(${fmtTokens(call.input_tokens || 0)} in${call.cached_input_tokens > 0 ? `, ${fmtTokens(call.cached_input_tokens || 0)} cached` : ""} + ${fmtTokens(call.output_tokens || 0)} out)${C.reset}`);
     lines.push(`    Chars:     in=${C.bold}${call.prompt_chars || 0}${C.reset}  out=${C.bold}${call.output_chars || 0}${C.reset}`);
     lines.push(`    Duration:  ${C.bold}${fmtDuration(call.duration_ms || 0)}${C.reset}`);
-    lines.push(`    Cost:      ${C.bold}${fmtUsd(call.cost_estimate_usd || 0)}${C.reset}`);
+    lines.push(`    Cost:      ${C.bold}${call.cost_estimate_usd == null ? "unavailable" : fmtUsd(call.cost_estimate_usd)}${C.reset}${call.billing_precision ? `  ${C.dim}(${call.billing_precision})${C.reset}` : ""}`);
     if (call.atlas_method) lines.push(`    ATLAS:       ${C.bold}${call.atlas_method}${C.reset}${call.atlas_prefetch_status ? ` (${call.atlas_prefetch_status})` : ""}`);
     if (call.error_text) {
       lines.push(`    ${C.red}Error:${C.reset}  ${String(call.error_text).slice(0, inner - 14)}`);

@@ -30,6 +30,10 @@ import {
   hashRefModelVisibility,
   hashRefModelVisibleScope,
 } from "./fetch-ref-policy.js";
+import {
+  consumeSourceReaccessAuthorization,
+  sourceSelectorFingerprint,
+} from "../../../domains/research/classes/SourceCoverageOwner.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -789,74 +793,6 @@ export function compactCodeSurveyResult(toolName, result, {
 // the tail lines behind one fetch_ref. Threshold from atlas_result_ref_paging_min_chars.
 const RESULT_REF_PAGING_DEFAULT_MIN_CHARS = 12000;
 const LENS_INLINE_MATCHES = 8;
-const BATCH_WINDOW_INLINE_CONTENT_CHARS = 4000;
-
-function boundedBatchWindowContent(content) {
-  if (content.length <= BATCH_WINDOW_INLINE_CONTENT_CHARS) {
-    return { content, truncated: false };
-  }
-  const bounded = content.slice(0, BATCH_WINDOW_INLINE_CONTENT_CHARS);
-  const finalLineBreak = bounded.lastIndexOf("\n");
-  return {
-    content: finalLineBreak > 0 ? bounded.slice(0, finalLineBreak) : bounded,
-    truncated: true,
-  };
-}
-
-function compactBatchCodeWindowItem(data = {}) {
-  const compact = {};
-  for (const key of [
-    "repo_rel_path",
-    "symbolId",
-    "startLine",
-    "endLine",
-    "totalLines",
-    "estimatedTokens",
-    "truncated",
-    "selectionBounded",
-    "outputTruncated",
-    "identifiersFound",
-    "identifiersReturned",
-    "identifiersMissing",
-    "identifiersOmitted",
-    "returnedFunctionAnchors",
-    "returnedFunctionAnchorsOmitted",
-    "continuationRef",
-    "continuationWindows",
-    "continuationRanges",
-  ]) {
-    if (data[key] != null) compact[key] = data[key];
-  }
-  if (typeof data.content === "string") {
-    const preview = boundedBatchWindowContent(data.content);
-    compact.content = preview.content;
-    if (preview.truncated) {
-      compact.inlineContentTruncated = true;
-      compact.fullContentEndLine = data.endLine;
-      const startLine = Number(data.startLine);
-      if (Number.isFinite(startLine) && preview.content.length > 0) {
-        compact.endLine = startLine + preview.content.split("\n").length - 1;
-      }
-    }
-  }
-  const additionalWindows = Array.isArray(data.additionalWindows)
-    ? data.additionalWindows
-    : [];
-  if (additionalWindows.length > 0) {
-    compact.inlineAdditionalWindowsOmitted = additionalWindows.length;
-    compact.additionalWindowRanges = additionalWindows.map((window) => ({
-      startLine: Number(window?.startLine) || null,
-      endLine: Number(window?.endLine) || null,
-      ...(Array.isArray(window?.identifiers) && window.identifiers.length > 0
-        ? { identifiers: window.identifiers.map(String) }
-        : {}),
-    }));
-  }
-  if (compact.inlineContentTruncated || additionalWindows.length > 0) {
-    compact.fetchEvidenceRefForFullContent = true;
-  }
-  return compact;
-}
 
 function resultRefPagingEnabled() {
   try {
@@ -925,78 +861,6 @@ export function compactCodeWindowLensResult(toolName, result, {
     envelope = JSON.parse(result);
   } catch {
     return { result, compacted: false };
-  }
-  const batchData = envelope?.data && typeof envelope.data === "object"
-    ? envelope.data
-    : envelope;
-  if (tool === "code.window" && batchData?.batch === true && Array.isArray(batchData.items)) {
-    const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
-    let compacted = false;
-    for (const item of batchData.items) {
-      if (item?.ok !== true || !item.data || typeof item.data !== "object") continue;
-      const itemArgs = Array.isArray(args?.items) ? args.items[item.index] || {} : {};
-      const child = compactCodeWindowLensResult("code.window", JSON.stringify(item.data), {
-        args: itemArgs,
-        context,
-        ownerScope,
-        enabled,
-        minChars,
-      });
-      try {
-        item.data = JSON.parse(child.result);
-        compacted ||= child.compacted;
-      } catch {
-        // The child began as JSON; retain the original structured data if a
-        // defensive transform ever returns a non-JSON transport string.
-      }
-      if (!hasHashRefScope(hashContext)) continue;
-      const payloadText = JSON.stringify(item.data, null, 1);
-      let surfaced;
-      try {
-        surfaced = surfaceHashRefForContext(hashContext, {
-          entryKind: "materialized",
-          payloadText,
-          descriptor: {
-            kind: "tool_result",
-            tool: "code.window",
-            args: itemArgs,
-            batchItem: Number(item.index),
-            source: "tool:code.window",
-          },
-          objectType: "atlas.code.window.batch_item",
-          source: "tool:code.window",
-          note: `code.window batch item ${Number(item.index) + 1}: ${item.data.repo_rel_path || item.target?.file || item.target?.symbolId || "selection"}`,
-          sizeChars: payloadText.length,
-          recomputable: true,
-          metadata: {
-            surfaced_by: "code_window_batch",
-            fetch_class: "citation",
-            // The response carries a flattened preview, not this complete
-            // stored payload. Keep the full-item ref fetchable for any
-            // explicitly reported omitted content or secondary windows.
-            ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
-            tool: "code.window",
-            batch_item: Number(item.index),
-            repo_rel_path: item.data.repo_rel_path || null,
-          },
-        }, scope);
-      } catch (err) {
-        recordHashSurfaceFailure(hashContext, tool, payloadText.length, err?.message || err);
-      }
-      if (surfaced?.ok && surfaced?.entry?.ref) {
-        item.evidenceRef = {
-          ref: surfaced.entry.ref,
-          objectType: surfaced.entry.object_type,
-          sizeChars: payloadText.length,
-        };
-        Object.assign(item, compactBatchCodeWindowItem(item.data));
-        delete item.data;
-        compacted = true;
-      }
-    }
-    return compacted
-      ? { result: JSON.stringify(envelope, null, 2), compacted: true }
-      : { result, compacted: false };
   }
   // Like code.survey above: the MCP owner stamps the BARE payload (top-level
   // matches[]/content), dispatch envelopes nest it under .data. Accept both —
@@ -1147,11 +1011,32 @@ export function compactCodeWindowLensResult(toolName, result, {
       ...(displayTail ? [displayTail] : []),
     ]);
     if (continuation.length > 0 && hasHashRefScope(hashContext)) {
-      const continuationPayload = JSON.stringify({
+      const continuationEnvelope = {
         tool: "code.window",
         repo_rel_path: data.repo_rel_path,
         requestedWindows: continuation,
-      }, null, 1);
+      };
+      // Compact encoding makes every complete window's payload span exact and
+      // stable. fetch_ref can therefore promote only fully delivered windows.
+      const continuationPayload = JSON.stringify(continuationEnvelope);
+      let continuationSearchOffset = 0;
+      const continuationSourceWindows = continuation.map((entry) => {
+        const encoded = JSON.stringify(entry);
+        const payloadStart = continuationPayload.indexOf(encoded, continuationSearchOffset);
+        const payloadEnd = payloadStart >= 0 ? payloadStart + encoded.length : -1;
+        if (payloadEnd >= 0) continuationSearchOffset = payloadEnd;
+        return {
+          repository_identity: data.repositoryIdentity || null,
+          source_version: data.sourceVersion || null,
+          repo_rel_path: data.repo_rel_path || null,
+          start_line: Number(entry.startLine) || null,
+          end_line: Number(entry.endLine) || null,
+          payload_start: payloadStart,
+          payload_end: payloadEnd,
+          content_sha256: crypto.createHash("sha256").update(String(entry.content || "").replace(/\r\n/g, "\n")).digest("hex"),
+          selector_fingerprint: sourceSelectorFingerprint(args),
+        };
+      }).filter((entry) => entry.payload_start >= 0 && entry.payload_end > entry.payload_start);
       let surfaced;
       try {
         surfaced = surfaceHashRefForContext(hashContext, {
@@ -1169,6 +1054,7 @@ export function compactCodeWindowLensResult(toolName, result, {
             ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
             tool: "code.window",
             windows: continuation.length,
+            source_windows: continuationSourceWindows,
           },
         }, scope);
       } catch (err) {
@@ -1178,6 +1064,23 @@ export function compactCodeWindowLensResult(toolName, result, {
         data.continuationRef = surfaced.entry.ref;
         data.continuationWindows = continuation.length;
         data.continuationRanges = continuation.map((entry) => `${entry.startLine}-${entry.endLine}`);
+        for (const entry of hashContext.attempt_id != null ? continuationSourceWindows : []) {
+          recordObservation({
+            work_item_id: hashContext.work_item_id ?? null,
+            job_id: hashContext.job_id ?? null,
+            attempt_id: hashContext.attempt_id ?? null,
+            observation_type: "source.coverage",
+            summary: `available_unseen source coverage ${entry.repo_rel_path}:${entry.start_line}-${entry.end_line}`,
+            detail: {
+              ...entry,
+              evidence_ref: surfaced.entry.ref,
+              delivery_state: "available_unseen",
+              origin: "continuation",
+              stored_chars: Math.max(0, entry.payload_end - entry.payload_start),
+              returned_chars: 0,
+            },
+          });
+        }
       } else {
         // Materialization failure must not silently discard selected evidence.
         // Restore the display tail to the primary content and expose native
@@ -1239,6 +1142,10 @@ export function compactCodeWindowLensResult(toolName, result, {
     } else if (carriedNativeContinuation) {
       compacted = true;
     }
+    // Source-version identity is durable coverage metadata, not model-facing
+    // evidence. Keep the response focused after continuation materialization.
+    delete data.sourceVersion;
+    delete data.repositoryIdentity;
   }
 
   if (!pagingEnabled || result.length <= min || !hasHashRefScope(hashContext)) {
@@ -2010,6 +1917,36 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null, p
     summary: message,
     detail,
   });
+  const sourceWindows = Array.isArray(result?.entry?.metadata?.source_windows)
+    ? result.entry.metadata.source_windows
+    : [];
+  if (
+    admitted
+    && detail.page_mode === "offset"
+    && detail.delivered_range_start != null
+    && detail.delivered_range_end != null
+  ) {
+    for (const window of sourceWindows) {
+      if (detail.delivered_range_start > Number(window.payload_start)) continue;
+      if (detail.delivered_range_end < Number(window.payload_end)) continue;
+      recordObservation({
+        work_item_id: hashContext.work_item_id ?? null,
+        job_id: hashContext.job_id ?? null,
+        attempt_id: hashContext.attempt_id ?? null,
+        observation_type: "source.coverage",
+        summary: `delivered continuation coverage ${window.repo_rel_path}:${window.start_line}-${window.end_line}`,
+        detail: {
+          ...window,
+          evidence_ref: ref,
+          delivery_state: "delivered",
+          origin: "continuation",
+          stored_chars: Math.max(0, Number(window.payload_end) - Number(window.payload_start)),
+          returned_chars: Math.max(0, Number(window.payload_end) - Number(window.payload_start)),
+          agent_call_id: hashContext.agent_call_id ?? null,
+        },
+      });
+    }
+  }
 }
 
 function invalidRefResult(ref) {
@@ -2051,6 +1988,16 @@ export function fetchHashRefTool(args = {}, {
     : null;
   recordFetchBatchObservation(hashContext, refs, args, { researchPhase, enforcePolicy, deliveryBudget });
   if (refs.length === 0) return JSON.stringify({ ok: false, error: "fetch_ref requires ref or refs" }, null, 2);
+  const requestedReaccessAuthorization = String(args.reaccessAuthorization || "").trim();
+  if (requestedReaccessAuthorization && refs.length !== 1) {
+    return JSON.stringify({
+      ok: false,
+      code: "fetch_ref_reaccess_single_ref_required",
+      classification: "reaccess_scope_mismatch",
+      retryable: false,
+      message: "A covered-evidence re-access authorization applies to exactly one stored ref.",
+    });
+  }
 
   const requestedLimit = parsePositiveInt(
     args.limit,
@@ -2074,12 +2021,35 @@ export function fetchHashRefTool(args = {}, {
           contentHash: result.entry.content_hash,
         })
       : [];
-    const policy = admitHashRefFetch({
+    const reaccessAuthorization = requestedReaccessAuthorization;
+    const reaccess = reaccessAuthorization
+      ? (result?.ok && result?.found
+          ? consumeSourceReaccessAuthorization({
+              authorization: reaccessAuthorization,
+              ref: normalizeRef(ref),
+              context: hashContext,
+            })
+          : { allowed: false, reason: "source_missing" })
+      : null;
+    const policy = reaccessAuthorization && !reaccess?.allowed
+      ? {
+          allowed: false,
+          code: reaccess?.reason === "source_missing"
+            ? "fetch_ref_reaccess_source_missing"
+            : "fetch_ref_reaccess_invalid",
+          classification: reaccess?.reason === "source_missing"
+            ? "reaccess_source_missing"
+            : "reaccess_invalid_or_consumed",
+          message: reaccess?.reason === "source_missing"
+            ? "The stored evidence for this re-access authorization is unavailable; the authorization was not consumed."
+            : "This covered-evidence re-access authorization is invalid, mismatched, or already consumed.",
+        }
+      : admitHashRefFetch({
       entry: result?.entry || null,
       args: deliveryArgs,
       history,
       context: hashContext,
-      enforce: enforcePolicy,
+      enforce: reaccess?.allowed ? false : enforcePolicy,
     });
     let rendered;
     if (policy.allowed === false) {
@@ -2103,13 +2073,16 @@ export function fetchHashRefTool(args = {}, {
     }
     recordFetchObservation(hashContext, ref, result, rendered, {
       ...policy,
+      reaccess_authorized: reaccess?.allowed === true,
+      reaccess_consumed: reaccessAuthorization ? reaccess?.allowed === true : false,
       research_phase: researchPhase,
       visible_ledger_enforced: enforcePolicy,
     });
     return rendered;
   };
 
-  if (refs.length === 1 && !Array.isArray(args.refs) && !Array.isArray(args.hashes)) {
+  const batchRequested = Array.isArray(args.ref) || Array.isArray(args.refs) || Array.isArray(args.hashes);
+  if (refs.length === 1 && !batchRequested) {
     const rendered = enforceResearchFetchSerializedBudget(fetchOne(refs[0]), deliveryBudget, refs);
     recordFetchBatchDeliveryObservation(hashContext, refs, rendered, {
       researchPhase,

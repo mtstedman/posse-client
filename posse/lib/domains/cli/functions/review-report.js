@@ -15,9 +15,10 @@ import {
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { workItemCost } from "../../billing/functions/cost.js";
-import { estimateBillableInputTokens } from "../../billing/functions/pricing.js";
+import { resolveCanonicalCallAccounting } from "../../billing/functions/usage-segments.js";
 import { jobIsBackgroundIndex, jobIsDisplayFailure, jobIsWriteStep, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
+import { getAtlas137AcceptanceTelemetry } from "../../observability/functions/atlas137-report.js";
 
 export { stripAnsi };
 
@@ -89,19 +90,10 @@ function optionalNonNegativeNumber(value) {
 }
 
 function callBillableInputTokens(call = {}) {
-  const inputTokens = nonNegativeNumber(call.input_tokens);
-  const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(call.cached_input_tokens));
-  const billable = estimateBillableInputTokens({
-    provider: call.provider,
-    modelName: call.model_name,
-    modelTier: call.model_tier,
-    inputTokens,
-    cachedInputTokens,
-    cacheCreationInputTokens: call.cache_creation_input_tokens,
-  });
-  return Number.isFinite(billable.billableInputTokens)
-    ? Math.max(0, billable.billableInputTokens)
-    : inputTokens;
+  const accounting = resolveCanonicalCallAccounting(call);
+  return Number.isFinite(accounting.billableInputTokens)
+    ? Math.max(0, accounting.billableInputTokens)
+    : null;
 }
 
 function dirtyTreeReview(worktreeStatus = null) {
@@ -284,6 +276,7 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
         })),
         agentCalls: (d.agentCalls || []).map((c) => {
           const billableInputTokens = callBillableInputTokens(c);
+          const accounting = resolveCanonicalCallAccounting(c);
           return {
             role: c.role,
             model: c.model_name || c.model_tier,
@@ -295,18 +288,23 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
             cacheCreationInputTokens: c.cache_creation_input_tokens || 0,
             outputTokens: c.output_tokens,
             billableInputTokens,
-            billableTokens: billableInputTokens + nonNegativeNumber(c.output_tokens),
+            billableTokens: billableInputTokens == null
+              ? null
+              : billableInputTokens + nonNegativeNumber(c.output_tokens),
             effort: c.reasoning_effort,
             provider: c.provider,
-            costUsd: c.cost_estimate_usd ?? null,
+            costUsd: accounting.costUsd,
+            costPrecision: accounting.costPrecision,
+            billingPrecision: accounting.precision,
+            exactUsage: accounting.exact,
           };
         }),
         totals: (() => {
           const inputTokens = nonNegativeNumber(d.totalInputTokens);
           const outputTokens = nonNegativeNumber(d.totalOutputTokens);
           const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(d.totalCachedInputTokens));
-          const billableInputTokens = optionalNonNegativeNumber(d.totalBillableInputTokens) ?? inputTokens;
-          const billableTokens = optionalNonNegativeNumber(d.totalBillableTokens) ?? (billableInputTokens + outputTokens);
+          const billableInputTokens = optionalNonNegativeNumber(d.totalBillableInputTokens);
+          const billableTokens = optionalNonNegativeNumber(d.totalBillableTokens);
           return {
             durationMs: d.totalDuration,
             inputTokens,
@@ -317,10 +315,19 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
             outputTokens,
             promptChars: d.totalPrompt,
             outputChars: d.totalOutput,
-            costUsd: d.totalCostUsd || 0,
+            costUsd: d.totalCostUsd == null ? null : nonNegativeNumber(d.totalCostUsd),
+            knownCostUsd: nonNegativeNumber(d.knownCostUsd),
+            costPrecision: d.costPrecision || "unknown",
+            exactCostCalls: nonNegativeNumber(d.exactCostCalls),
+            estimatedCostCalls: nonNegativeNumber(d.estimatedCostCalls),
+            unknownCostCalls: nonNegativeNumber(d.unknownCostCalls),
+            exactUsageCalls: nonNegativeNumber(d.exactUsageCalls),
+            inexactUsageCalls: nonNegativeNumber(d.inexactUsageCalls),
+            physicalProviderCalls: nonNegativeNumber(d.physicalProviderCalls),
             toolCalls: d.totalToolCalls || 0,
           };
         })(),
+        atlas137Telemetry: d.atlas137Telemetry || null,
         toolUsageSummary: Array.isArray(d.toolUsageSummary) ? d.toolUsageSummary : [],
         finalAssessment: d.finalAssessment || null,
         memoriesSurfaced: d.memoriesSurfaced || [],
@@ -429,16 +436,24 @@ export function buildReviewReportData(reviewable, {
     const totalCachedInputTokens = agentCalls.reduce((sum, call) => sum + Math.min(nonNegativeNumber(call.input_tokens), nonNegativeNumber(call.cached_input_tokens)), 0);
     const totalOutputTokens = agentCalls.reduce((sum, call) => sum + (call.output_tokens || 0), 0);
     const wiCost = workItemCost(wi.id);
-    const totalBillableInputTokens = Number.isFinite(Number(wiCost?.billableInputTokens))
+    const hasExactBillableRollup = wiCost?.billableTokens != null;
+    const totalBillableInputTokens = hasExactBillableRollup && Number.isFinite(Number(wiCost?.billableInputTokens))
       ? Math.max(0, Number(wiCost.billableInputTokens))
-      : agentCalls.reduce((sum, call) => sum + callBillableInputTokens(call), 0);
-    const totalBillableTokens = Number.isFinite(Number(wiCost?.billableTokens))
+      : null;
+    const totalBillableTokens = hasExactBillableRollup && Number.isFinite(Number(wiCost?.billableTokens))
       ? Math.max(0, Number(wiCost.billableTokens))
-      : totalBillableInputTokens + totalOutputTokens;
-    const totalCostUsd = Number(wiCost?.totalCostUsd ?? 0)
-      || agentCalls.reduce((sum, call) => sum + (Number(call.cost_estimate_usd) || 0), 0);
+      : null;
+    const totalCostUsd = wiCost?.totalCostUsd == null ? null : Math.max(0, Number(wiCost.totalCostUsd) || 0);
+    const knownCostUsd = Math.max(0, Number(wiCost?.knownCostUsd) || 0);
+    const costPrecision = wiCost?.costPrecision || "unknown";
     const toolUsageSummary = toolUsageByWorkItem.get(wi.id) || [];
     const totalToolCalls = toolUsageSummary.reduce((sum, item) => sum + (item.count || 0), 0);
+    const physicalProviderCalls = Number(wiCost?.callCount) || agentCalls.length;
+    const atlas137Telemetry = getAtlas137AcceptanceTelemetry({
+      workItemId: wi.id,
+      physicalProviderCalls,
+      accounting: wiCost,
+    });
 
     let gitDiff = [];
     if (wi.branch_name && wi.merge_base_hash && typeof gitDiffStat === "function") {
@@ -517,6 +532,15 @@ export function buildReviewReportData(reviewable, {
       totalBillableTokens,
       totalOutputTokens,
       totalCostUsd,
+      knownCostUsd,
+      costPrecision,
+      exactCostCalls: Number(wiCost?.exactCostCalls) || 0,
+      estimatedCostCalls: Number(wiCost?.estimatedCostCalls) || 0,
+      unknownCostCalls: Number(wiCost?.unknownCostCalls) || 0,
+      exactUsageCalls: Number(wiCost?.exactUsageCalls) || 0,
+      inexactUsageCalls: Number(wiCost?.inexactUsageCalls) || 0,
+      physicalProviderCalls,
+      atlas137Telemetry,
       toolUsageSummary,
       totalToolCalls,
       researchSummary,

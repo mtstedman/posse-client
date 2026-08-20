@@ -25,6 +25,16 @@ function truncate(text, max) {
   return `${s.slice(0, max - 1)}…`;
 }
 
+function formatCostState(costUsd, precision = "unknown") {
+  const state = String(precision || "unknown");
+  if (state === "unknown") return "cost unknown";
+  const formatted = formatCost(costUsd);
+  if (!formatted) return "cost unknown";
+  if (state === "partial") return `${formatted} known (partial)`;
+  if (state === "estimated") return `${formatted} estimated`;
+  return `${formatted} exact`;
+}
+
 function renderHeader(data) {
   const wi = data.workItem;
   const sum = data.summary;
@@ -48,8 +58,7 @@ function renderHeader(data) {
   if (sum.totalInputTokens || sum.totalOutputTokens) {
     totals.push(`~${formatTokens(sum.totalInputTokens)} in / ~${formatTokens(sum.totalOutputTokens)} out`);
   }
-  const cost = formatCost(sum.totalCostUsd);
-  if (cost) totals.push(cost);
+  totals.push(formatCostState(sum.knownCostUsd, sum.costPrecision));
   lines.push(`  ${C.dim}Totals:${C.reset}   ${totals.join("  |  ")}`);
   return lines.join("\n");
 }
@@ -64,8 +73,7 @@ function renderAttempts(attempts, { verbose = false } = {}) {
     if (att.inputTokens || att.outputTokens) {
       bits.push(`tok=${formatTokens(att.inputTokens)}/${formatTokens(att.outputTokens)}`);
     }
-    const cost = formatCost(att.costUsd);
-    if (cost) bits.push(cost);
+    bits.push(formatCostState(att.knownCostUsd, att.costPrecision));
     if (att.commitHash) bits.push(`commit=${String(att.commitHash).slice(0, 8)}`);
     lines.push(`    ${C.dim}├─${C.reset} attempt ${att.attemptNumber}: ${color}${att.status}${C.reset}  ${C.dim}${bits.join("  ")}${C.reset}`);
     if (att.errorText) {
@@ -74,8 +82,7 @@ function renderAttempts(attempts, { verbose = false } = {}) {
     if (verbose) {
       for (const call of att.agentCalls || []) {
         const atlas = call.atlasMethod ? ` atlas=${call.atlasMethod}` : "";
-        const callCost = formatCost(call.costUsd);
-        const costBit = callCost ? `  ${callCost}` : "";
+        const costBit = `  ${formatCostState(call.costUsd, call.costPrecision)}`;
         lines.push(`    ${C.dim}│${C.reset}   ${C.cyan}${call.role}${C.reset} ${C.dim}${call.provider || "?"}/${call.modelTier || "?"}${atlas}${C.reset}  ${formatDurationMs(call.durationMs)}  tok=${formatTokens(call.inputTokens)}/${formatTokens(call.outputTokens)}${costBit}`);
       }
     }

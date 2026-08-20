@@ -14,6 +14,7 @@
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getRemotePricingMap } from "../../providers/functions/model-catalog-store.js";
+import { providerLongContextRateMultipliers } from "../../../catalog/provider-economics.js";
 
 // Anthropic prompt-caching: writing to the cache costs 1.25x the base input
 // rate (5-minute TTL, Posse's default). Mirrors the authoritative Claude cost
@@ -248,23 +249,14 @@ function findTierDefault(provider, tier) {
   return TIER_DEFAULTS[key] ? { ...TIER_DEFAULTS[key], key } : null;
 }
 
-function usesOpenAiLongContextPremium(provider, modelName, inputTokens) {
-  const prov = normalizeProvider(provider);
-  if (prov !== "openai" && prov !== "codex") return false;
-  const model = normalizeModel(modelName)?.replace(/\[[^\]]+\]$/, "") || "";
-  if (!/^gpt-5\.(4|5)(?:-|$)/.test(model)) return false;
-  if (/^gpt-5\.(4|5)-(mini|nano)(?:-|$)/.test(model)) return false;
-  const input = Math.max(0, Number(inputTokens) || 0);
-  return input > 272_000;
-}
-
 function applyUsageRateAdjustments(rates, { provider, modelName, inputTokens } = {}) {
-  if (!usesOpenAiLongContextPremium(provider, modelName, inputTokens)) return rates;
+  const multiplier = providerLongContextRateMultipliers(provider, modelName, inputTokens);
+  if (!multiplier.active) return rates;
   return {
     ...rates,
-    inputPerM: rates.inputPerM * 2,
-    cachedInputPerM: rates.cachedInputPerM * 2,
-    outputPerM: rates.outputPerM * 1.5,
+    inputPerM: rates.inputPerM * multiplier.input,
+    cachedInputPerM: rates.cachedInputPerM * multiplier.cachedInput,
+    outputPerM: rates.outputPerM * multiplier.output,
     source: `${rates.source}:long_context`,
   };
 }

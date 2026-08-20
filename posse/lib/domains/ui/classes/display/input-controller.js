@@ -46,7 +46,7 @@ import {
   _buildQueueProviderUsageLines,
 } from "../../functions/display/helpers/provider-usage.js";
 import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
-import { estimateCallCost } from "../../../billing/functions/pricing.js";
+import { resolveCanonicalCallAccounting } from "../../../billing/functions/usage-segments.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
 
@@ -64,17 +64,8 @@ const WORKER_BOOT_STALLED_MS = 45_000;
 const JOB_FAILURE_STATUSES = new Set(FAILED_JOB_STATUSES);
 
 function resolvedCallCostUsd(call) {
-  const est = estimateCallCost({
-    provider: call?.provider,
-    modelName: call?.model_name,
-    modelTier: call?.model_tier,
-    inputTokens: call?.input_tokens,
-    outputTokens: call?.output_tokens,
-    cachedInputTokens: call?.cached_input_tokens,
-    cacheCreationInputTokens: call?.cache_creation_input_tokens,
-    knownCostUsd: call?.cost_estimate_usd,
-  });
-  return Number.isFinite(est.costUsd) ? est.costUsd : 0;
+  const accounting = resolveCanonicalCallAccounting(call);
+  return Number.isFinite(accounting.costUsd) ? accounting.costUsd : 0;
 }
 
 function keyName(key) {

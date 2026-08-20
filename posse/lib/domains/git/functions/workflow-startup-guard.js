@@ -3,7 +3,15 @@
 
 import fs from "fs";
 import path from "path";
-import { getSetting, logEvent } from "../../queue/functions/index.js";
+import {
+  getJob,
+  getSetting,
+  listWaitingLanePreparations,
+  logEvent,
+  poisonWaitingLanePreparation,
+  retireWaitingLanePreparation,
+} from "../../queue/functions/index.js";
+import { LOCK_HOLDING_JOB_STATUSES } from "../../queue/functions/common.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { SETTING_KEYS, STARTUP_DIRTY_TREE_POLICY_VALUES } from "../../../catalog/settings.js";
@@ -16,6 +24,143 @@ import { GIT_OPERATION_TIMEOUT_MS, isGitCommandFailure } from "./utils.js";
 import { snapshotAndResetDirtyWorktree } from "./worktree.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { firstGitLine } from "./workflow-git-utils.js";
+import { inspectPreparedWorktreeLockedAsync } from "./prepared-worktree-recovery.js";
+
+const LIVE_PREPARATION_JOB_STATUS_SET = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
+
+export function waitingLaneStartupInspectionAction(preparation, value, {
+  pathExists = false,
+  gitJobLive = false,
+} = {}) {
+  const intentRecoverable = value?.ok === true
+    && value.ownershipPhase === "intent"
+    && ["preparing_git", "activating"].includes(preparation?.state);
+  const intentBeforeAddRecoverable = value?.ok === false
+    && value?.status === "inspection_mismatch"
+    && value?.ownershipPhase === "intent"
+    && value?.registered === false
+    && pathExists === false
+    && preparation?.state === "preparing_git"
+    && gitJobLive === true;
+  const preparedAgreement = value?.ok === true
+    && value.ownershipPhase === "prepared"
+    && value.detached === true
+    && preparation?.state !== "active";
+  const expectedAttachedOid = String((
+    preparation?.state === "active"
+      ? (preparation?.applied_git_oid || preparation?.desired_generation?.git_oid || preparation?.desired_git_oid)
+      : (preparation?.desired_generation?.git_oid || preparation?.desired_git_oid || preparation?.applied_git_oid)
+  ) || "").trim().toLowerCase();
+  const attachedAgreement = value?.ok === true
+    && value.ownershipPhase === "attached"
+    && value.detached === false
+    && String(value?.branchName || "").trim().length > 0
+    && /^[0-9a-f]{40,64}$/u.test(expectedAttachedOid)
+    && String(value?.headOid || "").trim().toLowerCase() === expectedAttachedOid
+    && ["active", "activating"].includes(preparation?.state);
+  if (intentRecoverable) return "intent_observed";
+  if (intentBeforeAddRecoverable) return "intent_pre_add_observed";
+  if (attachedAgreement) return "attached_observed";
+  if (preparedAgreement) {
+    return preparation?.state === "activating"
+      ? "prepared_activation_recoverable"
+      : "prepared_observed";
+  }
+  return null;
+}
+
+/**
+ * Filesystem-first waiting-lane recovery. It records poison/retirement through
+ * the queue CAS API but never schedules replacement work; the coordinator runs
+ * its demand/job reconciliation only after these observations are returned.
+ */
+export async function reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
+  signal = null,
+  onMsg = () => {},
+} = {}) {
+  const observations = [];
+  let preparations = [];
+  try {
+    preparations = listWaitingLanePreparations({ limit: 1000 });
+  } catch (error) {
+    return [{ action: "unavailable", reason: error?.message || String(error) }];
+  }
+  for (const preparation of preparations) {
+    throwIfAborted(signal);
+    const root = preparation.worktree_root
+      ? path.resolve(preparation.worktree_root)
+      : null;
+    const base = {
+      work_item_id: preparation.work_item_id,
+      state: preparation.state,
+      version: preparation.version,
+      worktree_root: root,
+    };
+    if (!root || !preparation.ownership_record_id) {
+      if (root && fs.existsSync(root)) {
+        const transition = poisonWaitingLanePreparation({
+          workItemId: preparation.work_item_id,
+          expectedVersion: preparation.version,
+          reason: "startup_existing_path_without_ownership",
+        });
+        observations.push({ ...base, action: "poisoned_preserved", transition });
+        onMsg(`startup: preserved unowned prepared path for WI#${preparation.work_item_id}`);
+      } else {
+        observations.push({ ...base, action: "no_asset" });
+      }
+      continue;
+    }
+    try {
+      const observed = await inspectPreparedWorktreeLockedAsync({
+        projectDir,
+        worktreeRoot: root,
+        preparationId: preparation.ownership_record_id,
+        signal,
+      });
+      const value = observed.inspection?.result || null;
+      if (observed.inspection?.available === false) {
+        observations.push({ ...base, action: "native_capability_unavailable", reason: observed.inspection.reason });
+        continue;
+      }
+      let gitJobLive = false;
+      try {
+        gitJobLive = LIVE_PREPARATION_JOB_STATUS_SET.has(getJob(preparation.git_job_id)?.status);
+      } catch { /* unavailable queue proof is never treated as recoverable */ }
+      const agreementAction = waitingLaneStartupInspectionAction(preparation, value, {
+        pathExists: fs.existsSync(root),
+        gitJobLive,
+      });
+      if (agreementAction) {
+        observations.push({
+          ...base,
+          action: agreementAction,
+          inspection: value,
+        });
+        continue;
+      }
+      if (!fs.existsSync(root) && value?.registered !== true) {
+        const transition = retireWaitingLanePreparation({
+          workItemId: preparation.work_item_id,
+          expectedVersion: preparation.version,
+          reason: "startup_prepared_asset_missing",
+        });
+        observations.push({ ...base, action: "retired_missing", transition, inspection: value });
+        continue;
+      }
+      const transition = poisonWaitingLanePreparation({
+        workItemId: preparation.work_item_id,
+        expectedVersion: preparation.version,
+        reason: `startup_inspection_mismatch:${String(value?.status || value?.reason || "unknown").slice(0, 800)}`,
+      });
+      observations.push({ ...base, action: "poisoned_preserved", transition, inspection: value });
+      onMsg(`startup: preserved unexpected prepared worktree state for WI#${preparation.work_item_id}`);
+    } catch (error) {
+      observations.push({ ...base, action: "inspection_error_preserved", reason: error?.message || String(error) });
+      onMsg(`startup: prepared worktree inspection failed for WI#${preparation.work_item_id}; path preserved`);
+    }
+  }
+  return observations;
+}
 
 export function createStartupDirtyGuardHelpers(context) {
   const { projectDir, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
@@ -520,6 +665,12 @@ export function createStartupDirtyGuardHelpers(context) {
         try { onPhase({ detail }); } catch { /* display callback only */ }
       }
     };
+    emitPhase("reconciling waiting-lane filesystem");
+    const waitingLaneFilesystemRecovery = await reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
+      signal,
+      onMsg: (detail) => emitPhase(detail),
+    });
+    throwIfAborted(signal);
     const mode = normalizeStartupDirtyTreePolicy(policy || startupDirtyTreePolicy());
     emitPhase("checking target tree");
     // Sweep a SCIP infer-tsconfig placeholder orphaned by an interrupted index
@@ -530,7 +681,7 @@ export function createStartupDirtyGuardHelpers(context) {
     throwIfAborted(signal);
     if (!dirtyLines.length) {
       emitPhase("target tree clean");
-      return { ok: true, dirty: false, policy: mode, action: "clean" };
+      return { ok: true, dirty: false, policy: mode, action: "clean", waitingLaneFilesystemRecovery };
     }
     if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
       throw new Error(dirtyTreeGuardMessage({ reason, dirtyLines, policy: mode }));
@@ -548,6 +699,7 @@ export function createStartupDirtyGuardHelpers(context) {
           policy: mode,
           action: "no_staged_changes",
           dirtyCount: dirtyLines.length,
+          waitingLaneFilesystemRecovery,
         };
       }
       throwIfAborted(signal);
@@ -580,10 +732,11 @@ export function createStartupDirtyGuardHelpers(context) {
       action: "committed",
       dirtyCount: dirtyLines.length,
       commit,
+      waitingLaneFilesystemRecovery,
     };
   }
 
-  function guardStartupDirtyTreeInWorker({
+  async function guardStartupDirtyTreeInWorker({
     reason = "startup",
     policy = null,
     message = "chore: preserve startup work before posse boot",
@@ -591,7 +744,20 @@ export function createStartupDirtyGuardHelpers(context) {
     signal = null,
     timeoutMs = GIT_WORKFLOW_TASK_TIMEOUT_MS,
   } = {}) {
-    return runGitWorkflowTaskOffMainThread("guardStartupDirtyTree", {
+    throwIfAborted(signal);
+    if (typeof onPhase === "function") {
+      try { onPhase({ detail: "reconciling waiting-lane filesystem" }); } catch { /* display callback only */ }
+    }
+    const waitingLaneFilesystemRecovery = await reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
+      signal,
+      onMsg: (detail) => {
+        if (typeof onPhase === "function") {
+          try { onPhase({ detail }); } catch { /* display callback only */ }
+        }
+      },
+    });
+    throwIfAborted(signal);
+    const result = await runGitWorkflowTaskOffMainThread("guardStartupDirtyTree", {
       reason,
       policy,
       message,
@@ -600,6 +766,7 @@ export function createStartupDirtyGuardHelpers(context) {
       signal,
       timeoutMs,
     });
+    return { ...result, waitingLaneFilesystemRecovery };
   }
 
   function ensureCleanTargetBranch(reason, { fatalOnFailure = false, logWhenClean = false } = {}) {

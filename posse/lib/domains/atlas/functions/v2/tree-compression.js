@@ -8,6 +8,7 @@
 
 import { sha256Hex } from "./hash.js";
 import { runAtlasNativeMethodAsync } from "./native/invoke.js";
+import { buildViewTreeCompressionNativeAsync } from "./native/storage.js";
 import { atlasTreeNativeTimeoutMs } from "./tree-native-timeout.js";
 
 export const TREE_COMPRESSION_RUN_KIND = "tree-compression-snapshot";
@@ -258,6 +259,19 @@ export async function buildTreeCompressionSnapshot(db, opts = {}) {
     };
   }
 
+  const persistedViewPath = nativeCompressionViewPath(db);
+  if (persistedViewPath) {
+    const symbolCount = Number(db.prepare("SELECT COUNT(*) AS count FROM symbols").get()?.count || 0);
+    return /** @type {any} */ (await buildViewTreeCompressionNativeAsync(
+      persistedViewPath,
+      opts,
+      {
+        ...(opts.nativeManager ? { manager: opts.nativeManager } : {}),
+        timeoutMs: atlasTreeNativeTimeoutMs(symbolCount),
+      },
+    ));
+  }
+
   // Deterministic seed construction (scoring, term vectors, entrypoints, labels)
   // is owned by the Rust binary. Node only reads the scope tables into the
   // TreeBuildResult shape the binary consumes. There is no Node fallback — the
@@ -276,6 +290,14 @@ export async function buildTreeCompressionSnapshot(db, opts = {}) {
       timeoutMs: atlasTreeNativeTimeoutMs(tree.symbolFiles.length),
     },
   ));
+}
+
+/** @param {import("better-sqlite3").Database} db */
+function nativeCompressionViewPath(db) {
+  if (db?.memory === true) return null;
+  const name = String(db?.name || "").trim();
+  if (!name || name === ":memory:" || name.startsWith("file::memory:")) return null;
+  return name;
 }
 
 /**
@@ -701,7 +723,18 @@ export function importTreeCompressionMlSnapshot(db, exported) {
   try {
     ensureTreeCompressionTables(db);
     writeTreeCompressionSnapshot(db, exported.snapshot, exported.sourceSignature ?? null);
-    return { ok: true, seeds: Array.isArray(exported.snapshot.seeds) ? exported.snapshot.seeds.length : 0 };
+    const seeds = Array.isArray(exported.snapshot.seeds) ? exported.snapshot.seeds.length : 0;
+    // The snapshot and its labeled seed provenance are the durable ML result.
+    // A full view rebuild recreates derived_state_runs, so carry its successful
+    // run proof alongside the snapshot or readiness falsely reports that an
+    // exact imported ML surface was never seeded.
+    recordRun(db, TREE_COMPRESSION_ML_RUN_KIND, "ok", 0, {
+      profile: exported.snapshot.profile || TREE_COMPRESSION_ML_PROFILE,
+      source_signature: exported.sourceSignature ?? null,
+      seed_count: seeds,
+      restored_from_snapshot: true,
+    });
+    return { ok: true, seeds };
   } catch (err) {
     return { ok: false, error: String(/** @type {any} */ (err)?.message || err) };
   }

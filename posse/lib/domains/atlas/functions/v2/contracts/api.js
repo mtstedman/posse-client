@@ -330,6 +330,7 @@
  * @property {boolean} [layerMerge]         When true, materialize merged SCIP/tree-sitter layer rows instead of the legacy flat blob rows.
  * @property {"off" | "deterministic" | "ml"} [treeCompressionMode] Controls cached ATLAS tree seed compression during view build.
  * @property {number} [treeCompressionMaxSeeds] Maximum deterministic tree compression seeds to store.
+ * @property {boolean} [replaceExisting]        Build beside an existing view and atomically replace it only after the staged SQLite family is complete and valid.
  */
 
 /**

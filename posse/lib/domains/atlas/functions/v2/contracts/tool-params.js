@@ -136,12 +136,14 @@
 
 /**
  * @typedef {Object} FetchRefParams
- * @property {string} [ref]
+ * @property {string | string[]} [ref]
  * @property {string[]} [refs]
  * @property {string[]} [hashes]
  * @property {number} [offset]              Character offset; in search mode, matched-row offset.
  * @property {number} [limit]               Maximum page characters.
  * @property {string} [search]              Case-insensitive literal search within materialized text.
+ * @property {"auto" | "literal" | "regex"} [search_mode]
+ * @property {string} [reaccessAuthorization] One-use authorization from a covered source response.
  */
 
 // ============================================================================
@@ -278,8 +280,8 @@
 
 /**
  * @typedef {Object} SymbolGetCardParams
- * @property {string} [symbolId]              Required iff symbolRef is absent.
- * @property {SymbolRef} [symbolRef]          Required iff symbolId is absent.
+ * @property {string | string[]} [symbolId]   One exact ID or a batch.
+ * @property {SymbolRef | SymbolRef[]} [symbolRef] One exact lookup or a batch.
  * @property {string[]} [symbolIds]           Batch form; returns batch card data.
  * @property {SymbolRef[]} [symbolRefs]       Batch form; returns batch card data.
  * @property {string} [ifNoneMatch]
@@ -312,13 +314,13 @@
  * @typedef {Object} TreeScopeParams
  * @property {string} [taskText]              Natural-language task/scope text.
  * @property {TaskType} [taskType]
- * @property {string[]} [paths]               Repo-relative file/dir seeds.
+ * @property {string | string[]} [paths]      Repo-relative file/dir seeds.
  * @property {string[]} [editedFiles]         Repo-relative file/dir seeds from known work scope.
  * @property {string} [path]                  Single repo-relative file/dir seed.
- * @property {string[]} [symbolIds]           Stable ATLAS symbol ids/refs.
+ * @property {string | string[]} [symbolIds]  Stable ATLAS symbol ids/refs.
  * @property {string} [symbolId]              Single stable ATLAS symbol id/ref.
- * @property {string[]} [nodeIds]             Exact atlas_tree_nodes.node_id seeds.
- * @property {Array<{ refType: TreeRefType, refId: string }>} [refs]
+ * @property {string | string[]} [nodeIds]    Exact atlas_tree_nodes.node_id seeds.
+ * @property {{ refType: TreeRefType, refId: string } | Array<{ refType: TreeRefType, refId: string }>} [refs]
  * @property {TreeRefType} [refType]          Single cluster/process ref type.
  * @property {string} [refId]                 Single cluster/process ref id.
  * @property {number} [maxFiles]              Max candidate files returned. Default 40.
@@ -344,7 +346,6 @@
  * @property {Record<string, string>} [knownCardEtags]  Up to 1000 entries.
  * @property {string} [ifNoneMatch]
  * @property {CardDetail} [cardDetail]
- * @property {boolean} [adaptiveDetail]
  * @property {WireFormat} [wireFormat]
  * @property {WireFormatVersion} [wireFormatVersion]
  * @property {SliceBudget} [budget]
@@ -428,8 +429,6 @@
  * @property {string} [symbolId]
  * @property {string} [file]                  Canonical repo-relative path.
  * @property {string[]} identifiersToFind     1..50
- * @property {number} [maxLines]
- * @property {number} [maxTokens]
  * @property {number} [contextLines]
  * @property {string} [ifNoneMatch]
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.
@@ -439,26 +438,13 @@
  * @typedef {Object} CodeNeedWindowParams
  * @property {string} [symbolId]
  * @property {string} [file]                  Canonical repo-relative path.
- * @property {string} [reason]                Proof-of-need for raw-window escalation; required in scalar mode.
+ * @property {string} [reason]                Proof-of-need for raw-window escalation.
  * @property {number} [expectedLines]          Integer.
  * @property {string[]} [identifiersToFind]   Required with file; 1..50.
  * @property {CodeGranularity} [granularity]
- * @property {number} [maxTokens]             Scalar item cap, or batch-wide cap when items is present.
- * @property {CodeWindowItemParams[]} [items]  Two to four independent exact selections.
+ * @property {number} [maxTokens]             Exact selection cap.
  * @property {SliceContextHint} [sliceContext]
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.
- */
-
-/**
- * @typedef {Object} CodeWindowItemParams
- * @property {string} [symbolId]
- * @property {string} [file]                  Canonical repo-relative path.
- * @property {string} reason                  Exact fact this item should establish.
- * @property {number} [expectedLines]
- * @property {string[]} [identifiersToFind]   Required with file; 1..50.
- * @property {CodeGranularity} [granularity]
- * @property {number} [maxTokens]             Per-item cap, additionally bounded by the batch-wide fair share.
- * @property {string} [sessionId]
  */
 
 /**

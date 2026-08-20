@@ -17,6 +17,8 @@ import {
   ATLAS_VIEW_BUILD_METHOD,
   ATLAS_VIEW_CLONE_METHOD,
   ATLAS_VIEW_PATCH_META_METHOD,
+  ATLAS_VIEW_TREE_REFRESH_METHOD,
+  ATLAS_VIEW_TREE_COMPRESSION_METHOD,
 } from "../../../../../catalog/atlas.js";
 import { runAtlasNativeMethodAsync } from "./invoke.js";
 
@@ -30,6 +32,8 @@ export {
   ATLAS_VIEW_BUILD_METHOD,
   ATLAS_VIEW_CLONE_METHOD,
   ATLAS_VIEW_PATCH_META_METHOD,
+  ATLAS_VIEW_TREE_REFRESH_METHOD,
+  ATLAS_VIEW_TREE_COMPRESSION_METHOD,
 } from "../../../../../catalog/atlas.js";
 
 export function ensureLedgerNativeAsync(ledgerPath, opts = {}) {
@@ -68,6 +72,32 @@ export function applyViewNativeAsync(args, opts = {}) {
     idempotent: false,
     ...opts,
   });
+}
+
+/**
+ * Rebuild tree-derived rows transactionally inside the native storage layer.
+ * The request carries only a path and the response carries only counts, so a
+ * large repository's full tree never crosses the worker frame boundary.
+ */
+export function refreshViewTreeNativeAsync(viewPath, opts = {}) {
+  return runAtlasNativeMethodAsync(ATLAS_VIEW_TREE_REFRESH_METHOD, {
+    contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
+    view_path: viewPath,
+  }, {
+    idempotent: true,
+    ...opts,
+  });
+}
+
+/** Build a bounded deterministic compression snapshot from persisted tree rows. */
+export function buildViewTreeCompressionNativeAsync(viewPath, args = {}, opts = {}) {
+  return runAtlasNativeMethodAsync(ATLAS_VIEW_TREE_COMPRESSION_METHOD, {
+    contract_version: ATLAS_STORAGE_CONTRACT_VERSION,
+    view_path: viewPath,
+    max_seeds: args.maxSeeds,
+    max_depth: args.maxDepth,
+    max_files_per_seed: args.maxFilesPerSeed,
+  }, opts);
 }
 
 export function cloneViewNativeAsync({ sourcePath, destPath }, opts = {}) {

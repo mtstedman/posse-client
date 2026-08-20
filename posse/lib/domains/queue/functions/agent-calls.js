@@ -105,6 +105,11 @@ export function completeAgentCall(id, {
   atlas_prefetch_status = null,
   cost_estimate_usd = null,
   provider_usage_status = null,
+  billing_precision = null,
+  exact_billable_input_tokens = null,
+  long_context_tier_input_tokens = null,
+  provider_request_duration_ms = null,
+  usage_segment_count = null,
   skills = null,
   session_handle = null,
 } = {}) {
@@ -126,7 +131,12 @@ export function completeAgentCall(id, {
         skills = COALESCE(?, skills),
         session_handle = COALESCE(?, session_handle),
         cost_estimate_usd = COALESCE(?, cost_estimate_usd),
-        provider_usage_status = COALESCE(?, provider_usage_status)
+        provider_usage_status = COALESCE(?, provider_usage_status),
+        billing_precision = COALESCE(?, billing_precision),
+        exact_billable_input_tokens = COALESCE(?, exact_billable_input_tokens),
+        long_context_tier_input_tokens = COALESCE(?, long_context_tier_input_tokens),
+        provider_request_duration_ms = COALESCE(?, provider_request_duration_ms),
+        usage_segment_count = COALESCE(?, usage_segment_count)
     WHERE id = ?
   `).run(
     status, now(), duration_ms,
@@ -145,6 +155,11 @@ export function completeAgentCall(id, {
     session_handle == null ? null : String(session_handle),
     cost_estimate_usd,
     provider_usage_status == null ? null : String(provider_usage_status),
+    billing_precision == null ? null : String(billing_precision),
+    exact_billable_input_tokens,
+    long_context_tier_input_tokens,
+    provider_request_duration_ms,
+    usage_segment_count,
     id,
   );
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(id);
@@ -263,6 +278,8 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
       SUM(COALESCE(ac.cached_input_tokens, 0)) AS cached_input_tokens,
       SUM(COALESCE(ac.turns_used, 0)) AS turns_used,
       SUM(COALESCE(ac.cost_estimate_usd, 0)) AS cost_usd,
+      SUM(CASE WHEN ac.billing_precision IN ('exact', 'recovered_exact') THEN 1 ELSE 0 END) AS exact_usage_calls,
+      SUM(CASE WHEN ac.billing_precision IN ('aggregate_only', 'incomplete') THEN 1 ELSE 0 END) AS inexact_usage_calls,
       SUM(COALESCE(ac.duration_ms, 0)) AS duration_ms,
       MAX(COALESCE(ac.started_at, ac.created_at)) AS last_call_at,
       COALESCE(ev.evidence_count, 0) AS evidence_count,
@@ -656,6 +673,8 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
         SUM(COALESCE(output_tokens, 0))                   AS measured_output_tokens,
         SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL OR cached_input_tokens IS NULL THEN 1 ELSE 0 END) AS token_usage_unknown_calls,
         SUM(CASE WHEN input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cached_input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS token_usage_known_calls,
+        SUM(CASE WHEN billing_precision IN ('exact', 'recovered_exact') THEN 1 ELSE 0 END) AS exact_usage_calls,
+        SUM(CASE WHEN billing_precision IN ('aggregate_only', 'incomplete') THEN 1 ELSE 0 END) AS inexact_usage_calls,
         SUM(COALESCE(duration_ms, 0))                     AS total_duration_ms,
         SUM(COALESCE(cost_estimate_usd, 0))               AS cost_usd
       FROM agent_calls

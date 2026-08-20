@@ -15,6 +15,7 @@ import {
   incrementAndCreateAttempt,
   logEvent,
   refreshWorkItemStatus,
+  settleWaitingLaneAtlas,
   setJobResult,
   storeArtifact,
 } from "../../../queue/functions/index.js";
@@ -22,6 +23,7 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { ATLAS_WARM_JOB_POLICY } from "../../../atlas/functions/v2/contracts/jobs.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
+import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
 import { ledgerDbPath, mainViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
@@ -35,6 +37,45 @@ import {
 } from "../../../atlas/functions/v2/verbose-errors.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { WAITING_LANE_ATLAS_PURPOSE_VALUES } from "../../../../catalog/waiting-lane.js";
+import {
+  isAtlasMainGenerationPurpose,
+  withAtlasMainSourceProofLock,
+} from "../../../atlas/functions/v2/main-generation.js";
+export {
+  inspectAtlasMainSourceProof,
+  publishAtlasMainGenerationIfProven,
+} from "../../../atlas/functions/v2/main-generation.js";
+
+const WAITING_LANE_PURPOSE_SET = new Set(WAITING_LANE_ATLAS_PURPOSE_VALUES);
+const WAITING_LANE_SETTLEMENT_PURPOSE_SET = new Set(["wi-snapshot", "wi-catchup"]);
+
+const defaultWaitingLaneAtlasSettlementAdapter = ({ job, payload, result }) => settleWaitingLaneAtlas({
+  workItemId: Number(payload?.work_item_id || job?.work_item_id),
+  expectedVersion: Number(payload?.preparation_version),
+  atlasJobId: Number(job?.id),
+  actualGeneration: result?.generation,
+  result,
+});
+
+let waitingLaneAtlasSettlementAdapter = defaultWaitingLaneAtlasSettlementAdapter;
+
+/**
+ * Wave-1 adapter seam for Agent B/D's durable preparation settlement API.
+ * Absence is intentionally fail-silent: the Atlas result remains durable on
+ * the job and a later reconciliation pass may settle it.
+ *
+ * @param {null | ((input: { job: any, payload: any, result: any }) => Promise<unknown> | unknown)} adapter
+ */
+export function setWaitingLaneAtlasSettlementAdapter(adapter) {
+  waitingLaneAtlasSettlementAdapter = typeof adapter === "function"
+    ? adapter
+    : defaultWaitingLaneAtlasSettlementAdapter;
+}
+
+export function shouldSettleWaitingLaneAtlasPurpose(purpose) {
+  return WAITING_LANE_SETTLEMENT_PURPOSE_SET.has(String(purpose || ""));
+}
 
 function nowMs() {
   return Date.now();
@@ -111,6 +152,7 @@ function logAtlasWarmTelemetry(kind, extra = {}) {
 }
 
 function atlasWarmTelemetryContext({ jobId, purpose, branch, baselineBranch, repoRoot, paths, budgetMs, timeoutMs }) {
+  const waitingLanePurpose = WAITING_LANE_PURPOSE_SET.has(String(purpose || ""));
   return {
     job_id: jobId ?? null,
     purpose: purpose || null,
@@ -118,7 +160,9 @@ function atlasWarmTelemetryContext({ jobId, purpose, branch, baselineBranch, rep
     baseline_branch: baselineBranch || null,
     repo_root_basename: path.basename(String(repoRoot || "")) || null,
     path_count: Array.isArray(paths) ? paths.length : 0,
-    path_sample: Array.isArray(paths) ? paths.slice(0, 20) : [],
+    // Waiting-lane aggregate telemetry is deliberately path-free, even for
+    // repository-relative hints. The count is sufficient for rollout sizing.
+    path_sample: waitingLanePurpose ? [] : (Array.isArray(paths) ? paths.slice(0, 20) : []),
     budget_ms: Number(budgetMs) || null,
     timeout_ms: Number(timeoutMs) || null,
   };
@@ -129,10 +173,13 @@ function atlasWarmTelemetryContext({ jobId, purpose, branch, baselineBranch, rep
 // boot/scip timeouts that size full warms.
 const ATLAS_EMBEDDINGS_SLICE_BUDGET_MS = 10 * 60_000;
 
-function atlasWarmRuntimeBudgetMs(purpose, config = {}) {
+function atlasWarmRuntimeBudgetMs(purpose, config = {}, runtimeBudgetMs = null) {
   const policyBudget = positiveMs(ATLAS_WARM_JOB_POLICY.maxRuntimeMs) || 60_000;
-  if (purpose === "wi" || purpose === "wi-cleanup") return policyBudget;
-  if (purpose === "embeddings") return Math.max(policyBudget, ATLAS_EMBEDDINGS_SLICE_BUDGET_MS);
+  const callerBudget = positiveMs(runtimeBudgetMs);
+  if (purpose === "wi" || purpose === "wi-cleanup") return Math.max(policyBudget, callerBudget || 0);
+  if (purpose === "embeddings") {
+    return Math.max(policyBudget, ATLAS_EMBEDDINGS_SLICE_BUDGET_MS, callerBudget || 0);
+  }
   const candidates = [policyBudget];
   if (purpose === "main-full" || purpose === "main-incremental" || purpose === "scip-restage") {
     candidates.push(
@@ -143,7 +190,12 @@ function atlasWarmRuntimeBudgetMs(purpose, config = {}) {
   } else if (purpose === "main-merge") {
     candidates.push(positiveMs(config.bootTimeoutMs));
   }
+  if (callerBudget) candidates.push(callerBudget);
   return Math.max(...candidates.filter((n) => n != null));
+}
+
+export function __testAtlasWarmRuntimeBudgetMs(purpose, config = {}, runtimeBudgetMs = null) {
+  return atlasWarmRuntimeBudgetMs(purpose, config, runtimeBudgetMs);
 }
 
 // Gate-wait and post-acquire runtime are DISTINCT budgets. The conductor gets
@@ -158,7 +210,9 @@ function atlasWarmRuntimeBudgetMs(purpose, config = {}) {
 const ATLAS_WARM_SHORT_GATE_WAIT_MS = 30_000;
 const ATLAS_WARM_BULK_GATE_WAIT_MS = 3 * 60_000;
 export function atlasWarmGateWaitMs(purpose) {
-  if (purpose === "wi" || purpose === "wi-cleanup") return ATLAS_WARM_SHORT_GATE_WAIT_MS;
+  if (purpose === "wi" || purpose === "wi-cleanup" || WAITING_LANE_PURPOSE_SET.has(purpose)) {
+    return ATLAS_WARM_SHORT_GATE_WAIT_MS;
+  }
   return ATLAS_WARM_BULK_GATE_WAIT_MS;
 }
 
@@ -167,7 +221,7 @@ export function atlasWarmGateWaitMs(purpose) {
 // keeping WI-view freshness during big indexes. The gate ages queued bulk warms
 // so they still make progress (no starvation).
 export function atlasWarmGatePriority(purpose) {
-  return (purpose === "wi" || purpose === "wi-cleanup") ? 1 : 0;
+  return (purpose === "wi" || purpose === "wi-cleanup" || WAITING_LANE_PURPOSE_SET.has(purpose)) ? 1 : 0;
 }
 
 function atlasRuntimeDisabledReasonForRepo(repoRoot) {
@@ -201,7 +255,11 @@ function isAtlasWarmSoftInfrastructureMiss(err) {
   return err?.code === "THREAD_TIMEOUT" || err?.code === "DAEMON_TIMEOUT";
 }
 
-export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abortSignal = null } = {}) {
+export async function runAtlasWarmJob(worker, job, wrappedJob, {
+  leaseToken,
+  abortSignal = null,
+  runtimeBudgetMs = null,
+} = {}) {
   const startTime = nowMs();
   let attempt = null;
   try {
@@ -249,7 +307,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     // Bounded runtime guard — surface a deterministic skip if the policy
     // budget has already been exhausted (e.g. shutdown right before lease).
     const elapsed = nowMs() - startTime;
-    const budgetMs = atlasWarmRuntimeBudgetMs(purpose, config);
+    const budgetMs = atlasWarmRuntimeBudgetMs(purpose, config, runtimeBudgetMs);
     const exceeded = elapsed > budgetMs;
 
     /** @type {import("../../../atlas/functions/v2/contracts/jobs.js").AtlasWarmJobResult} */
@@ -316,6 +374,25 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
       }
     }
     result.duration_ms = nowMs() - startTime;
+    if (WAITING_LANE_PURPOSE_SET.has(purpose)) {
+      const createdAt = Date.parse(String(job?.created_at || ""));
+      recordWaitingLaneTelemetry("atlas_execution_finished", {
+        workItemId: job.work_item_id,
+        jobId: job.id,
+        purpose,
+        outcome: result.waiting_lane_outcome || "failed",
+        reason: result.waiting_lane_reason || "none",
+        operation: result.waiting_lane_operation || "none",
+        durationMs: result.duration_ms,
+        queueWaitMs: Number.isFinite(createdAt) ? Math.max(0, startTime - createdAt) : null,
+        tailEntries: result.tail_entries,
+        // Snapshot/catch-up are target-local and are excluded from the global
+        // Atlas readiness hold by contract.
+        globalAtlasHoldMs: 0,
+        desiredGeneration: payload.generation,
+        appliedGeneration: result.generation,
+      });
+    }
 
     logEvent({
       work_item_id: job.work_item_id,
@@ -342,6 +419,18 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, { leaseToken, abo
     });
 
     setJobResult(job.id, result);
+
+    if (shouldSettleWaitingLaneAtlasPurpose(purpose) && waitingLaneAtlasSettlementAdapter) {
+      try {
+        await waitingLaneAtlasSettlementAdapter({ job, payload, result });
+      } catch (err) {
+        logAtlasWarmTelemetry("atlas.waiting_lane.settlement_deferred", {
+          job_id: job.id,
+          purpose,
+          error: errorSummary(err),
+        });
+      }
+    }
 
     // Budget-sliced resume loop: an embeddings warm that stopped short of
     // parity enqueues the next slice (coalescing with any already-queued one).
@@ -498,12 +587,13 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
     // line and the live ATLAS/ONNX readiness bars in the TUI.
     const onProgress = (event) => {
       emitAtlasWarmProgress(worker, jobId, event);
-      warmReadinessProgress(event);
+      if (!WAITING_LANE_PURPOSE_SET.has(purpose)) warmReadinessProgress(event);
     };
-    warmReadinessStarted();
+    const tracksGlobalReadiness = !WAITING_LANE_PURPOSE_SET.has(purpose);
+    if (tracksGlobalReadiness) warmReadinessStarted();
     let warmOk = false;
     try {
-      const result = await runSqliteWrite(
+      const executeWarm = (sourceProof = null, sourceLockHeld = false) => runSqliteWrite(
         ledgerPath,
         async (gateInfo = {}) => {
           const conductorStartedAt = nowMs();
@@ -524,13 +614,22 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
                 scipMode: config?.scipMode,
                 scipDir: config?.scipDir,
                 config,
-                job,
+                job: sourceLockHeld
+                  ? { ...job, source_proof: sourceProof, source_lock_held: true }
+                  : job,
               },
               // The conductor gets its OWN full runtime budget, measured from
               // gate acquisition — gate-wait is bounded separately by waitMs
               // below and must not be charged against the conductor deadline.
               { signal: abortSignal, timeoutMs: budgetMs, onProgress },
             );
+            if (result.generation_proof_reason === "durable_generation_publication_failed") {
+              logAtlasWarmTelemetry("atlas.main_generation.not_published", {
+                ...warmTelemetry,
+                reason: result.generation_proof_reason,
+                error: errorSummary(result._generation_publish_error),
+              });
+            }
             logAtlasWarmTelemetry("atlas.warm.conductor_result", {
               ...warmTelemetry,
               outcome: "ok",
@@ -539,6 +638,16 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
               blobs_ingested: Number(result?.blobs_ingested) || 0,
               ledger_entries_appended: Number(result?.ledger_entries_appended) || 0,
               embeddings_complete: result?.embeddings_complete ?? null,
+              waiting_lane_outcome: WAITING_LANE_PURPOSE_SET.has(purpose)
+                ? (result?.waiting_lane_outcome || null)
+                : null,
+              waiting_lane_operation: WAITING_LANE_PURPOSE_SET.has(purpose)
+                ? (result?.waiting_lane_operation || null)
+                : null,
+              tail_entries: WAITING_LANE_PURPOSE_SET.has(purpose)
+                ? (Number(result?.tail_entries) || 0)
+                : null,
+              global_dispatch_hold_ms: WAITING_LANE_PURPOSE_SET.has(purpose) ? 0 : null,
             });
             return result;
           } catch (err) {
@@ -582,10 +691,28 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
           },
         },
       );
+      const result = !isAtlasMainGenerationPurpose(purpose)
+        ? await executeWarm()
+        : await withAtlasMainSourceProofLock({
+            repoRoot,
+            targetBranch: payload?.target_branch || baselineBranch,
+            expectedGitOid: payload?.git_oid || payload?.target_git_oid || null,
+            signal: abortSignal,
+            lockWaitMs: Math.min(gateWaitMs, 30_000),
+            run: (sourceProof, lock) => {
+              if (!lock.held) {
+                throw Object.assign(
+                  new Error("ATLAS main warm could not acquire the repository mutation lock"),
+                  { code: "ATLAS_MAIN_INTAKE_LOCK_UNAVAILABLE" },
+                );
+              }
+              return executeWarm(sourceProof, true);
+            },
+          });
       warmOk = true;
       return result;
     } finally {
-      warmReadinessDone(warmOk);
+      if (tracksGlobalReadiness) warmReadinessDone(warmOk);
     }
   } catch (err) {
     const purpose = String(payload?.purpose || "wi");

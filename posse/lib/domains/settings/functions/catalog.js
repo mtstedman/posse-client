@@ -51,6 +51,7 @@ import {
   ATLAS_MEMORY_SURFACE_MODE_VALUES,
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
+  WAITING_LANE_SHADOW_MODE_VALUES,
 } from "../../../catalog/settings.js";
 import {
   ATLAS_AUTO_FEEDBACK_VALUES,
@@ -90,6 +91,7 @@ export {
   ATLAS_MEMORY_SURFACE_MODE_VALUES,
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
+  WAITING_LANE_SHADOW_MODE_VALUES,
   ATLAS_AUTO_FEEDBACK_VALUES,
   ATLAS_BOOT_REINDEX_POLICY_VALUES,
   ATLAS_EMBEDDING_MODEL_OPTIONS,
@@ -205,6 +207,15 @@ export const SETTINGS_CATALOG = [
   // ── Scheduler ────────────────────────────────────────────────────────────
   { key: "scheduler_concurrency", default: "", runtimeFallback: "3", numeric: { integer: true, min: 1 }, description: "Default number of worker slots when --concurrency is not passed (empty = 3)" },
   { key: "scheduler_max_active_worktrees", default: "", numeric: { integer: true, min: 1 }, description: "Maximum number of active work-item worktrees the scheduler may run at once (empty = no cap)" },
+  { key: SETTING_KEYS.WAITING_LANE_SHADOW_MODE, default: "off", options: WAITING_LANE_SHADOW_MODE_VALUES, description: "Waiting-lane eligibility observation: off records nothing; shadow records decisions without creating a detached worktree or parked view" },
+  { key: SETTING_KEYS.WAITING_LANE_GIT_PREPARATION_ENABLED, default: "false", valueType: "boolean", description: "Create guarded detached waiting-lane worktrees after eligible research startup" },
+  { key: SETTING_KEYS.WAITING_LANE_ATLAS_SNAPSHOT_ENABLED, default: "false", valueType: "boolean", description: "Create parked ATLAS snapshots for eligible detached waiting lanes" },
+  { key: SETTING_KEYS.WAITING_LANE_ATLAS_CATCHUP_ENABLED, default: "false", valueType: "boolean", description: "Refresh parked waiting-lane views after validated main-generation publication" },
+  { key: SETTING_KEYS.WAITING_LANE_ACTIVATION_ENABLED, default: "false", valueType: "boolean", description: "Consume a validated prepared waiting lane during developer activation" },
+  { key: SETTING_KEYS.WAITING_LANE_PREPARATION_CONCURRENCY, default: "1", numeric: { integer: true, min: 1 }, description: "Maximum concurrent repository preparation jobs; independent of agent and ATLAS background slots" },
+  { key: SETTING_KEYS.WAITING_LANE_MAX_PREPARED_LANES, default: "1", numeric: { integer: true, min: 1 }, description: "Maximum resident detached waiting-lane caches before safe LRU/TTL eviction" },
+  { key: SETTING_KEYS.WAITING_LANE_PREPARED_TTL_MS, default: "3600000", numeric: { integer: true, min: 1000 }, description: "Idle lifetime in milliseconds for a prepared detached waiting lane" },
+  { key: SETTING_KEYS.WAITING_LANE_MAX_HOT_PATHS, default: "64", numeric: { integer: true, min: 1, max: 512 }, description: "Maximum normalized researcher hot paths retained for final mounted-view prefetch" },
   { key: "scheduler_poll_ms",     default: "500", numeric: { integer: true, min: 1 }, description: "Scheduler poll interval in milliseconds" },
   { key: "scheduler_repair_poll_ms", default: "5000", numeric: { integer: true, min: 1 }, description: "Fallback scheduler repair interval when no queue-state wake arrives" },
   { key: "default_lease_seconds", default: "120", numeric: { integer: true, min: 1 }, description: "Default job lease duration in seconds" },
@@ -290,7 +301,8 @@ export const SETTINGS_CATALOG = [
   { key: "assessor_fallback_reads",                default: "4", numeric: { integer: true, min: 0 }, description: "Extra assessor fallback file reads allowed during verification before retrying (read on attempt 1 if dev didn't surface output)" },
   { key: "assessor_fallback_reads_retry_step",     default: "2", numeric: { integer: true, min: 0 }, description: "Additional fallback reads added per retry attempt" },
   { key: "assessor_internal_retry_limit",          default: "2", numeric: { integer: true, min: 0 }, description: "Internal retry limit before failing assessment" },
-  { key: "assessor_parse_retry_input_tokens_cap",  default: "", numeric: { integer: true, min: 1 }, description: "Input token cap for parse-error retries (empty = no cap)" },
+  { key: SETTING_KEYS.ASSESSOR_MAX_TOOL_CALLS,       default: "12", numeric: { integer: true, min: 1 }, description: "Hard per-call assessor MCP tool ceiling; agent_handoff remains available after exhaustion" },
+  { key: SETTING_KEYS.ASSESSOR_PARSE_RETRY_INPUT_TOKENS_CAP, default: "150000", numeric: { integer: true, min: 0 }, description: "Shared assessor input-token cap across retries for one job (0 disables the cap; missing telemetry falls back to prompt_chars / 4)" },
 
   // ── Handoff / planner ────────────────────────────────────────────────────
   { key: "handoff_max_prompt_chars", default: "600000", numeric: { integer: true, min: 1 }, description: "Maximum characters in a single agent prompt" },

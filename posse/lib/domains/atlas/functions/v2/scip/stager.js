@@ -16,12 +16,21 @@ import { normalizeAtlasScipMode, shouldRunScipPhase } from "../../../../integrat
 import { formatAtlasError } from "../verbose-errors.js";
 import { sha256Hex } from "../hash.js";
 import { isCanonicalRepoPath } from "../paths.js";
+import {
+  inspectSampleForMinified,
+  isGeneratedSourceArtifactPath,
+  isLikelyMinifiedPath,
+  MINIFIED_SAMPLE_BYTES,
+  shouldInspectSourceForMinification,
+} from "../parser/index-filters.js";
 import { createProtoReader } from "./proto-reader.js";
 import { sanitizeScipOutputFileNative } from "./sanitizer.js";
+import { readScipBatchCoverage, writeScipBatchCoverage } from "./batch-coverage.js";
 import {
   buildFailedStagerMeta,
   buildRecoveredStagerMeta,
   buildStagerMeta,
+  commandArgsHashMatches,
   computeCommandArgsHash,
   metaIsCurrent,
   readStagerMeta,
@@ -175,6 +184,30 @@ export async function ensureScipStaged({
       posseRoot,
       languages: config?.scipLanguages ?? config?.atlas_scip_languages ?? null,
     });
+    const unavailableCandidates = lookup.candidates.filter((candidate) => !candidate.resolved);
+    if (unavailableCandidates.length > 0) {
+      const failedLanguages = unavailableCandidates.map((candidate) => candidate.id);
+      const error = describeScipIndexerLookup(lookup);
+      emit(onProgress, error, {
+        kind: "atlas.scip.indexer_unavailable",
+        failed_languages: failedLanguages,
+      });
+      return {
+        enabled: true,
+        dir,
+        files,
+        staged: false,
+        reason: "indexer_unavailable",
+        error,
+        results: unavailableCandidates.map((candidate) => ({
+          language: candidate.id,
+          status: "failed",
+          error: `${candidate.command} is unavailable`,
+        })),
+        failedLanguages,
+        orphanStagingRemoved,
+      };
+    }
     const policy = normalizeScipRestagePolicy(config?.scipRestagePolicy ?? config?.atlas_scip_restage_policy);
     const maxAgeHours = normalizeMaxAgeHours(config?.scipMaxAgeHours ?? config?.atlas_scip_max_age_hours);
     const normalTimeoutMs = normalizeTimeoutMs(timeoutMs ?? config?.scipIndexTimeoutMs ?? config?.atlas_scip_index_timeout_ms, null);
@@ -404,6 +437,10 @@ export async function buildScipBatchManifest({
       unavailable.push({ repo_rel_path: repoRelPath, reason: "path_not_canonical" });
       continue;
     }
+    if (isGeneratedSourceArtifactPath(repoRelPath)) {
+      unavailable.push({ repo_rel_path: repoRelPath, reason: "generated_artifact_skip" });
+      continue;
+    }
     const plan = planByExtension.get(path.extname(repoRelPath).toLowerCase()) || null;
     if (!plan) {
       unavailable.push({ repo_rel_path: repoRelPath, reason: "batch_indexer_unavailable" });
@@ -420,6 +457,13 @@ export async function buildScipBatchManifest({
         error: formatAtlasError(err),
       });
       continue;
+    }
+    if (shouldInspectSourceForMinification(repoRelPath, sourceBytes.length)) {
+      const sample = sourceBytes.subarray(0, Math.min(sourceBytes.length, MINIFIED_SAMPLE_BYTES));
+      if (isLikelyMinifiedPath(repoRelPath) || inspectSampleForMinified(sample).minified) {
+        unavailable.push({ repo_rel_path: repoRelPath, reason: "minified_skip" });
+        continue;
+      }
     }
     documents.push({
       documentOrdinal: documents.length,
@@ -492,6 +536,137 @@ export async function buildScipBatchManifest({
 }
 
 /**
+ * Preserve content-addressed coverage across incremental warms. Paths in the
+ * current intake replace prior entries; unchanged entries remain candidates
+ * and boot validates every carried hash against the new ledger snapshot.
+ *
+ * @param {{ repoRoot: string, scipDir: string, replacedPaths: string[], documents: Array<{ repo_rel_path: string, content_hash: string, source_languages?: string[] }> }} input
+ */
+export async function mergeScipBatchCoverageDocuments(input) {
+  const root = path.resolve(String(input.repoRoot || process.cwd()));
+  const replaced = new Set(uniqueBytewiseRepoPaths(input.replacedPaths || []));
+  const merged = new Map();
+  const previous = await readScipBatchCoverage(input.scipDir);
+  for (const document of previous?.documents || []) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    if (!isCanonicalRepoPath(repoRelPath) || replaced.has(repoRelPath)) continue;
+    // Drop receipts produced before minified-path exclusions were aligned.
+    // Content-density exclusions are handled by every newly replaced path.
+    let size = 0;
+    try { size = (await fs.promises.stat(path.join(root, repoRelPath))).size; } catch { continue; }
+    if (shouldInspectSourceForMinification(repoRelPath, size) && isLikelyMinifiedPath(repoRelPath)) continue;
+    merged.set(repoRelPath, {
+      repo_rel_path: repoRelPath,
+      content_hash: String(document?.content_hash || "").toLowerCase(),
+      source_languages: Array.isArray(document?.source_languages) ? document.source_languages : [],
+    });
+  }
+  for (const document of input.documents || []) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    if (!isCanonicalRepoPath(repoRelPath)) continue;
+    merged.set(repoRelPath, {
+      repo_rel_path: repoRelPath,
+      content_hash: String(document?.content_hash || "").toLowerCase(),
+      source_languages: Array.isArray(document?.source_languages) ? document.source_languages : [],
+    });
+  }
+  return [...merged.values()].sort((a, b) => Buffer.from(a.repo_rel_path).compare(Buffer.from(b.repo_rel_path)));
+}
+
+/**
+ * Reuse only artifacts whose prior downstream acknowledgement and exact
+ * content-addressed batch manifest are both durable. A reused artifact is
+ * handed to the CURRENT onBatchReady callback again, so the current ledger
+ * must acknowledge it before the new session records completion.
+ *
+ * Running sessions are deliberately ignored: their producer may still be
+ * writing an artifact. Recovered (bisected) batches are retried because their
+ * one-to-many output layout is not represented by the top-level manifest.
+ *
+ * @param {{ scipDir: string, manifest: Awaited<ReturnType<typeof buildScipBatchManifest>> }} input
+ * @returns {Promise<Map<number, { outputPath: string, sessionId: string }>>}
+ */
+async function findReusableScipBatchOutputs({ scipDir, manifest }) {
+  const batchesRoot = path.join(scipDir, "batches");
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(batchesRoot, { withFileTypes: true });
+  } catch {
+    return new Map();
+  }
+  const candidates = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const sessionDir = path.join(batchesRoot, entry.name);
+    const manifestPath = path.join(sessionDir, "manifest.json");
+    try {
+      const [raw, stat] = await Promise.all([
+        fs.promises.readFile(manifestPath, "utf8"),
+        fs.promises.stat(manifestPath),
+      ]);
+      const state = JSON.parse(raw);
+      if (!scipBatchSessionMatchesManifest(state, manifest)) continue;
+      candidates.push({ sessionDir, state, mtimeMs: stat.mtimeMs });
+    } catch {
+      // Session caches are advisory. Corrupt or concurrently removed entries
+      // simply fall back to staging the affected batches again.
+    }
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  const reusable = new Map();
+  for (const candidate of candidates) {
+    const failed = new Set(Array.isArray(candidate.state.failedBatches) ? candidate.state.failedBatches : []);
+    const recovered = new Set(Array.isArray(candidate.state.recoveredBatches) ? candidate.state.recoveredBatches : []);
+    for (const rawOrdinal of Array.isArray(candidate.state.completedBatches) ? candidate.state.completedBatches : []) {
+      const batchOrdinal = Number(rawOrdinal);
+      if (!Number.isSafeInteger(batchOrdinal)
+        || reusable.has(batchOrdinal)
+        || failed.has(batchOrdinal)
+        || recovered.has(batchOrdinal)) continue;
+      const batch = manifest.batches[batchOrdinal];
+      if (!batch) continue;
+      const outputPath = path.join(
+        candidate.sessionDir,
+        `batch-${String(batchOrdinal).padStart(5, "0")}`,
+        `${batch.plan.indexerId}.scip`,
+      );
+      try {
+        const stat = await fs.promises.lstat(outputPath);
+        if (!stat.isFile() || stat.size <= 0 || !validateSanitizedScipOutputFile(outputPath).ok) continue;
+      } catch {
+        continue;
+      }
+      reusable.set(batchOrdinal, {
+        outputPath,
+        sessionId: String(candidate.state.sessionId || path.basename(candidate.sessionDir)),
+      });
+    }
+  }
+  return reusable;
+}
+
+function scipBatchSessionMatchesManifest(state, manifest) {
+  const status = String(state?.status || "").trim().toLowerCase();
+  if (!new Set(["complete", "partial", "failed"]).has(status)) return false;
+  if (String(state?.filesetHash || "") !== manifest.filesetHash
+    || Number(state?.documentCount) !== manifest.documentCount
+    || Number(state?.batchCount) !== manifest.batchCount
+    || Number(state?.maxFiles) !== manifest.maxFiles
+    || Number(state?.maxSourceBytes) !== manifest.maxSourceBytes
+    || !Array.isArray(state?.batches)
+    || state.batches.length !== manifest.batches.length) return false;
+  return manifest.batches.every((batch, ordinal) => {
+    const prior = state.batches[ordinal];
+    return Number(prior?.batchOrdinal) === batch.batchOrdinal
+      && String(prior?.batchHash || "") === batch.batchHash
+      && String(prior?.language || "") === String(batch.plan.indexerId || "")
+      && Array.isArray(prior?.paths)
+      && prior.paths.length === batch.paths.length
+      && prior.paths.every((repoRelPath, index) => repoRelPath === batch.paths[index]);
+  });
+}
+
+/**
  * Stage ordered, path-preserving SCIP batches and hand each completed artifact
  * to a bounded downstream lane. The callback's returned promise is the batch
  * acknowledgement; at most `maxInFlight` unacknowledged batches are retained.
@@ -559,6 +734,7 @@ export async function stageScipBatches({
     maxFiles: config?.atlasScipBatchMaxFiles ?? config?.atlas_scip_batch_max_files,
     maxSourceBytes: config?.atlasScipBatchMaxSourceBytes ?? config?.atlas_scip_batch_max_source_bytes,
   });
+  const reusableBatches = await findReusableScipBatchOutputs({ scipDir: dir, manifest });
   const sessionId = sha256Hex(Buffer.from(
     `${manifest.filesetHash}\0${Date.now()}\0${process.pid}\0${Math.random()}`,
   )).slice(0, 32);
@@ -577,6 +753,10 @@ export async function stageScipBatches({
     maxSourceBytes: manifest.maxSourceBytes,
     completedBatches: [],
     failedBatches: [],
+    recoveredBatches: [],
+    resumedBatches: [],
+    resumedFromSessions: [...new Set([...reusableBatches.values()].map((entry) => entry.sessionId))],
+    unavailableDocuments: [],
     committedDocumentOrdinal: -1,
     status: "running",
     batches: manifest.batches.map((batch) => ({
@@ -606,6 +786,7 @@ export async function stageScipBatches({
     if (!pending) return;
     await pending.ack;
     state.completedBatches.push(pending.batch.batchOrdinal);
+    if (pending.resumedFromSession) state.resumedBatches.push(pending.batch.batchOrdinal);
     state.committedDocumentOrdinal = pending.batch.lastDocumentOrdinal;
     await writeBatchSessionManifest(sessionManifestPath, state);
   };
@@ -626,6 +807,54 @@ export async function stageScipBatches({
     }
     for (const batch of manifest.batches) {
       while (inFlight.length >= maxInFlight) await acknowledgeOldest();
+      const reusable = reusableBatches.get(batch.batchOrdinal);
+      if (reusable) {
+        const batchSha256 = sha256Hex(await fs.promises.readFile(reusable.outputPath));
+        const info = {
+          session_id: sessionId,
+          resumed_from_session_id: reusable.sessionId,
+          batch_ordinal: batch.batchOrdinal,
+          batch_count: manifest.batchCount,
+          first_document_ordinal: batch.firstDocumentOrdinal,
+          documents_expected: batch.documentsExpected,
+          batch_sha256: batchSha256,
+          manifest_batch_hash: batch.batchHash,
+          repo_rel_paths: batch.paths,
+          content_hashes: Object.fromEntries(batch.documents.map((document) => [
+            document.repoRelPath,
+            document.contentHash,
+          ])),
+          language: batch.plan.indexerId,
+          indexer: batch.plan.label,
+          source_languages: sourceLanguagesForPlan(batch.plan),
+          reused: true,
+        };
+        files.push(reusable.outputPath);
+        results.push({
+          ok: true,
+          staged: true,
+          reused: true,
+          resumedFromSession: reusable.sessionId,
+          documentsUnavailable: 0,
+          batchOrdinal: batch.batchOrdinal,
+          firstDocumentOrdinal: batch.firstDocumentOrdinal,
+          documentsExpected: batch.documentsExpected,
+          language: batch.plan.indexerId,
+          source_languages: sourceLanguagesForPlan(batch.plan),
+          outputPath: reusable.outputPath,
+        });
+        const ack = batchAcknowledgement(onBatchReady, reusable.outputPath, info);
+        inFlight.push({ batch, ack, resumedFromSession: reusable.sessionId });
+        emit(onProgress, `reused SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
+          kind: "atlas.scip.batch_reused",
+          batch_ordinal: batch.batchOrdinal,
+          batch_count: manifest.batchCount,
+          documents_expected: batch.documentsExpected,
+          language: batch.plan.indexerId,
+          resumed_from_session_id: reusable.sessionId,
+        });
+        continue;
+      }
       emit(onProgress, `staging SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount} (${batch.documentsExpected} documents)`, {
         kind: "atlas.scip.batch_staging_started",
         batch_ordinal: batch.batchOrdinal,
@@ -636,63 +865,77 @@ export async function stageScipBatches({
         language: batch.plan.indexerId,
         source_languages: sourceLanguagesForPlan(batch.plan),
       });
-      const staged = await stageScipBatch({
+      const recovered = await stageScipBatchWithRecovery({
         root,
         sessionDir,
         batch,
         onProgress,
       });
       const result = {
-        ok: staged.ok === true,
-        staged: staged.ok === true,
+        ok: recovered.ok,
+        staged: recovered.outputs.length > 0,
+        recovered: recovered.recovered,
+        documentsUnavailable: recovered.unavailable.length,
         batchOrdinal: batch.batchOrdinal,
         firstDocumentOrdinal: batch.firstDocumentOrdinal,
         documentsExpected: batch.documentsExpected,
         language: batch.plan.indexerId,
         source_languages: sourceLanguagesForPlan(batch.plan),
-        outputPath: staged.outputPath || null,
-        error: staged.error,
+        outputPath: recovered.outputs[0]?.staged?.outputPath || null,
+        error: recovered.ok ? undefined : recovered.error,
       };
       results.push(result);
-      if (!staged.ok || !staged.outputPath) {
+      if (!recovered.ok) {
         state.failedBatches.push(batch.batchOrdinal);
         await writeBatchSessionManifest(sessionManifestPath, state);
-        for (const repoRelPath of batch.paths) {
+        for (const unavailable of recovered.unavailable) {
           await notifyFileUnavailable(onFileUnavailable, {
-            repo_rel_path: repoRelPath,
+            repo_rel_path: unavailable.document.repoRelPath,
             reason: "batch_stage_failed",
-            error: staged.error || "SCIP batch staging failed",
+            error: unavailable.error || recovered.error || "SCIP batch staging failed",
           });
         }
         continue;
       }
-      files.push(staged.outputPath);
-      const info = {
-        session_id: sessionId,
-        batch_ordinal: batch.batchOrdinal,
-        batch_count: manifest.batchCount,
-        first_document_ordinal: batch.firstDocumentOrdinal,
-        documents_expected: batch.documentsExpected,
-        batch_sha256: staged.sha256,
-        manifest_batch_hash: batch.batchHash,
-        repo_rel_paths: batch.paths,
-        content_hashes: Object.fromEntries(batch.documents.map((document) => [
-          document.repoRelPath,
-          document.contentHash,
-        ])),
-        language: batch.plan.indexerId,
-        indexer: batch.plan.label,
-        source_languages: sourceLanguagesForPlan(batch.plan),
-      };
-      let ack;
-      try {
-        ack = typeof onBatchReady === "function"
-          ? Promise.resolve(onBatchReady(staged.outputPath, info))
-          : Promise.resolve();
-      } catch (err) {
-        ack = Promise.reject(err);
+      if (recovered.recovered) state.recoveredBatches.push(batch.batchOrdinal);
+      for (const unavailable of recovered.unavailable) {
+        state.unavailableDocuments.push({
+          repoRelPath: unavailable.document.repoRelPath,
+          contentHash: unavailable.document.contentHash,
+          error: unavailable.error || "SCIP document staging failed",
+        });
+        await notifyFileUnavailable(onFileUnavailable, {
+          repo_rel_path: unavailable.document.repoRelPath,
+          reason: "batch_document_stage_failed",
+          error: unavailable.error || "SCIP document staging failed",
+        });
       }
-      inFlight.push({ batch, ack });
+      const acknowledgements = [];
+      for (const output of recovered.outputs) {
+        const stagedBatch = output.batch;
+        const staged = output.staged;
+        files.push(staged.outputPath);
+        const info = {
+          session_id: sessionId,
+          batch_ordinal: batch.batchOrdinal,
+          recovery_batch_ordinal: stagedBatch.batchOrdinal,
+          batch_count: manifest.batchCount,
+          first_document_ordinal: stagedBatch.firstDocumentOrdinal,
+          documents_expected: stagedBatch.documentsExpected,
+          batch_sha256: staged.sha256,
+          manifest_batch_hash: stagedBatch.batchHash,
+          repo_rel_paths: stagedBatch.paths,
+          content_hashes: Object.fromEntries(stagedBatch.documents.map((document) => [
+            document.repoRelPath,
+            document.contentHash,
+          ])),
+          language: stagedBatch.plan.indexerId,
+          indexer: stagedBatch.plan.label,
+          source_languages: sourceLanguagesForPlan(stagedBatch.plan),
+        };
+        acknowledgements.push(batchAcknowledgement(onBatchReady, staged.outputPath, info));
+      }
+      inFlight.push({ batch, ack: observeBatchAcknowledgement(Promise.all(acknowledgements)) });
       emit(onProgress, `staged SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
         kind: "atlas.scip.batch_staged",
         batch_ordinal: batch.batchOrdinal,
@@ -706,6 +949,28 @@ export async function stageScipBatches({
     while (inFlight.length > 0) await acknowledgeOldest();
     state.status = state.failedBatches.length > 0 ? "partial" : "complete";
     await writeBatchSessionManifest(sessionManifestPath, state);
+    let batchCoverage = null;
+    if (state.status === "complete") {
+      const head = await resolveCurrentHead(root);
+      if (head) {
+        const documents = await mergeScipBatchCoverageDocuments({
+          repoRoot: root,
+          scipDir: dir,
+          replacedPaths: paths,
+          documents: manifest.documents.map((document) => ({
+            repo_rel_path: document.repoRelPath,
+            content_hash: document.contentHash,
+            source_languages: sourceLanguagesForPlan(document.plan),
+          })),
+        });
+        batchCoverage = await writeScipBatchCoverage({
+          scipDir: dir,
+          head,
+          filesetHash: sha256Hex(Buffer.from(JSON.stringify(documents))),
+          documents,
+        });
+      }
+    }
     return {
       enabled: true,
       dir,
@@ -716,6 +981,7 @@ export async function stageScipBatches({
       sessionId,
       sessionManifestPath,
       manifest,
+      batchCoverage,
     };
   } catch (err) {
     state.status = "failed";
@@ -773,6 +1039,94 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
   }
 }
 
+async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress }) {
+  const attempt = async (candidate) => {
+    try {
+      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress });
+    } catch (error) {
+      return { ok: false, outputPath: null, error: formatAtlasError(error) };
+    }
+  };
+  const initial = await attempt(batch);
+  if (initial.ok && initial.outputPath) {
+    return { ok: true, recovered: false, outputs: [{ batch, staged: initial }], unavailable: [], error: null };
+  }
+  if (batch.documents.length <= 1) {
+    return {
+      ok: true,
+      recovered: true,
+      outputs: [],
+      unavailable: batch.documents.map((document) => ({ document, error: initial.error })),
+      error: initial.error || "SCIP document staging failed",
+    };
+  }
+  emit(onProgress, `SCIP batch ${batch.batchOrdinal + 1} failed; isolating source documents`, {
+    kind: "atlas.scip.batch_recovery_started",
+    batch_ordinal: batch.batchOrdinal,
+    documents_expected: batch.documentsExpected,
+    error: initial.error || null,
+  });
+  const recover = async (candidate, suffix) => {
+    const staged = await attempt(candidate);
+    if (staged.ok && staged.outputPath) {
+      return { outputs: [{ batch: candidate, staged }], unavailable: [] };
+    }
+    if (candidate.documents.length <= 1) {
+      return {
+        outputs: [],
+        unavailable: candidate.documents.map((document) => ({ document, error: staged.error })),
+      };
+    }
+    const midpoint = Math.ceil(candidate.documents.length / 2);
+    const left = scipRecoveryBatch(candidate, candidate.documents.slice(0, midpoint), `${suffix}a`);
+    const right = scipRecoveryBatch(candidate, candidate.documents.slice(midpoint), `${suffix}b`);
+    const [leftResult, rightResult] = await Promise.all([
+      recover(left, `${suffix}a`),
+      recover(right, `${suffix}b`),
+    ]);
+    return {
+      outputs: [...leftResult.outputs, ...rightResult.outputs],
+      unavailable: [...leftResult.unavailable, ...rightResult.unavailable],
+    };
+  };
+  const midpoint = Math.ceil(batch.documents.length / 2);
+  const [leftResult, rightResult] = await Promise.all([
+    recover(scipRecoveryBatch(batch, batch.documents.slice(0, midpoint), "ra"), "ra"),
+    recover(scipRecoveryBatch(batch, batch.documents.slice(midpoint), "rb"), "rb"),
+  ]);
+  const recovered = {
+    outputs: [...leftResult.outputs, ...rightResult.outputs],
+    unavailable: [...leftResult.unavailable, ...rightResult.unavailable],
+  };
+  const ok = recovered.outputs.length > 0;
+  return {
+    ok,
+    recovered: true,
+    ...recovered,
+    error: ok ? null : (initial.error || "SCIP batch staging failed for every isolated document"),
+  };
+}
+
+function scipRecoveryBatch(parent, documents, suffix) {
+  const paths = documents.map((document) => document.repoRelPath);
+  return {
+    ...parent,
+    batchOrdinal: `${parent.batchOrdinal}-${suffix}`,
+    firstDocumentOrdinal: documents[0]?.documentOrdinal ?? parent.firstDocumentOrdinal,
+    lastDocumentOrdinal: documents.at(-1)?.documentOrdinal ?? parent.lastDocumentOrdinal,
+    documentsExpected: documents.length,
+    sourceBytes: documents.reduce((total, document) => total + Number(document.sourceBytes || 0), 0),
+    batchHash: sha256Hex(Buffer.from(JSON.stringify(documents.map((document) => ({
+      ordinal: document.documentOrdinal,
+      path: document.repoRelPath,
+      content_hash: document.contentHash,
+      source_bytes: document.sourceBytes,
+    }))))),
+    paths,
+    documents,
+  };
+}
+
 async function writeBatchProjectMetadata(root, viewRoot, batch) {
   if (batch.plan.indexerId === "typescript") {
     await fs.promises.writeFile(path.join(viewRoot, "tsconfig.json"), JSON.stringify({
@@ -797,6 +1151,21 @@ async function writeBatchProjectMetadata(root, viewRoot, batch) {
       const source = path.join(root, name);
       if (!await fileExists(source)) continue;
       await fs.promises.copyFile(source, path.join(viewRoot, name));
+    }
+    // Pyright's default excludes every dot-directory (`**/.*`). That turns a
+    // legitimate batch containing only a tracked helper such as
+    // `.github/workflows/release.py` into an empty SCIP file. Pin the isolated
+    // view to its already-sanitized batch manifest whenever a hidden path is
+    // present. A non-empty explicit exclude list prevents scip-python from
+    // restoring its dot-directory default while retaining ordinary generated
+    // dependency exclusions.
+    const hasHiddenPath = batch.paths.some((repoRelPath) => String(repoRelPath)
+      .split("/").some((segment) => segment.startsWith(".") && segment !== "." && segment !== ".."));
+    if (hasHiddenPath) {
+      await fs.promises.writeFile(path.join(viewRoot, "scip-pyrightconfig.json"), JSON.stringify({
+        include: batch.paths,
+        exclude: ["**/node_modules", "**/__pycache__"],
+      }), "utf8");
     }
   }
   // scip-python indexes the isolated project view with its ordinary `index`
@@ -830,6 +1199,27 @@ async function writeBatchSessionManifest(filePath, state) {
 async function notifyFileUnavailable(callback, info) {
   if (typeof callback !== "function") return;
   try { await callback(info); } catch { /* completion notifications are observational */ }
+}
+
+function batchAcknowledgement(callback, file, info) {
+  let acknowledgement;
+  try {
+    acknowledgement = typeof callback === "function"
+      ? Promise.resolve(callback(file, info))
+      : Promise.resolve();
+  } catch (err) {
+    acknowledgement = Promise.reject(err);
+  }
+  // Batches are staged ahead of the bounded downstream lane. Observe a fast
+  // rejection immediately so Node does not report it as unhandled while an
+  // older acknowledgement is still at the head of the queue; awaiting this
+  // same promise later continues to propagate the original failure.
+  return observeBatchAcknowledgement(acknowledgement);
+}
+
+function observeBatchAcknowledgement(acknowledgement) {
+  acknowledgement.catch(() => {});
+  return acknowledgement;
 }
 
 function positiveBatchLimit(value, fallback) {
@@ -1060,7 +1450,7 @@ const SCIP_FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60_000;
 function failureBackoffDecision(meta, { plan, currentHead = null, filesetHash = null, nowMs = Date.now() } = {}) {
   if (String(meta?.status || "").trim().toLowerCase() !== "failed") return null;
   // Changed inputs are new evidence — retry immediately.
-  if (String(meta?.command_args_hash || "") !== computeCommandArgsHash(plan)) return null;
+  if (!commandArgsHashMatches(meta?.command_args_hash, plan)) return null;
   const failedFileset = String(meta?.fileset_hash || "");
   const currentFileset = String(filesetHash || "");
   if (failedFileset && currentFileset && failedFileset !== currentFileset) return null;

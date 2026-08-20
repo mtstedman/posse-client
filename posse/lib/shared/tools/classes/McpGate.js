@@ -68,6 +68,14 @@ function resultText(message = {}) {
   return typeof result === "string" ? result : JSON.stringify(result ?? null);
 }
 
+function resultEnvelope(message = {}) {
+  if (message?.error) {
+    const detail = message.error?.message || JSON.stringify(message.error);
+    throw gateError("POSSE_MCP_GATE_RPC_ERROR", `MCP tool call failed: ${detail}`);
+  }
+  return message?.result ?? null;
+}
+
 /**
  * Immutable role/tool contract attached to one provider agent for its entire
  * lifetime. The replaceable owner-side attachment carries Job identity, never
@@ -355,7 +363,7 @@ export class McpGate {
     return payload?.message || null;
   }
 
-  async callTool(name, args = {}, rpcOptions = {}) {
+  async callToolResult(name, args = {}, rpcOptions = {}) {
     const message = await this.rpc({
       jsonrpc: "2.0",
       id: `agent-gate-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -365,7 +373,12 @@ export class McpGate {
         arguments: args && typeof args === "object" ? args : {},
       },
     }, rpcOptions);
-    return resultText(message);
+    return resultEnvelope(message);
+  }
+
+  async callTool(name, args = {}, rpcOptions = {}) {
+    const result = await this.callToolResult(name, args, rpcOptions);
+    return resultText({ result });
   }
 
   dispose({ reason = "agent_disposed" } = {}) {

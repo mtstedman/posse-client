@@ -55,7 +55,8 @@ const TOOLS_SUITE = [
   // MCP-first mutation/test helpers. Safe read-only checks are also exposed on
   // embedded function transports so OpenAI/Grok do not fall back to bash lint.
   { name: "move_file", mutatesWorktree: true, advertise: ["mcp"] },
-  { name: "copy_file", mutatesWorktree: true, advertise: ["mcp"] },
+  // The deterministic harness may invoke this directly, but agents do not discover it.
+  { name: "copy_file", mutatesWorktree: true, advertise: [] },
   { name: "make_dir", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "run_scoped_checks", mutatesWorktree: false, advertise: ["function", "mcp"] },
   // Deferred/unfinished DB-backed registered-test experiment. Keep schemas and

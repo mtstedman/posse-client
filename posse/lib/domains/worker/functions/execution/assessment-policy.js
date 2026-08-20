@@ -66,6 +66,13 @@ export function assessmentRetryFallbackReads(modelTier = "cheap", retryCount = 0
   return assessorFallbackReads(base + progressiveBonus, modelTier);
 }
 
+export function getAssessorMaxToolCalls() {
+  const raw = getSetting(SETTING_KEYS.ASSESSOR_MAX_TOOL_CALLS);
+  if (raw == null || raw === "") return 12;
+  const parsed = Number.parseInt(String(raw), 10);
+  return Number.isFinite(parsed) ? Math.max(1, parsed) : 12;
+}
+
 function getAssessorParseRetryInputTokensCap() {
   const raw = getSetting(SETTING_KEYS.ASSESSOR_PARSE_RETRY_INPUT_TOKENS_CAP);
   if (raw == null || raw === "") return 150000;
@@ -73,14 +80,32 @@ function getAssessorParseRetryInputTokensCap() {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 150000;
 }
 
-function getAssessorInputTokenSpend(jobId) {
+export function getAssessorInputTokenSpend(jobId) {
   if (jobId == null) return 0;
   const calls = getAgentCalls(jobId);
   return (Array.isArray(calls) ? calls : []).reduce((sum, call) => {
     if (call?.role !== "assessor") return sum;
-    const tokens = Number(call?.input_tokens);
-    return sum + (Number.isFinite(tokens) ? Math.max(0, tokens) : 0);
+    const measured = call?.input_tokens == null ? null : Number(call.input_tokens);
+    const promptChars = Number(call?.prompt_chars);
+    if (Number.isFinite(measured) && (measured > 0 || !(Number.isFinite(promptChars) && promptChars > 0))) {
+      return sum + Math.max(0, measured);
+    }
+    return sum + (Number.isFinite(promptChars) ? Math.max(0, Math.ceil(promptChars / 4)) : 0);
   }, 0);
+}
+
+export function assessorCallBudgetStatus(jobId, attemptId, maxCalls = 4) {
+  const normalizedAttemptId = Number(attemptId);
+  if (!Number.isInteger(normalizedAttemptId) || normalizedAttemptId <= 0) {
+    throw new TypeError("assessorCallBudgetStatus requires a positive attempt ID");
+  }
+  const calls = jobId == null ? [] : getAgentCalls(jobId);
+  const used = (Array.isArray(calls) ? calls : []).filter((call) => (
+    call?.role === "assessor"
+    && Number(call?.attempt_id) === normalizedAttemptId
+  )).length;
+  const cap = Math.max(1, Math.floor(Number(maxCalls) || 4));
+  return { exceeded: used >= cap, used, cap };
 }
 
 export function isAssessorParseRetryBudgetExceeded(jobId) {

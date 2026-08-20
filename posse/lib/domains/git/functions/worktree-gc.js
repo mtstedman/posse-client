@@ -9,11 +9,25 @@
 import fs from "fs";
 import path from "path";
 import { ACTIVE_LEASE_STATUSES, LOCK_HOLDING_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
-import { getWorkItem, listJobsByWorkItem, refreshWorkItemStatus, setMergeState, setWorkItemBranch } from "../../queue/functions/index.js";
+import {
+  clearWaitingLanePreparedAssetProof,
+  getWaitingLanePreparation,
+  getWorkItem,
+  listJobsByWorkItem,
+  poisonWaitingLanePreparation,
+  refreshWorkItemStatus,
+  retireWaitingLanePreparation,
+  setMergeState,
+  setWorkItemBranch,
+} from "../../queue/functions/index.js";
 import { throwIfAborted, isAbortError } from "../../runtime/functions/yield.js";
 import { jobNeedsGitWorktree } from "./policy.js";
 import { contextDir, wiScopeId } from "../../artifacts/functions/index.js";
-import { disposeWorkItemAtlasGraph } from "../../integrations/functions/atlas.js";
+import {
+  disposeWorkItemAtlasGraph,
+  resolveWorkItemAtlasContext,
+} from "../../integrations/functions/atlas.js";
+import { recordWaitingLaneTelemetry } from "../../observability/functions/waiting-lane-telemetry.js";
 import { gitExecAsync } from "./utils.js";
 import { createGcTiming } from "./worktree-internal.js";
 import { worktreeRoot } from "./worktree-path.js";
@@ -24,6 +38,9 @@ import {
 import { safeSnapshotAndRemoveWorktreeAsync } from "./worktree-safe-remove.js";
 import { deleteBranchPreservingTipAsync } from "./worktree-branch-ops.js";
 import { pruneRecoveredWorktreeSnapshotsAsync } from "./worktree-snapshots.js";
+import { removePreparedWorktreeIfSafeAsync } from "./prepared-worktree-recovery.js";
+import { selectWaitingLaneEvictionCandidates } from "../../scheduler/functions/waiting-lane-coordinator.js";
+import { tombstoneWaitingLanePreparationForCleanup } from "./waiting-lane-cleanup.js";
 
 const HOLDING_STATUSES = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
 const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
@@ -41,6 +58,85 @@ function workItemHoldsBench(workItemId) {
 function workItemHasActiveLease(workItemId) {
   const jobs = listJobsByWorkItem(workItemId);
   return jobs.some((job) => jobNeedsGitWorktree(job) && ACTIVE_LEASE_STATUS_SET.has(job.status));
+}
+
+async function preparedWaitingLaneGcAction(projectDir, wi, wtDir, preparation, onMsg, { signal = null } = {}) {
+  if (!preparation) return { handled: false, removed: false, preserved: false };
+  if (preparation.state === "poisoned") {
+    onMsg(`GC: preserving poisoned prepared worktree for WI#${preparation.work_item_id}`);
+    return { handled: true, removed: false, preserved: true };
+  }
+  if (preparation.state === "active") {
+    const transition = retireWaitingLanePreparation({
+      workItemId: preparation.work_item_id,
+      expectedVersion: preparation.version,
+      reason: "gc_terminal_active_cleanup",
+    });
+    return transition.preparation?.state === "retired"
+      ? { handled: false, removed: false, preserved: false }
+      : { handled: true, removed: false, preserved: false };
+  }
+  if (wi?.branch_name) {
+    const tombstone = await tombstoneWaitingLanePreparationForCleanup(preparation, { signal });
+    if (!tombstone.ready) {
+      onMsg(`GC: deferred branch-backed waiting-lane cleanup for WI#${preparation.work_item_id}; child settlement is incomplete`);
+      return { handled: true, removed: false, preserved: false };
+    }
+    return { handled: false, removed: false, preserved: false };
+  }
+  const wiTerminal = !!wi && TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status);
+  if (preparation.state !== "retired" && !wiTerminal) {
+    onMsg(`GC: holding prepared waiting-lane worktree for WI#${preparation.work_item_id} (state=${preparation.state})`);
+    return { handled: true, removed: false, preserved: false };
+  }
+  const tombstone = await tombstoneWaitingLanePreparationForCleanup(preparation, { signal });
+  if (!tombstone.ready) {
+    onMsg(`GC: deferred prepared waiting-lane cleanup for WI#${preparation.work_item_id}; child settlement is incomplete`);
+    return { handled: true, removed: false, preserved: false };
+  }
+  preparation = tombstone.preparation;
+  const root = path.resolve(preparation.worktree_root || wtDir);
+  if (!preparation.ownership_record_id) {
+    if (fs.existsSync(root)) {
+      poisonWaitingLanePreparation({
+        workItemId: preparation.work_item_id,
+        expectedVersion: preparation.version,
+        reason: "gc_missing_prepared_ownership_record",
+      });
+      onMsg(`GC: preserving prepared worktree for WI#${preparation.work_item_id}; ownership record is missing`);
+      return { handled: true, removed: false, preserved: true };
+    }
+    clearWaitingLanePreparedAssetProof({
+      workItemId: preparation.work_item_id,
+      expectedVersion: preparation.version,
+    });
+    return { handled: true, removed: false, preserved: false };
+  }
+  const removal = await removePreparedWorktreeIfSafeAsync({
+    projectDir,
+    worktreeRoot: root,
+    preparationId: preparation.ownership_record_id,
+    expectedOid: preparation.applied_git_oid || preparation.desired_git_oid,
+    signal,
+  });
+  if (!removal.removed && removal.preserve) {
+    poisonWaitingLanePreparation({
+      workItemId: preparation.work_item_id,
+      expectedVersion: preparation.version,
+      reason: `gc_preserved:${String(removal.reason || "inspection_mismatch").slice(0, 800)}`,
+    });
+    onMsg(`GC: preserving unexpected prepared worktree state for WI#${preparation.work_item_id} (${removal.reason})`);
+    return { handled: true, removed: false, preserved: true };
+  }
+  if (!fs.existsSync(root)) {
+    clearWaitingLanePreparedAssetProof({
+      workItemId: preparation.work_item_id,
+      expectedVersion: preparation.version,
+    });
+  }
+  disposeTerminalWorkItemAtlasGraph(projectDir, preparation.work_item_id, root);
+  if (removal.removed) onMsg(`GC: removed durably selected prepared worktree for WI#${preparation.work_item_id}`);
+  return { handled: true, removed: removal.removed, preserved: false };
 }
 
 function clearWorkItemBranchState(wi, { clearMergeState = false } = {}) {
@@ -171,6 +267,111 @@ function gcNowMs(nowFn) {
   return Date.now();
 }
 
+function measureWaitingLaneDiskBytes(targets, maxEntries = 100_000) {
+  const pending = [...new Set(targets.filter(Boolean).map((target) => path.resolve(target)))];
+  let bytes = 0;
+  let entries = 0;
+  let truncated = false;
+  while (pending.length > 0) {
+    if (entries >= maxEntries) {
+      truncated = true;
+      break;
+    }
+    const target = pending.pop();
+    let stat;
+    try { stat = fs.lstatSync(target); } catch { continue; }
+    entries++;
+    bytes += Math.max(0, Number(stat.size) || 0);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+    let children = [];
+    try { children = fs.readdirSync(target); } catch { continue; }
+    for (const child of children) pending.push(path.join(target, child));
+  }
+  return { bytes, entries, truncated };
+}
+
+/**
+ * Apply durable cap/TTL selection and physically retire only the exact rows
+ * selected by that CAS. Ordinary worktree GC is intentionally excluded so a
+ * scheduler cadence can run waiting-lane maintenance independently.
+ */
+export async function evictWaitingLanePreparationsAsync(projectDir, onMsg = () => {}, {
+  signal = null,
+  timingNow = null,
+} = {}) {
+  let removed = 0;
+  let preserved = 0;
+  const selectedPreparationIds = new Set();
+  let evictionCandidates = [];
+  try {
+    evictionCandidates = selectWaitingLaneEvictionCandidates({ nowMs: gcNowMs(timingNow) });
+  } catch (error) {
+    onMsg(`GC: waiting-lane eviction selection unavailable (${error?.message || error})`);
+  }
+  for (const candidate of evictionCandidates) {
+    throwIfAborted(signal);
+    const transition = retireWaitingLanePreparation({
+      workItemId: candidate.workItemId,
+      expectedVersion: candidate.expectedVersion,
+      reason: candidate.reason,
+    });
+    if (transition.outcome !== "retired" || transition.preparation?.state !== "retired") {
+      onMsg(`GC: skipped waiting-lane eviction for WI#${candidate.workItemId}; state CAS ${transition.outcome}`);
+      continue;
+    }
+    const preparation = transition.preparation;
+    onMsg(`GC: durably selected waiting-lane WI#${candidate.workItemId} for ${candidate.reason}`);
+    let wi = null;
+    try { wi = getWorkItem(candidate.workItemId); } catch { /* row may already be gone */ }
+    let warmedViewDbPath = null;
+    try {
+      warmedViewDbPath = resolveWorkItemAtlasContext({
+        projectDir,
+        worktreePath: preparation.worktree_root,
+        workItemId: candidate.workItemId,
+      })?.warmedViewDbPath || null;
+    } catch { /* disk telemetry is observational */ }
+    const worktreeDisk = measureWaitingLaneDiskBytes([preparation.worktree_root]);
+    const viewDisk = measureWaitingLaneDiskBytes([
+      warmedViewDbPath,
+      warmedViewDbPath ? `${warmedViewDbPath}-wal` : null,
+      warmedViewDbPath ? `${warmedViewDbPath}-shm` : null,
+    ]);
+    try {
+      const action = await preparedWaitingLaneGcAction(
+        projectDir,
+        wi,
+        preparation.worktree_root,
+        preparation,
+        onMsg,
+        { signal },
+      );
+      selectedPreparationIds.add(Number(candidate.workItemId));
+      if (action.removed) removed++;
+      if (action.preserved) preserved++;
+      recordWaitingLaneTelemetry("eviction_finished", {
+        preparation,
+        workItemId: candidate.workItemId,
+        outcome: action.preserved ? "preserved" : (action.removed ? "removed" : "retired"),
+        reason: candidate.reason,
+        worktreeDiskBytes: worktreeDisk.bytes,
+        viewDiskBytes: viewDisk.bytes,
+        diskMeasurementTruncated: worktreeDisk.truncated || viewDisk.truncated,
+        counts: {
+          selected: 1,
+          removed: action.removed ? 1 : 0,
+          preserved: action.preserved ? 1 : 0,
+        },
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      selectedPreparationIds.add(Number(candidate.workItemId));
+      onMsg(`GC: failed durably selected waiting-lane eviction for WI#${candidate.workItemId}: ${error?.message || error}`);
+    }
+  }
+  return { removed, preserved, selectedPreparationIds };
+}
+
 export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
   signal = null,
   timingSlowMs = null,
@@ -179,6 +380,9 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
 } = {}) {
   const timing = createGcTiming(onMsg, { slowMs: timingSlowMs, now: timingNow });
   try {
+    let removed = 0;
+    let cleaned = 0;
+    let preserved = 0;
     const projectKey = recoverySnapshotPruneProjectKey(projectDir);
     const minIntervalMs = Math.max(0, Number(recoveryPruneMinIntervalMs) || 0);
     const lastPrunedAt = lastRecoverySnapshotPruneAtByProject.get(projectKey) || 0;
@@ -192,8 +396,18 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
     }
     throwIfAborted(signal);
 
+    const eviction = await evictWaitingLanePreparationsAsync(projectDir, onMsg, { signal, timingNow });
+    removed += eviction.removed;
+    preserved += eviction.preserved;
+    const selectedPreparationIds = eviction.selectedPreparationIds;
+
     const root = worktreeRoot(projectDir, { disabled: true });
-    if (!fs.existsSync(root)) return;
+    if (!fs.existsSync(root)) {
+      if (removed > 0 || preserved > 0) {
+        onMsg(`GC: cleaned up ${removed} leftover worktree(s), reset 0 held dirty worktree(s), preserved ${preserved} snapshot(s)`);
+      }
+      return;
+    }
 
     let entries;
     try {
@@ -201,10 +415,6 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
     } catch {
       return;
     }
-
-    let removed = 0;
-    let cleaned = 0;
-    let preserved = 0;
 
     for (const entry of entries) {
       throwIfAborted(signal);
@@ -217,6 +427,7 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
       if (!match) continue;
 
       const wiId = parseInt(match[1], 10);
+      if (selectedPreparationIds.has(wiId)) continue;
       let wi;
       try {
         wi = await timing.step(`WI#${wiId} status lookup`, () => {
@@ -225,6 +436,35 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
         });
       } catch {
         continue;
+      }
+
+      let waitingPreparation = null;
+      try {
+        waitingPreparation = getWaitingLanePreparation(wiId);
+      } catch {
+        waitingPreparation = null;
+      }
+      if (waitingPreparation) {
+        let preparedAction;
+        try {
+          preparedAction = await preparedWaitingLaneGcAction(
+            projectDir,
+            wi,
+            wtDir,
+            waitingPreparation,
+            onMsg,
+            { signal },
+          );
+        } catch (err) {
+          if (isAbortError(err)) throw err;
+          onMsg(`GC: failed prepared waiting-lane inspection for WI#${wiId}: ${err?.message || err}`);
+          continue;
+        }
+        if (preparedAction.handled) {
+          if (preparedAction.removed) removed++;
+          if (preparedAction.preserved) preserved++;
+          continue;
+        }
       }
 
       if (wi && TERMINAL_WORK_ITEM_STATUS_SET.has(wi.status)) {

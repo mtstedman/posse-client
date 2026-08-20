@@ -12,6 +12,7 @@ import { ViewBuilder } from "../../atlas/classes/v2/ViewBuilder.js";
 import { sharedParserAdapter } from "../../atlas/classes/v2/ParserAdapter.js";
 import { ledgerDbPath, mainViewPath, warmedViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { ingestScipFile } from "../../atlas/functions/v2/scip/ingester.js";
+import { createAtlasPortableSnapshot } from "../../atlas/functions/v2/portable-snapshot.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 
 /**
@@ -22,6 +23,7 @@ import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
  * @property {unknown} [ledger]
  * @property {Record<string, unknown>} [config]
  * @property {(event: Record<string, unknown>) => void} [onProgress]
+ * @property {AbortSignal | null} [signal]
  */
 
 function resolveRepoRoot(repoRoot) {
@@ -132,8 +134,11 @@ export async function parse(opts) {
   const { repoRoot, branch, ledger, engine, closeLedger } = await openEngine(opts);
   try {
     const workItemId = opts.workItemId == null ? null : Number(opts.workItemId);
+    const purpose = workItemId != null && Number.isFinite(workItemId)
+      ? "wi"
+      : (paths.length > 0 ? "main-incremental" : "main-full");
     const warmResult = await engine.handleWarmJob({
-      purpose: workItemId != null && Number.isFinite(workItemId) ? "wi" : (paths.length > 0 ? "main-incremental" : "main-full"),
+      purpose,
       branch,
       paths,
       work_item_id: workItemId,
@@ -229,11 +234,12 @@ export async function ingestScip(opts) {
 export async function merge(opts) {
   const { repoRoot, branch, ledger, engine, closeLedger } = await openEngine(opts);
   try {
+    const ontoBranch = opts.ontoBranch || await defaultBranchFor(repoRoot, null);
     const warmResult = await engine.handleWarmJob({
       purpose: "main-merge",
       branch,
       work_item_id: opts.workItemId == null ? null : Number(opts.workItemId),
-      onto_branch: opts.ontoBranch || await defaultBranchFor(repoRoot, null),
+      onto_branch: ontoBranch,
       trigger_event: `system.atlas.merge:${opts.reason || "unspecified"}`,
       out_view_path: mainViewPath(repoRoot),
     });
@@ -270,6 +276,38 @@ export async function onnxRefresh(opts) {
     wait: opts.wait === true,
     queued: true,
     status: "background_pending",
+  };
+}
+
+/**
+ * Materialize a portable pre-warm snapshot. Archive builders must use these
+ * standalone files instead of copying live WAL-mode database pathnames.
+ *
+ * @param {AtlasSystemBase & { destinationRoot: string, lockWaitMs?: number }} opts
+ */
+export async function snapshot(opts) {
+  const repoRoot = resolveRepoRoot(opts.repoRoot);
+  const destinationRoot = path.resolve(String(opts.destinationRoot || ""));
+  if (!opts.destinationRoot) throw new TypeError("system.atlas.snapshot: destinationRoot is required");
+  const branch = await defaultBranchFor(repoRoot, opts.branch);
+  const result = await createAtlasPortableSnapshot({
+    repoRoot,
+    targetBranch: branch,
+    ledgerPath: ledgerDbPath(repoRoot),
+    viewPath: mainViewPath(repoRoot),
+    destinationLedgerPath: ledgerDbPath(destinationRoot),
+    destinationViewPath: mainViewPath(destinationRoot),
+    destinationRepoRoot: destinationRoot,
+    signal: opts.signal,
+    lockWaitMs: opts.lockWaitMs,
+  });
+  return {
+    ...result,
+    operation: "snapshot",
+    reason: String(opts.reason || "unspecified"),
+    repoRoot,
+    destinationRoot,
+    branch,
   };
 }
 

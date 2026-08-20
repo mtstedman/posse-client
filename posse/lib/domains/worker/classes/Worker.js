@@ -131,6 +131,9 @@ import {
   setUpWorktreeForJob as setUpWorktreeForJobFromModule,
 } from "../functions/helpers/worktree-lifecycle.js";
 import {
+  gateWaitingLanePlannerReadiness as gateWaitingLanePlannerReadinessFromModule,
+} from "../functions/helpers/waiting-lane-planner-readiness.js";
+import {
   extractResearcherQuestions as extractResearcherQuestionsFromModule,
   spawnFileRequestFollowUp as spawnFileRequestFollowUpFromModule,
   spawnPlanAfterResearch as spawnPlanAfterResearchFromModule,
@@ -1378,6 +1381,10 @@ export class Worker {
       return { ok: false, degraded: true, halted: true, requireAtlas: true, gate };
     }
     return { ok: true, degraded: true, gate };
+  }
+
+  async _gateWaitingLanePlannerReadiness(job, leaseToken, { signal = null } = {}) {
+    return gateWaitingLanePlannerReadinessFromModule(this, job, leaseToken, { signal });
   }
 
   _retryOrFail(...args) { return retryOrFailFromModule(this, ...args); }

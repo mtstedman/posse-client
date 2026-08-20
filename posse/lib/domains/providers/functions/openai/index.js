@@ -322,6 +322,7 @@ export async function callProvider(promptText, {
   recyclingMode = "fresh",
   priorSessionHandle = null,
   recordFinalPrompt = null, // (finalPrompt, { systemPrompt?, systemPromptFiles? }) => void
+  onUsageSegment = null,
   jobId = null,
   workItemId = null,
   attemptId = null,
@@ -530,6 +531,8 @@ export async function callProvider(promptText, {
   let latestResponseId = null;
   let outputTruncated = false;
   let outputLimitReason = null;
+  let usageRequestOrdinal = 0;
+  const responseDurations = new WeakMap();
 
   // -- Stall detection --
   // Role-aware multiplier matching Claude provider behavior.
@@ -547,7 +550,16 @@ export async function callProvider(promptText, {
     emit,
   });
 
-  const addUsage = (usage) => {
+  const createMeasuredResponse = async (...args) => {
+    const requestStartedAt = Date.now();
+    const response = await createResponse(...args);
+    if (response && typeof response === "object") {
+      responseDurations.set(response, Date.now() - requestStartedAt);
+    }
+    return response;
+  };
+
+  const addUsage = (usage, response = null) => {
     if (!usage) return;
     const normalized = normalizeProviderUsage("openai", usage);
     const inputTokens = normalized.inputTokens ?? 0;
@@ -556,6 +568,21 @@ export async function callProvider(promptText, {
     totalCachedInputTokens += normalized.cachedInputTokens ?? 0;
     totalReasoningOutputTokens += normalized.reasoningOutputTokens ?? 0;
     maxSingleTurnInputTokens = Math.max(maxSingleTurnInputTokens, inputTokens);
+    try {
+      onUsageSegment?.({
+        requestOrdinal: ++usageRequestOrdinal,
+        provider: "openai",
+        modelName: modelToUse,
+        inputTokens,
+        cachedInputTokens: normalized.cachedInputTokens ?? 0,
+        cacheCreationInputTokens: normalized.cacheCreationInputTokens ?? 0,
+        outputTokens: normalized.outputTokens ?? 0,
+        requestContextInputTokens: inputTokens,
+        durationMs: response ? responseDurations.get(response) ?? null : null,
+        usageSource: "live",
+        precision: "exact",
+      });
+    } catch { /* accounting persistence cannot break provider execution */ }
   };
 
   const throwIfOutputLimited = (response, phase) => {
@@ -601,11 +628,11 @@ export async function callProvider(promptText, {
 
     emit(`${C.dim}calling ${modelToUse}...${C.reset}`);
 
-    let response = await createResponse(createOpts, priorSessionHandle ? "resume call" : "initial call");
+    let response = await createMeasuredResponse(createOpts, priorSessionHandle ? "resume call" : "initial call");
     latestResponseId = response.id || latestResponseId;
 
     // Track tokens
-    addUsage(response.usage);
+    addUsage(response.usage, response);
 
     // -- Tool-use conversation loop (bounded) --
     const THROTTLE_MS = 200; // minimum delay between API calls to avoid rate limits
@@ -657,9 +684,9 @@ export async function callProvider(promptText, {
         if (isReasoningModel) finalOpts.reasoning = { effort };
 
         await abortableThrottle(THROTTLE_MS, abortSignal);
-        const finalResponse = await createResponse(finalOpts, "final answer");
+        const finalResponse = await createMeasuredResponse(finalOpts, "final answer");
         latestResponseId = finalResponse.id || latestResponseId;
-        addUsage(finalResponse.usage);
+        addUsage(finalResponse.usage, finalResponse);
         const finalText = finalResponse.output_text || "";
         if (finalText) allText += (allText ? "\n" : "") + finalText;
         throwIfOutputLimited(finalResponse, "forced final answer");
@@ -689,9 +716,9 @@ export async function callProvider(promptText, {
         if (isReasoningModel) finalOpts.reasoning = { effort };
 
         await abortableThrottle(THROTTLE_MS, abortSignal);
-        const finalResponse = await createResponse(finalOpts, "final answer");
+        const finalResponse = await createMeasuredResponse(finalOpts, "final answer");
         latestResponseId = finalResponse.id || latestResponseId;
-        addUsage(finalResponse.usage);
+        addUsage(finalResponse.usage, finalResponse);
         const finalText = finalResponse.output_text || "";
         if (finalText) allText += (allText ? "\n" : "") + finalText;
         throwIfOutputLimited(finalResponse, "forced final answer");
@@ -776,11 +803,11 @@ export async function callProvider(promptText, {
         nextOpts.reasoning = { effort };
       }
 
-      response = await createResponse(nextOpts, `turn ${turnCount}`);
+      response = await createMeasuredResponse(nextOpts, `turn ${turnCount}`);
       latestResponseId = response.id || latestResponseId;
 
       // Track tokens
-      addUsage(response.usage);
+      addUsage(response.usage, response);
     }
   } catch (err) {
     const durationMs = Date.now() - start;

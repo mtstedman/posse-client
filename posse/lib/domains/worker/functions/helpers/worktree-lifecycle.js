@@ -7,15 +7,20 @@ import fs from "fs";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { slugify } from "../../../../shared/format/functions/slug.js";
+import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { cleanupArtifactDirs, cleanupArtifactDirsAsync, isArtifactMode, contextDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
 import {
+  clearWaitingLanePreparedAssetProof,
   completeAttempt,
+  getWaitingLanePreparation,
   getWorkItem,
   incrementAndCreateAttempt,
   logEvent,
   setJobError,
   setWorkItemBranch,
+  poisonWaitingLanePreparation,
+  retireWaitingLanePreparation,
   storeArtifact,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
@@ -71,6 +76,8 @@ import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
 import { withBranchLockAsync } from "../../../git/functions/worktree-locks.js";
+import { removePreparedWorktreeIfSafeAsync } from "../../../git/functions/prepared-worktree-recovery.js";
+import { tombstoneWaitingLanePreparationForCleanup } from "../../../git/functions/waiting-lane-cleanup.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import {
   clearActiveWorktreeSentinel,
@@ -97,6 +104,7 @@ import {
   transientSetupRetryCountFromPayload,
 } from "./worktree-setup-policy.js";
 import { pendingCrossWiFileSyncs } from "./cross-wi-sync.js";
+import { tryActivateWaitingLaneForJobAsync } from "./waiting-lane-activation.js";
 
 // Re-exported for external importers (Worker.js, tests) that previously
 // imported these sentinel helpers from this module before the extraction into
@@ -670,7 +678,67 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       return true;
     };
 
-    if (job._worktreePath) {
+    const waitingLaneActivation = !job._worktreePath && !wi.branch_name
+      ? await withPhase("waiting_lane_activation", prepTrace, () => tryActivateWaitingLaneForJobAsync({
+          worker,
+          job,
+          wi,
+          branchName,
+          worktreeRoot: wtDir,
+          signal,
+        }))
+      : null;
+    if (waitingLaneActivation) {
+      const activationPhase = [...(prepTrace?.phases || [])]
+        .reverse()
+        .find((phase) => phase?.phase === "waiting_lane_activation");
+      const mountSource = waitingLaneActivation.activated
+        ? (waitingLaneActivation.atlas_ready ? "prepared_atlas" : "prepared_git")
+        : (waitingLaneActivation.fallback ? "ordinary_fallback" : "hard_stop");
+      const activationWaitMs = Number(activationPhase?.duration_ms) || 0;
+      recordWaitingLaneTelemetry("activation_finished", {
+        workItemId: wi.id,
+        jobId: job.id,
+        outcome: waitingLaneActivation.activated
+          ? "succeeded"
+          : (waitingLaneActivation.poisoned
+              ? "poisoned"
+              : (waitingLaneActivation.deferred ? "deferred" : "fallback")),
+        reason: waitingLaneActivation.reason,
+        mountSource,
+        durationMs: activationWaitMs,
+        activationWaitMs,
+        // A failed speculative lookup is directly additive to ordinary setup.
+        // Successful reuse is compared against ordinary worktree_add traces in
+        // aggregate; no counterfactual saving is invented per job.
+        criticalPathAddedMs: waitingLaneActivation.fallback ? activationWaitMs : 0,
+      });
+    }
+    if (waitingLaneActivation?.poisoned) {
+      const error = new Error(
+        `Prepared waiting-lane worktree is poisoned and was preserved at ${waitingLaneActivation.preserve_path || wtDir}`,
+      );
+      error.code = "WORKTREE_PREPARED_POISONED";
+      throw error;
+    }
+    if (waitingLaneActivation?.deferred) {
+      const error = new Error("Prepared waiting-lane child is still settling; dev activation will retry");
+      error.code = "WORKTREE_PREPARATION_BUSY";
+      throw error;
+    }
+    if (waitingLaneActivation?.activated) {
+      wtPath = waitingLaneActivation.wtPath;
+      branchName = waitingLaneActivation.branchName;
+      job._waitingLaneActivated = true;
+      job._waitingLaneAtlasJoined = waitingLaneActivation.atlas_ready === true;
+      job._waitingLaneWorktreeRoot = waitingLaneActivation.worktreeRoot;
+      job._activeWorktreeSentinel = waitingLaneActivation.sentinelPath || null;
+      if (waitingLaneActivation.atlas_context) {
+        job._atlasConfig = waitingLaneActivation.atlas_context.config || null;
+        job._atlasGraphDbPath = waitingLaneActivation.atlas_context.graphDbPath || null;
+      }
+      worker.emit(job.id, `${C.dim}[system] WI#${wi.id} activated prepared worktree ${branchName}${C.reset}`);
+    } else if (job._worktreePath) {
       wtPath = await withPhase("worktree_add", prepTrace, async () => {
         const configured = await configureWorktreeScopeAsync(job._worktreePath, worker.projectDir, { signal });
         try {
@@ -1009,8 +1077,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
 
     job._worktreePath = wtPath;
     await withPhase("sentinel_write", prepTrace, async () => {
+      if (job._activeWorktreeSentinel) return;
       try {
-        job._activeWorktreeSentinel = writeActiveWorktreeSentinel(wtPath, {
+        job._activeWorktreeSentinel = writeActiveWorktreeSentinel(job._waitingLaneWorktreeRoot || wtPath, {
           pid: process.pid,
           jobId: job.id ?? null,
           wiId: wi.id,
@@ -1023,6 +1092,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
 
     await yieldNow({ signal });
     await withPhase("atlas_join", prepTrace, async () => {
+      if (job._waitingLaneAtlasJoined) {
+        worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} prepared graph mounted and prefetched${C.reset}`);
+        return;
+      }
       try {
         if (await isMergeInProgressAsync(wtPath, { signal })) {
           worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
@@ -1080,7 +1153,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     });
 
     finalizePrepTrace(prepTrace, { ok: true });
-    if (isAtlasV2EmissionEnabled()) {
+    if (isAtlasV2EmissionEnabled() && !job._waitingLaneActivated) {
       emitAtlasV2DevLeased({
         payload: {
           wi_id: Number(wi.id),
@@ -1105,6 +1178,24 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       }
       worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
       return { ok: false, wtPath: null, branchName: null, sentinelPath: job._activeWorktreeSentinel || null };
+    }
+    if (gitErr?.code === "WORKTREE_PREPARATION_BUSY") {
+      const readyAt = new Date(Date.now() + 1_000).toISOString();
+      worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} ${gitErr.message}${C.reset}`);
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+      return { ok: false, wtPath: null, branchName: null, sentinelPath: null };
+    }
+    if (gitErr?.code === "WORKTREE_PREPARED_POISONED") {
+      worker.emit(job.id, `${C.red}[system] WI#${job.work_item_id} ${gitErr.message}${C.reset}`);
+      setJobError(job.id, gitErr.message);
+      storeArtifact({
+        job_id: job.id,
+        artifact_type: "log",
+        content_long: gitErr.message,
+      });
+      recordWorktreeSetupFailureAttempt(job, leaseToken, gitErr.message);
+      worker._retryOrFail(job, leaseToken, gitErr.message);
+      return { ok: false, wtPath: null, branchName: null, sentinelPath: null };
     }
     const lockTimeout = worktreeLockTimeoutInfo(gitErr);
     if (lockTimeout.timeout) {
@@ -1323,6 +1414,97 @@ function atlasCleanupDisposition(wi) {
   return "purged";
 }
 
+async function cleanupTerminalWaitingLanePreparation(worker, wi, wtDir, { signal = null } = {}) {
+  let preparation = getWaitingLanePreparation(wi.id);
+  if (!preparation) return { handled: false, preserved: false };
+  if (preparation.state === "poisoned") {
+    logTerminalCleanupFailure(
+      worker,
+      wi,
+      preparation.worktree_root || wtDir,
+      "preserved poisoned prepared worktree during terminal cleanup",
+      { waiting_lane_state: preparation.state },
+    );
+    return { handled: true, preserved: true };
+  }
+  // Once attached, the semantic branch/worktree is ordinary active state and
+  // the established snapshot-aware terminal cleanup remains authoritative.
+  if (preparation.state === "active") {
+    retireWaitingLanePreparation({
+      workItemId: wi.id,
+      expectedVersion: preparation.version,
+      reason: "terminal_active_cleanup",
+    });
+    return { handled: false, preserved: false };
+  }
+  if (wi.branch_name) {
+    const tombstone = await tombstoneWaitingLanePreparationForCleanup(preparation, { signal });
+    if (!tombstone.ready) {
+      return { handled: true, preserved: false };
+    }
+    return { handled: false, preserved: false };
+  }
+  const tombstone = await tombstoneWaitingLanePreparationForCleanup(preparation, { signal });
+  if (!tombstone.ready) {
+    logTerminalCleanupFailure(
+      worker,
+      wi,
+      preparation.worktree_root || wtDir,
+      "deferred prepared worktree cleanup until preparation children settle",
+      { waiting_lane_state: tombstone.preparation?.state || preparation.state },
+    );
+    return { handled: true, preserved: false };
+  }
+  preparation = tombstone.preparation;
+  const preparedRoot = preparation.worktree_root
+    ? path.resolve(preparation.worktree_root)
+    : path.resolve(wtDir);
+  if (!preparation.ownership_record_id) {
+    if (fs.existsSync(preparedRoot)) {
+      poisonWaitingLanePreparation({
+        workItemId: wi.id,
+        expectedVersion: preparation.version,
+        reason: "terminal_cleanup_missing_ownership_record",
+      });
+      return { handled: true, preserved: true };
+    }
+    clearWaitingLanePreparedAssetProof({
+      workItemId: wi.id,
+      expectedVersion: preparation.version,
+    });
+    return { handled: true, preserved: false };
+  }
+  const removal = await removePreparedWorktreeIfSafeAsync({
+    projectDir: worker.projectDir,
+    worktreeRoot: preparedRoot,
+    preparationId: preparation.ownership_record_id,
+    expectedOid: preparation.applied_git_oid || preparation.desired_git_oid,
+    signal,
+  });
+  if (!removal.removed && removal.preserve) {
+    poisonWaitingLanePreparation({
+      workItemId: wi.id,
+      expectedVersion: preparation.version,
+      reason: `terminal_cleanup_preserved:${String(removal.reason || "inspection_mismatch").slice(0, 800)}`,
+    });
+    logTerminalCleanupFailure(
+      worker,
+      wi,
+      preparedRoot,
+      "preserved unexpected prepared worktree state during terminal cleanup",
+      { reason: removal.reason },
+    );
+    return { handled: true, preserved: true };
+  }
+  if (!fs.existsSync(preparedRoot)) {
+    clearWaitingLanePreparedAssetProof({
+      workItemId: wi.id,
+      expectedVersion: preparation.version,
+    });
+  }
+  return { handled: true, preserved: false };
+}
+
 
 export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = null } = {}) {
   try {
@@ -1338,6 +1520,8 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
 
     const wtDir = await worktreePathAsync(worker.projectDir, wi.id, wi.title, { signal });
     if (deferTerminalCleanupIfActiveWork(wi, wtDir)) return;
+    const preparedCleanup = await cleanupTerminalWaitingLanePreparation(worker, wi, wtDir, { signal });
+    if (preparedCleanup.preserved) return;
     let atlasDisposed = false;
     const disposeAtlas = () => {
       if (atlasDisposed) return;
@@ -1356,7 +1540,7 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
     } catch {
       wtExists = false;
     }
-    if (wtExists) {
+    if (wtExists && !preparedCleanup.handled) {
       disposeAtlas();
       const cleanupResult = await safeSnapshotAndRemoveWorktreeAsync(wtDir, worker.projectDir, {
         reason: "terminal-worktree-cleanup",
@@ -1408,7 +1592,19 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
           });
         },
       });
-      if (cleanupResult.skipped) return;
+      if (cleanupResult.skipped || (cleanupResult.existed && !cleanupResult.removed)) return;
+    }
+
+    if (!fs.existsSync(wtDir)) {
+      const terminalPreparation = getWaitingLanePreparation(wi.id);
+      if (terminalPreparation?.state === "retired"
+        && (!terminalPreparation.worktree_root
+          || path.resolve(terminalPreparation.worktree_root) === path.resolve(wtDir))) {
+        clearWaitingLanePreparedAssetProof({
+          workItemId: wi.id,
+          expectedVersion: terminalPreparation.version,
+        });
+      }
     }
 
     disposeAtlas();

@@ -32,6 +32,9 @@ import {
   runAtlasWarmJob as runAtlasWarmJobFromModule,
 } from "../../functions/execution/atlas-warm-job.js";
 import {
+  runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule,
+} from "../../functions/execution/waiting-lane-prepare-job.js";
+import {
   setUpWorktreeForJob as setUpWorktreeForJobFromModule,
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
 } from "../../functions/helpers/worktree-lifecycle.js";
@@ -131,6 +134,16 @@ export class WorkerExecutionCoordinator {
       });
       if (!atlasFreshnessGate.ok) return;
 
+      // Research starts waiting-lane preparation speculatively.  Planning is
+      // the first consumer boundary: join only a current, physically verified
+      // detached checkout, otherwise requeue without creating an attempt.
+      const waitingLanePlannerGate = await worker._gateWaitingLanePlannerReadiness(
+        job,
+        leaseToken,
+        { signal: executeAbortController?.signal || null },
+      );
+      if (!waitingLanePlannerGate.ok) return;
+
       // -- Git worktree setup (mutating code-mode jobs only) --
       let branchName = null;
       const setup = await setUpWorktreeForJobFromModule(worker, job, leaseToken, {
@@ -168,6 +181,15 @@ export class WorkerExecutionCoordinator {
       // -- Short-circuit: promote is deterministic - no provider needed --
       if (job.job_type === "promote") {
         await runPromoteJobFromModule(worker, job, wrappedJob, { leaseToken });
+        return;
+      }
+
+      // -- Short-circuit: waiting_lane_prepare is deterministic - no provider needed --
+      if (job.job_type === "waiting_lane_prepare") {
+        await runWaitingLanePreparationJobFromModule(worker, job, wrappedJob, {
+          leaseToken,
+          abortSignal: executeAbortController?.signal || null,
+        });
         return;
       }
 

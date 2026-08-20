@@ -21,6 +21,32 @@ const DEFAULT_PATH_PATTERNS = [
 ];
 const HASH_NAMED_BUNDLE_RE = /(^|[\\/])(?:dist|bundle)-([A-Za-z0-9_]{6,})\.(js|mjs|cjs)$/i;
 
+// Checked-in golden compiler output is source-shaped but is not source. These
+// files commonly concatenate the original fixture, emitted JavaScript, and
+// declaration output into one parse unit, producing duplicate symbols and
+// synthetic helper noise. Keep this deliberately narrower than a generic
+// test/fixture exclusion: ordinary tests remain useful ATLAS evidence.
+const GENERATED_GOLDEN_SOURCE_PATHS = [
+  /(^|[\\/])tests?[\\/]baselines?[\\/]reference(?:[\\/]|$)/i,
+];
+
+// Folded into the view build fingerprint so an installation that gains a new
+// source-artifact policy cannot keep serving an exact-OID view built under the
+// previous inclusion rules.
+export const ATLAS_SOURCE_INDEX_POLICY_VERSION = "source-index-v2-generated-golden";
+
+/**
+ * True when a tracked, source-extension file is actually checked-in generated
+ * golden output. This is an indexing disposition, not a retrieval prior.
+ *
+ * @param {string} repoRelPath
+ * @returns {boolean}
+ */
+export function isGeneratedSourceArtifactPath(repoRelPath) {
+  if (typeof repoRelPath !== "string" || repoRelPath.length === 0) return false;
+  return GENERATED_GOLDEN_SOURCE_PATHS.some((pattern) => pattern.test(repoRelPath));
+}
+
 /**
  * Cheap path check — does this filename look like a build output? Runs
  * at directory walk time so we never even stat the file's content.
@@ -88,6 +114,34 @@ export function inspectSampleForMinified(sample, opts = {}) {
  * to characterize line shape without paying full-file read cost.
  */
 export const MINIFIED_SAMPLE_BYTES = 16 * 1024;
+
+/**
+ * Minification checks are a resource guard. Files smaller than the inspection
+ * window are cheaper to parse than to permanently exclude, even when a valid
+ * fixture or declaration contains one unusually long line.
+ *
+ * @param {number} byteSize
+ */
+export function shouldInspectForMinification(byteSize) {
+  return Number.isFinite(Number(byteSize)) && Number(byteSize) >= MINIFIED_SAMPLE_BYTES;
+}
+
+const MINIFIED_CONTENT_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs"]);
+
+/**
+ * The density heuristic models minified JavaScript. Applying it to PHP/TS
+ * templates and declaration fixtures mistakes legitimate generated strings
+ * and type expressions for bundles.
+ *
+ * @param {string} repoRelPath
+ * @param {number} byteSize
+ */
+export function shouldInspectSourceForMinification(repoRelPath, byteSize) {
+  const normalized = String(repoRelPath || "").replace(/\\/gu, "/");
+  const dot = normalized.lastIndexOf(".");
+  const extension = dot >= 0 ? normalized.slice(dot).toLowerCase() : "";
+  return MINIFIED_CONTENT_EXTENSIONS.has(extension) && shouldInspectForMinification(byteSize);
+}
 
 /**
  * Hard ceiling for tree-sitter indexing. Files larger than this are normally

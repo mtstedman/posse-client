@@ -4,7 +4,11 @@
 // Uses better-sqlite3 (synchronous) for simplicity and atomicity.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
-import { MUTATING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
+import {
+  MUTATING_JOB_TYPES,
+  NON_COMPLETION_BLOCKING_JOB_TYPES,
+  ONESHOT_SCOPE_SELECTION_SUBTYPE,
+} from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
@@ -67,7 +71,6 @@ const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
-const NON_COMPLETION_BLOCKING_JOB_TYPES = new Set(["atlas_warm"]);
 const PIPELINE_BOOTSTRAP_JOB_TYPES = new Set(["preflight", "research", "plan"]);
 
 function parseWorkItemMetadataRecord(wi) {
@@ -3391,6 +3394,7 @@ export function clearAll() {
       db.prepare(`DELETE FROM work_item_file_locks`).run();
       db.prepare(`DELETE FROM file_lane_waits`).run();
       db.prepare(`DELETE FROM file_materializations`).run();
+      db.prepare(`DELETE FROM waiting_lane_preparations`).run();
       db.prepare(`DELETE FROM human_gate_outbox`).run();
       db.prepare(`DELETE FROM human_gates`).run();
       db.prepare(`DELETE FROM job_terminal_transitions`).run();

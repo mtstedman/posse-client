@@ -34,6 +34,7 @@ import { isBuiltinCall } from "../resolver/builtins.js";
 import { PHP_STDLIB_FUNCTIONS } from "../resolver/php-stdlib.generated.js";
 import { parseImportModuleRef } from "../resolver/import-context.js";
 import { gitExecSafe } from "../../../../git/functions/utils.js";
+import { readAtlasMainIntakeState } from "../main-intake-state.js";
 
 let indexOperationCounter = 0;
 const DEFAULT_BRANCH_CACHE_TTL_MS = 60_000;
@@ -169,6 +170,21 @@ export async function repoStatus({ view, versionId, params, repoId = "default", 
   const treeCompression = buildTreeCompressionStatus(view);
   const dataQuality = params.detail === "minimal" ? null : await buildDataQuality(view, ledger);
   const memoryStats = ledger ? buildMemoryStats(ledger, repoId) : null;
+  const mainIntakeState = root ? readAtlasMainIntakeState(root) : null;
+  const mainIntake = mainIntakeState ? {
+    attemptId: mainIntakeState.attempt_id,
+    status: mainIntakeState.status,
+    purpose: mainIntakeState.purpose,
+    targetBranch: mainIntakeState.target_branch,
+    gitOid: mainIntakeState.git_oid,
+    sourceProof: mainIntakeState.source_proof,
+    startedAt: mainIntakeState.started_at,
+    lastStartedAt: mainIntakeState.last_started_at,
+    finishedAt: mainIntakeState.finished_at,
+    resumeCount: Number(mainIntakeState.resume_count) || 0,
+    skippedCount: Number(mainIntakeState.result?.skipped?.count) || 0,
+    generation: mainIntakeState.generation || null,
+  } : null;
   /** @type {RepoStatusData} */
   const data = {
     repoId,
@@ -200,6 +216,7 @@ export async function repoStatus({ view, versionId, params, repoId = "default", 
     graphDerivedState,
     treeCompression,
     memoryStats,
+    mainIntake,
     features: {
       memory: policy ? policy.memoryEnabled !== false : true,
       runtime: policy ? policy.runtimeEnabled === true : false,
@@ -212,6 +229,9 @@ export async function repoStatus({ view, versionId, params, repoId = "default", 
   if (embeddingStatus) data.embeddings = embeddingStatus;
   if (!freshness.current) {
     data.diagnostics?.warnings.push("View is behind ledger head; run index.refresh.");
+  }
+  if (mainIntake && mainIntake.status !== "complete") {
+    data.diagnostics?.warnings.push(`Main index intake is ${mainIntake.status}; the next warm will resume or recheck it.`);
   }
   const trueUnresolvedRate = edges.taxonomy && edges.total > 0 ? Number(edges.trueUnresolved || 0) / edges.total : 0;
   if (edges.taxonomy && trueUnresolvedRate > 0.25) {

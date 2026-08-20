@@ -29,6 +29,7 @@ import {
 } from "../../../../catalog/atlas.js";
 import { atlasEmbeddingModelVersion } from "./embeddings/model-version.js";
 import { treeCompressionSnapshotIsValidEmpty } from "./tree-compression.js";
+import { inspectViewMaterialization } from "./view-health.js";
 
 /**
  * @typedef {"ready" | "warming" | "failed" | "stale" | "off"} AtlasLayerStatus
@@ -156,18 +157,28 @@ function inspectViewAndTreesitter(repoRoot) {
         // forever on repos with enough unsupported-language symbols.
         const tags = semanticLanguageTags();
         const placeholders = tags.map(() => "?").join(",");
-        eligibleCandidates = Number(
-          viewDb.prepare(`SELECT COUNT(*) AS c FROM symbols WHERE lang IN (${placeholders})`).get(...tags)?.c,
-        ) || 0;
-        eligibleDocumentationCandidates = Number(
-          viewDb.prepare(`
-            SELECT COUNT(*) AS c FROM symbols
+        // Embeddings are keyed by (content_hash, local_id), not by view row.
+        // The same blob can occur at multiple repository paths, so counting
+        // raw symbol rows makes successful key deduplication look like missing
+        // vectors and traps boot in a futile warm/readiness loop.
+        eligibleCandidates = Number(viewDb.prepare(`
+          SELECT COUNT(*) AS c FROM (
+            SELECT 1 FROM symbols
+            WHERE lang IN (${placeholders})
+            GROUP BY content_hash, local_id
+          )
+        `).get(...tags)?.c) || 0;
+        eligibleDocumentationCandidates = Number(viewDb.prepare(`
+          SELECT COUNT(*) AS c FROM (
+            SELECT 1 FROM symbols
             WHERE lang IN (${placeholders}) AND doc IS NOT NULL AND TRIM(doc) <> ''
-          `).get(...tags)?.c,
-        ) || 0;
+            GROUP BY content_hash, local_id
+          )
+        `).get(...tags)?.c) || 0;
       } catch { /* leave 0 */ }
       const branch = meta.branch || "main";
       const viewSeq = Number(meta.ledger_seq);
+      const materialization = inspectViewMaterialization(viewDb, { treeCompressionMode: "off" });
       let headSeq = null;
       if (ledgerDb && tableExists(ledgerDb, "symbol_deltas")) {
         try {
@@ -175,7 +186,16 @@ function inspectViewAndTreesitter(repoRoot) {
           headSeq = row && row.s != null ? Number(row.s) : 0;
         } catch { /* leave null */ }
       }
-      if (!Number.isFinite(viewSeq)) {
+      if (!materialization.ok) {
+        views = {
+          layer: "views",
+          status: "failed",
+          coverage: materialization.counts?.symbols > 0
+            ? Math.round((Number(materialization.counts.treeSymbols || 0) / materialization.counts.symbols) * 100)
+            : 0,
+          detail: materialization.reason || "view materialization is incomplete",
+        };
+      } else if (!Number.isFinite(viewSeq)) {
         views = { layer: "views", status: "warming", coverage: 0, detail: "main view meta unreadable" };
       } else if (headSeq != null && headSeq > viewSeq) {
         const coverage = headSeq > 0 ? Math.round((viewSeq / headSeq) * 100) : 0;
@@ -312,6 +332,18 @@ function inspectTreeCompression(repoRoot, config) {
     return { layer: "tree-compression", status: "warming", coverage: 0, detail: "main view not built yet" };
   }
   try {
+    const materialization = inspectViewMaterialization(viewDb, { treeCompressionMode: mode });
+    if (!materialization.ok) {
+      const detail = materialization.reason === "tree_compression_empty"
+        ? "compression snapshot has no seeds"
+        : (materialization.reason || "compression materialization is incomplete");
+      return {
+        layer: "tree-compression",
+        status: "failed",
+        coverage: 0,
+        detail,
+      };
+    }
     if (!tableExists(viewDb, "atlas_tree_compression_snapshots")) {
       return { layer: "tree-compression", status: "warming", coverage: 0, detail: "no compression snapshot yet" };
     }

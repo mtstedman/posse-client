@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const composerPhp = path.join(here, "vendor", "davidrjenni", "scip-php", "src", "Composer", "Composer.php");
 const indexerPhp = path.join(here, "vendor", "davidrjenni", "scip-php", "src", "Indexer.php");
+const parserPhp = path.join(here, "vendor", "davidrjenni", "scip-php", "src", "Parser", "Parser.php");
 
 if (!fs.existsSync(composerPhp)) process.exit(0);
 let text = fs.readFileSync(composerPhp, "utf8").replace(/\r\n/g, "\n");
@@ -79,6 +80,27 @@ text = replaceOne(text, [
   "        }",
   "        $this->projectFiles = array_values(array_unique($projectFiles));",
 ].join("\n"), "project file fallback block");
+
+text = replaceOne(text, [
+  [
+    "        $generator = new ClassMapGenerator();",
+    "        $exclusionRegex = null;",
+    "        if (is_array($autoload['exclude-from-classmap'] ?? null) && count($autoload['exclude-from-classmap']) > 0) {",
+    "            $exclusionRegex = '{(' . implode('|', $autoload['exclude-from-classmap']) . ')}';",
+    "        }",
+  ].join("\n"),
+  [
+    "        $generator = new ClassMapGenerator();",
+    "        $exclusionRegex = is_array($autoload['exclude-from-classmap'] ?? null)",
+    "            ? self::buildExclusionRegex($projectRoot, $autoload['exclude-from-classmap'])",
+    "            : null;",
+  ].join("\n"),
+], [
+  "        $generator = new ClassMapGenerator();",
+  "        $exclusionRegex = is_array($autoload['exclude-from-classmap'] ?? null)",
+  "            ? self::buildExclusionRegex($projectRoot, $autoload['exclude-from-classmap'])",
+  "            : null;",
+].join("\n"), "exclude-from-classmap regex block");
 
 text = replaceOne(text, [
   [
@@ -210,6 +232,40 @@ text = replaceOne(text, [
 ].join("\n"), "installed packages block");
 
 const helper = [
+  "    /** @param array<int, mixed> $patterns */",
+  "    private static function buildExclusionRegex(string $projectRoot, array $patterns): ?string",
+  "    {",
+  "        $root = realpath($projectRoot);",
+  "        if ($root === false) {",
+  "            return null;",
+  "        }",
+  "        $regexes = [];",
+  "        foreach ($patterns as $rawPattern) {",
+  "            if (!is_string($rawPattern)) {",
+  "                continue;",
+  "            }",
+  "            $pattern = trim(strtr($rawPattern, '\\\\', '/'), '/');",
+  "            while (str_starts_with($pattern, './')) {",
+  "                $pattern = substr($pattern, 2);",
+  "            }",
+  "            $base = $root;",
+  "            while (str_starts_with($pattern, '../')) {",
+  "                $base = dirname($base);",
+  "                $pattern = substr($pattern, 3);",
+  "            }",
+  "            if ($pattern === '') {",
+  "                continue;",
+  "            }",
+  "            $pattern = preg_replace('{/+}', '/', preg_quote($pattern, '~'));",
+  "            if (!is_string($pattern)) {",
+  "                continue;",
+  "            }",
+  "            $pattern = strtr($pattern, ['\\\\*\\\\*' => '.+?', '\\\\*' => '[^/]+?']);",
+  "            $regexes[] = preg_quote(strtr($base, '\\\\', '/'), '~') . '/' . $pattern . '($|/)';",
+  "        }",
+  "        return count($regexes) > 0 ? '~(' . implode('|', $regexes) . ')~' : null;",
+  "    }",
+  "",
   "    /** @return array<int, non-empty-string> */",
   "    private static function loadFallbackPhpFiles(string $projectRoot): array",
   "    {",
@@ -266,6 +322,14 @@ if (!text.includes("private static function loadFallbackPhpFiles")) {
   }
   text = text.replace(anchor, `${anchor}\n\n${helper}`);
 }
+if (!text.includes("private static function buildExclusionRegex")) {
+  const fallbackHelperAnchor = "    /** @return array<int, non-empty-string> */\n    private static function loadFallbackPhpFiles";
+  if (!text.includes(fallbackHelperAnchor)) {
+    throw new Error("loadFallbackPhpFiles helper not found");
+  }
+  const exclusionHelper = helper.slice(0, helper.indexOf("    /** @return array<int, non-empty-string> */")).trimEnd();
+  text = text.replace(fallbackHelperAnchor, `${exclusionHelper}\n\n${fallbackHelperAnchor}`);
+}
 
 fs.writeFileSync(composerPhp, text);
 
@@ -298,10 +362,51 @@ if (fs.existsSync(indexerPhp)) {
   fs.writeFileSync(indexerPhp, indexerText);
 }
 
+if (fs.existsSync(parserPhp)) {
+  let parserText = fs.readFileSync(parserPhp, "utf8").replace(/\r\n/g, "\n");
+  parserText = replaceOne(parserText, [
+    "        $stmts = $this->parser->parse($code);",
+    [
+      "        try {",
+      "            $stmts = $this->parser->parse($code);",
+      "        } catch (\\PhpParser\\Error|\\TypeError $error) {",
+      "            fwrite(\\STDERR, \"scip-php skipping unsupported syntax in {$filename}: {$error->getMessage()}\\n\");",
+      "            return;",
+      "        }",
+    ].join("\n"),
+  ], [
+    "        try {",
+    "            $stmts = $this->parser->parse($code);",
+    "        } catch (\\PhpParser\\Error|\\TypeError $error) {",
+    "            fwrite(\\STDERR, \"scip-php skipping unsupported syntax in {$filename}: {$error->getMessage()}\\n\");",
+    "            return;",
+    "        }",
+  ].join("\n"), "unsupported PHP syntax block");
+  parserText = replaceOne(parserText, [
+    "        $t->traverse($stmts);",
+    [
+      "        try {",
+      "            $t->traverse($stmts);",
+      "        } catch (\\LogicException|\\TypeError $error) {",
+      "            fwrite(\\STDERR, \"scip-php skipping unsupported semantics in {$filename}: {$error->getMessage()}\\n\");",
+      "            return;",
+      "        }",
+    ].join("\n"),
+  ], [
+    "        try {",
+    "            $t->traverse($stmts);",
+    "        } catch (\\Throwable $error) {",
+    "            fwrite(\\STDERR, \"scip-php skipping unsupported semantics in {$filename}: {$error->getMessage()}\\n\");",
+    "            return;",
+    "        }",
+  ].join("\n"), "unsupported PHP semantics block");
+  fs.writeFileSync(parserPhp, parserText);
+}
+
 function replaceOne(input, candidates, replacement, label) {
+  if (input.includes(replacement)) return input;
   for (const candidate of candidates) {
     if (input.includes(candidate)) return input.replace(candidate, replacement);
   }
-  if (input.includes(replacement)) return input;
   throw new Error(`${label} not found`);
 }

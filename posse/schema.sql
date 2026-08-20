@@ -9,7 +9,8 @@ PRAGMA foreign_keys = ON;
 --   7 = + bridge change tracking for read-only stream cursors.
 --   8 = + durable human-gate and assessment lifecycle state.
 --  10 = + durable bridge command idempotency results.
-PRAGMA user_version = 10;
+--  11 = + disabled waiting-lane preparation contracts and durable state.
+PRAGMA user_version = 11;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -77,7 +78,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   parent_job_id INTEGER,
 
   job_type TEXT NOT NULL CHECK (
-    job_type IN ('research','plan','delegate','dev','assess','fix','summarize','human_input','artificer','promote','preflight','atlas_warm')
+    job_type IN ('research','plan','delegate','dev','assess','fix','summarize','human_input','artificer','promote','preflight','atlas_warm','waiting_lane_prepare')
   ),
 
   title TEXT NOT NULL,
@@ -186,6 +187,55 @@ CREATE INDEX IF NOT EXISTS idx_jobs_lease_owner
 
 CREATE INDEX IF NOT EXISTS idx_jobs_parent_job
   ON jobs(parent_job_id);
+
+CREATE TABLE IF NOT EXISTS waiting_lane_preparations (
+  work_item_id INTEGER PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'requested' CHECK (
+    state IN ('requested','preparing_git','waiting_atlas','ready','stale','activating','active','poisoned','retired')
+  ),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  demand_reason TEXT NOT NULL CHECK (demand_reason IN ('research','planner','dev','operator')),
+  target_branch TEXT NOT NULL,
+  worktree_root TEXT,
+  project_cwd TEXT,
+  ownership_record_id TEXT,
+  desired_git_oid TEXT,
+  desired_atlas_seq INTEGER CHECK (desired_atlas_seq IS NULL OR desired_atlas_seq >= 0),
+  desired_atlas_layer_revision INTEGER CHECK (
+    desired_atlas_layer_revision IS NULL OR desired_atlas_layer_revision >= 0
+  ),
+  desired_view_fingerprint TEXT,
+  applied_git_oid TEXT,
+  applied_atlas_seq INTEGER CHECK (applied_atlas_seq IS NULL OR applied_atlas_seq >= 0),
+  applied_atlas_layer_revision INTEGER CHECK (
+    applied_atlas_layer_revision IS NULL OR applied_atlas_layer_revision >= 0
+  ),
+  applied_view_fingerprint TEXT,
+  git_job_id INTEGER,
+  atlas_job_id INTEGER,
+  successor_needed INTEGER NOT NULL DEFAULT 0 CHECK (successor_needed IN (0, 1)),
+  hot_paths_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(hot_paths_json)),
+  poisoned_reason TEXT,
+  requested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  activated_at TEXT,
+  retired_at TEXT,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (git_job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+  FOREIGN KEY (atlas_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_waiting_lane_state_updated
+  ON waiting_lane_preparations(state, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_waiting_lane_demand
+  ON waiting_lane_preparations(target_branch, state, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_waiting_lane_git_job
+  ON waiting_lane_preparations(git_job_id);
+
+CREATE INDEX IF NOT EXISTS idx_waiting_lane_atlas_job
+  ON waiting_lane_preparations(atlas_job_id);
 
 CREATE TABLE IF NOT EXISTS human_gates (
   gate_job_id INTEGER PRIMARY KEY,
@@ -647,6 +697,12 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   atlas_prefetch_status TEXT,
   skills TEXT,
   cost_estimate_usd REAL,
+  provider_usage_status TEXT,
+  billing_precision TEXT,
+  exact_billable_input_tokens REAL,
+  long_context_tier_input_tokens INTEGER,
+  provider_request_duration_ms INTEGER,
+  usage_segment_count INTEGER,
   reasoning_effort TEXT DEFAULT 'medium',
   extended_thinking INTEGER NOT NULL DEFAULT 0 CHECK (extended_thinking IN (0,1)),
 
@@ -668,6 +724,60 @@ CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item
 
 CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch
   ON agent_calls(role, atlas_prefetch_status);
+
+CREATE TABLE IF NOT EXISTS provider_usage_segments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_call_id INTEGER NOT NULL,
+  request_ordinal INTEGER NOT NULL CHECK (request_ordinal > 0),
+  provider TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  request_context_input_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER,
+  usage_source TEXT NOT NULL CHECK (usage_source IN ('live','rollout_recovered','aggregate_only')),
+  precision TEXT NOT NULL CHECK (precision IN ('exact','recovered_exact','aggregate_only','incomplete')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+  UNIQUE (agent_call_id, request_ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS context_budget_checkpoints (
+  agent_call_id INTEGER PRIMARY KEY,
+  attempt_id INTEGER NOT NULL,
+  provider_session_id TEXT NOT NULL,
+  sequence_id INTEGER NOT NULL CHECK (sequence_id > 0),
+  provider TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  request_context_input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens_since_request INTEGER NOT NULL DEFAULT 0,
+  precision TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS source_reaccess_authorizations (
+  token_hash TEXT PRIMARY KEY,
+  work_item_id INTEGER,
+  job_id INTEGER NOT NULL,
+  attempt_id INTEGER NOT NULL,
+  agent_call_id INTEGER NOT NULL,
+  evidence_ref TEXT NOT NULL,
+  coverage_observation_id INTEGER,
+  max_uses INTEGER NOT NULL DEFAULT 1,
+  uses INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  consumed_at TEXT,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE,
+  FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+  FOREIGN KEY (coverage_observation_id) REFERENCES job_observations(id) ON DELETE SET NULL
+);
 
 CREATE TABLE IF NOT EXISTS agent_handoff_packets (
   agent_call_id INTEGER PRIMARY KEY,
@@ -1003,6 +1113,9 @@ CREATE INDEX IF NOT EXISTS idx_job_observations_job
 
 CREATE INDEX IF NOT EXISTS idx_job_observations_work_item
   ON job_observations(work_item_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_job_observations_attempt_type
+  ON job_observations(attempt_id, observation_type, id);
 
 
 -- DB-backed Posse test suites registered through deterministic MCP tools.

@@ -25,7 +25,6 @@ import { readRepoFileResult } from "./repo-read.js";
 /** @typedef {import("../contracts/tool-params.js").CodeGetSkeletonParams} CodeGetSkeletonParams */
 /** @typedef {import("../contracts/tool-params.js").CodeGetHotPathParams} CodeGetHotPathParams */
 /** @typedef {import("../contracts/tool-params.js").CodeNeedWindowParams} CodeNeedWindowParams */
-/** @typedef {import("../contracts/tool-params.js").CodeWindowItemParams} CodeWindowItemParams */
 /** @typedef {import("../contracts/tool-results.js").CodeSkeletonData} CodeSkeletonData */
 /** @typedef {import("../contracts/tool-results.js").CodeHotPathData} CodeHotPathData */
 /** @typedef {import("../contracts/tool-results.js").CodeWindowData} CodeWindowData */
@@ -273,67 +272,15 @@ function finishCodeHotPath({ versionId, params, targetPath, symbolId, hotPath, c
  * }} args
  */
 export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
-  if (Array.isArray(params.items)) {
-    return await codeNeedWindowBatch({ view, versionId, params, readFile, repoRoot, ledger, repoId });
+  if (Array.isArray(/** @type {any} */ (params).items)) {
+    return errorEnvelope({
+      action: "code.window",
+      versionId,
+      code: "batching_disabled",
+      message: "code.window multi-selection is disabled; issue independent scalar calls together",
+    });
   }
   return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNative);
-}
-
-async function codeNeedWindowBatch({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
-  const items = params.items.slice(0, 4);
-  const policy = getEffectivePolicy(ledger, repoId);
-  const policyItemCap = Math.max(64, positiveInteger(policy.maxWindowTokens) || 1200);
-  const maximumBatchTokens = policyItemCap * items.length;
-  const requestedBatchTokens = positiveInteger(params.maxTokens) || maximumBatchTokens;
-  const totalMaxTokens = Math.max(
-    64 * items.length,
-    Math.min(requestedBatchTokens, maximumBatchTokens),
-  );
-  const fairItemCap = Math.max(64, Math.floor(totalMaxTokens / items.length));
-  const envelopes = await Promise.all(items.map((item) => {
-    const requestedItemCap = positiveInteger(item.maxTokens) || fairItemCap;
-    return codeNeedWindowWithNative({
-      view,
-      versionId,
-      params: {
-        ...item,
-        maxTokens: Math.min(requestedItemCap, fairItemCap),
-        ...(item.sessionId || !params.sessionId ? {} : { sessionId: params.sessionId }),
-      },
-      readFile,
-      repoRoot,
-      ledger,
-      repoId,
-    }, codeWindowNative);
-  }));
-  const results = envelopes.map((envelope, index) => ({
-    index,
-    target: codeWindowItemTarget(items[index]),
-    ok: envelope?.ok === true,
-    ...(envelope?.ok === true ? { data: envelope.data } : { error: envelope?.error || {
-      code: "window_failed",
-      message: "code.window batch item returned no result",
-    } }),
-  }));
-  return okEnvelope({
-    action: "code.window",
-    versionId,
-    data: {
-      batch: true,
-      itemCount: results.length,
-      succeeded: results.filter((item) => item.ok).length,
-      failed: results.filter((item) => !item.ok).length,
-      totalMaxTokens,
-      perItemMaxTokens: fairItemCap,
-      items: results,
-    },
-  });
-}
-
-function codeWindowItemTarget(item = {}) {
-  return item.symbolId
-    ? { symbolId: String(item.symbolId) }
-    : { file: String(item.file || "") };
 }
 
 async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {

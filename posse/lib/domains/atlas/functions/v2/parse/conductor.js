@@ -59,7 +59,7 @@ function atlasThreadTransport(moduleUrl, { nativeAuth, retirePayload }) {
   });
 }
 
-/** @returns {{ stage, ingest, warm, merge, retrieve, executeTool, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
+/** @returns {{ stage, ingest, warm, publishGeneration, merge, retrieve, executeTool, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
 export function createConductorDaemon(opts = {}) {
   const nativeAuth = heartbeatAuthManager.getCapability();
   const readerHostUrl = opts.readerHostUrl || READER_HOST_URL;
@@ -233,11 +233,11 @@ export function createConductorDaemon(opts = {}) {
    */
   const readerWriteTargets = (opts = {}) => {
     const ledgerPath = opts?.ledgerPath ? String(opts.ledgerPath) : "";
-    const candidates = [
-      opts?.job?.out_view_path,
-      opts?.viewPath,
-      opts?.dbPath,
-    ];
+    const waitingLanePurpose = String(opts?.job?.purpose || "");
+    const targetLocal = waitingLanePurpose === "wi-snapshot" || waitingLanePurpose === "wi-catchup";
+    const candidates = targetLocal
+      ? [opts?.job?.out_view_path, opts?.viewPath]
+      : [opts?.job?.out_view_path, opts?.viewPath, opts?.dbPath];
     const seen = new Set();
     const targets = [];
     for (const candidate of candidates) {
@@ -362,7 +362,26 @@ export function createConductorDaemon(opts = {}) {
 
   const stage = (opts, reqOpts) => call(daemon, { op: "stage", ...opts }, reqOpts);
   const ingest = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts));
-  const warm = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts), { holdEmbeddings: true });
+  const waitingLanePurposes = new Set(["wi-snapshot", "wi-catchup", "wi-prefetch"]);
+  const regularWarm = writesWithReaderHold(
+    (opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts),
+    { holdEmbeddings: true },
+  );
+  const targetLocalWarm = writesWithReaderHold(
+    (opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts),
+    { holdEmbeddings: false },
+  );
+  const warm = (opts, reqOpts) => {
+    const purpose = String(opts?.job?.purpose || "");
+    if (purpose === "wi-prefetch") return call(daemon, { op: "warm", ...opts }, reqOpts);
+    return waitingLanePurposes.has(purpose)
+      ? targetLocalWarm(opts, reqOpts)
+      : regularWarm(opts, reqOpts);
+  };
+  const publishGeneration = writesWithReaderHold(
+    (opts, reqOpts) => call(daemon, { op: "publishGeneration", ...opts }, reqOpts),
+    { holdEmbeddings: false },
+  );
   const merge = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "merge", ...opts }, reqOpts));
   const retrieve = async (opts, reqOpts) => {
     const result = await callReader({ op: "retrieve", ...opts }, reqOpts);
@@ -438,6 +457,7 @@ export function createConductorDaemon(opts = {}) {
     stage,
     ingest,
     warm,
+    publishGeneration,
     merge,
     retrieve,
     executeTool,
@@ -642,6 +662,24 @@ function _indexTracked(fn) {
   };
 }
 
+function _warmTracked(fn) {
+  const tracked = _tracked(fn);
+  return async (opts, ...rest) => {
+    const purpose = String(opts?.job?.purpose || "");
+    if (purpose === "wi-snapshot" || purpose === "wi-catchup" || purpose === "wi-prefetch") {
+      return tracked(opts, ...rest);
+    }
+    _indexingInflight++;
+    try {
+      const result = await tracked(opts, ...rest);
+      _notifyIndexingSuccess();
+      return result;
+    } finally {
+      _indexingInflight--;
+    }
+  };
+}
+
 /** True while any warm/merge/ingest/stage/reindex op is running in the conductor. */
 export function isConductorIndexingInFlight() {
   return _indexingInflight > 0;
@@ -666,7 +704,8 @@ export function getSharedConductor() {
       close: base.close,
       stage: _indexTracked(base.stage),
       ingest: _indexTracked(base.ingest),
-      warm: _indexTracked(base.warm),
+      warm: _warmTracked(base.warm),
+      publishGeneration: _tracked(base.publishGeneration),
       merge: _indexTracked(base.merge),
       reindex: _indexTracked(base.reindex),
       reindexLanguage: _indexTracked(base.reindexLanguage),

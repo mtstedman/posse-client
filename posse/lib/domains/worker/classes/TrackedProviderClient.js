@@ -69,6 +69,12 @@ import {
   subAgentRuntime,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
+import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
+import {
+  markUsageSegmentsIncomplete,
+  recordUsageSegment,
+  summarizeUsageSegments,
+} from "../../billing/functions/usage-segments.js";
 
 function agentHandoffToolSchemaTelemetry(role, compactCompletion = false, compactV3 = false) {
   const schema = getAgentHandoffToolSchemaForRole(role, { compactCompletion, compactV3 });
@@ -334,11 +340,103 @@ const DEFAULT_DEPS = {
   retainReplayToolUses,
   agentHandoffTerminator,
   finalizeAgentHandoffForProvider,
+  publishContextBudgetCheckpoint,
+  markUsageSegmentsIncomplete,
+  recordUsageSegment,
+  summarizeUsageSegments,
 };
 
 function nonNegativeTokenCount(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : null;
+}
+
+function providerUsageStatus(stats, { measured, unavailable } = {}) {
+  if (unavailable) return "unavailable_after_terminal_stop";
+  if (!measured) return "unavailable";
+  return stats.tokenUsageSource === "codex_rollout"
+    ? "measured_codex_rollout"
+    : "measured";
+}
+
+function buildAccountingStats(stats, {
+  inputTokens,
+  outputTokens,
+  outputChars,
+  durationMs = stats.durationMs,
+  exitCode,
+  providerUsageStatus: usageStatus,
+  providerName,
+  modelTier,
+  modelName,
+  resolvedMaxOutputTokens,
+  outputTruncated = stats.outputTruncated === true,
+  outputLimitReason = stats.outputLimitReason || null,
+  providerStopCode = null,
+} = {}) {
+  const measured = inputTokens != null && outputTokens != null;
+  return {
+    ...stats,
+    inputTokens,
+    outputTokens,
+    cachedInputTokens: measured ? (stats.cachedInputTokens ?? null) : null,
+    cacheCreationInputTokens: measured ? (stats.cacheCreationInputTokens ?? null) : null,
+    reasoningOutputTokens: measured ? (stats.reasoningOutputTokens ?? null) : null,
+    outputChars,
+    durationMs,
+    exitCode,
+    providerUsageStatus: usageStatus,
+    ...(providerStopCode ? { providerStopCode } : {}),
+    provider: providerName,
+    modelTier,
+    modelName: stats.modelName || modelName,
+    maxOutputTokens: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+    outputTruncated,
+    outputLimitReason,
+  };
+}
+
+function completionAccountingFields({
+  stats,
+  accountingStats,
+  segmentSummary,
+  providerUsageMeasured,
+  providerUsageStatus: usageStatus,
+  resolvedMaxTurns,
+  resolvedMaxOutputTokens,
+  opts,
+  resolveCallCostEstimate,
+} = {}) {
+  const aggregateEstimateAvailable = providerUsageMeasured
+    && segmentSummary.precision === "aggregate_only";
+  return {
+    input_tokens: accountingStats.inputTokens,
+    output_tokens: accountingStats.outputTokens,
+    cached_input_tokens: accountingStats.cachedInputTokens,
+    cache_creation_input_tokens: accountingStats.cacheCreationInputTokens,
+    turns_used: stats.numTurns ?? null,
+    max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
+    max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+    output_truncated: accountingStats.outputTruncated,
+    output_limit_reason: accountingStats.outputLimitReason,
+    duration_ms: accountingStats.durationMs,
+    exit_code: accountingStats.exitCode,
+    atlas_method: opts.disableAtlas ? null : (stats.atlasMethod || opts.atlasMethod || null),
+    atlas_prefetch_status: opts.disableAtlas ? null : (opts.atlasPrefetchStatus || null),
+    cost_estimate_usd: segmentSummary.exact
+      ? segmentSummary.costUsd
+      : aggregateEstimateAvailable
+        ? resolveCallCostEstimate(accountingStats)
+        : null,
+    provider_usage_status: usageStatus,
+    billing_precision: segmentSummary.precision,
+    exact_billable_input_tokens: segmentSummary.exact ? segmentSummary.billableInputTokens : null,
+    long_context_tier_input_tokens: segmentSummary.longContextTierInputTokens,
+    provider_request_duration_ms: segmentSummary.durationMs,
+    usage_segment_count: segmentSummary.requestCount,
+    skills: opts.skillsAttached || null,
+    session_handle: stats.sessionHandle || stats.responseId || null,
+  };
 }
 
 function agentCommentaryFields(value) {
@@ -500,6 +598,8 @@ function agentJobAttachment(opts = {}, context = {}) {
     attemptId: context.attemptId ?? opts.attemptId ?? null,
     agentCallId: context.agentCallId ?? opts.agentCallId ?? null,
     promptChars: opts.promptChars || 0,
+    modelName: context.modelName || opts.modelName || null,
+    providerSessionId: `agent-call:${context.agentCallId ?? opts.agentCallId ?? "unknown"}`,
     allowWrite: opts.allowWrite === true,
     allowShell: opts.allowShell !== false,
     allowTests: opts.allowTests !== false,
@@ -620,7 +720,31 @@ export class TrackedProviderClient {
     ));
     this.emit = emit || (typeof worker.emit === "function" ? worker.emit.bind(worker) : () => {});
     this.resolveCallCostEstimate = resolveCallCostEstimate;
-    this.deps = { ...DEFAULT_DEPS, ...deps };
+    // A substituted agent-call store owns its accounting side tables too.
+    // Keep test/in-memory adapters isolated unless they explicitly provide
+    // the new segment/checkpoint hooks alongside createAgentCall.
+    const isolatedAccountingDeps = Object.prototype.hasOwnProperty.call(deps, "createAgentCall")
+      ? {
+          recordUsageSegment: () => null,
+          markUsageSegmentsIncomplete: () => {},
+          publishContextBudgetCheckpoint: () => null,
+          summarizeUsageSegments: (agentCallId) => ({
+            agentCallId: Number(agentCallId),
+            requestCount: 0,
+            exact: false,
+            precision: "aggregate_only",
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            outputTokens: 0,
+            longContextTierInputTokens: 0,
+            durationMs: 0,
+            billableInputTokens: null,
+            costUsd: null,
+          }),
+        }
+      : {};
+    this.deps = { ...DEFAULT_DEPS, ...isolatedAccountingDeps, ...deps };
     if (Object.prototype.hasOwnProperty.call(deps, "provisionAgentLoader")
       && !Object.prototype.hasOwnProperty.call(deps, "provisionAgentLoaderAsync")) {
       this.deps.provisionAgentLoaderAsync = null;
@@ -639,6 +763,82 @@ export class TrackedProviderClient {
 
   async trackedCall(prompt, opts, meta = {}) {
     return await this.call(prompt, opts, meta);
+  }
+
+  _resolveProviderAccounting({
+    agentCallId,
+    providerName,
+    modelTier,
+    modelName,
+    stats,
+    terminalUsageUnavailable = false,
+    missingUsagePrecision = "unknown",
+  }) {
+    const providerUsageMeasured = !terminalUsageUnavailable
+      && stats.inputTokens != null
+      && stats.outputTokens != null;
+    const captureIncomplete = terminalUsageUnavailable
+      || stats.usageCapturePrecision === "incomplete"
+      || (!providerUsageMeasured && missingUsagePrecision === "incomplete");
+    const usageStatus = providerUsageStatus(stats, {
+      measured: providerUsageMeasured,
+      unavailable: terminalUsageUnavailable,
+    });
+    if (captureIncomplete) this.deps.markUsageSegmentsIncomplete(agentCallId);
+    const expectedTotals = providerUsageMeasured ? {
+      inputTokens: stats.inputTokens,
+      outputTokens: stats.outputTokens,
+      cachedInputTokens: stats.cachedInputTokens,
+      cacheCreationInputTokens: stats.cacheCreationInputTokens,
+    } : null;
+    let segmentSummary = this.deps.summarizeUsageSegments(agentCallId, {
+      modelTier,
+      expectedTotals,
+    });
+    if (!providerUsageMeasured && segmentSummary.requestCount === 0) {
+      segmentSummary = {
+        ...segmentSummary,
+        exact: false,
+        precision: captureIncomplete ? "incomplete" : missingUsagePrecision,
+        costUsd: null,
+        billableInputTokens: null,
+      };
+    }
+    if (providerUsageMeasured && segmentSummary.requestCount === 0) {
+      this.deps.recordUsageSegment({
+        agentCallId,
+        requestOrdinal: 1,
+        provider: providerName,
+        modelName: stats.modelName || modelName,
+        inputTokens: stats.inputTokens,
+        outputTokens: stats.outputTokens,
+        cachedInputTokens: stats.cachedInputTokens,
+        cacheCreationInputTokens: stats.cacheCreationInputTokens,
+        requestContextInputTokens: stats.longContextInputTokens ?? stats.inputTokens,
+        durationMs: stats.durationMs,
+        usageSource: "aggregate_only",
+        precision: captureIncomplete ? "incomplete" : "aggregate_only",
+      });
+      segmentSummary = this.deps.summarizeUsageSegments(agentCallId, {
+        modelTier,
+        expectedTotals,
+      });
+    }
+    if (captureIncomplete && !segmentSummary.exact) {
+      segmentSummary = {
+        ...segmentSummary,
+        precision: "incomplete",
+        costUsd: null,
+        billableInputTokens: null,
+      };
+    }
+    return {
+      providerUsageMeasured,
+      providerUsageStatus: usageStatus,
+      segmentSummary,
+      accountingInputTokens: providerUsageMeasured ? stats.inputTokens : null,
+      accountingOutputTokens: providerUsageMeasured ? stats.outputTokens : null,
+    };
   }
 
   _isProviderCircuitOpen(providerName) {
@@ -1052,6 +1252,28 @@ export class TrackedProviderClient {
       agentCallId,
       promptChars: prompt.length,
       abortSignal: providerAbortSignal,
+      onUsageSegment: (segment) => {
+        const persisted = this.deps.recordUsageSegment({
+          ...segment,
+          agentCallId,
+          provider: segment?.provider || providerName,
+          modelName: segment?.modelName || modelName,
+        });
+        const attemptId = observationContext?.attempt_id ?? opts.attemptId ?? null;
+        if (attemptId != null && persisted?.request_ordinal != null) {
+          this.deps.publishContextBudgetCheckpoint({
+            agentCallId,
+            attemptId,
+            providerSessionId: `agent-call:${agentCallId}`,
+            sequenceId: persisted.request_ordinal,
+            provider: persisted.provider,
+            modelName: persisted.model_name,
+            requestContextInputTokens: persisted.request_context_input_tokens,
+            outputTokensSinceRequest: persisted.output_tokens,
+            precision: persisted.precision,
+          });
+        }
+      },
       onAgentCommentary: (value) => {
         try { upstreamAgentCommentary?.(value); } catch { /* caller telemetry is best effort */ }
         const commentary = agentCommentaryFields(value);
@@ -1154,6 +1376,7 @@ export class TrackedProviderClient {
           role: opts.role,
           workItemId: work_item_id,
           agentCallId,
+          modelName,
         });
     let agent = null;
     let agentLease = null;
@@ -1183,6 +1406,7 @@ export class TrackedProviderClient {
           workItemId: work_item_id,
           attemptId: observationContext?.attempt_id ?? null,
           agentCallId,
+          modelName,
         });
       const dispatched = preparedAgent
         ? await dispatcher.dispatchAgent({
@@ -1224,7 +1448,7 @@ export class TrackedProviderClient {
             || effectiveCapabilityOpts?.sessionPacket?.remote_issuance?.tools
             || [],
           executeInput: async ({ tool, arguments: inputArguments, signal }) => (
-            await agent.mcpGate.callTool(tool, inputArguments, {
+            await agent.mcpGate.callToolResult(tool, inputArguments, {
               signal,
               delegatedEvidence: true,
             })
@@ -1365,16 +1589,21 @@ export class TrackedProviderClient {
       const terminalUsageUnavailable = terminalProviderError != null
         && stats.terminalUsageFlushCompleted !== true
         && stats.usageFinalized !== true;
-      const providerUsageMeasured = !terminalUsageUnavailable
-        && stats.inputTokens != null
-        && stats.outputTokens != null;
-      const providerUsageStatus = terminalUsageUnavailable
-        ? "unavailable_after_terminal_stop"
-        : providerUsageMeasured
-          ? "measured"
-          : "unavailable";
-      const accountingInputTokens = providerUsageMeasured ? stats.inputTokens : null;
-      const accountingOutputTokens = providerUsageMeasured ? stats.outputTokens : null;
+      const {
+        providerUsageMeasured,
+        providerUsageStatus,
+        segmentSummary,
+        accountingInputTokens,
+        accountingOutputTokens,
+      } = this._resolveProviderAccounting({
+        agentCallId,
+        providerName,
+        modelTier: tier,
+        modelName,
+        stats,
+        terminalUsageUnavailable,
+        missingUsagePrecision: "unknown",
+      });
       const recordedOutputChars = typeof output === "string" ? output.length : null;
       if (handoffFinalization.applied) {
         const materializedOutput = String(output ?? "");
@@ -1491,48 +1720,34 @@ export class TrackedProviderClient {
         output_truncated: stats.outputTruncated === true,
         replay_memory: getReplayMemoryStats(),
       });
-      const accountingStats = {
-        ...stats,
+      const accountingStats = buildAccountingStats(stats, {
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
-        cachedInputTokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
-        cacheCreationInputTokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
-        reasoningOutputTokens: providerUsageMeasured ? (stats.reasoningOutputTokens ?? null) : null,
         outputChars: recordedOutputChars,
         exitCode: terminalProviderError == null ? stats.exitCode : null,
         providerUsageStatus,
-        providerStopCode: terminalProviderError?.code || null,
-        provider: providerName,
+        providerName,
         modelTier: tier,
-        modelName: stats.modelName || modelName,
-        maxOutputTokens: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
-        outputTruncated: stats.outputTruncated === true,
-        outputLimitReason: stats.outputLimitReason || null,
-      };
+        modelName,
+        resolvedMaxOutputTokens,
+        providerStopCode: terminalProviderError?.code || null,
+      });
 
       completeAgentCall(agentCallId, {
         status: "succeeded",
         output_chars: recordedOutputChars,
-        input_tokens: accountingInputTokens,
-        output_tokens: accountingOutputTokens,
-        cached_input_tokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
-        cache_creation_input_tokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
-        turns_used: stats.numTurns ?? null,
-        max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
-        max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
-        output_truncated: stats.outputTruncated === true,
-        output_limit_reason: stats.outputLimitReason || null,
+        ...completionAccountingFields({
+          stats,
+          accountingStats,
+          segmentSummary,
+          providerUsageMeasured,
+          providerUsageStatus,
+          resolvedMaxTurns,
+          resolvedMaxOutputTokens,
+          opts,
+          resolveCallCostEstimate: this.resolveCallCostEstimate,
+        }),
         model_name: stats.modelName || null,
-        duration_ms: stats.durationMs,
-        exit_code: terminalProviderError == null ? stats.exitCode : null,
-        atlas_method: opts.disableAtlas ? null : (stats.atlasMethod || opts.atlasMethod || null),
-        atlas_prefetch_status: opts.disableAtlas ? null : (opts.atlasPrefetchStatus || null),
-        cost_estimate_usd: providerUsageMeasured
-          ? this.resolveCallCostEstimate(accountingStats)
-          : null,
-        provider_usage_status: providerUsageStatus,
-        skills: opts.skillsAttached || null,
-        session_handle: stats.sessionHandle || stats.responseId || null,
       });
 
       this._recordContextPressureTelemetry({
@@ -1654,16 +1869,21 @@ export class TrackedProviderClient {
       const terminalUsageUnavailable = terminalStopOwnsFailure
         && stats.terminalUsageFlushCompleted !== true
         && stats.usageFinalized !== true;
-      const providerUsageMeasured = !terminalUsageUnavailable
-        && stats.inputTokens != null
-        && stats.outputTokens != null;
-      const providerUsageStatus = terminalUsageUnavailable
-        ? "unavailable_after_terminal_stop"
-        : providerUsageMeasured
-          ? "measured"
-          : "unavailable";
-      const accountingInputTokens = providerUsageMeasured ? stats.inputTokens : null;
-      const accountingOutputTokens = providerUsageMeasured ? stats.outputTokens : null;
+      const {
+        providerUsageMeasured,
+        providerUsageStatus,
+        segmentSummary: failureSegmentSummary,
+        accountingInputTokens,
+        accountingOutputTokens,
+      } = this._resolveProviderAccounting({
+        agentCallId,
+        providerName,
+        modelTier: tier,
+        modelName,
+        stats,
+        terminalUsageUnavailable,
+        missingUsagePrecision: "incomplete",
+      });
       const recordedOutputChars = terminalUsageUnavailable
         ? null
         : Object.prototype.hasOwnProperty.call(stats, "outputChars")
@@ -1696,47 +1916,35 @@ export class TrackedProviderClient {
         output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
         replay_memory: getReplayMemoryStats(),
       });
-      const accountingStats = {
-        ...stats,
+      const accountingStats = buildAccountingStats(stats, {
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
-        cachedInputTokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
-        cacheCreationInputTokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
-        reasoningOutputTokens: providerUsageMeasured ? (stats.reasoningOutputTokens ?? null) : null,
         outputChars: recordedOutputChars,
         durationMs: recordedDurationMs,
         exitCode: recordedExitCode,
         providerUsageStatus,
-        provider: providerName,
+        providerName,
         modelTier: tier,
-        modelName: stats.modelName || modelName,
-        maxOutputTokens: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
+        modelName,
+        resolvedMaxOutputTokens,
         outputTruncated: stats.outputTruncated === true || err.outputTruncated === true,
         outputLimitReason: stats.outputLimitReason || err.outputLimitReason || null,
-      };
+      });
       completeAgentCall(agentCallId, {
         status: "failed",
         output_chars: recordedOutputChars,
-        input_tokens: accountingInputTokens,
-        output_tokens: accountingOutputTokens,
-        cached_input_tokens: providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
-        cache_creation_input_tokens: providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
-        turns_used: stats.numTurns ?? null,
-        max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
-        max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
-        output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
-        output_limit_reason: stats.outputLimitReason || err.outputLimitReason || null,
-        duration_ms: recordedDurationMs,
-        exit_code: recordedExitCode,
+        ...completionAccountingFields({
+          stats,
+          accountingStats,
+          segmentSummary: failureSegmentSummary,
+          providerUsageMeasured,
+          providerUsageStatus,
+          resolvedMaxTurns,
+          resolvedMaxOutputTokens,
+          opts,
+          resolveCallCostEstimate: this.resolveCallCostEstimate,
+        }),
         error_text: err.message?.slice(0, 2000),
-        atlas_method: opts.disableAtlas ? null : (stats.atlasMethod || opts.atlasMethod || null),
-        atlas_prefetch_status: opts.disableAtlas ? null : (opts.atlasPrefetchStatus || null),
-        cost_estimate_usd: providerUsageMeasured
-          ? this.resolveCallCostEstimate(accountingStats)
-          : null,
-        provider_usage_status: providerUsageStatus,
-        skills: opts.skillsAttached || null,
-        session_handle: stats.sessionHandle || stats.responseId || null,
       });
 
       this._recordContextPressureTelemetry({
@@ -2378,7 +2586,7 @@ export class TrackedProviderClient {
               observationContext: {
                 work_item_id,
                 job_id,
-                attempt_id: ambient.attempt_id ?? null,
+                attempt_id: attempt_id ?? ambient.attempt_id ?? null,
                 role: opts.role ?? ambient.role ?? null,
               },
               abortSignal: fbAc.signal,

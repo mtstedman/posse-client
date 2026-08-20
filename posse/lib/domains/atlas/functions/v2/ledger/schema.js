@@ -253,6 +253,49 @@ export function ensureLegacyScipColumnsBeforeDdl(db) {
 }
 
 /**
+ * Install the durable materialization epoch used by waiting-lane views.
+ *
+ * Ledger blob-layer writes are committed by the resident native writer. The
+ * triggers deliberately live in SQLite rather than in the Node caller so the
+ * revision advances in the exact transaction that mutates `blob_layers`.
+ * Child symbol/edge rewrites are covered by their owning layer upsert.
+ *
+ * @param {Database.Database} db
+ */
+export function ensureLayerRevisionTracking(db) {
+  if (!tableExists(db, "meta") || !tableExists(db, "blob_layers")) return;
+  const install = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO meta(key, value) VALUES('layer_revision', '0')
+       ON CONFLICT(key) DO NOTHING`,
+    ).run();
+    runDdl(db, `
+      CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_insert
+      AFTER INSERT ON blob_layers
+      BEGIN
+        INSERT INTO meta(key, value) VALUES('layer_revision', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_update
+      AFTER UPDATE ON blob_layers
+      BEGIN
+        INSERT INTO meta(key, value) VALUES('layer_revision', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_delete
+      AFTER DELETE ON blob_layers
+      BEGIN
+        INSERT INTO meta(key, value) VALUES('layer_revision', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+      END;
+    `);
+  });
+  install.immediate();
+}
+
+/**
  * Memory evidence provenance (additive, nullable per schema policy): why a
  * memory is stale and how often assessment evidence contradicted it.
  *

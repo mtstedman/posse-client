@@ -37,6 +37,7 @@ export const VOLATILE_FIELDS = Object.freeze(
     "overallSavingsPercent",
     "savingsPercent",
     // Timings.
+    "runtimeTelemetry",
     "durationMs",
     "duration_ms",
     "totalDurationMs",
@@ -61,8 +62,15 @@ export const VOLATILE_FIELDS = Object.freeze(
     "memory_id",
     "snapshotId",
     "operationId",
+    "attemptId",
+    "attempt_id",
     "startedAt",
+    "started_at",
+    "lastStartedAt",
+    "last_started_at",
     "completedAt",
+    "finishedAt",
+    "finished_at",
     "at",
     // Runtime-local filesystem paths.
     "repoRoot",

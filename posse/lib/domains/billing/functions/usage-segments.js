@@ -1,0 +1,372 @@
+import { getDb } from "../../../shared/storage/functions/index.js";
+import { providerLongContextRateMultipliers } from "../../../catalog/provider-economics.js";
+import { estimateBillableInputTokens, estimateCallCost } from "./pricing.js";
+
+const SOURCES = new Set(["live", "rollout_recovered", "aggregate_only"]);
+const PRECISIONS = new Set(["exact", "recovered_exact", "aggregate_only", "incomplete"]);
+
+function count(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : 0;
+}
+
+function positiveOrdinal(value) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
+}
+
+export function normalizeUsageSegment(segment = {}) {
+  const agentCallId = Number(segment.agentCallId ?? segment.agent_call_id);
+  const requestOrdinal = positiveOrdinal(segment.requestOrdinal ?? segment.request_ordinal);
+  const provider = String(segment.provider || "").trim().toLowerCase();
+  const modelName = String(segment.modelName ?? segment.model_name ?? "").trim();
+  if (!Number.isInteger(agentCallId) || agentCallId <= 0) throw new Error("usage segment requires agentCallId");
+  if (requestOrdinal == null) throw new Error("usage segment requires a positive requestOrdinal");
+  if (!provider || !modelName) throw new Error("usage segment requires provider and modelName");
+  const usageSource = SOURCES.has(segment.usageSource ?? segment.usage_source)
+    ? (segment.usageSource ?? segment.usage_source)
+    : "live";
+  const precision = PRECISIONS.has(segment.precision)
+    ? segment.precision
+    : (usageSource === "rollout_recovered" ? "recovered_exact" : "exact");
+  return {
+    agentCallId,
+    requestOrdinal,
+    provider,
+    modelName,
+    inputTokens: count(segment.inputTokens ?? segment.input_tokens),
+    cachedInputTokens: count(segment.cachedInputTokens ?? segment.cached_input_tokens),
+    cacheCreationInputTokens: count(segment.cacheCreationInputTokens ?? segment.cache_creation_input_tokens),
+    outputTokens: count(segment.outputTokens ?? segment.output_tokens),
+    requestContextInputTokens: count(
+      segment.requestContextInputTokens
+      ?? segment.request_context_input_tokens
+      ?? segment.inputTokens
+      ?? segment.input_tokens,
+    ),
+    durationMs: segment.durationMs == null && segment.duration_ms == null
+      ? null
+      : count(segment.durationMs ?? segment.duration_ms),
+    usageSource,
+    precision,
+  };
+}
+
+// Idempotent across live/recovery replay. A live exact record wins over a
+// recovered copy; neither can be downgraded by aggregate/incomplete data.
+export function recordUsageSegment(segment, { db = getDb() } = {}) {
+  const row = normalizeUsageSegment(segment);
+  db.prepare(`
+    INSERT INTO provider_usage_segments (
+      agent_call_id, request_ordinal, provider, model_name,
+      input_tokens, cached_input_tokens, cache_creation_input_tokens,
+      output_tokens, request_context_input_tokens, duration_ms,
+      usage_source, precision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(agent_call_id, request_ordinal) DO UPDATE SET
+      provider = excluded.provider,
+      model_name = excluded.model_name,
+      input_tokens = excluded.input_tokens,
+      cached_input_tokens = excluded.cached_input_tokens,
+      cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+      output_tokens = excluded.output_tokens,
+      request_context_input_tokens = excluded.request_context_input_tokens,
+      duration_ms = COALESCE(excluded.duration_ms, provider_usage_segments.duration_ms),
+      usage_source = excluded.usage_source,
+      precision = excluded.precision,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE CASE excluded.precision
+      WHEN 'exact' THEN 4 WHEN 'recovered_exact' THEN 3
+      WHEN 'aggregate_only' THEN 2 ELSE 1 END
+      >= CASE provider_usage_segments.precision
+      WHEN 'exact' THEN 4 WHEN 'recovered_exact' THEN 3
+      WHEN 'aggregate_only' THEN 2 ELSE 1 END
+  `).run(
+    row.agentCallId, row.requestOrdinal, row.provider, row.modelName,
+    row.inputTokens, row.cachedInputTokens, row.cacheCreationInputTokens,
+    row.outputTokens, row.requestContextInputTokens, row.durationMs,
+    row.usageSource, row.precision,
+  );
+  return db.prepare(`SELECT * FROM provider_usage_segments WHERE agent_call_id = ? AND request_ordinal = ?`)
+    .get(row.agentCallId, row.requestOrdinal);
+}
+
+export function listUsageSegments(agentCallId, { db = getDb() } = {}) {
+  try {
+    return db.prepare(`SELECT * FROM provider_usage_segments WHERE agent_call_id = ? ORDER BY request_ordinal`)
+      .all(agentCallId);
+  } catch {
+    return [];
+  }
+}
+
+export function listUsageSegmentsForAgentCalls(agentCallIds, { db = getDb() } = {}) {
+  const ids = [...new Set((agentCallIds || [])
+    .map(Number)
+    .filter((id) => Number.isInteger(id) && id > 0))];
+  const byAgentCallId = new Map(ids.map((id) => [id, []]));
+  try {
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = db.prepare(`
+        SELECT * FROM provider_usage_segments
+        WHERE agent_call_id IN (${placeholders})
+        ORDER BY agent_call_id, request_ordinal
+      `).all(...chunk);
+      for (const row of rows) byAgentCallId.get(Number(row.agent_call_id))?.push(row);
+    }
+  } catch {
+    // provider_usage_segments is absent in pre-migration/compatibility databases.
+  }
+  return byAgentCallId;
+}
+
+export function markUsageSegmentsIncomplete(agentCallId, { db = getDb() } = {}) {
+  db.prepare(`
+    UPDATE provider_usage_segments
+    SET precision = 'incomplete', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE agent_call_id = ?
+  `).run(agentCallId);
+}
+
+export function summarizeUsageSegments(agentCallId, {
+  db = getDb(),
+  modelTier = null,
+  expectedTotals = null,
+  usageSegments = null,
+  queryExpectedTotals = true,
+} = {}) {
+  const segments = Array.isArray(usageSegments)
+    ? usageSegments
+    : listUsageSegments(agentCallId, { db });
+  const exactSegmentState = segments.length > 0
+    && segments.every((segment) => segment.precision === "exact" || segment.precision === "recovered_exact");
+  const contiguous = segments.every((segment, index) => Number(segment.request_ordinal) === index + 1);
+  let exact = exactSegmentState && contiguous;
+  let mismatch = exactSegmentState && !contiguous;
+  const totals = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    outputTokens: 0,
+    longContextTierInputTokens: 0,
+    durationMs: 0,
+    billableInputTokens: exact ? 0 : null,
+    costUsd: exact ? 0 : null,
+  };
+  let exactCostAvailable = exact;
+  for (const segment of segments) {
+    totals.inputTokens += count(segment.input_tokens);
+    totals.cachedInputTokens += count(segment.cached_input_tokens);
+    totals.cacheCreationInputTokens += count(segment.cache_creation_input_tokens);
+    totals.outputTokens += count(segment.output_tokens);
+    totals.durationMs += count(segment.duration_ms);
+    const pricingInput = count(segment.request_context_input_tokens);
+    if (providerLongContextRateMultipliers(
+      segment.provider,
+      segment.model_name,
+      pricingInput,
+    ).active) {
+      totals.longContextTierInputTokens += count(segment.input_tokens);
+    }
+    if (exact) {
+      const priced = estimateCallCost({
+        provider: segment.provider,
+        modelName: segment.model_name,
+        modelTier,
+        inputTokens: segment.input_tokens,
+        outputTokens: segment.output_tokens,
+        cachedInputTokens: segment.cached_input_tokens,
+        cacheCreationInputTokens: segment.cache_creation_input_tokens,
+        longContextInputTokens: pricingInput,
+      });
+      if (priced.source !== "none" && Number.isFinite(priced.costUsd)) totals.costUsd += priced.costUsd;
+      else exactCostAvailable = false;
+      totals.billableInputTokens += estimateBillableInputTokens({
+        provider: segment.provider,
+        modelName: segment.model_name,
+        modelTier,
+        inputTokens: segment.input_tokens,
+        cachedInputTokens: segment.cached_input_tokens,
+        cacheCreationInputTokens: segment.cache_creation_input_tokens,
+        longContextInputTokens: pricingInput,
+      }).billableInputTokens;
+    }
+  }
+  if (!exactCostAvailable) totals.costUsd = null;
+  let aggregate = expectedTotals;
+  if (!aggregate && queryExpectedTotals) {
+    try {
+      const call = db.prepare(`
+        SELECT input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens
+        FROM agent_calls WHERE id = ?
+      `).get(agentCallId);
+      if (call?.input_tokens != null && call?.output_tokens != null) aggregate = call;
+    } catch { /* optional compatibility check */ }
+  }
+  if (aggregate && segments.length > 0) {
+    const expected = {
+      inputTokens: count(aggregate.inputTokens ?? aggregate.input_tokens),
+      outputTokens: count(aggregate.outputTokens ?? aggregate.output_tokens),
+      cachedInputTokens: count(aggregate.cachedInputTokens ?? aggregate.cached_input_tokens),
+      cacheCreationInputTokens: count(aggregate.cacheCreationInputTokens ?? aggregate.cache_creation_input_tokens),
+    };
+    const aggregateMatches = totals.inputTokens === expected.inputTokens
+      && totals.outputTokens === expected.outputTokens
+      && totals.cachedInputTokens === expected.cachedInputTokens
+      && totals.cacheCreationInputTokens === expected.cacheCreationInputTokens;
+    mismatch ||= !aggregateMatches;
+    exact &&= aggregateMatches;
+    if (!exact) {
+      totals.billableInputTokens = null;
+      totals.costUsd = null;
+    }
+  }
+  const incomplete = segments.some((segment) => segment.precision === "incomplete") || mismatch;
+  return {
+    agentCallId: Number(agentCallId),
+    requestCount: segments.length,
+    exact,
+    precision: exact
+      ? (segments.some((segment) => segment.precision === "recovered_exact") ? "recovered_exact" : "exact")
+      : incomplete
+        ? "incomplete"
+        : segments.length > 0 || aggregate
+          ? "aggregate_only"
+          : "unknown",
+    ...totals,
+  };
+}
+
+function hasAggregateUsage(call = {}) {
+  return (call.input_tokens ?? call.inputTokens) != null
+    && (call.output_tokens ?? call.outputTokens) != null;
+}
+
+function estimatedAggregateCost(call, totals) {
+  const priced = estimateCallCost({
+    provider: call.provider,
+    modelName: call.model_name ?? call.modelName,
+    modelTier: call.model_tier ?? call.modelTier,
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    cachedInputTokens: totals.cachedInputTokens,
+    cacheCreationInputTokens: totals.cacheCreationInputTokens,
+    knownCostUsd: call.cost_estimate_usd ?? call.costEstimateUsd,
+    longContextInputTokens: call.long_context_tier_input_tokens
+      ?? call.longContextTierInputTokens
+      ?? null,
+  });
+  return priced.source === "none" || !Number.isFinite(priced.costUsd)
+    ? { costUsd: null, costSource: "none", costPrecision: "unknown" }
+    : { costUsd: priced.costUsd, costSource: `aggregate:${priced.source}`, costPrecision: "estimated" };
+}
+
+export function resolveCanonicalCallAccounting(call = {}, {
+  db = getDb(),
+  usageSegments = null,
+} = {}) {
+  const inputTokens = count(call.input_tokens ?? call.inputTokens);
+  const outputTokens = count(call.output_tokens ?? call.outputTokens);
+  const cachedInputTokens = Math.min(
+    inputTokens,
+    count(call.cached_input_tokens ?? call.cachedInputTokens),
+  );
+  const cacheCreationInputTokens = Math.min(
+    Math.max(0, inputTokens - cachedInputTokens),
+    count(call.cache_creation_input_tokens ?? call.cacheCreationInputTokens),
+  );
+  const agentCallId = Number(call.id ?? call.agent_call_id ?? call.agentCallId) || null;
+  const aggregateUsageAvailable = hasAggregateUsage(call);
+  const segments = agentCallId
+    ? summarizeUsageSegments(agentCallId, {
+      db,
+      modelTier: call.model_tier ?? call.modelTier,
+      expectedTotals: aggregateUsageAvailable ? call : null,
+      usageSegments,
+      queryExpectedTotals: false,
+    })
+    : { requestCount: 0 };
+  if (segments.requestCount > 0) {
+    const aggregateCost = segments.precision === "aggregate_only" && aggregateUsageAvailable
+      ? estimatedAggregateCost(call, {
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        cacheCreationInputTokens,
+      })
+      : null;
+    const costUsd = segments.exact ? segments.costUsd : aggregateCost?.costUsd ?? null;
+    return {
+      inputTokens: segments.inputTokens,
+      outputTokens: segments.outputTokens,
+      cachedInputTokens: segments.cachedInputTokens,
+      cacheCreationInputTokens: segments.cacheCreationInputTokens,
+      billableInputTokens: segments.billableInputTokens,
+      billableTokens: segments.exact ? segments.billableInputTokens + segments.outputTokens : null,
+      costUsd,
+      costSource: segments.exact
+        ? `segments:${segments.precision}`
+        : aggregateCost?.costSource ?? `segments:${segments.precision}`,
+      costPrecision: segments.exact && costUsd != null
+        ? "exact"
+        : aggregateCost?.costPrecision ?? "unknown",
+      precision: segments.precision,
+      exact: segments.exact,
+      requestCount: segments.requestCount,
+      durationMs: segments.durationMs,
+      longContextTierInputTokens: segments.longContextTierInputTokens,
+    };
+  }
+  const persistedPrecision = String(call.billing_precision ?? call.billingPrecision ?? "").trim();
+  if (persistedPrecision === "unknown"
+    || persistedPrecision === "incomplete"
+    || persistedPrecision === "exact"
+    || persistedPrecision === "recovered_exact") {
+    return {
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      cacheCreationInputTokens,
+      billableInputTokens: null,
+      billableTokens: null,
+      costUsd: null,
+      costSource: persistedPrecision === "unknown" ? "none" : `segments:${persistedPrecision}`,
+      costPrecision: "unknown",
+      precision: persistedPrecision === "unknown" ? "unknown" : "incomplete",
+      exact: false,
+      requestCount: count(call.usage_segment_count ?? call.usageSegmentCount),
+      durationMs: call.provider_request_duration_ms ?? call.providerRequestDurationMs ?? null,
+      longContextTierInputTokens: call.long_context_tier_input_tokens
+        ?? call.longContextTierInputTokens
+        ?? null,
+    };
+  }
+  const aggregateCost = aggregateUsageAvailable
+    ? estimatedAggregateCost(call, {
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      cacheCreationInputTokens,
+    })
+    : { costUsd: null, costSource: "none", costPrecision: "unknown" };
+  return {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+    billableInputTokens: null,
+    billableTokens: null,
+    costUsd: aggregateCost.costUsd,
+    costSource: aggregateCost.costSource,
+    costPrecision: aggregateCost.costPrecision,
+    precision: aggregateUsageAvailable ? "aggregate_only" : "unknown",
+    exact: false,
+    requestCount: 0,
+    durationMs: call.provider_request_duration_ms ?? call.providerRequestDurationMs ?? null,
+    longContextTierInputTokens: call.long_context_tier_input_tokens
+      ?? call.longContextTierInputTokens
+      ?? null,
+  };
+}

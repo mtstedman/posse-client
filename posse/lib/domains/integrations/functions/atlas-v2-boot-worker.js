@@ -97,6 +97,8 @@ async function main() {
     config = {},
     testBlockMs = 0,
     purpose = "main-full",
+    sourceProof = null,
+    sourceLockHeld = false,
   } = workerData || {};
   if (!ledgerDbPath) throw new TypeError("ATLAS v2 boot worker: ledgerDbPath is required");
   if (!repoRoot) throw new TypeError("ATLAS v2 boot worker: repoRoot is required");
@@ -157,6 +159,8 @@ async function main() {
       branch: String(defaultBranch || "main").trim() || "main",
       out_view_path: mainViewDbPath,
       trigger_event: "boot",
+      source_proof: sourceProof,
+      source_lock_held: sourceLockHeld === true,
     });
     if (stopRequested && stopController.signal.aborted) {
       throw stopController.signal.reason || new Error("ATLAS boot worker stopped");

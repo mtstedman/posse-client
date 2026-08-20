@@ -305,7 +305,7 @@ function observationValueFromKeys(input = {}, keys = []) {
 }
 
 function summarizeCatalogObservedToolUse(toolName, input = {}) {
-  const entry = ToolCatalog.get(toolName);
+  const entry = ToolCatalog.getCanonical(toolName);
   const observation = entry?.observation;
   if (!observation?.label) return null;
   const source = observationValueFromKeys(input, observation.sourceKey ? [observation.sourceKey] : []);

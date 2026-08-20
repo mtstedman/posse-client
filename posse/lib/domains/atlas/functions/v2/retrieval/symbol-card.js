@@ -38,21 +38,22 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
   const sessionId = /** @type {any} */ (params).sessionId;
 
   if (params.symbolId) {
-    const parsed = parseSymbolId(params.symbolId);
+    const selectedSymbolId = /** @type {string} */ (params.symbolId);
+    const parsed = parseSymbolId(selectedSymbolId);
     if (!parsed) {
       return errorEnvelope({
         action: "symbol.card",
         versionId,
         code: "invalid_symbol_id",
-        message: `Malformed symbolId ${params.symbolId}`,
+        message: `Malformed symbolId ${selectedSymbolId}`,
       });
     }
     target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
     if (!target) {
-      overlayTarget = await findOverlaySymbol({ repoRoot, sessionId, symbolId: params.symbolId });
+      overlayTarget = await findOverlaySymbol({ repoRoot, sessionId, symbolId: selectedSymbolId });
     }
   } else if (params.symbolRef) {
-    const ref = params.symbolRef;
+    const ref = /** @type {import("../contracts/tool-params.js").SymbolRef} */ (params.symbolRef);
     const opts = /** @type {any} */ ({ fuzzy: false });
     if (ref.kind) opts.kinds = [ref.kind];
     if (ref.file) opts.pathPrefix = ref.file;
@@ -65,7 +66,7 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
       target = matches[0];
     }
     if (!target) {
-      overlayTarget = await findOverlaySymbolByRef({ repoRoot, sessionId, ref: params.symbolRef });
+      overlayTarget = await findOverlaySymbolByRef({ repoRoot, sessionId, ref });
     }
   } else {
     return errorEnvelope({
@@ -174,7 +175,7 @@ export async function symbolGetCards({ view, versionId, params, repoRoot, ledger
       action,
       versionId,
       code: "invalid_params",
-      message: "symbol.card requires symbolId, symbolRef, symbolIds, or symbolRefs",
+      message: "symbol.card requires symbolId or symbolRef as one selector or an array",
     });
   }
 
@@ -224,7 +225,9 @@ export async function symbolGetCards({ view, versionId, params, repoRoot, ledger
  * @param {SymbolGetCardParams} params
  */
 function hasBatchCardParams(params) {
-  return Array.isArray(/** @type {any} */ (params).symbolIds)
+  return Array.isArray(/** @type {any} */ (params).symbolId)
+    || Array.isArray(/** @type {any} */ (params).symbolRef)
+    || Array.isArray(/** @type {any} */ (params).symbolIds)
     || Array.isArray(/** @type {any} */ (params).symbolRefs);
 }
 
@@ -246,7 +249,7 @@ function collectCardRequests(params) {
     requests.push({ index: index++, symbolId });
   };
 
-  if (params.symbolId) addSymbolId(params.symbolId);
+  for (const symbolId of scalarOrArray(/** @type {any} */ (params).symbolId)) addSymbolId(symbolId);
   for (const symbolId of arrayParam(/** @type {any} */ (params).symbolIds)) addSymbolId(symbolId);
 
   const addSymbolRef = (value) => {
@@ -269,7 +272,7 @@ function collectCardRequests(params) {
     requests.push({ index: index++, symbolRef: normalized.ref });
   };
 
-  if (params.symbolRef) addSymbolRef(params.symbolRef);
+  for (const symbolRef of scalarOrArray(/** @type {any} */ (params).symbolRef)) addSymbolRef(symbolRef);
   for (const symbolRef of arrayParam(/** @type {any} */ (params).symbolRefs)) addSymbolRef(symbolRef);
 
   return requests;
@@ -281,6 +284,15 @@ function collectCardRequests(params) {
  */
 function arrayParam(value) {
   return Array.isArray(value) ? value : [];
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown[]}
+ */
+function scalarOrArray(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
 }
 
 /**

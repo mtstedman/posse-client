@@ -14,7 +14,7 @@
 
 import { sha256Hex } from "../hash.js";
 import { buildLineStarts, scipRangeToJs } from "./position.js";
-import { externalDisplayName, parseScipSymbol } from "./symbol-parser.js";
+import { externalDisplayName, isStructuralScipDefinition, parseScipSymbol } from "./symbol-parser.js";
 import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 
 /** @typedef {import("./decode.js").ScipIndex} ScipIndex */
@@ -143,7 +143,7 @@ export function buildScipIndexCache(index) {
     const definitionLocalIds = computeDefinitionLocalIds(occurrences, symbolsBySymbol);
     const definitionIntervals = computeDefinitionIntervals(occurrences, definitionLocalIds);
     for (const occ of occurrences) {
-      if (!occ.parsed || occ.parsed.local) continue;
+      if (!isStructuralScipDefinition(occ.parsed)) continue;
       const localId = definitionLocalIds.get(occ.raw.symbol);
       if (localId == null) continue;
       if (contentHash && !definitionBySymbol.has(occ.raw.symbol)) {

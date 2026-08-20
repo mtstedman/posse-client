@@ -15,6 +15,10 @@ import { openViewDbReadOnly, openViewDbReadWrite } from "../../functions/v2/view
 import { runNativeViewRead } from "../../functions/v2/native/view-read.js";
 import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
 import { hydrateNativeBlastRadius, hydrateNativeSlice } from "../../functions/v2/view-slice.js";
+import {
+  normalizeWaitingLaneGeneration,
+  waitingLaneGenerationsEqual,
+} from "../../../../catalog/waiting-lane.js";
 
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ViewMeta} ViewMeta */
 /** @typedef {import("../../functions/v2/contracts/api.js").View} ViewContract */
@@ -70,7 +74,17 @@ export class View {
     if (response.result !== "meta" || !response.value) {
       throw new Error("ATLAS view-read returned an invalid meta result");
     }
-    return normalizeViewMeta(response.value);
+    // The native v1 meta response predates joint-generation fields. Keep its
+    // validation for the established contract, then supplement the additive
+    // metadata from this already-open local read handle.
+    const local = this.#metaValuesLocal();
+    return normalizeViewMeta({
+      ...local,
+      ...response.value,
+      layer_revision: local.layer_revision,
+      view_fingerprint: local.view_fingerprint,
+      git_oid: local.git_oid,
+    });
   }
 
   /**
@@ -82,6 +96,11 @@ export class View {
    * @returns {ViewMeta}
    */
   metaLocal() {
+    return normalizeViewMeta(this.#metaValuesLocal());
+  }
+
+  /** @returns {Record<string, string>} */
+  #metaValuesLocal() {
     const rows = /** @type {Array<{ key: string, value: string | null }>} */ (
       this.#db.prepare("SELECT key, value FROM meta").all()
     );
@@ -90,7 +109,79 @@ export class View {
     for (const row of rows) {
       if (row.value != null) values[row.key] = row.value;
     }
-    return normalizeViewMeta(values);
+    return values;
+  }
+
+  /**
+   * Return the exact durable joint generation, or null while Git identity has
+   * not been proven/published for this materialization.
+   *
+   * @returns {import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration | null}
+   */
+  generationLocal() {
+    const meta = this.metaLocal();
+    return normalizeWaitingLaneGeneration({
+      target_branch: meta.branch,
+      git_oid: meta.git_oid,
+      atlas_ledger_seq: meta.ledger_seq,
+      atlas_layer_revision: meta.layer_revision,
+      view_fingerprint: meta.view_fingerprint,
+    });
+  }
+
+  /**
+   * Publish Git identity only when the view's actual materialization exactly
+   * matches the requested generation. This is the final durable step after a
+   * clean exact-OID source proof.
+   *
+   * @param {import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration} generation
+   * @param {{ intake?: any }} [opts]
+   * @returns {import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration}
+   */
+  publishGeneration(generation, { intake = null } = {}) {
+    if (this.#mode !== "readwrite") {
+      throw new Error("View.publishGeneration: view must be opened readwrite");
+    }
+    const expected = normalizeWaitingLaneGeneration(generation);
+    if (!expected) throw new TypeError("View.publishGeneration: invalid generation");
+    const meta = this.metaLocal();
+    const materialization = {
+      target_branch: meta.branch,
+      git_oid: expected.git_oid,
+      atlas_ledger_seq: meta.ledger_seq,
+      atlas_layer_revision: meta.layer_revision,
+      view_fingerprint: meta.view_fingerprint,
+    };
+    if (!waitingLaneGenerationsEqual(materialization, expected)) {
+      throw new Error("View.publishGeneration: view materialization does not match requested generation");
+    }
+    this.#db.transaction(() => {
+      this.#db.prepare(
+        "INSERT INTO meta(key, value) VALUES('git_oid', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      ).run(expected.git_oid);
+      if (intake?.attempt_id) {
+        const completedIntake = {
+          schema_version: Number(intake.schema_version) || 1,
+          attempt_id: String(intake.attempt_id),
+          status: "complete",
+          purpose: String(intake.purpose || "main-incremental"),
+          target_branch: expected.target_branch,
+          git_oid: expected.git_oid,
+          started_at: intake.started_at || null,
+          finished_at: new Date().toISOString(),
+          resume_count: Number(intake.resume_count) || 0,
+          generation: expected,
+        };
+        this.#db.prepare(
+          "INSERT INTO meta(key, value) VALUES('main_intake', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ).run(JSON.stringify(completedIntake));
+      }
+    }).immediate();
+    const actual = this.generationLocal();
+    if (!actual || !waitingLaneGenerationsEqual(actual, expected)) {
+      throw new Error("View.publishGeneration: durable generation verification failed");
+    }
+    return actual;
   }
 
   /** @returns {ViewQuery} */
@@ -478,6 +569,18 @@ export function normalizeViewMeta(values) {
   if (!Number.isInteger(ledgerSeq) || ledgerSeq < 0) {
     throw new Error("ATLAS view meta has an invalid ledger_seq");
   }
+  // Existing pre-generation views remain mountable so the warmer can
+  // recognize and replace them. Revision 0 + an empty fingerprint is a
+  // deliberately non-publishable legacy marker, not an exact generation.
+  const layerRevision = values.layer_revision == null || values.layer_revision === ""
+    ? 0
+    : Number(values.layer_revision);
+  if (!Number.isSafeInteger(layerRevision) || layerRevision < 0) {
+    throw new Error("ATLAS view meta has an invalid layer_revision");
+  }
+  const viewFingerprint = typeof values.view_fingerprint === "string"
+    ? values.view_fingerprint.trim()
+    : "";
 
   let warmedForFiles = values.warmed_for_files ?? null;
   if (typeof warmedForFiles === "string") {
@@ -497,6 +600,11 @@ export function normalizeViewMeta(values) {
     parent_branch: values.parent_branch ?? null,
     parent_seq: optionalIntegerMeta(values.parent_seq),
     ledger_seq: ledgerSeq,
+    layer_revision: layerRevision,
+    view_fingerprint: viewFingerprint,
+    git_oid: typeof values.git_oid === "string" && values.git_oid.trim()
+      ? values.git_oid.trim().toLowerCase()
+      : null,
     built_at: typeof values.built_at === "string" ? values.built_at : "",
     warmed_for_files: warmedForFiles,
     prefetched_symbols: optionalIntegerMeta(values.prefetched_symbols),

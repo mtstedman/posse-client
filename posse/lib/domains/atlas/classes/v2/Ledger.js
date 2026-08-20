@@ -15,7 +15,11 @@ import Database from "better-sqlite3";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { isContentHash } from "../../functions/v2/hash.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
-import { openLedgerDb, openLedgerDbReadOnly } from "../../functions/v2/ledger/schema.js";
+import {
+  ensureLayerRevisionTracking,
+  openLedgerDb,
+  openLedgerDbReadOnly,
+} from "../../functions/v2/ledger/schema.js";
 import {
   ensureLedgerNativeAsync,
   invalidateStorageCacheNativeAsync,
@@ -90,6 +94,7 @@ export class Ledger {
    * @param {boolean} readOnly
    */
   #bootstrap(readOnly) {
+    if (!readOnly) ensureLayerRevisionTracking(this.#db);
     this.#stmt = this.#prepareAll();
     this.#interner = new Interner(this.#db);
     this.#scipIndex = new ScipIndexStore(this.#db, this.#interner);
@@ -357,6 +362,20 @@ export class Ledger {
   headSeq(branch) {
     const row = /** @type {{ s: number }} */ (this.#stmt.headSeqByBranch.get(branch));
     return row?.s || 0;
+  }
+
+  /**
+   * Durable epoch for blob-layer materialization. It advances inside the
+   * same SQLite transaction as every blob-layer insert/update/delete.
+   *
+   * @returns {number}
+   */
+  layerRevision() {
+    const row = /** @type {{ value?: string } | undefined} */ (
+      this.#db.prepare("SELECT value FROM meta WHERE key = 'layer_revision'").get()
+    );
+    const revision = Number(row?.value ?? 0);
+    return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
   }
 
   /**

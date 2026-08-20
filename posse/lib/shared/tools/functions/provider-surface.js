@@ -53,6 +53,18 @@ function pushUnique(values, value) {
   if (value && !values.includes(value)) values.push(value);
 }
 
+export function renderAtlasGuidance(contract = {}) {
+  const hasAtlas = (Array.isArray(contract?.tools) ? contract.tools : [])
+    .some((tool) => String(tool?.suite || "").trim() === "atlas"
+      || String(tool?.access || "").trim() === "atlas");
+  return hasAtlas
+    ? [
+      "Atlas symbol tracing: To get new information about a symbol, choose a different Atlas tool suited to the unresolved fact.",
+      "Atlas reference traversal: Use citation refs directly for citation or handoff. Fetch continuation refs, explicit cursor, survey, or continuation fields, bounded or omitted content, and focused matches within stored payloads. Group concurrently ready refs into one fetch; use one ref when it unlocks the next cursor. Follow returned cursors in order while task-relevant content remains, and use each returned view ref for citation, slicing, or handoff. Start a fresh producer call for a materially different scope.",
+    ]
+    : [];
+}
+
 export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
   if (!toolRenderer || typeof toolRenderer.tryRenderIssued !== "function") return [];
 
@@ -77,7 +89,7 @@ export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
 
   const lines = [];
   if (parallelAtlas.length + parallelDeterministic.length > 0) {
-    lines.push("Turn batching: Batch two to four independent, ready read only tool calls together in the same assistant response. All read only tools issued this run, Atlas and standard, support turn batching.");
+    lines.push("Turn batching: Batch independent, ready read only tool calls together in the same assistant response. All read only tools issued this run, Atlas and standard, support turn batching.");
   }
   if (nativeBatch.length > 0) {
     lines.push("Schema batching: Tools with schema defined batch fields can combine items in one call within their declared limits.");

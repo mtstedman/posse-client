@@ -110,6 +110,12 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // scopes the run to that language's indexer (aliases like `ts`/`py`
       // normalize; unknown values fall back to all detected languages);
       // without it the run covers every detected language.
+      // This standalone operation does not pass through the main-intake source
+      // proof, which normally refreshes native Git authorization. The SCIP
+      // sanitizer still needs an exact tracked-file manifest; authorize Git in
+      // this conductor before staging so it cannot silently fall back to a
+      // capped filesystem walk on large repositories.
+      await nativeBinaries.binary("git").prewarmNativeAuth();
       const { ensureScipStaged } = await import("../scip/stager.js");
       const lang = String(request.lang || "").trim();
       const config = lang
@@ -162,6 +168,10 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         // ledger/view writers, so queued merges/warms must not wait behind it.
         deferEmbeddings: true,
       });
+      const purpose = String(request.job?.purpose || "");
+      const targetLocal = purpose === "wi-snapshot"
+        || purpose === "wi-catchup"
+        || purpose === "wi-prefetch";
       try {
         const result = await dbWrite.run(() => engine.handleWarmJob(request.job ?? { paths: request.paths ?? [] }));
         // Outside dbWrite.run, still inside this request: progress events keep
@@ -169,14 +179,53 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         // flush writes into `result` (captured by reference at defer time).
         // Serialized per repo so this index's ANN save/rename can't race a
         // concurrent warm's in this host (single in-host embedding writer).
-        await runEmbeddingWriteExclusive(request.repoRoot || request.ledgerPath, () => engine.flushDeferredEmbeddings());
+        if (!targetLocal) {
+          await runEmbeddingWriteExclusive(request.repoRoot || request.ledgerPath, () => engine.flushDeferredEmbeddings());
+        }
         return result;
       } finally {
         // The warm may have rewritten the on-disk ANN; cached retrieval-side
         // embedding handles hold the old index in memory.
-        const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");
-        await invalidateConductorRetrieveResources();
+        if (!targetLocal) {
+          const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");
+          await invalidateConductorRetrieveResources();
+        }
       }
+    }
+
+    case "publishGeneration": {
+      const targetBranch = String(request.targetBranch || "").trim();
+      const gitOid = String(request.gitOid || "").trim().toLowerCase();
+      const viewPath = String(request.viewPath || request.dbPath || "").trim();
+      if (!targetBranch || !/^[0-9a-f]{40,64}$/u.test(gitOid) || !viewPath) {
+        throw new TypeError("publishGeneration requires targetBranch, gitOid, and viewPath");
+      }
+      const ledger = await getLedger(request.ledgerPath, request.dbPath || viewPath);
+      const { View } = await import("../../../classes/v2/View.js");
+      return dbWrite.run(() => {
+        const view = View.mount({ dbPath: viewPath, mode: "readwrite" });
+        try {
+          const meta = view.metaLocal();
+          if (meta.branch !== targetBranch) {
+            throw new Error(`publishGeneration branch mismatch (${meta.branch} != ${targetBranch})`);
+          }
+          if (ledger.headSeq(targetBranch) !== meta.ledger_seq) {
+            throw new Error("publishGeneration ledger sequence is not current");
+          }
+          if (ledger.layerRevision() !== meta.layer_revision) {
+            throw new Error("publishGeneration layer revision is not current");
+          }
+          return view.publishGeneration({
+            target_branch: targetBranch,
+            git_oid: gitOid,
+            atlas_ledger_seq: meta.ledger_seq,
+            atlas_layer_revision: meta.layer_revision,
+            view_fingerprint: meta.view_fingerprint,
+          });
+        } finally {
+          view.close();
+        }
+      });
     }
 
     case "retrieve": {

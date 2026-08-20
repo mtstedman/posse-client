@@ -157,6 +157,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_ASSESSMENT_PARSE_ERROR: "job.assessment_parse_error",
   JOB_ASSESSMENT_PARSE_RETRY_BUDGET_EXCEEDED: "job.assessment_parse_retry_budget_exceeded",
   JOB_ASSESSMENT_PROVIDER_ERROR: "job.assessment_provider_error",
+  JOB_ASSESSMENT_REUSED: "job.assessment_reused",
   JOB_ASSESSMENT_RETRY_PAYLOAD_PARSE_FAILED: "job.assessment_retry_payload_parse_failed",
   JOB_ASSESSMENT_TURN_BUDGET_EXHAUSTED: "job.assessment_turn_budget_exhausted",
   JOB_ASSESSMENT_TRANSPORT_ERROR: "job.assessment_transport_error",

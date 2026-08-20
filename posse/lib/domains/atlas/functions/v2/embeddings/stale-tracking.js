@@ -73,10 +73,37 @@ export async function pruneStaleEmbeddingHashes({ base, index, hashes = null, le
  * @returns {Promise<void>}
  */
 export const PRUNE_KEEP_SCAN_LIMIT = 100_000;
+// Keep prune requests comfortably beneath the shared native JSONL envelope.
+// A repo-global index can have many warmed views, so bounding each view alone
+// is insufficient: their union may still be arbitrarily large.
+export const PRUNE_KEEP_REQUEST_BYTES = 48 * 1024 * 1024;
 
 export async function pruneEmbeddingIndexToCurrentView({ base, view, index, extraKeepKeys = [] }) {
   if (!view || typeof index?.pruneToKeys !== "function") return;
-  const keep = [];
+  /** @type {Map<string, { content_hash: string, local_id: any }>} */
+  const keep = new Map();
+  let keepRequestBytes = 0;
+  const addKeepKey = (key) => {
+    const contentHash = String(key?.content_hash ?? "").trim();
+    if (!contentHash) return true;
+    const localId = key?.local_id;
+    const identity = `${contentHash}\0${String(localId)}`;
+    if (keep.has(identity)) return true;
+    const normalized = { content_hash: contentHash, local_id: localId };
+    // Match the vector wire shape closely enough to reserve ample space for
+    // the worker envelope, auth pulse, method name, and JSON punctuation.
+    const wireBytes = Buffer.byteLength(JSON.stringify({
+      contentHash,
+      localId,
+    }), "utf8") + 1;
+    if (keepRequestBytes + wireBytes > PRUNE_KEEP_REQUEST_BYTES) {
+      /** @type {any} */ (base).embeddings_prune_skipped_keep_bytes = keepRequestBytes + wireBytes;
+      return false;
+    }
+    keep.set(identity, normalized);
+    keepRequestBytes += wireBytes;
+    return true;
+  };
   let symbolCount = 0;
   for await (const symbols of iterateViewSymbolPages({
     view,
@@ -89,12 +116,16 @@ export async function pruneEmbeddingIndexToCurrentView({ base, view, index, extr
       /** @type {any} */ (base).embeddings_prune_skipped_keep_cap = symbolCount;
       return;
     }
-    for (const symbol of symbols) keep.push(...embeddingKeysForSymbol(symbol));
+    for (const symbol of symbols) {
+      for (const key of embeddingKeysForSymbol(symbol)) {
+        if (!addKeepKey(key)) return;
+      }
+    }
   }
   for (const key of extraKeepKeys) {
-    if (key && key.content_hash != null) keep.push({ content_hash: key.content_hash, local_id: key.local_id });
+    if (!addKeepKey(key)) return;
   }
-  const removed = await index.pruneToKeys(keep);
+  const removed = await index.pruneToKeys([...keep.values()]);
   if (Number.isFinite(Number(removed)) && Number(removed) > 0) {
     /** @type {any} */ (base).embeddings_orphans_pruned = Number(removed);
   }

@@ -375,6 +375,7 @@ export class AssessmentHandoffAdapter {
       const assessmentSession = new AssessmentSession({
         job,
         output: storedOutput,
+        attemptId: assessAttempt.attempt.id,
         providerClient: worker.providerClient,
         worker,
         options: {

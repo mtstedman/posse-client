@@ -19,7 +19,13 @@ import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "./to-rows.j
 import { sha256Hex } from "../hash.js";
 import { normalizeRepoPath, repoRelativeFromAbsolute } from "../paths.js";
 import { languageForPath } from "../parse/language-buckets.js";
-import { inspectSampleForMinified, isLikelyMinifiedPath, MINIFIED_SAMPLE_BYTES } from "../parser/index-filters.js";
+import {
+  inspectSampleForMinified,
+  isGeneratedSourceArtifactPath,
+  isLikelyMinifiedPath,
+  MINIFIED_SAMPLE_BYTES,
+  shouldInspectSourceForMinification,
+} from "../parser/index-filters.js";
 import { scipBasenameSourceLanguages } from "../scip-progress.js";
 import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas/shared.js";
 
@@ -493,7 +499,7 @@ export async function ingestScipFile({
         if (!repoRelPath) {
           throw new RangeError(`SCIP document path is not canonical repo-relative: ${document.repo_rel_path || "(empty)"}`);
         }
-        if (document.skip_reason === "minified_skip") {
+        if (document.skip_reason === "minified_skip" || document.skip_reason === "generated_artifact_skip") {
           documentsSkipped++;
           advanceDocumentProgress(document);
           emitDocumentProgress();
@@ -844,13 +850,17 @@ async function hydrateScipDocument(doc, index, repoRoot) {
     return;
   }
   doc.relative_path = repoRelPath;
+  if (isGeneratedSourceArtifactPath(repoRelPath)) {
+    doc.atlas_skip_reason = "generated_artifact_skip";
+    doc.atlas_skip_message = "SCIP document is checked-in generated golden output";
+    return;
+  }
   const abs = resolveDocumentPath(index.metadata.project_root, repoRoot, repoRelPath);
   if (!abs) return;
   if (doc.text) {
     try {
       const diskBytes = await fs.promises.readFile(abs);
-      const embeddedBytes = Buffer.from(doc.text, "utf8");
-      if (sha256Hex(diskBytes) !== sha256Hex(embeddedBytes)) {
+      if (decodeScipSourceBytes(diskBytes) !== doc.text) {
         // Embedded text means the indexer gave us an exact file snapshot.
         // If the same path now has different bytes, ranges belong to the
         // older snapshot and must not be attached to the current file hash.
@@ -869,7 +879,7 @@ async function hydrateScipDocument(doc, index, repoRoot) {
   }
   try {
     const bytes = await fs.promises.readFile(abs);
-    doc.text = bytes.toString("utf8");
+    doc.text = decodeScipSourceBytes(bytes);
     doc.source_bytes = bytes;
     markMinifiedDocumentSkip(doc, repoRelPath, bytes);
   } catch {
@@ -878,8 +888,40 @@ async function hydrateScipDocument(doc, index, repoRoot) {
   }
 }
 
+/**
+ * Decode repository source without losing the raw bytes used for its Git
+ * content hash. TypeScript accepts UTF-8/UTF-16 BOMs; SCIP ranges address the
+ * decoded text while ATLAS identity must continue to address the disk bytes.
+ * @param {Buffer | Uint8Array} value
+ */
+function decodeScipSourceBytes(value) {
+  const bytes = Buffer.from(value);
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return bytes.subarray(2).toString("utf16le");
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const body = bytes.subarray(2);
+    const swapped = Buffer.alloc(body.length + (body.length % 2));
+    for (let offset = 0; offset + 1 < body.length; offset += 2) {
+      swapped[offset] = body[offset + 1];
+      swapped[offset + 1] = body[offset];
+    }
+    if (body.length % 2) {
+      swapped[swapped.length - 2] = 0xfd;
+      swapped[swapped.length - 1] = 0xff;
+    }
+    return swapped.toString("utf16le");
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return bytes.subarray(3).toString("utf8");
+  }
+  return bytes.toString("utf8");
+}
+
 function markMinifiedDocumentSkip(doc, repoRelPath, bytes) {
   if (doc.atlas_skip_reason) return;
+  const byteLength = Buffer.isBuffer(bytes) ? bytes.length : Buffer.byteLength(String(bytes || ""));
+  if (!shouldInspectSourceForMinification(repoRelPath, byteLength)) return;
   if (isLikelyMinifiedPath(repoRelPath)) {
     doc.atlas_skip_reason = "minified_skip";
     doc.atlas_skip_message = "SCIP document path matches minified/bundled pattern";

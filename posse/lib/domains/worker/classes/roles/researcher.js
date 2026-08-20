@@ -56,6 +56,10 @@ import {
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { hasLineRef } from "../../../research/functions/line-refs.js";
 import { buildWebFetchCachePreload, cacheResearchWebFetches } from "../../../research/functions/web-cache.js";
+import {
+  captureWaitingLaneResearchHotPaths,
+  requestWaitingLaneResearchDemand,
+} from "../../../research/functions/waiting-lane-demand.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 
 const CHILD_BRIEF_SYNTH_CHAR_LIMIT = 12000;
@@ -80,6 +84,8 @@ const DEFAULT_DEPS = {
   maxTurnsOverrideFromPayload: defaultMaxTurnsOverrideFromPayload,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
   researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
+  requestWaitingLaneResearchDemand,
+  captureWaitingLaneResearchHotPaths,
   shortJobTitle: defaultShortJobTitle,
 };
 
@@ -517,6 +523,7 @@ export class ResearcherRole extends BaseRole {
       isDeepthinkTask,
       isResearchBudgetDeep,
       loadNudges,
+      requestWaitingLaneResearchDemand: requestPreparationDemand,
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
@@ -696,6 +703,21 @@ export class ResearcherRole extends BaseRole {
         })
       : "";
 
+    // Handoff/prefetch is complete at this seam. The demand helper performs
+    // only a published-generation probe and durable DB ensure; detached Git
+    // and parked-view work is left to the independent preparation lane.
+    let waitingLaneDemand = null;
+    try {
+      waitingLaneDemand = requestPreparationDemand({
+        workItem,
+        payload,
+        projectDir,
+        atlasRepoRoot: researcherPacket?.atlas?.repo?.repoPath || projectDir,
+        reportMode,
+        webOnlyAnswer,
+      });
+    } catch { /* optional cache demand must never block provider dispatch */ }
+
     Object.assign(ctx, {
       deepthink,
       childJobIds,
@@ -708,6 +730,7 @@ export class ResearcherRole extends BaseRole {
       researchRetrySynthesisMode: retrySynthesisMode,
       researchRoleMode: roleMode,
       researcherPacket,
+      waitingLaneDemand,
       workItem,
     });
 
@@ -836,6 +859,18 @@ export class ResearcherRole extends BaseRole {
       artifact_type: "summary",
       content_long: output,
     });
+
+    if (output && !ctx.researchReportMode && ctx.payload?.web_only_answer !== true) {
+      try {
+        this.roleDeps().captureWaitingLaneResearchHotPaths({
+          workItemId: job.work_item_id,
+          output,
+          roleMode: ctx.researchRoleMode,
+          shadow: ctx.payload?.fanout_shadow === true,
+          projectDir: ctx.projectDir || this.context?.projectDir || process.cwd(),
+        });
+      } catch { /* bounded hot-path hints are optional cache metadata */ }
+    }
 
     // Durable findings ride the structured appendix (memories field) — the
     // pipeline persists them here, capped per round, instead of the agent

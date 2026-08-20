@@ -18,7 +18,7 @@ import {
   getAgentCallsByWorkItem,
   getDependencies,
 } from "../../../queue/functions/index.js";
-import { estimateCallCost } from "../../../billing/functions/pricing.js";
+import { resolveCanonicalCallAccounting } from "../../../billing/functions/usage-segments.js";
 
 function safeJson(value, fallback = null) {
   if (value == null) return fallback;
@@ -50,6 +50,13 @@ function sumTokens(calls, field) {
     }
   }
   return seen ? total : null;
+}
+
+function costPrecision({ callCount, exactCostCalls, estimatedCostCalls, unknownCostCalls }) {
+  if (callCount > 0 && unknownCostCalls === callCount) return "unknown";
+  if (unknownCostCalls > 0) return "partial";
+  if (estimatedCostCalls > 0) return "estimated";
+  return "exact";
 }
 
 function indexBy(rows, keyField) {
@@ -108,6 +115,9 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
   let totalInput = 0;
   let totalOutput = 0;
   let totalCost = 0;
+  let exactCostCalls = 0;
+  let estimatedCostCalls = 0;
+  let unknownCostCalls = 0;
   let totalAttempts = 0;
   const statusCounts = {};
 
@@ -123,27 +133,30 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
       const attemptOutput = sumTokens(calls, "output_tokens") || 0;
       let attemptCost = 0;
       let sawCost = false;
+      let attemptExactCostCalls = 0;
+      let attemptEstimatedCostCalls = 0;
+      let attemptUnknownCostCalls = 0;
       // Use the provider-reported cost when present; otherwise estimate from
       // tokens × pricing. This way callers that never got a cost_estimate_usd
       // written (older rows, providers that don't report) still see cost.
       for (const call of calls) {
-        const est = estimateCallCost({
-          provider: call.provider,
-          modelName: call.model_name,
-          modelTier: call.model_tier,
-          inputTokens: call.input_tokens,
-          outputTokens: call.output_tokens,
-          cachedInputTokens: call.cached_input_tokens,
-          cacheCreationInputTokens: call.cache_creation_input_tokens,
-          knownCostUsd: call.cost_estimate_usd,
-        });
-        if (Number.isFinite(est.costUsd) && est.costUsd > 0) {
-          attemptCost += est.costUsd;
+        const accounting = resolveCanonicalCallAccounting(call);
+        call._resolvedCostUsd = accounting.costUsd;
+        call._costSource = accounting.costSource;
+        call._costPrecision = accounting.costPrecision;
+        call._billingPrecision = accounting.precision;
+        call._exactUsage = accounting.exact;
+        if (accounting.costPrecision === "exact") attemptExactCostCalls += 1;
+        else if (accounting.costPrecision === "estimated") attemptEstimatedCostCalls += 1;
+        else attemptUnknownCostCalls += 1;
+        if (Number.isFinite(accounting.costUsd)) {
+          attemptCost += accounting.costUsd;
           sawCost = true;
-          call._resolvedCostUsd = est.costUsd;
-          call._costSource = est.source;
         }
       }
+      exactCostCalls += attemptExactCostCalls;
+      estimatedCostCalls += attemptEstimatedCostCalls;
+      unknownCostCalls += attemptUnknownCostCalls;
       totalInput += attemptInput;
       totalOutput += attemptOutput;
       if (sawCost) totalCost += attemptCost;
@@ -162,6 +175,13 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
         inputTokens: attemptInput || null,
         outputTokens: attemptOutput || null,
         costUsd: sawCost ? attemptCost : null,
+        knownCostUsd: attemptCost,
+        costPrecision: costPrecision({
+          callCount: calls.length,
+          exactCostCalls: attemptExactCostCalls,
+          estimatedCostCalls: attemptEstimatedCostCalls,
+          unknownCostCalls: attemptUnknownCostCalls,
+        }),
         commitHash: attempt.commit_hash,
         errorText: attempt.error_text,
         notes: attempt.notes,
@@ -181,6 +201,9 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
           // provider-reported cost_estimate_usd or the tokens × rate estimate.
           costUsd: call._resolvedCostUsd ?? call.cost_estimate_usd ?? null,
           costSource: call._costSource || (call.cost_estimate_usd != null ? "known" : null),
+          costPrecision: call._costPrecision || "unknown",
+          billingPrecision: call._billingPrecision || call.billing_precision || null,
+          exactUsage: call._exactUsage ?? null,
           atlasMethod: call.atlas_method,
           errorText: call.error_text,
           startedAt: call.started_at,
@@ -209,22 +232,19 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
     const orphanCalls = (agentCallsByJob.get(job.id) || [])
       .filter((call) => call.attempt_id == null || !jobAttemptIds.has(call.attempt_id));
     for (const call of orphanCalls) {
-      const est = estimateCallCost({
-        provider: call.provider,
-        modelName: call.model_name,
-        modelTier: call.model_tier,
-        inputTokens: call.input_tokens,
-        outputTokens: call.output_tokens,
-        cachedInputTokens: call.cached_input_tokens,
-        cacheCreationInputTokens: call.cache_creation_input_tokens,
-        knownCostUsd: call.cost_estimate_usd,
-      });
+      const accounting = resolveCanonicalCallAccounting(call);
+      call._resolvedCostUsd = accounting.costUsd;
+      call._costSource = accounting.costSource;
+      call._costPrecision = accounting.costPrecision;
+      call._billingPrecision = accounting.precision;
+      call._exactUsage = accounting.exact;
+      if (accounting.costPrecision === "exact") exactCostCalls += 1;
+      else if (accounting.costPrecision === "estimated") estimatedCostCalls += 1;
+      else unknownCostCalls += 1;
       totalInput += Number(call.input_tokens) || 0;
       totalOutput += Number(call.output_tokens) || 0;
-      if (Number.isFinite(est.costUsd) && est.costUsd > 0) {
-        totalCost += est.costUsd;
-        call._resolvedCostUsd = est.costUsd;
-        call._costSource = est.source;
+      if (Number.isFinite(accounting.costUsd)) {
+        totalCost += accounting.costUsd;
       }
     }
 
@@ -264,6 +284,9 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
         outputTokens: call.output_tokens,
         costUsd: call._resolvedCostUsd ?? call.cost_estimate_usd ?? null,
         costSource: call._costSource || (call.cost_estimate_usd != null ? "known" : null),
+        costPrecision: call._costPrecision || "unknown",
+        billingPrecision: call._billingPrecision || call.billing_precision || null,
+        exactUsage: call._exactUsage ?? null,
         atlasMethod: call.atlas_method,
         errorText: call.error_text,
         createdAt: call.created_at,
@@ -307,7 +330,22 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
       eventCount: allEvents.length,
       totalInputTokens: totalInput || null,
       totalOutputTokens: totalOutput || null,
-      totalCostUsd: totalCost || null,
+      totalCostUsd: costPrecision({
+        callCount: allAgentCalls.length,
+        exactCostCalls,
+        estimatedCostCalls,
+        unknownCostCalls,
+      }) === "unknown" ? null : totalCost,
+      knownCostUsd: totalCost,
+      costPrecision: costPrecision({
+        callCount: allAgentCalls.length,
+        exactCostCalls,
+        estimatedCostCalls,
+        unknownCostCalls,
+      }),
+      exactCostCalls,
+      estimatedCostCalls,
+      unknownCostCalls,
       statusCounts,
     },
     jobs: jobNodes,

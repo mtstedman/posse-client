@@ -21,7 +21,8 @@
 
 import fs from "fs";
 import path from "path";
-import { ViewBuilder } from "./ViewBuilder.js";
+import { randomUUID } from "crypto";
+import { ViewBuilder, viewFingerprintForOptions } from "./ViewBuilder.js";
 import { View } from "./View.js";
 import { OrderedDocumentIntake } from "./OrderedDocumentIntake.js";
 import {
@@ -67,10 +68,12 @@ import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-
 import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
 import {
   inspectSampleForMinified,
+  isGeneratedSourceArtifactPath,
   isOversizedForParsing,
   isLikelyMinifiedPath,
   MAX_PARSE_FILE_BYTES,
   MINIFIED_SAMPLE_BYTES,
+  shouldInspectSourceForMinification,
 } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
 import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
@@ -97,6 +100,16 @@ import {
   shouldRunMlTreeCompressionReseed,
 } from "../../functions/v2/tree-compression-policy.js";
 import { MAX_FULL_WARM_PATHS, walkRepoFilesAsync } from "../../functions/v2/warm-walk.js";
+import { withAtlasViewWriteLock } from "../../functions/v2/view-write-lock.js";
+import {
+  isAtlasMainGenerationPurpose,
+  runAtlasMainIntake,
+} from "../../functions/v2/main-generation.js";
+import {
+  WAITING_LANE_ATLAS_PURPOSES,
+  normalizeWaitingLaneGeneration,
+  waitingLaneGenerationsEqual,
+} from "../../../../catalog/waiting-lane.js";
 
 // Re-exported for the warmer test suite, which imports this decision helper
 // from the engine's public surface.
@@ -124,6 +137,16 @@ export { shouldRunMlTreeCompressionReseed };
 
 function nowMs() {
   return Date.now();
+}
+
+function waitingLaneMismatchOutcome(actual, desired) {
+  if (actual
+    && actual.target_branch === desired.target_branch
+    && (actual.atlas_layer_revision > desired.atlas_layer_revision
+      || actual.atlas_ledger_seq > desired.atlas_ledger_seq)) {
+    return "needs_latest";
+  }
+  return "superseded";
 }
 
 function recordIntakeTelemetry(base, kind, detail = {}) {
@@ -162,6 +185,42 @@ function ledgerHasCurrentParsedBlob(ledger, contentHash, options = {}) {
 }
 
 /**
+ * A recoverable Tree-sitter gap is complete when SCIP durably indexed the
+ * exact same immutable content hash. Keep the parser diagnostics on the warm
+ * result, but remove those paths from `skipped`: callers use that list as the
+ * fail-closed publication boundary, and the merged A+B view is complete for
+ * these documents even though one source layer is partial or empty.
+ *
+ * @param {Ledger} ledger
+ * @param {AtlasWarmJobResult} base
+ * @param {Map<string, { contentHash: string, lang: string }>} parseGaps
+ */
+function reconcileScipCoveredParseGaps(ledger, base, parseGaps) {
+  if (!(parseGaps instanceof Map) || parseGaps.size === 0) return;
+  const coveredPaths = [];
+  for (const [repoRelPath, gap] of parseGaps.entries()) {
+    let covered = false;
+    try {
+      covered = ledger.listBlobLayers(gap.contentHash).some((layer) => (
+        layer?.source === "scip"
+        && layer?.status === "indexed"
+        && String(layer?.lang || "").toLowerCase() === gap.lang
+      ));
+    } catch {
+      covered = false;
+    }
+    if (covered) coveredPaths.push(repoRelPath);
+  }
+  if (coveredPaths.length === 0) return;
+  const covered = new Set(coveredPaths);
+  base.skipped = base.skipped.filter((row) => !(
+    row?.reason === "parse_error" && covered.has(String(row?.repo_rel_path || ""))
+  ));
+  /** @type {any} */ (base).scip_covered_parse_gaps = coveredPaths.length;
+  /** @type {any} */ (base).scip_covered_parse_gap_paths = coveredPaths;
+}
+
+/**
  * SCIP runs before tree-sitter during warmup. Some SCIP indexers, notably the
  * PHP indexer, omit procedural declarations while still marking the blob as
  * parsed. Let tree-sitter merge in its symbol rows for those blobs instead of
@@ -196,62 +255,6 @@ function shouldMergeTreeSitterRowsForScipBlob({ ledger, contentHash, repoRelPath
   }
 }
 
-const VIEW_WRITE_LOCKS = new Map();
-
-/**
- * Serialize destructive/open-for-write work per view DB path. The worker
- * normally gates warm jobs at the ledger level, but tests and direct callers
- * can still target the same cache file concurrently.
- *
- * @template T
- * @param {string} viewPath
- * @param {() => T | Promise<T>} fn
- * @returns {Promise<T>}
- */
-async function withViewWriteLock(viewPath, fn) {
-  const raw = path.resolve(String(viewPath || "view")).replace(/\\/g, "/");
-  const key = process.platform === "win32" ? raw.toLowerCase() : raw;
-  const previous = VIEW_WRITE_LOCKS.get(key) || Promise.resolve();
-  const waitForPrevious = Promise.resolve(previous).catch(() => {});
-  let release = () => {};
-  const current = waitForPrevious.then(() => new Promise((resolve) => { release = () => resolve(undefined); }));
-  VIEW_WRITE_LOCKS.set(key, current);
-  await waitForPrevious;
-  try {
-    return await fn();
-  } finally {
-    release();
-    if (VIEW_WRITE_LOCKS.get(key) === current) VIEW_WRITE_LOCKS.delete(key);
-  }
-}
-
-/**
- * Idempotent move (Windows-safe): try rename first, fall back to
- * copy+unlink on EXDEV. WAL sidecars are best-effort moved too.
- *
- * @param {string} from
- * @param {string} to
- */
-function safeMoveFile(from, to) {
-  fs.mkdirSync(path.dirname(to), { recursive: true });
-  try {
-    fs.renameSync(from, to);
-  } catch (err) {
-    if (/** @type {any} */ (err)?.code !== "EXDEV") throw err;
-    fs.copyFileSync(from, to);
-    fs.unlinkSync(from);
-  }
-  for (const sfx of ["-wal", "-shm"]) {
-    if (fs.existsSync(from + sfx)) {
-      try { fs.renameSync(from + sfx, to + sfx); }
-      catch {
-        try { fs.copyFileSync(from + sfx, to + sfx); fs.unlinkSync(from + sfx); }
-        catch { /* sidecars are advisory; SQLite recovers without them */ }
-      }
-    }
-  }
-}
-
 /**
  * Patch the meta table on an already-built view file to point at a
  * different branch / lineage. Used when a warmed view originally
@@ -270,15 +273,49 @@ function patchViewBranchMeta(viewPath, meta) {
       "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     );
     const del = db.prepare("DELETE FROM meta WHERE key = ?");
-    set.run("branch", meta.branch);
-    set.run("built_at", meta.built_at || new Date().toISOString());
-    if (meta.parent_branch) set.run("parent_branch", meta.parent_branch);
-    else del.run("parent_branch");
-    if (meta.parent_seq != null) set.run("parent_seq", String(meta.parent_seq));
-    else del.run("parent_seq");
-    if (Number.isInteger(meta.ledger_seq)) set.run("ledger_seq", String(meta.ledger_seq));
+    db.transaction(() => {
+      set.run("branch", meta.branch);
+      set.run("built_at", meta.built_at || new Date().toISOString());
+      if (meta.parent_branch) set.run("parent_branch", meta.parent_branch);
+      else del.run("parent_branch");
+      if (meta.parent_seq != null) set.run("parent_seq", String(meta.parent_seq));
+      else del.run("parent_seq");
+      if (Number.isInteger(meta.ledger_seq)) set.run("ledger_seq", String(meta.ledger_seq));
+    }).immediate();
   } finally {
     view.close();
+  }
+}
+
+/**
+ * Clone and optionally rebrand a view entirely under a staging name. The
+ * canonical destination appears only after SQLite is closed and no recovery
+ * sidecar remains, so interruption cannot poison the consumer-visible cache.
+ *
+ * @param {ViewBuilder} builder
+ * @param {string} sourcePath
+ * @param {string} destPath
+ * @param {{ branch: string, parent_branch?: string | null, parent_seq?: number | null, ledger_seq?: number, built_at?: string } | null} meta
+ */
+function publishClonedView(builder, sourcePath, destPath, meta = null) {
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  const stagedPath = path.join(
+    path.dirname(destPath),
+    `.${path.basename(destPath)}.${process.pid}.${randomUUID()}.cloning`,
+  );
+  try {
+    builder.cloneView({ sourcePath, destPath: stagedPath });
+    if (meta) patchViewBranchMeta(stagedPath, meta);
+    const sidecars = ["-wal", "-shm", "-journal"]
+      .map((suffix) => stagedPath + suffix)
+      .filter((candidate) => fs.existsSync(candidate));
+    if (sidecars.length > 0) {
+      throw new Error(`staged view clone retained SQLite sidecars: ${sidecars.join(", ")}`);
+    }
+    fs.renameSync(stagedPath, destPath);
+  } catch (error) {
+    try { removeSqliteFile(stagedPath); } catch { /* preserve clone failure */ }
+    throw error;
   }
 }
 
@@ -385,8 +422,14 @@ export class ParseEngine {
     };
   }
 
+  #viewFingerprint() {
+    return viewFingerprintForOptions(this.#viewBuildOptions());
+  }
+
   #viewMetaMatchesBuildMode(meta) {
-    return viewFreshness(meta, null, { layerMerge: this.#viewLayerMerge }).current === true;
+    return viewFreshness(meta, null, { layerMerge: this.#viewLayerMerge }).current === true
+      && meta?.layer_revision === this.#ledger.layerRevision()
+      && meta?.view_fingerprint === this.#viewFingerprint();
   }
 
   #emitProgress(event) {
@@ -651,9 +694,11 @@ export class ParseEngine {
    *   onDocumentCommitted?: ((document: { repo_rel_path: string, content_hash: string, lang: string }) => Promise<void> | void) | null,
    *   expectedContentHashes?: Record<string, string> | null,
    * }} [opts]
+   * @returns {Promise<boolean>}
    */
   async #ingestScipFiles(base, files, opts = {}) {
-    if (!Array.isArray(files) || files.length === 0) return;
+    if (!Array.isArray(files) || files.length === 0) return true;
+    let completedWithoutError = true;
     for (const scipPath of files) {
       try {
         const prepared = opts.preparedFiles?.get(normalizedScipPath(scipPath)) || null;
@@ -727,6 +772,7 @@ export class ParseEngine {
         base.blobs_reused += result.blobs_reused;
         base.ledger_entries_appended += result.ledger_entries_appended || 0;
       } catch (err) {
+        completedWithoutError = false;
         logAtlasError(`[Warmer.#ingestScipFiles] ingest ${scipPath} threw:`, err);
         base.skipped.push({
           repo_rel_path: ".",
@@ -735,6 +781,7 @@ export class ParseEngine {
         });
       }
     }
+    return completedWithoutError;
   }
 
   /**
@@ -770,6 +817,7 @@ export class ParseEngine {
    */
   #createScipIngestQueue(base, opts = {}) {
     let tail = Promise.resolve();
+    const completedIntakes = new Map();
     const add = (scipPath, info = {}) => {
       const key = normalizedScipPath(scipPath);
       if (!key) return tail;
@@ -807,17 +855,38 @@ export class ParseEngine {
             });
             return;
           }
-          return this.#ingestScipFiles(base, [file], {
+          const bytesHash = sha256Hex(ready.bytes);
+          const completed = completedIntakes.get(key);
+          if (completed?.bytesHash === bytesHash) {
+            // The startup snapshot and a fallback whole-project plan can
+            // point at the same unchanged persistent artifact. Do not repeat
+            // its expensive decode/native definition prepass, but replay the
+            // coverage declaration with the current scope so the later,
+            // terminal callback can close provisional startup omissions.
+            if (completed.coverage && typeof opts.onDocumentsPrepared === "function") {
+              await opts.onDocumentsPrepared(scipCoverageForIntake(completed.coverage, {
+                scopePaths,
+                terminalizeAbsent,
+              }));
+            }
+            return;
+          }
+          let preparedCoverage = null;
+          const ingested = await this.#ingestScipFiles(base, [file], {
             ...opts,
             onDocumentsPrepared: typeof opts.onDocumentsPrepared === "function"
-              ? (coverage) => opts.onDocumentsPrepared(scipCoverageForIntake(coverage, {
-                  scopePaths,
-                  terminalizeAbsent,
-                }))
+              ? (coverage) => {
+                  preparedCoverage = coverage;
+                  return opts.onDocumentsPrepared(scipCoverageForIntake(coverage, {
+                    scopePaths,
+                    terminalizeAbsent,
+                  }));
+                }
               : null,
             expectedContentHashes,
             preparedFiles: new Map([[key, ready]]),
           });
+          if (ingested) completedIntakes.set(key, { bytesHash, coverage: preparedCoverage });
         });
       return tail;
     };
@@ -892,6 +961,42 @@ export class ParseEngine {
    */
   async handleWarmJob(payload) {
     const purpose = /** @type {AtlasWarmPurpose} */ (String(payload?.purpose || "wi"));
+    if (!isAtlasMainGenerationPurpose(purpose)) return this.#handleWarmJobUnpinned(payload);
+    const mainPayload = /** @type {any} */ (payload);
+    const targetBranch = purpose === "main-merge"
+      ? String(payload?.onto_branch || this.#defaultBranch)
+      : String(mainPayload?.target_branch || payload?.branch || this.#defaultBranch);
+    const viewPath = String(payload?.out_view_path || mainViewPath(this.#repoRoot));
+    return runAtlasMainIntake({
+      repoRoot: this.#repoRoot,
+      purpose,
+      targetBranch,
+      expectedGitOid: mainPayload?.git_oid || mainPayload?.target_git_oid || null,
+      paths: Array.isArray(payload?.paths) ? payload.paths : [],
+      viewPath,
+      ledger: this.#ledger,
+      signal: this.#signal,
+      sourceProof: mainPayload?.source_proof || null,
+      sourceLockHeld: mainPayload?.source_lock_held === true,
+      treeCompressionMode: this.#treeCompressionMode,
+      run: ({ intake }) => this.#handleWarmJobUnpinned({
+        ...payload,
+        resume_paths: Array.isArray(intake?.resume?.paths) ? intake.resume.paths : [],
+        resume_repository_recheck: intake?.resume?.repository_recheck === true,
+        resume_paths_truncated: intake?.resume?.paths_truncated === true,
+      }),
+    });
+  }
+
+  /**
+   * The main-index lifecycle wrapper above is the only public route here.
+   * Non-main purposes also enter this implementation directly.
+   *
+   * @param {AtlasWarmJobPayload} payload
+   * @returns {Promise<AtlasWarmJobResult>}
+   */
+  async #handleWarmJobUnpinned(payload) {
+    const purpose = /** @type {AtlasWarmPurpose} */ (String(payload?.purpose || "wi"));
     const start = nowMs();
     /** @type {AtlasWarmJobResult} */
     const base = {
@@ -909,6 +1014,15 @@ export class ParseEngine {
     try {
       await this.#emitStage("initializing", `warming ${purpose}`);
       await this.#ensureDefaultBranch();
+      if (purpose === WAITING_LANE_ATLAS_PURPOSES.SNAPSHOT) {
+        return finalize(await this.#snapshotWaitingLane(payload, base), start);
+      }
+      if (purpose === WAITING_LANE_ATLAS_PURPOSES.CATCHUP) {
+        return finalize(await this.#catchupWaitingLane(payload, base), start);
+      }
+      if (purpose === WAITING_LANE_ATLAS_PURPOSES.PREFETCH) {
+        return finalize(await this.#prefetchWaitingLane(payload, base), start);
+      }
       // Phase 0: consume any `.scip` files staged for this repo. Under the
       // layer model SCIP and tree-sitter each write their OWN source layer
       // (no flat first-writer-wins), so this ordering is no longer load-bearing
@@ -1145,15 +1259,15 @@ export class ParseEngine {
         : { ok: false };
       try { if (warmedProbe.ok) warmedProbe.view.close(); } catch { /* ignore */ }
       if (canMountWarmed.ok) {
-        safeMoveFile(warmed, dest);
-        if (branchRec) {
-          patchViewBranchMeta(dest, {
+        publishClonedView(this.#builder, warmed, dest, branchRec
+          ? {
             branch: branchRec.name,
             parent_branch: branchRec.parent_branch,
             parent_seq: branchRec.parent_seq,
             ledger_seq: this.#ledger.headSeq(branchRec.name),
-          });
-        }
+          }
+          : null);
+        removeSqliteFile(warmed);
         return { from: "warmed", viewPath: dest };
       }
       removeSqliteFile(warmed);
@@ -1176,15 +1290,14 @@ export class ParseEngine {
         try { mainProbe.view.close(); } catch { /* ignore */ }
       }
       if (canCloneMain.ok) {
-        this.#builder.cloneView({ sourcePath: main, destPath: dest });
-        if (branchRec) {
-          patchViewBranchMeta(dest, {
+        publishClonedView(this.#builder, main, dest, branchRec
+          ? {
             branch: branchRec.name,
             parent_branch: branchRec.parent_branch,
             parent_seq: branchRec.parent_seq,
             ledger_seq: this.#ledger.headSeq(branchRec.name),
-          });
-        }
+          }
+          : null);
         return { from: "main-clone", viewPath: dest };
       }
       // Do not delete the main view just because it cannot serve THIS
@@ -1223,7 +1336,7 @@ export class ParseEngine {
    */
   mountForWorktreeAsync(args, opts = {}) {
     const key = args?.worktreePath ? worktreeViewPath(args.worktreePath) : this.#repoRoot;
-    return runSqliteWrite(key, () => withViewWriteLock(key, () => this.mountForWorktree(args)), {
+    return runSqliteWrite(key, () => withAtlasViewWriteLock(key, () => this.mountForWorktree(args)), {
       label: opts.label || "Warmer.mountForWorktree",
       waitMs: opts.waitMs,
     });
@@ -1475,7 +1588,7 @@ export class ParseEngine {
       base.skipped = [];
       return base;
     }
-    return await withViewWriteLock(outPath, async () => {
+    return await withAtlasViewWriteLock(outPath, async () => {
       if (fs.existsSync(outPath)) {
         // Already warmed — check whether the existing file is fresh
         // relative to the current ledger head. Stale views get rebuilt;
@@ -1511,12 +1624,9 @@ export class ParseEngine {
           await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: "wi" });
           return base;
         }
-        // Stale or unreadable — drop the file (plus WAL sidecars) so
+        // Stale or unreadable — drop the complete SQLite family so
         // buildFrom can write a fresh view at the same path.
-        for (const sfx of ["", "-wal", "-shm"]) {
-          try { fs.unlinkSync(outPath + sfx); }
-          catch { /* may not exist, may be locked — buildFrom will surface a clean error */ }
-        }
+        removeSqliteFile(outPath);
       }
       const branchHint = payload.branch || (
         payload.work_item_id != null ? ledgerBranchForWi(payload.work_item_id) : this.#defaultBranch
@@ -1549,15 +1659,14 @@ export class ParseEngine {
         }
         if (canCloneMain.ok) {
           await this.#emitStage("view", `cloning main view for ${targetBranch}`);
-          this.#builder.cloneView({ sourcePath: main, destPath: outPath });
-          if (branchRec) {
-            patchViewBranchMeta(outPath, {
+          publishClonedView(this.#builder, main, outPath, branchRec
+            ? {
               branch: branchRec.name,
               parent_branch: branchRec.parent_branch,
               parent_seq: branchRec.parent_seq,
               ledger_seq: this.#ledger.headSeq(branchRec.name),
-            });
-          }
+            }
+            : null);
           const cloned = View.mount({ dbPath: outPath });
           try {
             const meta = cloned.metaLocal();
@@ -1612,7 +1721,7 @@ export class ParseEngine {
   async #rebuildBranchView({ payload, branch, base, hintPaths = null }) {
     const outPath = payload.out_view_path || (branch === this.#defaultBranch ? mainViewPath(this.#repoRoot) : null);
     if (!outPath) return base;
-    return await withViewWriteLock(outPath, async () => {
+    return await withAtlasViewWriteLock(outPath, async () => {
       try {
         await this.#emitStage("view", `building ${branch} view at seq ${this.#ledger.headSeq(branch)}`, {
           percent: 0,
@@ -1627,10 +1736,9 @@ export class ParseEngine {
           ? this.#exportMlCompressionSnapshot(outPath)
           : null;
         // Native retrieval keeps read handles warm between calls. Retire the
-        // exact view before replacing this rebuildable cache or Windows will
-        // reject the unlink with EBUSY/EPERM on a repeated warm.
+        // exact view before the staged build's final atomic replacement. Keep
+        // the canonical file itself in place until that replacement succeeds.
         await invalidateStorageCacheNativeAsync(outPath);
-        removeSqliteFile(outPath);
         const canonicalHints = Array.isArray(hintPaths)
           ? hintPaths.filter(isCanonicalRepoPath).slice(0, 200)
           : [];
@@ -1669,6 +1777,7 @@ export class ParseEngine {
           outPath,
           options: {
             ...this.#viewBuildOptions(),
+            replaceExisting: true,
             ...(canonicalHints.length > 0
               ? {
                   warmedForFiles: canonicalHints,
@@ -1738,7 +1847,7 @@ export class ParseEngine {
     const paths = await walkRepoFilesAsync(this.#repoRoot, (filename, relPath) => {
       const ext = path.extname(filename).toLowerCase();
       if (!ext || !(/** @type {ParserAdapter} */ (this.#parser)).supports(ext)) return false;
-      if (isLikelyMinifiedPath(relPath || filename)) return false;
+      if (isGeneratedSourceArtifactPath(relPath)) return false;
       return true;
     });
     const total = paths.length;
@@ -1866,6 +1975,9 @@ export class ParseEngine {
     stageScipPaths = null,
   } = {}) {
     let paths = Array.isArray(payload?.paths) ? payload.paths : [];
+    const resumePaths = Array.isArray(payload?.resume_paths)
+      ? payload.resume_paths.filter(isCanonicalRepoPath)
+      : [];
     const branch = payload.branch || this.#defaultBranch;
     if (!this.#ledger.getBranch(branch)) {
       base.skipped = paths.map((p) => ({
@@ -1886,11 +1998,17 @@ export class ParseEngine {
     // Boot warms and truncated-hint warms both need the freshness scan: the
     // former has no hints at all, the latter deliberately dropped an
     // over-cap hint list rather than index a silent subset of it.
-    if (paths.length === 0
-      && (String(payload?.trigger_event || "") === "boot" || payload?.paths_truncated === true)) {
-      paths = await this.#discoverBootFreshnessPaths({ branch, base });
+    const needsFreshnessScan = (paths.length === 0 && String(payload?.trigger_event || "") === "boot")
+      || payload?.paths_truncated === true
+      || payload?.resume_repository_recheck === true
+      || payload?.resume_paths_truncated === true;
+    if (needsFreshnessScan) {
+      paths = [
+        ...paths,
+        ...await this.#discoverBootFreshnessPaths({ branch, base }),
+      ];
     }
-    paths = orderedUniquePaths(paths);
+    paths = orderedUniquePaths([...paths, ...resumePaths]);
     base.paths_considered = paths.length;
     await this.#indexPaths({ paths, branch, base, documentIntake, stageScipPaths });
     if (!buildView) {
@@ -1924,7 +2042,7 @@ export class ParseEngine {
       // full cost once; subsequent incrementals get the fast path.
       return this.#rebuildBranchView({ payload, branch, base, hintPaths });
     }
-    const incremental = await withViewWriteLock(outPath, async () => {
+    const incremental = await withAtlasViewWriteLock(outPath, async () => {
       /** @type {View | null} */
       let view = null;
       try {
@@ -1974,7 +2092,7 @@ export class ParseEngine {
             view,
             ledger: this.#ledger,
             entries,
-            options: { layerMerge: this.#viewLayerMerge },
+            options: this.#viewBuildOptions(),
           }, {
             onProgress: (e) => {
               if (e?.phase === "tree") {
@@ -2037,6 +2155,268 @@ export class ParseEngine {
   }
 
   /**
+   * Resolve the canonical parked output for a WI. Caller-supplied alternate
+   * paths are rejected so two WIs can never coalesce onto one cache file.
+   *
+   * @param {AtlasWarmJobPayload} payload
+   * @returns {string | null}
+   */
+  #waitingLaneParkedPath(payload) {
+    const workItemId = Number(payload?.work_item_id);
+    if (!Number.isSafeInteger(workItemId) || workItemId <= 0) return null;
+    const canonical = warmedViewPath(this.#repoRoot, workItemId);
+    if (payload?.out_view_path
+      && path.resolve(String(payload.out_view_path)) !== path.resolve(canonical)) {
+      return null;
+    }
+    return canonical;
+  }
+
+  /** @param {AtlasWarmJobResult} base @param {string} outcome @param {string} reason */
+  #waitingLaneMiss(base, outcome, reason) {
+    base.waiting_lane_outcome = /** @type {any} */ (outcome);
+    base.waiting_lane_operation = "none";
+    base.waiting_lane_reason = reason;
+    return base;
+  }
+
+  /**
+   * @param {string} viewPath
+   * @returns {{ meta: import("../../functions/v2/contracts/schemas.js").ViewMeta, generation: import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration | null } | null}
+   */
+  #readViewGeneration(viewPath) {
+    const probe = openViewWithMeta(viewPath, View);
+    if (!probe.ok) return null;
+    try {
+      return { meta: probe.meta, generation: probe.view.generationLocal() };
+    } finally {
+      try { probe.view.close(); } catch { /* probe cleanup */ }
+    }
+  }
+
+  /**
+   * A stored Git OID is not enough after a newer ledger/layer write. Require
+   * the source main view to remain the current exact materialization before it
+   * can seed either a bounded tail or an exact clone.
+   *
+   * @param {{ meta: import("../../functions/v2/contracts/schemas.js").ViewMeta, generation: import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration | null }} source
+   * @param {import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration} desired
+   */
+  #publishedSourceMatches(source, desired) {
+    return !!source.generation
+      && waitingLaneGenerationsEqual(source.generation, desired)
+      && source.meta.branch === desired.target_branch
+      && this.#ledger.headSeq(desired.target_branch) === desired.atlas_ledger_seq
+      && this.#ledger.layerRevision() === desired.atlas_layer_revision
+      && source.meta.view_fingerprint === this.#viewFingerprint();
+  }
+
+  /** @param {AtlasWarmJobPayload} payload @param {AtlasWarmJobResult} base */
+  async #snapshotWaitingLane(payload, base) {
+    const desired = normalizeWaitingLaneGeneration(payload?.generation);
+    const outPath = this.#waitingLaneParkedPath(payload);
+    if (!desired || !outPath) {
+      return this.#waitingLaneMiss(base, "needs_reprepare", "invalid_generation_or_wi_output");
+    }
+    const sourcePath = mainViewPath(this.#repoRoot);
+    return withAtlasViewWriteLock(outPath, async () => {
+      const source = this.#readViewGeneration(sourcePath);
+      if (!source?.generation) {
+        return this.#waitingLaneMiss(base, "needs_reprepare", "published_main_generation_unavailable");
+      }
+      if (!this.#publishedSourceMatches(source, desired)) {
+        return this.#waitingLaneMiss(
+          base,
+          waitingLaneMismatchOutcome(source.generation, desired),
+          "published_main_generation_mismatch",
+        );
+      }
+      const existing = this.#readViewGeneration(outPath);
+      if (existing?.generation && waitingLaneGenerationsEqual(existing.generation, desired)) {
+        base.view_written = outPath;
+        base.view_etag = existing.meta.built_at;
+        base.generation = existing.generation;
+        base.waiting_lane_outcome = "already_current";
+        base.waiting_lane_operation = "none";
+        return base;
+      }
+      if (fs.existsSync(outPath)) {
+        await invalidateStorageCacheNativeAsync(outPath);
+        removeSqliteFile(outPath);
+      }
+      this.#builder.cloneView({ sourcePath, destPath: outPath });
+      const output = this.#readViewGeneration(outPath);
+      if (!output?.generation || !waitingLaneGenerationsEqual(output.generation, desired)) {
+        try { removeSqliteFile(outPath); } catch { /* preserve primary outcome */ }
+        return this.#waitingLaneMiss(base, "needs_latest", "snapshot_output_generation_mismatch");
+      }
+      base.view_written = outPath;
+      base.view_etag = output.meta.built_at;
+      base.generation = output.generation;
+      base.waiting_lane_outcome = "ready";
+      base.waiting_lane_operation = "snapshot";
+      return base;
+    });
+  }
+
+  /** @param {AtlasWarmJobPayload} payload @param {AtlasWarmJobResult} base */
+  async #catchupWaitingLane(payload, base) {
+    const desired = normalizeWaitingLaneGeneration(payload?.generation);
+    const outPath = this.#waitingLaneParkedPath(payload);
+    if (!desired || !outPath) {
+      return this.#waitingLaneMiss(base, "needs_reprepare", "invalid_generation_or_wi_output");
+    }
+    const sourcePath = mainViewPath(this.#repoRoot);
+    return withAtlasViewWriteLock(outPath, async () => {
+      const source = this.#readViewGeneration(sourcePath);
+      if (!source) {
+        return this.#waitingLaneMiss(base, "needs_reprepare", "main_view_unavailable");
+      }
+      if (source.meta.layer_revision > desired.atlas_layer_revision) {
+        return this.#waitingLaneMiss(base, "needs_latest", "main_layer_revision_overshot_request");
+      }
+      if (!source.generation || !this.#publishedSourceMatches(source, desired)) {
+        return this.#waitingLaneMiss(
+          base,
+          source.generation ? waitingLaneMismatchOutcome(source.generation, desired) : "needs_reprepare",
+          "published_main_generation_mismatch",
+        );
+      }
+      const target = this.#readViewGeneration(outPath);
+      if (fs.existsSync(outPath) && !target) {
+        return this.#waitingLaneMiss(base, "needs_reprepare", "parked_view_corrupt");
+      }
+      if (target?.generation && waitingLaneGenerationsEqual(target.generation, desired)) {
+        base.view_written = outPath;
+        base.view_etag = target.meta.built_at;
+        base.generation = target.generation;
+        base.waiting_lane_outcome = "already_current";
+        base.waiting_lane_operation = "none";
+        return base;
+      }
+      if (target?.meta?.ledger_seq > desired.atlas_ledger_seq
+        || target?.meta?.layer_revision > desired.atlas_layer_revision) {
+        return this.#waitingLaneMiss(base, "superseded", "parked_view_overshot_request");
+      }
+
+      const compatibleTail = !!target
+        && target.meta.branch === desired.target_branch
+        && target.meta.layer_revision === desired.atlas_layer_revision
+        && target.meta.view_fingerprint === desired.view_fingerprint
+        && target.meta.ledger_seq <= desired.atlas_ledger_seq;
+      const tailLimit = Number(payload?.tail_entry_limit);
+      const measuredTailLimit = Number.isSafeInteger(tailLimit) && tailLimit >= 0 ? tailLimit : null;
+      let entries = [];
+      if (compatibleTail && measuredTailLimit != null) {
+        entries = this.#ledger.tail(desired.target_branch, target.meta.ledger_seq, {
+          upToSeq: desired.atlas_ledger_seq,
+          limit: measuredTailLimit + 1,
+        });
+      }
+      const tailReachesDesired = target
+        && (target.meta.ledger_seq === desired.atlas_ledger_seq
+          || entries.at(-1)?.seq === desired.atlas_ledger_seq);
+      if (compatibleTail
+        && measuredTailLimit != null
+        && entries.length <= measuredTailLimit
+        && tailReachesDesired) {
+        let view = null;
+        try {
+          view = View.mount({ dbPath: outPath, mode: "readwrite" });
+          if (entries.length > 0) {
+            await this.#builder.incrementalApply({
+              view,
+              ledger: this.#ledger,
+              entries,
+              options: this.#viewBuildOptions(),
+            });
+          }
+          const published = view.publishGeneration(desired);
+          base.view_written = outPath;
+          base.view_etag = view.metaLocal().built_at;
+          base.generation = published;
+          base.waiting_lane_outcome = "ready";
+          base.waiting_lane_operation = "tail";
+          base.tail_entries = entries.length;
+          return base;
+        } catch (err) {
+          logAtlasError("[Warmer.#catchupWaitingLane] bounded tail failed:", err);
+          return this.#waitingLaneMiss(base, "needs_reprepare", "bounded_tail_failed");
+        } finally {
+          try { view?.close(); } catch { /* cleanup */ }
+        }
+      }
+
+      try {
+        if (fs.existsSync(outPath)) {
+          await invalidateStorageCacheNativeAsync(outPath);
+          removeSqliteFile(outPath);
+        }
+        this.#builder.cloneView({ sourcePath, destPath: outPath });
+        const output = this.#readViewGeneration(outPath);
+        if (!output?.generation || !waitingLaneGenerationsEqual(output.generation, desired)) {
+          try { removeSqliteFile(outPath); } catch { /* preserve mismatch */ }
+          return this.#waitingLaneMiss(base, "needs_latest", "clone_output_generation_mismatch");
+        }
+        base.view_written = outPath;
+        base.view_etag = output.meta.built_at;
+        base.generation = output.generation;
+        base.waiting_lane_outcome = "ready";
+        base.waiting_lane_operation = "clone";
+        base.tail_entries = entries.length;
+        return base;
+      } catch (err) {
+        logAtlasError("[Warmer.#catchupWaitingLane] exact clone failed:", err);
+        return this.#waitingLaneMiss(base, "needs_reprepare", "exact_clone_failed");
+      }
+    });
+  }
+
+  /** @param {AtlasWarmJobPayload} payload @param {AtlasWarmJobResult} base */
+  async #prefetchWaitingLane(payload, base) {
+    const viewPath = typeof payload?.out_view_path === "string" && payload.out_view_path
+      ? path.resolve(payload.out_view_path)
+      : null;
+    if (!viewPath || !fs.existsSync(viewPath)) {
+      return this.#waitingLaneMiss(base, "needs_reprepare", "mounted_view_unavailable");
+    }
+    const desired = payload?.generation == null
+      ? null
+      : normalizeWaitingLaneGeneration(payload.generation);
+    if (payload?.generation != null && !desired) {
+      return this.#waitingLaneMiss(base, "needs_reprepare", "invalid_generation");
+    }
+    let view = null;
+    try {
+      view = View.mount({ dbPath: viewPath, mode: "readonly" });
+      const actual = view.generationLocal();
+      if (desired && (!actual || !waitingLaneGenerationsEqual(actual, desired))) {
+        return this.#waitingLaneMiss(base, "needs_latest", "mounted_view_generation_mismatch");
+      }
+      const paths = Array.isArray(payload?.paths)
+        ? payload.paths.filter(isCanonicalRepoPath).slice(0, 200)
+        : [];
+      const stats = this.#builder.prefetch({
+        view,
+        hint: { paths, depth: 2, maxSymbols: 500 },
+      });
+      base.view_written = viewPath;
+      base.view_etag = view.metaLocal().built_at;
+      if (actual) base.generation = actual;
+      base.prefetched_symbols = stats.symbols;
+      base.prefetched_edges = stats.edges;
+      base.waiting_lane_outcome = "prefetched";
+      base.waiting_lane_operation = "prefetch";
+      return base;
+    } catch (err) {
+      logAtlasError("[Warmer.#prefetchWaitingLane] failed:", err);
+      return this.#waitingLaneMiss(base, "needs_reprepare", "prefetch_failed");
+    } finally {
+      try { view?.close(); } catch { /* cleanup */ }
+    }
+  }
+
+  /**
    * Walk the repo root and (re)index every supported file. Same parser
    * dependency as #warmIncremental. Skips common vendored / generated
    * directories and respects `MAX_FULL_WARM_PATHS` as a hard upper bound
@@ -2073,9 +2453,7 @@ export class ParseEngine {
     const walkedPaths = await walkRepoFilesAsync(this.#repoRoot, (filename, relPath) => {
       const ext = path.extname(filename).toLowerCase();
       if (!ext || !(/** @type {ParserAdapter} */ (this.#parser)).supports(ext)) return false;
-      // Skip well-known minified/bundled paths so we never even open them.
-      // Catches *.min.js, *-min.js, *.bundle.js, *.bundle.<hash>.js etc.
-      if (isLikelyMinifiedPath(relPath || filename)) return false;
+      if (isGeneratedSourceArtifactPath(relPath)) return false;
       return true;
     }, { maxPaths: MAX_FULL_WARM_PATHS });
     let paths = walkedPaths;
@@ -2150,6 +2528,7 @@ export class ParseEngine {
     const scipWork = typeof stageScipPaths === "function"
       ? Promise.resolve().then(() => stageScipPaths(paths))
       : null;
+    const parseGaps = new Map();
     const total = paths.length;
     // Per-language totals (computed up front from path extensions) so each
     // progress event can carry { language, current_for_lang, total_for_lang }
@@ -2252,6 +2631,38 @@ export class ParseEngine {
           continue;
         }
 
+        if (isGeneratedSourceArtifactPath(repo_rel_path)) {
+          const before = snapshot.get(repo_rel_path);
+          if (before) {
+            await reportIndexProgress(repo_rel_path, {
+              force: true,
+              stage: "recording delta",
+              current: ordinal,
+              text: `removing generated source artifact ${ordinal}/${total} ${repo_rel_path}`,
+              language: pathLanguage,
+            });
+            recordStaleEmbeddingHash(base, before);
+            await this.#ledger.append({
+              branch,
+              op: "remove",
+              repo_rel_path,
+              before_content_hash: before,
+              after_content_hash: null,
+            });
+            await deletePathSourceStat(repo_rel_path);
+            base.ledger_entries_appended++;
+            snapshot.delete(repo_rel_path);
+          }
+          /** @type {any} */ (base).generated_artifacts_excluded =
+            Number(/** @type {any} */ (base).generated_artifacts_excluded || 0) + 1;
+          const samples = Array.isArray(/** @type {any} */ (base).generated_artifact_samples)
+            ? /** @type {any} */ (base).generated_artifact_samples
+            : [];
+          if (samples.length < 50) samples.push(repo_rel_path);
+          /** @type {any} */ (base).generated_artifact_samples = samples;
+          continue;
+        }
+
         const absPath = path.join(this.#repoRoot, repo_rel_path);
         let onDiskExists = false;
         try { onDiskExists = fs.existsSync(absPath); }
@@ -2292,17 +2703,6 @@ export class ParseEngine {
           continue;
         }
 
-        // Path-glob skip catches *.min.js / *.bundle.js without opening the
-        // file. Path globs miss non-suffix-conventional bundles like
-        // hls-DixMeGmu.js — fall back to a content-shape sample.
-        if (isLikelyMinifiedPath(repo_rel_path)) {
-          base.skipped.push({
-            repo_rel_path,
-            reason: "minified_skip",
-            message: "Path matches minified/bundled pattern",
-          });
-          continue;
-        }
         /** @type {Buffer | null} */
         let fileBytes = null;
         let fileStat = null;
@@ -2325,10 +2725,23 @@ export class ParseEngine {
             });
             continue;
           }
+          // Minification is a resource guard, not a classification of tiny
+          // files. Long TypeScript declarations and JavaScript fixtures can
+          // legitimately have multi-thousand-character lines; parsing those
+          // is cheap. Apply path/content heuristics only once a file is at
+          // least one full inspection window.
+          if (shouldInspectSourceForMinification(repo_rel_path, fileStat.size) && isLikelyMinifiedPath(repo_rel_path)) {
+            base.skipped.push({
+              repo_rel_path,
+              reason: "minified_skip",
+              message: "Path matches minified/bundled pattern",
+            });
+            continue;
+          }
           fileBytes = await fs.promises.readFile(absPath);
           contentHash = sha256Hex(fileBytes);
           const sample = fileBytes.subarray(0, Math.min(fileBytes.length, MINIFIED_SAMPLE_BYTES));
-          if (sample.length > 0) {
+          if (shouldInspectSourceForMinification(repo_rel_path, fileBytes.length) && sample.length > 0) {
             const inspection = inspectSampleForMinified(sample);
             if (inspection.minified) {
               base.skipped.push({
@@ -2398,6 +2811,7 @@ export class ParseEngine {
             : [];
           emptyLayerPaths.push(repo_rel_path);
           /** @type {any} */ (base).treesitter_empty_layer_paths = emptyLayerPaths;
+          parseGaps.set(repo_rel_path, { contentHash, lang: pathLanguage });
         }
         if (parsed.hasError) {
           const partialSymbolCount = Array.isArray(parsed.symbols) ? parsed.symbols.length : 0;
@@ -2408,11 +2822,6 @@ export class ParseEngine {
             : "partial extraction contained no symbols and was discarded";
           const err = new Error(`tree-sitter parse error for ${repo_rel_path}; ${disposition}`);
           logAtlasError(`[Warmer.#indexPaths] recovered parse was partial for ${repo_rel_path}:`, err);
-          base.skipped.push({
-            repo_rel_path,
-            reason: "parse_error",
-            message: formatAtlasError(err),
-          });
           if (retainPartial) {
             parsed = { ...parsed, hasError: false };
             /** @type {any} */ (base).treesitter_partial_layers = Number(/** @type {any} */ (base).treesitter_partial_layers || 0) + 1;
@@ -2421,7 +2830,13 @@ export class ParseEngine {
               : [];
             partialLayerPaths.push(repo_rel_path);
             /** @type {any} */ (base).treesitter_partial_layer_paths = partialLayerPaths;
+            parseGaps.set(repo_rel_path, { contentHash: parsed.content_hash, lang: parsed.lang });
           } else {
+          base.skipped.push({
+            repo_rel_path,
+            reason: "parse_error",
+            message: formatAtlasError(err),
+          });
           if (!this.#viewLayerMerge || !contentHash || !pathLanguage) continue;
           parsed = {
             repo_rel_path,
@@ -2437,6 +2852,7 @@ export class ParseEngine {
             : [];
           emptyLayerPaths.push(repo_rel_path);
           /** @type {any} */ (base).treesitter_empty_layer_paths = emptyLayerPaths;
+          parseGaps.set(repo_rel_path, { contentHash: parsed.content_hash, lang: parsed.lang });
           }
         }
 
@@ -2563,6 +2979,7 @@ export class ParseEngine {
     } finally {
       documentIntake?.finishTreeSitter();
       if (scipWork) await scipWork;
+      if (this.#viewLayerMerge) reconcileScipCoveredParseGaps(this.#ledger, base, parseGaps);
     }
   }
 

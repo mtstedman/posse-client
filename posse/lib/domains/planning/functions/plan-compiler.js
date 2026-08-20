@@ -17,6 +17,7 @@ import {
   getWorkItem,
   logEvent,
   rewireDependency,
+  retireWaitingLanePlanning,
   setJobError,
   setJobResult,
   storeArtifact,
@@ -115,6 +116,7 @@ import {
 import { ASSESSABLE_JOB_TYPES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
 
 const FRONTEND_DESIGN_SKILL_ID = "frontend-design";
 const REPORT_DELIVERABLE_EXTENSIONS = "md|txt|json|csv|html";
@@ -307,7 +309,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   buildIntermediateReportTask = (task) => task,
   logBadInputFailure = () => {},
   normalizePlannerScore = (value) => value,
+  promoteWaitingLaneDevDemand = promoteWaitingLaneOnDevDemand,
   repairWebAssetCreateScope = repairWebAssetCreateScopeFromModule,
+  retireWaitingLanePlanningDemand = retireWaitingLanePlanning,
   spawnFromRole = defaultSpawnFromRole,
 } = {}) {
       const plannerRole = worker?.roleRegistry?.get?.("plan");
@@ -2030,6 +2034,29 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           detail: "Planner plan contained no valid tasks after schema validation",
         });
         throw new Error("Planner plan contained no valid tasks after schema validation");
+      }
+
+      // Research demand is speculative until the planner materializes a real
+      // queued dev/code consumer. Promotion reuses the row's exact published
+      // generation and is fail-closed when no such durable row exists.
+      const hasDevDemand = [...allCreatedJobIds]
+        .map((jobId) => getJob(jobId))
+        .some((createdJob) => createdJob?.job_type === "dev" && createdJob.status === "queued");
+      if (hasDevDemand) {
+        promoteWaitingLaneDevDemand({
+          workItemId: planJob.work_item_id,
+          projectDir: worker.projectDir,
+        });
+      } else {
+        // A planner reservation freezes speculative residency. If the final
+        // compiled batch has no dev consumer, retire that reservation now so
+        // the eviction cadence can physically clean it without waiting for
+        // terminal WI cleanup.
+        retireWaitingLanePlanningDemand({
+          workItemId: planJob.work_item_id,
+          consumerJobId: planJob.id,
+          reason: "planner_compiled_without_dev",
+        });
       }
 
       wirePlannerDependencies();

@@ -4,6 +4,7 @@ import { ATLAS_TOOL_DEFS } from "../../../../domains/integrations/functions/dete
 import { optionalAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../../../../domains/atlas/functions/v2/symbol-id.js";
 import { coerceLooseAtlasSymbolArgs, validateAtlasPayloadSymbolIds } from "../../../../domains/atlas/functions/v2/signal-extraction.js";
 import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
+import { normalizeAtlasIdentifierList } from "../../../../domains/atlas/functions/v2/contracts/identifiers.js";
 
 const ATLAS_MAX_QUERY_LENGTH = 512;
 const ATLAS_MAX_LIMIT = 50;
@@ -60,35 +61,6 @@ function sanitizeRelativePathList(values = [], maxItems = 30) {
     if (out.length >= maxItems) break;
   }
   return out;
-}
-
-function sanitizeIdentifierList(values = [], maxItems = ATLAS_MAX_IDENTIFIERS) {
-  const list = normalizeStringListInput(values);
-  const out = [];
-  for (const raw of list) {
-    const candidate = sanitizeString(raw, 128);
-    if (!candidate) continue;
-    if (!/^[A-Za-z0-9_$.:/#-]+$/u.test(candidate)) continue;
-    if (!out.includes(candidate)) out.push(candidate);
-    if (out.length >= maxItems) break;
-  }
-  return out;
-}
-
-function normalizeStringListInput(values) {
-  if (Array.isArray(values)) return values;
-  if (typeof values !== "string") return [];
-  const text = values.trim();
-  if (!text) return [];
-  if (text.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      // Fall through to lightweight splitting.
-    }
-  }
-  return text.split(/[\s,;]+/u).filter(Boolean);
 }
 
 function sanitizeShortStringList(values = [], maxItems = 12, maxLen = 64) {
@@ -493,7 +465,6 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
           ? sanitizeString(payload.failingTestPath, 512)
           : undefined,
         cardDetail: payload.cardDetail != null ? sanitizeString(payload.cardDetail, 64) : undefined,
-        adaptiveDetail: payload.adaptiveDetail == null ? undefined : !!payload.adaptiveDetail,
         ifNoneMatch: payload.ifNoneMatch != null ? sanitizeString(payload.ifNoneMatch, 512) : undefined,
         wireFormat: normalizeAtlasWireFormat(payload.wireFormat),
         wireFormatVersion: payload.wireFormatVersion == null ? undefined : clampInt(payload.wireFormatVersion, 1, 3, 2),
@@ -587,7 +558,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
       ? sanitizeString(payload.file, 512)
       : null;
     if (!symbolId && !file) throw new Error("ATLAS code.lens requires symbolId or file.");
-    const identifiersToFind = sanitizeIdentifierList(payload.identifiersToFind || payload.identifiers);
+    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind || payload.identifiers, ATLAS_MAX_IDENTIFIERS);
     if (identifiersToFind.length === 0) {
       throw new Error("ATLAS code.lens requires identifiersToFind.");
     }
@@ -605,44 +576,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
 
   if (normalizedAction === "code.window") {
     if (Array.isArray(payload.items)) {
-      if (payload.items.length < 2 || payload.items.length > 4) {
-        throw new Error("ATLAS code.window items must contain two to four selections.");
-      }
-      const items = payload.items.map((item, index) => {
-        if (!item || typeof item !== "object" || Array.isArray(item)) {
-          throw new Error(`ATLAS code.window items[${index}] must be an object.`);
-        }
-        const reason = sanitizeString(item.reason || item.justification || "", ATLAS_MAX_QUERY_LENGTH);
-        const symbolId = optionalAtlasSymbolId(item.symbolId, `code.window items[${index}] symbolId`);
-        const file = item.file && isSafeRelativePath(item.file)
-          ? sanitizeString(item.file, 512)
-          : null;
-        if (!symbolId && !file) throw new Error(`ATLAS code.window items[${index}] requires symbolId or file.`);
-        if (!reason) throw new Error(`ATLAS code.window items[${index}] requires reason.`);
-        const identifiersToFind = sanitizeIdentifierList(item.identifiersToFind);
-        if (file && identifiersToFind.length === 0) {
-          throw new Error(`ATLAS code.window items[${index}] file mode requires identifiersToFind.`);
-        }
-        return {
-          ...(symbolId ? { symbolId } : { file }),
-          reason,
-          identifiersToFind,
-          expectedLines: clampInt(item.expectedLines, 1, 2000, 120),
-          ...(item.granularity ? { granularity: sanitizeString(item.granularity, 32) } : {}),
-          ...(item.maxTokens == null ? {} : { maxTokens: clampInt(item.maxTokens, 64, ATLAS_MAX_BUDGET_TOKENS, 1200) }),
-          ...(item.sessionId ? { sessionId: sanitizeString(item.sessionId, 256) } : {}),
-        };
-      });
-      return {
-        action: normalizedAction,
-        cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
-        payload: {
-          items,
-          maxTokens: clampInt(payload.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, Math.min(4800, items.length * 1200)),
-          ...(payload.sessionId ? { sessionId: sanitizeString(payload.sessionId, 256) } : {}),
-          ...(payload.repoId ? { repoId: payload.repoId } : {}),
-        },
-      };
+      throw new Error("ATLAS code.window multi-selection is disabled; issue independent scalar calls together.");
     }
     const reason = sanitizeString(payload.reason || payload.justification || "", ATLAS_MAX_QUERY_LENGTH);
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.window symbolId");
@@ -651,7 +585,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
       : null;
     if (!symbolId && !file) throw new Error("ATLAS code.window requires symbolId or file.");
     if (!reason) throw new Error("ATLAS code.window requires reason.");
-    const identifiersToFind = sanitizeIdentifierList(payload.identifiersToFind);
+    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, ATLAS_MAX_IDENTIFIERS);
     if (file && identifiersToFind.length === 0) {
       throw new Error("ATLAS code.window file mode requires identifiersToFind.");
     }

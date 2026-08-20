@@ -11,7 +11,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
 const SOFT_NO_WRITE_ATTEMPTS = 2;
 const NO_WRITE_RETRY_BACKOFF_MS = 30_000;
-const BRANCH_NET_DIFF_MAX_CHARS = 60_000;
+const BRANCH_NET_DIFF_MAX_CHARS = 50_000;
 const BRANCH_NET_DIFF_MAX_FILES = 100;
 
 function pendingFileRequestCount(pendingFileRequests = null) {
@@ -44,12 +44,6 @@ export function shouldShortCircuitNoWriteAssessment({
 
 function normalizeGitPath(value) {
   return String(value || "").replace(/\\/g, "/").trim();
-}
-
-function compactDiff(text, maxChars = BRANCH_NET_DIFF_MAX_CHARS) {
-  const value = String(text || "").trim();
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n...[branch net diff truncated]`;
 }
 
 export async function detectBranchNetDiffForNoWriteAsync({
@@ -134,16 +128,27 @@ export async function detectBranchNetDiffForNoWriteAsync({
   }
 
   let diff = "";
+  let diffStat = "";
   const scopedFiles = entries.map((entry) => entry.file).slice(0, Math.max(1, maxFiles));
   try {
-    diff = await gitExecAsync(
-      ["-c", "core.quotePath=false", "diff", "--no-renames", "--unified=6", `${base}..HEAD`, "--", ...scopedFiles],
-      cwd,
-      { timeoutMs: 20_000, maxBuffer: 1024 * 1024 * 4 },
-    );
+    [diff, diffStat] = await Promise.all([
+      gitExecAsync(
+        ["-c", "core.quotePath=false", "diff", "--no-renames", "--unified=6", `${base}..HEAD`, "--", ...scopedFiles],
+        cwd,
+        { timeoutMs: 20_000, maxBuffer: 1024 * 1024 * 8 },
+      ),
+      gitExecAsync(
+        ["-c", "core.quotePath=false", "diff", "--stat", "--summary", `${base}..HEAD`, "--", ...scopedFiles],
+        cwd,
+        { timeoutMs: 20_000, maxBuffer: 1024 * 1024 * 2 },
+      ),
+    ]);
   } catch {
     diff = "";
   }
+  const normalizedDiff = String(diff || "").trim();
+  const diffBytes = Buffer.byteLength(normalizedDiff, "utf8");
+  const diffTruncated = diffBytes > maxDiffChars;
 
   return {
     ok: true,
@@ -153,7 +158,12 @@ export async function detectBranchNetDiffForNoWriteAsync({
     head: currentHead,
     files: entries.map((entry) => entry.file),
     entries,
-    diff: compactDiff(diff, maxDiffChars),
+    // All-or-nothing inline evidence: a partial diff is worse than no body
+    // because assessors distrust it and pay again to re-derive the full view.
+    diff: diffTruncated ? "" : normalizedDiff,
+    diffBytes,
+    diffTruncated,
+    diffStat: String(diffStat || "").trim(),
   };
 }
 

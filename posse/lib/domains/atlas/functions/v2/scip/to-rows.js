@@ -22,6 +22,7 @@ import { sha256Hex } from "../hash.js";
 import {
   descriptorsToQualifiedName,
   externalDisplayName,
+  isStructuralScipDefinition,
 } from "./symbol-parser.js";
 import { scipConfidence } from "./confidence.js";
 import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
@@ -41,7 +42,9 @@ import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 //   v4: native rows carry per-document call-proof coverage metadata into
 //       layered storage so the view merge can suppress redundant tree-sitter
 //       calls only when SCIP coverage is explicit.
-export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v4-call-proof-metadata";
+//   v5: strip portable staging prefixes and suppress parameter/type-parameter/
+//       synthetic-meta definitions so SCIP contributes structural gaps only.
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v5-structural-symbols";
 
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */
@@ -96,7 +99,7 @@ export function scipDocumentToParseResult({ cache, document, repo_rel_path, bind
     const parsed = occ.parsed;
     const local_id = symbolToLocalId.get(occ.raw.symbol);
     if (local_id == null) continue;
-    if (parsed.local) {
+    if (!isStructuralScipDefinition(parsed)) {
       suppressedLocalIds.add(local_id);
       emittedSymbols.add(occ.raw.symbol);
       continue;

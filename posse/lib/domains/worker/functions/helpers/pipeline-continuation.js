@@ -709,7 +709,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
   return researchJob;
 }
 
-export function spawnPlanAfterResearch(worker, researchJob, output, options = {}) {
+export function spawnPlanAfterResearch(worker, researchJob, output, _options = {}) {
   const wi = getWorkItem(researchJob.work_item_id);
   if (wi?.research_skipped) {
     updateWorkItemResearchSkip(researchJob.work_item_id, { skipped: false, reason: null });
@@ -965,14 +965,16 @@ export function spawnPlanAfterResearch(worker, researchJob, output, options = {}
 
   const existingPlanJob = findExistingPlanForResearch(researchJob);
   if (existingPlanJob) {
-    const atlasEvidenceWarmJobId = Number(options.atlasEvidenceWarmJobId);
-    const atlasEvidenceWarmRequired = options.atlasEvidenceWarmRequired === true;
-    const hasAtlasEvidenceWarmJob = Number.isInteger(atlasEvidenceWarmJobId) && atlasEvidenceWarmJobId > 0;
-    if (hasAtlasEvidenceWarmJob || atlasEvidenceWarmRequired) {
-      const existingPayload = parseJobPayload(existingPlanJob);
-      if (hasAtlasEvidenceWarmJob) existingPayload._atlas_evidence_warm_job_id = atlasEvidenceWarmJobId;
-      else delete existingPayload._atlas_evidence_warm_job_id;
-      if (atlasEvidenceWarmRequired) existingPayload._atlas_evidence_warm_required = true;
+    const existingPayload = parseJobPayload(existingPlanJob);
+    if (
+      Object.hasOwn(existingPayload, "_atlas_evidence_warm_job_id")
+      || Object.hasOwn(existingPayload, "_atlas_evidence_warm_required")
+    ) {
+      // This plan consumes the main view, not the retired research-complete WI
+      // warm. Remove only that parked-view fence; commit-to-assessor fences are
+      // installed and enforced on mutating jobs in the assessment pipeline.
+      delete existingPayload._atlas_evidence_warm_job_id;
+      delete existingPayload._atlas_evidence_warm_required;
       existingPlanJob.payload_json = JSON.stringify(existingPayload);
       updateJobPayload(existingPlanJob.id, existingPlanJob.payload_json);
     }
@@ -998,10 +1000,6 @@ export function spawnPlanAfterResearch(worker, researchJob, output, options = {}
     ...replanPayloadFields(researchPayload),
     deepthink_budget: researchBudget,
     deepthink: isResearchBudgetDeep(researchBudget),
-    ...(Number.isInteger(Number(options.atlasEvidenceWarmJobId)) && Number(options.atlasEvidenceWarmJobId) > 0
-      ? { _atlas_evidence_warm_job_id: Number(options.atlasEvidenceWarmJobId) }
-      : {}),
-    ...(options.atlasEvidenceWarmRequired === true ? { _atlas_evidence_warm_required: true } : {}),
   };
   if (isRedTeamPlanningPayload(researchPayload)) {
     const chain = createRedTeamPlanChain({

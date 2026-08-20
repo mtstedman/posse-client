@@ -331,10 +331,13 @@ export async function callProvider(promptText, {
   attemptId = null,
   agentCallId = null,
   promptChars = 0,
+  fallbackReads = null,
+  assessorMaxToolCalls = null,
   skipRolePrompt = false,
   recyclingMode = "fresh",
   priorSessionHandle = null,
   recordFinalPrompt = null, // (finalPrompt, { systemPrompt?, systemPromptFiles? }) => void
+  onUsageSegment = null,
   disableAtlas = false,
   atlasPrefetchStatus = null,
   atlasConfig = null,
@@ -472,6 +475,8 @@ export async function callProvider(promptText, {
       attemptId,
       agentCallId,
       promptChars,
+      fallbackReads,
+      assessorMaxToolCalls,
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
@@ -828,10 +833,28 @@ export async function callProvider(promptText, {
             executionMode: CLAUDE_EXECUTION_MODE_INTERACTIVE,
             usageEstimated: !hasInteractiveUsage,
             usageFinalized: hasInteractiveUsage === true,
+            usageCapturePrecision: hasInteractiveUsage ? "aggregate_only" : "unknown",
             interactiveCompletedBy: result.completedBy || null,
             mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
             mcpAttachMissingProof: enforceMcpAttachProof && mcpCleanup.attachProofResult?.missingProof === true,
           };
+          if (hasInteractiveUsage) {
+            try {
+              onUsageSegment?.({
+                requestOrdinal: 1,
+                provider: "claude",
+                modelName: modelToUse,
+                inputTokens: estimatedInputTokens,
+                cachedInputTokens: stats.cachedInputTokens ?? 0,
+                cacheCreationInputTokens: stats.cacheCreationInputTokens ?? 0,
+                outputTokens: estimatedOutputTokens,
+                requestContextInputTokens: estimatedInputTokens,
+                durationMs,
+                usageSource: "aggregate_only",
+                precision: "aggregate_only",
+              });
+            } catch { /* accounting persistence cannot break provider execution */ }
+          }
           if (stats.mcpAttachMissingProof) {
             const err = new Error("Claude deterministic MCP attach proof missing: provider exited without owner-observed initialize/tools-list.");
             err.code = "MCP_ATTACH_PROOF_MISSING";
@@ -1465,6 +1488,7 @@ export async function callProvider(promptText, {
         // arrived before a terminal stop killed the process, usage is complete
         // and trustworthy; stderr-parsed fallback tokens are not.
         usageFinalized: resultData != null,
+        usageCapturePrecision: resultData != null ? "aggregate_only" : "unknown",
         costUsd: apiEquivalentCostUsd ?? resultData?.cost_usd ?? null,
         totalCostUsd: resultData?.total_cost_usd || null,
         numTurns: resultData?.num_turns || null,
@@ -1486,6 +1510,23 @@ export async function callProvider(promptText, {
         mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
         mcpAttachMissingProof: mcpCleanup.attachProofResult?.missingProof === true,
       };
+      if (resultData != null) {
+        try {
+          onUsageSegment?.({
+            requestOrdinal: 1,
+            provider: "claude",
+            modelName: modelToUse,
+            inputTokens: normalizedUsage.inputTokens ?? 0,
+            cachedInputTokens: normalizedUsage.cachedInputTokens ?? 0,
+            cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens ?? 0,
+            outputTokens: normalizedUsage.outputTokens ?? 0,
+            requestContextInputTokens: normalizedUsage.inputTokens ?? 0,
+            durationMs,
+            usageSource: "aggregate_only",
+            precision: "aggregate_only",
+          });
+        } catch { /* accounting persistence cannot break provider execution */ }
+      }
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
       // attach-under-load failure leaves a trace even on a clean exit, where

@@ -40,6 +40,11 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
       if (this.dryRun) return this.ok("ok", "scip-rust wrapper present");
       const validation = await this.validateRustAnalyzer();
       if (!validation.ok) return this.failed(`scip-rust wrapper exists, but ${validation.message}`);
+      // Older wrappers delegated through PATH. That made a successfully
+      // installed indexer fail later in scrubbed workers whose PATH differed
+      // from the install session. Refresh it with the validated absolute
+      // analyzer path whenever dependency setup runs.
+      await this.writeRustWrapper(validation.path);
       return this.ok("ok", "scip-rust wrapper already installed");
     });
     if (existing?.ok === true || existing?.ok === false) return existing;
@@ -58,9 +63,11 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
     });
     if (toolchain?.ok === false) return toolchain;
 
+    let analyzerPath = null;
     const analyzer = await this.runStep(3, "validate rust-analyzer", async () => {
       const validation = await this.validateRustAnalyzer();
       if (!validation.ok) return this.failed(validation.message);
+      analyzerPath = validation.path;
       return this.ok("ok", "rust-analyzer available");
     });
     if (analyzer?.ok === false) return analyzer;
@@ -72,7 +79,7 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
     if (prepared?.ok === false) return prepared;
 
     return await this.runStep(5, "write scip-rust wrapper", async () => {
-      await this.writeRustWrapper();
+      await this.writeRustWrapper(analyzerPath);
       return this.ok("installed", "installed scip-rust wrapper");
     });
   }
@@ -82,33 +89,51 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   }
 
   async validateRustAnalyzer() {
-    let probe = await runCommand("rust-analyzer", ["--version"], { timeoutMs: 30_000 });
+    let analyzerPath = await this.resolveRustAnalyzerPath();
+    let probe = analyzerPath
+      ? await runCommand(analyzerPath, ["--version"], { timeoutMs: 30_000 })
+      : { ok: false, message: "rust-analyzer is not on PATH" };
     if (!probe.ok && await commandOnPath("rustup")) {
       const install = await runCommand("rustup", ["component", "add", "rust-analyzer"], { timeoutMs: this.timeoutMs });
       clearCommandOnPathCache("rust-analyzer");
       if (!install.ok) {
         return { ok: false, message: `rustup component add rust-analyzer failed: ${install.message}` };
       }
-      probe = await runCommand("rust-analyzer", ["--version"], { timeoutMs: 30_000 });
+      analyzerPath = await this.resolveRustAnalyzerPath();
+      probe = analyzerPath
+        ? await runCommand(analyzerPath, ["--version"], { timeoutMs: 30_000 })
+        : { ok: false, message: "rust-analyzer is not on PATH after rustup install" };
     }
     if (!probe.ok) return { ok: false, message: `rust-analyzer not runnable: ${probe.message}` };
-    return { ok: true, message: "" };
+    return { ok: true, message: "", path: analyzerPath };
   }
 
-  async writeRustWrapper() {
+  async resolveRustAnalyzerPath() {
+    const locator = this.platform === "win32" ? "where" : "which";
+    const located = await runCommand(locator, ["rust-analyzer"], { timeoutMs: 30_000 });
+    if (!located.ok) return null;
+    const first = String(located.message || "").split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
+    return first ? path.resolve(first) : null;
+  }
+
+  async writeRustWrapper(analyzerPath) {
+    if (!analyzerPath || !path.isAbsolute(analyzerPath)) {
+      throw new Error("cannot write scip-rust wrapper without an absolute rust-analyzer path");
+    }
     if (this.platform === "win32") {
       await fs.promises.writeFile(
         path.join(this.binDir, "scip-rust.cmd"),
         [
           "@echo off",
-          "rust-analyzer scip %*",
+          `"${String(analyzerPath).replaceAll('"', '""')}" scip %*`,
         ].join("\r\n"),
         "utf8",
       );
       return;
     }
     const file = path.join(this.binDir, "scip-rust");
-    await fs.promises.writeFile(file, "#!/usr/bin/env sh\nexec rust-analyzer scip \"$@\"\n", "utf8");
+    const quoted = `'${String(analyzerPath).replaceAll("'", `'"'"'`)}'`;
+    await fs.promises.writeFile(file, `#!/usr/bin/env sh\nexec ${quoted} scip "$@"\n`, "utf8");
     await fs.promises.chmod(file, 0o755);
   }
 }

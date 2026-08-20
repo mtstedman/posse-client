@@ -742,7 +742,11 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     ? rawEmbeddingModelId
     : DEFAULT_ATLAS_EMBEDDING_MODEL_ID;
   const dbViewLayerMerge = useLiveSettings ? readDbSetting("atlas_view_layer_merge") : null;
-  const viewLayerMerge = String(firstProvided(explicitValue("viewLayerMerge", "atlasViewLayerMerge", "atlas_view_layer_merge"), dbViewLayerMerge, "on")).trim().toLowerCase() === "on";
+  const viewLayerMerge = parseBool(firstProvided(
+    explicitValue("viewLayerMerge", "atlasViewLayerMerge", "atlas_view_layer_merge"),
+    dbViewLayerMerge,
+    "on",
+  ));
   const viewWaitMs = parseIntOrNull(firstProvided(explicitValue("viewWaitMs", "atlas_v2_view_wait_ms"), dbViewWaitMs)) ?? 2500;
   const explicitAutoRefreshStale = explicitValue("autoRefreshStale", "atlas_v2_auto_refresh_stale");
   const autoRefreshStale = provided(explicitAutoRefreshStale) && String(explicitAutoRefreshStale).trim() !== ""

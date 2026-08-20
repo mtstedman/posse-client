@@ -256,6 +256,7 @@
  * @property {Record<string, unknown>} [indexProgress]
  * @property {Record<string, unknown>} [graphDerivedState]
  * @property {{ memories: number, feedbackSignals: number } | null} [memoryStats]
+ * @property {{ attemptId: string, status: string, purpose: string, targetBranch: string, gitOid: string | null, sourceProof: Record<string, unknown>, startedAt: string | null, lastStartedAt: string | null, finishedAt: string | null, resumeCount: number, skippedCount: number, generation: Record<string, unknown> | null } | null} [mainIntake]
  * @property {{ available: boolean, profile?: string | null, builtAt?: string | null, seedCount?: number, currentLabels?: number, staleLabels?: number, maxDriftCount?: number, oldestStaleSince?: string | null, lastLabeledAt?: string | null } | null} [treeCompression]
  * @property {Record<string, unknown>} [dataQuality]
  * @property {{ memory: boolean, runtime: boolean, workflow: boolean, liveBuffers: boolean, scipIngest: boolean }} [features]
@@ -417,8 +418,8 @@
 
 /**
  * symbol.card returns a single SymbolCard. The envelope's `data` is
- * the card directly, unless called with batch fields (`symbolIds` /
- * `symbolRefs`), where it returns the batch SymbolCardsData shape.
+ * the card directly, unless `symbolId` or `symbolRef` is an array (or a
+ * compatibility batch alias is used), where it returns SymbolCardsData.
  *
  * @typedef {SymbolCard} SymbolGetCardData
  */
@@ -813,23 +814,6 @@
  * @property {Array<{content:string,startLine:number,endLine:number,rangeStart:number,rangeEnd:number,signature:string,callableKind:string,owner?:string,anchor:string}>} [_returnedFunctionAnchors] Private owner transport; replaced with returnedFunctionAnchors before model delivery.
  * @property {Array<{anchor:string,owner?:string,signature:string,callableKind:string,startLine:number,endLine:number,ref?:string}>} [returnedFunctionAnchors] Temporary fetchable anchors for directly returned anonymous functions visible in this result.
  * @property {number} [returnedFunctionAnchorsOmitted]
- * @property {boolean} [batch]                True only for a bounded multi-item response.
- * @property {number} [itemCount]
- * @property {number} [succeeded]
- * @property {number} [failed]
- * @property {number} [totalMaxTokens]
- * @property {number} [perItemMaxTokens]
- * @property {CodeWindowBatchItemResult[]} [items]
- */
-
-/**
- * @typedef {Object} CodeWindowBatchItemResult
- * @property {number} index
- * @property {{symbolId?: string, file?: string}} target
- * @property {boolean} ok
- * @property {CodeWindowData} [data]
- * @property {ToolError} [error]
- * @property {{ref:string, objectType:string, sizeChars:number}} [evidenceRef]
  */
 
 /**

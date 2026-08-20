@@ -4,6 +4,12 @@
 // native and Atlas evidence safety must be explicit closed sets.
 
 export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
+export const SUB_AGENT_EVIDENCE_OUTCOMES = Object.freeze({
+  DELIVERED: "evidence_delivered",
+  COVERED: "covered",
+  CONTROL: "control",
+  ERROR: "error",
+});
 export const SUB_AGENT_LIMITS = Object.freeze({
   maxBatch: 3,
   maxInputs: 3,

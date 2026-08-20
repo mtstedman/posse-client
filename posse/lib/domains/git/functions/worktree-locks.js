@@ -642,6 +642,24 @@ export function gitStashLockPath(wtPath, projectDir = null, _nativeParity = {}) 
   return localLockPath(request.runtimeRoot, "git-stash-locks", repoIdentity, "repo");
 }
 
+// Repository-wide fence for mutations of the shared worktree registry. Both
+// speculative preparation and dev activation take this before any per-root
+// worktree lock so two WIs cannot invert lock order through .git/worktrees.
+export function repositoryWorktreeAdminLockPath(wtPath, projectDir = null, _nativeParity = {}) {
+  const request = lockPathRequestPayload(wtPath, projectDir);
+  const commonDir = localGitCommonDir(request.wtPath);
+  const repoIdentity = commonDir
+    || request.projectDir
+    || request.wtPath;
+  // Nested project cwd must not create a second admin-lock namespace. Anchor
+  // ordinary repositories beside their common .git directory; keep the
+  // established request runtime for bare/unusual layouts.
+  const runtimeRoot = commonDir && path.basename(commonDir) === ".git"
+    ? getRuntimeRoot(path.dirname(commonDir))
+    : request.runtimeRoot;
+  return localLockPath(runtimeRoot, "worktree-admin-locks", repoIdentity, "repo");
+}
+
 export async function gitStashLockPathAsync(wtPath, projectDir = null, { signal = null } = {}) {
   throwIfAborted(signal);
   return gitStashLockPath(wtPath, projectDir);
@@ -673,6 +691,19 @@ export async function withWorktreeLockAsync(wtPath, projectDir, fn, opts = {}) {
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
     throw new Error(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
+  }
+  try {
+    return await fn();
+  } finally {
+    await lock.releaseAsync();
+  }
+}
+
+export async function withRepositoryWorktreeAdminLockAsync(wtPath, projectDir, fn, opts = {}) {
+  const lockPath = repositoryWorktreeAdminLockPath(wtPath, projectDir, { disabled: true });
+  const lock = await acquireWorktreeLockAsync(lockPath, opts);
+  if (!lock.acquired) {
+    throw new Error(`Timed out waiting for repository worktree-admin lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
   }
   try {
     return await fn();

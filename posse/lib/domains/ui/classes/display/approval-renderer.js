@@ -54,7 +54,7 @@ import {
   roleBrandColor,
 } from "../../functions/display/helpers/brand.js";
 import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
-import { estimateBillableInputTokens, estimateCallCost } from "../../../billing/functions/pricing.js";
+import { resolveCanonicalCallAccounting } from "../../../billing/functions/usage-segments.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
 
@@ -127,17 +127,8 @@ function effectiveReviewAssessment(data = {}) {
 }
 
 function resolvedCallCostUsd(call) {
-  const est = estimateCallCost({
-    provider: call?.provider,
-    modelName: call?.model_name,
-    modelTier: call?.model_tier,
-    inputTokens: call?.input_tokens,
-    outputTokens: call?.output_tokens,
-    cachedInputTokens: call?.cached_input_tokens,
-    cacheCreationInputTokens: call?.cache_creation_input_tokens,
-    knownCostUsd: call?.cost_estimate_usd,
-  });
-  return Number.isFinite(est.costUsd) ? est.costUsd : 0;
+  const accounting = resolveCanonicalCallAccounting(call);
+  return Number.isFinite(accounting.costUsd) ? accounting.costUsd : 0;
 }
 
 function nonNegativeNumber(value) {
@@ -149,28 +140,22 @@ function callTokenMetrics(call = {}) {
   const inputTokens = nonNegativeNumber(call.input_tokens);
   const outputTokens = nonNegativeNumber(call.output_tokens);
   const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(call.cached_input_tokens));
-  const billable = estimateBillableInputTokens({
-    provider: call.provider,
-    modelName: call.model_name,
-    modelTier: call.model_tier,
-    inputTokens,
-    cachedInputTokens,
-    cacheCreationInputTokens: call.cache_creation_input_tokens,
-  });
-  const billableInputTokens = Number.isFinite(billable.billableInputTokens)
-    ? Math.max(0, billable.billableInputTokens)
-    : inputTokens;
+  const accounting = resolveCanonicalCallAccounting(call);
+  const billableInputTokens = Number.isFinite(accounting.billableInputTokens)
+    ? Math.max(0, accounting.billableInputTokens)
+    : null;
   return {
     inputTokens,
     outputTokens,
     cachedInputTokens,
     billableInputTokens,
-    billableTokens: billableInputTokens + outputTokens,
+    billableTokens: billableInputTokens == null ? null : billableInputTokens + outputTokens,
     rawTokens: inputTokens + outputTokens,
   };
 }
 
 function optionalNonNegativeNumber(value) {
+  if (value == null || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(0, n) : null;
 }
@@ -182,8 +167,13 @@ function approvalTokenTotals(data = {}) {
     acc.inputTokens += metrics.inputTokens;
     acc.outputTokens += metrics.outputTokens;
     acc.cachedInputTokens += metrics.cachedInputTokens;
-    acc.billableInputTokens += metrics.billableInputTokens;
-    acc.billableTokens += metrics.billableTokens;
+    if (metrics.billableInputTokens == null || metrics.billableTokens == null) {
+      acc.billableInputTokens = null;
+      acc.billableTokens = null;
+    } else if (acc.billableInputTokens != null && acc.billableTokens != null) {
+      acc.billableInputTokens += metrics.billableInputTokens;
+      acc.billableTokens += metrics.billableTokens;
+    }
     return acc;
   }, {
     inputTokens: 0,
@@ -198,12 +188,18 @@ function approvalTokenTotals(data = {}) {
     inputTokens,
     optionalNonNegativeNumber(data.totalCachedInputTokens ?? data.totals?.cachedInputTokens) ?? summed.cachedInputTokens,
   );
-  const explicitBillableInput = optionalNonNegativeNumber(data.totalBillableInputTokens ?? data.totals?.billableInputTokens);
-  const billableInputTokens = explicitBillableInput
-    ?? (calls.length > 0 ? summed.billableInputTokens : inputTokens);
-  const explicitBillableTotal = optionalNonNegativeNumber(data.totalBillableTokens ?? data.totals?.billableTokens);
-  const billableTokens = explicitBillableTotal
-    ?? (calls.length > 0 ? summed.billableTokens : billableInputTokens + outputTokens);
+  const billableInputValue = data.totalBillableInputTokens !== undefined
+    ? data.totalBillableInputTokens
+    : data.totals?.billableInputTokens;
+  const billableTotalValue = data.totalBillableTokens !== undefined
+    ? data.totalBillableTokens
+    : data.totals?.billableTokens;
+  const billableInputTokens = billableInputValue !== undefined
+    ? optionalNonNegativeNumber(billableInputValue)
+    : (calls.length > 0 ? summed.billableInputTokens : null);
+  const billableTokens = billableTotalValue !== undefined
+    ? optionalNonNegativeNumber(billableTotalValue)
+    : (calls.length > 0 ? summed.billableTokens : null);
   return {
     inputTokens,
     outputTokens,
@@ -216,7 +212,20 @@ function approvalTokenTotals(data = {}) {
 }
 
 function billableDiffers(metrics = {}) {
+  if (metrics.billableTokens == null) return false;
   return Math.round(nonNegativeNumber(metrics.billableTokens)) !== Math.round(nonNegativeNumber(metrics.rawTokens));
+}
+
+function approvalCostDisplay(data = {}) {
+  const precision = String(data.costPrecision ?? data.totals?.costPrecision ?? "").trim()
+    || ((data.totalCostUsd ?? data.totals?.costUsd) != null ? "estimated" : "unknown");
+  const exposed = data.totalCostUsd ?? data.totals?.costUsd;
+  const known = data.knownCostUsd ?? data.totals?.knownCostUsd ?? exposed;
+  if (precision === "unknown" || !Number.isFinite(Number(known))) return "unknown";
+  const amount = _fmtUsd(Math.max(0, Number(known)));
+  if (precision === "partial") return `${amount} known (partial)`;
+  if (precision === "estimated") return `${amount} estimated`;
+  return `${amount} exact`;
 }
 
 // ─── Display ────────────────────────────────────────────────────────────────
@@ -791,12 +800,14 @@ export class DisplayApprovalRenderer {
     const totalIn = tokenTotals.inputTokens ? _fmtTokens(tokenTotals.inputTokens) : "0";
     const totalOut = tokenTotals.outputTokens ? _fmtTokens(tokenTotals.outputTokens) : "0";
     const cachedSuffix = tokenTotals.cachedInputTokens > 0 ? ` (${_fmtTokens(tokenTotals.cachedInputTokens)} cached)` : "";
-    const billableSuffix = billableDiffers(tokenTotals) ? `  ${C.bold}Billable:${C.reset} ${_fmtTokens(tokenTotals.billableTokens)} total` : "";
+    const billableSuffix = tokenTotals.billableTokens == null
+      ? `  ${C.bold}Billable:${C.reset} unavailable`
+      : billableDiffers(tokenTotals) ? `  ${C.bold}Billable:${C.reset} ${_fmtTokens(tokenTotals.billableTokens)} total` : "";
     const totalTools = Number(data.totalToolCalls || 0);
-    const totalCostUsd = Number(data.totalCostUsd ?? (data.agentCalls || []).reduce((sum, call) => sum + resolvedCallCostUsd(call), 0)) || 0;
+    const costDisplay = approvalCostDisplay(data);
     const jobCount = visibleJobs.length;
     const passCount = visibleJobs.filter(j => ["succeeded", "recovered"].includes(jobReportStatus(j, visibleJobs))).length;
-    lines.push(` ${C.bold}Duration:${C.reset} ${totalDur}s  ${C.bold}Jobs:${C.reset} ${passCount}/${jobCount} passed  ${C.bold}Tokens:${C.reset} ${totalIn} in${cachedSuffix} / ${totalOut} out${billableSuffix}  ${C.bold}Calls:${C.reset} ${(data.agentCalls || []).length}  ${C.bold}Tools:${C.reset} ${totalTools}  ${C.bold}Cost:${C.reset} ${_fmtUsd(totalCostUsd)}`);
+    lines.push(` ${C.bold}Duration:${C.reset} ${totalDur}s  ${C.bold}Jobs:${C.reset} ${passCount}/${jobCount} passed  ${C.bold}Tokens:${C.reset} ${totalIn} in${cachedSuffix} / ${totalOut} out${billableSuffix}  ${C.bold}Calls:${C.reset} ${(data.agentCalls || []).length}  ${C.bold}Tools:${C.reset} ${totalTools}  ${C.bold}Cost:${C.reset} ${costDisplay}`);
     for (const line of _taskProviderBudgetLines(data, getProviderUsageSummaryCache().summaries || [])) {
       lines.push(line);
     }
@@ -831,11 +842,7 @@ export class DisplayApprovalRenderer {
       ?? data.totals?.toolCalls
       ?? (Array.isArray(data.toolUsageSummary) ? data.toolUsageSummary.reduce((sum, item) => sum + (Number(item?.count) || 0), 0) : 0)
     ) || 0;
-    const totalCostUsd = Number(
-      data.totalCostUsd
-      ?? data.totals?.costUsd
-      ?? (data.agentCalls || []).reduce((sum, call) => sum + resolvedCallCostUsd(call), 0)
-    ) || 0;
+    const costDisplay = approvalCostDisplay(data);
 
     const dot = `  ${C.dim}·${C.reset}  `;
     const kv = (label, valueText) => `   ${C.dim}${label.padEnd(10)}${C.reset} ${C.bold}${valueText}${C.reset}`;
@@ -843,6 +850,8 @@ export class DisplayApprovalRenderer {
     lines.push(`${kv("tokens", `${C.cyan}${_fmtTokens(totalTok)} raw${C.reset}`)}${dot}${C.dim}${_fmtTokens(totalIn)} in${cachedDetail}${C.reset} ${C.dim}+ ${_fmtTokens(totalOut)} out${C.reset}`);
     if (billableDiffers(tokenTotals)) {
       lines.push(`${kv("billable", `${C.cyan}${_fmtTokens(tokenTotals.billableTokens)} total${C.reset}`)}${dot}${C.dim}${_fmtTokens(tokenTotals.billableInputTokens)} input-equiv${C.reset} ${C.dim}+ ${_fmtTokens(totalOut)} out${C.reset}`);
+    } else if (tokenTotals.billableTokens == null) {
+      lines.push(`${kv("billable", `${C.yellow}unavailable${C.reset}`)}${dot}${C.dim}raw token usage retained${C.reset}`);
     }
     lines.push(`${kv("duration", `${totalDur.toFixed(1)}s`)}${dot}${C.dim}${(totalDur / 60).toFixed(1)} min${C.reset}`);
     const _callsValue =
@@ -851,7 +860,7 @@ export class DisplayApprovalRenderer {
       (timeoutCalls > 0 ? `${C.dim}, ${C.reset}${C.yellow}${timeoutCalls} timeout${C.reset}` : "") +
       `${C.dim})${C.reset}`;
     lines.push(`${kv("calls", _callsValue)}`);
-    lines.push(`${kv("tools", String(totalToolCalls))}${dot}${C.dim}cost${C.reset} ${C.bold}${_fmtUsd(totalCostUsd)}${C.reset}`);
+    lines.push(`${kv("tools", String(totalToolCalls))}${dot}${C.dim}cost${C.reset} ${C.bold}${costDisplay}${C.reset}`);
     lines.push("");
 
     // ── Model usage breakdown ──
@@ -867,7 +876,7 @@ export class DisplayApprovalRenderer {
     for (const call of (data.agentCalls || [])) {
       const key = call.model_name || tierModelName(call.model_tier, { providerName: call.provider }) || "unknown";
       if (!modelMap.has(key)) {
-        modelMap.set(key, { calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billableTokens: 0, duration: 0, costUsd: 0, succeeded: 0, failed: 0 });
+        modelMap.set(key, { calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billableTokens: 0, billableAvailable: true, duration: 0, costUsd: 0, succeeded: 0, failed: 0 });
       }
       const m = modelMap.get(key);
       const metrics = callTokenMetrics(call);
@@ -875,7 +884,8 @@ export class DisplayApprovalRenderer {
       m.inputTokens += metrics.inputTokens;
       m.cachedInputTokens += metrics.cachedInputTokens;
       m.outputTokens += metrics.outputTokens;
-      m.billableTokens += metrics.billableTokens;
+      if (metrics.billableTokens == null) m.billableAvailable = false;
+      else m.billableTokens += metrics.billableTokens;
       m.duration += (call.duration_ms || 0);
       m.costUsd += resolvedCallCostUsd(call);
       if (call.status === "succeeded") m.succeeded++;
@@ -896,7 +906,7 @@ export class DisplayApprovalRenderer {
           `${_fmtTokens(m.inputTokens).padStart(9)} ` +
           `${(m.cachedInputTokens ? _fmtTokens(m.cachedInputTokens) : "—").padStart(9)} ` +
           `${_fmtTokens(m.outputTokens).padStart(9)} ` +
-          `${_fmtTokens(m.billableTokens).padStart(9)} ` +
+          `${(m.billableAvailable ? _fmtTokens(m.billableTokens) : "—").padStart(9)} ` +
           `${_fmtUsd(m.costUsd).padStart(9)} ` +
           `${(m.duration / 1000).toFixed(1).padStart(8)}s ` +
           `${rateColor}${rate.padStart(8)}${C.reset}`
@@ -911,7 +921,7 @@ export class DisplayApprovalRenderer {
     for (const call of (data.agentCalls || [])) {
       const key = call.role || "unknown";
       if (!roleMap.has(key)) {
-        roleMap.set(key, { calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billableTokens: 0, duration: 0, costUsd: 0 });
+        roleMap.set(key, { calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billableTokens: 0, billableAvailable: true, duration: 0, costUsd: 0 });
       }
       const r = roleMap.get(key);
       const metrics = callTokenMetrics(call);
@@ -919,7 +929,8 @@ export class DisplayApprovalRenderer {
       r.inputTokens += metrics.inputTokens;
       r.cachedInputTokens += metrics.cachedInputTokens;
       r.outputTokens += metrics.outputTokens;
-      r.billableTokens += metrics.billableTokens;
+      if (metrics.billableTokens == null) r.billableAvailable = false;
+      else r.billableTokens += metrics.billableTokens;
       r.duration += (call.duration_ms || 0);
       r.costUsd += resolvedCallCostUsd(call);
     }
@@ -931,14 +942,16 @@ export class DisplayApprovalRenderer {
 
       for (const [role, r] of roleMap) {
         const color = roleBrandColor(role);
-        const pct = tokenTotals.billableTokens > 0 ? `${Math.round(100 * r.billableTokens / tokenTotals.billableTokens)}%` : "—";
+        const pct = tokenTotals.billableTokens != null && tokenTotals.billableTokens > 0 && r.billableAvailable
+          ? `${Math.round(100 * r.billableTokens / tokenTotals.billableTokens)}%`
+          : "—";
         lines.push(
           `  ${color}${role.padEnd(14)}${C.reset} ` +
           `${String(r.calls).padStart(6)} ` +
           `${_fmtTokens(r.inputTokens).padStart(9)} ` +
           `${(r.cachedInputTokens ? _fmtTokens(r.cachedInputTokens) : "—").padStart(9)} ` +
           `${_fmtTokens(r.outputTokens).padStart(9)} ` +
-          `${_fmtTokens(r.billableTokens).padStart(9)} ` +
+          `${(r.billableAvailable ? _fmtTokens(r.billableTokens) : "—").padStart(9)} ` +
           `${_fmtUsd(r.costUsd).padStart(9)} ` +
           `${(r.duration / 1000).toFixed(1).padStart(8)}s ` +
           `${pct.padStart(9)}`
@@ -997,7 +1010,7 @@ export class DisplayApprovalRenderer {
         const inTok = metrics.inputTokens ? _fmtTokens(metrics.inputTokens) : "\u2014";
         const cachedTok = metrics.cachedInputTokens ? _fmtTokens(metrics.cachedInputTokens) : "\u2014";
         const outTok = metrics.outputTokens ? _fmtTokens(metrics.outputTokens) : "\u2014";
-        const billableTok = metrics.billableTokens ? _fmtTokens(metrics.billableTokens) : "\u2014";
+        const billableTok = metrics.billableTokens == null ? "\u2014" : _fmtTokens(metrics.billableTokens);
         const cost = _fmtUsd(resolvedCallCostUsd(call));
         const model = (call.model_name || tierModelName(call.model_tier, { providerName: call.provider }) || "?").slice(0, 13);
         const effort = call.reasoning_effort ? call.reasoning_effort.slice(0, 3) : "med";

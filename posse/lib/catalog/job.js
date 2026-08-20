@@ -21,6 +21,7 @@ export const JOB_TYPES = Object.freeze([
   "promote",
   "preflight",
   "atlas_warm",
+  "waiting_lane_prepare",
 ]);
 export const JOB_TYPE_LIST_SQL = sqlList(JOB_TYPES);
 
@@ -153,10 +154,9 @@ export const DEADLOCK_TERMINAL_STATUSES_SQL = sqlList(DEADLOCK_TERMINAL_STATUSES
 
 // ── Job-type sets that drive scheduling, locking, and assessment routing ─────
 //
-// `atlas_warm` is deterministic, non-mutating, and not assessable; it is
-// intentionally absent from every set below. Adding it would route warming
-// jobs through repo locking, assessment spawning, or worktree mutation, none
-// of which apply.
+// Cache-only and repository-preparation jobs are deterministic and not
+// assessable. They are intentionally absent from the broad mutation sets
+// below; repository preparation receives its narrower locks separately.
 
 export const MUTATING_JOB_TYPES = new Set(["dev", "fix", "artificer", "promote"]);
 export const ASSESSABLE_JOB_TYPES = new Set(["dev", "fix", "artificer"]);
@@ -165,7 +165,12 @@ export const QUEUE_LOCKING_JOB_TYPES = new Set(["dev", "fix", "promote"]);
 // Job types whose work is local/deterministic and never goes through a
 // provider call (no Claude/OpenAI/Codex/etc.). Used by the worker to skip
 // agent dispatch for these and run them in-process.
-export const NON_PROVIDER_JOB_TYPES = new Set(["human_input", "promote", "atlas_warm"]);
+export const NON_PROVIDER_JOB_TYPES = new Set([
+  "human_input",
+  "promote",
+  "atlas_warm",
+  "waiting_lane_prepare",
+]);
 
 // Job types that emit a declared output contract enforced by the worker
 // (allowed/forbidden file lists, scope checks). Other mutating types still
@@ -206,6 +211,18 @@ export const WORKTREE_JOB_TYPES = new Set(["dev", "fix", "promote"]);
 
 // Background maintenance work, NOT agent work. These run on a separate scheduler
 // budget so they never consume one of the N agent compute slots, and they are
-// kept out of the agent pipeline/fleet/lock views. `atlas_warm` is the only one
-// today: deterministic, non-provider, fail-silent index warming.
-export const BACKGROUND_JOB_TYPES = new Set(["atlas_warm"]);
+// kept out of the agent pipeline/fleet/lock views. Both current types are
+// deterministic, non-provider, fail-silent accelerators.
+export const BACKGROUND_JOB_TYPES = new Set(["atlas_warm", "waiting_lane_prepare"]);
+
+// Optional accelerators never participate in WI completion, hard-dependency
+// deadlock propagation, reviewability, or assessment. Keep this canonical so
+// queue paths do not grow independent literal exclusions.
+export const NON_COMPLETION_BLOCKING_JOB_TYPES = new Set([
+  "atlas_warm",
+  "waiting_lane_prepare",
+]);
+
+// Repository-structural jobs need worktree-admin/root locking without being
+// classified as source-mutating or assessable agent work.
+export const REPOSITORY_PREPARATION_JOB_TYPES = new Set(["waiting_lane_prepare"]);

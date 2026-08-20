@@ -7,6 +7,7 @@
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
+import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
 import { recordAtlasUsageEvent } from "../../functions/v2/retrieval/usage.js";
 import {
@@ -40,7 +41,6 @@ export const DEFAULT_SEMANTIC_FILE_LEXICAL_OVERLAP_WEIGHT = 0.75;
 const ATLAS_SEMANTIC_REPEAT_ACTIONS = new Set([
   "symbol.search",
   "code.lens",
-  "code.window",
 ]);
 
 const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
@@ -306,6 +306,28 @@ export function nativeSymbolSearchArgs(action, args = {}) {
   return candidatePoolLimit === callerLimit
     ? effectiveArgs
     : { ...effectiveArgs, limit: candidatePoolLimit };
+}
+
+function nativeCompleteToolArgs(action, args = {}) {
+  const effectiveArgs = nativeSymbolSearchArgs(action, args);
+  if (action !== "code.lens" && action !== "code.window") return effectiveArgs;
+  const normalizeSelection = (selection) => {
+    if (!selection || typeof selection !== "object" || !Array.isArray(selection.identifiersToFind)) {
+      return selection;
+    }
+    return {
+      ...selection,
+      identifiersToFind: selection.identifiersToFind.map((value) => (
+        normalizeAtlasIdentifier(value) || value
+      )),
+    };
+  };
+  const normalized = normalizeSelection(effectiveArgs);
+  if (!Array.isArray(effectiveArgs.items)) return normalized;
+  return {
+    ...normalized,
+    items: effectiveArgs.items.map(normalizeSelection),
+  };
 }
 
 function applyNativeSymbolSearchPriors(envelope, args = {}) {
@@ -651,9 +673,10 @@ export class AtlasToolExecutor {
   async executeTool(request = /** @type {AtlasToolRequest} */ ({})) {
     const toolName = String(request.toolName || "").trim();
     if (!toolName) throw new Error("AtlasToolExecutor.executeTool requires toolName");
-    const args = request.args && typeof request.args === "object" ? request.args : {};
+    const rawArgs = request.args && typeof request.args === "object" ? request.args : {};
     const baseAction = resolveAtlasAction(toolName);
-    const action = gatewayEffectiveAction(baseAction, args);
+    const action = gatewayEffectiveAction(baseAction, rawArgs);
+    const args = nativeCompleteToolArgs(action, rawArgs);
     const repoKey = this.#repoKeyFor(request);
     this.#invalidateMismatchedReadContext(request, repoKey);
     const dedupeRepoKey = this.#dedupeRepoKeyForRequest(request, repoKey);
@@ -969,7 +992,7 @@ export class AtlasToolExecutor {
         const vectorBridgeMs = Math.max(0, this.#now() - vectorStartedAt);
         const nativeArgs = request.action === "tree.scope"
           ? treeScopeDiscoveryArgs(request.args || {}, readPayload.readRoot)
-          : nativeSymbolSearchArgs(request.action, request.args || {});
+          : nativeCompleteToolArgs(request.action, request.args || {});
         // code.survey's agent-visible map is deliberately compact, but its
         // hash ref must be able to search every symbol collected by that same
         // survey. This private runtime flag asks the native complete-tool path

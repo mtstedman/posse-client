@@ -1,6 +1,11 @@
 import { findRunnableJob, expireStaleSessionLeases } from "../../queue/functions/index.js";
+import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 
-const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set(["atlas_warm", "human_input"]);
+const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set([
+  "atlas_warm",
+  WAITING_LANE_JOB_TYPE,
+  "human_input",
+]);
 
 // Keeps the tick preamble and lease decisions together. The Scheduler facade
 // owns callbacks and mutable run-loop state, so the planner receives it as an

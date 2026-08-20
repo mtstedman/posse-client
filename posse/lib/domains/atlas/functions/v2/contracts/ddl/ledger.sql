@@ -251,6 +251,33 @@ CREATE INDEX IF NOT EXISTS blob_layers_lookup
 CREATE INDEX IF NOT EXISTS idx_blob_layers_merge_read
   ON blob_layers(content_hash, lang, status, indexed_at DESC, id DESC);
 
+-- A materialization epoch independent from branch ledger sequence. These
+-- triggers run inside the writer transaction, so a crash after same-content
+-- layer enrichment but before view publication leaves old views stale.
+INSERT INTO meta(key, value) VALUES('layer_revision', '0')
+  ON CONFLICT(key) DO NOTHING;
+
+CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_insert
+AFTER INSERT ON blob_layers
+BEGIN
+  INSERT INTO meta(key, value) VALUES('layer_revision', '1')
+  ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+END;
+
+CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_update
+AFTER UPDATE ON blob_layers
+BEGIN
+  INSERT INTO meta(key, value) VALUES('layer_revision', '1')
+  ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+END;
+
+CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_delete
+AFTER DELETE ON blob_layers
+BEGIN
+  INSERT INTO meta(key, value) VALUES('layer_revision', '1')
+  ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+END;
+
 -- -----------------------------------------------------------------------------
 -- Branch lineage. main is the root; every other branch is forked at a
 -- specific parent seq. Forks are free — they just record lineage.

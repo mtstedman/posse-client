@@ -15,11 +15,16 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
+import { SUB_AGENT_EVIDENCE_OUTCOMES } from "../../../catalog/sub-agent.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_SESSION_RELEASED_NOTIFICATION,
 } from "../../../catalog/mcp.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
+import {
+  assessorFallbackReadKey,
+  isAssessorFallbackReadKey,
+} from "../../../domains/assessment/functions/fallback-read-tools.js";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
@@ -34,6 +39,7 @@ import {
 } from "../../../domains/providers/functions/shared/tool-runtime.js";
 import {
   getAgentHandoffRecord,
+  materializeAgentHandoffEvidenceSelector,
   recordAgentHandoffRejection,
   rejectAgentHandoffForLaterTool,
 } from "../../../domains/handoff/functions/agent-handoff.js";
@@ -46,12 +52,17 @@ import {
   sealSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
+import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
+import {
+  subAgentDispatchIdentities,
+  subAgentEvidenceCallIdentities,
+  subAgentMutationTargetKeys,
+} from "../../../domains/sub-agent/functions/routing-identity.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import {
   recordObservation,
   recordToolUseObservations,
   researchExplorationObservationStatus,
-  researchRetrievalCoverageStatus,
   researchSurveyCoverageStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
@@ -71,6 +82,7 @@ import {
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
   researchSynthesisDecision,
+  researchSynthesisExplorationCeiling,
 } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
@@ -81,6 +93,16 @@ import {
   narrowBootConfigToSignedClaims,
 } from "../functions/issued-tool-policy.js";
 import { toolSchemaTelemetry } from "../functions/tool-schema-telemetry.js";
+import { sourceSelectorFingerprint } from "../../../domains/research/classes/SourceCoverageOwner.js";
+import {
+  admitSourceContextHeadroom,
+  releaseSourceContextHeadroomReservation,
+} from "../../../domains/research/functions/context-headroom.js";
+import {
+  materializeSourceCoverage,
+  prepareSourceCoverage,
+  sourceCoverageOwnerForSession,
+} from "../../../domains/research/functions/owner-source-admission.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
@@ -128,7 +150,7 @@ const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set([
   "policy.get",
   "usage.stats",
 ]);
-const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 1;
+const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 2;
 const SUB_AGENT_ROUTING_MIN_TARGETS = 2;
 const SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS = 3000;
 const SUB_AGENT_ROUTING_REMINDER =
@@ -142,11 +164,11 @@ const SUB_AGENT_ROUTING_BLOCK =
   "Dispatch one sub_agent batch with completion.mode=wait_all, preferring one citation_synthesis.v1 request with two or three ordered inputs for related targets, " +
   "or continue without another read if current context is sufficient.";
 const SUB_AGENT_DELEGATED_REPEAT_BLOCK =
-  "Duplicate delegated read suppressed successfully: this target was already materialized and synthesized by the completed citation child. " +
+  "Duplicate delegated read suppressed successfully: this exact evidence selection was already materialized and synthesized by the completed citation child. " +
   "Use the returned cited packet as the inspection result and synthesize now. " +
-  "Do not retry this target through another evidence tool. A successful write to the target still permits post-edit verification.";
+  "Do not retry this selection through another evidence tool. A successful write to the target still permits post-edit verification.";
 const SUB_AGENT_REDUNDANT_DISPATCH_BLOCK =
-  "Every requested sub-agent input target is already present in the parent context from successful evidence calls. " +
+  "Every requested sub-agent evidence selection is already present in the parent context from successful evidence calls. " +
   "Do not dispatch a child to reread completed parent work; make the decision or mutation directly.";
 
 const SUB_AGENT_EVIDENCE_TOOLS = new Set([
@@ -168,7 +190,9 @@ function createSubAgentRoutingState() {
   return {
     evidenceCalls: 0,
     targets: new Set(),
+    selections: new Map(),
     delegatedTargets: new Set(),
+    delegatedSelections: new Map(),
     dispatched: false,
     reminderIssued: false,
     materializedChars: 0,
@@ -180,51 +204,60 @@ function subAgentRoutingEnabled(policy) {
   return policy?.suites?.tools?.has("sub_agent") === true;
 }
 
-function subAgentEvidenceTargets(args = {}) {
-  const found = new Set();
-  const visit = (value, key = "") => {
-    if (Array.isArray(value)) {
-      for (const entry of value) visit(entry, key);
-      return;
-    }
-    if (!value || typeof value !== "object") {
-      if (
-        typeof value === "string"
-        && /(?:^|_)(?:file|files|path|paths)$/u.test(key)
-        && value.trim()
-      ) {
-        found.add(value.trim());
-      }
-      return;
-    }
-    for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+function subAgentIdentityOptions(context = null) {
+  return {
+    materializeRef: context && typeof context === "object"
+      ? (ref) => materializeAgentHandoffEvidenceSelector(ref, context)
+      : null,
   };
-  visit(args);
-  return found;
 }
 
-function subAgentRoutingBlockReason(state, requested, args = {}) {
+function subAgentRoutingContext(session) {
+  const boot = session?.bootConfig || {};
+  return {
+    work_item_id: boot.workItemId ?? null,
+    job_id: boot.jobId ?? null,
+    attempt_id: boot.attemptId ?? null,
+    agent_call_id: boot.agentCallId ?? null,
+  };
+}
+
+function subAgentRoutingIdentities(requested, args = {}, result = null, context = null) {
+  if (requested?.suite === "tools" && requested?.name === "sub_agent") {
+    return subAgentDispatchIdentities(args, subAgentIdentityOptions(context));
+  }
+  return subAgentEvidenceCallIdentities(requested, args, result);
+}
+
+function replaceDelegatedTargetSummary(state) {
+  state.delegatedTargets.clear();
+  for (const targets of state.delegatedSelections.values()) {
+    for (const target of targets) state.delegatedTargets.add(target);
+  }
+}
+
+function subAgentRoutingBlockReason(state, requested, args = {}, context = null) {
   if (!state) return "";
-  const requestedTargets = subAgentEvidenceTargets(args);
+  const identities = subAgentRoutingIdentities(requested, args, null, context);
   if (
     requested?.suite === "tools"
     && requested?.name === "sub_agent"
     && args?.op === "dispatch"
-    && requestedTargets.size > 0
-    && [...requestedTargets].every((target) => state.targets.has(target))
+    && identities.selectionKeys.size > 0
+    && [...identities.selectionKeys].every((selection) => state.selections.has(selection))
   ) {
     return "redundant_dispatch";
   }
   if (!SUB_AGENT_EVIDENCE_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
-  const targets = new Set([...state.targets, ...requestedTargets]);
-  if (state.dispatched && [...requestedTargets].some((target) => state.delegatedTargets.has(target))) {
+  if (state.dispatched
+    && [...identities.selectionKeys].some((selection) => state.delegatedSelections.has(selection))) {
     return "delegated_repeat";
   }
   if (state.mutated) return "";
   if (state.dispatched) return "";
   return state.evidenceCalls >= SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS
     && state.materializedChars >= SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS
-    && targets.size >= SUB_AGENT_ROUTING_MIN_TARGETS
+    && state.targets.size >= SUB_AGENT_ROUTING_MIN_TARGETS
     ? "required"
     : "";
 }
@@ -237,7 +270,7 @@ function subAgentMaterializedChars(result) {
   ), 0);
 }
 
-function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null) {
+function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null, context = null) {
   if (!state) return "";
   if (requested?.suite === "tools" && requested?.name === "sub_agent") {
     state.dispatched = true;
@@ -248,21 +281,42 @@ function noteSubAgentRoutingSuccess(state, requested, args = {}, result = null) 
       && result.results.every((entry) => (
         entry?.status === "completed"
         && ["complete", "partial"].includes(entry?.packet?.outcome)
-      ));
+    ));
     if (completedWaitAll) {
-      for (const target of subAgentEvidenceTargets(args)) state.delegatedTargets.add(target);
+      const identities = subAgentRoutingIdentities(requested, args, result, context);
+      for (const selection of identities.selectionKeys) {
+        state.delegatedSelections.set(
+          selection,
+          new Set(identities.selectionTargets?.get(selection) || []),
+        );
+      }
+      replaceDelegatedTargetSummary(state);
     }
     return "";
   }
   if (SUB_AGENT_WRITE_TOOLS.has(`${requested?.suite}.${requested?.name}`)) {
     state.mutated = true;
-    for (const target of subAgentEvidenceTargets(args)) state.delegatedTargets.delete(target);
+    const mutatedTargets = subAgentMutationTargetKeys(args);
+    for (const [selection, targets] of state.delegatedSelections) {
+      if ([...targets].some((target) => mutatedTargets.has(target))) {
+        state.delegatedSelections.delete(selection);
+      }
+    }
+    replaceDelegatedTargetSummary(state);
     return "";
   }
   if (!SUB_AGENT_EVIDENCE_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
+  if (result?.result
+    && classifyDelegatedToolResult(result.result).outcome !== SUB_AGENT_EVIDENCE_OUTCOMES.DELIVERED) {
+    return "";
+  }
+  const identities = subAgentRoutingIdentities(requested, args, result, context);
   state.evidenceCalls += 1;
   state.materializedChars += subAgentMaterializedChars(result);
-  for (const target of subAgentEvidenceTargets(args)) state.targets.add(target);
+  for (const target of identities.targetKeys) state.targets.add(target);
+  for (const selection of identities.selectionKeys) {
+    state.selections.set(selection, new Set(identities.selectionTargets?.get(selection) || []));
+  }
   if (
     !state.mutated
     && !state.dispatched
@@ -415,6 +469,7 @@ function researchNoticeFlagsFor(session) {
       midpoint: false,
       curtain: false,
       lastSlot: false,
+      extension: false,
       earlyFetchBatching: false,
       earlyFetchSynthesisAudit: false,
     };
@@ -595,6 +650,10 @@ function requestedToolPolicyName(name, args = {}) {
     name: stripToolsPrefix(raw),
     nested: "",
   };
+}
+
+export function __testAssessorFallbackReadKey(name, args = {}) {
+  return assessorFallbackReadKey(requestedToolPolicyName(name, args));
 }
 
 function suiteToolAllowlistPolicy(bootConfig = {}) {
@@ -1036,7 +1095,9 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   const assignedStep = Number.isSafeInteger(assignedExplorationStep)
     ? assignedExplorationStep
     : observedExplorationSteps + 1;
-  const assignedAbsoluteCeiling = assignedStep > RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
+  const assignedAbsoluteCeiling = assignedStep > researchSynthesisExplorationCeiling({
+    staleSteps: status.stale_steps,
+  });
   return {
     tracked: true,
     blocked: progressDecision.required || assignedAbsoluteCeiling,
@@ -1218,39 +1279,19 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
   });
 }
 
-function researchCoverageForSession(session, toolName = "", toolArgs = {}) {
-  const boot = session?.bootConfig || {};
-  const coverage = researchRetrievalCoverageStatus({
-    jobId: boot.jobId ?? null,
-    attemptId: boot.attemptId ?? null,
-  });
-  const action = effectiveAtlasResearchAction(requestedToolPolicyName(toolName, toolArgs));
-  const addFile = (bucket, value) => {
-    const file = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
-    if (file && !bucket.includes(file)) bucket.push(file);
-  };
-  if (action === "code.skeleton") addFile(coverage.skeletonizedFiles, toolArgs?.file);
-  if (action === "code.window") {
-    if (toolArgs?.file) addFile(coverage.windowedFiles, toolArgs.file);
-    else if (toolArgs?.symbolId) coverage.symbolWindows += 1;
-    for (const item of Array.isArray(toolArgs?.items) ? toolArgs.items : []) {
-      if (item?.file) addFile(coverage.windowedFiles, item.file);
-      else if (item?.symbolId) coverage.symbolWindows += 1;
-    }
-  }
-  return coverage;
-}
-
-function appendOwnerResearchSynthesisNotice(result, session, toolName, admission, toolArgs = {}) {
+function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.assignedExplorationStep
     ?? admission.explorationSteps + 1;
   const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
   const flags = researchNoticeFlagsFor(session);
+  const explorationCeiling = researchSynthesisExplorationCeiling({
+    staleSteps: admission.staleSteps,
+  });
   let notice = null;
   let noticeKind = null;
-  if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+  if (explorationSteps >= explorationCeiling) {
     flags.midpoint = true;
     flags.curtain = true;
     flags.lastSlot = true;
@@ -1263,7 +1304,7 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
       absoluteCeilingReached: true,
-      coverage: researchCoverageForSession(session, toolName, toolArgs),
+      explorationCeiling,
     });
     noticeKind = "research_closeout";
   } else if (
@@ -1280,9 +1321,7 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     && !flags.midpoint
   ) {
     flags.midpoint = true;
-    notice = buildResearchMidpointAuditText({
-      coverage: researchCoverageForSession(session, toolName, toolArgs),
-    });
+    notice = buildResearchMidpointAuditText();
     noticeKind = "research_midpoint";
   }
   if (!notice) return result;
@@ -1532,6 +1571,7 @@ function ownerAtlasEvidenceIdentities({ session, toolName, toolArgs, result, out
     || parsed?.found === false
     || parsed?.duplicateSuppressed === true
     || parsed?.alreadySurfaced === true
+    || parsed?.structureAlreadyVisible === true
     || String(parsed?.status || "").toLowerCase() === "covered"
   ) {
     return [];
@@ -1626,6 +1666,7 @@ function recordOwnerModelControlNotice(session, toolName, notice = {}) {
  *   durationMs?: number | null,
  *   queueWaitMs?: number | null,
  *   executor?: Record<string, any> | null,
+ *   observationDetail?: Record<string, any> | null,
  * }} [observation]
  */
 function recordOwnerToolObservation({
@@ -1638,6 +1679,7 @@ function recordOwnerToolObservation({
   durationMs = null,
   queueWaitMs = null,
   executor = null,
+  observationDetail = null,
 } = {}) {
   const boot = session?.bootConfig || {};
   const outcome = error ? "failed" : classifyMcpToolResult(result);
@@ -1674,6 +1716,7 @@ function recordOwnerToolObservation({
           result_chars: resultChars,
           transport: "mcp_owner",
           executor: executor && typeof executor === "object" ? executor : null,
+          ...(observationDetail && typeof observationDetail === "object" ? observationDetail : {}),
           atlas_artifacts: result?._meta?.atlasArtifacts || null,
           atlas_batch: result?._meta?.atlasBatch || null,
           ...(evidenceIdentities == null ? {} : {
@@ -1712,6 +1755,133 @@ function recordOwnerToolObservation({
       ...attachTelemetryContext(session, null),
       tool_name: toolName || null,
       error: ownerErrorSummary(recordErr),
+    });
+  }
+}
+
+function sourceSelectionItems(toolArgs = {}) {
+  return [toolArgs || {}];
+}
+
+function sourceSelectionCoverageCursor(coverageOwner) {
+  if (!coverageOwner?.db || !coverageOwner?.attemptId) return 0;
+  try {
+    return Number(coverageOwner.db.prepare(`
+      SELECT COALESCE(MAX(id), 0) AS id
+      FROM job_observations
+      WHERE attempt_id = ? AND observation_type = 'source.coverage'
+    `).get(coverageOwner.attemptId)?.id || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function sourceSelectionCoverageStats(coverageOwner, sinceId, selections) {
+  const byFingerprint = new Map(selections.map((selection) => [
+    sourceSelectorFingerprint(selection),
+    { returnedChars: 0, storedChars: 0, novel: false },
+  ]));
+  if (!coverageOwner?.db || !coverageOwner?.attemptId) return byFingerprint;
+  try {
+    const rows = coverageOwner.db.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ? AND observation_type = 'source.coverage' AND id > ?
+      ORDER BY id ASC
+    `).all(coverageOwner.attemptId, Math.max(0, Number(sinceId) || 0));
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      const stats = byFingerprint.get(String(detail?.selector_fingerprint || ""));
+      if (!stats) continue;
+      stats.returnedChars += Math.max(0, Number(detail?.returned_chars) || 0);
+      stats.storedChars += Math.max(0, Number(detail?.stored_chars) || 0);
+      if (detail?.novel_source === true || (
+        detail?.novel_source !== false
+        && Number(detail?.stored_chars) > 0
+        && !String(detail?.origin || "").includes("reuse")
+      )) stats.novel = true;
+    }
+  } catch {
+    // Compatibility databases may not expose the coverage ledger.
+  }
+  return byFingerprint;
+}
+
+function parsedSourceEvidenceItems(result, selectionCount) {
+  const byIndex = new Map();
+  const text = result?.content?.find((part) => part?.type === "text" && typeof part.text === "string")?.text;
+  if (!text) return byIndex;
+  const suffixAt = text.indexOf("\n\n[");
+  let parsed;
+  try { parsed = JSON.parse(suffixAt >= 0 ? text.slice(0, suffixAt) : text); } catch { return byIndex; }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  if (selectionCount < 1) return byIndex;
+  let returnedChars = typeof data?.content === "string" ? data.content.length : 0;
+  for (const additional of Array.isArray(data?.additionalWindows) ? data.additionalWindows : []) {
+    if (typeof additional?.content === "string") returnedChars += additional.content.length;
+  }
+  byIndex.set(0, { returnedChars });
+  return byIndex;
+}
+
+/**
+ * @param {{
+ *   session?: any,
+ *   toolArgs?: Record<string, any>,
+ *   entries?: Array<Record<string, any>>,
+ *   coverageOwner?: any,
+ *   coverageCursor?: number,
+ *   evidenceResult?: any,
+ * }} input
+ */
+function recordSourceSelectionObservations({
+  session,
+  toolArgs,
+  entries,
+  coverageOwner = null,
+  coverageCursor = 0,
+  evidenceResult = null,
+} = {}) {
+  const boot = session?.bootConfig || {};
+  const selections = sourceSelectionItems(toolArgs);
+  const coverageStats = sourceSelectionCoverageStats(coverageOwner, coverageCursor, selections);
+  const resultStats = parsedSourceEvidenceItems(evidenceResult, selections.length);
+  for (const [index, selection] of selections.entries()) {
+    const entry = entries?.[index] || {};
+    const outcome = ["executed", "covered", "blocked"].includes(entry.outcome)
+      ? entry.outcome
+      : "blocked";
+    const fingerprint = sourceSelectorFingerprint(selection);
+    const coverage = coverageStats.get(fingerprint) || {};
+    const returnedChars = outcome === "executed"
+      ? Math.max(Number(resultStats.get(index)?.returnedChars) || 0, Number(coverage.returnedChars) || 0)
+      : Math.max(0, Number(coverage.returnedChars) || 0);
+    recordObservation({
+      work_item_id: boot.workItemId ?? null,
+      job_id: boot.jobId ?? null,
+      attempt_id: boot.attemptId ?? null,
+      observation_type: "research.source_selection",
+      summary: `Source selection ${index + 1} ${outcome}: ${entry.reason || "unspecified"}`,
+      detail: {
+        version: 1,
+        action: "code.window",
+        item_index: index,
+        selector_fingerprint: fingerprint,
+        attempted: true,
+        outcome,
+        executed: outcome === "executed",
+        covered: outcome === "covered",
+        blocked: outcome === "blocked",
+        novel_source: outcome === "executed" && coverage.novel === true,
+        returned_chars: returnedChars,
+        stored_chars: entry.storedChars == null
+          ? Math.max(0, Number(coverage.storedChars) || 0)
+          : Math.max(0, Number(entry.storedChars) || 0),
+        reason: entry.reason || "unspecified",
+        reason_class: entry.reasonClass || null,
+        agent_call_id: boot.agentCallId ?? null,
+      },
     });
   }
 }
@@ -2849,12 +3019,68 @@ export class PersistentMcpOwner {
           return;
         }
         const requested = requestedToolPolicyName(toolName, toolArgs);
+        if (String(session?.bootConfig?.role || "") === "assessor" && requested.name !== "agent_handoff") {
+          const maxToolCalls = Number.isInteger(Number(session?.bootConfig?.assessorMaxToolCalls))
+            ? Math.max(1, Number(session.bootConfig.assessorMaxToolCalls))
+            : 12;
+          session._assessorToolCallCount = Number(session._assessorToolCallCount || 0) + 1;
+          if (session._assessorToolCallCount > maxToolCalls) {
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: {
+                jsonrpc: "2.0",
+                id: message?.id ?? null,
+                result: {
+                  content: [{
+                    type: "text",
+                    text: "Assessor tool-call budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+                  }],
+                  isError: false,
+                },
+              },
+            });
+            return;
+          }
+          if (isAssessorFallbackReadKey(assessorFallbackReadKey(requested))) {
+            const fallbackReadCap = Number.isFinite(Number(session?.bootConfig?.fallbackReads))
+              ? Math.max(0, Math.floor(Number(session.bootConfig.fallbackReads)))
+              : 0;
+            session._assessorFallbackReadCount = Number(session._assessorFallbackReadCount || 0);
+            if (session._assessorFallbackReadCount >= fallbackReadCap) {
+              sendJson(res, 200, {
+                ok: true,
+                bootId: this.bootId,
+                sessionId: id,
+                message: {
+                  jsonrpc: "2.0",
+                  id: message?.id ?? null,
+                  result: {
+                    content: [{
+                      type: "text",
+                      text: "Assessor read budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+                    }],
+                    isError: false,
+                  },
+                },
+              });
+              return;
+            }
+            session._assessorFallbackReadCount += 1;
+          }
+        }
         const routingState = subAgentRoutingEnabled(policy)
           ? session._subAgentRouting
           : null;
         const routingBlockReason = delegatedEvidence
           ? ""
-          : subAgentRoutingBlockReason(routingState, requested, toolArgs);
+          : subAgentRoutingBlockReason(
+              routingState,
+              requested,
+              toolArgs,
+              subAgentRoutingContext(session),
+            );
         if (routingBlockReason) {
           const delegatedRepeat = routingBlockReason === "delegated_repeat";
           const redundantDispatch = routingBlockReason === "redundant_dispatch";
@@ -3041,7 +3267,13 @@ export class PersistentMcpOwner {
                 duration_ms: Date.now() - startedAt,
               },
             });
-            noteSubAgentRoutingSuccess(routingState, requested, toolArgs, result);
+            noteSubAgentRoutingSuccess(
+              routingState,
+              requested,
+              toolArgs,
+              result,
+              subAgentRoutingContext(session),
+            );
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -3095,7 +3327,13 @@ export class PersistentMcpOwner {
           return;
         }
         if (requested.suite === "atlas") {
-          const response = await this._executeAtlasToolCall({ message, session, toolName, toolArgs });
+          const response = await this._executeAtlasToolCall({
+            message,
+            session,
+            toolName,
+            toolArgs,
+            delegatedEvidence,
+          });
           if (rejectAgentHandoffForLaterTool(
             session?.bootConfig?.agentCallId,
             requested.name || toolName,
@@ -3119,7 +3357,13 @@ export class PersistentMcpOwner {
             return;
           }
           const reminder = mcpToolCallSuccess(response) && !delegatedEvidence
-            ? noteSubAgentRoutingSuccess(routingState, requested, toolArgs, response)
+            ? noteSubAgentRoutingSuccess(
+                routingState,
+                requested,
+                toolArgs,
+                response,
+                subAgentRoutingContext(session),
+              )
             : "";
           const finalizedResponse = appendToolResultText(response, reminder, {
             kind: "sub_agent_routing_checkpoint",
@@ -3182,6 +3426,7 @@ export class PersistentMcpOwner {
             requested,
             message?.params?.arguments || {},
             response,
+            subAgentRoutingContext(session),
           );
           const priorResponse = response;
           response = appendToolResultText(priorResponse, reminder, {
@@ -3280,7 +3525,10 @@ export class PersistentMcpOwner {
       Number(this._researchAdmissionReservations.get(reservationKey) || 0),
     );
     const assignedExplorationStep = highestReserved + 1;
-    if (assignedExplorationStep <= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS) {
+    const reservableCeiling = researchSynthesisExplorationCeiling({
+      staleSteps: observed.stale_steps,
+    });
+    if (assignedExplorationStep <= reservableCeiling) {
       this._researchAdmissionReservations.set(reservationKey, assignedExplorationStep);
     }
     return ownerResearchSynthesisAdmission(
@@ -3345,6 +3593,7 @@ export class PersistentMcpOwner {
     toolName,
     toolArgs,
     binding,
+    delegatedEvidence = false,
     synthesisAdmission: reservedSynthesisAdmission = null,
     enqueuedAt = null,
   }) {
@@ -3357,6 +3606,27 @@ export class PersistentMcpOwner {
     }
     const context = attachTelemetryContext(session, this.bootId, binding?.bootConfig);
     const requested = requestedToolPolicyName(toolName, toolArgs);
+    let coverageReservationsToRelease = [];
+    let contextHeadroomReservation = null;
+    let coverageObservationCursor = 0;
+    let activeCoverageOwner = null;
+    let activeCoverageAdmissions = [];
+    let nativeSourceExecutionStarted = false;
+    if (requested.name === "code.window" && Array.isArray(toolArgs?.items)) {
+      const result = mcpToolErrorPayload(
+        "code.window multi-selection is disabled; issue independent scalar calls together",
+      );
+      recordOwnerToolObservation({
+        session,
+        toolName,
+        toolArgs,
+        result,
+        durationMs: Date.now() - startedAt,
+        queueWaitMs,
+        executor: { via: "scalar_window_contract" },
+      });
+      return mcpToolResultMessage(message, result);
+    }
     const memoryAction = isMemoryToolAction(requested.name);
     if (memoryAction && this._terminalMemoryToolSessions.has(session)) {
       const result = terminalMemoryToolRejection(requested.name);
@@ -3390,13 +3660,29 @@ export class PersistentMcpOwner {
       );
     }
     if (synthesisAdmission.blocked) {
+      if (session?.bootConfig?.attemptId != null) {
+        recordObservation({
+          work_item_id: session.bootConfig.workItemId ?? null,
+          job_id: session.bootConfig.jobId ?? null,
+          attempt_id: session.bootConfig.attemptId,
+          observation_type: "research.exploration_blocked",
+          summary: `Research exploration blocked: ${synthesisAdmission.blockReason || "closeout"}`,
+          detail: {
+            action: effectiveAtlasResearchAction(requested),
+            physical_request: 1,
+            consumed_step: false,
+            exploration_steps: synthesisAdmission.explorationSteps,
+            stale_steps: synthesisAdmission.staleSteps,
+            reason: synthesisAdmission.blockReason || "closeout",
+          },
+        });
+      }
       const gateText = synthesisAdmission.citationFetch
         ? buildResearchCitationFetchGateText({ reason: synthesisAdmission.blockReason })
         : buildResearchSynthesisRequiredText({
           explorationSteps: synthesisAdmission.explorationSteps,
           staleSteps: synthesisAdmission.staleSteps,
           absoluteCeilingReached: synthesisAdmission.blockReason === "exploration_ceiling",
-          coverage: researchCoverageForSession(session),
         });
       const result = tagOwnerModelControlNotice({
         content: [{
@@ -3430,6 +3716,17 @@ export class PersistentMcpOwner {
         reason: synthesisAdmission.blockReason,
         duration_ms: Date.now() - startedAt,
       });
+      if (requested.name === "code.window") {
+        recordSourceSelectionObservations({
+          session,
+          toolArgs,
+          entries: sourceSelectionItems(toolArgs).map(() => ({
+            outcome: "blocked",
+            reason: synthesisAdmission.blockReason || "research_closeout",
+            reasonClass: "suppression",
+          })),
+        });
+      }
       return mcpToolResultMessage(message, result);
     }
     try {
@@ -3441,7 +3738,6 @@ export class PersistentMcpOwner {
           session,
           toolName,
           synthesisAdmission,
-          {},
         );
         session.noteAtlasGateEvent?.({
           action: "code.skeleton",
@@ -3493,7 +3789,6 @@ export class PersistentMcpOwner {
           session,
           toolName,
           synthesisAdmission,
-          toolArgs,
         );
         recordOwnerToolObservation({
           session,
@@ -3516,11 +3811,110 @@ export class PersistentMcpOwner {
         });
         return mcpToolResultMessage(message, result);
       }
+      const coverageOwner = requested.name === "code.window"
+        ? sourceCoverageOwnerForSession(session, binding?.bootConfig)
+        : null;
+      activeCoverageOwner = coverageOwner;
+      coverageObservationCursor = sourceSelectionCoverageCursor(coverageOwner);
+      const windowSelections = coverageOwner
+        ? [toolArgs || {}]
+        : [];
+      /** @type {any[]} */
+      const coverageAdmissions = [];
+      if (coverageOwner) {
+        for (const selection of windowSelections) {
+          const admission = await coverageOwner.admitOrReserve(selection);
+          coverageAdmissions.push(admission);
+          if (admission?.reservation) {
+            coverageReservationsToRelease.push({ owner: coverageOwner, reservation: admission.reservation });
+          }
+        }
+      }
+      activeCoverageAdmissions = coverageAdmissions;
+      const uncoveredIndexes = coverageAdmissions
+        .map((admission, index) => (admission.covered ? null : index))
+        .filter((index) => index != null);
+      if (coverageOwner && uncoveredIndexes.length === 0) {
+        const coveredPayload = coverageAdmissions[0].result;
+        let result = mcpToolTextPayload(JSON.stringify(coveredPayload));
+        result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
+        result = appendOwnerResearchSynthesisNotice(result, session, toolName, synthesisAdmission);
+        recordOwnerToolObservation({
+          session, toolName, toolArgs, result,
+          durationMs: Date.now() - startedAt,
+          queueWaitMs,
+          executor: { via: "source_coverage" },
+        });
+        recordSourceSelectionObservations({
+          session,
+          toolArgs,
+          coverageOwner,
+          coverageCursor: coverageObservationCursor,
+          entries: windowSelections.map((_, index) => {
+            const admission = coverageAdmissions[index];
+            return {
+              outcome: "covered",
+              reason: admission?.reason || "covered_reuse",
+              reasonClass: "reaccess",
+            };
+          }),
+        });
+        return mcpToolResultMessage(message, result);
+      }
+      const executorArgs = toolArgs && typeof toolArgs === "object" ? toolArgs : {};
+      const contextHeadroom = coverageOwner && !delegatedEvidence
+        ? admitSourceContextHeadroom({
+            boot: session?.bootConfig || {},
+            args: executorArgs,
+          })
+        : { allowed: true, reason: delegatedEvidence ? "delegated_child_consumer" : "not_source_window" };
+      contextHeadroomReservation = contextHeadroom.reservation || null;
+      if (!contextHeadroom.allowed) {
+        for (const entry of coverageReservationsToRelease) {
+          entry.owner?.settleReservation(entry.reservation, "headroom_blocked");
+        }
+        coverageReservationsToRelease = [];
+        const result = mcpToolTextPayload(JSON.stringify({
+          status: "blocked",
+          executed: false,
+          reason: `context_headroom_${contextHeadroom.reason}`,
+          predictedNextRequestTokens: contextHeadroom.predicted,
+          longContextThresholdTokens: contextHeadroom.threshold,
+          message: "Near the long-context tier, source discovery must be one batched request. Stored evidence re-access and final handoff remain available.",
+        }));
+        recordOwnerToolObservation({
+          session, toolName, toolArgs, result,
+          durationMs: Date.now() - startedAt,
+          queueWaitMs,
+          executor: { via: "context_headroom" },
+        });
+        recordSourceSelectionObservations({
+          session,
+          toolArgs,
+          coverageOwner,
+          coverageCursor: coverageObservationCursor,
+          entries: windowSelections.map((_, index) => {
+            const admission = coverageAdmissions[index];
+            if (admission?.covered) return {
+              outcome: "covered",
+              reason: admission.reason || "covered_reuse",
+              reasonClass: "reaccess",
+            };
+            return {
+              outcome: "blocked",
+              reason: contextHeadroom.reason || "context_headroom",
+              reasonClass: "headroom",
+            };
+          }),
+        });
+        return mcpToolResultMessage(message, result);
+      }
       const executor = getSharedAtlasToolExecutor();
       const executorStartedAt = Date.now();
+      nativeSourceExecutionStarted = coverageOwner != null;
       const executed = await executor.executeTool({
         toolName,
-        args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+        args: executorArgs,
         session: atlasExecutorSessionContext(session, binding?.bootConfig),
         source: {
           kind: "mcp_owner",
@@ -3529,6 +3923,10 @@ export class PersistentMcpOwner {
         },
       });
       if (!gatewayBindingIsCurrent(session, binding)) {
+        releaseSourceContextHeadroomReservation(contextHeadroomReservation);
+        for (const entry of coverageReservationsToRelease) {
+          entry.owner?.settleReservation(entry.reservation, "stale_binding");
+        }
         appendRunTelemetry("diagnostics", {
           kind: "mcp.owner.atlas_tool_call",
           ...context,
@@ -3543,6 +3941,7 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      if (coverageOwner) result = prepareSourceCoverage(result, coverageOwner, toolArgs || {});
       const evidenceResult = result;
       const executorCompletedAt = Date.now();
       const transformStartedAt = Date.now();
@@ -3556,6 +3955,13 @@ export class PersistentMcpOwner {
         ...atlasGateResultState(result),
       });
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
+      if (coverageOwner) result = materializeSourceCoverage(result, coverageOwner, toolArgs || {});
+      for (const admission of coverageAdmissions) {
+        coverageOwner?.settleReservation(admission.reservation, result?.isError ? "failed" : "confirmed");
+      }
+      coverageReservationsToRelease = [];
+      releaseSourceContextHeadroomReservation(contextHeadroomReservation);
+      contextHeadroomReservation = null;
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
       // attaching here ensures an Atlas-only phase receives pending operator
       // feedback at its next result boundary.
@@ -3565,7 +3971,6 @@ export class PersistentMcpOwner {
         session,
         toolName,
         synthesisAdmission,
-        toolArgs,
       );
       const ownerTransformMs = Math.max(0, Date.now() - transformStartedAt);
       const executorDiagnostics = {
@@ -3587,6 +3992,24 @@ export class PersistentMcpOwner {
         queueWaitMs,
         executor: executorDiagnostics,
       });
+      if (coverageOwner) {
+        recordSourceSelectionObservations({
+          session,
+          toolArgs,
+          coverageOwner,
+          coverageCursor: coverageObservationCursor,
+          evidenceResult,
+          entries: windowSelections.map((_, index) => {
+            const admission = coverageAdmissions[index];
+            if (admission?.covered) return {
+              outcome: "covered",
+              reason: admission.reason || "covered_reuse",
+              reasonClass: "reaccess",
+            };
+            return { outcome: "executed", reason: "native_execution", reasonClass: null };
+          }),
+        });
+      }
       appendRunTelemetry("diagnostics", {
         kind: "mcp.owner.atlas_tool_call",
         ...context,
@@ -3600,6 +4023,10 @@ export class PersistentMcpOwner {
       });
       return mcpToolResultMessage(message, result);
     } catch (err) {
+      for (const entry of coverageReservationsToRelease) {
+        entry.owner?.settleReservation(entry.reservation, "failed");
+      }
+      releaseSourceContextHeadroomReservation(contextHeadroomReservation);
       if (!gatewayBindingIsCurrent(session, binding)) {
         return staleGatewayBindingToolResult(message);
       }
@@ -3632,7 +4059,6 @@ export class PersistentMcpOwner {
         session,
         toolName,
         synthesisAdmission,
-        toolArgs,
       );
       recordOwnerToolObservation({
         session,
@@ -3643,10 +4069,34 @@ export class PersistentMcpOwner {
         durationMs: Date.now() - startedAt,
         queueWaitMs,
       });
+      if (requested.name === "code.window") {
+        recordSourceSelectionObservations({
+          session,
+          toolArgs,
+          coverageOwner: activeCoverageOwner,
+          coverageCursor: coverageObservationCursor,
+          entries: sourceSelectionItems(toolArgs).map((_, index) => {
+            const admission = activeCoverageAdmissions[index];
+            if (admission?.covered) return {
+              outcome: "covered",
+              reason: admission.reason || "covered_reuse",
+              reasonClass: "reaccess",
+            };
+            return nativeSourceExecutionStarted
+              ? { outcome: "executed", reason: "execution_error", reasonClass: "suppression" }
+              : { outcome: "blocked", reason: "pre_execution_error", reasonClass: "suppression" };
+          }),
+        });
+      }
       return mcpToolResultMessage(
         message,
         result,
       );
+    } finally {
+      for (const entry of coverageReservationsToRelease) {
+        entry.owner?.settleReservation(entry.reservation, "finally_released");
+      }
+      releaseSourceContextHeadroomReservation(contextHeadroomReservation);
     }
   }
 

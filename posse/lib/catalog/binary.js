@@ -15,6 +15,13 @@
 
 export const REQUIRED_ATLAS_BINARY_NAMES = Object.freeze(["atlas", "vector"]);
 export const NATIVE_DAEMON_PROTOCOL = "posse.daemon.v1";
+// Must match posse_worker::DEFAULT_MAX_WORKER_LINE_BYTES. Persistent native
+// workers reject a larger JSONL request before it can recover the request id.
+export const NATIVE_WORKER_MAX_REQUEST_BYTES = 64 * 1024 * 1024;
+// Atlas and its vector sidecar use the cataloged bulk protocol in both
+// directions. Tree construction for large repositories can legitimately
+// exceed the smaller shared worker default.
+export const ATLAS_NATIVE_WORKER_MAX_REQUEST_BYTES = 256 * 1024 * 1024;
 export const NATIVE_UPDATE_PROTOCOL = "posse.native_update.v1";
 export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
 export const ATLAS_EXECUTE_TOOL_CONTRACT_VERSION = 1;
@@ -138,6 +145,12 @@ export const NATIVE_BINARIES = Object.freeze({
     keyGated: false,
   }),
 });
+
+export function nativeWorkerMaxRequestBytes(name) {
+  return name === "atlas" || name === "vector"
+    ? ATLAS_NATIVE_WORKER_MAX_REQUEST_BYTES
+    : NATIVE_WORKER_MAX_REQUEST_BYTES;
+}
 
 // Inventory is derived from the registry itself. Adding a catalog entry is
 // enough to propagate it to pull/reconcile loops; there is no second name list

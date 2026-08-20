@@ -302,20 +302,48 @@ function descriptorPathPrefixLength(descriptors, repoRelPath) {
   const pathParts = repoRelPath.replace(/\\/g, "/").split("/").filter(Boolean);
   if (pathParts.length === 0) return 0;
 
-  let best = 0;
-  for (let i = 0; i < pathParts.length; i++) {
-    const suffix = pathParts.slice(i);
-    if (suffix.length > names.length) continue;
-    let matches = true;
-    for (let j = 0; j < suffix.length; j++) {
-      if (names[j] !== suffix[j]) {
-        matches = false;
-        break;
+  // Portable/batched indexers may compile a path-preserving project view
+  // under .posse/atlas/scip/... and encode that staging prefix into every
+  // symbol. Find the repository path anywhere in the descriptor head and
+  // strip through its final segment. Prefer the longest path suffix and the
+  // latest occurrence so a coincidental earlier directory name cannot win.
+  let bestPathLength = 0;
+  let bestOffset = 0;
+  for (let pathStart = 0; pathStart < pathParts.length; pathStart++) {
+    const suffix = pathParts.slice(pathStart);
+    if (suffix.length > names.length || suffix.length < bestPathLength) continue;
+    for (let descriptorStart = 0; descriptorStart + suffix.length <= names.length; descriptorStart++) {
+      let matches = true;
+      for (let j = 0; j < suffix.length; j++) {
+        if (names[descriptorStart + j] !== suffix[j]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const offset = descriptorStart + suffix.length;
+      if (suffix.length > bestPathLength || (suffix.length === bestPathLength && offset > bestOffset)) {
+        bestPathLength = suffix.length;
+        bestOffset = offset;
       }
     }
-    if (matches && suffix.length > best) best = suffix.length;
   }
-  return best;
+  return bestOffset;
+}
+
+const NON_STRUCTURAL_DEFINITION_DESCRIPTORS = new Set(["parameter", "type_parameter", "meta"]);
+
+/**
+ * SCIP producers sometimes give parameters, generic parameters, and inferred
+ * object-literal properties package-global identities. They are useful graph
+ * implementation details but are not stable repository navigation symbols.
+ *
+ * @param {ScipParsedSymbol | null | undefined} parsed
+ * @returns {boolean}
+ */
+export function isStructuralScipDefinition(parsed) {
+  if (!parsed || parsed.local || parsed.descriptors.length === 0) return false;
+  return !NON_STRUCTURAL_DEFINITION_DESCRIPTORS.has(parsed.descriptors.at(-1)?.kind || "");
 }
 
 /**

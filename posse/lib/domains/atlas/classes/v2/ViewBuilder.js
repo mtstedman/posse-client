@@ -19,6 +19,7 @@
 
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import Database from "better-sqlite3";
 import { View } from "./View.js";
 import { VIEW_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
@@ -33,9 +34,12 @@ import {
 } from "../../functions/v2/tree-compression.js";
 import { normalizeTreeCompressionMode } from "../../functions/v2/tree-compression-policy.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
-import { normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
+import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { languageForPath } from "../../functions/v2/parse/language-buckets.js";
+import { ATLAS_SOURCE_INDEX_POLICY_VERSION } from "../../functions/v2/parser/index-filters.js";
+import { sha256Hex } from "../../functions/v2/hash.js";
+import { inspectViewMaterialization, removeSqliteFile } from "../../functions/v2/view-health.js";
 
 /** @typedef {import("../../functions/v2/contracts/schemas.js").ViewMeta} ViewMeta */
 /** @typedef {import("../../functions/v2/contracts/schemas.js").LedgerEntry} LedgerEntry */
@@ -47,6 +51,44 @@ import { languageForPath } from "../../functions/v2/parse/language-buckets.js";
 const GRAPH_DERIVED_SIGNATURE_META_KEY = "graph_derived_input_signature";
 const TREE_DERIVED_SIGNATURE_META_KEY = "tree_derived_input_signature";
 const TREE_COMPRESSION_SIGNATURE_META_KEY = "tree_compression_input_signature";
+
+/** @param {string} outPath */
+function temporaryViewBuildPath(outPath) {
+  return path.join(
+    path.dirname(outPath),
+    `.${path.basename(outPath)}.${process.pid}.${randomUUID()}.building`,
+  );
+}
+
+/** @param {string} dbPath */
+function sqliteSidecars(dbPath) {
+  return ["-wal", "-shm", "-journal"]
+    .map((suffix) => dbPath + suffix)
+    .filter((candidate) => fs.existsSync(candidate));
+}
+
+/**
+ * Fingerprint every switch that changes the materialized view shape.
+ * The canonical JSON keys are fixed here so callers cannot accidentally
+ * publish a generation using runtime object insertion order.
+ *
+ * @param {BuildOptions | Record<string, any>} [options]
+ * @returns {string}
+ */
+export function viewFingerprintForOptions(options = {}) {
+  const treeCompressionMode = normalizeTreeCompressionMode(options.treeCompressionMode);
+  const treeCompressionMaxSeeds = treeCompressionMode === "off"
+    ? null
+    : (positiveIntOrNull(options.treeCompressionMaxSeeds) ?? null);
+  return sha256Hex(JSON.stringify({
+    schema_version: VIEW_SCHEMA_VERSION,
+    source_index_policy: ATLAS_SOURCE_INDEX_POLICY_VERSION,
+    scip_rows_spec: ATLAS_SCIP_ROWS_SPEC_VERSION,
+    layer_merge: options.layerMerge === true,
+    tree_compression_mode: treeCompressionMode,
+    tree_compression_max_seeds: treeCompressionMaxSeeds,
+  }));
+}
 
 /** @implements {ViewBuilderContract} */
 export class ViewBuilder {
@@ -68,7 +110,8 @@ export class ViewBuilder {
       throw new RangeError("ViewBuilder.buildFrom: atSeq must be a non-negative integer");
     }
     if (!outPath) throw new TypeError("ViewBuilder.buildFrom: outPath is required");
-    if (fs.existsSync(outPath)) {
+    const replacingExisting = fs.existsSync(outPath);
+    if (replacingExisting && options.replaceExisting !== true) {
       throw new Error(`ViewBuilder.buildFrom: outPath already exists: ${outPath}`);
     }
 
@@ -85,10 +128,19 @@ export class ViewBuilder {
 
     const lineage = buildLineage(ledger, branch, atSeq);
     const pathToBlob = assemblePathToBlob(ledger, lineage);
+    const consumedLayerRevision = typeof ledger.layerRevision === "function"
+      ? ledger.layerRevision()
+      : 0;
+    const viewFingerprint = viewFingerprintForOptions(options);
 
-    const view = View.mount({ dbPath: outPath, mode: "readwrite" });
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    const buildPath = temporaryViewBuildPath(outPath);
+    /** @type {ViewMeta | null} */
+    let builtMeta = null;
     try {
-      const db = view._unsafeDb();
+      const view = View.mount({ dbPath: buildPath, mode: "readwrite" });
+      try {
+        const db = view._unsafeDb();
       /** @type {string[] | null} */
       let warmedFor = options.warmedForFiles ?? null;
       /** @type {number | null} */
@@ -106,10 +158,9 @@ export class ViewBuilder {
         try { progress(event); } catch { /* observational */ }
       };
       // Build in per-phase transactions rather than one giant all-or-nothing
-      // transaction. Each phase commits on its own, so a crash mid-build leaves
-      // the view WITHOUT its meta marker (writeMeta is strictly last) — consumers
-      // treat a meta-less view as absent and rebuild from the ledger (the
-      // untouched source of truth), so there's no partial-state corruption.
+      // transaction. Each phase commits on its own inside the unpublished
+      // staging database. The meta marker remains strictly last, and only a
+      // completed, closed database is renamed to the canonical path.
       // Smaller transactions also keep lock windows short and let the symbol/
       // edge passes report progress between chunks. db.transaction() can't nest,
       // so each phase wraps its own work; populateSymbolsAndEdges chunks
@@ -130,6 +181,13 @@ export class ViewBuilder {
         maxSeeds: options.treeCompressionMaxSeeds,
       });
       emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
+      assertRequiredTreeMaterialization({
+        db,
+        treeDerived,
+        treeCompression,
+        mode: options.treeCompressionMode,
+        operation: "ViewBuilder.buildFrom",
+      });
       if (hasHint) {
         db.transaction(() => {
           const stats = runPrefetch(db, hint);
@@ -141,12 +199,19 @@ export class ViewBuilder {
       // Final phase — the meta row is the "view is valid" commit marker. Written
       // last and on its own so a partial build never looks complete.
       db.transaction(() => {
+        if (typeof ledger.layerRevision === "function"
+          && ledger.layerRevision() !== consumedLayerRevision) {
+          throw new Error("ViewBuilder.buildFrom: ledger layer revision changed during materialization");
+        }
         writeMeta(db, {
           schema_version: VIEW_SCHEMA_VERSION,
           branch,
           parent_branch: branchRec.parent_branch ?? null,
           parent_seq: branchRec.parent_seq ?? null,
           ledger_seq: atSeq,
+          layer_revision: consumedLayerRevision,
+          view_fingerprint: viewFingerprint,
+          git_oid: null,
           built_at: new Date().toISOString(),
           warmed_for_files: warmedFor,
           prefetched_symbols: prefetchedSymbols,
@@ -155,10 +220,28 @@ export class ViewBuilder {
           layer_merge: options.layerMerge === true,
         });
       })();
-      emitPhase("done", 1, 1);
-      return view.metaLocal();
-    } finally {
-      view.close();
+        // A fresh materialization is never exposed under its canonical name
+        // while SQLite can still require recovery. Checkpoint and close the
+        // staging family first; only then publish the standalone database.
+        try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* not in WAL mode */ }
+        emitPhase("done", 1, 1);
+        builtMeta = view.metaLocal();
+      } finally {
+        view.close();
+      }
+      const sidecars = sqliteSidecars(buildPath);
+      if (sidecars.length > 0) {
+        throw new Error(`ViewBuilder.buildFrom: staged view retained SQLite sidecars: ${sidecars.join(", ")}`);
+      }
+      if (replacingExisting) prepareCanonicalViewForReplacement(outPath);
+      // Same-directory rename is the commit point: interruption before it
+      // leaves the prior canonical state untouched (or absent), never a
+      // partially built database that readonly consumers must recover.
+      fs.renameSync(buildPath, outPath);
+      return /** @type {ViewMeta} */ (builtMeta);
+    } catch (error) {
+      try { removeSqliteFile(buildPath); } catch { /* preserve the build failure */ }
+      throw error;
     }
   }
 
@@ -235,6 +318,10 @@ export class ViewBuilder {
     }
 
     const db = view._unsafeDb();
+    const consumedLayerRevision = typeof ledger.layerRevision === "function"
+      ? ledger.layerRevision()
+      : current.layer_revision;
+    const viewFingerprint = viewFingerprintForOptions(options);
     // Track the last successfully-applied seq. If an entry skips (missing
     // blob in the ledger), ledger_seq must NOT advance past it — otherwise
     // queries would see stale symbols at the new claimed seq.
@@ -276,11 +363,25 @@ export class ViewBuilder {
       maxSeeds: options.treeCompressionMaxSeeds,
     });
     emitPhase(treeRefreshOutcomeEvent(treeDerived, treeCompression));
+    assertRequiredTreeMaterialization({
+      db,
+      treeDerived,
+      treeCompression,
+      mode: options.treeCompressionMode,
+      operation: "ViewBuilder.incrementalApply",
+    });
     emitPhase("resolve", 1, 1);
     db.transaction(() => {
+      if (typeof ledger.layerRevision === "function"
+        && ledger.layerRevision() !== consumedLayerRevision) {
+        throw new Error("ViewBuilder.incrementalApply: ledger layer revision changed during materialization");
+      }
       writeMeta(db, {
         ...current,
         ledger_seq: lastAppliedSeq,
+        layer_revision: consumedLayerRevision,
+        view_fingerprint: viewFingerprint,
+        git_oid: null,
         built_at: new Date().toISOString(),
       });
     })();
@@ -362,6 +463,17 @@ export class ViewBuilder {
       label: opts.label || "ViewBuilder.cloneView",
       waitMs: opts.waitMs,
     });
+  }
+
+  /**
+   * Touch a bounded symbol neighborhood without mutating the view.
+   *
+   * @param {{ view: View, hint: BuildHint }} args
+   * @returns {{ symbols: number, edges: number }}
+   */
+  prefetch({ view, hint }) {
+    if (!view) throw new TypeError("ViewBuilder.prefetch: view is required");
+    return runPrefetch(view._unsafeDb(), hint);
   }
 }
 
@@ -1014,6 +1126,9 @@ function writeMeta(viewDb, meta) {
   put("parent_branch", meta.parent_branch ?? null);
   put("parent_seq", meta.parent_seq != null ? String(meta.parent_seq) : null);
   put("ledger_seq", String(meta.ledger_seq));
+  put("layer_revision", String(meta.layer_revision));
+  put("view_fingerprint", meta.view_fingerprint);
+  put("git_oid", meta.git_oid ?? null);
   put("built_at", meta.built_at);
   put(
     "warmed_for_files",
@@ -1119,6 +1234,80 @@ function treeRefreshOutcomeEvent(treeDerived, treeCompression) {
       ? "seeds current"
       : (Number.isFinite(seedCount) ? `${seedCount} seeds` : "seeds built");
   return { ...base, status: "ok", detail: `${treePart} · ${seedPart}` };
+}
+
+/**
+ * Tree-derived rows and configured deterministic compression are required
+ * parts of a materialized view, not best-effort telemetry. Refuse to write
+ * the validity meta (or publish a staged database) when either refresh failed
+ * or when its persisted rows do not satisfy the retrieval contract.
+ *
+ * ML labels are applied later by ParseEngine, so an ML build is validated here
+ * through its required deterministic base and again at generation publication
+ * after the model pass.
+ *
+ * @param {{
+ *   db: import("better-sqlite3").Database,
+ *   treeDerived: any,
+ *   treeCompression: any,
+ *   mode?: string | null,
+ *   operation: string,
+ * }} args
+ */
+function assertRequiredTreeMaterialization({ db, treeDerived, treeCompression, mode, operation }) {
+  if (!treeDerived?.skipped && treeDerived?.result?.ok !== true) {
+    throw new Error(`${operation}: required tree-derived refresh failed: ${treeDerived?.result?.error || "unknown error"}`);
+  }
+  const normalizedMode = normalizeTreeCompressionMode(mode);
+  if (normalizedMode !== "off" && !treeCompression?.skipped && treeCompression?.result?.ok !== true) {
+    throw new Error(`${operation}: required tree-compression refresh failed: ${treeCompression?.result?.error || "unknown error"}`);
+  }
+  const materialization = inspectViewMaterialization(db, {
+    treeCompressionMode: normalizedMode === "off" ? "off" : "deterministic",
+  });
+  if (!materialization.ok) {
+    throw new Error(`${operation}: required tree materialization is invalid (${materialization.reason || "unknown"})`);
+  }
+}
+
+/**
+ * Recover/checkpoint the old canonical family before replacing its primary
+ * file. A surviving WAL or journal belongs to the old database and must never
+ * be allowed to attach to the freshly staged database after the rename.
+ *
+ * @param {string} outPath
+ */
+function prepareCanonicalViewForReplacement(outPath) {
+  const existing = new Database(outPath, { fileMustExist: true });
+  try {
+    existing.pragma("busy_timeout = 5000");
+    const checkpoint = existing.pragma("wal_checkpoint(TRUNCATE)");
+    const busy = Array.isArray(checkpoint) ? Number(checkpoint[0]?.busy || 0) : 0;
+    if (busy !== 0) {
+      throw new Error(`ViewBuilder.buildFrom: existing view checkpoint remained busy (${busy})`);
+    }
+  } finally {
+    existing.close();
+  }
+  // A successful TRUNCATE checkpoint proves the old WAL contains no frames
+  // needed by the primary database. SQLite can nevertheless leave an empty
+  // WAL and its shared-memory file behind while another readonly handle is
+  // open in this process. Detach those old-family names before the atomic
+  // primary-file replacement; on platforms that prohibit unlinking an open
+  // sidecar this throws and preserves the prior canonical view.
+  for (const suffix of ["-wal", "-shm"]) {
+    try {
+      fs.unlinkSync(outPath + suffix);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new Error(`ViewBuilder.buildFrom: failed to detach existing SQLite sidecar ${outPath + suffix}: ${error?.message || error}`);
+      }
+    }
+  }
+  const sidecars = sqliteSidecars(outPath);
+  if (sidecars.length > 0) {
+    throw new Error(`ViewBuilder.buildFrom: existing view retained SQLite sidecars: ${sidecars.join(", ")}`);
+  }
 }
 
 function positiveIntOrNull(value) {

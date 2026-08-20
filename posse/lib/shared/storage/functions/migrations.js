@@ -22,17 +22,19 @@ import {
   createEventsIndexes,
   createJobsIndexes,
   createRunInsightsIndexes,
+  createWaitingLanePreparationIndexes,
   createWorkItemsIndexes,
   eventsCreateSql,
   getTableColumnNames,
   jobsCreateSql,
   quoteIdent,
   withForeignKeysDisabled,
+  waitingLanePreparationsCreateSql,
   workItemsCreateSql,
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 10;
+export const HOST_SCHEMA_VERSION = 11;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -393,6 +395,40 @@ export function __testRepairAtlasV2HostSchema(db) {
   return repairAtlasV2HostSchema(db);
 }
 
+export function needsWaitingLanePreparationSchema(db) {
+  const jobsTableSql = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'`
+  ).get()?.sql || "";
+  return {
+    jobs: !!jobsTableSql && !jobsTableSql.includes("'waiting_lane_prepare'"),
+    preparations: !tableExists(db, "waiting_lane_preparations"),
+  };
+}
+
+export function repairWaitingLanePreparationSchema(db) {
+  const needs = needsWaitingLanePreparationSchema(db);
+  if (!needs.jobs && !needs.preparations) return false;
+  const q = SQL(db);
+  withForeignKeysDisabled(db, () => db.transaction(() => {
+    if (needs.jobs) {
+      const tmpName = "_jobs_waiting_lane_mig";
+      q.run(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
+      q.run(jobsCreateSql(tmpName));
+      copyJobsForAtlasV2HostRepair(db, "jobs", tmpName);
+      q.run(`DROP TABLE ${quoteIdent("jobs")}`);
+      q.run(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("jobs")}`);
+      createJobsIndexes(db);
+    }
+    q.run(waitingLanePreparationsCreateSql());
+    createWaitingLanePreparationIndexes(db);
+  })());
+  return true;
+}
+
+export function __testRepairWaitingLanePreparationSchema(db) {
+  return repairWaitingLanePreparationSchema(db);
+}
+
 const HUMAN_GATE_JOB_COLUMNS = Object.freeze([
   ["assessment_state", "TEXT NOT NULL DEFAULT 'not_started'"],
   ["assessment_attempt_count", "INTEGER NOT NULL DEFAULT 0"],
@@ -535,6 +571,7 @@ const QUEUE_ORPHAN_REPAIR_TABLES = new Set([
   "posse_test_suites",
   "posse_tests",
   "work_item_terminal_transitions",
+  "waiting_lane_preparations",
 ]);
 
 export function needsQueueForeignKeyOrphanRepair(db) {
@@ -621,6 +658,16 @@ export function repairQueueForeignKeyOrphans(db) {
         DELETE FROM work_item_terminal_transitions
         WHERE NOT EXISTS (SELECT 1 FROM work_items wi WHERE wi.id = work_item_terminal_transitions.work_item_id)
       `).run().changes;
+    }
+    if (tableExists(db, "waiting_lane_preparations")) {
+      changed += db.prepare(`
+        DELETE FROM waiting_lane_preparations
+        WHERE NOT EXISTS (
+          SELECT 1 FROM work_items wi WHERE wi.id = waiting_lane_preparations.work_item_id
+        )
+      `).run().changes;
+      changed += detachMissingParent("waiting_lane_preparations", "git_job_id", "jobs");
+      changed += detachMissingParent("waiting_lane_preparations", "atlas_job_id", "jobs");
     }
   })();
   return changed > 0;

@@ -11,18 +11,30 @@ import { fileURLToPath } from "node:url";
 import { Worker as NodeWorker } from "node:worker_threads";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { isExternallyRoutedAtlasTool } from "./deterministic-mcp/tool-descriptors.js";
 import { POSSE_MCP_GATEWAY_TRANSPORT } from "../../../catalog/mcp.js";
 import { GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
+import { viewFingerprintForOptions } from "../../atlas/classes/v2/ViewBuilder.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
-import { gitCurrentHashAsync, gitExec } from "../../git/functions/utils.js";
+import { gitCurrentHashAsync, gitExec, gitExecAsync } from "../../git/functions/utils.js";
+import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
 import { ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
+import { sha256Hex } from "../../atlas/functions/v2/hash.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
+import { readScipBatchCoverage } from "../../atlas/functions/v2/scip/batch-coverage.js";
 import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
-import { openViewWithMeta, viewFreshness } from "../../atlas/functions/v2/view-health.js";
+import { scipBasenameSourceLanguages } from "../../atlas/functions/v2/scip-progress.js";
+import {
+  inspectViewMaterialization,
+  openViewWithMeta,
+  viewFreshness,
+} from "../../atlas/functions/v2/view-health.js";
+import { readAtlasMainIntakeState } from "../../atlas/functions/v2/main-intake-state.js";
+import { withAtlasMainSourceProofLock } from "../../atlas/functions/v2/main-generation.js";
 import { runSqliteWrite } from "../../../shared/concurrency/functions/sqlite-gate.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -73,6 +85,7 @@ import {
   resolveAtlasRepoTarget,
   resolveAtlasRepoTargetAsync,
 } from "./atlas/repo.js";
+import { normalizeWaitingLaneGeneration, waitingLaneGenerationsEqual } from "../../../catalog/waiting-lane.js";
 
 export {
   ATLAS_ROLE_ORDER,
@@ -110,14 +123,22 @@ const ATLAS_V2_BOOT_WORKER_STOP_GRACE_MS = 10_000;
 /**
  * Run the boot main-view freshness check in a worker thread.
  * @param {any} [args]
- * @returns {Promise<{ exists: boolean, readable: boolean, branchMatches: boolean, current: boolean, meta?: any, freshness?: any, ledgerFormat?: any, error: string | null }>}
+ * @returns {Promise<{ exists: boolean, readable: boolean, branchMatches: boolean, current: boolean, meta?: any, freshness?: any, materialization?: any, ledgerFormat?: any, error: string | null }>}
  */
-function inspectMainViewForBootInWorker({ viewPath, branch, ledgerDbPath = null, timeoutMs = 120_000, signal = null, layerMerge = null } = {}) {
+function inspectMainViewForBootInWorker({
+  viewPath,
+  branch,
+  ledgerDbPath = null,
+  timeoutMs = 120_000,
+  signal = null,
+  layerMerge = null,
+  treeCompressionMode = "off",
+} = {}) {
   return ATLAS_BOOT_THREAD_MANAGER.run(VIEW_INSPECT_WORKER_URL, {
     label: "ATLAS boot view inspect",
     timeoutMs,
     signal,
-    workerData: { viewPath, branch, ledgerDbPath, layerMerge },
+    workerData: { viewPath, branch, ledgerDbPath, layerMerge, treeCompressionMode },
   });
 }
 
@@ -661,7 +682,12 @@ export async function checkAtlasMainFreshnessGate({
   };
 }
 
-async function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { layerMerge = null } = {}) {
+async function inspectMainViewForBoot(
+  viewPath,
+  branch,
+  ledgerDbPath = null,
+  { layerMerge = null, treeCompressionMode = "off" } = {},
+) {
   const status = {
     exists: false,
     readable: false,
@@ -669,6 +695,8 @@ async function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { l
     current: false,
     meta: null,
     freshness: null,
+    structure: null,
+    materialization: null,
     error: null,
   };
   const probe = await openViewWithMeta(viewPath, AtlasView);
@@ -680,17 +708,19 @@ async function inspectMainViewForBoot(viewPath, branch, ledgerDbPath = null, { l
     }
     status.readable = true;
     status.meta = probe.meta || null;
+    status.structure = inspectViewMaterialization(probe.view._unsafeDb(), { treeCompressionMode: "off" });
+    status.materialization = inspectViewMaterialization(probe.view._unsafeDb(), { treeCompressionMode });
     status.branchMatches = probe.meta?.branch === branch;
     if (!status.branchMatches) return status;
     if (!ledgerDbPath) {
-      status.current = true;
+      status.current = status.structure?.ok === true;
       return status;
     }
     let ledger = null;
     try {
       ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
       status.freshness = viewFreshness(probe.meta, ledger, { layerMerge });
-      status.current = status.freshness.current === true;
+      status.current = status.freshness.current === true && status.structure?.ok === true;
     } catch (err) {
       status.error = err?.message || String(err);
       status.current = false;
@@ -757,7 +787,7 @@ function decorateWorkerError(err, extra = {}) {
   return err;
 }
 
-/** @param {{ ledgerDbPath: string, repoRoot: string, defaultBranch: string, mainViewDbPath: string, config?: Record<string, any>, onProgress?: ((event: any) => void) | null, timeoutMs?: number | null, testBlockMs?: number, purpose?: string }} args */
+/** @param {{ ledgerDbPath: string, repoRoot: string, defaultBranch: string, mainViewDbPath: string, config?: Record<string, any>, onProgress?: ((event: any) => void) | null, timeoutMs?: number | null, testBlockMs?: number, purpose?: string, sourceProof?: any, sourceLockHeld?: boolean }} args */
 async function runAtlasV2BootWarmWorkerThread({
   ledgerDbPath,
   repoRoot,
@@ -768,6 +798,8 @@ async function runAtlasV2BootWarmWorkerThread({
   timeoutMs = null,
   testBlockMs = 0,
   purpose = "main-full",
+  sourceProof = null,
+  sourceLockHeld = false,
 }) {
   const maxMs = resolveAtlasV2BootTimeoutMs(timeoutMs, config);
   const vectorMode = String(config?.vectorBackend ?? config?.atlas_vector_backend ?? "").trim().toLowerCase();
@@ -796,6 +828,8 @@ async function runAtlasV2BootWarmWorkerThread({
         config,
         testBlockMs,
         purpose,
+        sourceProof,
+        sourceLockHeld,
         nativeAuth: heartbeatAuthManager.getCapability(),
         nativeRuntime,
       },
@@ -1038,6 +1072,377 @@ async function inspectScipBootState({ repoRoot = "", config = {} } = {}) {
   };
 }
 
+function atlasBootViewFingerprint(repoRoot, config = {}) {
+  return viewFingerprintForOptions({
+    repoRoot,
+    layerMerge: config?.viewLayerMerge === true,
+    treeCompressionMode: config?.treeCompressionMode,
+    treeCompressionMaxSeeds: config?.treeCompressionMaxSeeds,
+  });
+}
+
+function atlasBootSourceWalkDecision(reason, generation = null) {
+  const normalized = normalizeWaitingLaneGeneration(generation);
+  if (reason === "exact_joint_generation" && normalized) {
+    return Object.freeze({ skipped: true, reason, generation: normalized });
+  }
+  return Object.freeze({ skipped: false, reason: String(reason || "proof_unavailable") });
+}
+
+/**
+ * Inspect the persisted ledger/view half of the boot-skip proof. The returned
+ * shape deliberately contains no filesystem paths or raw errors: callers can
+ * safely surface it in startup telemetry.
+ *
+ * @param {{ ledgerDbPath: string, mainViewDbPath: string, repoRoot: string, targetBranch: string, gitOid: string, config?: Record<string, any> }} args
+ */
+async function inspectAtlasBootMaterialization({
+  ledgerDbPath,
+  mainViewDbPath,
+  repoRoot,
+  targetBranch,
+  gitOid,
+  config = {},
+}) {
+  const viewStatus = await inspectMainViewForBootInWorker({
+    viewPath: mainViewDbPath,
+    branch: targetBranch,
+    ledgerDbPath,
+    layerMerge: config?.viewLayerMerge === true,
+    treeCompressionMode: config?.treeCompressionMode,
+  });
+  if (!viewStatus?.exists) return { ok: false, reason: "main_view_missing" };
+  if (!viewStatus?.readable || viewStatus?.ledgerFormat?.resetNeeded) {
+    return { ok: false, reason: "main_view_unreadable" };
+  }
+  if (!viewStatus?.branchMatches) return { ok: false, reason: "view_branch_mismatch" };
+  if (viewStatus?.materialization?.ok !== true) {
+    return { ok: false, reason: viewStatus?.materialization?.reason || "view_materialization_not_ready" };
+  }
+
+  const generation = normalizeWaitingLaneGeneration({
+    target_branch: viewStatus?.meta?.branch,
+    git_oid: viewStatus?.meta?.git_oid,
+    atlas_ledger_seq: viewStatus?.meta?.ledger_seq,
+    atlas_layer_revision: viewStatus?.meta?.layer_revision,
+    view_fingerprint: viewStatus?.meta?.view_fingerprint,
+  });
+  if (!generation) return { ok: false, reason: "joint_generation_unpublished" };
+  if (generation.target_branch !== targetBranch || generation.git_oid !== gitOid) {
+    return { ok: false, reason: "joint_generation_git_mismatch" };
+  }
+  const intake = readAtlasMainIntakeState(repoRoot);
+  if (intake && intake.status !== "complete") {
+    return { ok: false, reason: `main_intake_${intake.status || "incomplete"}` };
+  }
+  if (intake?.generation && !waitingLaneGenerationsEqual(intake.generation, generation)) {
+    return { ok: false, reason: "main_intake_generation_mismatch" };
+  }
+  if (generation.view_fingerprint !== atlasBootViewFingerprint(repoRoot, config)) {
+    return { ok: false, reason: "view_fingerprint_mismatch" };
+  }
+
+  let ledger = null;
+  try {
+    ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
+    if (!ledger.getBranch(targetBranch)) return { ok: false, reason: "ledger_branch_missing" };
+    if (ledger.headSeq(targetBranch) !== generation.atlas_ledger_seq) {
+      return { ok: false, reason: "ledger_head_mismatch" };
+    }
+    if (ledger.layerRevision() !== generation.atlas_layer_revision) {
+      return { ok: false, reason: "layer_revision_mismatch" };
+    }
+    if (!viewStatus?.current) return { ok: false, reason: "view_not_current" };
+    return { ok: true, generation };
+  } finally {
+    try { ledger?.close?.(); } catch { /* proof is already fail-closed */ }
+  }
+}
+
+/**
+ * Prove that every staged SCIP artifact is already represented in the ledger
+ * at the exact checkout OID. Staging policy uncertainty and unreadable bytes
+ * are proof failures, never skip permission.
+ *
+ * @param {{ repoRoot: string, ledgerDbPath: string, targetBranch: string, gitOid: string, config?: Record<string, any> }} args
+ */
+async function inspectExactScipBootState({ repoRoot, ledgerDbPath, targetBranch, gitOid, config = {} }) {
+  const mode = normalizeAtlasScipMode(config?.scipMode);
+  if (!shouldRunScipPhase(mode)) return { ok: true, signature: [] };
+  const dir = atlasV2BootScipDir(repoRoot, config);
+  const [files, staging] = await Promise.all([
+    listScipFiles(dir),
+    describeScipStagingState({ repoRoot, scipDir: dir, config }),
+  ]);
+  const rows = Array.isArray(staging?.rows) ? staging.rows : [];
+  const pendingRows = rows.filter((row) => (
+    row?.decision?.action === "stage"
+    || String(row?.meta_status || row?.meta?.status || "").toLowerCase() === "failed"
+  ));
+
+  let ledger = null;
+  try {
+    ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
+    const ingested = ledger.listScipIndexes();
+    const signature = [];
+    if (pendingRows.length > 0) {
+      const batch = await inspectExactScipBatchCoverage({
+        targetBranch,
+        gitOid,
+        scipDir: dir,
+        rows: pendingRows,
+        ledger,
+      });
+      if (!batch.ok) return { ok: false, reason: "scip_staging_pending" };
+      signature.push(batch.signature);
+    }
+    for (const scipPath of files) {
+      const bytesHash = sha256Hex(await fs.promises.readFile(scipPath));
+      signature.push(bytesHash);
+      if (!ingested.some((row) => row.scip_bytes_hash === bytesHash && row.ingested_head === gitOid)) {
+        // Main intake can supersede a persistent whole-project artifact with
+        // exact path-preserving batches (for example when a project indexer
+        // omits ignored-but-tracked files). The durable batch receipt is an
+        // equivalent proof for this artifact's source languages.
+        const batch = await inspectExactScipBatchCoverage({
+          targetBranch,
+          gitOid,
+          scipDir: dir,
+          rows: [{ source_languages: scipBasenameSourceLanguages(scipPath) }],
+          ledger,
+        });
+        if (!batch.ok) return { ok: false, reason: "scip_ingest_pending" };
+        signature.push(batch.signature);
+      }
+    }
+    return { ok: true, signature: signature.sort() };
+  } finally {
+    try { ledger?.close?.(); } catch { /* proof is already fail-closed */ }
+  }
+}
+
+async function inspectExactScipBatchCoverage({ targetBranch, gitOid, scipDir, rows, ledger }) {
+  const receipt = await readScipBatchCoverage(scipDir);
+  if (!receipt || String(receipt.head || "").toLowerCase() !== String(gitOid || "").toLowerCase()) {
+    return { ok: false };
+  }
+  const languages = new Set(uniqueSourceLanguages(rows.flatMap((row) => (
+    Array.isArray(row?.source_languages) ? row.source_languages : []
+  ))));
+  if (languages.size === 0) return { ok: false };
+  const branch = ledger.getBranch(targetBranch);
+  if (!branch) return { ok: false };
+  const snapshot = ledger.pathSnapshotAt(targetBranch, ledger.headSeq(targetBranch));
+  const covered = new Map();
+  for (const document of receipt.documents) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    const contentHash = String(document?.content_hash || "").toLowerCase();
+    const sourceLanguages = uniqueSourceLanguages(document?.source_languages || []);
+    if (!sourceLanguages.some((language) => languages.has(language))) continue;
+    if (!repoRelPath || snapshot.get(repoRelPath) !== contentHash) return { ok: false };
+    // A successful batch proves the indexer examined this exact source/hash,
+    // but project indexers can legitimately omit documents excluded by their
+    // own project configuration. Tree-sitter is the complementary symbol
+    // source for those files; require durable coverage from at least one of
+    // the two symbol layers rather than requiring SCIP to duplicate it.
+    const symbolLayer = ledger.listBlobLayers(contentHash).some((layer) => (
+      (layer?.source === "scip" || layer?.source === "treesitter")
+      && layer?.status === "indexed"
+      && languages.has(String(layer?.lang || "").toLowerCase())
+    ));
+    if (!symbolLayer) return { ok: false };
+    covered.set(repoRelPath, contentHash);
+  }
+  if (covered.size === 0) return { ok: false };
+  for (const [repoRelPath, contentHash] of snapshot.entries()) {
+    const applies = ledger.listBlobLayers(contentHash).some((layer) => (
+      (layer?.source === "scip" || layer?.source === "treesitter")
+      && layer?.status === "indexed"
+      && languages.has(String(layer?.lang || "").toLowerCase())
+    ));
+    if (applies && covered.get(repoRelPath) !== contentHash) return { ok: false };
+  }
+  return {
+    ok: true,
+    signature: `batch:${sha256Hex(Buffer.from(JSON.stringify(receipt)))}`,
+  };
+}
+
+async function inspectExactAtlasLayerReadiness({ repoRoot, config, signal = null }) {
+  // Test/diagnostic configurations can explicitly disable the vector backend;
+  // production configurations keep it on and therefore must prove parity
+  // before the boot route skips the entire warm pipeline.
+  if (String(config?.vectorBackend || "").trim().toLowerCase() === "off") {
+    return { ok: true, signature: ["embeddings:off"] };
+  }
+  const readiness = await ATLAS_BOOT_THREAD_MANAGER.run(ATLAS_READINESS_WORKER_URL, {
+    label: "ATLAS exact boot readiness inspect",
+    timeoutMs: 120_000,
+    signal,
+    workerData: { repoRoot, config },
+  });
+  const layers = Array.isArray(readiness?.layers) ? readiness.layers : [];
+  if (layers.length === 0) return { ok: false, reason: "atlas_layers_not_ready" };
+  const notReady = layers.filter((layer) => layer?.status !== "ready" && layer?.status !== "off");
+  if (notReady.length > 0) {
+    const layer = String(notReady[0]?.layer || "");
+    const reason = layer.startsWith("embeddings")
+      ? "embeddings_not_ready"
+      : (layer === "tree-compression" ? "tree_compression_not_ready" : "atlas_layers_not_ready");
+    return { ok: false, reason };
+  }
+  return {
+    ok: true,
+    signature: layers.map((layer) => [layer.layer, layer.status, layer.coverage ?? null]),
+  };
+}
+
+export async function __testInspectExactScipBatchCoverage(args) {
+  return inspectExactScipBatchCoverage(args);
+}
+
+/**
+ * Inspect one Git side of the exact boot proof. The caller holds the canonical
+ * root worktree lock across both calls and the final decision.
+ *
+ * @param {{ repoRoot: string, targetBranch: string, expectedGitOid?: string | null, signal?: AbortSignal | null }} args
+ */
+async function inspectAtlasBootGitProof({ repoRoot, targetBranch, expectedGitOid = null, signal = null }) {
+  const branch = String(targetBranch || "").trim();
+  if (!branch) return { ok: false, reason: "target_branch_missing" };
+  const targetOid = String(await gitExecAsync(
+    ["rev-parse", "--verify", `${branch}^{commit}`],
+    repoRoot,
+    { signal, timeoutMs: 30_000 },
+  )).trim().toLowerCase();
+  const headOid = String(await gitExecAsync(
+    ["rev-parse", "--verify", "HEAD^{commit}"],
+    repoRoot,
+    { signal, timeoutMs: 30_000 },
+  )).trim().toLowerCase();
+  const status = String(await gitExecAsync(
+    ["status", "--porcelain", "--untracked-files=all"],
+    repoRoot,
+    { signal, timeoutMs: 30_000 },
+  )).trim();
+  if (!/^[0-9a-f]{40,64}$/u.test(targetOid)) return { ok: false, reason: "target_oid_invalid" };
+  if (expectedGitOid && targetOid !== expectedGitOid) {
+    return { ok: false, reason: "target_moved_during_proof" };
+  }
+  if (headOid !== targetOid) return { ok: false, reason: "source_head_not_target" };
+  if (status) return { ok: false, reason: "source_root_dirty" };
+  return { ok: true, target_branch: branch, git_oid: targetOid };
+}
+
+/**
+ * Return a path-free decision for the boot source-stat walk. A positive
+ * decision is possible only while the root worktree lock fences two clean Git
+ * proofs around two identical durable ledger/view/SCIP observations.
+ *
+ * @param {{ repoRoot: string, ledgerDbPath: string, mainViewDbPath: string, config?: Record<string, any>, policy?: string, signal?: AbortSignal | null, lockWaitMs?: number }} args
+ */
+export async function inspectAtlasBootSourceWalkSkip({
+  repoRoot,
+  ledgerDbPath,
+  mainViewDbPath,
+  config = {},
+  policy = "smart",
+  signal = null,
+  lockWaitMs = 30_000,
+}) {
+  if (normalizeAtlasBootReindexPolicy(policy) === "always") {
+    return atlasBootSourceWalkDecision("policy_always");
+  }
+  try {
+    return await withWorktreeLockAsync(repoRoot, repoRoot, async () => {
+      const targetBranch = String(await resolveTargetBranchAsync(repoRoot, { signal }) || "").trim();
+      const beforeGit = await inspectAtlasBootGitProof({ repoRoot, targetBranch, signal });
+      if (!beforeGit.ok) return atlasBootSourceWalkDecision(beforeGit.reason);
+      const [ledgerPresent, viewPresent] = await Promise.all([
+        fs.promises.access(ledgerDbPath).then(() => true, () => false),
+        fs.promises.access(mainViewDbPath).then(() => true, () => false),
+      ]);
+      if (!ledgerPresent) return atlasBootSourceWalkDecision("ledger_missing");
+      if (!viewPresent) return atlasBootSourceWalkDecision("main_view_missing");
+
+      const firstMaterialization = await inspectAtlasBootMaterialization({
+        ledgerDbPath,
+        mainViewDbPath,
+        repoRoot,
+        targetBranch,
+        gitOid: beforeGit.git_oid,
+        config,
+      });
+      if (!firstMaterialization.ok) return atlasBootSourceWalkDecision(firstMaterialization.reason);
+      const firstScip = await inspectExactScipBootState({
+        repoRoot,
+        ledgerDbPath,
+        targetBranch,
+        gitOid: beforeGit.git_oid,
+        config,
+      });
+      if (!firstScip.ok) return atlasBootSourceWalkDecision(firstScip.reason);
+      const firstReadiness = await inspectExactAtlasLayerReadiness({
+        repoRoot,
+        config,
+        signal,
+      });
+      if (!firstReadiness.ok) return atlasBootSourceWalkDecision(firstReadiness.reason);
+
+      const secondMaterialization = await inspectAtlasBootMaterialization({
+        ledgerDbPath,
+        mainViewDbPath,
+        repoRoot,
+        targetBranch,
+        gitOid: beforeGit.git_oid,
+        config,
+      });
+      if (!secondMaterialization.ok) return atlasBootSourceWalkDecision(secondMaterialization.reason);
+      if (!waitingLaneGenerationsEqual(firstMaterialization.generation, secondMaterialization.generation)) {
+        return atlasBootSourceWalkDecision("joint_generation_changed_during_proof");
+      }
+      const secondScip = await inspectExactScipBootState({
+        repoRoot,
+        ledgerDbPath,
+        targetBranch,
+        gitOid: beforeGit.git_oid,
+        config,
+      });
+      if (!secondScip.ok) return atlasBootSourceWalkDecision(secondScip.reason);
+      if (JSON.stringify(firstScip.signature) !== JSON.stringify(secondScip.signature)) {
+        return atlasBootSourceWalkDecision("scip_state_changed_during_proof");
+      }
+      const secondReadiness = await inspectExactAtlasLayerReadiness({
+        repoRoot,
+        config,
+        signal,
+      });
+      if (!secondReadiness.ok) return atlasBootSourceWalkDecision(secondReadiness.reason);
+      if (JSON.stringify(firstReadiness.signature) !== JSON.stringify(secondReadiness.signature)) {
+        return atlasBootSourceWalkDecision("atlas_readiness_changed_during_proof");
+      }
+
+      const targetBranchAfter = String(await resolveTargetBranchAsync(repoRoot, { signal }) || "").trim();
+      if (targetBranchAfter !== targetBranch) {
+        return atlasBootSourceWalkDecision("target_branch_changed_during_proof");
+      }
+      const afterGit = await inspectAtlasBootGitProof({
+        repoRoot,
+        targetBranch,
+        expectedGitOid: beforeGit.git_oid,
+        signal,
+      });
+      if (!afterGit.ok) return atlasBootSourceWalkDecision(afterGit.reason);
+      return atlasBootSourceWalkDecision("exact_joint_generation", secondMaterialization.generation);
+    }, {
+      signal,
+      waitMs: Math.max(0, Number(lockWaitMs) || 0),
+    });
+  } catch {
+    return atlasBootSourceWalkDecision("proof_unavailable");
+  }
+}
+
 /**
  * @param {any} args
  */
@@ -1053,6 +1458,7 @@ function runAtlasV2BootWarmInWorker(args) {
           branch: args.defaultBranch,
           ledgerDbPath: args.ledgerDbPath,
           layerMerge: args?.config?.viewLayerMerge === true,
+          treeCompressionMode: args?.config?.treeCompressionMode,
         })
       : null;
     const indexCurrent = atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus });
@@ -1658,19 +2064,64 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   }
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   await asyncBoundary();
+  const bootReindexPolicy = normalizeAtlasBootReindexPolicy(config?.bootReindexPolicy);
+  const proofTimeoutMs = resolveAtlasV2BootTimeoutMs(opts?.timeoutMs, config);
+  const bootSourceWalk = await inspectAtlasBootSourceWalkSkip({
+    repoRoot: storage.repoRoot,
+    ledgerDbPath: storage.ledgerDbPath,
+    mainViewDbPath: storage.mainViewDbPath,
+    config,
+    policy: bootReindexPolicy,
+    signal: opts?.signal || null,
+    lockWaitMs: Math.min(30_000, proofTimeoutMs),
+  });
+  const writeRunTelemetry = typeof opts?.__testRunTelemetryWriter === "function"
+    ? opts.__testRunTelemetryWriter
+    : appendRunTelemetry;
+  try {
+    writeRunTelemetry("runtime", {
+      event: "atlas.boot_source_walk.decision",
+      component: "atlas",
+      skipped: bootSourceWalk.skipped,
+      reason: bootSourceWalk.reason,
+      generation: bootSourceWalk.generation || null,
+    });
+  } catch { /* startup telemetry is observational */ }
+  emitBootProgress(opts?.onProgress, {
+    kind: "line",
+    stream: "system",
+    stage: "index",
+    text: bootSourceWalk.skipped
+      ? "ATLAS boot source walk skipped: exact joint generation"
+      : `ATLAS boot source walk retained: ${bootSourceWalk.reason}`,
+    boot_source_walk: bootSourceWalk,
+  });
+  if (bootSourceWalk.skipped) {
+    seedAtlasBootReadiness({ ok: true, result: null, config });
+    return {
+      attempted: false,
+      ok: true,
+      status: 0,
+      skipped: "exact_joint_generation",
+      backend: "atlas-v2",
+      branch: bootSourceWalk.generation.target_branch,
+      generation: bootSourceWalk.generation,
+      boot_source_walk: bootSourceWalk,
+    };
+  }
   const baselineBranch = await resolveAtlasBaselineBranchAsync(storage.repoRoot);
   ensureParentDir(storage.ledgerDbPath);
   const [ledgerPresent, mainViewPresent] = await Promise.all([
     fs.promises.access(storage.ledgerDbPath).then(() => true, () => false),
     fs.promises.access(storage.mainViewDbPath).then(() => true, () => false),
   ]);
-  const bootReindexPolicy = normalizeAtlasBootReindexPolicy(config?.bootReindexPolicy);
   const viewStatus = ledgerPresent
     ? await inspectMainViewForBootInWorker({
         viewPath: storage.mainViewDbPath,
         branch: baselineBranch,
         ledgerDbPath: storage.ledgerDbPath,
         layerMerge: config?.viewLayerMerge === true,
+        treeCompressionMode: config?.treeCompressionMode,
       })
     : null;
   const indexPresent = atlasBootIndexCurrent({ ledgerPresent, mainViewPresent, viewStatus });
@@ -1707,23 +2158,39 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   };
   warmReadinessStarted();
   try {
-    const result = await runAtlasV2BootWarmWithProgress({
-      onProgress: onProgressWithReadiness,
-      heartbeatMs: opts?.heartbeatMs,
-      repoId: storage.repo.repoId || null,
-      branch: baselineBranch,
-      task: async (progressArgs = {}) => {
-        const { onProgress, emitStage } = /** @type {any} */ (progressArgs);
-        await emitStage?.("worker", "starting ATLAS boot worker");
-        return await runAtlasV2BootWarmInWorker({
-          ledgerDbPath: storage.ledgerDbPath,
-          repoRoot: storage.repoRoot,
-          defaultBranch: baselineBranch,
-          mainViewDbPath: storage.mainViewDbPath,
-          config,
-          onProgress,
-          timeoutMs: opts?.timeoutMs ?? config?.bootTimeoutMs ?? getAtlasV2BootTimeoutMs(),
-          testBlockMs: Number(opts?.__testWorkerBlockMs || 0),
+    const result = await withAtlasMainSourceProofLock({
+      repoRoot: storage.repoRoot,
+      targetBranch: baselineBranch,
+      signal: opts?.signal || null,
+      lockWaitMs: Math.min(30_000, proofTimeoutMs),
+      run: (sourceProof, lock) => {
+        if (!lock.held) {
+          throw Object.assign(
+            new Error("ATLAS boot intake could not acquire the repository mutation lock"),
+            { code: "ATLAS_MAIN_INTAKE_LOCK_UNAVAILABLE" },
+          );
+        }
+        return runAtlasV2BootWarmWithProgress({
+          onProgress: onProgressWithReadiness,
+          heartbeatMs: opts?.heartbeatMs,
+          repoId: storage.repo.repoId || null,
+          branch: baselineBranch,
+          task: async (progressArgs = {}) => {
+            const { onProgress, emitStage } = /** @type {any} */ (progressArgs);
+            await emitStage?.("worker", "starting ATLAS boot worker");
+            return await runAtlasV2BootWarmInWorker({
+              ledgerDbPath: storage.ledgerDbPath,
+              repoRoot: storage.repoRoot,
+              defaultBranch: baselineBranch,
+              mainViewDbPath: storage.mainViewDbPath,
+              config,
+              onProgress,
+              sourceProof,
+              sourceLockHeld: true,
+              timeoutMs: opts?.timeoutMs ?? config?.bootTimeoutMs ?? getAtlasV2BootTimeoutMs(),
+              testBlockMs: Number(opts?.__testWorkerBlockMs || 0),
+            });
+          },
         });
       },
     });
@@ -1739,6 +2206,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
       graphDbPath: storage.ledgerDbPath,
       repoId: storage.repo.repoId || null,
       branch: baselineBranch,
+      boot_source_walk: bootSourceWalk,
     };
   } catch (err) {
     seedAtlasBootReadiness({ ok: false, config });
@@ -1755,6 +2223,7 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
       graphDbPath: storage.ledgerDbPath,
       repoId: storage.repo.repoId || null,
       branch: baselineBranch,
+      boot_source_walk: bootSourceWalk,
     };
   }
 }
@@ -1790,6 +2259,7 @@ export async function startAtlasPreflightIndex(opts = {}) {
         branch: baselineBranch,
         ledgerDbPath: storage.ledgerDbPath,
         layerMerge: config?.viewLayerMerge === true,
+        treeCompressionMode: config?.treeCompressionMode,
       });
       viewCurrent = atlasBootIndexCurrent({
         ledgerPresent,

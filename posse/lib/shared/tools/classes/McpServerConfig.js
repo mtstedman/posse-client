@@ -623,6 +623,8 @@ function buildDeterministicMcpBootPayload(role, {
   attemptId = null,
   agentCallId = null,
   promptChars = 0,
+  fallbackReads = null,
+  assessorMaxToolCalls = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
   atlasGateEnabled = true,
@@ -694,6 +696,12 @@ function buildDeterministicMcpBootPayload(role, {
       attemptId,
       agentCallId,
       promptChars: Math.max(0, Number(promptChars) || 0),
+      fallbackReads: Number.isFinite(Number(fallbackReads))
+        ? Math.max(0, Math.floor(Number(fallbackReads)))
+        : null,
+      assessorMaxToolCalls: Number.isFinite(Number(assessorMaxToolCalls))
+        ? Math.max(1, Math.floor(Number(assessorMaxToolCalls)))
+        : null,
       atlasAvailable: atlasEnabled,
       atlasGateEnabled,
       atlasPrefetchStatus: atlasPrefetchStatus != null ? String(atlasPrefetchStatus) : "",
@@ -1213,6 +1221,8 @@ export class McpServerConfig {
     attemptId = null,
     agentCallId = null,
     promptChars = 0,
+    fallbackReads = null,
+    assessorMaxToolCalls = null,
     atlasPrefetchStatus = null,
     atlasAvailable = null,
     atlasGateEnabled = true,
@@ -1250,6 +1260,8 @@ export class McpServerConfig {
     void attemptId;
     void agentCallId;
     void promptChars;
+    void fallbackReads;
+    void assessorMaxToolCalls;
     void atlasPrefetchStatus;
     void atlasAvailable;
     void atlasGateEnabled;

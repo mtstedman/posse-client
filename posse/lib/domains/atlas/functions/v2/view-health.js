@@ -8,6 +8,100 @@
 import fs from "fs";
 import path from "path";
 import { languageForPath } from "./parse/language-buckets.js";
+import { treeCompressionSnapshotIsValidEmpty } from "./tree-compression.js";
+
+function viewTableExists(db, table) {
+  try {
+    return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
+  } catch {
+    return false;
+  }
+}
+
+function viewCount(db, sql, ...params) {
+  return Number(db.prepare(sql).get(...params)?.count || 0);
+}
+
+/**
+ * Validate the derived retrieval materialization behind a current view meta
+ * row. Ledger sequence equality alone is insufficient: an interrupted or
+ * externally replaced database can retain its generation pin while losing
+ * tree coverage or its configured compression pass.
+ *
+ * @param {import("better-sqlite3").Database} db
+ * @param {{ treeCompressionMode?: string | null }} [options]
+ */
+export function inspectViewMaterialization(db, options = {}) {
+  const required = ["symbols", "atlas_tree_nodes", "derived_state_runs"];
+  if (!db || required.some((table) => !viewTableExists(db, table))) {
+    return { ok: false, reason: "view_derived_tables_missing" };
+  }
+  try {
+    const symbols = viewCount(db, "SELECT COUNT(*) AS count FROM symbols");
+    const nodes = viewCount(db, "SELECT COUNT(*) AS count FROM atlas_tree_nodes");
+    const roots = viewCount(db, "SELECT COUNT(*) AS count FROM atlas_tree_nodes WHERE node_id='root'");
+    const treeSymbols = viewCount(
+      db,
+      "SELECT COUNT(*) AS count FROM atlas_tree_nodes WHERE symbol_ref IS NOT NULL",
+    );
+    const derivedStatus = String(db.prepare(
+      "SELECT status FROM derived_state_runs WHERE kind='tree-derived' ORDER BY id DESC LIMIT 1",
+    ).get()?.status || "").toLowerCase();
+    const counts = { symbols, nodes, roots, treeSymbols };
+    if (derivedStatus !== "ok") return { ok: false, reason: "tree_derived_not_ready", counts };
+    if (nodes <= 0 || roots !== 1) return { ok: false, reason: "tree_root_invalid", counts };
+    if (treeSymbols !== symbols) {
+      return { ok: false, reason: "tree_symbol_coverage_incomplete", counts };
+    }
+
+    const compressionMode = String(options.treeCompressionMode || "off").trim().toLowerCase();
+    if (compressionMode === "off") return { ok: true, reason: null, counts };
+    if (!viewTableExists(db, "atlas_tree_compression_snapshots")
+      || !viewTableExists(db, "atlas_tree_compression_seeds")) {
+      return { ok: false, reason: "tree_compression_tables_missing", counts };
+    }
+    const snapshot = db.prepare(
+      "SELECT id, status, summary_json AS summaryJson FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
+    ).get();
+    const compressionStatus = String(db.prepare(
+      "SELECT status FROM derived_state_runs WHERE kind='tree-compression-snapshot' ORDER BY id DESC LIMIT 1",
+    ).get()?.status || "").toLowerCase();
+    if (!snapshot || String(snapshot.status || "").toLowerCase() !== "ok" || compressionStatus !== "ok") {
+      return { ok: false, reason: "tree_compression_not_ready", counts };
+    }
+    const seeds = viewCount(
+      db,
+      "SELECT COUNT(*) AS count FROM atlas_tree_compression_seeds WHERE snapshot_id=?",
+      Number(snapshot.id),
+    );
+    const staleSeeds = viewCount(
+      db,
+      "SELECT COUNT(*) AS count FROM atlas_tree_compression_seeds WHERE snapshot_id=? AND stale_since IS NOT NULL",
+      Number(snapshot.id),
+    );
+    const labeledSeeds = viewCount(
+      db,
+      "SELECT COUNT(*) AS count FROM atlas_tree_compression_seeds WHERE snapshot_id=? AND labeled_at IS NOT NULL",
+      Number(snapshot.id),
+    );
+    const compression = { seeds, staleSeeds, labeledSeeds };
+    if (staleSeeds > 0) return { ok: false, reason: "tree_compression_stale", counts, compression };
+    if (seeds <= 0 && !treeCompressionSnapshotIsValidEmpty(db, snapshot)) {
+      return { ok: false, reason: "tree_compression_empty", counts, compression };
+    }
+    if (compressionMode === "ml" && seeds > 0) {
+      const mlStatus = String(db.prepare(
+        "SELECT status FROM derived_state_runs WHERE kind='tree-compression-ml-pass' ORDER BY id DESC LIMIT 1",
+      ).get()?.status || "").toLowerCase();
+      if (mlStatus !== "ok" || labeledSeeds !== seeds) {
+        return { ok: false, reason: "tree_compression_ml_not_ready", counts, compression };
+      }
+    }
+    return { ok: true, reason: null, counts, compression };
+  } catch {
+    return { ok: false, reason: "view_materialization_unreadable" };
+  }
+}
 
 /**
  * @param {number} ms

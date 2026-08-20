@@ -119,6 +119,8 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
   const attemptId = numberOrNull(bootConfig.attemptId);
   const agentCallId = numberOrNull(bootConfig.agentCallId);
   const promptChars = numberOrNull(bootConfig.promptChars);
+  const fallbackReads = numberOrNull(bootConfig.fallbackReads);
+  const assessorMaxToolCalls = numberOrNull(bootConfig.assessorMaxToolCalls);
   const role = stringOrNull(bootConfig.role);
   const providerName = stringOrNull(bootConfig.providerName);
   return {
@@ -142,6 +144,8 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       attemptId,
       agentCallId,
       promptChars,
+      fallbackReads,
+      assessorMaxToolCalls,
       disableSystemTools: bootConfig.disableSystemTools === true,
       coordinationChild: bootConfig.coordinationChild === true,
       agentHandoffContract: agentHandoffContractFromBootConfig(bootConfig),
@@ -231,6 +235,8 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     attemptId: numberOrNull(capabilities.attemptId),
     agentCallId: numberOrNull(capabilities.agentCallId),
     promptChars: numberOrNull(capabilities.promptChars) || 0,
+    fallbackReads: numberOrNull(capabilities.fallbackReads),
+    assessorMaxToolCalls: numberOrNull(capabilities.assessorMaxToolCalls),
     disableSystemTools: capabilities.disableSystemTools === true,
     coordinationChild: capabilities.coordinationChild === true,
     agentHandoffContract: normalizeAgentHandoffContract(capabilities.agentHandoffContract),

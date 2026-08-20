@@ -17,11 +17,12 @@ function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").trim();
 }
 
-function diffArgs(commitHash, paths = [], extra = []) {
+function diffArgs(commitHash, paths = [], extra = [], commitBaseHash = "") {
+  const range = commitBaseHash ? `${commitBaseHash}..${commitHash}` : `${commitHash}^!`;
   return [
     "diff",
     ...extra,
-    `${commitHash}^!`,
+    range,
     "--",
     ...paths,
   ];
@@ -169,18 +170,20 @@ function diffNarrativeFailure(err, commit, scopedPaths) {
 export function buildDiffNarrative({
   cwd = process.cwd(),
   commitHash = "",
+  commitBaseHash = "",
   paths = [],
 } = {}) {
   const commit = String(commitHash || "").trim();
+  const base = String(commitBaseHash || "").trim();
   const scopedPaths = scopedNarrativePaths(paths);
   if (!commit || scopedPaths.length === 0) return missingNarrativeInputResult();
 
   try {
     return assembleDiffNarrative(commit, {
-      numstatRaw: git(cwd, diffArgs(commit, scopedPaths, ["--numstat"])),
-      nameStatusRaw: git(cwd, diffArgs(commit, scopedPaths, ["--name-status"])),
-      statRaw: git(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"])),
-      unifiedRaw: git(cwd, diffArgs(commit, scopedPaths, ["--unified=0"])),
+      numstatRaw: git(cwd, diffArgs(commit, scopedPaths, ["--numstat"], base)),
+      nameStatusRaw: git(cwd, diffArgs(commit, scopedPaths, ["--name-status"], base)),
+      statRaw: git(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"], base)),
+      unifiedRaw: git(cwd, diffArgs(commit, scopedPaths, ["--unified=0"], base)),
     });
   } catch (err) {
     return diffNarrativeFailure(err, commit, scopedPaths);
@@ -190,18 +193,20 @@ export function buildDiffNarrative({
 export async function buildDiffNarrativeAsync({
   cwd = process.cwd(),
   commitHash = "",
+  commitBaseHash = "",
   paths = [],
 } = {}) {
   const commit = String(commitHash || "").trim();
+  const base = String(commitBaseHash || "").trim();
   const scopedPaths = scopedNarrativePaths(paths);
   if (!commit || scopedPaths.length === 0) return missingNarrativeInputResult();
 
   try {
     const [numstatRaw, nameStatusRaw, statRaw, unifiedRaw] = await Promise.all([
-      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--numstat"])),
-      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--name-status"])),
-      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"])),
-      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--unified=0"])),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--numstat"], base)),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--name-status"], base)),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--stat", "--summary"], base)),
+      gitAsync(cwd, diffArgs(commit, scopedPaths, ["--unified=0"], base)),
     ]);
     return assembleDiffNarrative(commit, { numstatRaw, nameStatusRaw, statRaw, unifiedRaw });
   } catch (err) {
@@ -236,6 +241,7 @@ export function formatDiffNarrative(narrative) {
 function narrativeInputsFromContext(assessmentContext) {
   return {
     commitHash: String(assessmentContext.commit_hash || "").trim(),
+    commitBaseHash: String(assessmentContext.commit_base_hash || "").trim(),
     paths: [
       ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
       ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
@@ -254,12 +260,12 @@ function applyNarrativeToContext(assessmentContext, narrative) {
 
 export function attachDiffNarrative(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
-  const { commitHash, paths } = narrativeInputsFromContext(assessmentContext);
-  return applyNarrativeToContext(assessmentContext, buildDiffNarrative({ cwd, commitHash, paths }));
+  const { commitHash, commitBaseHash, paths } = narrativeInputsFromContext(assessmentContext);
+  return applyNarrativeToContext(assessmentContext, buildDiffNarrative({ cwd, commitHash, commitBaseHash, paths }));
 }
 
 export async function attachDiffNarrativeAsync(assessmentContext = null, cwd = null) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
-  const { commitHash, paths } = narrativeInputsFromContext(assessmentContext);
-  return applyNarrativeToContext(assessmentContext, await buildDiffNarrativeAsync({ cwd, commitHash, paths }));
+  const { commitHash, commitBaseHash, paths } = narrativeInputsFromContext(assessmentContext);
+  return applyNarrativeToContext(assessmentContext, await buildDiffNarrativeAsync({ cwd, commitHash, commitBaseHash, paths }));
 }

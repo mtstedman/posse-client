@@ -9,6 +9,10 @@ import {
   getToolBatchingClass,
   TOOL_BATCHING_CLASSES,
 } from "../../../../catalog/tool-surface/batching.js";
+import {
+  projectAgentToolDefinition,
+  projectAgentToolSchema,
+} from "../../../../shared/tools/functions/agent-schema.js";
 
 export { TOOL_ATTACHMENT_BY_PROVIDER };
 export { getToolBatchingClass, TOOL_BATCHING_CLASSES };
@@ -147,6 +151,10 @@ export const SURFACED_ATLAS_TOOL_DEFS = Object.freeze(
   Object.fromEntries(Object.entries(ATLAS_TOOL_DEFS).filter(([action]) => isAtlasActionSurfaced(action))),
 );
 
+export const SYSTEM_PREFETCH_CAPABLE_ATLAS_ACTIONS = Object.freeze(new Set([
+  "code.survey",
+]));
+
 function withNativeAtlasSchemas(defs) {
   const out = {};
   for (const [action, def] of Object.entries(defs)) {
@@ -185,6 +193,7 @@ function mergeDescriptionsInPlace(target, source) {
   if (!Object.prototype.hasOwnProperty.call(target, "default") && Object.prototype.hasOwnProperty.call(source, "default")) {
     target.default = source.default;
   }
+  if (source.internalOnly === true) target.internalOnly = true;
   const targetProps = target.properties && typeof target.properties === "object" ? target.properties : {};
   const sourceProps = source.properties && typeof source.properties === "object" ? source.properties : {};
   for (const [key, child] of Object.entries(targetProps)) {
@@ -205,80 +214,98 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-export const TOOL_EXECUTION_SPECS = Object.freeze({
+// One authored entry per callable tool. Provider schemas, execution metadata,
+// observations, lazy Atlas discovery, and inventories all project from this
+// catalog; do not add parallel schema or summary dictionaries.
+export const TOOL_CATALOG = {
   agent_handoff: {
+    schema: TOOL_AGENT_HANDOFF,
     access: "coordination",
     summary: "Submit the terminal structured handoff report; any selected evidence is materialized backend-side.",
     observation: { type: "tool.agent_handoff", label: "AgentHandoff", format: "generic", targetKeys: ["profile", "outcome"] },
   },
   sub_agent: {
+    schema: TOOL_SUB_AGENT,
     access: "coordination",
     summary: "Dispatch or control a bounded batch of isolated citation-synthesis agents.",
     budgetExempt: true,
     observation: { type: "tool.sub_agent", label: "SubAgent", format: "generic", targetKeys: ["op", "batch_id"] },
   },
   sub_agent_next_input: {
+    schema: TOOL_SUB_AGENT_NEXT_INPUT,
     access: "coordination",
     summary: "Advance a citation child's backend-owned ordered input cursor.",
     budgetExempt: true,
     observation: { type: "tool.sub_agent_next_input", label: "SubAgentInput", format: "generic", targetKeys: ["position"] },
   },
   read_file: {
+    schema: TOOL_READ_FILE,
     access: "read",
     summary: "Read file contents with line-aware slices.",
     observation: { type: "tool.read", label: "Read", format: "file", pathKeys: ["file_path", "path"], requireTarget: true, includeRange: true },
   },
   chain_read: {
+    schema: TOOL_CHAIN_READ,
     access: "read",
     summary: "Read exact missing context; the first page is paired with chain_verdict and relevant continuations inherit it.",
     observation: { type: "tool.chain_read", label: "ChainRead", format: "file", pathKeys: ["path"], requireTarget: true, pair: "chain_read+chain_verdict" },
   },
   chain_verdict: {
+    schema: TOOL_CHAIN_VERDICT,
     access: "read",
     summary: "Record whether a newly read file was relevant; later pages inherit a relevant verdict.",
     observation: { type: "tool.chain_verdict", label: "ChainReview", format: "chain_verdict", pathKeys: ["path"], pair: "chain_read+chain_verdict" },
   },
   pull_brief: {
+    schema: TOOL_PULL_BRIEF,
     access: "read",
     summary: "Build a bounded deterministic file brief for targeted context retrieval.",
     observation: { type: "tool.pull_brief", label: "PullBrief", format: "generic", targetKeys: ["query", "mode"] },
   },
   get_brief: {
+    schema: TOOL_GET_BRIEF,
     access: "read",
     summary: "Load the pre-staged research brief bundle (analysis, structured data, file priorities, function index, source manifest) for this work item in one call.",
     observation: { type: "tool.get_brief", label: "GetBrief", format: "generic", targetKeys: [] },
   },
   project_db_query: {
+    schema: TOOL_PROJECT_DB_QUERY,
     access: "read",
     summary: "Run a single SQL statement against the project's configured application database; allowed statement types follow the operator-granted permissions.",
     observation: { type: "tool.project_db_query", label: "ProjectDbQuery", format: "generic", targetKeys: ["query"] },
   },
   list_files: {
+    schema: TOOL_LIST_FILES,
     access: "read",
     summary: "List directories and files within the allowed workspace scope.",
     observation: { type: "tool.list", label: "List", format: "list", targetKeys: ["path", "directory", "pattern"] },
   },
   search_files: {
+    schema: TOOL_SEARCH_FILES,
     access: "read",
     summary: "Search file contents deterministically through the required ripgrep-backed search_files tool.",
     observation: { type: "tool.search", label: "Search", format: "search", targetKeys: ["path", "directory", "file_path"] },
   },
   git_history: {
+    schema: TOOL_GIT_HISTORY,
     access: "read",
     summary: "Inspect git log/show/blame/diff history without shell access.",
     observation: { type: "tool.git_history", label: "GitHistory", format: "generic", targetKeys: ["path", "op", "ref"] },
   },
   inspect_file: {
+    schema: TOOL_INSPECT_FILE,
     access: "read",
-    summary: "Inspect file metadata and image dimensions; pass `paths: [...]` to batch many files in one call instead of looping.",
-    observation: { type: "tool.inspect", label: "Inspect", format: "file", pathKeys: ["file_path", "path"], arrayPathKeys: ["paths"], requireTarget: true },
+    summary: "Inspect metadata and image dimensions for one file path or an ordered batch.",
+    observation: { type: "tool.inspect", label: "Inspect", format: "file", pathKeys: ["file_path", "path"], arrayPathKeys: ["path", "paths"], requireTarget: true },
   },
   hash_file: {
+    schema: TOOL_HASH_FILE,
     access: "read",
     summary: "Hash files deterministically for verification and audit.",
     observation: { type: "tool.hash", label: "Hash", format: "file", pathKeys: ["file_path", "path"], requireTarget: true },
   },
   write_file: {
+    schema: TOOL_WRITE_FILE,
     access: "write",
     deprecated: true,
     deprecationReason: "Code handoff materializes exact files_to_create paths before provider execution; code dev/fix must populate them with edit_file.",
@@ -286,106 +313,128 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     observation: { type: "tool.write", label: "Write", format: "file", pathKeys: ["file_path", "path"], requireTarget: true },
   },
   edit_file: {
+    schema: TOOL_EDIT_FILE,
     access: "write",
     summary: "Patch existing allowed files or update their executable permission without shell editing.",
     observation: { type: "tool.edit", label: "Edit", format: "edit", pathKeys: ["file_path", "path"], requireTarget: true },
   },
   request_scope: {
+    schema: TOOL_REQUEST_SCOPE,
     access: "write",
     summary: "Pause the current job for human approval of one exact writable file path.",
     observation: { type: "tool.scope_request", label: "ScopeRequest", format: "file", pathKeys: ["path"], requireTarget: true },
   },
   move_file: {
+    schema: TOOL_MOVE_FILE,
     access: "write",
     summary: "Move or rename files inside the allowed scope.",
     observation: { type: "tool.move", label: "Move", format: "move_copy", sourceKey: "source", destinationKey: "destination" },
   },
   copy_file: {
+    schema: TOOL_COPY_FILE,
     access: "write",
     summary: "Copy files inside the allowed scope.",
     observation: { type: "tool.copy", label: "Copy", format: "move_copy", sourceKey: "source", destinationKey: "destination" },
+    surfaced: false,
   },
   make_dir: {
+    schema: TOOL_MAKE_DIR,
     access: "write",
     summary: "Create directories inside the allowed scope.",
     observation: { type: "tool.mkdir", label: "MkDir", format: "file", pathKeys: ["path"], requireTarget: true },
   },
   resize_image: {
+    schema: TOOL_RESIZE_IMAGE,
     access: "write",
     summary: "Resize PNG images deterministically.",
     observation: { type: "tool.resize_image", label: "Resize image", format: "resize_image", pathKeys: ["path", "file_path"] },
   },
   read_image_metadata: {
+    schema: TOOL_READ_IMAGE_METADATA,
     access: "read",
     summary: "Inspect image metadata such as format and dimensions.",
     observation: { type: "tool.read_image_metadata", label: "ImageMeta", format: "file", pathKeys: ["path", "file_path"], requireTarget: true },
   },
   validate_artifact_output: {
+    schema: TOOL_VALIDATE_ARTIFACT_OUTPUT,
     access: "read",
     summary: "Validate artifact output contents and image dimensions.",
     observation: { type: "tool.validate_artifact_output", label: "Validate artifact output", format: "artifact_output", rootKey: "output_root" },
   },
   prune_artifact_output: {
+    schema: TOOL_PRUNE_ARTIFACT_OUTPUT,
     access: "write",
     summary: "Remove non-deliverable sidecar files from artifact output roots.",
     observation: { type: "tool.prune_artifact_output", label: "Prune artifact output", format: "artifact_output", rootKey: "output_root", includeDryRun: true },
   },
   optimize_image: {
+    schema: TOOL_OPTIMIZE_IMAGE,
     access: "write",
     summary: "Optimize PNG images by stripping non-essential metadata.",
     observation: { type: "tool.optimize_image", label: "OptimizeImg", format: "file", pathKeys: ["path", "file_path"], requireTarget: true },
   },
   reencode_image: {
+    schema: TOOL_REENCODE_IMAGE,
     access: "write",
     summary: "Re-encode image files to clean PNGs, including JPEG bytes saved with .png names.",
     observation: { type: "tool.reencode_image", label: "ReencodeImg", format: "reencode_image", pathKeys: ["path", "file_path"] },
   },
   clean_image: {
+    schema: TOOL_CLEAN_IMAGE,
     access: "write",
     summary: "Inspect, re-encode, resize, or optimize images through one scoped cleanup tool.",
     observation: { type: "tool.clean_image", label: "CleanImage", format: "reencode_image", pathKeys: ["path", "file_path", "output_path"] },
   },
   generate_image: {
+    schema: TOOL_GENERATE_IMAGE,
     access: "write",
     summary: "Generate new image artifacts inside allowed output scope.",
     observation: { type: "tool.generate_image", label: "Generate image", format: "generate_image", pathKeys: ["filename"] },
   },
   extract_image_text: {
+    schema: TOOL_EXTRACT_IMAGE_TEXT,
     access: "read",
     summary: "Run local tesseract OCR to extract text from an image.",
     observation: { type: "tool.extract_image_text", label: "ExtractText", format: "file", pathKeys: ["path", "file_path"], requireTarget: true },
   },
   run_scoped_checks: {
+    schema: TOOL_RUN_SCOPED_CHECKS,
     access: "shell",
     summary: "Canonical lint/typecheck route for the declared job scope, including scoped PHP syntax lint when applicable.",
     observation: { type: "tool.run_scoped_checks", label: "ScopedChecks", format: "generic", targetKeys: ["checks", "scope"] },
   },
   create_test_suite: {
+    schema: TOOL_CREATE_TEST_SUITE,
     access: "shell",
     summary: "Create or update one DB-backed registered test suite without exposing the suite catalog.",
     observation: { type: "tool.create_test_suite", label: "CreateSuite", format: "generic", targetKeys: ["name", "suite"] },
   },
   create_test: {
+    schema: TOOL_CREATE_TEST,
     access: "shell",
     summary: "Register or update one or many tests in a suite; every candidate runs first and a failing candidate is never persisted.",
     observation: { type: "tool.create_test", label: "CreateTest", format: "generic", targetKeys: ["suite_id", "suite", "name", "target_files", "target_symbols"] },
   },
   run_test: {
+    schema: TOOL_RUN_TEST,
     access: "shell",
     summary: "Run one or many DB-backed registered tests and return per-test suite/name and pass/fail feedback.",
     observation: { type: "tool.run_test", label: "RunTest", format: "generic", targetKeys: ["test_id", "suite_id", "suite", "test"] },
   },
   run_test_suite: {
+    schema: TOOL_RUN_TEST_SUITE,
     access: "shell",
     summary: "Run all active tests in one named/id suite without listing the full catalog.",
     observation: { type: "tool.run_test_suite", label: "RunSuite", format: "generic", targetKeys: ["suite_id", "suite"] },
   },
   bash: {
+    schema: TOOL_BASH,
     access: "shell",
     summary: "Run guarded shell commands only when deterministic tools cannot satisfy the task; do not bypass run_scoped_checks for lint/typecheck.",
     observation: { type: "tool.bash", label: "Bash", format: "command", commandKey: "command", kind: "system_call" },
   },
   agent_feedback: {
+    schema: TOOL_AGENT_FEEDBACK,
     // "read" = no workspace/file writes, so it stays available to read-only
     // roles (planner/researcher/assessor). It does record to the Monitor Agents
     // interaction channel; that is intentional and not a workspace mutation.
@@ -395,72 +444,25 @@ export const TOOL_EXECUTION_SPECS = Object.freeze({
     budgetExempt: true,
   },
   get_operator_feedback: {
+    schema: TOOL_GET_OPERATOR_FEEDBACK,
     access: "read",
     summary: "Internal recovery endpoint for interrupted direct operator-feedback delivery.",
     observation: { type: "tool.get_operator_feedback", label: "GetFeedback", format: "generic", targetKeys: ["limit"] },
     budgetExempt: true,
   },
   ack_operator_feedback: {
+    schema: TOOL_ACK_OPERATOR_FEEDBACK,
     access: "read",
     summary: "Acknowledge retrieved operator feedback as accepted, rejected, or deferred.",
     observation: { type: "tool.ack_operator_feedback", label: "AckFeedback", format: "generic", targetKeys: ["interaction_id", "decision"] },
     budgetExempt: true,
   },
-  "query": { access: "atlas", summary: "Compact gateway for native ATLAS v2 retrieval actions." },
-  "code": { access: "atlas", summary: "Compact gateway for native ATLAS v2 code-inspection actions." },
-  "repo": { access: "atlas", summary: "Compact gateway for native ATLAS v2 action-catalog discovery: action search and compact manuals." },
-  "agent": { access: "atlas", summary: "Compact gateway for native ATLAS v2 memory curation actions: memory store and memory feedback." },
-  "action.search": { access: "atlas", summary: "Search the native ATLAS v2 action catalog for the right tool/action." },
-  "manual": { access: "atlas", summary: "Return compact native ATLAS v2 API reference entries." },
-  "workflow": { access: "atlas", summary: "Execute multi-step native ATLAS workflows with data transforms and references." },
-  "info": { access: "atlas", summary: "Report native ATLAS v2 runtime, storage, view freshness, ledger, and policy diagnostics." },
-  "fetch_ref": { access: "atlas", summary: "Open already-stored content for citable #refs; this never reruns the originating tool. A ref_role=citation/current_fetch=not_needed stub is already visible: cite or hand it off without fetching. Fetch only ref_role=continuation, explicit cursor/survey/continuation fields, omitted or bounded content, or focused matches within stored payloads. Every non-empty fetch returns view_ref, whose payload is exactly the returned text field; cite, slice, or hand off view_ref rather than the continuation ref. The ledger rejects fully visible content, duplicate pages, and repeated empty searches. Re-call the producer only for a materially different scope; do not infer payload type from the ref." },
-  "create_ref": { access: "atlas", summary: "Store an evidence chunk (inline text or a server-side slice of an existing ref) and get back a #ref stub. Batchable via chunks[]; the optional note is retained with the stored ref." },
-  "repo.register": { access: "atlas", summary: "Register a repository with ATLAS v2 and initialize ledger/view storage." },
-  "repo.status": { access: "atlas", summary: "Get ATLAS repository status, health, and latest version identifiers." },
-  "repo.overview": { access: "atlas", summary: "Fetch ATLAS repository summaries, indexed coverage, directory summaries, and hotspots." },
-  "index.refresh": { access: "atlas", summary: "Refresh the ATLAS v2 index and materialized view for full or incremental updates." },
-  "repo.quality": { access: "atlas", summary: "Inspect ATLAS v2 index quality, parser health, edge resolution, and feedback gaps." },
-  "buffer.push": { access: "atlas", summary: "Push an unsaved editor buffer overlay into ATLAS v2 retrieval." },
-  "buffer.checkpoint": { access: "atlas", summary: "Clear or persist an ATLAS v2 editor buffer overlay." },
-  "buffer.status": { access: "atlas", summary: "Inspect active ATLAS v2 editor buffer overlays." },
-  "symbol.search": { access: "atlas", summary: "Search indexed symbols through ATLAS for targeted semantic discovery." },
-  "symbol.card": { access: "atlas", summary: "Fetch compact symbol cards without loading whole files: one card by symbolId/symbolRef, or a batch with per-item errors via symbolIds/symbolRefs." },
-  "symbol.overview": { access: "atlas", summary: "List compact call/reference sites for a symbol without full caller cards." },
-  "tree.overview": { access: "atlas", summary: "Top-level code-tree orientation: root containment page plus the compressed-tree labeled area map." },
-  "tree.branch": { access: "atlas", summary: "Expandable tree discovery in the depth direction: page a focused path/node/symbol subtree with aggregate counts and area labels. Revisit only to follow a deeper branch or explicit page; no code content." },
-  "tree.scope": { access: "atlas", summary: "Returns the ten highest-ranked candidate files inline. When more exist, nextCandidateFiles is an atlas.fetch_ref value for the already-stored next ranked page. Traverse it without rerunning tree.scope; call tree.scope again only for a materially different query or scope." },
-  "tree.expand": { access: "atlas", summary: "Expandable tree discovery in the breadth direction: grow validated seeds into surrounding branches, siblings, tests, entrypoints, and risk metrics. Revisit only with a genuinely different frontier." },
-  "slice.build": { access: "atlas", summary: "Build a task-scoped ATLAS slice for bounded dependency context." },
-  "slice.refresh": { access: "atlas", summary: "Refresh an ATLAS slice incrementally instead of rebuilding from scratch." },
-  "edit.plan": { access: "atlas", summary: "Preview symbol/file-scoped edit candidates with preconditions before using write tools." },
-  "code.skeleton": { access: "atlas", summary: "Code outline for one symbol or file. A successful prefetched code.survey already provides the structural outline for its files; go directly to code.window unless you can name a surveyGap. Do not repeat the same selection." },
-  "code.lens": { access: "atlas", summary: "Focused code excerpts for named identifiers. Do not call code.lens more than once for the same symbol or substantially overlapping file/identifier selection; follow tailMatchesRef when present." },
-  "code.window": { access: "atlas", summary: "Bounded exact code for a symbol or anchored file region. Follow continuation refs and do not repeat overlapping selections." },
-  "code.survey": { access: "atlas", summary: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the already-stored next ten. Search/fetch the stored pages with atlas.fetch_ref, then follow each returned next cursor until none remains. Search stored pages for exact task concepts before choosing among parallel versions or implementations; rank is not a version decision. This traverses the completed survey and does not rerun code.survey; call code.survey again only for a materially different path or symbol scope." },
-  "code.structure": { access: "atlas", summary: "Exact indexed inventory for files, symbols, imports, and fan-in/fan-out. Use instead of content tools when bodies are not needed." },
-  "code.db": { access: "atlas", summary: "Internal WI/setup DB query inventory. Not routed through agent gateways." },
-  "context": { access: "atlas", summary: "Request generated ATLAS context (taskType + contextMode) for precise/broad retrieval." },
-  "context.summary": { access: "atlas", summary: "Request compact ATLAS context with an answer, evidence list, and next action guidance." },
-  "agent.feedback": { access: "atlas", summary: "Record useful/missing symbols to improve future ATLAS context quality." },
-  "agent.feedback.query": { access: "atlas", summary: "Query useful/missing symbol feedback aggregates for retrieval tuning." },
-  "review.delta": { access: "atlas", summary: "Fetch ATLAS semantic diff and blast-radius context between versions." },
-  "review.analyze": { access: "atlas", summary: "Run ATLAS PR risk analysis with blast-radius evidence." },
-  "review.risk": { access: "atlas", summary: "Fetch ATLAS semantic diff and risk analysis in one assessor call." },
-  "slice.spillover.get": { access: "atlas", summary: "Fetch deferred-edge spillover for an existing slice without rebuilding." },
-  "file.read": { access: "atlas", summary: "Bounded file read via ATLAS: offset/limit, search+context, or jsonPath. Honors ETag (ifNoneMatch)." },
-  "memory.store": { access: "atlas", summary: "Store one rare, verified durable memory linked to exact symbols/files. Title <=120 chars; content <=1200 chars." },
-  "memory.surface": { access: "atlas", summary: "Probe exact symbols/files and return only which anchors have attached memory; no bodies or fuzzy search." },
-  "memory.get": { access: "atlas", summary: "Fetch memories attached to exact symbols or files, normally after memory.surface/prefetch shows those anchors have memory." },
-  "memory.feedback": { access: "atlas", summary: "Issue a simple enum verdict for an existing memory you actually used or checked: used, stale, wrong, or duplicate." },
-  "policy.get": { access: "atlas", summary: "Fetch native ATLAS v2 policy for the current repository." },
-  "policy.set": { access: "atlas", summary: "Patch native ATLAS v2 policy settings." },
-  "usage.stats": { access: "atlas", summary: "Report native ATLAS v2 action usage and estimated token savings." },
-  "runtime.execute": { access: "atlas", summary: "Execute policy-gated runtime commands inside the repository with output artifacts." },
-  "runtime.queryOutput": { access: "atlas", summary: "Query persisted runtime output artifacts by keyword." },
-  "scip.ingest": { access: "atlas", summary: "Ingest a prebuilt SCIP index into the native ATLAS v2 ledger." },
-  "file.write": { access: "atlas", summary: "Intentionally not exposed in native ATLAS v2. Use scoped edit_file for code changes; deprecated write_file remains only for dynamic artifact compatibility." },
-});
+  ...Object.fromEntries(Object.entries(ATLAS_TOOL_DEFS).map(([name, schema]) => [name, {
+    schema,
+    access: "atlas",
+    systemPrefetchCapable: SYSTEM_PREFETCH_CAPABLE_ATLAS_ACTIONS.has(name),
+  }])),
+};
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "fetch_ref",
@@ -503,11 +505,11 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // dev/fix provider starts, then moved into files_to_modify. write_file
       // remains registered for compatibility/artificer output but must not be
       // issued on this surface; edit_file can populate the empty file.
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
       imageGeneration: ["generate_image"],
     }),
     // Assessor carries project_db_query on the READ lane so it can verify the
@@ -543,7 +545,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   }),
   deterministicMcp: Object.freeze({
     read: Object.freeze(["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
-    write: Object.freeze(["write_file", "edit_file", "move_file", "copy_file", "make_dir", "prune_artifact_output"]),
+    write: Object.freeze(["write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output"]),
     // Read-only image inspection (dev/artificer/assessor). clean_image is a
     // mutation and is gated to artificer separately — keep it out of this set.
     imageHelpers: Object.freeze(["read_image_metadata", "validate_artifact_output"]),
@@ -658,47 +660,6 @@ export const TOOL_OBSERVATION_ALIASES = Object.freeze({
   exec_command: "bash",
 });
 
-const NATIVE_SCHEMAS = Object.freeze({
-  agent_handoff: TOOL_AGENT_HANDOFF,
-  sub_agent: TOOL_SUB_AGENT,
-  sub_agent_next_input: TOOL_SUB_AGENT_NEXT_INPUT,
-  read_file: TOOL_READ_FILE,
-  write_file: TOOL_WRITE_FILE,
-  edit_file: TOOL_EDIT_FILE,
-  request_scope: TOOL_REQUEST_SCOPE,
-  list_files: TOOL_LIST_FILES,
-  search_files: TOOL_SEARCH_FILES,
-  git_history: TOOL_GIT_HISTORY,
-  inspect_file: TOOL_INSPECT_FILE,
-  hash_file: TOOL_HASH_FILE,
-  agent_feedback: TOOL_AGENT_FEEDBACK,
-  get_operator_feedback: TOOL_GET_OPERATOR_FEEDBACK,
-  ack_operator_feedback: TOOL_ACK_OPERATOR_FEEDBACK,
-  resize_image: TOOL_RESIZE_IMAGE,
-  read_image_metadata: TOOL_READ_IMAGE_METADATA,
-  validate_artifact_output: TOOL_VALIDATE_ARTIFACT_OUTPUT,
-  prune_artifact_output: TOOL_PRUNE_ARTIFACT_OUTPUT,
-  optimize_image: TOOL_OPTIMIZE_IMAGE,
-  reencode_image: TOOL_REENCODE_IMAGE,
-  clean_image: TOOL_CLEAN_IMAGE,
-  extract_image_text: TOOL_EXTRACT_IMAGE_TEXT,
-  run_scoped_checks: TOOL_RUN_SCOPED_CHECKS,
-  create_test_suite: TOOL_CREATE_TEST_SUITE,
-  create_test: TOOL_CREATE_TEST,
-  run_test: TOOL_RUN_TEST,
-  run_test_suite: TOOL_RUN_TEST_SUITE,
-  bash: TOOL_BASH,
-  move_file: TOOL_MOVE_FILE,
-  copy_file: TOOL_COPY_FILE,
-  make_dir: TOOL_MAKE_DIR,
-  chain_read: TOOL_CHAIN_READ,
-  chain_verdict: TOOL_CHAIN_VERDICT,
-  pull_brief: TOOL_PULL_BRIEF,
-  get_brief: TOOL_GET_BRIEF,
-  generate_image: TOOL_GENERATE_IMAGE,
-  project_db_query: TOOL_PROJECT_DB_QUERY,
-});
-
 function roleAllowlistForTool(toolName) {
   if (toolName === "sub_agent_next_input") return new Set(["subagent"]);
   if (toolName === "agent_handoff") {
@@ -717,6 +678,10 @@ function roleAllowlistForTool(toolName) {
     ]);
     if (names.has(toolName)) roles.push(role);
   }
+  // Researcher switches between read_file (when Atlas is available) and the
+  // audited chain protocol (when it is not). The static catalog records the
+  // union; runtime availability performs the mode-specific narrowing.
+  if (toolName === "read_file" && !roles.includes("researcher")) roles.push("researcher");
   return new Set(roles);
 }
 
@@ -738,49 +703,52 @@ function capabilityFlagsFor(access) {
   });
 }
 
-export const TOOL_CATALOG = Object.freeze({
-  ...Object.fromEntries(Object.entries(NATIVE_SCHEMAS).map(([name, schema]) => {
-    const spec = TOOL_EXECUTION_SPECS[name];
-    if (!spec) throw new Error(`Missing TOOL_EXECUTION_SPECS entry for native tool ${name}`);
-    if (!spec.observation) throw new Error(`Missing observation spec for native tool ${name}`);
-    return [name, Object.freeze({
-      name,
-      schema,
-      access: spec.access,
-      summary: spec.summary,
-      batching: getToolBatchingClass(name),
-      observation: Object.freeze({ ...spec.observation }),
-      roleAllowlist: roleAllowlistForTool(name),
-      gateTier: GATED_NATIVE_TOOLS.has(name) ? "native-atlas-gated" : "native",
-      capabilityFlags: capabilityFlagsFor(spec.access),
-      budgetExempt: !!spec.budgetExempt,
-      deprecated: spec.deprecated === true,
-      deprecationReason: spec.deprecationReason || null,
-    })];
-  })),
-  ...Object.fromEntries(Object.entries(SURFACED_ATLAS_TOOL_DEFS).map(([name, schema]) => {
-    const spec = TOOL_EXECUTION_SPECS[name];
-    if (!spec) throw new Error(`Missing TOOL_EXECUTION_SPECS entry for ATLAS tool ${name}`);
-    return [name, Object.freeze({
-      name,
-      schema,
-      access: spec.access,
-      summary: spec.summary,
-      batching: getToolBatchingClass(name),
-      observation: null,
-      roleAllowlist: atlasRoleAllowlistForTool(name),
-      gateTier: "atlas",
-      capabilityFlags: capabilityFlagsFor("atlas"),
-    })];
-  })),
-});
+for (const [name, authored] of Object.entries(TOOL_CATALOG)) {
+  const access = String(authored.access || "unknown");
+  if (!authored.schema) throw new Error(`Missing schema in canonical tool catalog entry ${name}`);
+  if (access !== "atlas" && !authored.observation) {
+    throw new Error(`Missing observation metadata in canonical tool catalog entry ${name}`);
+  }
+  const roleAllowlist = access === "atlas"
+    ? atlasRoleAllowlistForTool(name)
+    : roleAllowlistForTool(name);
+  const surfaced = typeof authored.surfaced === "boolean"
+    ? authored.surfaced
+    : (access === "atlas" ? isAtlasActionSurfaced(name) : roleAllowlist.size > 0);
+  TOOL_CATALOG[name] = Object.freeze({
+    ...authored,
+    name,
+    summary: String(authored.summary || authored.schema.description || ""),
+    batching: getToolBatchingClass(name),
+    observation: authored.observation ? Object.freeze({ ...authored.observation }) : null,
+    roleAllowlist,
+    gateTier: access === "atlas"
+      ? "atlas"
+      : (GATED_NATIVE_TOOLS.has(name) ? "native-atlas-gated" : "native"),
+    capabilityFlags: capabilityFlagsFor(access),
+    surfaced,
+    budgetExempt: authored.budgetExempt === true,
+    deprecated: authored.deprecated === true,
+    deprecationReason: authored.deprecationReason || null,
+  });
+}
+Object.freeze(TOOL_CATALOG);
 
 export function getToolCatalogEntry(name) {
+  const entry = TOOL_CATALOG[name] || null;
+  return entry?.surfaced === false ? null : entry;
+}
+
+export function getCanonicalToolCatalogEntry(name) {
   return TOOL_CATALOG[name] || null;
 }
 
 export function getToolSchema(name) {
-  return TOOL_CATALOG[name]?.schema || null;
+  return getToolCatalogEntry(name)?.schema || null;
+}
+
+export function getCanonicalToolSchema(name) {
+  return getCanonicalToolCatalogEntry(name)?.schema || null;
 }
 
 export function getToolSchemaForRole(name, role, {
@@ -792,8 +760,27 @@ export function getToolSchemaForRole(name, role, {
 }
 
 export function getToolExecutionSpec(name) {
-  const spec = TOOL_EXECUTION_SPECS[name];
-  return spec ? { ...spec, batching: getToolBatchingClass(name) } : null;
+  const entry = getToolCatalogEntry(name);
+  if (!entry) return null;
+  return executionSpecForEntry(entry);
+}
+
+export function getCanonicalToolExecutionSpec(name) {
+  const entry = getCanonicalToolCatalogEntry(name);
+  if (!entry) return null;
+  return executionSpecForEntry(entry);
+}
+
+function executionSpecForEntry(entry) {
+  return {
+    access: entry.access,
+    summary: entry.summary,
+    batching: entry.batching,
+    observation: entry.observation,
+    budgetExempt: entry.budgetExempt,
+    deprecated: entry.deprecated,
+    deprecationReason: entry.deprecationReason,
+  };
 }
 
 export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false } = {}) {
@@ -898,7 +885,7 @@ export function getSyntheticAtlasToolSchemas(availableToolNames = []) {
     schemas.push({
       name: "atlas.review.risk",
       description: def.description,
-      inputSchema: def.parameters,
+      inputSchema: projectAgentToolSchema(def.parameters),
       annotations: { title: "ATLAS PR Risk" },
     });
   }
@@ -1039,7 +1026,7 @@ export function isExternallyRoutedAtlasTool(name) {
 }
 
 export function buildNativeToolDescriptor(schema) {
-  return {
+  return projectAgentToolDefinition({
     name: schema.name,
     description: schema.description,
     inputSchema: schema.parameters || { type: "object", properties: {}, additionalProperties: false },
@@ -1050,7 +1037,7 @@ export function buildNativeToolDescriptor(schema) {
       idempotentHint: false,
       openWorldHint: false,
     },
-  };
+  });
 }
 
 export function buildFoldedAtlasToolDescriptor(schema = {}, {
@@ -1061,15 +1048,14 @@ export function buildFoldedAtlasToolDescriptor(schema = {}, {
     : {};
   const name = String(schema.name || "");
   const mutating = isBlockedFoldedAtlasTool(name);
-  let canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
+  const canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
   let inputSchema = schema.inputSchema;
-  // Keep researcher calls scalar at the advertised boundary for every
-  // provider. The canonical multi-selection contract remains available to
-  // other roles and internal callers, while researchers can issue independent
-  // top-level calls that provider runtimes are able to schedule concurrently.
+  // Keep every provider-facing window selection scalar so independent exact
+  // reads can be scheduled concurrently. Upstream catalogs may temporarily
+  // retain the retired items mode during a staggered rollout, so narrow it at
+  // this local enforcement boundary too.
   if (
-    String(role || "").trim().toLowerCase() === "researcher"
-    && stripAtlasPrefix(name) === "code.window"
+    stripAtlasPrefix(name) === "code.window"
     && inputSchema?.properties?.items
     && Array.isArray(inputSchema.anyOf)
   ) {
@@ -1079,13 +1065,11 @@ export function buildFoldedAtlasToolDescriptor(schema = {}, {
       ...inputSchema,
       properties,
       required: [],
-      // Project the scalar modes from the canonical contract itself so file
-      // and symbol requirements cannot drift at this provider boundary.
       anyOf: inputSchema.anyOf.filter((mode) => !mode?.required?.includes("items")),
     };
-    canonicalDescription = "Bounded exact code for one symbol or anchored file region. Follow returnedFunctionAnchors and continuationRef values; do not repeat overlapping selections.";
   }
-  return {
+  void role;
+  return projectAgentToolDefinition({
     ...schema,
     description: canonicalDescription || schema.description,
     ...(inputSchema ? { inputSchema } : {}),
@@ -1097,5 +1081,5 @@ export function buildFoldedAtlasToolDescriptor(schema = {}, {
       idempotentHint: false,
       openWorldHint: false,
     },
-  };
+  });
 }

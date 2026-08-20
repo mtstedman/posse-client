@@ -44,7 +44,7 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
       continue;
     }
     if (!EMBEDDED_DETERMINISTIC_TOOLS.has(name)) continue;
-    const schema = ToolCatalog.getSchema(name, {
+    const schema = ToolCatalog.getAgentSchema(name, {
       role: contract?.role,
       compactCompletion: contract?.agentHandoffCompactV1 === true,
       compactV3: contract?.agentHandoffCompactV3 === true,
