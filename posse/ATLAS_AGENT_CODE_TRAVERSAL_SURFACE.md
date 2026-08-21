@@ -255,7 +255,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Focused code excerpts for named identifiers, usages, or branches. Pass only the identifiers the current question needs.
+Focused localization for named identifiers, usages, or branches within an identified file or symbol.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -306,11 +306,11 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Exact indexed inventory for files, symbols, imports, and fan-in and fan-out edges. Returns structural relationships and optional symbol summaries while leaving source bodies out of the response.
+Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges, with optional symbol summaries.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `edgeKinds` | `array<string>` | Optional | max items 6 | Exact edge kinds to inventory. Defaults to ["imports"] for structure/fan-in work. |
+| `edgeKinds` | `array<string>` | Optional | max items 6 | Relationships to inventory. Select calls or references for behavioral traversal; defaults to imports. |
 | `includeEdges` | `boolean` | Optional |  | Include exact internal/inbound/outbound edge rows. Default true. |
 | `includeSymbols` | `boolean` | Optional |  | Include per-file symbol summaries. Default true. |
 | `maxFiles` | `integer` | Optional | min 1; max 128 | Optional cap on resolved indexed files. Default 64, max 128. |
@@ -331,7 +331,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | Yes |
 
-Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the next stored page. Rank expresses candidate order.
+Ranked multi-file symbol preview and call map for behavior spanning files or owners. surveyRef and pagination retain the full surveyed inventory.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -354,7 +354,7 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Bounded exact code for one symbol or anchored file region, sized to establish a named code fact.
+Exact-source verification for an identified symbol or anchored file region, establishing a named code fact.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -363,7 +363,7 @@ Bounded exact code for one symbol or anchored file region, sized to establish a 
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Symbol, enclosing block, or containing-file selection. |
 | `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Required file-mode anchors for bounded slices. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Inline token cap for this exact selection. |
-| `reason` | `string` | Required | max length 20000 | Exact code fact this selection should establish. |
+| `reason` | `string` | Required | max length 20000 | Named code fact to verify. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
 ### `atlas.create_ref`
@@ -1036,7 +1036,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Compact symbol details for one symbol or a batch. Each card includes signature, summary, callers, callees, relationship metrics, and source location; batch results include per-item errors.
+Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1058,7 +1058,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Usage tracing for one exact symbol. Returns compact call and reference sites with relationship kinds, confidence, and locations.
+Concrete call and reference sites for an identified symbol, with relationship kinds, confidence, and locations.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

@@ -472,7 +472,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.card": {
     type: "function",
     name: "atlas_symbol_card",
-    description: "Compact symbol details for one symbol or a batch. Each card includes signature, summary, callers, callees, relationship metrics, and source location; batch results include per-item errors.",
+    description: "Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations.",
     parameters: {
       type: "object",
       properties: {
@@ -592,7 +592,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.overview": {
     type: "function",
     name: "atlas_symbol_overview",
-    description: "Usage tracing for one exact symbol. Returns compact call and reference sites with relationship kinds, confidence, and locations.",
+    description: "Concrete call and reference sites for an identified symbol, with relationship kinds, confidence, and locations.",
     parameters: {
       type: "object",
       properties: {
@@ -777,7 +777,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Multi-file content map with ranked per-file symbol previews and a call map. Its surveyRef stores the full surveyed symbol inventory; surveys over ten files also return pagination.cursor for the next stored page. Rank expresses candidate order.",
+    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners. surveyRef and pagination retain the full surveyed inventory.",
     parameters: {
       type: "object",
       properties: {
@@ -793,12 +793,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.structure": {
     type: "function",
     name: "atlas_code_structure",
-    description: "Exact indexed inventory for files, symbols, imports, and fan-in and fan-out edges. Returns structural relationships and optional symbol summaries while leaving source bodies out of the response.",
+    description: "Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges, with optional symbol summaries.",
     parameters: {
       type: "object",
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path, e.g. \"src/routes\" or [\"lib/a.ts\", \"lib/b.ts\"]. Resolves up to 128 indexed files." },
-        edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, description: "Exact edge kinds to inventory. Defaults to [\"imports\"] for structure/fan-in work." },
+        edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, description: "Relationships to inventory. Select calls or references for behavioral traversal; defaults to imports." },
         maxFiles: { type: "integer", description: "Optional cap on resolved indexed files. Default 64, max 128." },
         includeSymbols: { type: "boolean", description: "Include per-file symbol summaries. Default true." },
         includeEdges: { type: "boolean", description: "Include exact internal/inbound/outbound edge rows. Default true." },
@@ -824,7 +824,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Focused code excerpts for named identifiers, usages, or branches. Pass only the identifiers the current question needs.",
+    description: "Focused localization for named identifiers, usages, or branches within an identified file or symbol.",
     parameters: {
       type: "object",
       properties: {
@@ -846,13 +846,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "Bounded exact code for one symbol or anchored file region, sized to establish a named code fact.",
+    description: "Exact-source verification for an identified symbol or anchored file region, establishing a named code fact.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path when no symbolId is available." },
-        reason: { type: "string", description: "Exact code fact this selection should establish." },
+        reason: { type: "string", description: "Named code fact to verify." },
         identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Required file-mode anchors for bounded slices." },
         expectedLines: { type: "integer", description: "Approximate total line count for a file-mode slice." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Symbol, enclosing block, or containing-file selection." },
