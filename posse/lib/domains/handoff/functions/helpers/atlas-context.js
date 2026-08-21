@@ -3270,6 +3270,7 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
     atlasHeading("ATLAS RESEARCH PREFETCH"),
     "These are the initial ATLAS calls already made for you. Use them before making additional ATLAS or native file/search calls.",
     "Wrap up as soon as the gathered evidence supports the requested result. Do not seek corroboration or spend additional calls merely because they are available.",
+    "Choose retrieval by the shape of the unresolved fact; these are routing choices, not required stages. Before another call, compare visible, prefetched, and eligible ref-backed evidence with the requested result. If it is sufficient, hand off. Otherwise name the specific missing fact and use the tool that answers it directly: discovery when the target or location is unknown, code.lens to localize multiple named facts within a known target, and code.window only for exact source in a known symbol or region. Follow eligible survey or continuation refs before retrieving the same source again. Do not invent paths or symbol IDs, reopen source supplied in full, or retry an invalid path or ID with another guess; return to discovery. Batch independent gaps.",
   ];
 
   if (context) {

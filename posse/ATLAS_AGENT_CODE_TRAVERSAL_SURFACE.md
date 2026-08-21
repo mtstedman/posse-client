@@ -255,7 +255,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Focused localization for named identifiers, usages, or branches within one identified file or symbol. Put every same-target identifier needed for the decision into one request.
+Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -331,7 +331,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | Yes |
 
-Ranked multi-file symbol preview and call map for behavior spanning files or owners. Submit all known paths together; surveyRef and pagination retain the full surveyed inventory.
+Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, survey the nearest credible parent scope instead of guessing a narrow path; surveyRef and pagination retain the full surveyed inventory.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -354,7 +354,7 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-One bounded exact-source verification for an identified symbol or anchored file region. The result establishes a named code fact and a covered repeat returns its existing evidence ref.
+One bounded exact-source verification for an identified symbol or anchored file region; it is not target discovery. Call it only for a named code fact absent from visible or eligible ref-backed evidence. Never guess a path or symbol ID. A same-target revisit must identify an uncovered branch or range; a covered repeat returns its existing evidence ref.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -463,7 +463,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Reference retrieval for unseen stored #ref content. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.
+Reference retrieval for unseen stored #ref content. Follow an eligible survey or continuation ref before retrieving the same source again. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1083,7 +1083,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Repository symbol discovery for an unknown target. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations.
+Repository symbol discovery when the target or its location is unknown. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations. Reuse returned IDs exactly; never construct or guess a symbol ID.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

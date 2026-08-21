@@ -217,7 +217,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Reference retrieval for unseen stored #ref content. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.",
+    description: "Reference retrieval for unseen stored #ref content. Follow an eligible survey or continuation ref before retrieving the same source again. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.",
     parameters: {
       type: "object",
       properties: {
@@ -438,7 +438,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Repository symbol discovery for an unknown target. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations.",
+    description: "Repository symbol discovery when the target or its location is unknown. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations. Reuse returned IDs exactly; never construct or guess a symbol ID.",
     parameters: {
       type: "object",
       properties: {
@@ -777,7 +777,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners. Submit all known paths together; surveyRef and pagination retain the full surveyed inventory.",
+    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, survey the nearest credible parent scope instead of guessing a narrow path; surveyRef and pagination retain the full surveyed inventory.",
     parameters: {
       type: "object",
       properties: {
@@ -824,7 +824,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Focused localization for named identifiers, usages, or branches within one identified file or symbol. Put every same-target identifier needed for the decision into one request.",
+    description: "Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows.",
     parameters: {
       type: "object",
       properties: {
@@ -846,7 +846,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "One bounded exact-source verification for an identified symbol or anchored file region. The result establishes a named code fact and a covered repeat returns its existing evidence ref.",
+    description: "One bounded exact-source verification for an identified symbol or anchored file region; it is not target discovery. Call it only for a named code fact absent from visible or eligible ref-backed evidence. Never guess a path or symbol ID. A same-target revisit must identify an uncovered branch or range; a covered repeat returns its existing evidence ref.",
     parameters: {
       type: "object",
       properties: {
