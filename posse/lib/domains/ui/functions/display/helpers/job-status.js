@@ -1,7 +1,11 @@
 // lib/display/helpers/job-status.js
 
 import { FAILED_JOB_STATUSES, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
-import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../../../catalog/job.js";
+import {
+  MUTATING_JOB_TYPES,
+  QUEUE_LOCKING_JOB_TYPES,
+  jobTypeIsNonCompletionBlocking,
+} from "../../../../../catalog/job.js";
 
 export const JOB_TYPE_ABBR = {
   research: "R",
@@ -33,15 +37,14 @@ export const JOB_TYPE_COLORS_KEY = {
   atlas_warm: "cyan",
 };
 
+// Context-indexing display selector only. It answers "is this the warm/index
+// progress row?" and must never be used to decide reviewability: review
+// visibility is derived from the canonical non-completion-blocking contract
+// below, not from a parallel job-type allowlist kept here.
 export const BACKGROUND_ATLAS_WARM_JOB_TYPES = new Set(["atlas_warm"]);
-export const BACKGROUND_INDEX_JOB_TYPES = BACKGROUND_ATLAS_WARM_JOB_TYPES;
 
 export function jobIsBackgroundAtlasWarm(job) {
   return BACKGROUND_ATLAS_WARM_JOB_TYPES.has(job?.job_type);
-}
-
-export function jobIsBackgroundIndex(job) {
-  return jobIsBackgroundAtlasWarm(job);
 }
 
 export const REVIEW_WRITE_JOB_TYPES = MUTATING_JOB_TYPES;
@@ -55,8 +58,16 @@ export function jobIsRepoWriteStep(job) {
   return APPROVAL_REPO_WRITE_JOB_TYPES.has(job?.job_type);
 }
 
+// Optional accelerators (atlas_warm, waiting_lane_prepare, and any future
+// member of the canonical set) never participate in reviewability or
+// assessment, so a failed optional job cannot fail an otherwise successful
+// review. Foreground job types stay review-visible, including when they fail.
+export function jobIsNonCompletionBlocking(job) {
+  return jobTypeIsNonCompletionBlocking(job?.job_type);
+}
+
 export function jobIsReviewVisible(job) {
-  return !jobIsBackgroundIndex(job);
+  return !jobIsNonCompletionBlocking(job);
 }
 
 export function reviewVisibleJobs(jobs = []) {

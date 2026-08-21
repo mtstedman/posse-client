@@ -289,6 +289,13 @@ export function resolveCanonicalCallAccounting(call = {}, {
     })
     : { requestCount: 0 };
   if (segments.requestCount > 0) {
+    // ACC-1: incomplete segments cannot erase a complete provider aggregate.
+    // Raw additive counters stay authoritative from the aggregate; only the
+    // derived pricing quantities (exact price, billable tokens, and the
+    // long-context tier split) stay unknown. With no aggregate to prefer the
+    // segment sums remain the only known counters and are kept as they are.
+    const aggregateOverridesIncompleteSegments = segments.precision === "incomplete"
+      && aggregateUsageAvailable;
     const aggregateCost = segments.precision === "aggregate_only" && aggregateUsageAvailable
       ? estimatedAggregateCost(call, {
         inputTokens,
@@ -299,10 +306,14 @@ export function resolveCanonicalCallAccounting(call = {}, {
       : null;
     const costUsd = segments.exact ? segments.costUsd : aggregateCost?.costUsd ?? null;
     return {
-      inputTokens: segments.inputTokens,
-      outputTokens: segments.outputTokens,
-      cachedInputTokens: segments.cachedInputTokens,
-      cacheCreationInputTokens: segments.cacheCreationInputTokens,
+      inputTokens: aggregateOverridesIncompleteSegments ? inputTokens : segments.inputTokens,
+      outputTokens: aggregateOverridesIncompleteSegments ? outputTokens : segments.outputTokens,
+      cachedInputTokens: aggregateOverridesIncompleteSegments
+        ? cachedInputTokens
+        : segments.cachedInputTokens,
+      cacheCreationInputTokens: aggregateOverridesIncompleteSegments
+        ? cacheCreationInputTokens
+        : segments.cacheCreationInputTokens,
       billableInputTokens: segments.billableInputTokens,
       billableTokens: segments.exact ? segments.billableInputTokens + segments.outputTokens : null,
       costUsd,
@@ -316,7 +327,9 @@ export function resolveCanonicalCallAccounting(call = {}, {
       exact: segments.exact,
       requestCount: segments.requestCount,
       durationMs: segments.durationMs,
-      longContextTierInputTokens: segments.longContextTierInputTokens,
+      longContextTierInputTokens: aggregateOverridesIncompleteSegments
+        ? null
+        : segments.longContextTierInputTokens,
     };
   }
   const persistedPrecision = String(call.billing_precision ?? call.billingPrecision ?? "").trim();

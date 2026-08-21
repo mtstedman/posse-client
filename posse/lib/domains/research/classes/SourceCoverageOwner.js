@@ -23,6 +23,17 @@ function stable(value) {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
 }
 
+// SC-1: `maxTokens` is an independent output cap, so it is part of partial
+// selector identity. Without it a truncated request at maxTokens 200 and an
+// otherwise identical retry at 1200 shared a fingerprint, and the wider retry
+// was answered with the narrower stored region instead of being executed.
+// Cross-window-size reuse remains available, but only through the separate
+// verified complete-symbol fingerprint below.
+export function normalizedSelectorMaxTokens(value) {
+  const maxTokens = Number(value);
+  return Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : null;
+}
+
 export function sourceSelectorFingerprint(args = {}) {
   return sha256(stable({
     symbolId: args.symbolId || null,
@@ -35,6 +46,7 @@ export function sourceSelectorFingerprint(args = {}) {
     // omitted form so a model does not miss delivered coverage merely because
     // it relied on that default.
     granularity: args.granularity || "symbol",
+    maxTokens: normalizedSelectorMaxTokens(args.maxTokens),
     sliceContext: args.sliceContext || null,
   }));
 }

@@ -5,11 +5,14 @@ import { contextHeadroomReservationOwner } from "../classes/ContextHeadroomReser
 
 const ESTIMATOR_ERROR_HEADROOM_TOKENS = 4_096;
 const DEFAULT_WINDOW_RESULT_TOKENS = 1_200;
+// The smallest per-selection cap `resultCap` will honour. Below this a bounded
+// re-issue cannot buy any headroom, so no source read is admissible at all.
+export const MIN_SOURCE_WINDOW_RESULT_TOKENS = 64;
 
 function resultCap(args = {}) {
   const items = Array.isArray(args.items) ? args.items : [args];
   return items.reduce((sum, item) => (
-    sum + Math.max(64, Number(item?.maxTokens) || DEFAULT_WINDOW_RESULT_TOKENS)
+    sum + Math.max(MIN_SOURCE_WINDOW_RESULT_TOKENS, Number(item?.maxTokens) || DEFAULT_WINDOW_RESULT_TOKENS)
   ), 0);
 }
 
@@ -50,19 +53,30 @@ export function admitSourceContextHeadroom({ boot = {}, args = {} } = {}) {
   const key = `${boot.attemptId}:${boot.providerSessionId}`;
   const existing = contextHeadroomReservationOwner.reservedTokens(key);
   const reservationTokens = resultCap(args);
-  const predicted = Math.ceil(
+  // Everything in the next request that is not this call's own result payload,
+  // including every concurrently pending scalar-result reservation.
+  const committed = Math.ceil(
     Number(checkpoint.checkpoint.request_context_input_tokens || 0)
     + Number(checkpoint.checkpoint.output_tokens_since_request || 0)
     + existing
-    + reservationTokens
     + ESTIMATOR_ERROR_HEADROOM_TOKENS,
   );
+  const predicted = committed + reservationTokens;
   const nearTier = predicted >= boundary;
-  const batched = Array.isArray(args.items) && args.items.length >= 2;
-  const allowed = !nearTier || batched;
+  // D-3: the public contract is scalar-only, so "batch it into items" was never
+  // an executable remediation. Near the tier the admissible move is a bounded
+  // selection: the result cap the caller declares must keep the whole next
+  // request under the long-context threshold. Independent scalar calls issued
+  // together are still fine — each draws from the same remaining budget below,
+  // because `existing` holds their pending reservations.
+  const availableResultTokens = Math.max(0, threshold - committed);
+  const allowed = !nearTier || reservationTokens <= availableResultTokens;
+  const remediable = availableResultTokens >= MIN_SOURCE_WINDOW_RESULT_TOKENS;
   const reason = !nearTier
     ? "below_headroom"
-    : (allowed ? "batched_request" : "batch_required");
+    : (allowed
+      ? "bounded_selection"
+      : (remediable ? "result_bound_required" : "source_budget_exhausted"));
   if (allowed) contextHeadroomReservationOwner.reserve(key, reservationTokens);
   observation(boot, {
     agent_call_id: boot.agentCallId ?? null,
@@ -72,6 +86,8 @@ export function admitSourceContextHeadroom({ boot = {}, args = {} } = {}) {
     threshold_tokens: threshold,
     admission_boundary_tokens: boundary,
     previous_pending_reservation_tokens: existing,
+    requested_result_tokens: reservationTokens,
+    available_result_tokens: availableResultTokens,
     reservation_tokens: allowed ? reservationTokens : 0,
     checkpoint_sequence_id: checkpoint.checkpoint.sequence_id,
     expected_next_sequence_id: Number(checkpoint.checkpoint.sequence_id) + 1,
@@ -82,11 +98,21 @@ export function admitSourceContextHeadroom({ boot = {}, args = {} } = {}) {
     reason,
     predicted,
     threshold,
-    reservation: allowed ? { key, tokens: reservationTokens } : null,
+    requestedResultTokens: reservationTokens,
+    availableResultTokens,
+    remediable,
+    reservation: allowed ? { key, tokens: reservationTokens, released: false } : null,
   };
 }
 
+// Exactly-once by construction: the reservation record carries its own release
+// state, so a site that releases and returns cannot be double-charged by the
+// enclosing `finally`. Double release would deflate the pending total and
+// over-admit the next request at the tier boundary.
 export function releaseSourceContextHeadroomReservation(reservation) {
-  if (!reservation?.key || !reservation.tokens) return;
+  if (!reservation?.key || !reservation.tokens) return false;
+  if (reservation.released === true) return false;
+  reservation.released = true;
   contextHeadroomReservationOwner.release(reservation.key, reservation.tokens);
+  return true;
 }

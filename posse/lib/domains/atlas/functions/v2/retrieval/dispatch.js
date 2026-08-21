@@ -28,7 +28,7 @@ import { treeGrow, treeOverview, treeScope, treeWalk } from "./tree.js";
 import { codeSurvey } from "./survey.js";
 import { codeStructure } from "./exact.js";
 import { codeDb } from "./db.js";
-import { codeGetSkeleton, codeGetHotPath, codeNeedWindow } from "./code.js";
+import { codeGetSkeleton, codeLens, codeNeedWindow } from "./code.js";
 import { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";
 import { fileRead } from "./file-read.js";
 import { deltaGet, prRiskAnalyze, prRisk } from "./blast-radius.js";
@@ -298,7 +298,7 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (codeGetSkeleton({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.lens":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeGetHotPath({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
+      return /** @type {any} */ (codeLens({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.window":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (codeNeedWindow({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));

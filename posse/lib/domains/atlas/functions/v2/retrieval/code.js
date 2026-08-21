@@ -13,7 +13,7 @@ import { isCanonicalRepoPath } from "../paths.js";
 import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
 import { getEffectivePolicy } from "./policy.js";
 import {
-  codeHotPathNative,
+  codeLensNative,
   codeSkeletonNative,
   codeWindowNative,
 } from "../native/code-context.js";
@@ -23,10 +23,10 @@ import { readRepoFileResult } from "./repo-read.js";
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
 /** @typedef {import("../contracts/tool-params.js").CodeGetSkeletonParams} CodeGetSkeletonParams */
-/** @typedef {import("../contracts/tool-params.js").CodeGetHotPathParams} CodeGetHotPathParams */
+/** @typedef {import("../contracts/tool-params.js").CodeLensParams} CodeLensParams */
 /** @typedef {import("../contracts/tool-params.js").CodeNeedWindowParams} CodeNeedWindowParams */
 /** @typedef {import("../contracts/tool-results.js").CodeSkeletonData} CodeSkeletonData */
-/** @typedef {import("../contracts/tool-results.js").CodeHotPathData} CodeHotPathData */
+/** @typedef {import("../contracts/tool-results.js").CodeLensData} CodeLensData */
 /** @typedef {import("../contracts/tool-results.js").CodeWindowData} CodeWindowData */
 
 /** @typedef {(path: string) => string | null} ReadFile */
@@ -171,16 +171,16 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
  * @param {{
  *   view: View,
  *   versionId: string,
- *   params: CodeGetHotPathParams,
+ *   params: CodeLensParams,
  *   readFile: ReadFile,
  *   repoRoot?: string,
  * }} args
  */
-export async function codeGetHotPath({ view, versionId, params, readFile, repoRoot }) {
-  return await codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, codeHotPathNative);
+export async function codeLens({ view, versionId, params, readFile, repoRoot }) {
+  return await codeLensWithNative({ view, versionId, params, readFile, repoRoot }, codeLensNative);
 }
 
-async function codeGetHotPathWithNative({ view, versionId, params, readFile, repoRoot }, buildHotPath) {
+async function codeLensWithNative({ view, versionId, params, readFile, repoRoot }, buildLens) {
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.lens" });
   if (!resolved.ok) return errorEnvelope({
     action: "code.lens",
@@ -211,7 +211,7 @@ async function codeGetHotPathWithNative({ view, versionId, params, readFile, rep
     }
   }
   const calledFrom = await calledFromBreadcrumbs(view, [...lensTargets.values()], { maxSymbols: 4 });
-  const resolvedHotPath = await buildHotPath({
+  const resolvedLens = await buildLens({
     repo_rel_path: targetPath,
     source,
     target: resolved.target,
@@ -219,35 +219,35 @@ async function codeGetHotPathWithNative({ view, versionId, params, readFile, rep
     identifiersToFind: idents,
     contextLines,
   });
-  return finishCodeHotPath({
+  return finishCodeLens({
     versionId,
     params,
     targetPath,
     symbolId,
-    hotPath: resolvedHotPath,
+    lens: resolvedLens,
     calledFrom,
   });
 }
 
-function finishCodeHotPath({ versionId, params, targetPath, symbolId, hotPath, calledFrom = [] }) {
-  const etag = String(hotPath.etag || "");
+function finishCodeLens({ versionId, params, targetPath, symbolId, lens, calledFrom = [] }) {
+  const etag = String(lens.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
     return notModifiedEnvelope({ action: "code.lens", versionId, etag });
   }
-  /** @type {CodeHotPathData} */
+  /** @type {CodeLensData} */
   const data = {
     ...(symbolId ? { symbolId } : {}),
     repo_rel_path: targetPath,
-    matches: Array.isArray(hotPath.matches) ? hotPath.matches : [],
-    identifiersFound: Array.isArray(hotPath.identifiersFound) ? hotPath.identifiersFound : [],
-    ...(hotPath.identifiersFoundInText?.length
-      ? { identifiersFoundInText: hotPath.identifiersFoundInText }
+    matches: Array.isArray(lens.matches) ? lens.matches : [],
+    identifiersFound: Array.isArray(lens.identifiersFound) ? lens.identifiersFound : [],
+    ...(lens.identifiersFoundInText?.length
+      ? { identifiersFoundInText: lens.identifiersFoundInText }
       : {}),
-    identifiersMissing: Array.isArray(hotPath.identifiersMissing) ? hotPath.identifiersMissing : [],
-    truncated: hotPath.truncated === true,
-    omittedMatchCount: Math.max(0, Number(hotPath.omittedMatchCount) || 0),
-    ...(typeof hotPath.degradedReason === "string" && hotPath.degradedReason
-      ? { degradedReason: hotPath.degradedReason }
+    identifiersMissing: Array.isArray(lens.identifiersMissing) ? lens.identifiersMissing : [],
+    truncated: lens.truncated === true,
+    omittedMatchCount: Math.max(0, Number(lens.omittedMatchCount) || 0),
+    ...(typeof lens.degradedReason === "string" && lens.degradedReason
+      ? { degradedReason: lens.degradedReason }
       : {}),
     ...(calledFrom.length > 0 ? { calledFrom } : {}),
     etag,

@@ -43,6 +43,7 @@ import { signalAbortError } from "../../../runtime/functions/yield.js";
 export { extractJson };
 
 import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
+import { createAssessorToolLoopBudget } from "../shared/assessor-tool-loop-budget.js";
 const LIVE_CHANNEL_TURN_LIMIT = 12;
 
 function abortableThrottle(ms, signal = null) {
@@ -338,6 +339,7 @@ export async function callProvider(promptText, {
   abortSignal = null,
   stallTimeout = null,  // stall detection timeout in seconds
   fallbackReads = null, // max fallback read_file calls (from handoff context budgets)
+  assessorMaxToolCalls = null, // assessor per-call tool ceiling (assessor_max_tool_calls)
   taskMode = "code",    // task mode - informational (not used for tool gating)
   needsImageGeneration = false, // explicit flag - enables generate_image tool
   skipRolePrompt = false,
@@ -541,6 +543,12 @@ export async function callProvider(promptText, {
   let liveChannelTurnCount = 0;
   let readCount = 0;
   const maxReads = fallbackReads ?? DEFAULT_FALLBACK_READS;
+  // Physical assessor tool calls, not provider turns: one provider batch can
+  // carry many calls, so the ceiling is evaluated per call inside the batch.
+  const assessorToolBudget = createAssessorToolLoopBudget({
+    role,
+    maxToolCalls: assessorMaxToolCalls,
+  });
   let allText = "";
   const toolUses = [];
   let providerToolTurnIndex = 0;
@@ -768,6 +776,23 @@ export async function callProvider(promptText, {
           providerBatchSize: functionCalls.length,
         };
         toolUses.push(recordedToolUse);
+
+        // -- Enforce the assessor tool-call ceiling --
+        // The decision comes from the canonical shared policy so this loop
+        // cannot drift from the MCP transports on the cap, the boundary, the
+        // agent_handoff exemption, or the exhaustion wording. Blocked calls
+        // never reach executeTool and consume no other sublimit.
+        const assessorCeiling = assessorToolBudget.evaluate(call.name);
+        if (assessorCeiling) {
+          emit(`${C.yellow}  [budget] ${call.name} denied - assessor tool-call ceiling ${assessorCeiling.cap} reached${C.reset}`);
+          recordedToolUse.blockedReason = assessorCeiling.reason;
+          toolResults.push({
+            type: "function_call_output",
+            call_id: call.call_id,
+            output: assessorCeiling.text,
+          });
+          continue;
+        }
 
         // -- Enforce read budget --
         if (call.name === "read_file") {

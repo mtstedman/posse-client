@@ -235,7 +235,7 @@ function camelToAction(value) {
     sliceRefresh: "slice.refresh",
     sliceSpilloverGet: "slice.spillover.get",
     codeGetSkeleton: "code.skeleton",
-    codeGetHotPath: "code.lens",
+    codeLens: "code.lens",
     codeNeedWindow: "code.window",
     contextSummary: "context.summary",
     repoRegister: "repo.register",

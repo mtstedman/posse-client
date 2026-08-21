@@ -37,18 +37,68 @@ const WALK_SKIP_DIRS = new Set([
 ]);
 
 /**
+ * Typed disposition recorded when a walked entry is excluded from exact
+ * source indexing because it is a symlink. Git proves only the committed link
+ * text, so the dereferenced target can change while `git status` stays clean;
+ * hashing that target would certify bytes the repository OID never proved.
+ */
+export const ATLAS_WARM_WALK_SYMLINK_SKIP_REASON = "symlink_skip";
+
+/** Human-readable disposition message paired with the reason above. */
+export const ATLAS_WARM_WALK_SYMLINK_SKIP_MESSAGE =
+  "Symlink excluded from exact source indexing; Git proves the link text, not the dereferenced target";
+
+/**
+ * Single decision point shared by the Git-backed walk, the filesystem
+ * fallback walk, and the per-path indexer, so all three return the same
+ * disposition for the same entry.
+ *
+ * The argument only needs `lstat` semantics, which makes the symlink
+ * disposition exercisable without symlink-creation privilege: pass an
+ * `fs.Stats` from `fs.lstat`, an `fs.Dirent` from
+ * `readdir({ withFileTypes: true })`, or an injected stub.
+ *
+ * @param {{ isFile?: () => boolean, isSymbolicLink?: () => boolean } | null | undefined} entry
+ * @returns {{ indexable: boolean, skip: { reason: string, message: string } | null }}
+ */
+export function atlasWarmWalkEntryDisposition(entry) {
+  if (typeof entry?.isSymbolicLink === "function" && entry.isSymbolicLink()) {
+    return {
+      indexable: false,
+      skip: {
+        reason: ATLAS_WARM_WALK_SYMLINK_SKIP_REASON,
+        message: ATLAS_WARM_WALK_SYMLINK_SKIP_MESSAGE,
+      },
+    };
+  }
+  return {
+    indexable: typeof entry?.isFile === "function" && entry.isFile(),
+    skip: null,
+  };
+}
+
+/**
  * Async variant used by warm jobs so a full-repo scan yields between
  * directory reads instead of monopolizing the event loop.
  *
  * @param {string} repoRoot
  * @param {(filename: string, relPath: string) => boolean} accept
- * @param {{ maxPaths?: number }} [opts]
+ * @param {{ maxPaths?: number, onExcluded?: (skip: { repo_rel_path: string, reason: string, message: string }) => void }} [opts]
  * @returns {Promise<string[]>}
  */
 export async function walkRepoFilesAsync(repoRoot, accept, opts = {}) {
   const maxPaths = Number.isInteger(opts.maxPaths) && /** @type {number} */ (opts.maxPaths) > 0
     ? /** @type {number} */ (opts.maxPaths)
     : Infinity;
+  const onExcluded = typeof opts.onExcluded === "function" ? opts.onExcluded : null;
+  /**
+   * @param {string} relPath
+   * @param {{ reason: string, message: string }} skip
+   */
+  const reportExcluded = (relPath, skip) => {
+    if (!onExcluded) return;
+    onExcluded({ repo_rel_path: relPath, reason: skip.reason, message: skip.message });
+  };
   /** @type {string[]} */
   const out = [];
   // Git is the authoritative source manifest for exact warms. It includes
@@ -67,11 +117,21 @@ export async function walkRepoFilesAsync(repoRoot, accept, opts = {}) {
       if (out.length >= maxPaths) break;
       const filename = path.posix.basename(relPath);
       if (!accept(filename, relPath)) continue;
+      /** @type {fs.Stats | null} */
+      let entry = null;
       try {
-        if (!(await fs.promises.stat(path.join(repoRoot, relPath))).isFile()) continue;
+        // lstat, not stat: a tracked symlink must be dispositioned as a
+        // symlink instead of silently resolving to its target's bytes.
+        entry = await fs.promises.lstat(path.join(repoRoot, relPath));
       } catch {
         continue;
       }
+      const disposition = atlasWarmWalkEntryDisposition(entry);
+      if (disposition.skip) {
+        reportExcluded(relPath, disposition.skip);
+        continue;
+      }
+      if (!disposition.indexable) continue;
       out.push(relPath);
     }
     return out;
@@ -97,9 +157,17 @@ export async function walkRepoFilesAsync(repoRoot, accept, opts = {}) {
         if (name.startsWith(".") && !relDir) continue;
         const childRel = relDir ? `${relDir}/${name}` : name;
         if (!await walk(path.join(absDir, name), childRel)) return false;
-      } else if (ent.isFile()) {
+      } else {
         const relPath = relDir ? `${relDir}/${name}` : name;
         if (!accept(name, relPath)) continue;
+        // Dirent already carries lstat semantics, so this fallback reaches the
+        // same symlink disposition as the Git-backed walk above.
+        const disposition = atlasWarmWalkEntryDisposition(ent);
+        if (disposition.skip) {
+          reportExcluded(relPath, disposition.skip);
+          continue;
+        }
+        if (!disposition.indexable) continue;
         out.push(relPath);
       }
     }

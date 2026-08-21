@@ -130,7 +130,7 @@
 /**
  * @typedef {Object} AtlasWarmSkip
  * @property {string} repo_rel_path
- * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "generated_artifact_skip" | "busy" | "infra_unavailable" | "rebuild_required"} reason
+ * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "generated_artifact_skip" | "symlink_skip" | "busy" | "infra_unavailable" | "rebuild_required"} reason
  * @property {string} [message]
  */
 
@@ -156,6 +156,10 @@ export const ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS = Object.freeze([
   "size_exceeded",
   "minified_skip",
   "generated_artifact_skip",
+  // A symlink is excluded rather than dereferenced: Git proves only the
+  // committed link text. The path is accounted because the exact view
+  // contains no rows derived from it.
+  "symlink_skip",
 ]);
 
 /** Frozen status policy. Implementations and tests must source from here. */

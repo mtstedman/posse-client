@@ -45,7 +45,10 @@ import {
 } from "../../functions/v2/verbose-errors.js";
 import { ingestView } from "../../functions/v2/embeddings/ingest.js";
 import { reconcileEmbeddings, resumeEmbeddingsSlice } from "../../functions/v2/embeddings/on-demand.js";
-import { ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS } from "../../functions/v2/contracts/jobs.js";
+import {
+  ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS,
+  ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS,
+} from "../../functions/v2/contracts/jobs.js";
 import { errorForTelemetry, recordEmbeddingForensics } from "../../functions/v2/embeddings/forensics.js";
 import { cleanupStaleEmbeddingDirs, openEmbeddingResources } from "../../functions/v2/embeddings/resources.js";
 import {
@@ -99,7 +102,11 @@ import {
   positiveIntOrDefault,
   shouldRunMlTreeCompressionReseed,
 } from "../../functions/v2/tree-compression-policy.js";
-import { MAX_FULL_WARM_PATHS, walkRepoFilesAsync } from "../../functions/v2/warm-walk.js";
+import {
+  MAX_FULL_WARM_PATHS,
+  atlasWarmWalkEntryDisposition,
+  walkRepoFilesAsync,
+} from "../../functions/v2/warm-walk.js";
 import { withAtlasViewWriteLock } from "../../functions/v2/view-write-lock.js";
 import {
   isAtlasMainGenerationPurpose,
@@ -120,6 +127,13 @@ export { shouldRunMlTreeCompressionReseed };
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmPurpose} AtlasWarmPurpose */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasRebuildRequirement} AtlasRebuildRequirement */
 /** @typedef {import("../../functions/v2/contracts/jobs.js").AtlasWarmSkip} AtlasWarmSkip */
+
+/**
+ * Skip reasons that account for a path completely and therefore still allow an
+ * exact main generation. Every one of them must remove the prior generation's
+ * contribution for that path before publication.
+ */
+const ACCOUNTED_EXCLUSION_REASONS = new Set(ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS);
 /** @typedef {import("../../functions/v2/contracts/api.js").ViewSymbol} ViewSymbol */
 
 /**
@@ -1844,12 +1858,21 @@ export class ParseEngine {
       progress_total: snapshot.size,
       percent: snapshot.size > 0 ? 0 : 100,
     });
+    /** @type {Set<string>} */
+    const walkExcludedPaths = new Set();
     const paths = await walkRepoFilesAsync(this.#repoRoot, (filename, relPath) => {
       const ext = path.extname(filename).toLowerCase();
       if (!ext || !(/** @type {ParserAdapter} */ (this.#parser)).supports(ext)) return false;
       if (isGeneratedSourceArtifactPath(relPath)) return false;
       return true;
-    });
+    }, { onExcluded: (skip) => walkExcludedPaths.add(String(skip?.repo_rel_path || "")) });
+    // A path the walk now excludes still exists on disk, so the missing-file
+    // sweep below would report it unchanged. Route the ones the previous
+    // generation indexed through the incremental warm so their contributions
+    // are removed instead of surviving under the next exact OID.
+    for (const repoRelPath of walkExcludedPaths) {
+      if (snapshot.has(repoRelPath)) rememberChanged(repoRelPath);
+    }
     const total = paths.length;
     for (const repoRelPath of paths) {
       const lang = languageForPath(repoRelPath);
@@ -2450,12 +2473,17 @@ export class ParseEngine {
       return base;
     }
     await this.#emitStage("walking", `scanning repository for ${branch}`);
+    /** @type {Set<string>} */
+    const walkExcludedPaths = new Set();
     const walkedPaths = await walkRepoFilesAsync(this.#repoRoot, (filename, relPath) => {
       const ext = path.extname(filename).toLowerCase();
       if (!ext || !(/** @type {ParserAdapter} */ (this.#parser)).supports(ext)) return false;
       if (isGeneratedSourceArtifactPath(relPath)) return false;
       return true;
-    }, { maxPaths: MAX_FULL_WARM_PATHS });
+    }, {
+      maxPaths: MAX_FULL_WARM_PATHS,
+      onExcluded: (skip) => walkExcludedPaths.add(String(skip?.repo_rel_path || "")),
+    });
     let paths = walkedPaths;
     const truncated = walkedPaths.length >= MAX_FULL_WARM_PATHS;
     let removedSnapshotPaths = [];
@@ -2479,6 +2507,12 @@ export class ParseEngine {
         });
       }
     }
+    if (walkExcludedPaths.size > 0) {
+      // Indexing dispositions the exclusion once, in the same place that
+      // removes any prior contribution for the path.
+      paths = paths.concat([...walkExcludedPaths].sort());
+      /** @type {any} */ (base).fileset_paths_excluded = walkExcludedPaths.size;
+    }
     paths = orderedUniquePaths(paths);
     base.paths_considered = paths.length;
     const removedSuffix = removedSnapshotPaths.length > 0
@@ -2492,6 +2526,32 @@ export class ParseEngine {
     await this.#indexPaths({ paths, branch, base, documentIntake, stageScipPaths });
     if (!buildView) return base;
     return await this.#rebuildBranchView({ payload, branch, base });
+  }
+
+  /**
+   * True when the previous generation's rows for a path this parser cannot
+   * read came from another layer (SCIP) and still describe the bytes on disk.
+   * Those rows are derived from the exact bytes the repository OID proves, so
+   * the path is still indexed rather than excluded.
+   *
+   * @param {string | undefined | null} beforeHash
+   * @param {string} absPath
+   * @returns {Promise<boolean>}
+   */
+  async #retainsCoverageWithoutParser(beforeHash, absPath) {
+    const hash = String(beforeHash || "");
+    if (!hash) return false;
+    const ledger = /** @type {any} */ (this.#ledger);
+    if (typeof ledger.listBlobLayers !== "function") return false;
+    const layers = ledger.listBlobLayers(hash) || [];
+    const coveredElsewhere = layers.some((layer) => String(layer?.source || "") !== "treesitter"
+      && String(layer?.status || "indexed") === "indexed");
+    if (!coveredElsewhere) return false;
+    try {
+      return sha256Hex(await fs.promises.readFile(absPath)) === hash;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -2603,6 +2663,48 @@ export class ParseEngine {
         repo_rel_path: repoRelPath,
       }, { label: "Ledger.deleteSourceStat.indexPath" });
     };
+    /**
+     * Record an accounted exclusion for a path this generation will not index,
+     * and drop whatever the previous generation contributed for it.
+     *
+     * An accounted skip still lets the generation publish as exact
+     * (`ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS`), so the excluded path
+     * must contribute no rows at all. Leaving the prior `add`/`modify` in the
+     * snapshot would keep the previous generation's symbols and hashes alive
+     * under the new Git OID. Read/parse/infra failures deliberately do not
+     * come through here: they are unaccounted, keep closeout partial, and
+     * retain their rows.
+     *
+     * @param {AtlasWarmSkip} skip
+     * @param {{ ordinal: number, language: string | null }} progress
+     */
+    const recordAccountedExclusion = async (skip, { ordinal, language }) => {
+      const repoRelPath = String(skip?.repo_rel_path || "");
+      if (!ACCOUNTED_EXCLUSION_REASONS.has(String(skip?.reason || ""))) {
+        throw new TypeError(`recordAccountedExclusion: '${skip?.reason}' is not an accounted skip reason`);
+      }
+      base.skipped.push(skip);
+      const before = snapshot.get(repoRelPath);
+      if (!before) return;
+      await reportIndexProgress(repoRelPath, {
+        force: true,
+        stage: "recording delta",
+        current: ordinal,
+        text: `removing excluded file ${ordinal}/${total} ${repoRelPath}`,
+        language,
+      });
+      recordStaleEmbeddingHash(base, before);
+      await this.#ledger.append({
+        branch,
+        op: "remove",
+        repo_rel_path: repoRelPath,
+        before_content_hash: before,
+        after_content_hash: null,
+      });
+      await deletePathSourceStat(repoRelPath);
+      base.ledger_entries_appended++;
+      snapshot.delete(repoRelPath);
+    };
 
     for (const rawPath of paths) {
       const repo_rel_path = String(rawPath || "");
@@ -2623,11 +2725,11 @@ export class ParseEngine {
           language: pathLanguage,
         });
         if (!isCanonicalRepoPath(repo_rel_path)) {
-          base.skipped.push({
+          await recordAccountedExclusion({
             repo_rel_path,
             reason: "unsupported_lang",
             message: "Non-canonical repo path; expected forward-slash repo-relative form",
-          });
+          }, { ordinal, language: pathLanguage });
           continue;
         }
 
@@ -2695,11 +2797,22 @@ export class ParseEngine {
 
         const ext = path.extname(repo_rel_path).toLowerCase();
         if (!ext || !this.#parser.supports(ext)) {
-          base.skipped.push({
+          /** @type {AtlasWarmSkip} */
+          const unsupported = {
             repo_rel_path,
             reason: "unsupported_lang",
             message: `Unsupported extension '${ext || "(none)"}'`,
-          });
+          };
+          // "This parser cannot read it" is not the same as "excluded". A
+          // SCIP-only document sits here on every warm, and its rows still
+          // describe the bytes on disk. Only when nothing else covers the
+          // current bytes is this an exclusion whose prior contribution must
+          // go — which is also what a shrinking parser language set produces.
+          if (await this.#retainsCoverageWithoutParser(snapshot.get(repo_rel_path), absPath)) {
+            base.skipped.push(unsupported);
+            continue;
+          }
+          await recordAccountedExclusion(unsupported, { ordinal, language: pathLanguage });
           continue;
         }
 
@@ -2716,13 +2829,25 @@ export class ParseEngine {
             text: `sampling ${ordinal}/${total} ${repo_rel_path}`,
             language: pathLanguage,
           });
-          fileStat = await fs.promises.stat(absPath);
+          // lstat, not stat: the walk already excludes symlinks, and an
+          // explicitly requested path must reach the same disposition instead
+          // of being parsed from a dereferenced target Git never proved.
+          fileStat = await fs.promises.lstat(absPath);
+          const entryDisposition = atlasWarmWalkEntryDisposition(fileStat);
+          if (entryDisposition.skip) {
+            await recordAccountedExclusion({
+              repo_rel_path,
+              reason: /** @type {any} */ (entryDisposition.skip.reason),
+              message: entryDisposition.skip.message,
+            }, { ordinal, language: pathLanguage });
+            continue;
+          }
           if (isOversizedForParsing(fileStat.size)) {
-            base.skipped.push({
+            await recordAccountedExclusion({
               repo_rel_path,
               reason: "size_exceeded",
               message: `File is ${fileStat.size} bytes; max parse size is ${MAX_PARSE_FILE_BYTES} bytes`,
-            });
+            }, { ordinal, language: pathLanguage });
             continue;
           }
           // Minification is a resource guard, not a classification of tiny
@@ -2731,11 +2856,11 @@ export class ParseEngine {
           // is cheap. Apply path/content heuristics only once a file is at
           // least one full inspection window.
           if (shouldInspectSourceForMinification(repo_rel_path, fileStat.size) && isLikelyMinifiedPath(repo_rel_path)) {
-            base.skipped.push({
+            await recordAccountedExclusion({
               repo_rel_path,
               reason: "minified_skip",
               message: "Path matches minified/bundled pattern",
-            });
+            }, { ordinal, language: pathLanguage });
             continue;
           }
           fileBytes = await fs.promises.readFile(absPath);
@@ -2744,11 +2869,11 @@ export class ParseEngine {
           if (shouldInspectSourceForMinification(repo_rel_path, fileBytes.length) && sample.length > 0) {
             const inspection = inspectSampleForMinified(sample);
             if (inspection.minified) {
-              base.skipped.push({
+              await recordAccountedExclusion({
                 repo_rel_path,
                 reason: "minified_skip",
                 message: `Content looks minified (maxLine=${Math.round(inspection.maxLineLen)} meanLine=${Math.round(inspection.meanLineLen)})`,
-              });
+              }, { ordinal, language: pathLanguage });
               continue;
             }
           }

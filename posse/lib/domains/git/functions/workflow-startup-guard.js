@@ -6,7 +6,7 @@ import path from "path";
 import {
   getJob,
   getSetting,
-  listWaitingLanePreparations,
+  listAllWaitingLanePreparations,
   logEvent,
   poisonWaitingLanePreparation,
   retireWaitingLanePreparation,
@@ -81,7 +81,11 @@ export async function reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
   const observations = [];
   let preparations = [];
   try {
-    preparations = listWaitingLanePreparations({ limit: 1000 });
+    // Every row that can still own a filesystem asset, paged to exhaustion.
+    // A lifetime cap here let terminal history whose asset proof was already
+    // cleared hide a newer prepared worktree from startup recovery; rows with
+    // no `worktree_root` have no asset to recover and only produced noise.
+    preparations = listAllWaitingLanePreparations({ withWorktreeAsset: true });
   } catch (error) {
     return [{ action: "unavailable", reason: error?.message || String(error) }];
   }

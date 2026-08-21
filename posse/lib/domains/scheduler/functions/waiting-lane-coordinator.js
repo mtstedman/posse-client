@@ -12,6 +12,7 @@ import {
 import {
   WAITING_LANE_ATLAS_PURPOSES,
   WAITING_LANE_JOB_TYPE,
+  WAITING_LANE_NONTERMINAL_STATES,
   WAITING_LANE_SETTING_KEYS,
   normalizeWaitingLaneGeneration,
 } from "../../../catalog/waiting-lane.js";
@@ -24,6 +25,7 @@ import {
   getJob,
   getSetting,
   getWaitingLanePreparation,
+  listAllWaitingLanePreparations,
   listWaitingLanePreparations,
   parseJobPayload,
   retireWaitingLanePreparation,
@@ -545,10 +547,13 @@ export function selectWaitingLaneEvictionCandidates({
       AND wi.branch_name IS NOT NULL
       AND trim(wi.branch_name) <> ''
   `).all().map((row) => Number(row.work_item_id)));
-  const physicalResidents = listWaitingLanePreparations({ limit: 1000 })
+  // Query the residents that actually hold an asset instead of scanning
+  // lifetime history: terminal rows whose asset proof was already cleared can
+  // never push a newer resident outside the enumeration window, and paging
+  // means more than one page of asset-holding rows is still complete.
+  const physicalResidents = listAllWaitingLanePreparations({ withWorktreeAsset: true })
     .filter((preparation) => (
-      preparation.worktree_root
-      && preparation.state !== "active"
+      preparation.state !== "active"
       && !branchBackedRetiredIds.has(Number(preparation.work_item_id))
     ))
     .sort((left, right) => {
@@ -622,7 +627,14 @@ export function reconcileWaitingLanePreparationsOnBoot({
     if (advanced.advanced) summary.mainGenerations++;
   }
 
-  for (const observed of listWaitingLanePreparations({ limit: 1000 })) {
+  // Complete keyset enumeration of every live lane. Terminal rows are excluded
+  // because none of the branches below can change a retired/poisoned row, and
+  // scanning them was what let lifetime history push live lanes out of the
+  // window; the remaining live rows are paged until exhaustion.
+  const live = listAllWaitingLanePreparations({
+    states: [...WAITING_LANE_NONTERMINAL_STATES],
+  });
+  for (const observed of live) {
     let preparation = getWaitingLanePreparation(observed.work_item_id) || observed;
     const workItem = db.prepare(`SELECT id, status FROM work_items WHERE id = ?`).get(preparation.work_item_id);
     if (!workItem || TERMINAL_WORK_ITEM_STATUS_SET.has(workItem.status)) {

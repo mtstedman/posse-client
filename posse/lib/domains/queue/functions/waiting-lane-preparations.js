@@ -25,6 +25,9 @@ export {
 const DEFAULT_MAX_HOT_PATHS = 32;
 const ABSOLUTE_MAX_HOT_PATHS = 256;
 const DEFAULT_LIST_LIMIT = 100;
+// Page-size ceiling, never a lifetime enumeration ceiling. Callers that must
+// see every relevant row resume with the compound `(updated_at, work_item_id)`
+// keyset cursor returned by the previous page instead of raising this number.
 const MAX_LIST_LIMIT = 1000;
 
 const DEMAND_PRIORITY = new Map(
@@ -232,7 +235,42 @@ export function getWaitingLanePreparation(workItemId) {
   return decodePreparation(selectPreparation(getDb(), workItemId));
 }
 
-export function listWaitingLanePreparations({ states = null, targetBranch = null, limit = DEFAULT_LIST_LIMIT } = {}) {
+/**
+ * Compound keyset cursor for `listWaitingLanePreparations`. `work_item_id` is
+ * the table's INTEGER PRIMARY KEY, so `(updated_at, work_item_id)` is a total
+ * order and resuming strictly after the last returned row can neither skip nor
+ * repeat an unchanged row while other rows are inserted concurrently.
+ *
+ * @param {any} preparation
+ * @returns {{ updated_at: string, work_item_id: number } | null}
+ */
+export function waitingLanePreparationCursor(preparation) {
+  const updatedAt = normalizeOptionalString(preparation?.updated_at);
+  const workItemId = Number(preparation?.work_item_id);
+  if (!updatedAt || !Number.isSafeInteger(workItemId) || workItemId <= 0) return null;
+  return { updated_at: updatedAt, work_item_id: workItemId };
+}
+
+function normalizeListCursor(after) {
+  if (after == null) return null;
+  const cursor = waitingLanePreparationCursor(after);
+  if (!cursor) {
+    throw new TypeError("after must be a { updated_at, work_item_id } waiting-lane cursor");
+  }
+  return cursor;
+}
+
+/**
+ * One ordered page of preparation rows. `limit` bounds the page, not the
+ * lifetime history: pass `after` with the cursor of the last row to continue.
+ */
+export function listWaitingLanePreparations({
+  states = null,
+  targetBranch = null,
+  limit = DEFAULT_LIST_LIMIT,
+  after = null,
+  withWorktreeAsset = false,
+} = {}) {
   const db = getDb();
   const stateValues = states == null ? [] : (Array.isArray(states) ? states : [states]);
   if (stateValues.some((state) => !STATE_SET.has(state))) {
@@ -240,6 +278,7 @@ export function listWaitingLanePreparations({ states = null, targetBranch = null
   }
   const normalizedTarget = targetBranch == null ? null : normalizeOptionalString(targetBranch);
   if (targetBranch != null && !normalizedTarget) throw new TypeError("targetBranch must be a non-empty string");
+  const cursor = normalizeListCursor(after);
   const normalizedLimit = Number.isSafeInteger(limit) && limit >= 0
     ? Math.min(limit, MAX_LIST_LIMIT)
     : DEFAULT_LIST_LIMIT;
@@ -255,6 +294,13 @@ export function listWaitingLanePreparations({ states = null, targetBranch = null
     where.push("target_branch = ?");
     params.push(normalizedTarget);
   }
+  if (withWorktreeAsset) {
+    where.push("worktree_root IS NOT NULL AND trim(worktree_root) <> ''");
+  }
+  if (cursor) {
+    where.push("(updated_at > ? OR (updated_at = ? AND work_item_id > ?))");
+    params.push(cursor.updated_at, cursor.updated_at, cursor.work_item_id);
+  }
   return db.prepare(`
     SELECT *
     FROM waiting_lane_preparations
@@ -262,6 +308,51 @@ export function listWaitingLanePreparations({ states = null, targetBranch = null
     ORDER BY updated_at ASC, work_item_id ASC
     LIMIT ?
   `).all(...params, normalizedLimit).map(decodePreparation);
+}
+
+/**
+ * Complete keyset enumeration of the matching rows, oldest first. Terminal
+ * lifetime history can never hide a newer row from a consumer that uses this:
+ * there is no lifetime cap, only a page size. Rows whose `updated_at` is
+ * rewritten between pages are yielded at most once.
+ */
+export function* iterateWaitingLanePreparations({
+  states = null,
+  targetBranch = null,
+  withWorktreeAsset = false,
+  pageSize = MAX_LIST_LIMIT,
+} = {}) {
+  const boundedPageSize = Number.isSafeInteger(pageSize) && pageSize > 0
+    ? Math.min(pageSize, MAX_LIST_LIMIT)
+    : MAX_LIST_LIMIT;
+  const seen = new Set();
+  let after = null;
+  for (;;) {
+    const page = listWaitingLanePreparations({
+      states,
+      targetBranch,
+      withWorktreeAsset,
+      limit: boundedPageSize,
+      after,
+    });
+    if (page.length === 0) return;
+    for (const preparation of page) {
+      if (seen.has(preparation.work_item_id)) continue;
+      seen.add(preparation.work_item_id);
+      yield preparation;
+    }
+    after = waitingLanePreparationCursor(page[page.length - 1]);
+    if (!after || page.length < boundedPageSize) return;
+  }
+}
+
+/**
+ * Snapshot of every matching row. Consumers that retire/poison rows while
+ * reconciling must use this rather than the lazy iterator, so their own writes
+ * cannot reorder the enumeration underneath them.
+ */
+export function listAllWaitingLanePreparations(options = {}) {
+  return [...iterateWaitingLanePreparations(options)];
 }
 
 export function ensureWaitingLanePreparation({

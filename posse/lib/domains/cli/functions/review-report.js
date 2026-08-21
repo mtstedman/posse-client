@@ -16,7 +16,7 @@ import {
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { workItemCost } from "../../billing/functions/cost.js";
 import { resolveCanonicalCallAccounting } from "../../billing/functions/usage-segments.js";
-import { jobIsBackgroundIndex, jobIsDisplayFailure, jobIsWriteStep, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
+import { jobIsDisplayFailure, jobIsWriteStep, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 import { getAtlas137AcceptanceTelemetry } from "../../observability/functions/atlas137-report.js";
 
@@ -427,7 +427,7 @@ export function buildReviewReportData(reviewable, {
 
   return reviewable.map((wi) => {
     const jobs = listJobsByWorkItem(wi.id);
-    const visibleJobs = jobs.filter((job) => !jobIsBackgroundIndex(job));
+    const visibleJobs = reviewVisibleJobs(jobs);
     const agentCalls = getAgentCallsByWorkItem(wi.id);
     const totalDuration = agentCalls.reduce((sum, call) => sum + (call.duration_ms || 0), 0);
     const totalPrompt = agentCalls.reduce((sum, call) => sum + (call.prompt_chars || 0), 0);

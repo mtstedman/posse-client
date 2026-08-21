@@ -47,6 +47,9 @@ export const DEFAULT_SCIP_COLD_INDEX_TIMEOUT_MS = 600_000;
 const SCIP_STAGING_ORPHAN_GRACE_MS = 660_000;
 const SCIP_BATCH_STAGE_INDEXERS = new Set(["typescript", "python", "php"]);
 export const DEFAULT_SCIP_BATCH_MAX_FILES = 32;
+// Used only when the repository has no resolvable HEAD (a non-git source tree).
+// Kept stable so symbol identities do not churn between stages of one repo.
+const SCIP_UNKNOWN_PROJECT_VERSION = "0.0.0";
 export const DEFAULT_SCIP_BATCH_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
 export const DEFAULT_SCIP_BATCH_IN_FLIGHT = 2;
 const SCIP_INDEXER_ENV_EXACT = new Set([
@@ -734,6 +737,9 @@ export async function stageScipBatches({
     maxFiles: config?.atlasScipBatchMaxFiles ?? config?.atlas_scip_batch_max_files,
     maxSourceBytes: config?.atlasScipBatchMaxSourceBytes ?? config?.atlas_scip_batch_max_source_bytes,
   });
+  // Resolved once per stage: every batch view is cut from this HEAD, and the
+  // isolated views have no `.git` for the indexer to read it from itself.
+  const batchProjectVersion = await resolveCurrentHead(root);
   const reusableBatches = await findReusableScipBatchOutputs({ scipDir: dir, manifest });
   const sessionId = sha256Hex(Buffer.from(
     `${manifest.filesetHash}\0${Date.now()}\0${process.pid}\0${Math.random()}`,
@@ -781,6 +787,21 @@ export async function stageScipBatches({
   const files = [...fallbackFiles];
   const results = (fallback.results || []).map((row) => ({ ...row, fallbackWholeProject: true }));
   const inFlight = [];
+  // Documents whose staged artifact was handed to ledger intake. A bisected
+  // batch can acknowledge some documents while others fail permanently, so the
+  // coverage receipt is built from this set rather than from the manifest: an
+  // acknowledged receipt row must mean successful intake of that exact
+  // document and hash, never an attempted or failed stage. Recording at
+  // acknowledgement-dispatch time is safe because a rejected acknowledgement
+  // throws out of the drain loop below, before any receipt is written.
+  const acknowledgedDocuments = new Map();
+  const recordAcknowledgedDocuments = (documents) => {
+    for (const document of documents || []) {
+      const repoRelPath = String(document?.repoRelPath || "");
+      if (!repoRelPath) continue;
+      acknowledgedDocuments.set(repoRelPath, document);
+    }
+  };
   const acknowledgeOldest = async () => {
     const pending = inFlight.shift();
     if (!pending) return;
@@ -835,6 +856,7 @@ export async function stageScipBatches({
           staged: true,
           reused: true,
           resumedFromSession: reusable.sessionId,
+          documentsAcknowledged: batch.documents.length,
           documentsUnavailable: 0,
           batchOrdinal: batch.batchOrdinal,
           firstDocumentOrdinal: batch.firstDocumentOrdinal,
@@ -845,6 +867,7 @@ export async function stageScipBatches({
         });
         const ack = batchAcknowledgement(onBatchReady, reusable.outputPath, info);
         inFlight.push({ batch, ack, resumedFromSession: reusable.sessionId });
+        recordAcknowledgedDocuments(batch.documents);
         emit(onProgress, `reused SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
           kind: "atlas.scip.batch_reused",
           batch_ordinal: batch.batchOrdinal,
@@ -870,11 +893,14 @@ export async function stageScipBatches({
         sessionDir,
         batch,
         onProgress,
+        projectVersion: batchProjectVersion,
       });
       const result = {
         ok: recovered.ok,
         staged: recovered.outputs.length > 0,
         recovered: recovered.recovered,
+        documentsAcknowledged: recovered.outputs
+          .reduce((total, output) => total + (output.batch?.documents?.length || 0), 0),
         documentsUnavailable: recovered.unavailable.length,
         batchOrdinal: batch.batchOrdinal,
         firstDocumentOrdinal: batch.firstDocumentOrdinal,
@@ -934,6 +960,7 @@ export async function stageScipBatches({
           source_languages: sourceLanguagesForPlan(stagedBatch.plan),
         };
         acknowledgements.push(batchAcknowledgement(onBatchReady, staged.outputPath, info));
+        recordAcknowledgedDocuments(stagedBatch.documents);
       }
       inFlight.push({ batch, ack: observeBatchAcknowledgement(Promise.all(acknowledgements)) });
       emit(onProgress, `staged SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
@@ -942,6 +969,8 @@ export async function stageScipBatches({
         batch_count: manifest.batchCount,
         first_document_ordinal: batch.firstDocumentOrdinal,
         documents_expected: batch.documentsExpected,
+        documents_acknowledged: result.documentsAcknowledged,
+        documents_unavailable: result.documentsUnavailable,
         language: batch.plan.indexerId,
         source_languages: sourceLanguagesForPlan(batch.plan),
       });
@@ -953,11 +982,15 @@ export async function stageScipBatches({
     if (state.status === "complete") {
       const head = await resolveCurrentHead(root);
       if (head) {
+        // Only acknowledged documents are recorded. Every path this intake
+        // attempted stays in `replacedPaths`, so a document that failed to
+        // stage drops its prior receipt row instead of inheriting a stale
+        // acknowledgement: it remains retryable and cannot prove exact boot.
         const documents = await mergeScipBatchCoverageDocuments({
           repoRoot: root,
           scipDir: dir,
           replacedPaths: paths,
-          documents: manifest.documents.map((document) => ({
+          documents: [...acknowledgedDocuments.values()].map((document) => ({
             repo_rel_path: document.repoRelPath,
             content_hash: document.contentHash,
             source_languages: sourceLanguagesForPlan(document.plan),
@@ -992,10 +1025,10 @@ export async function stageScipBatches({
 }
 
 /**
- * @param {{ root: string, sessionDir: string, batch: any, onProgress?: ((event: Record<string, any>) => void) | null }} args
+ * @param {{ root: string, sessionDir: string, batch: any, onProgress?: ((event: Record<string, any>) => void) | null, projectVersion?: string | null }} args
  * @returns {Promise<ScipIndexerRunResult & { outputPath: string, sha256?: string }>}
  */
-async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
+async function stageScipBatch({ root, sessionDir, batch, onProgress, projectVersion = null }) {
   const batchName = `batch-${String(batch.batchOrdinal).padStart(5, "0")}`;
   const outputDir = path.join(sessionDir, batchName);
   const outputPath = path.join(outputDir, `${batch.plan.indexerId}.scip`);
@@ -1015,7 +1048,10 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
       }
     }
     await writeBatchProjectMetadata(root, viewRoot, batch);
-    const rewritten = planWithOutputPath(batch.plan, outputPath);
+    const rewritten = planWithProjectVersion(
+      planWithOutputPath(batch.plan, outputPath),
+      projectVersion,
+    );
     if (!rewritten.replaced) {
       return { ok: false, outputPath, error: `SCIP batch plan does not reference ${batch.plan.outputPath}` };
     }
@@ -1039,10 +1075,10 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress }) {
   }
 }
 
-async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress }) {
+async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress, projectVersion = null }) {
   const attempt = async (candidate) => {
     try {
-      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress });
+      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress, projectVersion });
     } catch (error) {
       return { ok: false, outputPath: null, error: formatAtlasError(error) };
     }
@@ -1152,21 +1188,24 @@ async function writeBatchProjectMetadata(root, viewRoot, batch) {
       if (!await fileExists(source)) continue;
       await fs.promises.copyFile(source, path.join(viewRoot, name));
     }
-    // Pyright's default excludes every dot-directory (`**/.*`). That turns a
-    // legitimate batch containing only a tracked helper such as
-    // `.github/workflows/release.py` into an empty SCIP file. Pin the isolated
-    // view to its already-sanitized batch manifest whenever a hidden path is
-    // present. A non-empty explicit exclude list prevents scip-python from
-    // restoring its dot-directory default while retaining ordinary generated
-    // dependency exclusions.
-    const hasHiddenPath = batch.paths.some((repoRelPath) => String(repoRelPath)
-      .split("/").some((segment) => segment.startsWith(".") && segment !== "." && segment !== ".."));
-    if (hasHiddenPath) {
-      await fs.promises.writeFile(path.join(viewRoot, "scip-pyrightconfig.json"), JSON.stringify({
-        include: batch.paths,
-        exclude: ["**/node_modules", "**/__pycache__"],
-      }), "utf8");
-    }
+    // Always pin the isolated view to its already-sanitized batch manifest.
+    // Two independent defaults otherwise empty the SCIP output:
+    //   1. Pyright excludes every dot-directory (`**/.*`), so a batch holding
+    //      only a tracked helper such as `.github/workflows/release.py` indexes
+    //      nothing.
+    //   2. The `pyproject.toml` copied above is the *repository's*, and its
+    //      `[tool.pyright] include`/`exclude` describes the real tree, not this
+    //      view. pydantic pins `include = ['pydantic', 'tests/test_pipeline.py']`,
+    //      which reports `Total Project Files 0` for every batch outside that
+    //      scope.
+    // The view contains exactly `batch.paths`, so pinning include to it is the
+    // truth of the view rather than a widening. A non-empty explicit exclude
+    // list prevents scip-python from restoring its dot-directory default while
+    // retaining ordinary generated dependency exclusions.
+    await fs.promises.writeFile(path.join(viewRoot, "scip-pyrightconfig.json"), JSON.stringify({
+      include: batch.paths,
+      exclude: ["**/node_modules", "**/__pycache__"],
+    }), "utf8");
   }
   // scip-python indexes the isolated project view with its ordinary `index`
   // command. Deliberately do not add or invoke --target-only: it emits empty
@@ -2100,6 +2139,22 @@ function planWithOutputPath(plan, outputPath) {
       outputPath,
     },
   };
+}
+
+// scip-python resolves `--project-version` from the current git revision when
+// the flag is absent. A batch project view is a bare copy with no `.git`, so
+// that lookup yields `undefined`, `normalizeNameOrVersion` throws, and the
+// indexer still exits 0 after writing a zero-document .scip. Pin the version to
+// the repository HEAD the batch was cut from so isolated views produce the same
+// symbol identities as a whole-repo stage.
+function planWithProjectVersion({ replaced, plan }, projectVersion) {
+  if (plan.indexerId !== "python") return { replaced, plan };
+  const args = Array.isArray(plan.args) ? plan.args.map((arg) => String(arg)) : [];
+  if (args.some((arg) => arg === "--project-version" || arg.startsWith("--project-version="))) {
+    return { replaced, plan };
+  }
+  const version = String(projectVersion || "").trim() || SCIP_UNKNOWN_PROJECT_VERSION;
+  return { replaced, plan: { ...plan, args: [...args, "--project-version", version] } };
 }
 
 async function replaceFile(from, to) {

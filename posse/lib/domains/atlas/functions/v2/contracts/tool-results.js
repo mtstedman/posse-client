@@ -767,10 +767,10 @@
  */
 
 /**
- * @typedef {Object} CodeHotPathData
+ * @typedef {Object} CodeLensData
  * @property {SymbolId} [symbolId]
  * @property {string} [repo_rel_path]
- * @property {CodeHotPathMatch[]} matches
+ * @property {CodeLensMatch[]} matches
  * @property {string[]} identifiersFound
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
@@ -782,7 +782,7 @@
  */
 
 /**
- * @typedef {Object} CodeHotPathMatch
+ * @typedef {Object} CodeLensMatch
  * @property {string} repo_rel_path
  * @property {number} line
  * @property {string} text
@@ -1368,7 +1368,7 @@
  *   | ToolResultEnvelope<SliceSpilloverGetData> & { action: "slice.spillover.get" }
  *   | ToolResultEnvelope<EditPlanData>         & { action: "edit.plan" }
  *   | ToolResultEnvelope<CodeSkeletonData>     & { action: "code.skeleton" }
- *   | ToolResultEnvelope<CodeHotPathData>      & { action: "code.lens" }
+ *   | ToolResultEnvelope<CodeLensData>      & { action: "code.lens" }
  *   | ToolResultEnvelope<CodeWindowData>       & { action: "code.window" }
  *   | ToolResultEnvelope<CodeStructureData>    & { action: "code.structure" }
  *   | ToolResultEnvelope<CodeDbData>        & { action: "code.db" }

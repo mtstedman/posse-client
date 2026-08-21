@@ -17,6 +17,11 @@ export const ADMIN_MAX_TEXT_CHARS = 2048;
 export const ADMIN_MAX_VALUE_CHARS = 16384;
 export const ADMIN_MAX_JSON_BYTES = 2 * 1024 * 1024;
 
+// Default ceiling applied when `assessor_max_tool_calls` is not configured as
+// an integer. Shared by the settings catalogue default and by the assessor
+// tool-call budget policy enforced at every assessor tool transport.
+export const ASSESSOR_MAX_TOOL_CALLS_DEFAULT = 12;
+
 export const SETTING_KEYS = Object.freeze({
   ASSESSMENT_SCOPE_MODE: "assessment_scope_mode",
   ASSESSMENT_SCOPE_MAX_GROUP_JOBS: "assessment_scope_max_group_jobs",

@@ -29,8 +29,8 @@ export async function codeSkeletonNative(payload, opts = {}) {
   return requireCodeResult("code-skeleton", await runAtlasNativeMethodAsync("code-skeleton", payload, opts), payload.repo_rel_path);
 }
 
-export async function codeHotPathNative(payload, opts = {}) {
-  return requireCodeResult("code-hotpath", await runAtlasNativeMethodAsync("code-hotpath", payload, opts), payload.repo_rel_path);
+export async function codeLensNative(payload, opts = {}) {
+  return requireCodeResult("code-lens", await runAtlasNativeMethodAsync("code-lens", payload, opts), payload.repo_rel_path);
 }
 
 export async function codeWindowNative(payload, opts = {}) {

@@ -226,3 +226,11 @@ export const NON_COMPLETION_BLOCKING_JOB_TYPES = new Set([
 // Repository-structural jobs need worktree-admin/root locking without being
 // classified as source-mutating or assessable agent work.
 export const REPOSITORY_PREPARATION_JOB_TYPES = new Set(["waiting_lane_prepare"]);
+
+// Canonical lookup for the optional-accelerator contract above. Review,
+// display, and assessment surfaces derive visibility from this predicate
+// instead of keeping their own partial job-type allowlists, so every current
+// and future member of NON_COMPLETION_BLOCKING_JOB_TYPES is honoured at once.
+export function jobTypeIsNonCompletionBlocking(jobType) {
+  return NON_COMPLETION_BLOCKING_JOB_TYPES.has(jobType);
+}

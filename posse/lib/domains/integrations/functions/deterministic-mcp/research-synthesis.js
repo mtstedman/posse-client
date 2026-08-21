@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 export const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 export const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
 // Leave enough room for broad source-read tasks to close late-discovered gaps.
@@ -94,25 +96,59 @@ export function researchSynthesisDecision({
 // evidence; empty results and exact repeats advance the stale streak instead. In-memory by design — a
 // gateway restart re-credits at most one duplicate per signature, which errs
 // toward keeping the evidence window open rather than closing it early.
+//
+// RS-1: the signature is scoped, not global. `scopeKey` carries the runtime
+// research-session owner and its repository identity, so identical arguments
+// issued by two different sessions (or against two different working
+// directories) are independent evidence events. The result digest is part of
+// the signature too: re-reading the same selector after the content changed is
+// new evidence, not an exact repeat.
 function nativeExplorationResultHasEvidence(resultText) {
   const text = String(resultText ?? "").trim();
   if (!text) return false;
   return !/^(?:No files found\.|No matches found\.)$/i.test(text);
 }
 
-export function createNativeExplorationNoveltyTracker({ maxEntries = 1024 } = {}) {
+export function nativeExplorationResultDigest(resultText) {
+  if (resultText === undefined) return "";
+  return crypto.createHash("sha256").update(String(resultText ?? ""), "utf8").digest("hex").slice(0, 24);
+}
+
+export function nativeExplorationNoveltySignature({
+  scopeKey = "",
+  toolName = "",
+  args = null,
+  resultText = undefined,
+} = {}) {
+  let serializedArgs;
+  try {
+    serializedArgs = JSON.stringify(args ?? null);
+  } catch {
+    serializedArgs = "unserializable";
+  }
+  return [
+    String(scopeKey || ""),
+    String(toolName || ""),
+    serializedArgs,
+    nativeExplorationResultDigest(resultText),
+  ].join("|");
+}
+
+export function createNativeExplorationNoveltyTracker({ maxEntries = 1024, scopeKey = "" } = {}) {
+  const scope = String(scopeKey || "");
   const seen = new Set();
   return {
+    scopeKey: scope,
     isNovel(toolName, args, resultText = undefined) {
       if (resultText !== undefined && !nativeExplorationResultHasEvidence(resultText)) {
         return false;
       }
-      let signature;
-      try {
-        signature = `${String(toolName || "")}|${JSON.stringify(args ?? null)}`;
-      } catch {
-        signature = `${String(toolName || "")}|unserializable`;
-      }
+      const signature = nativeExplorationNoveltySignature({
+        scopeKey: scope,
+        toolName,
+        args,
+        resultText,
+      });
       if (seen.has(signature)) return false;
       if (seen.size < maxEntries) seen.add(signature);
       return true;

@@ -13,6 +13,7 @@ import { ATLAS_SOURCE_LANGUAGE_ORDER } from "../../../../../catalog/atlas.js";
 import { gitExecBuffer } from "../../../../git/functions/utils.js";
 import { languageForPath } from "../parse/language-buckets.js";
 import { normalizeScipLanguages } from "./languages.js";
+import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
 
 export const DEFAULT_SCIP_INDEX_TIMEOUT_MS = 120_000;
 
@@ -632,9 +633,15 @@ function gitTreeFilesetEntries(repoRoot, ref, spec) {
     const tab = raw.indexOf("\t");
     if (tab === -1) continue;
     const header = raw.slice(0, tab).split(/\s+/u);
+    const mode = header[0] || "";
     const type = header[1] || "";
     const objectId = header[2] || "";
     if (type !== "blob" || !objectId) continue;
+    // AX-1: a symlink is a blob with mode 120000. Its object id proves only the
+    // link text while the indexer reads through the link, so including it both
+    // admits unprovable rows and pins a digest that cannot change when the
+    // target does. Exclude it, matching the worktree and filesystem routes.
+    if (mode === "120000") continue;
     const rel = normalizeRepoRel(raw.slice(tab + 1));
     if (!pathMatchesFilesetSpec(rel, spec)) continue;
     entries.push({ path: rel, digest: objectId, kind: "git-blob" });
@@ -658,8 +665,10 @@ function gitWorktreeFilesetEntries(repoRoot, spec) {
     if (!rel || !pathMatchesFilesetSpec(rel, spec)) continue;
     const abs = path.join(repoRoot, rel);
     try {
-      const st = fs.statSync(abs);
-      if (!st.isFile()) continue;
+      // AX-1: lstat, never stat. A tracked symlink's bytes are not proven by the
+      // repository OID, so it must not enter the fileset under a dereferenced
+      // digest. This mirrors the warm walk and the filesystem fallback below.
+      if (!atlasWarmWalkEntryDisposition(fs.lstatSync(abs)).indexable) continue;
       entries.push({ path: rel, digest: sha256File(abs), kind: "worktree-file" });
     } catch {
       // Deleted paths are not current fileset inputs.
@@ -684,8 +693,10 @@ function gitWorktreeFilesetPathEntries(repoRoot, spec) {
     if (!rel || !pathMatchesFilesetSpec(rel, spec)) continue;
     const abs = path.join(repoRoot, rel);
     try {
-      const st = fs.statSync(abs);
-      if (!st.isFile()) continue;
+      // AX-1: this manifest becomes the sanitizer's allowedPaths on the
+      // non-batched whole-repo route, so admitting a symlink here lets rows
+      // derived from unprovable bytes survive into an exact generation.
+      if (!atlasWarmWalkEntryDisposition(fs.lstatSync(abs)).indexable) continue;
       entries.push({ path: rel, kind: "worktree-file" });
     } catch {
       // Deleted paths are not current manifest inputs.

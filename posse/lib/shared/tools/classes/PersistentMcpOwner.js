@@ -25,6 +25,10 @@ import {
   assessorFallbackReadKey,
   isAssessorFallbackReadKey,
 } from "../../../domains/assessment/functions/fallback-read-tools.js";
+import {
+  assessorToolBudgetApplies,
+  assessorToolCallCeilingDecision,
+} from "../functions/assessor-tool-budget.js";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
@@ -1183,7 +1187,9 @@ function surveyAwareSkeletonRedirect(session, requested, toolArgs = {}) {
     message: "The prefetched code.survey already supplied this file's structural outline. Use that survey evidence and request exact unresolved code with code.window.",
     nextAction: {
       action: "code.window",
-      instruction: "Request the exact unresolved identifier or branch; batch 2-4 known targets in items when useful.",
+      // RH-1: `code.window` is scalar-only. Naming `items` here advertised a
+      // call form the schema omits and the owner and native executor reject.
+      instruction: "Request the exact unresolved identifier or branch; issue independent scalar calls together in one response when several targets are known.",
     },
     escapeHatch: {
       field: "surveyGap",
@@ -3056,12 +3062,16 @@ export class PersistentMcpOwner {
           return;
         }
         const requested = requestedToolPolicyName(toolName, toolArgs);
-        if (String(session?.bootConfig?.role || "") === "assessor" && requested.name !== "agent_handoff") {
-          const maxToolCalls = Number.isInteger(Number(session?.bootConfig?.assessorMaxToolCalls))
-            ? Math.max(1, Number(session.bootConfig.assessorMaxToolCalls))
-            : 12;
+        const assessorRole = String(session?.bootConfig?.role || "");
+        if (assessorToolBudgetApplies(assessorRole, requested.name)) {
           session._assessorToolCallCount = Number(session._assessorToolCallCount || 0) + 1;
-          if (session._assessorToolCallCount > maxToolCalls) {
+          const ceiling = assessorToolCallCeilingDecision({
+            role: assessorRole,
+            toolName: requested.name,
+            usedToolCalls: session._assessorToolCallCount,
+            maxToolCalls: session?.bootConfig?.assessorMaxToolCalls,
+          });
+          if (ceiling.blocked) {
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -3072,7 +3082,7 @@ export class PersistentMcpOwner {
                 result: {
                   content: [{
                     type: "text",
-                    text: "Assessor tool-call budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+                    text: ceiling.text,
                   }],
                   isError: false,
                 },
@@ -3921,13 +3931,30 @@ export class PersistentMcpOwner {
           entry.owner?.settleReservation(entry.reservation, "headroom_blocked");
         }
         coverageReservationsToRelease = [];
+        // RH-1: the remediation must name a call form the schema, the owner,
+        // and the native executor all accept. `code.window` is scalar-only, so
+        // the executable move near the tier is a bounded scalar re-issue with a
+        // smaller `maxTokens`, not a rejected `items` batch. When no result
+        // budget remains at all, say so instead of proposing an impossible read.
         const result = mcpToolTextPayload(JSON.stringify({
           status: "blocked",
           executed: false,
           reason: `context_headroom_${contextHeadroom.reason}`,
           predictedNextRequestTokens: contextHeadroom.predicted,
           longContextThresholdTokens: contextHeadroom.threshold,
-          message: "Near the long-context tier, source discovery must be one batched request. Stored evidence re-access and final handoff remain available.",
+          requestedResultTokens: contextHeadroom.requestedResultTokens,
+          availableResultTokens: contextHeadroom.availableResultTokens,
+          ...(contextHeadroom.remediable
+            ? {
+              nextAction: {
+                action: "code.window",
+                instruction: `Re-issue this same scalar selection with maxTokens at most ${contextHeadroom.availableResultTokens}.`,
+              },
+              message: `Near the long-context tier, each source read must declare a result bound that fits the remaining budget: re-issue this scalar code.window with maxTokens at most ${contextHeadroom.availableResultTokens}. Independent scalar calls may still be issued together, but they share that remaining budget. Stored evidence re-access and final handoff remain available.`,
+            }
+            : {
+              message: "No source-read budget remains before the long-context tier. Do not retry this read at any maxTokens. Use the evidence already gathered, re-access stored refs, and hand off.",
+            }),
         }));
         recordOwnerToolObservation({
           session, toolName, toolArgs, result,
@@ -3971,6 +3998,7 @@ export class PersistentMcpOwner {
       });
       if (!gatewayBindingIsCurrent(session, binding)) {
         releaseSourceContextHeadroomReservation(contextHeadroomReservation);
+        contextHeadroomReservation = null;
         for (const entry of coverageReservationsToRelease) {
           entry.owner?.settleReservation(entry.reservation, "stale_binding");
         }
@@ -4074,6 +4102,7 @@ export class PersistentMcpOwner {
         entry.owner?.settleReservation(entry.reservation, "failed");
       }
       releaseSourceContextHeadroomReservation(contextHeadroomReservation);
+      contextHeadroomReservation = null;
       if (!gatewayBindingIsCurrent(session, binding)) {
         return staleGatewayBindingToolResult(message);
       }

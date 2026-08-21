@@ -379,7 +379,7 @@
  */
 
 // ============================================================================
-// code.* — Code skeleton, hot-path, and raw window
+// code.* — Code skeleton, lens, and raw window
 // ============================================================================
 
 /**
@@ -425,7 +425,7 @@
  */
 
 /**
- * @typedef {Object} CodeGetHotPathParams
+ * @typedef {Object} CodeLensParams
  * @property {string} [symbolId]
  * @property {string} [file]                  Canonical repo-relative path.
  * @property {string[]} identifiersToFind     1..50
@@ -700,7 +700,7 @@
  *   | { action: "slice.spillover.get" } & SliceSpilloverGetParams
  *   | { action: "edit.plan" } & EditPlanParams
  *   | { action: "code.skeleton" } & CodeGetSkeletonParams
- *   | { action: "code.lens" } & CodeGetHotPathParams
+ *   | { action: "code.lens" } & CodeLensParams
  *   | { action: "code.window" } & CodeNeedWindowParams
  *   | { action: "code.survey" } & CodeSurveyParams
  *   | { action: "code.structure" } & CodeStructureParams

@@ -46,6 +46,10 @@ import {
   assessorFallbackReadCallKey,
   isAssessorFallbackReadKey,
 } from "../../assessment/functions/fallback-read-tools.js";
+import {
+  assessorToolBudgetApplies,
+  assessorToolCallCeilingDecision,
+} from "../../../shared/tools/functions/assessor-tool-budget.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   recordAgentHandoffRejection,
@@ -516,18 +520,21 @@ function gatewayScopeState(scopeKey = gateScopeKey, { gateConfiguration = null }
 }
 
 function assessorToolBudgetDecision(toolName, args = {}) {
-  if (roleName !== "assessor" || toolName === "agent_handoff") return null;
+  if (!assessorToolBudgetApplies(roleName, toolName)) return null;
   const state = gatewayScopeState(gateScopeKey);
-  const maxToolCalls = Number.isInteger(Number(bootConfig.assessorMaxToolCalls))
-    ? Math.max(1, Number(bootConfig.assessorMaxToolCalls))
-    : 12;
   state.assessorToolCallCount += 1;
-  if (state.assessorToolCallCount > maxToolCalls) {
+  const ceiling = assessorToolCallCeilingDecision({
+    role: roleName,
+    toolName,
+    usedToolCalls: state.assessorToolCallCount,
+    maxToolCalls: bootConfig.assessorMaxToolCalls,
+  });
+  if (ceiling.blocked) {
     return {
-      reason: "tool_call_ceiling",
-      text: "Assessor tool-call budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
-      used: state.assessorToolCallCount,
-      cap: maxToolCalls,
+      reason: ceiling.reason,
+      text: ceiling.text,
+      used: ceiling.used,
+      cap: ceiling.cap,
     };
   }
   if (!isAssessorFallbackReadKey(assessorFallbackReadCallKey(toolName, args))) return null;
@@ -1812,12 +1819,29 @@ function makeDirWithinScope(args = {}) {
 // emitted (relevant/irrelevant). Persists to a JSON file so restarts resume.
 
 const RESEARCH_STATE_LIMIT = 5000;
-const researchStatesByKey = new Map();
+// Keyed by runtimeSessionKey(). Each entry owns everything mutable about one
+// research session: the chain ledger, the one-shot notice flags, and the
+// native-exploration novelty tracker. Nothing research-mutable lives at module
+// scope except the pointers to the currently selected owner.
+const researchSessionsByKey = new Map();
 
-function researchStatePathForCurrentBoot() {
+// D-7: the durable ledger file must carry the same identity as the in-memory
+// session key. `job-<id>-attempt-<id>.json` was coarser than runtimeSessionKey(),
+// so two sessions differing only by agent call, binding epoch, role, or token
+// held separate in-memory ledgers that wrote one shared file and clobbered each
+// other. (workspaceCwd is already the path root, so cwd is not a colliding axis.)
+function researchSessionLedgerToken(sessionKey) {
+  return crypto.createHash("sha256")
+    .update(String(sessionKey || ""), "utf8")
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function researchStatePathForCurrentBoot(sessionKey = runtimeSessionKey()) {
   if (!isResearcherRole || !mcpJobId || !mcpAttemptId) return null;
   const logDir = path.join(workspaceCwd, ".posse", "research-state");
-  return path.join(logDir, `job-${mcpJobId}-attempt-${mcpAttemptId}.json`);
+  const sessionToken = researchSessionLedgerToken(sessionKey);
+  return path.join(logDir, `job-${mcpJobId}-attempt-${mcpAttemptId}-session-${sessionToken}.json`);
 }
 
 function readResearchState(filePath) {
@@ -1884,9 +1908,15 @@ function createResearchLedger(filePath = null) {
   return ledger;
 }
 
-let researchLogPath = researchStatePathForCurrentBoot();
-let researchLedger = createResearchLedger(researchLogPath);
-let researchState = researchLedger.state;
+// Pointers into the currently selected research-session owner. They are
+// re-pointed by selectResearchStateForCurrentBoot(); they are never a session's
+// only home for mutable state.
+let researchLogPath = null;
+let researchLedger = null;
+let researchState = null;
+let researchNoticeFlags = null;
+let nativeExplorationNovelty = null;
+selectResearchStateForCurrentBoot(runtimeSessionKey());
 
 function saveResearchState() {
   researchLedger.save();
@@ -2098,8 +2128,12 @@ function embeddedControlResult(text, kind, trigger = null) {
 // calls), so equality triggers can silently skip the midpoint/final-window
 // warnings; threshold-crossing flags cannot. In-memory: a gateway restart
 // re-emits at most one already-shown notice.
-const researchNoticeFlags = { midpoint: false, curtain: false, extension: false };
-const nativeExplorationNovelty = createNativeExplorationNoveltyTracker();
+//
+// RS-1: both the flags and the novelty tracker live on the keyed research
+// session owner (see createResearchSessionOwner). The module-level bindings are
+// only pointers at the currently selected owner, so one session can neither
+// suppress another session's notice nor make another session's evidence look
+// stale.
 
 function appendResearchExplorationNotice(text, toolName) {
   if (!isResearcherRole || !isResearchExplorationTool(toolName)) return text;
@@ -2521,7 +2555,7 @@ function gateScopeKeyForBootConfig(config = bootConfig, { sessionId = null } = {
 
 function releaseGatewaySessionState(config, { sessionId = null } = {}) {
   const released = releaseGatewayScope(gateScopeKeyForBootConfig(config, { sessionId }));
-  researchStatesByKey.delete(runtimeSessionKey(config, sessionId));
+  researchSessionsByKey.delete(runtimeSessionKey(config, sessionId));
   return released;
 }
 
@@ -2712,21 +2746,42 @@ function recomputeAtlasAllowedActionsForCurrentBoot() {
   }
 }
 
+function createResearchSessionOwner(sessionKey, filePath) {
+  return {
+    sessionKey: String(sessionKey || ""),
+    filePath,
+    ledger: createResearchLedger(filePath),
+    // Threshold-crossing one-shot notice flags, owned per session.
+    noticeFlags: { midpoint: false, curtain: false, extension: false },
+    // Novelty is scoped to the session key and its repository root, so
+    // identical arguments in another session are independent evidence.
+    novelty: createNativeExplorationNoveltyTracker({
+      scopeKey: `${String(sessionKey || "")}|repo:${workspaceCwd}`,
+    }),
+  };
+}
+
+// Eviction and gateway restart deliberately drop the novelty and notice state
+// instead of inheriting another session's: a rebuilt owner re-credits evidence
+// and may re-emit at most one already-shown notice, which fails toward keeping
+// the evidence window open rather than forcing premature closeout.
 function selectResearchStateForCurrentBoot(sessionKey = runtimeSessionKey()) {
-  researchLogPath = researchStatePathForCurrentBoot();
   const key = String(sessionKey || runtimeSessionKey());
-  let ledger = researchStatesByKey.get(key);
-  if (!ledger) {
-    ledger = createResearchLedger(researchLogPath);
-    researchStatesByKey.set(key, ledger);
-    while (researchStatesByKey.size > RESEARCH_STATE_LIMIT) {
-      const oldest = researchStatesByKey.keys().next().value;
+  researchLogPath = researchStatePathForCurrentBoot(key);
+  let session = researchSessionsByKey.get(key);
+  if (!session) {
+    session = createResearchSessionOwner(key, researchLogPath);
+    researchSessionsByKey.set(key, session);
+    while (researchSessionsByKey.size > RESEARCH_STATE_LIMIT) {
+      const oldest = researchSessionsByKey.keys().next().value;
       if (oldest == null || oldest === key) break;
-      researchStatesByKey.delete(oldest);
+      researchSessionsByKey.delete(oldest);
     }
   }
-  researchLedger = ledger;
-  researchState = ledger.state;
+  researchLedger = session.ledger;
+  researchState = session.ledger.state;
+  researchNoticeFlags = session.noticeFlags;
+  nativeExplorationNovelty = session.novelty;
 }
 
 function applyRuntimeBootConfig(nextConfig = {}, {

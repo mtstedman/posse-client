@@ -21,7 +21,7 @@ export {
 export { runtimeExecute, runtimeQueryOutput } from "./runtime.js";
 export {
   codeGetSkeleton,
-  codeGetHotPath,
+  codeLens,
   codeNeedWindow,
 } from "./code.js";
 export { contextBuild, contextSummary, agentFeedback, agentFeedbackQuery } from "./context.js";

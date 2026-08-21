@@ -29,6 +29,12 @@ const EVENTS = new Set([
   "activation_finished",
   "eviction_finished",
   "boot_reconciled",
+  // Planner-consumer boundary. Every outcome of the plan-job readiness gate is
+  // recorded here; an emitted name that is missing from this registry builds no
+  // record at all, so the recorder silently discards the outcome.
+  "planner_reserved",
+  "planner_deferred",
+  "planner_fallback",
 ]);
 
 const ENUM_VALUES = new Set([
@@ -53,6 +59,7 @@ const ENUM_VALUES = new Set([
   "fallback",
   "retry",
   "deferred",
+  "reserved",
   "git_only",
   "atlas_queued",
   "ready",
@@ -121,6 +128,24 @@ const REASONS = new Set([
   "invalid_or_missing_generation",
   "lock_timeout",
   "execution_error",
+  // Planner-consumer boundary reasons. Without these every planner outcome
+  // would normalize to "other" and the recorded event could not distinguish a
+  // disabled gate from a failed inspection. Dynamic inspection statuses still
+  // fall back to "other"; nothing here carries a path or free text.
+  "dry_run",
+  "planner_consumption_disabled",
+  "planner_atlas_repo_unavailable",
+  "planner_demand_reconciliation_failed",
+  "planner_readiness_timeout",
+  "planner_prepared_root_missing",
+  "planner_prepared_root_mismatch",
+  "planner_reservation_lost",
+  "planner_inspection_unavailable",
+  "planner_parked_view_unavailable",
+  "preparation_pending",
+  ...WAITING_LANE_STATES.map((state) => `preparation_${state}`),
+  "parked",
+  "main",
   "none",
   "other",
 ]);

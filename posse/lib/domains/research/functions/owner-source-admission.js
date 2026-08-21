@@ -1,4 +1,4 @@
-import { SourceCoverageOwner } from "../classes/SourceCoverageOwner.js";
+import { SourceCoverageOwner, completeSymbolSelectorFingerprint } from "../classes/SourceCoverageOwner.js";
 
 export function sourceCoverageOwnerForSession(session, bootConfig = session?.bootConfig || {}) {
   return new SourceCoverageOwner({
@@ -50,8 +50,42 @@ export function prepareSourceCoverage(result, coverageOwner, toolArgs = {}) {
   return visitSourceData(result, toolArgs, (data, args) => coverageOwner.prepareData(data, args));
 }
 
+function lowered(value) {
+  return Array.isArray(value) ? value.map((entry) => String(entry || "").toLowerCase()) : [];
+}
+
+// D-8: live-delivered windows must be able to earn the verified complete-symbol
+// fingerprint, or SC-1's `maxTokens` change would remove cross-window reuse
+// from every live source read, including complete untruncated ones.
+//
+// A live result qualifies only when the request itself is complete-symbol
+// eligible (single identifier, file mode, symbol granularity — enforced by
+// completeSymbolSelectorFingerprint) AND the delivered payload proves the whole
+// symbol arrived: not `truncated`, not `selectionBounded`, not `outputTruncated`,
+// carrying no spilled-over regions, and actually returning the identifier that
+// was asked for. Anything short of that stays partial-selector-only.
+export function liveCompleteSymbolSelector(data = {}, args = {}, origin = "primary") {
+  if (origin !== "primary") return null;
+  if (data.truncated === true || data.selectionBounded === true || data.outputTruncated === true) return null;
+  if (Array.isArray(data.additionalWindows) && data.additionalWindows.length > 0) return null;
+  if (Number(data.returnedFunctionAnchorsOmitted) > 0) return null;
+  if (!completeSymbolSelectorFingerprint(args)) return null;
+  const requested = String(args.identifiersToFind?.[0] || "").toLowerCase();
+  if (!requested) return null;
+  if (!lowered(data.identifiersReturned).includes(requested)) return null;
+  if ([...lowered(data.identifiersMissing), ...lowered(data.identifiersOmitted)].includes(requested)) return null;
+  return {
+    file: args.file,
+    identifiersToFind: [args.identifiersToFind[0]],
+    granularity: "symbol",
+  };
+}
+
 export function materializeSourceCoverage(result, coverageOwner, toolArgs = {}) {
   return visitSourceData(result, toolArgs, (data, args, origin) => (
-    coverageOwner.materializeData(data, args, { origin })
+    coverageOwner.materializeData(data, args, {
+      origin,
+      completeSymbolSelector: liveCompleteSymbolSelector(data, args, origin),
+    })
   ));
 }
