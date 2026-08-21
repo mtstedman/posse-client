@@ -1239,7 +1239,14 @@ async function inspectExactScipBatchCoverage({ targetBranch, gitOid, scipDir, ro
     const contentHash = String(document?.content_hash || "").toLowerCase();
     const sourceLanguages = uniqueSourceLanguages(document?.source_languages || []);
     if (!sourceLanguages.some((language) => languages.has(language))) continue;
-    if (!repoRelPath || snapshot.get(repoRelPath) !== contentHash) return { ok: false };
+    if (!repoRelPath) return { ok: false };
+    // Project indexers can report generated/golden documents that ATLAS
+    // deliberately excludes from the branch snapshot. Those extra receipt
+    // rows cannot prove coverage for any current path, but they also must not
+    // invalidate an otherwise exact snapshot. A receipt row for a path that
+    // IS in the snapshot remains hash-strict.
+    if (!snapshot.has(repoRelPath)) continue;
+    if (snapshot.get(repoRelPath) !== contentHash) return { ok: false };
     // A successful batch proves the indexer examined this exact source/hash,
     // but project indexers can legitimately omit documents excluded by their
     // own project configuration. Tree-sitter is the complementary symbol
@@ -1281,7 +1288,12 @@ async function inspectExactAtlasLayerReadiness({ repoRoot, config, signal = null
     signal,
     workerData: { repoRoot, config },
   });
-  const layers = Array.isArray(readiness?.layers) ? readiness.layers : [];
+  // Exact boot proves SCIP separately on both sides of this readiness read and
+  // compares those exact signatures. Do not let an older project-indexer meta
+  // row veto that newer durable batch proof here. The generic readiness scan
+  // remains authoritative for every other layer.
+  const layers = (Array.isArray(readiness?.layers) ? readiness.layers : [])
+    .filter((layer) => !String(layer?.layer || "").startsWith("scip:"));
   if (layers.length === 0) return { ok: false, reason: "atlas_layers_not_ready" };
   const notReady = layers.filter((layer) => layer?.status !== "ready" && layer?.status !== "off");
   if (notReady.length > 0) {
