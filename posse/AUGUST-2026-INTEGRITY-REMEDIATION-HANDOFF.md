@@ -942,6 +942,81 @@ swap per site.
 
 Do not solve WL-2 by increasing 1,000 to a larger fixed lifetime cap.
 
+## VER-1: Re-warm only when the persisted encoding changes
+
+Operator requirement, recorded 2026-08-21. **As long as the ledger encoding
+version has not changed, a new ATLAS version must not force the databases to be
+re-warmed.** Reuse is the default; invalidation must be earned.
+
+### Current behaviour
+
+Two independent versions can invalidate stored work, and only one of them is an
+encoding version.
+
+`ATLAS_DATA_SCHEMA_VERSION` (`contracts/ddl/index.js`, currently `3`) is the
+true encoding version. It backs both `LEDGER_SCHEMA_VERSION` and
+`VIEW_SCHEMA_VERSION`, and its own comment states the contract: bumped whenever
+rebuildable data or index *layout* changes, with a ledger mismatch used as the
+cold-boot generation marker that recreates every rebuildable store together.
+That behaviour is correct and stays.
+
+`ATLAS_PARSER_SPEC_VERSION` (`parser/version.js`, currently
+`"edge-coverage-v5"`) is not an encoding version, but it invalidates as if it
+were. `hasCurrentParsedBlob` and `hasCurrentTreeSitterLayer`
+(`ledger/BlobStore.js` ~673 and ~686) both require an exact match against it, and
+`ledgerHasCurrentParsedBlob` (`ParseEngine.js` ~191) is what
+`#discoverBootFreshnessPaths` consults to decide whether a stat-matched file
+still needs parsing. A bump therefore re-parses every blob in the repository
+even when the persisted row shape is byte-identical.
+
+Its own changelog shows the two meanings already conflated: `edge-coverage-v2`
+records a genuine change in what `to_name` *means*, which must invalidate, while
+`edge-coverage-v3/v4` are described only as "native parser coverage revisions"
+and `edge-coverage-v5` says outright that it "forces existing blobs through the
+corrected native parser". Those are implementation revisions. Under this
+requirement they must not trigger a re-warm.
+
+### Required contract
+
+Separate the two axes and gate reuse on the encoding axis only.
+
+- An **encoding change** — the shape, columns, or meaning of persisted symbol,
+  edge, or layer rows — invalidates stored work. Keep the existing behaviour.
+- A **parser build or coverage revision** — the same output contract produced by
+  a different implementation — must not invalidate anything. Stored rows remain
+  reusable and no re-warm is scheduled.
+- The producing parser revision should still be recorded on the blob or layer so
+  that provenance and telemetry can answer "which build produced this row", but
+  **that recorded value must not participate in the currency test.** Recording it
+  and gating on it are different things; only the second is forbidden.
+- A deliberate re-parse must remain expressible. Removing the implicit trigger
+  should not remove the operator's ability to force one, so provide an explicit
+  path (a maintenance action or an encoding-version bump) rather than relying on
+  a version string bump as the de facto mechanism.
+
+### Notes for the implementer
+
+The change is a policy split, not a rename. Verify every consumer of
+`ATLAS_PARSER_SPEC_VERSION` before narrowing it — `hasCurrentParsedBlob`,
+`hasCurrentTreeSitterLayer`, the `blobs` insert, the layer uniqueness key
+`(content_hash, source, tool_version, parser_spec_version, config_hash,
+deps_hash, fileset_hash)`, and `reconcileScipCoveredParseGaps` all reference it,
+and they do not all want the same treatment. The layer uniqueness key in
+particular may legitimately need to keep distinguishing producers even once the
+currency test stops doing so.
+
+SCIP layers key on `tool_version: indexerVersion` (`scip/ingester.js` ~547),
+which is the external indexer's version rather than the ATLAS build. That axis
+is out of scope here: a genuinely different `scip-typescript` can produce
+different symbols from identical bytes, so it is not the case this requirement
+describes.
+
+Acceptance: with the encoding version unchanged, a parser-revision bump leaves
+every stored blob current, `#discoverBootFreshnessPaths` reports no changed
+paths for unmodified files, and no warm job is scheduled. With the encoding
+version bumped, the existing cold-boot rebuild still occurs. Provenance for the
+producing revision remains queryable in both cases.
+
 ## Dependency and integration order
 
 ### Wave 0: Lock contracts and baselines

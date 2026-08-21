@@ -67,7 +67,11 @@ export function _taskProviderBudgetLines(data, summaries = null) {
   for (const call of agentCalls) {
     const provider = String(call.provider || "").trim().toLowerCase();
     if (!provider) continue;
-    const total = (call.input_tokens || 0) + (call.output_tokens || 0);
+    // Canonical totals, not the row columns: an interrupted call has null
+    // aggregate columns but known segment totals, and reading the columns
+    // would silently drop it from the task's provider budget line.
+    const accounting = resolveCanonicalCallAccounting({ ...call, provider });
+    const total = (accounting.inputTokens || 0) + (accounting.outputTokens || 0);
     if (total <= 0) continue;
     providerTaskTokens.set(provider, (providerTaskTokens.get(provider) || 0) + total);
   }
@@ -119,10 +123,13 @@ function _aggregateProviderUsageRows(rows = []) {
   for (const row of rows) {
     const provider = String(row?.provider || "").trim().toLowerCase();
     if (!provider) continue;
-    const inputTokens = Math.max(0, Number(row?.input_tokens) || 0);
-    const outputTokens = Math.max(0, Number(row?.output_tokens) || 0);
-    const cachedInputTokens = Math.min(inputTokens, Math.max(0, Number(row?.cached_input_tokens) || 0));
     const accounting = resolveCanonicalCallAccounting({ ...row, provider });
+    // Raw counters come from the canonical resolver. Reading the row columns
+    // here reported an interrupted call as zero tokens, and the guard below
+    // then dropped the row from the panel entirely.
+    const inputTokens = Math.max(0, Number(accounting.inputTokens) || 0);
+    const outputTokens = Math.max(0, Number(accounting.outputTokens) || 0);
+    const cachedInputTokens = Math.min(inputTokens, Math.max(0, Number(accounting.cachedInputTokens) || 0));
     const billableInputTokens = Number.isFinite(accounting.billableInputTokens)
       ? Math.max(0, accounting.billableInputTokens)
       : null;
@@ -193,7 +200,11 @@ export function getProviderUsageSince({ sinceIso = null, untilIso = null } = {})
     const where = [
       "provider IS NOT NULL",
       "TRIM(provider) <> ''",
-      "COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0",
+      // Rows whose aggregate columns are null still carry known raw totals when
+      // usage segments survived, so admit them and let the canonical resolver
+      // decide; _aggregateProviderUsageRows drops what is genuinely empty.
+      "(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0"
+      + " OR COALESCE(usage_segment_count, 0) > 0)",
     ];
     const params = [];
     if (sinceIso) {

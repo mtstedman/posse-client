@@ -26,6 +26,7 @@ import {
 import { createProtoReader } from "./proto-reader.js";
 import { sanitizeScipOutputFileNative } from "./sanitizer.js";
 import { readScipBatchCoverage, writeScipBatchCoverage } from "./batch-coverage.js";
+import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
 import {
   buildFailedStagerMeta,
   buildRecoveredStagerMeta,
@@ -450,6 +451,24 @@ export async function buildScipBatchManifest({
       continue;
     }
     const sourcePath = path.join(root, repoRelPath);
+    // AX-1: the warm walk excludes tracked symlinks, but #warmFull concatenates
+    // the excluded set back into `paths` so #indexPaths can record the accounted
+    // exclusion, and #indexPaths hands that same array to SCIP staging before
+    // any per-path disposition. Read and copy below both dereference, so the
+    // check has to live here, at the boundary that consumes the bytes.
+    try {
+      if (!atlasWarmWalkEntryDisposition(await fs.promises.lstat(sourcePath)).indexable) {
+        unavailable.push({ repo_rel_path: repoRelPath, reason: "symlink_skip" });
+        continue;
+      }
+    } catch (err) {
+      unavailable.push({
+        repo_rel_path: repoRelPath,
+        reason: "source_unavailable",
+        error: formatAtlasError(err),
+      });
+      continue;
+    }
     let sourceBytes;
     try {
       sourceBytes = await fs.promises.readFile(sourcePath);
@@ -577,6 +596,45 @@ export async function mergeScipBatchCoverageDocuments(input) {
 }
 
 /**
+ * Carry the typed unavailable rows across incremental warms with the same
+ * replacement rule the acknowledged rows use. A path this intake re-attempted
+ * is described by this intake alone; a path it never touched keeps its prior
+ * verdict only while the file still exists. An acknowledged path is never also
+ * unavailable.
+ *
+ * @param {{ repoRoot: string, scipDir: string, replacedPaths: string[], acknowledgedPaths: string[], documents: Array<{ repo_rel_path: string, content_hash: string, reason: string, source_languages?: string[] }> }} input
+ */
+export async function mergeScipBatchUnavailableDocuments(input) {
+  const root = path.resolve(String(input.repoRoot || process.cwd()));
+  const replaced = new Set(uniqueBytewiseRepoPaths(input.replacedPaths || []));
+  const acknowledged = new Set(input.acknowledgedPaths || []);
+  const merged = new Map();
+  const previous = await readScipBatchCoverage(input.scipDir);
+  for (const document of previous?.unavailable_documents || []) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    if (!isCanonicalRepoPath(repoRelPath) || replaced.has(repoRelPath) || acknowledged.has(repoRelPath)) continue;
+    try { await fs.promises.stat(path.join(root, repoRelPath)); } catch { continue; }
+    merged.set(repoRelPath, {
+      repo_rel_path: repoRelPath,
+      content_hash: String(document?.content_hash || "").toLowerCase(),
+      reason: String(document?.reason || "unavailable"),
+      source_languages: Array.isArray(document?.source_languages) ? document.source_languages : [],
+    });
+  }
+  for (const document of input.documents || []) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    if (!isCanonicalRepoPath(repoRelPath) || acknowledged.has(repoRelPath)) continue;
+    merged.set(repoRelPath, {
+      repo_rel_path: repoRelPath,
+      content_hash: String(document?.content_hash || "").toLowerCase(),
+      reason: String(document?.reason || "unavailable"),
+      source_languages: Array.isArray(document?.source_languages) ? document.source_languages : [],
+    });
+  }
+  return [...merged.values()].sort((a, b) => Buffer.from(a.repo_rel_path).compare(Buffer.from(b.repo_rel_path)));
+}
+
+/**
  * Reuse only artifacts whose prior downstream acknowledgement and exact
  * content-addressed batch manifest are both durable. A reused artifact is
  * handed to the CURRENT onBatchReady callback again, so the current ledger
@@ -674,6 +732,11 @@ function scipBatchSessionMatchesManifest(state, manifest) {
  * to a bounded downstream lane. The callback's returned promise is the batch
  * acknowledgement; at most `maxInFlight` unacknowledged batches are retained.
  *
+ * The acknowledgement may resolve to `{ ok, failed_documents }` to report what
+ * intake actually recorded. Only the documents it acknowledges enter the
+ * coverage receipt and let their batch be resumed by a later session; the rest
+ * are written to the receipt as typed unavailable rows and stay retryable.
+ *
  * @param {{
  *   repoRoot?: string,
  *   paths?: string[],
@@ -759,6 +822,7 @@ export async function stageScipBatches({
     maxSourceBytes: manifest.maxSourceBytes,
     completedBatches: [],
     failedBatches: [],
+    unacknowledgedBatches: [],
     recoveredBatches: [],
     resumedBatches: [],
     resumedFromSessions: [...new Set([...reusableBatches.values()].map((entry) => entry.sessionId))],
@@ -787,29 +851,78 @@ export async function stageScipBatches({
   const files = [...fallbackFiles];
   const results = (fallback.results || []).map((row) => ({ ...row, fallbackWholeProject: true }));
   const inFlight = [];
-  // Documents whose staged artifact was handed to ledger intake. A bisected
+  // Documents whose staged artifact was TAKEN IN by the ledger. A bisected
   // batch can acknowledge some documents while others fail permanently, so the
   // coverage receipt is built from this set rather than from the manifest: an
   // acknowledged receipt row must mean successful intake of that exact
-  // document and hash, never an attempted or failed stage. Recording at
-  // acknowledgement-dispatch time is safe because a rejected acknowledgement
-  // throws out of the drain loop below, before any receipt is written.
+  // document and hash, never an attempted or failed stage. Recording happens
+  // when the acknowledgement RESOLVES, not when it is dispatched: the intake
+  // lane reports per-document failure in its result, and a resolved
+  // acknowledgement is not by itself evidence that the ledger accepted the
+  // documents (see `resolveBatchIntakeOutcome`).
   const acknowledgedDocuments = new Map();
-  const recordAcknowledgedDocuments = (documents) => {
-    for (const document of documents || []) {
-      const repoRelPath = String(document?.repoRelPath || "");
-      if (!repoRelPath) continue;
-      acknowledgedDocuments.set(repoRelPath, document);
-    }
+  /** @type {Map<string, { repoRelPath: string, contentHash: string, reason: string, error: string | null, plan: any }>} */
+  const unavailableDocuments = new Map();
+  const recordUnavailableDocument = (document, reason, error) => {
+    const repoRelPath = String(document?.repoRelPath || "");
+    if (!repoRelPath || acknowledgedDocuments.has(repoRelPath)) return;
+    unavailableDocuments.set(repoRelPath, {
+      repoRelPath,
+      contentHash: String(document?.contentHash || ""),
+      reason,
+      error: error ? String(error) : null,
+      plan: document?.plan || null,
+    });
+  };
+  const syncUnavailableState = () => {
+    state.unavailableDocuments = [...unavailableDocuments.values()].map((document) => ({
+      repoRelPath: document.repoRelPath,
+      contentHash: document.contentHash,
+      reason: document.reason,
+      error: document.error || document.reason,
+    }));
   };
   const acknowledgeOldest = async () => {
     const pending = inFlight.shift();
     if (!pending) return;
-    await pending.ack;
-    state.completedBatches.push(pending.batch.batchOrdinal);
-    if (pending.resumedFromSession) state.resumedBatches.push(pending.batch.batchOrdinal);
-    state.committedDocumentOrdinal = pending.batch.lastDocumentOrdinal;
+    // Each staged artifact of this batch is resolved against the documents it
+    // actually carried, so one failed recovery artifact cannot invalidate a
+    // sibling artifact's acknowledged documents (or vice versa).
+    const outcomes = await Promise.all(pending.parts.map((part) => (
+      Promise.resolve(part.ack).then((result) => resolveBatchIntakeOutcome(result, part.documents))
+    )));
+    const outcome = {
+      acknowledged: outcomes.flatMap((entry) => entry.acknowledged),
+      unavailable: outcomes.flatMap((entry) => entry.unavailable),
+    };
+    for (const document of outcome.acknowledged) {
+      const repoRelPath = String(document?.repoRelPath || "");
+      if (!repoRelPath) continue;
+      acknowledgedDocuments.set(repoRelPath, document);
+      unavailableDocuments.delete(repoRelPath);
+    }
+    for (const entry of outcome.unavailable) {
+      recordUnavailableDocument(entry.document, "batch_intake_not_acknowledged", entry.error);
+    }
+    if (outcome.unavailable.length === 0) {
+      // Only a fully acknowledged batch may be resumed by a later session:
+      // reuse skips the indexer, and a batch whose intake failed has no
+      // durable downstream acknowledgement to inherit.
+      state.completedBatches.push(pending.batch.batchOrdinal);
+      if (pending.resumedFromSession) state.resumedBatches.push(pending.batch.batchOrdinal);
+      state.committedDocumentOrdinal = pending.batch.lastDocumentOrdinal;
+    } else {
+      state.unacknowledgedBatches.push(pending.batch.batchOrdinal);
+    }
+    syncUnavailableState();
     await writeBatchSessionManifest(sessionManifestPath, state);
+    for (const entry of outcome.unavailable) {
+      await notifyFileUnavailable(onFileUnavailable, {
+        repo_rel_path: entry.document.repoRelPath,
+        reason: "batch_intake_not_acknowledged",
+        error: entry.error || "SCIP intake did not acknowledge the document",
+      });
+    }
   };
 
   try {
@@ -866,8 +979,11 @@ export async function stageScipBatches({
           outputPath: reusable.outputPath,
         });
         const ack = batchAcknowledgement(onBatchReady, reusable.outputPath, info);
-        inFlight.push({ batch, ack, resumedFromSession: reusable.sessionId });
-        recordAcknowledgedDocuments(batch.documents);
+        inFlight.push({
+          batch,
+          parts: [{ ack, documents: batch.documents }],
+          resumedFromSession: reusable.sessionId,
+        });
         emit(onProgress, `reused SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
           kind: "atlas.scip.batch_reused",
           batch_ordinal: batch.batchOrdinal,
@@ -913,6 +1029,10 @@ export async function stageScipBatches({
       results.push(result);
       if (!recovered.ok) {
         state.failedBatches.push(batch.batchOrdinal);
+        for (const unavailable of recovered.unavailable) {
+          recordUnavailableDocument(unavailable.document, "batch_stage_failed", unavailable.error || recovered.error);
+        }
+        syncUnavailableState();
         await writeBatchSessionManifest(sessionManifestPath, state);
         for (const unavailable of recovered.unavailable) {
           await notifyFileUnavailable(onFileUnavailable, {
@@ -925,11 +1045,12 @@ export async function stageScipBatches({
       }
       if (recovered.recovered) state.recoveredBatches.push(batch.batchOrdinal);
       for (const unavailable of recovered.unavailable) {
-        state.unavailableDocuments.push({
-          repoRelPath: unavailable.document.repoRelPath,
-          contentHash: unavailable.document.contentHash,
-          error: unavailable.error || "SCIP document staging failed",
-        });
+        recordUnavailableDocument(
+          unavailable.document,
+          "batch_document_stage_failed",
+          unavailable.error || "SCIP document staging failed",
+        );
+        syncUnavailableState();
         await notifyFileUnavailable(onFileUnavailable, {
           repo_rel_path: unavailable.document.repoRelPath,
           reason: "batch_document_stage_failed",
@@ -959,10 +1080,12 @@ export async function stageScipBatches({
           indexer: stagedBatch.plan.label,
           source_languages: sourceLanguagesForPlan(stagedBatch.plan),
         };
-        acknowledgements.push(batchAcknowledgement(onBatchReady, staged.outputPath, info));
-        recordAcknowledgedDocuments(stagedBatch.documents);
+        acknowledgements.push({
+          ack: batchAcknowledgement(onBatchReady, staged.outputPath, info),
+          documents: stagedBatch.documents,
+        });
       }
-      inFlight.push({ batch, ack: observeBatchAcknowledgement(Promise.all(acknowledgements)) });
+      inFlight.push({ batch, parts: acknowledgements });
       emit(onProgress, `staged SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
         kind: "atlas.scip.batch_staged",
         batch_ordinal: batch.batchOrdinal,
@@ -996,11 +1119,28 @@ export async function stageScipBatches({
             source_languages: sourceLanguagesForPlan(document.plan),
           })),
         });
+        // Every document this intake attempted and could not record is named
+        // in the same receipt. Silence would let a later boot at this OID read
+        // an unexamined document as merely omitted by the indexer and prove
+        // exactness over it; the typed row makes the gap retryable evidence.
+        const unavailable = await mergeScipBatchUnavailableDocuments({
+          repoRoot: root,
+          scipDir: dir,
+          replacedPaths: paths,
+          acknowledgedPaths: documents.map((document) => document.repo_rel_path),
+          documents: [...unavailableDocuments.values()].map((document) => ({
+            repo_rel_path: document.repoRelPath,
+            content_hash: document.contentHash,
+            reason: document.reason,
+            source_languages: sourceLanguagesForPlan(document.plan),
+          })),
+        });
         batchCoverage = await writeScipBatchCoverage({
           scipDir: dir,
           head,
-          filesetHash: sha256Hex(Buffer.from(JSON.stringify(documents))),
+          filesetHash: sha256Hex(Buffer.from(JSON.stringify({ documents, unavailable }))),
           documents,
+          unavailableDocuments: unavailable,
         });
       }
     }
@@ -1015,6 +1155,12 @@ export async function stageScipBatches({
       sessionManifestPath,
       manifest,
       batchCoverage,
+      unavailableDocuments: [...unavailableDocuments.values()].map((document) => ({
+        repo_rel_path: document.repoRelPath,
+        content_hash: document.contentHash,
+        reason: document.reason,
+        error: document.error || document.reason,
+      })),
     };
   } catch (err) {
     state.status = "failed";
@@ -1238,6 +1384,51 @@ async function writeBatchSessionManifest(filePath, state) {
 async function notifyFileUnavailable(callback, info) {
   if (typeof callback !== "function") return;
   try { await callback(info); } catch { /* completion notifications are observational */ }
+}
+
+/**
+ * Interpret one batch acknowledgement against the documents that batch handed
+ * to intake.
+ *
+ * The downstream lane reports its outcome by resolving to
+ * `{ ok, failed_documents }`. `ok: false` means the artifact never reached the
+ * ledger at all, so no document in it was taken in; `failed_documents` names
+ * the documents the ledger refused while the rest of the artifact committed.
+ * Documents the indexer legitimately omitted from the artifact are not
+ * reported as failures and stay acknowledged, which is what lets a
+ * complementary tree-sitter layer prove them.
+ *
+ * A callback that resolves to anything unstructured keeps the original
+ * contract: resolving is the acknowledgement, rejecting aborts the stage.
+ *
+ * @param {unknown} result
+ * @param {Array<{ repoRelPath: string, contentHash: string, plan: any }>} documents
+ * @returns {{ acknowledged: any[], unavailable: Array<{ document: any, error: string | null }> }}
+ */
+function resolveBatchIntakeOutcome(result, documents) {
+  const dispatched = Array.isArray(documents) ? documents : [];
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return { acknowledged: dispatched, unavailable: [] };
+  }
+  const report = /** @type {Record<string, any>} */ (result);
+  if (report.ok === false) {
+    const error = String(report.error || report.reason || "SCIP intake did not acknowledge the batch");
+    return { acknowledged: [], unavailable: dispatched.map((document) => ({ document, error })) };
+  }
+  const failedByPath = new Map();
+  for (const entry of Array.isArray(report.failed_documents) ? report.failed_documents : []) {
+    const repoRelPath = String(entry?.repo_rel_path || "");
+    if (repoRelPath) failedByPath.set(repoRelPath, entry);
+  }
+  if (failedByPath.size === 0) return { acknowledged: dispatched, unavailable: [] };
+  const acknowledged = [];
+  const unavailable = [];
+  for (const document of dispatched) {
+    const failure = failedByPath.get(String(document?.repoRelPath || ""));
+    if (failure) unavailable.push({ document, error: String(failure.reason || "SCIP intake failed for the document") });
+    else acknowledged.push(document);
+  }
+  return { acknowledged, unavailable };
 }
 
 function batchAcknowledgement(callback, file, info) {

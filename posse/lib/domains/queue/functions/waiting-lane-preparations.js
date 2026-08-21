@@ -241,6 +241,15 @@ export function getWaitingLanePreparation(workItemId) {
  * order and resuming strictly after the last returned row can neither skip nor
  * repeat an unchanged row while other rows are inserted concurrently.
  *
+ * It is also safe under concurrent *mutation*, which is the non-obvious half.
+ * `updated_at` is not in `MUTABLE_COLUMNS`: no CAS transition can set it to an
+ * arbitrary value. Every write stamps `now()`, so a row can only move strictly
+ * forward in the order — never backwards behind an advancing cursor, and so
+ * never past a position the caller has already read without being seen. A row
+ * that jumps ahead of the cursor is simply yielded later; the `seen` set in
+ * `iterateWaitingLanePreparations` makes that at-most-once. Do not "fix" this
+ * by ordering on a mutable column or by paging with OFFSET.
+ *
  * @param {any} preparation
  * @returns {{ updated_at: string, work_item_id: number } | null}
  */

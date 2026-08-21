@@ -334,6 +334,25 @@ export class Ledger {
   }
 
   /**
+   * Operator maintenance action: force the next warm to re-parse every blob
+   * that an earlier parser build produced. This is the explicit re-parse
+   * trigger — a parser spec version bump on its own no longer invalidates
+   * stored work.
+   *
+   * @returns {{ parse_reparse_floor: string }}
+   */
+  requestParserReparse() {
+    return this.#blob.requestParserReparse();
+  }
+
+  /**
+   * @returns {string | null}
+   */
+  parseReparseFloor() {
+    return this.#blob.parseReparseFloor();
+  }
+
+  /**
    * @param {string} branch
    * @param {number} fromSeq
    * @param {{ limit?: number, upToSeq?: number } | number} [options]

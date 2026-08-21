@@ -26,6 +26,10 @@ export const ATLAS_V2_HELP_COMMANDS = Object.freeze([
     summary: "Delete view files (default: warmed)",
   },
   {
+    usage: "reparse",
+    summary: "Force the next warm to re-parse blobs produced by an older parser build",
+  },
+  {
     usage: "models pull",
     summary: "Download and install the production Jina package into the shared model cache",
   },

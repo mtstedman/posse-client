@@ -678,6 +678,19 @@ export class ParseEngine {
           message: `SCIP batch ${Number(row.batchOrdinal) + 1} failed (${row.language || "unknown"}): ${row.error || "unknown error"}`,
         });
       }
+      // A bisected batch that recovers at least one document is `ok: true`, so
+      // the loop above never sees the documents that failed inside it. Account
+      // for each one by path: an unaccounted document is a silent hole in the
+      // generation's own record of what it indexed.
+      for (const document of staged.unavailableDocuments || []) {
+        const repoRelPath = String(document?.repo_rel_path || "");
+        if (!repoRelPath) continue;
+        base.skipped.push({
+          repo_rel_path: repoRelPath,
+          reason: "parse_error",
+          message: `SCIP document was not acknowledged (${document.reason || "unavailable"}): ${document.error || "unknown error"}`,
+        });
+      }
       /** @type {any} */ (base).scip_batch_session = staged.sessionId || null;
       /** @type {any} */ (base).scip_batches_staged = staged.files?.length || 0;
       return staged.files || [];
@@ -707,6 +720,7 @@ export class ParseEngine {
    *   onDocumentsPrepared?: ((coverage: { documents: Array<{ repo_rel_path: string, content_hash: string }>, source_languages: string[] }) => Promise<void> | void) | null,
    *   onDocumentCommitted?: ((document: { repo_rel_path: string, content_hash: string, lang: string }) => Promise<void> | void) | null,
    *   expectedContentHashes?: Record<string, string> | null,
+   *   onFileIntake?: ((result: Record<string, any>) => void) | null,
    * }} [opts]
    * @returns {Promise<boolean>}
    */
@@ -771,6 +785,11 @@ export class ParseEngine {
             });
           },
         });
+        // The run continues past a per-document failure and a decode failure
+        // reports itself as a skip, so the boolean below is not evidence that
+        // the ledger recorded this artifact. Hand the caller the result it
+        // needs to decide what was actually acknowledged.
+        if (typeof opts.onFileIntake === "function") opts.onFileIntake(result);
         if (result.skipped) continue;
         if (result.stale_scip) {
           // Drift evidence from intake: the index references files the tree no
@@ -821,6 +840,13 @@ export class ParseEngine {
    * the next artifact read starts immediately while the previous artifact's
    * ledger writes remain serialized on the shared handle.
    *
+   * `add` resolves to this artifact's intake report — `{ ok, failed_documents }`
+   * — on a promise of its own. The shared `tail` still orders the lane and is
+   * kept non-rejecting so one failed artifact cannot break the chain, which is
+   * exactly why it cannot double as the acknowledgement: the stager needs a
+   * per-batch verdict to decide which documents may enter the coverage
+   * receipt.
+   *
    * @param {AtlasWarmJobResult} base
    * @param {{
    *   force?: boolean,
@@ -834,7 +860,7 @@ export class ParseEngine {
     const completedIntakes = new Map();
     const add = (scipPath, info = {}) => {
       const key = normalizedScipPath(scipPath);
-      if (!key) return tail;
+      if (!key) return Promise.resolve({ ok: false, reason: "scip_path_invalid", failed_documents: [] });
       const file = String(scipPath);
       const scopePaths = (Array.isArray(info?.repo_rel_paths) ? info.repo_rel_paths : [])
         .map((repoRelPath) => String(repoRelPath || ""))
@@ -853,7 +879,7 @@ export class ParseEngine {
         producedAt: stat?.mtime?.toISOString?.() || null,
         error: null,
       })).catch((error) => ({ bytes: null, producedAt: null, error }));
-      tail = tail
+      const intake = tail
         .catch((err) => {
           logAtlasError("[Warmer.#createScipIngestQueue] previous intake failed:", err);
         })
@@ -867,7 +893,7 @@ export class ParseEngine {
               reason: "parse_error",
               message: `SCIP read failed for ${path.basename(file)}: ${formatAtlasError(error)}`,
             });
-            return;
+            return { ok: false, reason: "artifact_read_failed", failed_documents: [] };
           }
           const bytesHash = sha256Hex(ready.bytes);
           const completed = completedIntakes.get(key);
@@ -883,11 +909,27 @@ export class ParseEngine {
                 terminalizeAbsent,
               }));
             }
-            return;
+            return { ok: true, reason: "already_ingested", failed_documents: completed.failedDocuments };
           }
           let preparedCoverage = null;
+          /** @type {Array<{ repo_rel_path: string, content_hash: string, reason: string }>} */
+          const failedDocuments = [];
+          let artifactRecorded = true;
           const ingested = await this.#ingestScipFiles(base, [file], {
             ...opts,
+            onFileIntake: (result) => {
+              for (const document of Array.isArray(result?.failed_documents) ? result.failed_documents : []) {
+                failedDocuments.push({
+                  repo_rel_path: String(document?.repo_rel_path || ""),
+                  content_hash: String(document?.content_hash || ""),
+                  reason: String(document?.reason || "scip_intake_failed"),
+                });
+              }
+              // A decode failure reports itself as a skip with a non-complete
+              // status: no document in the artifact was recorded, and the
+              // artifact cannot say which ones they were.
+              if (result?.skipped === true && result?.status !== "complete") artifactRecorded = false;
+            },
             onDocumentsPrepared: typeof opts.onDocumentsPrepared === "function"
               ? (coverage) => {
                   preparedCoverage = coverage;
@@ -900,9 +942,17 @@ export class ParseEngine {
             expectedContentHashes,
             preparedFiles: new Map([[key, ready]]),
           });
-          if (ingested) completedIntakes.set(key, { bytesHash, coverage: preparedCoverage });
+          const ok = ingested && artifactRecorded;
+          if (ok) completedIntakes.set(key, { bytesHash, coverage: preparedCoverage, failedDocuments });
+          return {
+            ok,
+            reason: ok ? "ingested" : "intake_failed",
+            failed_documents: failedDocuments,
+          };
         });
-      return tail;
+      // Keep the ordering tail free of both the report and the rejection.
+      tail = intake.then(() => {}, () => {});
+      return intake;
     };
     return {
       add,

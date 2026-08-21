@@ -50,6 +50,13 @@ export function assessorToolBudgetApplies(role, toolName) {
  * @returns {number}
  */
 export function assessorToolCallCap(configuredMaxToolCalls) {
+  // An unspecified cap means "use the catalogued default", never "one call".
+  // Number(null) is 0 and passes Number.isInteger, so null, undefined, and ""
+  // must be rejected before the numeric test or an unconfigured assessor is
+  // silently held to a single tool call.
+  if (configuredMaxToolCalls == null || configuredMaxToolCalls === "") {
+    return ASSESSOR_MAX_TOOL_CALLS_DEFAULT;
+  }
   return Number.isInteger(Number(configuredMaxToolCalls))
     ? Math.max(1, Number(configuredMaxToolCalls))
     : ASSESSOR_MAX_TOOL_CALLS_DEFAULT;

@@ -8,6 +8,7 @@
 //   warm-now              — synchronously enqueue a warm job, no waiting.
 //   models pull           — explicitly download the production Jina model.
 //   purge-views           — delete view files (warmed/, main view, WI views).
+//   reparse               — force the next warm to re-parse older-build blobs.
 //   scip ...              — inspect/install/restage/ingest SCIP artifacts.
 //
 // All subcommands are read-only by default. `rebuild`, `warm-now`, and
@@ -422,6 +423,28 @@ function printPurgeViews({ projectDir, args }) {
   for (const file of removed.slice(0, 20)) console.log(`    - ${path.relative(projectDir, file)}`);
   if (removed.length > 20) console.log(`    ${C.dim}... and ${removed.length - 20} more${C.reset}`);
   return { removed };
+}
+
+/**
+ * Operator-forced re-parse. A new ATLAS build reuses stored parse rows by
+ * design, so this is how a deliberate re-parse is expressed: record the
+ * running build's parser spec version as the ledger's re-parse floor and let
+ * the next warm rebuild anything an older build produced. No rows are deleted,
+ * so retrieval keeps serving the existing parse until replacements land.
+ */
+async function runParseReparse({ projectDir }) {
+  const led = await openLedgerForCli(projectDir);
+  if (!led) return null;
+  try {
+    const result = led.requestParserReparse();
+    console.log(
+      `  ${C.green}[atlas-v2 reparse]${C.reset} re-parse requested (floor=${result.parse_reparse_floor})`,
+    );
+    console.log(`    ${C.dim}the next warm re-parses blobs produced by an older parser build${C.reset}`);
+    return result;
+  } finally {
+    led.close();
+  }
 }
 
 function scipDir(projectDir) {
@@ -867,6 +890,8 @@ export async function runAtlasV2Command({ projectDir, argv = [] } = {}) {
       return printWarmNow({ projectDir, args: rest });
     case "purge-views":
       return printPurgeViews({ projectDir, args: rest });
+    case "reparse":
+      return await runParseReparse({ projectDir });
     case "models": {
       const modelsSub = String(rest[0] || "pull").toLowerCase();
       if (modelsSub === "pull") return await runModelsPull({ projectDir });

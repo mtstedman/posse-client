@@ -89,8 +89,7 @@ function optionalNonNegativeNumber(value) {
   return Number.isFinite(n) ? Math.max(0, n) : null;
 }
 
-function callBillableInputTokens(call = {}) {
-  const accounting = resolveCanonicalCallAccounting(call);
+function callBillableInputTokens(accounting = {}) {
   return Number.isFinite(accounting.billableInputTokens)
     ? Math.max(0, accounting.billableInputTokens)
     : null;
@@ -275,22 +274,24 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
           finishedAt: j.finished_at,
         })),
         agentCalls: (d.agentCalls || []).map((c) => {
-          const billableInputTokens = callBillableInputTokens(c);
+          // Canonical raw counters, not the row columns: an interrupted call
+          // keeps known segment totals while its aggregate columns are null.
           const accounting = resolveCanonicalCallAccounting(c);
+          const billableInputTokens = callBillableInputTokens(accounting);
           return {
             role: c.role,
             model: c.model_name || c.model_tier,
             tier: c.model_tier,
             status: c.status,
             durationMs: c.duration_ms,
-            inputTokens: c.input_tokens,
-            cachedInputTokens: c.cached_input_tokens || 0,
-            cacheCreationInputTokens: c.cache_creation_input_tokens || 0,
-            outputTokens: c.output_tokens,
+            inputTokens: accounting.inputTokens,
+            cachedInputTokens: accounting.cachedInputTokens || 0,
+            cacheCreationInputTokens: accounting.cacheCreationInputTokens || 0,
+            outputTokens: accounting.outputTokens,
             billableInputTokens,
             billableTokens: billableInputTokens == null
               ? null
-              : billableInputTokens + nonNegativeNumber(c.output_tokens),
+              : billableInputTokens + nonNegativeNumber(accounting.outputTokens),
             effort: c.reasoning_effort,
             provider: c.provider,
             costUsd: accounting.costUsd,
@@ -432,9 +433,12 @@ export function buildReviewReportData(reviewable, {
     const totalDuration = agentCalls.reduce((sum, call) => sum + (call.duration_ms || 0), 0);
     const totalPrompt = agentCalls.reduce((sum, call) => sum + (call.prompt_chars || 0), 0);
     const totalOutput = agentCalls.reduce((sum, call) => sum + (call.output_chars || 0), 0);
-    const totalInputTokens = agentCalls.reduce((sum, call) => sum + (call.input_tokens || 0), 0);
-    const totalCachedInputTokens = agentCalls.reduce((sum, call) => sum + Math.min(nonNegativeNumber(call.input_tokens), nonNegativeNumber(call.cached_input_tokens)), 0);
-    const totalOutputTokens = agentCalls.reduce((sum, call) => sum + (call.output_tokens || 0), 0);
+    // Token totals roll up the canonical per-call counters so they agree with
+    // the per-call rows above and with the billing rollup below.
+    const callAccounting = agentCalls.map((call) => resolveCanonicalCallAccounting(call));
+    const totalInputTokens = callAccounting.reduce((sum, a) => sum + nonNegativeNumber(a.inputTokens), 0);
+    const totalCachedInputTokens = callAccounting.reduce((sum, a) => sum + Math.min(nonNegativeNumber(a.inputTokens), nonNegativeNumber(a.cachedInputTokens)), 0);
+    const totalOutputTokens = callAccounting.reduce((sum, a) => sum + nonNegativeNumber(a.outputTokens), 0);
     const wiCost = workItemCost(wi.id);
     const hasExactBillableRollup = wiCost?.billableTokens != null;
     const totalBillableInputTokens = hasExactBillableRollup && Number.isFinite(Number(wiCost?.billableInputTokens))

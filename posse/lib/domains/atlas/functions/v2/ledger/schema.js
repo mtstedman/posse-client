@@ -112,6 +112,49 @@ export function tableColumnSet(db, table) {
   return new Set(cols.map((c) => c.name));
 }
 
+/**
+ * Meta key holding the operator-requested parse re-parse floor: the parser
+ * spec version that stored parse rows must have been produced at (or later,
+ * meaning the running build's own spec) to still count as current.
+ *
+ * Absent — the normal state — means no spec gating at all: a new ATLAS build
+ * reuses every stored blob, which is the point. It is written only by the
+ * explicit maintenance action, never by a version-string bump.
+ */
+export const PARSE_REPARSE_FLOOR_META_KEY = "parse_reparse_floor";
+
+/**
+ * @param {Database.Database} db
+ * @returns {string | null}
+ */
+export function readParseReparseFloor(db) {
+  try {
+    const row = /** @type {{ value?: string | null } | undefined} */ (
+      db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(PARSE_REPARSE_FLOOR_META_KEY)
+    );
+    const value = row?.value == null ? "" : String(row.value);
+    return value || null;
+  } catch {
+    // Legacy/partial ledgers without a meta table simply have no floor.
+    return null;
+  }
+}
+
+/**
+ * @param {Database.Database} db
+ * @param {string} specVersion
+ * @returns {string}
+ */
+export function writeParseReparseFloor(db, specVersion) {
+  const value = String(specVersion || "");
+  if (!value) throw new RangeError("writeParseReparseFloor: specVersion is required");
+  db.prepare(
+    `INSERT INTO meta(key, value) VALUES(?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(PARSE_REPARSE_FLOOR_META_KEY, value);
+  return value;
+}
+
 export const REQUIRED_LEDGER_COLUMNS = Object.freeze({
   blob_symbols: [
     "range_start_line",

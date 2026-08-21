@@ -4035,7 +4035,16 @@ export class PersistentMcpOwner {
         coverageOwner?.settleReservation(admission.reservation, result?.isError ? "failed" : "confirmed");
       }
       coverageReservationsToRelease = [];
-      releaseSourceContextHeadroomReservation(contextHeadroomReservation);
+      // F1: a delivered result's tokens are not spent when the call returns —
+      // they sit in the model's context until the next provider request carries
+      // them. Releasing here made every serialized read see an empty scope, so
+      // roles on the serial queue (every role but researcher) admitted N reads
+      // against the same budget. The reservation therefore outlives the queue
+      // slot and is dropped by `supersede()` once a newer checkpoint proves the
+      // request that consumed it has been made, with the scope TTL as backstop.
+      // A result that was NOT delivered still releases at the throw,
+      // stale-binding, and blocked sites below.
+      if (result?.isError) releaseSourceContextHeadroomReservation(contextHeadroomReservation);
       contextHeadroomReservation = null;
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
       // attaching here ensures an Atlas-only phase receives pending operator

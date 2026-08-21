@@ -26,7 +26,6 @@ import {
   getSetting,
   getWaitingLanePreparation,
   listAllWaitingLanePreparations,
-  listWaitingLanePreparations,
   parseJobPayload,
   retireWaitingLanePreparation,
   runImmediateTransaction,
@@ -476,8 +475,18 @@ export function reconcileWaitingLaneJobCompletion(job, options = {}) {
 }
 
 /**
- * Bounded oldest-first rescan used after cap/TTL cleanup releases residency.
- * This only enqueues/coalesces queue work; it never inspects or mutates files.
+ * Oldest-first rescan used after cap/TTL cleanup releases residency. This only
+ * enqueues/coalesces queue work; it never inspects or mutates files.
+ *
+ * `limit` bounds the scheduling *actions* one pass may take, not how far the
+ * scan may reach. Bounding the window instead starved the scan: neither
+ * `canRunWaitingLanePreparation` nor `preparationAdmission` writes to a row it
+ * suppresses, so a permanently suppressed row's `updated_at` never advances
+ * and it held its oldest-first slot forever. Enough of them and no later row
+ * was ever examined again — including by the post-eviction pass, whose entire
+ * purpose is to refill the lane the eviction just freed. Suppressed rows are
+ * cheap: the row-level gate is a pure function of the row and settings, and
+ * only rows that pass it reach a database transaction.
  */
 export function scheduleWaitingLaneBacklog({
   settings = readWaitingLaneCoordinatorSettings(),
@@ -494,11 +503,14 @@ export function scheduleWaitingLaneBacklog({
     results: [],
   };
   if (boundedLimit === 0) return summary;
-  const backlog = listWaitingLanePreparations({
+  // A snapshot rather than the lazy iterator: scheduling can move a row's
+  // `updated_at`, and the snapshot keeps this pass's own writes from reordering
+  // the enumeration underneath it.
+  const backlog = listAllWaitingLanePreparations({
     states: [...PREPARATION_SCHEDULABLE_STATES],
-    limit: boundedLimit,
   });
   for (const preparation of backlog) {
+    if (summary.scheduled >= boundedLimit) break;
     const result = scheduleWaitingLanePreparation(preparation, { settings });
     summary.examined++;
     if (result.scheduled) {
@@ -561,7 +573,21 @@ export function selectWaitingLaneEvictionCandidates({
       return timeOrder || Number(left.work_item_id) - Number(right.work_item_id);
     });
   const residents = physicalResidents.filter(isEvictableWaitingLanePreparation);
-  const overflow = Math.max(0, physicalResidents.length - Math.max(1, Number(maxPreparedLanes) || 1));
+  const capacity = Math.max(1, Number(maxPreparedLanes) || 1);
+  // Rows this pass can never reclaim — preserved poison (GC returns before
+  // clearing the asset proof, so the row outlives every eviction pass until
+  // the physical owner clears it) and in-flight preparation — are the floor of
+  // achievable occupancy. Capacity eviction is only worth doing when that floor
+  // can still fit under the cap; above it, evicting every evictable resident
+  // leaves occupancy over cap anyway, so the selection would destroy the one
+  // asset that still works and buy nothing. Without this gate a lane with more
+  // preserved poison than its cap selected its single healthy resident for
+  // `prepared_lane_capacity` eviction forever. Releasing that occupancy is the
+  // physical owner's job (clearing the preserved asset proof), not eviction's.
+  const unreclaimable = physicalResidents.length - residents.length;
+  const overflow = unreclaimable > capacity
+    ? 0
+    : Math.max(0, physicalResidents.length - capacity);
   const cutoff = Number(nowMs) - Math.max(1, Number(ttlMs) || DEFAULT_PREPARED_TTL_MS);
   const selected = new Map();
   for (const preparation of residents) {

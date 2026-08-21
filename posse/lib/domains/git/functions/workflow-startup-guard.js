@@ -15,6 +15,7 @@ import { LOCK_HOLDING_JOB_STATUSES } from "../../queue/functions/common.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { SETTING_KEYS, STARTUP_DIRTY_TREE_POLICY_VALUES } from "../../../catalog/settings.js";
+import { WAITING_LANE_NONTERMINAL_STATES } from "../../../catalog/waiting-lane.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import {
   buildPosseRuntimeIgnoreEntries,
@@ -25,6 +26,7 @@ import { snapshotAndResetDirtyWorktree } from "./worktree.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { firstGitLine } from "./workflow-git-utils.js";
 import { inspectPreparedWorktreeLockedAsync } from "./prepared-worktree-recovery.js";
+import { gitTopLevelAsync } from "./worktree-path.js";
 
 const LIVE_PREPARATION_JOB_STATUS_SET = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
 
@@ -77,18 +79,46 @@ export function waitingLaneStartupInspectionAction(preparation, value, {
 export async function reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
   signal = null,
   onMsg = () => {},
+  deps = {},
 } = {}) {
+  const resolveGitTopLevelAsync = deps.gitTopLevelAsync || gitTopLevelAsync;
+  const inspectPrepared = deps.inspectPreparedWorktreeLockedAsync
+    || inspectPreparedWorktreeLockedAsync;
   const observations = [];
   let preparations = [];
   try {
-    // Every row that can still own a filesystem asset, paged to exhaustion.
-    // A lifetime cap here let terminal history whose asset proof was already
-    // cleared hide a newer prepared worktree from startup recovery; rows with
-    // no `worktree_root` have no asset to recover and only produced noise.
-    preparations = listAllWaitingLanePreparations({ withWorktreeAsset: true });
+    // Every row that can still own a *recoverable* filesystem asset, paged to
+    // exhaustion. Two bounds matter here and they are not the same bound:
+    //
+    //   - No lifetime cap. A cap let terminal history whose asset proof was
+    //     already cleared hide a newer prepared worktree from startup
+    //     recovery (WL-2).
+    //   - A state filter. `poisoned` and `retired` are terminal: GC preserves
+    //     a poisoned row's asset without clearing `worktree_root`, so the row
+    //     is immortal, and re-inspecting it can only re-derive the terminal
+    //     disposition it already has. Every such row costs a lock pair and a
+    //     native inspect on the boot path, sequentially, so enumerating them
+    //     made startup grow without bound in lifetime poison events. Terminal
+    //     assets are reclaimed by waiting-lane eviction and worktree GC, which
+    //     are the owners of that decision; boot recovery is not.
+    preparations = listAllWaitingLanePreparations({
+      states: [...WAITING_LANE_NONTERMINAL_STATES],
+      withWorktreeAsset: true,
+    });
   } catch (error) {
     return [{ action: "unavailable", reason: error?.message || String(error) }];
   }
+  // Resolved at most once for the whole reconciliation: `projectDir` is fixed,
+  // so the Git top level is too. A failure is cached deliberately — a repo that
+  // cannot be resolved will not resolve on the next row either, and re-spawning
+  // Git per row is exactly the boot cost this avoids.
+  let repositoryRootPromise = null;
+  const repositoryRootAsync = () => {
+    if (!repositoryRootPromise) {
+      repositoryRootPromise = Promise.resolve(resolveGitTopLevelAsync(projectDir, { signal }));
+    }
+    return repositoryRootPromise;
+  };
   for (const preparation of preparations) {
     throwIfAborted(signal);
     const root = preparation.worktree_root
@@ -115,8 +145,9 @@ export async function reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
       continue;
     }
     try {
-      const observed = await inspectPreparedWorktreeLockedAsync({
+      const observed = await inspectPrepared({
         projectDir,
+        repositoryRoot: await repositoryRootAsync(),
         worktreeRoot: root,
         preparationId: preparation.ownership_record_id,
         signal,

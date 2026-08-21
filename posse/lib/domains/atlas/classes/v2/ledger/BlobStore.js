@@ -13,7 +13,12 @@ import { nowIso } from "../../../functions/v2/ledger/normalize.js";
 import { isContentHash } from "../../../functions/v2/hash.js";
 import { isCanonicalRepoPath } from "../../../functions/v2/paths.js";
 import { ATLAS_PARSER_SPEC_VERSION, ATLAS_PARSER_VERSION } from "../../../functions/v2/parser/version.js";
-import { tableColumnSet, tableExists } from "../../../functions/v2/ledger/schema.js";
+import {
+  readParseReparseFloor,
+  tableColumnSet,
+  tableExists,
+  writeParseReparseFloor,
+} from "../../../functions/v2/ledger/schema.js";
 import { mergeLayerRows } from "../../../functions/v2/ledger/layer-merge.js";
 
 /** @typedef {import("../../../functions/v2/contracts/schemas.js").SymbolRow} SymbolRow */
@@ -114,6 +119,12 @@ export class BlobStore {
   #stmt;
   /** @type {boolean} */
   #hasBlobLayerMetadata;
+  /**
+   * Operator-requested parse floor, or null when stored parse rows are
+   * reusable regardless of which build produced them (the default).
+   * @type {string | null}
+   */
+  #parseReparseFloor;
 
   /**
    * @param {import("better-sqlite3").Database} db
@@ -129,6 +140,7 @@ export class BlobStore {
     const hasBlobParserVersion = blobColumns.has("parser_version") && blobColumns.has("parser_spec_version");
     const hasBodyIdentifiers = blobSymbolColumns.has("body_identifiers");
     this.#hasBlobLayerMetadata = blobLayerColumns.has("metadata_json");
+    this.#parseReparseFloor = readParseReparseFloor(db);
     this.#stmt = {
       blobExists: db.prepare("SELECT 1 AS one FROM blobs WHERE content_hash = ? LIMIT 1"),
       blobByHash: db.prepare("SELECT content_hash, lang, byte_size FROM blobs WHERE content_hash = ? LIMIT 1"),
@@ -293,6 +305,10 @@ export class BlobStore {
           ? "UPDATE blobs SET parser_version = NULL, parser_spec_version = NULL WHERE content_hash = ?"
           : "SELECT 0 WHERE ? IS NOT NULL",
       ),
+      // Currency is the parser CONTRACT (`tool_version`), not the build
+      // revision that happened to produce the row: a coverage/build revision
+      // writes the same layer shape, so an existing indexed tree-sitter layer
+      // stays reusable across ATLAS versions.
       currentTreeSitterLayer: db.prepare(
         hasBlobLayers
           ? `SELECT 1 AS one
@@ -300,10 +316,23 @@ export class BlobStore {
              WHERE content_hash = ?
                AND source = 'treesitter'
                AND tool_version = ?
-               AND parser_spec_version = ?
                AND status = 'indexed'
              LIMIT 1`
-          : "SELECT 1 AS one WHERE 0 AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL",
+          : "SELECT 1 AS one WHERE 0 AND ? IS NOT NULL AND ? IS NOT NULL",
+      ),
+      // Only used while an operator re-parse request is outstanding: layers
+      // produced before the requested floor stop counting as current.
+      currentTreeSitterLayerAtFloor: db.prepare(
+        hasBlobLayers
+          ? `SELECT 1 AS one
+             FROM blob_layers
+             WHERE content_hash = ?
+               AND source = 'treesitter'
+               AND tool_version = ?
+               AND parser_spec_version IN (?, ?)
+               AND status = 'indexed'
+             LIMIT 1`
+          : "SELECT 1 AS one WHERE 0 AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL",
       ),
     };
   }
@@ -667,6 +696,13 @@ export class BlobStore {
   }
 
   /**
+   * True when the blob already holds a parse produced by the current parser
+   * contract. The producing build revision (`parser_spec_version`) is recorded
+   * for provenance but does NOT gate reuse: a coverage or build revision emits
+   * the same persisted shape, so re-parsing would be pure waste. Encoding
+   * changes invalidate through `ATLAS_DATA_SCHEMA_VERSION`, and an operator can
+   * force a re-parse with `requestParserReparse()`.
+   *
    * @param {string} content_hash
    * @returns {boolean}
    */
@@ -675,8 +711,8 @@ export class BlobStore {
     const row = /** @type {{ parser_version?: string | null, parser_spec_version?: string | null } | undefined} */ (
       this.#stmt.blobParseState.get(content_hash)
     );
-    return row?.parser_version === ATLAS_PARSER_VERSION
-      && row?.parser_spec_version === ATLAS_PARSER_SPEC_VERSION;
+    if (row?.parser_version !== ATLAS_PARSER_VERSION) return false;
+    return this.#parseSpecSatisfiesFloor(row?.parser_spec_version);
   }
 
   /**
@@ -685,11 +721,53 @@ export class BlobStore {
    */
   hasCurrentTreeSitterLayer(content_hash) {
     if (!isContentHash(content_hash)) return false;
-    return !!this.#stmt.currentTreeSitterLayer.get(
+    const floor = this.#parseReparseFloor;
+    if (!floor) {
+      return !!this.#stmt.currentTreeSitterLayer.get(content_hash, ATLAS_PARSER_VERSION);
+    }
+    return !!this.#stmt.currentTreeSitterLayerAtFloor.get(
       content_hash,
       ATLAS_PARSER_VERSION,
+      floor,
       ATLAS_PARSER_SPEC_VERSION,
     );
+  }
+
+  /**
+   * The deliberate re-parse. Records the running build's parser spec version
+   * as the ledger's re-parse floor, so every blob and tree-sitter layer
+   * produced by an earlier revision stops passing the currency test and the
+   * next warm re-parses it. Nothing is deleted, so reads keep serving the
+   * stored rows until their replacements land.
+   *
+   * Idempotent, and stable across later upgrades: rows written at the floor
+   * revision OR at the running build's revision both satisfy it, so a build
+   * that moves past the floor does not trigger a second sweep.
+   *
+   * @returns {{ parse_reparse_floor: string }}
+   */
+  requestParserReparse() {
+    const floor = writeParseReparseFloor(this.#db, ATLAS_PARSER_SPEC_VERSION);
+    this.#parseReparseFloor = floor;
+    return { parse_reparse_floor: floor };
+  }
+
+  /**
+   * @returns {string | null}
+   */
+  parseReparseFloor() {
+    return this.#parseReparseFloor;
+  }
+
+  /**
+   * @param {unknown} specVersion
+   * @returns {boolean}
+   */
+  #parseSpecSatisfiesFloor(specVersion) {
+    const floor = this.#parseReparseFloor;
+    if (!floor) return true;
+    const value = specVersion == null ? "" : String(specVersion);
+    return value === floor || value === ATLAS_PARSER_SPEC_VERSION;
   }
 
   /**

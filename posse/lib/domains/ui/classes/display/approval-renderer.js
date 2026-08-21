@@ -137,10 +137,13 @@ function nonNegativeNumber(value) {
 }
 
 function callTokenMetrics(call = {}) {
-  const inputTokens = nonNegativeNumber(call.input_tokens);
-  const outputTokens = nonNegativeNumber(call.output_tokens);
-  const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(call.cached_input_tokens));
+  // Raw counters come from the canonical resolver, not the row columns: a row
+  // whose aggregate columns are null but whose usage segments survived still
+  // has known raw totals, and reading the columns would render it as zero.
   const accounting = resolveCanonicalCallAccounting(call);
+  const inputTokens = nonNegativeNumber(accounting.inputTokens);
+  const outputTokens = nonNegativeNumber(accounting.outputTokens);
+  const cachedInputTokens = Math.min(inputTokens, nonNegativeNumber(accounting.cachedInputTokens));
   const billableInputTokens = Number.isFinite(accounting.billableInputTokens)
     ? Math.max(0, accounting.billableInputTokens)
     : null;

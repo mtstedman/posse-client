@@ -56,15 +56,27 @@ export function classifyPreparedWorktreeInspection(inspection, { pathExists = fa
   return { safe: true, preserve: false, reason: null };
 }
 
+/**
+ * `repositoryRoot` lets a caller that inspects many prepared worktrees under
+ * one `projectDir` resolve the Git top level once. `gitTopLevelAsync` spawns a
+ * Git subprocess and returns the same answer for a fixed `projectDir`, so
+ * re-resolving it per row is pure cost; startup recovery pays it O(rows) times
+ * otherwise. An explicit value must still be an absolute path, and it is
+ * validated against the worktree root exactly as the resolved one is.
+ */
 export async function inspectPreparedWorktreeLockedAsync({
   projectDir,
   worktreeRoot,
   preparationId,
+  repositoryRoot = null,
   signal = null,
   waitMs = 30_000,
   nativeParity = {},
 } = {}) {
-  const repoRoot = await gitTopLevelAsync(projectDir, { signal });
+  const providedRoot = typeof repositoryRoot === "string" && path.isAbsolute(repositoryRoot.trim())
+    ? path.resolve(repositoryRoot.trim())
+    : null;
+  const repoRoot = providedRoot || await gitTopLevelAsync(projectDir, { signal });
   const root = validatePreparedWorktreeRoot(repoRoot, worktreeRoot);
   return withRepositoryWorktreeAdminLockAsync(repoRoot, projectDir, () => {
     return withWorktreeLockAsync(root, projectDir, async () => {

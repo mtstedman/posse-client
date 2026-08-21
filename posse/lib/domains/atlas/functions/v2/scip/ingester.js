@@ -43,6 +43,10 @@ import { getCurrentGitHeadAsync } from "../../../../integrations/functions/atlas
  * @property {number} blobs_reused
  * @property {number} external_symbols
  * @property {string[]} covered_content_hashes  Hashes of every blob SCIP touched.
+ * @property {Array<{ repo_rel_path: string, content_hash: string, reason: string }>} [failed_documents]
+ *   Documents this intake did not durably record. A caller that publishes an
+ *   acknowledgement receipt must exclude these: the run continues past a
+ *   per-document failure, so a non-throwing intake is not proof of coverage.
  * @property {number} ledger_entries_appended
  * @property {string} scheme
  * @property {string} fileset_hash
@@ -180,6 +184,7 @@ export async function ingestScipFile({
         blobs_reused: 0,
         external_symbols: 0,
         covered_content_hashes: [],
+        failed_documents: [],
         ledger_entries_appended: 0,
         scheme: "",
         fileset_hash: "",
@@ -383,6 +388,7 @@ export async function ingestScipFile({
       blobs_reused: 0,
       external_symbols: 0,
       covered_content_hashes: [],
+      failed_documents: [],
       ledger_entries_appended: 0,
       scheme,
       fileset_hash: filesetHash,
@@ -393,6 +399,8 @@ export async function ingestScipFile({
 
   /** @type {string[]} */
   const coveredHashes = [];
+  /** @type {Array<{ repo_rel_path: string, content_hash: string, reason: string }>} */
+  const failedDocuments = [];
   let documentsIngested = 0;
   let blobsReused = 0;
   let externalsBound = 0;
@@ -442,6 +450,13 @@ export async function ingestScipFile({
       // loop (one thrown error + one failed event per document) on every
       // re-warm while the failure persists.
       documentsFailed = totalDocuments;
+      for (const document of rowDocuments) {
+        failedDocuments.push({
+          repo_rel_path: String(document?.repo_rel_path || ""),
+          content_hash: String(document?.content_hash || ""),
+          reason: "branch_snapshot_failed",
+        });
+      }
       emit(onEvent, {
         kind: "atlas.scip.ingest.failed",
         scheme,
@@ -617,6 +632,14 @@ export async function ingestScipFile({
         documentsFailed++;
         const failReason = document.skip_reason || (!repoRelPath ? "path_not_canonical" : "parse_error");
         if (failReason === "missing_text") documentsMissingText++;
+        // Named, per-document failure evidence. The loop deliberately
+        // continues, so the run's own success flag cannot stand in for this
+        // document's durability; an acknowledgement receipt must exclude it.
+        failedDocuments.push({
+          repo_rel_path: repoRelPath,
+          content_hash: String(document?.content_hash || ""),
+          reason: failReason,
+        });
         emit(onEvent, {
           kind: "atlas.scip.ingest.failed",
           scheme,
@@ -687,6 +710,7 @@ export async function ingestScipFile({
     blobs_reused: blobsReused,
     external_symbols: externalsBound,
     covered_content_hashes: coveredHashes,
+    failed_documents: failedDocuments,
     ledger_entries_appended: ledgerEntriesAppended,
     scheme,
     fileset_hash: filesetHash,
@@ -775,6 +799,7 @@ function handleScipIndexDecodeFailure({ buf, err, onEvent, scipPath }) {
     blobs_reused: 0,
     external_symbols: 0,
     covered_content_hashes: [],
+    failed_documents: [],
     ledger_entries_appended: 0,
     scheme: "unknown",
     fileset_hash: filesetHash,

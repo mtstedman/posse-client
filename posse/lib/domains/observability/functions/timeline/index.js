@@ -39,17 +39,28 @@ function durationMs(startTs, endTs) {
   return Math.max(0, end - start);
 }
 
+// Reads the canonical accounting stamped onto each call by callAccounting(),
+// never the raw agent_calls columns: a call whose aggregate columns are null
+// but whose usage segments survived still has known raw token totals.
 function sumTokens(calls, field) {
   let total = 0;
   let seen = false;
   for (const call of calls) {
-    const value = Number(call?.[field]);
+    const value = Number(callAccounting(call)?.[field]);
     if (Number.isFinite(value) && value > 0) {
       total += value;
       seen = true;
     }
   }
   return seen ? total : null;
+}
+
+// Resolves once per call and memoizes on the row so the summary totals, the
+// per-call nodes, and the cost precision counters all report the same numbers.
+function callAccounting(call) {
+  if (call == null) return null;
+  if (!call._accounting) call._accounting = resolveCanonicalCallAccounting(call);
+  return call._accounting;
 }
 
 function costPrecision({ callCount, exactCostCalls, estimatedCostCalls, unknownCostCalls }) {
@@ -129,8 +140,8 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
 
     const attemptNodes = attempts.map((attempt) => {
       const calls = agentCallsByAttempt.get(attempt.id) || [];
-      const attemptInput = sumTokens(calls, "input_tokens") || 0;
-      const attemptOutput = sumTokens(calls, "output_tokens") || 0;
+      const attemptInput = sumTokens(calls, "inputTokens") || 0;
+      const attemptOutput = sumTokens(calls, "outputTokens") || 0;
       let attemptCost = 0;
       let sawCost = false;
       let attemptExactCostCalls = 0;
@@ -140,7 +151,7 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
       // tokens × pricing. This way callers that never got a cost_estimate_usd
       // written (older rows, providers that don't report) still see cost.
       for (const call of calls) {
-        const accounting = resolveCanonicalCallAccounting(call);
+        const accounting = callAccounting(call);
         call._resolvedCostUsd = accounting.costUsd;
         call._costSource = accounting.costSource;
         call._costPrecision = accounting.costPrecision;
@@ -195,8 +206,8 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
           status: call.status,
           exitCode: call.exit_code,
           durationMs: call.duration_ms,
-          inputTokens: call.input_tokens,
-          outputTokens: call.output_tokens,
+          inputTokens: callAccounting(call).inputTokens,
+          outputTokens: callAccounting(call).outputTokens,
           // costUsd reflects whatever was known at query time: either the
           // provider-reported cost_estimate_usd or the tokens × rate estimate.
           costUsd: call._resolvedCostUsd ?? call.cost_estimate_usd ?? null,
@@ -232,7 +243,7 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
     const orphanCalls = (agentCallsByJob.get(job.id) || [])
       .filter((call) => call.attempt_id == null || !jobAttemptIds.has(call.attempt_id));
     for (const call of orphanCalls) {
-      const accounting = resolveCanonicalCallAccounting(call);
+      const accounting = callAccounting(call);
       call._resolvedCostUsd = accounting.costUsd;
       call._costSource = accounting.costSource;
       call._costPrecision = accounting.costPrecision;
@@ -241,8 +252,8 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
       if (accounting.costPrecision === "exact") exactCostCalls += 1;
       else if (accounting.costPrecision === "estimated") estimatedCostCalls += 1;
       else unknownCostCalls += 1;
-      totalInput += Number(call.input_tokens) || 0;
-      totalOutput += Number(call.output_tokens) || 0;
+      totalInput += Number(accounting.inputTokens) || 0;
+      totalOutput += Number(accounting.outputTokens) || 0;
       if (Number.isFinite(accounting.costUsd)) {
         totalCost += accounting.costUsd;
       }
@@ -280,8 +291,8 @@ export function buildTimeline(wiId, { eventLimit = 500 } = {}) {
         modelName: call.model_name,
         status: call.status,
         durationMs: call.duration_ms,
-        inputTokens: call.input_tokens,
-        outputTokens: call.output_tokens,
+        inputTokens: callAccounting(call).inputTokens,
+        outputTokens: callAccounting(call).outputTokens,
         costUsd: call._resolvedCostUsd ?? call.cost_estimate_usd ?? null,
         costSource: call._costSource || (call.cost_estimate_usd != null ? "known" : null),
         costPrecision: call._costPrecision || "unknown",

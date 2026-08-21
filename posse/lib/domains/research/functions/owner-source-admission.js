@@ -62,13 +62,25 @@ function lowered(value) {
 // eligible (single identifier, file mode, symbol granularity — enforced by
 // completeSymbolSelectorFingerprint) AND the delivered payload proves the whole
 // symbol arrived: not `truncated`, not `selectionBounded`, not `outputTruncated`,
-// carrying no spilled-over regions, and actually returning the identifier that
-// was asked for. Anything short of that stays partial-selector-only.
+// carrying no spilled-over regions, no unseen continuation, and actually
+// returning the identifier that was asked for. Anything short of that stays
+// partial-selector-only.
+//
+// F5: a continuation is a lossless partition of the selected result — the ref
+// exists precisely because some selected lines were NOT delivered inline. A
+// payload carrying one is therefore incomplete no matter what the truncation
+// flags say, and promoting it would answer a wider retry `covered` from a
+// fraction of the symbol. Both spellings are checked: `_continuationWindows`
+// is the native transport and `continuationRef` is what survives after the
+// hash-ref surfacing that normally consumes it.
 export function liveCompleteSymbolSelector(data = {}, args = {}, origin = "primary") {
   if (origin !== "primary") return null;
   if (data.truncated === true || data.selectionBounded === true || data.outputTruncated === true) return null;
   if (Array.isArray(data.additionalWindows) && data.additionalWindows.length > 0) return null;
   if (Number(data.returnedFunctionAnchorsOmitted) > 0) return null;
+  if (String(data.continuationRef || "").trim()) return null;
+  if (Number(data.continuationWindows) > 0) return null;
+  if (Array.isArray(data._continuationWindows) && data._continuationWindows.length > 0) return null;
   if (!completeSymbolSelectorFingerprint(args)) return null;
   const requested = String(args.identifiersToFind?.[0] || "").toLowerCase();
   if (!requested) return null;

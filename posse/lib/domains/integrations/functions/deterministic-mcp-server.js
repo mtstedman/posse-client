@@ -157,6 +157,7 @@ import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-author
 import {
   RESEARCH_CITATION_FETCH_GATE_ENABLED,
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
+  NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
@@ -1187,7 +1188,7 @@ function dedupeReadFile(args = {}) {
     && lastReadMeta.mtimeMs === stat.mtimeMs
   ) {
     const elapsed = Math.max(0, now - lastReadMeta.atMs);
-    return `Duplicate read suppressed: ${normalizedArgs.path} (same range, unchanged file, ${elapsed}ms since last read). Reuse the previous read result or change offset/limit.`;
+    return `${NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX} ${normalizedArgs.path} (same range, unchanged file, ${elapsed}ms since last read). Reuse the previous read result or change offset/limit.`;
   }
 
   const result = execReadFile(normalizedArgs, workspaceCwd, effectiveScopePredicates);

@@ -15,6 +15,29 @@ function positiveOrdinal(value) {
   return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
 }
 
+// Cache counters are subsets of the input counter. Every place that reports or
+// compares call-level counters must apply the same containment so a single row
+// cannot present one `cached` value to the aggregate match test and a different
+// one to the surfaces that display it.
+function clampCallCounters({
+  inputTokens = 0,
+  outputTokens = 0,
+  cachedInputTokens = 0,
+  cacheCreationInputTokens = 0,
+} = {}) {
+  const input = count(inputTokens);
+  const cached = Math.min(input, count(cachedInputTokens));
+  return {
+    inputTokens: input,
+    outputTokens: count(outputTokens),
+    cachedInputTokens: cached,
+    cacheCreationInputTokens: Math.min(
+      Math.max(0, input - cached),
+      count(cacheCreationInputTokens),
+    ),
+  };
+}
+
 export function normalizeUsageSegment(segment = {}) {
   const agentCallId = Number(segment.agentCallId ?? segment.agent_call_id);
   const requestOrdinal = positiveOrdinal(segment.requestOrdinal ?? segment.request_ordinal);
@@ -205,13 +228,17 @@ export function summarizeUsageSegments(agentCallId, {
       if (call?.input_tokens != null && call?.output_tokens != null) aggregate = call;
     } catch { /* optional compatibility check */ }
   }
+  // The reported segment counters and the aggregate they are matched against
+  // are clamped identically, so the match test and every consumer that displays
+  // the result read the same numbers.
+  Object.assign(totals, clampCallCounters(totals));
   if (aggregate && segments.length > 0) {
-    const expected = {
-      inputTokens: count(aggregate.inputTokens ?? aggregate.input_tokens),
-      outputTokens: count(aggregate.outputTokens ?? aggregate.output_tokens),
-      cachedInputTokens: count(aggregate.cachedInputTokens ?? aggregate.cached_input_tokens),
-      cacheCreationInputTokens: count(aggregate.cacheCreationInputTokens ?? aggregate.cache_creation_input_tokens),
-    };
+    const expected = clampCallCounters({
+      inputTokens: aggregate.inputTokens ?? aggregate.input_tokens,
+      outputTokens: aggregate.outputTokens ?? aggregate.output_tokens,
+      cachedInputTokens: aggregate.cachedInputTokens ?? aggregate.cached_input_tokens,
+      cacheCreationInputTokens: aggregate.cacheCreationInputTokens ?? aggregate.cache_creation_input_tokens,
+    });
     const aggregateMatches = totals.inputTokens === expected.inputTokens
       && totals.outputTokens === expected.outputTokens
       && totals.cachedInputTokens === expected.cachedInputTokens
@@ -244,7 +271,7 @@ function hasAggregateUsage(call = {}) {
     && (call.output_tokens ?? call.outputTokens) != null;
 }
 
-function estimatedAggregateCost(call, totals) {
+function estimatedAggregateCost(call, totals, longContextTierInputTokens = null) {
   const priced = estimateCallCost({
     provider: call.provider,
     modelName: call.model_name ?? call.modelName,
@@ -254,9 +281,7 @@ function estimatedAggregateCost(call, totals) {
     cachedInputTokens: totals.cachedInputTokens,
     cacheCreationInputTokens: totals.cacheCreationInputTokens,
     knownCostUsd: call.cost_estimate_usd ?? call.costEstimateUsd,
-    longContextInputTokens: call.long_context_tier_input_tokens
-      ?? call.longContextTierInputTokens
-      ?? null,
+    longContextInputTokens: longContextTierInputTokens,
   });
   return priced.source === "none" || !Number.isFinite(priced.costUsd)
     ? { costUsd: null, costSource: "none", costPrecision: "unknown" }
@@ -267,16 +292,20 @@ export function resolveCanonicalCallAccounting(call = {}, {
   db = getDb(),
   usageSegments = null,
 } = {}) {
-  const inputTokens = count(call.input_tokens ?? call.inputTokens);
-  const outputTokens = count(call.output_tokens ?? call.outputTokens);
-  const cachedInputTokens = Math.min(
+  const {
     inputTokens,
-    count(call.cached_input_tokens ?? call.cachedInputTokens),
-  );
-  const cacheCreationInputTokens = Math.min(
-    Math.max(0, inputTokens - cachedInputTokens),
-    count(call.cache_creation_input_tokens ?? call.cacheCreationInputTokens),
-  );
+    outputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+  } = clampCallCounters({
+    inputTokens: call.input_tokens ?? call.inputTokens,
+    outputTokens: call.output_tokens ?? call.outputTokens,
+    cachedInputTokens: call.cached_input_tokens ?? call.cachedInputTokens,
+    cacheCreationInputTokens: call.cache_creation_input_tokens ?? call.cacheCreationInputTokens,
+  });
+  const persistedLongContextTierInputTokens = call.long_context_tier_input_tokens
+    ?? call.longContextTierInputTokens
+    ?? null;
   const agentCallId = Number(call.id ?? call.agent_call_id ?? call.agentCallId) || null;
   const aggregateUsageAvailable = hasAggregateUsage(call);
   const segments = agentCallId
@@ -296,13 +325,21 @@ export function resolveCanonicalCallAccounting(call = {}, {
     // segment sums remain the only known counters and are kept as they are.
     const aggregateOverridesIncompleteSegments = segments.precision === "incomplete"
       && aggregateUsageAvailable;
+    // The long-context split is only knowable for the counters it was derived
+    // from. When the aggregate replaces partial segment sums the split is
+    // unknown; otherwise the segment-derived split describes exactly the
+    // counters being reported. This single value is what pricing consumes and
+    // what consumers display, so the row never carries two answers.
+    const longContextTierInputTokens = aggregateOverridesIncompleteSegments
+      ? null
+      : segments.longContextTierInputTokens;
     const aggregateCost = segments.precision === "aggregate_only" && aggregateUsageAvailable
       ? estimatedAggregateCost(call, {
         inputTokens,
         outputTokens,
         cachedInputTokens,
         cacheCreationInputTokens,
-      })
+      }, longContextTierInputTokens)
       : null;
     const costUsd = segments.exact ? segments.costUsd : aggregateCost?.costUsd ?? null;
     return {
@@ -327,9 +364,7 @@ export function resolveCanonicalCallAccounting(call = {}, {
       exact: segments.exact,
       requestCount: segments.requestCount,
       durationMs: segments.durationMs,
-      longContextTierInputTokens: aggregateOverridesIncompleteSegments
-        ? null
-        : segments.longContextTierInputTokens,
+      longContextTierInputTokens,
     };
   }
   const persistedPrecision = String(call.billing_precision ?? call.billingPrecision ?? "").trim();
@@ -351,9 +386,11 @@ export function resolveCanonicalCallAccounting(call = {}, {
       exact: false,
       requestCount: count(call.usage_segment_count ?? call.usageSegmentCount),
       durationMs: call.provider_request_duration_ms ?? call.providerRequestDurationMs ?? null,
-      longContextTierInputTokens: call.long_context_tier_input_tokens
-        ?? call.longContextTierInputTokens
-        ?? null,
+      // Same identity as the segment branch above: the counters reported here
+      // are the aggregate columns, while the persisted long-context split was
+      // derived from segment coverage that is no longer readable, so it cannot
+      // be attributed to them.
+      longContextTierInputTokens: null,
     };
   }
   const aggregateCost = aggregateUsageAvailable
@@ -362,7 +399,7 @@ export function resolveCanonicalCallAccounting(call = {}, {
       outputTokens,
       cachedInputTokens,
       cacheCreationInputTokens,
-    })
+    }, persistedLongContextTierInputTokens)
     : { costUsd: null, costSource: "none", costPrecision: "unknown" };
   return {
     inputTokens,
@@ -378,8 +415,8 @@ export function resolveCanonicalCallAccounting(call = {}, {
     exact: false,
     requestCount: 0,
     durationMs: call.provider_request_duration_ms ?? call.providerRequestDurationMs ?? null,
-    longContextTierInputTokens: call.long_context_tier_input_tokens
-      ?? call.longContextTierInputTokens
-      ?? null,
+    // No segment accounting was ever recorded for this row, so the persisted
+    // column is call-scoped by construction and is both reported and priced.
+    longContextTierInputTokens: persistedLongContextTierInputTokens,
   };
 }

@@ -1230,6 +1230,17 @@ async function inspectExactScipBatchCoverage({ targetBranch, gitOid, scipDir, ro
     Array.isArray(row?.source_languages) ? row.source_languages : []
   ))));
   if (languages.size === 0) return { ok: false };
+  // A document this generation attempted and could not record is named in the
+  // receipt, and no ledger state can discharge it. Nothing else can: a
+  // document that failed precisely because no indexer examined it has no
+  // layer to fail the sweep below, and it may not even be in the snapshot.
+  // Rejecting here is what keeps it retryable at this exact OID.
+  for (const document of receipt.unavailable_documents || []) {
+    if (!String(document?.repo_rel_path || "")) return { ok: false };
+    const sourceLanguages = uniqueSourceLanguages(document?.source_languages || []);
+    if (sourceLanguages.length > 0 && !sourceLanguages.some((language) => languages.has(language))) continue;
+    return { ok: false };
+  }
   const branch = ledger.getBranch(targetBranch);
   if (!branch) return { ok: false };
   const snapshot = ledger.pathSnapshotAt(targetBranch, ledger.headSeq(targetBranch));

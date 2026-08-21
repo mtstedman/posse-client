@@ -103,9 +103,16 @@ export function researchSynthesisDecision({
 // directories) are independent evidence events. The result digest is part of
 // the signature too: re-reading the same selector after the content changed is
 // new evidence, not an exact repeat.
+// F3: a gateway control response that explicitly withholds evidence is not
+// evidence, and its text carries volatile fields (elapsed milliseconds). Both
+// reasons keep it out of the digest: digesting it would make every suppressed
+// duplicate hash novel and defeat the staleness gate entirely.
+export const NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX = "Duplicate read suppressed:";
+
 function nativeExplorationResultHasEvidence(resultText) {
   const text = String(resultText ?? "").trim();
   if (!text) return false;
+  if (text.startsWith(NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX)) return false;
   return !/^(?:No files found\.|No matches found\.)$/i.test(text);
 }
 

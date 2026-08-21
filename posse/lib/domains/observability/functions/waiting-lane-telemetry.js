@@ -7,6 +7,7 @@
 import {
   WAITING_LANE_DEMAND_REASONS,
   WAITING_LANE_STATES,
+  WAITING_LANE_TRANSITION_OUTCOMES,
   normalizeWaitingLaneGeneration,
   waitingLaneGenerationsEqual,
 } from "../../../catalog/waiting-lane.js";
@@ -146,6 +147,13 @@ const REASONS = new Set([
   ...WAITING_LANE_STATES.map((state) => `preparation_${state}`),
   "parked",
   "main",
+  // Callers legitimately pass a transition outcome where no more specific
+  // reason exists — the planner boundary falls back to `demand.outcome` when
+  // the demand call returns no reason at all. Those names are closed catalog
+  // values, so registering them here keeps `ineligible`, `poisoned`,
+  // `retired`, `version_conflict`, `already_current`, and `coalesced_queued`
+  // distinguishable instead of collapsing all six into "other".
+  ...WAITING_LANE_TRANSITION_OUTCOMES,
   "none",
   "other",
 ]);

@@ -696,10 +696,15 @@ function buildDeterministicMcpBootPayload(role, {
       attemptId,
       agentCallId,
       promptChars: Math.max(0, Number(promptChars) || 0),
-      fallbackReads: Number.isFinite(Number(fallbackReads))
+      // Unspecified must stay unspecified so the downstream catalogued defaults
+      // apply. Number(null) is 0 and passes Number.isFinite, so signing an
+      // unset gate would pin the assessor to zero fallback reads and a single
+      // tool call for the life of the token.
+      fallbackReads: fallbackReads != null && fallbackReads !== "" && Number.isFinite(Number(fallbackReads))
         ? Math.max(0, Math.floor(Number(fallbackReads)))
         : null,
-      assessorMaxToolCalls: Number.isFinite(Number(assessorMaxToolCalls))
+      assessorMaxToolCalls: assessorMaxToolCalls != null && assessorMaxToolCalls !== ""
+        && Number.isFinite(Number(assessorMaxToolCalls))
         ? Math.max(1, Math.floor(Number(assessorMaxToolCalls)))
         : null,
       atlasAvailable: atlasEnabled,
