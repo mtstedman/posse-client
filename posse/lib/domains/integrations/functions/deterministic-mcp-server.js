@@ -2095,10 +2095,10 @@ function embeddedControlResult(text, kind, trigger = null) {
 
 // One-shot notice progress. Exploration steps sync from the shared ledger and
 // can skip numbers (owner-side ATLAS work advances the count between native
-// calls), so equality triggers can silently skip the midpoint/curtain
+// calls), so equality triggers can silently skip the midpoint/final-window
 // warnings; threshold-crossing flags cannot. In-memory: a gateway restart
 // re-emits at most one already-shown notice.
-const researchNoticeFlags = { midpoint: false, curtain: false, lastSlot: false, extension: false };
+const researchNoticeFlags = { midpoint: false, curtain: false, extension: false };
 const nativeExplorationNovelty = createNativeExplorationNoveltyTracker();
 
 function appendResearchExplorationNotice(text, toolName) {
@@ -2111,16 +2111,11 @@ function appendResearchExplorationNotice(text, toolName) {
   if (researchState.synthesisRequiredAt) {
     researchNoticeFlags.midpoint = true;
     researchNoticeFlags.curtain = true;
-    researchNoticeFlags.lastSlot = true;
     notice = buildResearchSynthesisRequiredMessage(toolName);
     noticeKind = "research_closeout";
-  } else if (
-    (explorationSteps >= curtainStart && !researchNoticeFlags.curtain)
-    || (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1 && !researchNoticeFlags.lastSlot)
-  ) {
+  } else if (explorationSteps >= curtainStart && !researchNoticeFlags.curtain) {
     researchNoticeFlags.midpoint = true;
     researchNoticeFlags.curtain = true;
-    if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1) researchNoticeFlags.lastSlot = true;
     notice = buildResearchCurtainCallText({ explorationSteps });
     noticeKind = "research_curtain";
   } else if (

@@ -459,7 +459,7 @@ function researchBudgetKey(boot = {}) {
 // One-shot notice progress per job/attempt. Owner-assigned exploration steps
 // can skip numbers (native/chain exploration recorded between owner calls also
 // advances the durable count), so equality triggers can silently skip the
-// midpoint/curtain warnings; threshold-crossing flags cannot. In-memory only:
+// midpoint/final-window warnings; threshold-crossing flags cannot. In-memory only:
 // an owner restart re-emits at most one already-shown notice.
 const RESEARCH_NOTICE_FLAG_LIMIT = 2000;
 const researchNoticeFlagState = new Map();
@@ -470,7 +470,6 @@ function researchNoticeFlagsFor(session) {
     flags = {
       midpoint: false,
       curtain: false,
-      lastSlot: false,
       extension: false,
       earlyFetchBatching: false,
       earlyFetchSynthesisAudit: false,
@@ -1337,7 +1336,6 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
   if (explorationSteps >= explorationCeiling) {
     flags.midpoint = true;
     flags.curtain = true;
-    flags.lastSlot = true;
     recordOwnerResearchSynthesisRequired(session, {
       explorationSteps,
       staleSteps: admission.staleSteps,
@@ -1350,13 +1348,9 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
       explorationCeiling,
     });
     noticeKind = "research_closeout";
-  } else if (
-    (explorationSteps >= curtainStart && !flags.curtain)
-    || (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1 && !flags.lastSlot)
-  ) {
+  } else if (explorationSteps >= curtainStart && !flags.curtain) {
     flags.midpoint = true;
     flags.curtain = true;
-    if (explorationSteps >= RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - 1) flags.lastSlot = true;
     notice = buildResearchCurtainCallText({ explorationSteps });
     noticeKind = "research_curtain";
   } else if (

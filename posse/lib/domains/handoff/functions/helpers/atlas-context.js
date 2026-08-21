@@ -3269,6 +3269,7 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
   const lines = [
     atlasHeading("ATLAS RESEARCH PREFETCH"),
     "These are the initial ATLAS calls already made for you. Use them before making additional ATLAS or native file/search calls.",
+    "Wrap up as soon as the gathered evidence supports the requested result. Do not seek corroboration or spend additional calls merely because they are available.",
   ];
 
   if (context) {

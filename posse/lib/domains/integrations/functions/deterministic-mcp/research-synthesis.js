@@ -1,7 +1,8 @@
 export const RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS = 12;
 export const RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS = 4;
-// Leave enough room for broad source-read tasks to close late-discovered gaps;
-// the curtain call reserves the final five calls for targeted closure.
+// Leave enough room for broad source-read tasks to close late-discovered gaps.
+// The model sees no total budget; it receives one final-window warning only
+// when at most two targeted evidence calls remain.
 const DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS = 30;
 const configuredExplorationCeiling = Number(
   process.env.POSSE_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
@@ -13,7 +14,7 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
         + RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
-export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 5;
+export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
 // Atlas137: close at the base ceiling. Eligibility for a future extension may
 // be observed, but it never changes admission in this release.
 export const RESEARCH_SYNTHESIS_CEILING_EXTENSION_STEPS = 0;
@@ -168,7 +169,7 @@ export function buildResearchStopCheckpointText() {
 export function buildResearchMidpointAuditText({ coverage = {} } = {}) {
   void coverage;
   return [
-    `SYNTHESIS CHECKPOINT: ${RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS} exploration calls have been used.`,
+    "EVIDENCE CHECKPOINT: wrap up as soon as the gathered evidence supports the requested result.",
     buildResearchStopCheckpointText(),
   ].join("\n");
 }
@@ -182,8 +183,8 @@ export function buildResearchCurtainCallText({
     RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - Number(explorationSteps || 0),
   );
   return [
-    `RESEARCH BUDGET: ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} ${remainingCalls === 1 ? "remains" : "remain"} before required closeout.`,
-    "Use the remaining calls only when needed, then close out from the gathered evidence.",
+    `FINAL EVIDENCE WINDOW: You have ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} left before required closeout.`,
+    "Do not spend them merely because they are available. If the current evidence is sufficient, synthesize now; otherwise use them only for answer-critical gaps.",
   ].join("\n");
 }
 
@@ -195,18 +196,17 @@ export function buildResearchSynthesisRequiredText({
   coverage = {},
 } = {}) {
   void coverage;
+  void explorationSteps;
+  void explorationCeiling;
+  void staleSteps;
   const stopReason = absoluteCeilingReached
     ? "deterministic_research_tool_ceiling"
     : "deterministic_synthesize_now_no_novel_evidence";
-  const ceiling = Math.max(
-    RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
-    Number(explorationCeiling) || 0,
-  );
   return [
     "RESEARCH CLOSEOUT REQUIRED.",
     absoluteCeilingReached
-      ? `Exploration budget used: ${Math.min(Number(explorationSteps) || 0, ceiling)}/${ceiling}.`
-      : `No new relevant evidence in the last ${staleSteps} exploration calls.`,
+      ? "The evidence-gathering window is closed."
+      : "Recent exploration is no longer producing new relevant evidence.",
     `No further discovery calls are available. If essential unseen stored evidence remains, issue one final batched atlas.fetch_ref call containing all eligible refs. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }
