@@ -217,11 +217,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Reference retrieval. Open stored ATLAS #ref content with batching, paging, slicing, and focused search. Each non-empty result includes a view_ref whose payload is the returned text.",
+    description: "Reference retrieval for unseen stored #ref content. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.",
     parameters: {
       type: "object",
       properties: {
-        ref: { type: ["string", "array"], items: { type: "string" }, description: "One hash ref alias such as #a3f9, or an array of aliases for a batch." },
+        ref: { type: ["string", "array"], items: { type: "string" }, description: "One hash ref alias such as #a3f9, or every independently needed alias as one array batch." },
         refs: { type: "array", items: { type: "string" }, description: "Compatibility alias for a batch of hash refs.", internalOnly: true },
         hashes: { type: "array", items: { type: "string" }, description: "Alias for refs.", internalOnly: true },
         offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0." },
@@ -438,11 +438,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Repository symbol discovery. Search indexed project declarations and bodies by name, concept, or semantic hint. Results identify repository-defined symbols and include stable symbol IDs and locations.",
+    description: "Repository symbol discovery for an unknown target. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations.",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Symbol search query." },
+        query: { type: "string", description: "One unresolved symbol name or concept; retain returned symbol IDs for later reasoning." },
         limit: { type: "integer", description: "Maximum number of results to return." },
         semantic: { type: "boolean", description: "Enable semantic reranking when supported." },
         vectorCandidateLimit: { type: "integer", minimum: 1, maximum: 1000, description: "Experimental exact ANN candidate delivery depth.", internalOnly: true },
@@ -472,7 +472,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.card": {
     type: "function",
     name: "atlas_symbol_card",
-    description: "Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations.",
+    description: "Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations. Submit every symbol needed for the same decision as one batch.",
     parameters: {
       type: "object",
       properties: {
@@ -592,7 +592,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.overview": {
     type: "function",
     name: "atlas_symbol_overview",
-    description: "Concrete call and reference sites for an identified symbol, with relationship kinds, confidence, and locations.",
+    description: "Concrete call and reference sites for an identified symbol when its relationships are the missing fact, with relationship kinds, confidence, and locations.",
     parameters: {
       type: "object",
       properties: {
@@ -777,7 +777,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners. surveyRef and pagination retain the full surveyed inventory.",
+    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners. Submit all known paths together; surveyRef and pagination retain the full surveyed inventory.",
     parameters: {
       type: "object",
       properties: {
@@ -793,7 +793,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.structure": {
     type: "function",
     name: "atlas_code_structure",
-    description: "Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges, with optional symbol summaries.",
+    description: "Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges. Submit known paths together and select the relationship kinds needed for the decision.",
     parameters: {
       type: "object",
       properties: {
@@ -824,13 +824,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Focused localization for named identifiers, usages, or branches within an identified file or symbol.",
+    description: "Focused localization for named identifiers, usages, or branches within one identified file or symbol. Put every same-target identifier needed for the decision into one request.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "One identifier string or an array of identifiers to match." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All identifiers needed from the selected file or symbol, matched together." },
         contextLines: { type: "integer", description: "Context lines around each match." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
@@ -846,15 +846,15 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "Exact-source verification for an identified symbol or anchored file region, establishing a named code fact.",
+    description: "One bounded exact-source verification for an identified symbol or anchored file region. The result establishes a named code fact and a covered repeat returns its existing evidence ref.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path when no symbolId is available." },
-        reason: { type: "string", description: "Named code fact to verify." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Required file-mode anchors for bounded slices." },
-        expectedLines: { type: "integer", description: "Approximate total line count for a file-mode slice." },
+        reason: { type: "string", description: "Unresolved code fact absent from visible evidence; a revisit names the uncovered branch or range." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All known same-file anchors for one bounded file-mode slice." },
+        expectedLines: { type: "integer", description: "Approximate total line count as an integer for a file-mode slice, for example 220." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Symbol, enclosing block, or containing-file selection." },
         maxTokens: { type: "integer", description: "Inline token cap for this exact selection." },
         sliceContext: { type: "object", description: "Task-slice accounting context supplied by orchestration.", internalOnly: true },

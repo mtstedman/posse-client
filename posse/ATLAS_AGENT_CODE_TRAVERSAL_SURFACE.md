@@ -255,13 +255,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Focused localization for named identifiers, usages, or branches within an identified file or symbol.
+Focused localization for named identifiers, usages, or branches within one identified file or symbol. Put every same-target identifier needed for the decision into one request.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `contextLines` | `integer` | Optional | min 0; max 100 | Context lines around each match. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path fallback when you have a file but not an opaque symbolId. |
-| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | One identifier string or an array of identifiers to match. |
+| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | All identifiers needed from the selected file or symbol, matched together. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
 ### `atlas.code.skeleton`
@@ -306,7 +306,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges, with optional symbol summaries.
+Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges. Submit known paths together and select the relationship kinds needed for the decision.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -331,7 +331,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | Yes |
 
-Ranked multi-file symbol preview and call map for behavior spanning files or owners. surveyRef and pagination retain the full surveyed inventory.
+Ranked multi-file symbol preview and call map for behavior spanning files or owners. Submit all known paths together; surveyRef and pagination retain the full surveyed inventory.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -354,16 +354,16 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Exact-source verification for an identified symbol or anchored file region, establishing a named code fact.
+One bounded exact-source verification for an identified symbol or anchored file region. The result establishes a named code fact and a covered repeat returns its existing evidence ref.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Approximate total line count for a file-mode slice. |
+| `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Approximate total line count as an integer for a file-mode slice, for example 220. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path when no symbolId is available. |
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Symbol, enclosing block, or containing-file selection. |
-| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Required file-mode anchors for bounded slices. |
+| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Inline token cap for this exact selection. |
-| `reason` | `string` | Required | max length 20000 | Named code fact to verify. |
+| `reason` | `string` | Required | max length 20000 | Unresolved code fact absent from visible evidence; a revisit names the uncovered branch or range. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
 ### `atlas.create_ref`
@@ -463,14 +463,14 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Reference retrieval. Open stored ATLAS #ref content with batching, paging, slicing, and focused search. Each non-empty result includes a view_ref whose payload is the returned text.
+Reference retrieval for unseen stored #ref content. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs. |
 | `offset` | `integer` | Optional | min 0 | Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0. |
 | `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. It permits one stored ref to be delivered once more. |
-| `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or an array of aliases for a batch. |
+| `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or every independently needed alias as one array batch. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax). |
 
@@ -1036,7 +1036,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations.
+Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations. Submit every symbol needed for the same decision as one batch.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1058,7 +1058,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Concrete call and reference sites for an identified symbol, with relationship kinds, confidence, and locations.
+Concrete call and reference sites for an identified symbol when its relationships are the missing fact, with relationship kinds, confidence, and locations.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1083,12 +1083,12 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Repository symbol discovery. Search indexed project declarations and bodies by name, concept, or semantic hint. Results identify repository-defined symbols and include stable symbol IDs and locations.
+Repository symbol discovery for an unknown target. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 500 | Maximum number of results to return. |
-| `query` | `string` | Required | min length 1; max length 20000 | Symbol search query. |
+| `query` | `string` | Required | min length 1; max length 20000 | One unresolved symbol name or concept; retain returned symbol IDs for later reasoning. |
 | `scope` | `string` | Optional | default "either"; values "name", "body", "either" | Search symbol names, symbol-body identifier tokens, or both. Default either. |
 | `semantic` | `boolean` | Optional |  | Enable semantic reranking when supported. |
 

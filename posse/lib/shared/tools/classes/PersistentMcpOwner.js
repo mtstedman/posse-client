@@ -121,6 +121,8 @@ const GATEWAY_RESTART_BACKOFF_MS = 2000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
+const SOURCE_EVIDENCE_REUSE_NOTICE_KIND = "source_evidence_reuse";
+const sourceEvidenceReuseNoticeAttempts = new WeakMap();
 const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set([
   "action.search",
   "repo.status",
@@ -974,6 +976,47 @@ function tagOwnerModelControlNotice(result, text, detail = {}) {
     enumerable: false,
   });
   return next;
+}
+
+function sourceEvidenceReuseNotice(coverageOwner, admission) {
+  const attemptId = Number(coverageOwner?.attemptId) || null;
+  const db = coverageOwner?.db;
+  const ref = String(admission?.result?.evidenceRef?.ref || "").trim();
+  if (!attemptId || !db || !ref) return null;
+
+  let issuedAttempts = sourceEvidenceReuseNoticeAttempts.get(db);
+  if (!issuedAttempts) {
+    issuedAttempts = new Set();
+    sourceEvidenceReuseNoticeAttempts.set(db, issuedAttempts);
+  }
+  if (issuedAttempts.has(attemptId)) return null;
+
+  try {
+    const recorded = db.prepare(`
+      SELECT 1
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'tool.response_control'
+        AND json_valid(detail_json)
+        AND json_extract(detail_json, '$.kind') = ?
+      LIMIT 1
+    `).get(attemptId, SOURCE_EVIDENCE_REUSE_NOTICE_KIND);
+    if (recorded) {
+      issuedAttempts.add(attemptId);
+      return null;
+    }
+  } catch {
+    // Compatibility databases may not expose JSON query helpers. The in-memory
+    // guard still keeps the notice one-shot for the live owner.
+  }
+
+  // Mark before returning so concurrent covered calls cannot both emit the
+  // first-duplicate nudge. The response-control observation below makes the
+  // decision durable across owner restarts.
+  issuedAttempts.add(attemptId);
+  return `EVIDENCE_REUSE: This source selection was already delivered as ${ref}. `
+    + "Use that evidence ref directly in reasoning and citations. If a different code fact remains unresolved, "
+    + "request only its uncovered symbol, branch, or range and issue independent reads together.";
 }
 
 function annotateOwnerResultTransform(result, detail = {}) {
@@ -3835,8 +3878,18 @@ export class PersistentMcpOwner {
         .map((admission, index) => (admission.covered ? null : index))
         .filter((index) => index != null);
       if (coverageOwner && uncoveredIndexes.length === 0) {
-        const coveredPayload = coverageAdmissions[0].result;
+        const coveredAdmission = coverageAdmissions[0];
+        const reuseNotice = sourceEvidenceReuseNotice(coverageOwner, coveredAdmission);
+        const coveredPayload = reuseNotice
+          ? { ...coveredAdmission.result, message: reuseNotice }
+          : coveredAdmission.result;
         let result = mcpToolTextPayload(JSON.stringify(coveredPayload));
+        if (reuseNotice) {
+          result = tagOwnerModelControlNotice(result, reuseNotice, {
+            kind: SOURCE_EVIDENCE_REUSE_NOTICE_KIND,
+            trigger: coveredAdmission.reason || "covered_reuse",
+          });
+        }
         result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
         result = appendOwnerResearchSynthesisNotice(result, session, toolName, synthesisAdmission);
         recordOwnerToolObservation({
