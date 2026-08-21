@@ -1288,12 +1288,20 @@ async function inspectExactAtlasLayerReadiness({ repoRoot, config, signal = null
     signal,
     workerData: { repoRoot, config },
   });
+  return classifyExactAtlasLayerReadiness(readiness);
+}
+
+function classifyExactAtlasLayerReadiness(readiness) {
   // Exact boot proves SCIP separately on both sides of this readiness read and
   // compares those exact signatures. Do not let an older project-indexer meta
-  // row veto that newer durable batch proof here. The generic readiness scan
-  // remains authoritative for every other layer.
+  // row or the aggregate no-artifact sentinel veto that newer durable batch
+  // proof here. The generic readiness scan remains authoritative for every
+  // other layer.
   const layers = (Array.isArray(readiness?.layers) ? readiness.layers : [])
-    .filter((layer) => !String(layer?.layer || "").startsWith("scip:"));
+    .filter((layer) => {
+      const name = String(layer?.layer || "");
+      return name !== "scip" && !name.startsWith("scip:");
+    });
   if (layers.length === 0) return { ok: false, reason: "atlas_layers_not_ready" };
   const notReady = layers.filter((layer) => layer?.status !== "ready" && layer?.status !== "off");
   if (notReady.length > 0) {
@@ -1307,6 +1315,10 @@ async function inspectExactAtlasLayerReadiness({ repoRoot, config, signal = null
     ok: true,
     signature: layers.map((layer) => [layer.layer, layer.status, layer.coverage ?? null]),
   };
+}
+
+export function __testClassifyExactAtlasLayerReadiness(readiness) {
+  return classifyExactAtlasLayerReadiness(readiness);
 }
 
 export async function __testInspectExactScipBatchCoverage(args) {
