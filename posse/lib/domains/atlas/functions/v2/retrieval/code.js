@@ -12,6 +12,7 @@ import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
 import { getEffectivePolicy } from "./policy.js";
+import { normalizeAtlasCodeWindowPolicy } from "../../../../../catalog/atlas-tools.js";
 import {
   codeLensNative,
   codeSkeletonNative,
@@ -269,9 +270,10 @@ function finishCodeLens({ versionId, params, targetPath, symbolId, lens, calledF
  *   repoRoot?: string,
  *   ledger?: import("../contracts/api.js").Ledger,
  *   repoId?: string | null,
+ *   config?: Record<string, any>,
  * }} args
  */
-export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId }) {
+export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId, config }) {
   if (Array.isArray(/** @type {any} */ (params).items)) {
     return errorEnvelope({
       action: "code.window",
@@ -280,10 +282,10 @@ export async function codeNeedWindow({ view, versionId, params, readFile, repoRo
       message: "code.window multi-selection is disabled; issue independent scalar calls together",
     });
   }
-  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, codeWindowNative);
+  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config }, codeWindowNative);
 }
 
-async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId }, buildWindow) {
+async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config }, buildWindow) {
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
   if (!resolved.ok) return errorEnvelope({
     action: "code.window",
@@ -301,6 +303,17 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     });
   }
   const policy = getEffectivePolicy(ledger, repoId);
+  const liveCodeWindowPolicy = normalizeAtlasCodeWindowPolicy(policy);
+  const snapshottedCodeWindowPolicy = config?.codeWindowPolicy
+    ? normalizeAtlasCodeWindowPolicy(config.codeWindowPolicy)
+    : liveCodeWindowPolicy;
+  // The run snapshot keeps prompt/schema/execution stable. A live policy
+  // tightening still wins, so a long-running agent cannot retain a larger
+  // window after an operator lowers the repository ceiling.
+  const codeWindowPolicy = {
+    maxWindowTokens: Math.min(snapshottedCodeWindowPolicy.maxWindowTokens, liveCodeWindowPolicy.maxWindowTokens),
+    maxWindowLines: Math.min(snapshottedCodeWindowPolicy.maxWindowLines, liveCodeWindowPolicy.maxWindowLines),
+  };
   const identifiers = normalizeIdentifiers(params.identifiersToFind);
   const { source, target, targetPath, symbolId } = resolved;
   if (policy.requireIdentifiers && identifiers.length === 0 && !target) {
@@ -312,8 +325,8 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     });
   }
   const maxTokens = Math.min(
-    typeof params.maxTokens === "number" && params.maxTokens > 0 ? params.maxTokens : policy.maxWindowTokens,
-    policy.maxWindowTokens,
+    typeof params.maxTokens === "number" && params.maxTokens > 0 ? params.maxTokens : codeWindowPolicy.maxWindowTokens,
+    codeWindowPolicy.maxWindowTokens,
   );
   const result = await buildWindow({
     repo_rel_path: targetPath,
@@ -323,7 +336,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     identifiersToFind: identifiers,
     expectedLines: positiveInteger(params.expectedLines),
     granularity: params.granularity || "symbol",
-    maxWindowLines: policy.maxWindowLines,
+    maxWindowLines: codeWindowPolicy.maxWindowLines,
     maxTokens,
   });
   const additionalWindows = normalizeCodeWindowSlices(result.additionalWindows);

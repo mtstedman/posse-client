@@ -95,6 +95,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_EMBEDDED_QUEUE_WAIT_MS: "atlas_embedded_queue_wait_ms",
   ATLAS_JOB_CACHE_TTL_MS: "atlas_job_cache_ttl_ms",
   ATLAS_PREFETCH_CACHE_TTL_MS: "atlas_prefetch_cache_ttl_ms",
+  ATLAS_RESEARCH_PREFETCH_FOCUS: "atlas_research_prefetch_focus",
   ATLAS_CORRUPTION_COOLDOWN_MS: "atlas_corruption_cooldown_ms",
   ATLAS_SCIP_INDEX_ARGS: "atlas_scip_index_args",
   ATLAS_SCIP_INDEX_COMMAND: "atlas_scip_index_command",
@@ -183,6 +184,7 @@ export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]
 export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const ATLAS_SHADOW_GUARDRAILS_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const ATLAS_HANDOFF_PREFETCH_MODE_VALUES = Object.freeze(["on", "off"]);
+export const ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);

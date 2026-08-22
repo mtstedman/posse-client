@@ -273,6 +273,10 @@ function envBootConfig(env = process.env) {
       repoId: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_REPO_ID || "").trim(),
       graphDbPath: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_GRAPH_DB_PATH || "").trim(),
       liveBuffers: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_LIVE_BUFFERS || env.POSSE_ATLAS_LIVE_BUFFERS || "").trim(),
+      codeWindowPolicy: {
+        maxWindowLines: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_MAX_WINDOW_LINES || "").trim(),
+        maxWindowTokens: String(env.POSSE_DETERMINISTIC_MCP_ATLAS_MAX_WINDOW_TOKENS || "").trim(),
+      },
     },
     remoteCatalog: {
       enabled: parseEnvBool(env.POSSE_DETERMINISTIC_MCP_REMOTE_TOOL_CATALOG_ENABLED),
@@ -637,6 +641,10 @@ function getDeterministicAtlasConfig() {
   const repoId = bootString(atlasConfig.repoId);
   const graphDbPath = bootString(atlasConfig.graphDbPath);
   const viewWaitMs = bootString(atlasConfig.viewWaitMs);
+  const codeWindowPolicy = atlasConfig.codeWindowPolicy
+    && typeof atlasConfig.codeWindowPolicy === "object"
+    ? atlasConfig.codeWindowPolicy
+    : null;
   const autoRefreshStale = typeof atlasConfig.autoRefreshStale === "boolean"
     ? atlasConfig.autoRefreshStale
     : parseBoolOverride(atlasConfig.autoRefreshStale);
@@ -645,6 +653,7 @@ function getDeterministicAtlasConfig() {
     && !repoId
     && !graphDbPath
     && !viewWaitMs
+    && !codeWindowPolicy
     && autoRefreshStale == null
   ) return base;
   return {
@@ -654,6 +663,7 @@ function getDeterministicAtlasConfig() {
     requestedGraphDbPath: graphDbPath ? path.resolve(graphDbPath) : base.requestedGraphDbPath,
     viewWaitMs: viewWaitMs === "" ? base.viewWaitMs : viewWaitMs,
     autoRefreshStale: autoRefreshStale == null ? base.autoRefreshStale : autoRefreshStale,
+    ...(codeWindowPolicy ? { codeWindowPolicy: { ...codeWindowPolicy } } : {}),
   };
 }
 
@@ -3355,7 +3365,10 @@ async function handleRequest(msg) {
       .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
       .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
       .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name)))
-      .map((tool) => buildFoldedAtlasToolDescriptor(tool, { role: roleName }));
+      .map((tool) => buildFoldedAtlasToolDescriptor(tool, {
+        role: roleName,
+        codeWindowPolicy: bootConfig?.atlas?.codeWindowPolicy || null,
+      }));
     if (isGateActive({ scopeKey: gateScopeKey }) && atlasTools.length === 0) {
       unlockForAtlasUnavailable({ reason: "atlas_tools_unavailable", scopeKey: gateScopeKey });
       appendToolLog({

@@ -1526,8 +1526,8 @@ async function executeEmbeddedAtlasV2Tool({
   }
 }
 
-export function getAtlasEmbeddedToolDefinitions(toolNames = []) {
-  return getAtlasDeterministicToolDefinitions(toolNames);
+export function getAtlasEmbeddedToolDefinitions(toolNames = [], opts = {}) {
+  return getAtlasDeterministicToolDefinitions(toolNames, opts);
 }
 
 export function resolveEmbeddedAtlasAction(toolName) {
@@ -1812,7 +1812,10 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
   }
   let prepared;
   try {
-    prepared = prepareAtlasDeterministicPayload(action, args, { repoId: repo.repoId || null });
+    prepared = prepareAtlasDeterministicPayload(action, args, {
+      repoId: repo.repoId || null,
+      codeWindowPolicy: config?.codeWindowPolicy || null,
+    });
   } catch (err) {
     const message = err?.message || String(err);
     recordAtlasToolObservation({

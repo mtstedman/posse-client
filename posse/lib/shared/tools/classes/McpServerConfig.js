@@ -496,6 +496,8 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
     POSSE_DETERMINISTIC_MCP_ATLAS_REPO_PATH: String(payload.atlas?.repoPath || ""),
     POSSE_DETERMINISTIC_MCP_ATLAS_REPO_ID: String(payload.atlas?.repoId || ""),
     POSSE_DETERMINISTIC_MCP_ATLAS_GRAPH_DB_PATH: String(payload.atlas?.graphDbPath || ""),
+    POSSE_DETERMINISTIC_MCP_ATLAS_MAX_WINDOW_LINES: String(payload.atlas?.codeWindowPolicy?.maxWindowLines || ""),
+    POSSE_DETERMINISTIC_MCP_ATLAS_MAX_WINDOW_TOKENS: String(payload.atlas?.codeWindowPolicy?.maxWindowTokens || ""),
     POSSE_DETERMINISTIC_MCP_REMOTE_TOOL_CATALOG_ENABLED: boolEnv(payload.remoteCatalog?.enabled === true),
     POSSE_DETERMINISTIC_MCP_REMOTE_TOOL_CATALOG_MODE: String(payload.remoteCatalog?.mode || ""),
     POSSE_DETERMINISTIC_MCP_REMOTE_TOOL_SUITES: Array.isArray(payload.remoteCatalog?.requestedSuites)
@@ -721,6 +723,9 @@ function buildDeterministicMcpBootPayload(role, {
         jobCacheEnabled: resolvedAtlasConfig?.jobCacheEnabled === true,
         jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,
+        codeWindowPolicy: resolvedAtlasConfig?.codeWindowPolicy
+          ? { ...resolvedAtlasConfig.codeWindowPolicy }
+          : null,
       },
       // Remote issuance is authoritative but may only narrow this local role
       // projection. Persist the local tools lane so a stale remote catalog

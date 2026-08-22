@@ -162,7 +162,10 @@ export function resolveLifecycleSurveyTargetSymbolIds(targets, files) {
  * Returns an inactive plan for ordinary questions or when no surveyed symbol
  * has a concrete lexical/family relationship to the assignment.
  */
-export function planLifecycleSurveyExpansion(taskText, files, { maxBodies = 3 } = {}) {
+export function planLifecycleSurveyExpansion(taskText, files, {
+  maxBodies = 3,
+  focusAdmission = null,
+} = {}) {
   const taskFamilies = familiesFor(taskText);
   const boundedMax = Math.max(0, Math.min(4, Math.floor(Number(maxBodies) || 0)));
   if (taskFamilies.size === 0 || boundedMax === 0) {
@@ -171,7 +174,14 @@ export function planLifecycleSurveyExpansion(taskText, files, { maxBodies = 3 } 
 
   const taskTerms = new Set(splitTerms(taskText));
   const taskPhrase = ` ${normalizedPhrase(taskText)} `;
+  const focusedIdentifiers = new Set((Array.isArray(focusAdmission?.explicitIdentifiers)
+    ? focusAdmission.explicitIdentifiers
+    : []).map(normalizedPhrase).filter(Boolean));
+  const focusedPaths = new Set((Array.isArray(focusAdmission?.explicitPaths)
+    ? focusAdmission.explicitPaths
+    : []).map((value) => String(value || "").replace(/\\/g, "/").toLowerCase()).filter(Boolean));
   const candidates = [];
+  let focusGateRejected = 0;
   let order = 0;
   for (const file of Array.isArray(files) ? files : []) {
     const filePath = String(file?.path || "").trim().replace(/\\/g, "/");
@@ -209,6 +219,23 @@ export function planLifecycleSurveyExpansion(taskText, files, { maxBodies = 3 } 
       // members must match directly or belong to a verified named anchor.
       const fileFocusEligible = hasFileFocus && classSymbols.length === 0;
       if (!direct.explicitlyNamed && direct.sharedFamilies.length === 0 && direct.sharedTerms.length === 0 && !anchor && !fileFocusEligible) continue;
+      if (focusAdmission?.enabled === true) {
+        const explicitlyAnchored = focusedIdentifiers.has(direct.phrase)
+          || (anchor?.phrase ? focusedIdentifiers.has(anchor.phrase) : false)
+          || focusedPaths.has(filePath.toLowerCase());
+        const convergedTerms = new Set([
+          ...direct.sharedTerms,
+          ...(anchor?.sharedTerms || []),
+          ...fileFocus.sharedTerms,
+        ]);
+        const confidenceAllows = String(focusAdmission.treeConfidence || "").toLowerCase() === "high"
+          && String(focusAdmission.scopeRisk || "").toLowerCase() !== "high"
+          && convergedTerms.size >= 2;
+        if (!explicitlyAnchored && !confidenceAllows) {
+          focusGateRejected += 1;
+          continue;
+        }
+      }
       const span = reportedSymbolSpan(symbol);
       if (span.estimatedLines != null && span.estimatedLines > MAX_ESTIMATED_BODY_LINES) continue;
       const focuses = focusLanesFor({ direct, anchor, fileFocus });
@@ -280,9 +307,14 @@ export function planLifecycleSurveyExpansion(taskText, files, { maxBodies = 3 } 
 
   return {
     active: targets.length > 0,
-    reason: targets.length > 0 ? "task_matched_lifecycle_symbols" : "no_matching_survey_symbols",
+    reason: targets.length > 0
+      ? "task_matched_lifecycle_symbols"
+      : focusGateRejected > 0
+        ? "lifecycle_matches_below_focus_confidence"
+        : "no_matching_survey_symbols",
     taskFamilies: [...taskFamilies].sort(),
     focusLanes: [...coveredFocuses],
+    focusGateRejected,
     targets,
   };
 }

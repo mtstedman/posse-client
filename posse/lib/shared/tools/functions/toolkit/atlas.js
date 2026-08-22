@@ -1,6 +1,10 @@
 import path from "path";
 import { recordToolInvocation } from "../../../../domains/observability/functions/observations.js";
-import { ATLAS_TOOL_DEFS } from "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+import {
+  ATLAS_TOOL_DEFS,
+  projectAtlasToolDefinitionForRuntime,
+} from "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS, normalizeAtlasCodeWindowPolicy } from "../../../../catalog/atlas-tools.js";
 import { optionalAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../../../../domains/atlas/functions/v2/symbol-id.js";
 import { coerceLooseAtlasSymbolArgs, validateAtlasPayloadSymbolIds } from "../../../../domains/atlas/functions/v2/signal-extraction.js";
 import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
@@ -255,15 +259,27 @@ export function resolveAtlasDeterministicCliAction(action) {
   return normalizeAction(action);
 }
 
-export function getAtlasDeterministicToolDefinitions(toolNames = []) {
-  return (toolNames || []).map((toolName) => ATLAS_TOOL_DEFS[toolName]).filter(Boolean);
+export function getAtlasDeterministicToolDefinitions(toolNames = [], {
+  codeWindowPolicy = null,
+} = {}) {
+  return (toolNames || [])
+    .map((toolName) => {
+      const schema = ATLAS_TOOL_DEFS[toolName];
+      return schema
+        ? projectAtlasToolDefinitionForRuntime(schema, { action: toolName, codeWindowPolicy })
+        : null;
+    })
+    .filter(Boolean);
 }
 
 export function resolveAtlasDeterministicAction(toolName) {
   return ATLAS_TOOL_NAME_TO_ACTION[toolName] || null;
 }
 
-export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = null } = {}) {
+export function prepareAtlasDeterministicPayload(action, args = {}, {
+  repoId = null,
+  codeWindowPolicy = null,
+} = {}) {
   const normalizedAction = normalizeAction(action);
   const payload = { ...(args || {}) };
   const fallbackOnlyNested = nestedFallbackOnlyAction(payload);
@@ -597,7 +613,16 @@ export function prepareAtlasDeterministicPayload(action, args = {}, { repoId = n
         reason,
         identifiersToFind,
         expectedLines: clampInt(payload.expectedLines, 1, 2000, 120),
-        ...(payload.maxTokens == null ? {} : { maxTokens: clampInt(payload.maxTokens, 64, ATLAS_MAX_BUDGET_TOKENS, 1200) }),
+        ...(payload.maxTokens == null ? {} : {
+          maxTokens: clampInt(
+            payload.maxTokens,
+            1,
+            codeWindowPolicy
+              ? normalizeAtlasCodeWindowPolicy(codeWindowPolicy).maxWindowTokens
+              : ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens,
+            1200,
+          ),
+        }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -707,12 +732,13 @@ function atlasActionSupportsRepoId(action) {
 export function executeAtlasDeterministicCommand(action, args = {}, {
   cwd = process.cwd(),
   repoId = null,
+  codeWindowPolicy = null,
   executor,
 } = {}) {
   if (typeof executor !== "function") {
     throw new Error("executeAtlasDeterministicCommand requires an executor callback.");
   }
-  const prepared = prepareAtlasDeterministicPayload(action, args, { repoId });
+  const prepared = prepareAtlasDeterministicPayload(action, args, { repoId, codeWindowPolicy });
   recordToolInvocation({
     tool: prepared.action,
     input: prepared.payload,

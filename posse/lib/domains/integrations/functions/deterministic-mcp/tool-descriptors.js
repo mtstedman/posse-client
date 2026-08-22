@@ -115,7 +115,10 @@ export {
   TOOL_SUB_AGENT,
 } from "../../../../catalog/native-tools.js";
 
-import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
+import {
+  ATLAS_TOOL_DEFS_RAW,
+  normalizeAtlasCodeWindowPolicy,
+} from "../../../../catalog/atlas-tools.js";
 import {
   INTERNAL_ATLAS_SURFACE_ACTIONS,
   INTERNAL_ATLAS_SURFACE_ACTION_SET,
@@ -1025,13 +1028,31 @@ export function isExternallyRoutedAtlasTool(name) {
     && !ATLAS_PREFETCH_ONLY_ACTIONS.has(action);
 }
 
-export function buildNativeToolDescriptor(schema) {
+export function projectAtlasToolDefinitionForRuntime(schema = {}, {
+  action = null,
+  codeWindowPolicy = null,
+} = {}) {
+  const normalizedAction = normalizeAtlasActionName(action || schema?.name);
+  if (normalizedAction !== "code.window" || !codeWindowPolicy) return schema;
+  const policy = normalizeAtlasCodeWindowPolicy(codeWindowPolicy);
+  const projected = cloneJson(schema);
+  for (const schemaKey of ["parameters", "inputSchema"]) {
+    const maxTokens = projected?.[schemaKey]?.properties?.maxTokens;
+    if (!maxTokens || typeof maxTokens !== "object") continue;
+    maxTokens.maximum = policy.maxWindowTokens;
+    maxTokens.description = `Optional inline token cap for this selection. The configured maximum for this run is ${policy.maxWindowTokens} tokens; larger values are clamped.`;
+  }
+  return projected;
+}
+
+export function buildNativeToolDescriptor(schema, opts = {}) {
+  const projected = projectAtlasToolDefinitionForRuntime(schema, opts);
   return projectAgentToolDefinition({
-    name: schema.name,
-    description: schema.description,
-    inputSchema: schema.parameters || { type: "object", properties: {}, additionalProperties: false },
+    name: projected.name,
+    description: projected.description,
+    inputSchema: projected.parameters || { type: "object", properties: {}, additionalProperties: false },
     annotations: {
-      title: schema.name,
+      title: projected.name,
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -1042,14 +1063,16 @@ export function buildNativeToolDescriptor(schema) {
 
 export function buildFoldedAtlasToolDescriptor(schema = {}, {
   role = null,
+  codeWindowPolicy = null,
 } = {}) {
-  const annotations = schema.annotations && typeof schema.annotations === "object"
-    ? schema.annotations
+  const projected = projectAtlasToolDefinitionForRuntime(schema, { codeWindowPolicy });
+  const annotations = projected.annotations && typeof projected.annotations === "object"
+    ? projected.annotations
     : {};
-  const name = String(schema.name || "");
+  const name = String(projected.name || "");
   const mutating = isBlockedFoldedAtlasTool(name);
   const canonicalDescription = ATLAS_TOOL_DEFS[stripAtlasPrefix(name)]?.description;
-  let inputSchema = schema.inputSchema;
+  let inputSchema = projected.inputSchema;
   // Keep every provider-facing window selection scalar so independent exact
   // reads can be scheduled concurrently. Upstream catalogs may temporarily
   // retain the retired items mode during a staggered rollout, so narrow it at
@@ -1070,8 +1093,8 @@ export function buildFoldedAtlasToolDescriptor(schema = {}, {
   }
   void role;
   return projectAgentToolDefinition({
-    ...schema,
-    description: canonicalDescription || schema.description,
+    ...projected,
+    description: canonicalDescription || projected.description,
     ...(inputSchema ? { inputSchema } : {}),
     annotations: {
       ...annotations,

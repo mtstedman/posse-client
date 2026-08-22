@@ -39,7 +39,9 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
       continue;
     }
     if (isAtlasTool(tool)) {
-      const defs = getAtlasEmbeddedToolDefinitions([name]);
+      const defs = getAtlasEmbeddedToolDefinitions([name], {
+        codeWindowPolicy: contract?.atlasCodeWindowPolicy || null,
+      });
       if (defs.length > 0) map[name] = defs[0];
       continue;
     }

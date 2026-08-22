@@ -54,15 +54,23 @@ function pushUnique(values, value) {
 }
 
 export function renderAtlasGuidance(contract = {}) {
-  const hasAtlas = (Array.isArray(contract?.tools) ? contract.tools : [])
+  const tools = Array.isArray(contract?.tools) ? contract.tools : [];
+  const hasAtlas = tools
     .some((tool) => String(tool?.suite || "").trim() === "atlas"
       || String(tool?.access || "").trim() === "atlas");
-  return hasAtlas
-    ? [
-      "Atlas symbol tracing: To get new information about a symbol, choose a different Atlas tool suited to the unresolved fact.",
-      "Atlas reference traversal: Use citation refs directly for citation or handoff. Fetch continuation refs, explicit cursor, survey, or continuation fields, bounded or omitted content, and focused matches within stored payloads. Group concurrently ready refs into one fetch; use one ref when it unlocks the next cursor. Follow returned cursors in order while task-relevant content remains, and use each returned view ref for citation, slicing, or handoff. Start a fresh producer call for a materially different scope.",
-    ]
-    : [];
+  if (!hasAtlas) return [];
+  const lines = [
+    "Atlas symbol tracing: To get new information about a symbol, choose a different Atlas tool suited to the unresolved fact.",
+    "Atlas reference traversal: Use citation refs directly for citation or handoff. Fetch continuation refs, explicit cursor, survey, or continuation fields, bounded or omitted content, and focused matches within stored payloads. Group concurrently ready refs into one fetch; use one ref when it unlocks the next cursor. Follow returned cursors in order while task-relevant content remains, and use each returned view ref for citation, slicing, or handoff. Start a fresh producer call for a materially different scope.",
+  ];
+  const hasCodeWindow = tools.some((tool) => canonicalToolName(tool) === "code.window");
+  const policy = contract?.atlasCodeWindowPolicy;
+  if (hasCodeWindow && policy) {
+    lines.push(
+      `Atlas code window limit: code.window is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit maxTokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,
+    );
+  }
+  return lines;
 }
 
 export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
@@ -89,7 +97,7 @@ export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
 
   const lines = [];
   if (parallelAtlas.length + parallelDeterministic.length > 0) {
-    lines.push("Turn batching: Batch independent, ready read only tool calls together in the same assistant response. All read only tools issued this run, Atlas and standard, support turn batching.");
+    lines.push("Turn batching: Issue every independent, ready read only tool call together in the same assistant response. Prefer one batched turn whenever the calls are already determined; a single-call turn fits a call whose target depends on the previous result. All read only tools issued this run, Atlas and standard, support turn batching.");
   }
   if (nativeBatch.length > 0) {
     lines.push("Schema batching: Tools with schema defined batch fields can combine items in one call within their declared limits.");

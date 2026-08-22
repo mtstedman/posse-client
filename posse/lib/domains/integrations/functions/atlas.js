@@ -86,6 +86,8 @@ import {
   resolveAtlasRepoTargetAsync,
 } from "./atlas/repo.js";
 import { normalizeWaitingLaneGeneration, waitingLaneGenerationsEqual } from "../../../catalog/waiting-lane.js";
+import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
+import { getEffectiveCodeWindowPolicy } from "../../atlas/functions/v2/retrieval/policy.js";
 
 export {
   ATLAS_ROLE_ORDER,
@@ -446,6 +448,38 @@ function repoStorageFor({ cwd = null, config = getAtlasIntegrationConfig() } = {
     ledgerDbPath: path.join(atlasRoot, "ledger.db"),
     mainViewDbPath: path.join(atlasRoot, "views", "main.view.db"),
     warmedRoot: path.join(atlasRoot, "views", "warmed"),
+  };
+}
+
+function codeWindowPolicyForStorage(storage = {}, config = {}) {
+  if (config?.codeWindowPolicy && typeof config.codeWindowPolicy === "object") {
+    return normalizeAtlasCodeWindowPolicy(config.codeWindowPolicy);
+  }
+  let ledger = null;
+  const ledgerDbPath = config?.atlasV2LedgerDbPath
+    || config?.ledgerDbPath
+    || storage?.ledgerDbPath
+    || null;
+  try {
+    if (!ledgerDbPath || !fs.existsSync(ledgerDbPath)) {
+      return getEffectiveCodeWindowPolicy(undefined, storage?.repo?.repoId || "default");
+    }
+    ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
+    return getEffectiveCodeWindowPolicy(ledger, storage?.repo?.repoId || "default");
+  } catch {
+    return getEffectiveCodeWindowPolicy(undefined, storage?.repo?.repoId || "default");
+  } finally {
+    try { ledger?.close?.(); } catch { /* best-effort read snapshot */ }
+  }
+}
+
+export function withAtlasExecutionPolicySnapshot(config = null, attachment = null) {
+  const base = config || getAtlasIntegrationConfig();
+  const codeWindowPolicy = attachment?.codeWindowPolicy;
+  if (!codeWindowPolicy) return base;
+  return {
+    ...base,
+    codeWindowPolicy: { ...codeWindowPolicy },
   };
 }
 
@@ -2681,6 +2715,7 @@ export function buildDisabledAtlasAttachment({
     requiredFailureReason: null,
     tools: [],
     internalTools: [],
+    codeWindowPolicy: null,
     backend: "atlas-v2",
   };
 }
@@ -2793,6 +2828,7 @@ export function resolveAtlasExecutionAttachment(args = {}) {
       ? "provider_non_atlas_fallback"
       : (split && baseActive ? "atlas_split_control" : "atlas_route_inactive");
   const failClosed = !!(required && route.shouldAdvertise && !active && !providerFallback);
+  const codeWindowPolicy = active ? codeWindowPolicyForStorage(storage, config) : null;
   return {
     provider,
     transport: support.transport,
@@ -2814,6 +2850,7 @@ export function resolveAtlasExecutionAttachment(args = {}) {
     requiredFailureReason: failClosed ? unavailableReason : null,
     tools: active ? filteredRouteTools(route) : [],
     internalTools: active ? cloneArray(route.internalTools || route.tools) : [],
+    codeWindowPolicy,
     backend: "atlas-v2",
     unavailableReason,
     ledgerDbPath: storage.ledgerDbPath,

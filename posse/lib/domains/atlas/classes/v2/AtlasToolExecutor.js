@@ -592,6 +592,15 @@ function dispatchCacheTtlFor(request = {}) {
   return Number.isFinite(ttlMs) ? Math.max(0, ttlMs) : DEFAULT_DISPATCH_CACHE_TTL_MS;
 }
 
+function codeWindowPolicyForRequest(request = {}, action = "") {
+  if (String(action || "").toLowerCase() !== "code.window") return null;
+  const config = request.config || {};
+  const session = request.session || {};
+  const boot = session.bootConfig || session || {};
+  const atlas = boot.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
+  return config.codeWindowPolicy || atlas.codeWindowPolicy || null;
+}
+
 /**
  * @typedef {{
  *   toolName: string,
@@ -699,6 +708,7 @@ export class AtlasToolExecutor {
     const semanticRepeatKey = semanticScope
       ? `${semanticScope}|${action}|${stableStringify(args)}`
       : null;
+    const codeWindowPolicy = codeWindowPolicyForRequest(request, action);
     if (semanticRepeatKey && this.#semanticRepeats.has(semanticRepeatKey)) {
       return duplicateSuppressedToolResult(action);
     }
@@ -713,7 +723,7 @@ export class AtlasToolExecutor {
       const result = await this.#dispatchCache.getOrRun(dispatchCacheKey, async () => {
         const value = await run();
         const dedupeEligible = ATLAS_READONLY_DEDUPE_ACTIONS.has(String(action).toLowerCase());
-        const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey: dedupeRepoKey }) : null;
+        const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey: dedupeRepoKey, codeWindowPolicy }) : null;
         if (dedupeKey) this.#rememberDedupe(dedupeKey, value);
         return value;
       }, { ttlMs: dispatchCacheTtlMs, cacheReady: dispatchCacheReady, repoKey });
@@ -722,7 +732,7 @@ export class AtlasToolExecutor {
       return result.value;
     }
     const dedupeEligible = ATLAS_READONLY_DEDUPE_ACTIONS.has(String(action).toLowerCase());
-    const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey: dedupeRepoKey }) : null;
+    const dedupeKey = dedupeEligible ? this.#dedupeKey({ toolName, args, repoKey: dedupeRepoKey, codeWindowPolicy }) : null;
     if (dedupeKey) {
       const cached = this.#recentDedupe.get(dedupeKey);
       if (cached && this.#now() - cached.atMs <= this.#dedupeWindowMs) {
@@ -1157,6 +1167,13 @@ export class AtlasToolExecutor {
     const wantsSemantic = (action === "symbol.search" && args.semantic)
       || (action === "slice.build" && args.taskText && args.semantic !== false)
       || ((action === "context" || action === "context.summary") && args.taskText);
+    const boot = request.session?.bootConfig || request.session || {};
+    const atlas = boot?.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
+    const executionConfig = {
+      ...(context.config && typeof context.config === "object" ? context.config : {}),
+      ...(request.config && typeof request.config === "object" ? request.config : {}),
+      ...(atlas.codeWindowPolicy ? { codeWindowPolicy: atlas.codeWindowPolicy } : {}),
+    };
     return {
       call,
       viewPath: context.viewPath || null,
@@ -1167,12 +1184,13 @@ export class AtlasToolExecutor {
       semantic: !!wantsSemantic,
       taskText,
       taskType: typeof args.taskType === "string" ? args.taskType : undefined,
-      config: cloneJson(request.config || context.config || {}) || {},
+      config: cloneJson(executionConfig) || {},
     };
   }
 
-  #dedupeKey({ toolName, args, repoKey }) {
-    return `${repoKey}|${String(toolName || "")}|${stableStringify(args || {})}`;
+  #dedupeKey({ toolName, args, repoKey, codeWindowPolicy = null }) {
+    const policyKey = codeWindowPolicy ? `|codeWindowPolicy=${stableStringify(codeWindowPolicy)}` : "";
+    return `${repoKey}|${String(toolName || "")}|${stableStringify(args || {})}${policyKey}`;
   }
 
   #dedupeRepoKeyForRequest(request, repoKey) {

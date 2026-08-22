@@ -15,7 +15,7 @@ import { appendExecutionTools, buildExecutionContract, renderExecutionContractBl
 import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { issuedToolSurfaceForProviderPolicy, narrowProviderOptionsToRemoteIssuance } from "../../../../shared/tools/functions/issued-tool-policy.js";
-import { buildDisabledAtlasAttachment, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
+import { buildDisabledAtlasAttachment, logAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment, withAtlasExecutionPolicySnapshot } from "../../../integrations/functions/atlas.js";
 import {
   buildAtlasGateScopeKey,
   configureGate,
@@ -366,6 +366,7 @@ export async function callProvider(promptText, {
       workItemId,
       config: atlasConfig || undefined,
     });
+  const executionAtlasConfig = withAtlasExecutionPolicySnapshot(atlasConfig, atlasAttachment);
   const atlasMethodForStats = disableAtlas ? null : (atlasAttachment?.method || "baseline");
   logAtlasAttachment({
     attachment: atlasAttachment,
@@ -431,6 +432,7 @@ export async function callProvider(promptText, {
     issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
     agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
     agentHandoffCompactV3: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
+    atlasCodeWindowPolicy: atlasAttachment?.codeWindowPolicy || null,
     needsImageGeneration,
     scopedFiles,
     createFiles,
@@ -793,7 +795,7 @@ export async function callProvider(promptText, {
         const displayToolName = formatAtlasToolUseDisplayName(call.name, callInput) || call.name;
         emit(`${C.dim}  [tool] ${displayToolName}(${shortArgs}${shortArgs.length >= 100 ? "..." : ""})${C.reset}`);
 
-        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, atlasConfig, gateScopeKey, declaredScope, executionContract, mcpGate, abortSignal);
+        const rawResult = await executeTool(call.name, call.arguments, workingDir, allowWrite, scopePredicates, executionAtlasConfig, gateScopeKey, declaredScope, executionContract, mcpGate, abortSignal);
         const toolMs = Date.now() - toolStart;
         // executeTool can yield non-strings (e.g. error paths in tool handlers
         // that surface objects). Coerce before .length / .slice so a single

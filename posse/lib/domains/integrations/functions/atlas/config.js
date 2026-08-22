@@ -566,6 +566,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       jobCacheTtlMs: 300000,
       prefetchCacheTtlMs: 600000,
       prefetchEntrypointRank: false,
+      researchPrefetchFocusMode: "off",
       treeIdentifierRoutingShadow: false,
       surveyBriefEdgeCount: 8,
       surveyEdgeCap: 0,
@@ -637,6 +638,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbJobCacheTtlMs = useLiveSettings ? readDbSetting("atlas_job_cache_ttl_ms") : null;
   const dbPrefetchCacheTtlMs = useLiveSettings ? readDbSetting("atlas_prefetch_cache_ttl_ms") : null;
   const dbPrefetchEntrypointRank = useLiveSettings ? readDbSettingBool("atlas_prefetch_entrypoint_rank") : null;
+  const dbResearchPrefetchFocus = useLiveSettings ? readDbSetting("atlas_research_prefetch_focus") : null;
   const dbTreeIdentifierRoutingShadow = useLiveSettings ? readDbSettingBool("atlas_tree_identifier_routing_shadow") : null;
   const dbSurveyBriefEdgeCount = useLiveSettings ? readDbSetting("atlas_survey_brief_edge_count") : null;
   const dbSurveyEdgeCap = useLiveSettings ? readDbSetting("atlas_survey_edge_cap") : null;
@@ -772,6 +774,14 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const prefetchEntrypointRank = provided(explicitPrefetchEntrypointRank) && String(explicitPrefetchEntrypointRank).trim() !== ""
     ? parseBool(explicitPrefetchEntrypointRank)
     : (dbPrefetchEntrypointRank == null ? true : dbPrefetchEntrypointRank === true);
+  const rawResearchPrefetchFocusMode = String(firstProvided(
+    explicitValue("researchPrefetchFocusMode", "atlas_research_prefetch_focus"),
+    dbResearchPrefetchFocus,
+    "on",
+  )).trim().toLowerCase();
+  const researchPrefetchFocusMode = ["off", "shadow", "on"].includes(rawResearchPrefetchFocusMode)
+    ? rawResearchPrefetchFocusMode
+    : "on";
   const explicitTreeIdentifierRoutingShadow = explicitValue("treeIdentifierRoutingShadow", "atlas_tree_identifier_routing_shadow");
   const treeIdentifierRoutingShadow = provided(explicitTreeIdentifierRoutingShadow) && String(explicitTreeIdentifierRoutingShadow).trim() !== ""
     ? parseBool(explicitTreeIdentifierRoutingShadow)
@@ -849,6 +859,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     jobCacheTtlMs,
     prefetchCacheTtlMs,
     prefetchEntrypointRank,
+    researchPrefetchFocusMode,
     treeIdentifierRoutingShadow,
     surveyBriefEdgeCount,
     surveyEdgeCap,

@@ -15,6 +15,40 @@ import {
 
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
 
+export const ATLAS_CODE_WINDOW_DEFAULT_POLICY = Object.freeze({
+  maxWindowLines: 800,
+  maxWindowTokens: 8000,
+});
+
+export const ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS = Object.freeze({
+  maxWindowLines: 20_000,
+  maxWindowTokens: 200_000,
+});
+
+export function normalizeAtlasCodeWindowPolicy(value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    maxWindowLines: boundedInteger(
+      source.maxWindowLines,
+      1,
+      ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowLines,
+      ATLAS_CODE_WINDOW_DEFAULT_POLICY.maxWindowLines,
+    ),
+    maxWindowTokens: boundedInteger(
+      source.maxWindowTokens,
+      1,
+      ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens,
+      ATLAS_CODE_WINDOW_DEFAULT_POLICY.maxWindowTokens,
+    ),
+  };
+}
+
+function boundedInteger(value, minimum, maximum, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, parsed));
+}
+
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.card",
@@ -830,7 +864,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All identifiers needed from the selected file or symbol, matched together." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText." },
         contextLines: { type: "integer", description: "Context lines around each match." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
@@ -853,10 +887,10 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path when no symbolId is available." },
         reason: { type: "string", description: "Unresolved code fact absent from visible evidence; a revisit names the uncovered branch or range." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All known same-file anchors for one bounded file-mode slice." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All known same-file anchors for one bounded file-mode slice. Declared names resolve here: function, class, method, and variable names written exactly as they are declared." },
         expectedLines: { type: "integer", description: "Approximate total line count as an integer for a file-mode slice, for example 220." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Symbol, enclosing block, or containing-file selection." },
-        maxTokens: { type: "integer", description: "Inline token cap for this exact selection." },
+        maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped." },
         sliceContext: { type: "object", description: "Task-slice accounting context supplied by orchestration.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },

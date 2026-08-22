@@ -29,7 +29,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { filterProviderToolUseReplay, getObservationContext, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordOutput } from "../../../shared/telemetry/functions/logging/output-log.js";
-import { resolveAtlasExecutionAttachment } from "../../integrations/functions/atlas.js";
+import { resolveAtlasExecutionAttachment, withAtlasExecutionPolicySnapshot } from "../../integrations/functions/atlas.js";
 import { provisionAgentLoader, provisionAgentLoaderAsync, provisionSessionLaneLoader, provisionSessionLaneLoaderAsync, assertLoaderClean, assertLoaderCleanAsync } from "../functions/helpers/agent-loader.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import {
@@ -625,6 +625,9 @@ function agentJobAttachment(opts = {}, context = {}) {
       jobCacheEnabled: atlasConfig.jobCacheEnabled === true,
       jobCacheTtlMs: atlasConfig.jobCacheTtlMs ?? null,
       autoRefreshStale: atlasConfig.autoRefreshStale ?? null,
+      codeWindowPolicy: atlasConfig.codeWindowPolicy
+        ? { ...atlasConfig.codeWindowPolicy }
+        : null,
     },
     disableSystemTools: opts.disableSystemTools === true,
   };
@@ -2309,7 +2312,11 @@ export class TrackedProviderClient {
           workItemId: work_item_id,
           config: opts.atlasConfig || undefined,
         });
-        opts = { ...opts, atlasMethod: attachment?.method || null };
+        opts = {
+          ...opts,
+          atlasMethod: attachment?.method || null,
+          atlasConfig: withAtlasExecutionPolicySnapshot(opts.atlasConfig, attachment),
+        };
       } catch {
         // Provider-specific setup resolves ATLAS again; this early value is
         // only for live agent_call telemetry while the provider is still running.

@@ -1605,9 +1605,11 @@ export async function handoff(input, { providerName = null } = {}) {
       await Promise.all([
         _attachAtlasPlannerSlice(atlasPrefetchPacket),
         _attachAtlasAssessorPrefetch(atlasPrefetchPacket),
-        _attachAtlasResearcherPrefetch(atlasPrefetchPacket),
         _attachAtlasDbPrefetch(atlasPrefetchPacket),
       ]);
+      // Researcher context selection depends on the tree/survey result: the
+      // focused policy chooses one primary lane instead of preloading both.
+      await _attachAtlasResearcherPrefetch(atlasPrefetchPacket);
     }), {
       timeoutMs: atlasHandoffPrefetchTimeoutMs(),
       timeoutGraceMs: HANDOFF_TIMEOUT_GRACE_MS,

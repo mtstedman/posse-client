@@ -301,7 +301,7 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (codeLens({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.window":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeNeedWindow({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
+      return /** @type {any} */ (codeNeedWindow({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId, config: ctx.config }));
     case "code.survey":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (codeSurvey({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));

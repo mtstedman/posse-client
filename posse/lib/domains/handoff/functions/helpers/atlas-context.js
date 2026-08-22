@@ -38,6 +38,11 @@ import {
   atlasResultField,
   atlasSymbolCardField,
 } from "../../../atlas/functions/v2/contracts/tool-results.js";
+import {
+  buildResearcherVisibleTaskProjection,
+  chooseResearcherPrefetchLane,
+  normalizeResearchPrefetchFocusMode,
+} from "./research-prefetch-policy.js";
 
 const ATLAS_EXACT_PREFETCH_MAX_FILES = 6;
 const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
@@ -215,7 +220,10 @@ function _extractMentionedRepoPathsFromText(text) {
   return _uniqueAtlasPaths(out, ATLAS_REFERENCE_PREFETCH_MAX_FILES * 4);
 }
 
-function _collectAtlasReferenceFiles(packet) {
+function _collectAtlasReferenceFiles(packet, {
+  visibleTaskText = null,
+  allowHints = true,
+} = {}) {
   const hints = packet?.context_hints || {};
   const raw = packet?._raw_payload || {};
   const excluded = _pathSet([
@@ -224,19 +232,21 @@ function _collectAtlasReferenceFiles(packet) {
     ...(Array.isArray(raw.files_to_create) ? raw.files_to_create : []),
     ...(Array.isArray(raw.files_to_delete) ? raw.files_to_delete : []),
   ]);
-  const taskText = [
-    raw.task_spec,
-    raw.instructions,
-    raw.fix_instructions,
-    packet?.title,
-    packet?.project_context,
-    Array.isArray(packet?.success_criteria) ? packet.success_criteria.join("\n") : "",
-  ].filter(Boolean).join("\n");
+  const taskText = visibleTaskText != null
+    ? String(visibleTaskText)
+    : [
+      raw.task_spec,
+      raw.instructions,
+      raw.fix_instructions,
+      packet?.title,
+      packet?.project_context,
+      Array.isArray(packet?.success_criteria) ? packet.success_criteria.join("\n") : "",
+    ].filter(Boolean).join("\n");
   const candidates = _uniqueAtlasPaths([
-    ...(Array.isArray(hints.atlas_reference_files) ? hints.atlas_reference_files : []),
-    ...(Array.isArray(hints.atlasReferenceFiles) ? hints.atlasReferenceFiles : []),
-    ...(Array.isArray(raw.atlas_reference_files) ? raw.atlas_reference_files : []),
-    ...(Array.isArray(raw.atlasReferenceFiles) ? raw.atlasReferenceFiles : []),
+    ...(allowHints && Array.isArray(hints.atlas_reference_files) ? hints.atlas_reference_files : []),
+    ...(allowHints && Array.isArray(hints.atlasReferenceFiles) ? hints.atlasReferenceFiles : []),
+    ...(allowHints && Array.isArray(raw.atlas_reference_files) ? raw.atlas_reference_files : []),
+    ...(allowHints && Array.isArray(raw.atlasReferenceFiles) ? raw.atlasReferenceFiles : []),
     ..._extractMentionedRepoPathsFromText(taskText),
   ], ATLAS_REFERENCE_PREFETCH_MAX_FILES * 2);
   return candidates
@@ -245,27 +255,34 @@ function _collectAtlasReferenceFiles(packet) {
     .slice(0, ATLAS_REFERENCE_PREFETCH_MAX_FILES);
 }
 
-function _collectAtlasSeedFiles(packet) {
+function _collectAtlasSeedFiles(packet, options = {}) {
   return _uniqueAtlasPaths([
-    ..._collectValidatedAtlasSeedFiles(packet),
-    ..._collectLexicalAtlasCandidateFiles(packet, 8),
+    ..._collectValidatedAtlasSeedFiles(packet, options),
+    ..._collectLexicalAtlasCandidateFiles(packet, 8, options.taskText),
   ], 30);
 }
 
 // Seeds with provenance: explicit file scope, researcher-validated seeds, and
 // on-disk paths the task itself names. Everything here was put in front of the
 // pipeline deliberately — unlike the lexical scan, which is a guess.
-function _collectValidatedAtlasSeedFiles(packet) {
+function _collectValidatedAtlasSeedFiles(packet, {
+  visibleOnly = false,
+  taskText = null,
+} = {}) {
   return _uniqueAtlasPaths([
     ...(Array.isArray(packet?.files_to_modify) ? packet.files_to_modify : []),
     ...(Array.isArray(packet?.related_files) ? packet.related_files : []),
-    ...(Array.isArray(packet?.context_hints?.atlas_seed_files) ? packet.context_hints.atlas_seed_files : []),
-    ...(Array.isArray(packet?.context_hints?.atlasSeedFiles) ? packet.context_hints.atlasSeedFiles : []),
-    ..._collectAtlasReferenceFiles(packet),
+    ...(!visibleOnly && Array.isArray(packet?.context_hints?.atlas_seed_files) ? packet.context_hints.atlas_seed_files : []),
+    ...(!visibleOnly && Array.isArray(packet?.context_hints?.atlasSeedFiles) ? packet.context_hints.atlasSeedFiles : []),
+    ..._collectAtlasReferenceFiles(packet, {
+      visibleTaskText: visibleOnly ? taskText : null,
+      allowHints: !visibleOnly,
+    }),
   ], 30);
 }
 
-function _collectAtlasSeedSymbols(packet, maxItems = 24) {
+function _collectAtlasSeedSymbols(packet, maxItems = 24, { visibleOnly = false } = {}) {
+  if (visibleOnly) return [];
   const raw = [
     ...(Array.isArray(packet?.context_hints?.atlas_seed_symbols) ? packet.context_hints.atlas_seed_symbols : []),
     ...(Array.isArray(packet?.context_hints?.atlasSeedSymbols) ? packet.context_hints.atlasSeedSymbols : []),
@@ -296,9 +313,14 @@ function _collectAtlasSeedSymbols(packet, maxItems = 24) {
  *                         set, and task terms mostly re-find the seeds.
  *   any role w/o seeds  → the researcher-shaped broad scope.
  */
-export function resolveAtlasPrefetchPlan(packet, atlasConfig = packet?.atlas_config || getAtlasIntegrationConfig()) {
+export function resolveAtlasPrefetchPlan(
+  packet,
+  atlasConfig = packet?.atlas_config || getAtlasIntegrationConfig(),
+  { focus = null, visibleOnly = false } = {},
+) {
   const role = String(packet?.recipient || "").trim().toLowerCase();
-  const validatedSeeds = _collectValidatedAtlasSeedFiles(packet);
+  const taskText = focus?.focusText || null;
+  const validatedSeeds = _collectValidatedAtlasSeedFiles(packet, { visibleOnly, taskText });
   // The compressed ATLAS tree indexes source code, not arbitrary deployment
   // config. Keep config files in exact-file prefetch, but do not send them as
   // tree seeds where they produce a misleading "missing" diagnostic.
@@ -313,25 +335,31 @@ export function resolveAtlasPrefetchPlan(packet, atlasConfig = packet?.atlas_con
   return {
     mode: "broad",
     action: "tree.scope",
-    seedFiles: (entrypointRank ? indexedSeeds : _collectAtlasSeedFiles(packet))
+    seedFiles: (entrypointRank ? indexedSeeds : _collectAtlasSeedFiles(packet, { visibleOnly, taskText }))
       .filter((file) => _isIndexedSourcePath(file)),
     useTaskText: true,
   };
 }
 
-function _collectExplicitAtlasPrefetchFiles(packet) {
+function _collectExplicitAtlasPrefetchFiles(packet, {
+  visibleOnly = false,
+  taskText = null,
+} = {}) {
   const hints = packet?.context_hints || {};
   const raw = packet?._raw_payload || {};
   return _uniqueAtlasPaths([
     ...(Array.isArray(packet?.files_to_modify) ? packet.files_to_modify : []),
-    ...(Array.isArray(hints.atlas_prefetch_files) ? hints.atlas_prefetch_files : []),
-    ...(Array.isArray(hints.atlasPrefetchFiles) ? hints.atlasPrefetchFiles : []),
-    ...(Array.isArray(hints.atlas_seed_files) ? hints.atlas_seed_files : []),
-    ...(Array.isArray(hints.atlasSeedFiles) ? hints.atlasSeedFiles : []),
-    ...(Array.isArray(raw.atlas_prefetch_files) ? raw.atlas_prefetch_files : []),
-    ...(Array.isArray(raw.atlasPrefetchFiles) ? raw.atlasPrefetchFiles : []),
-    ..._collectAtlasReferenceFiles(packet),
-    ...(_truthyHint(hints.allow_related_atlas_prefetch) || _truthyHint(hints.allowRelatedAtlasPrefetch)
+    ...(!visibleOnly && Array.isArray(hints.atlas_prefetch_files) ? hints.atlas_prefetch_files : []),
+    ...(!visibleOnly && Array.isArray(hints.atlasPrefetchFiles) ? hints.atlasPrefetchFiles : []),
+    ...(!visibleOnly && Array.isArray(hints.atlas_seed_files) ? hints.atlas_seed_files : []),
+    ...(!visibleOnly && Array.isArray(hints.atlasSeedFiles) ? hints.atlasSeedFiles : []),
+    ...(!visibleOnly && Array.isArray(raw.atlas_prefetch_files) ? raw.atlas_prefetch_files : []),
+    ...(!visibleOnly && Array.isArray(raw.atlasPrefetchFiles) ? raw.atlasPrefetchFiles : []),
+    ..._collectAtlasReferenceFiles(packet, {
+      visibleTaskText: visibleOnly ? taskText : null,
+      allowHints: !visibleOnly,
+    }),
+    ...(!visibleOnly && (_truthyHint(hints.allow_related_atlas_prefetch) || _truthyHint(hints.allowRelatedAtlasPrefetch))
       ? (Array.isArray(packet?.related_files) ? packet.related_files : [])
       : []),
   ], ATLAS_EXACT_PREFETCH_MAX_FILES);
@@ -341,11 +369,15 @@ function _pathSet(values = []) {
   return new Set(_uniqueAtlasPaths(values).map((filePath) => filePath.toLowerCase()));
 }
 
-export function selectAtlasPrefetchTargets(packet, sliceFilePaths = []) {
+export function selectAtlasPrefetchTargets(packet, sliceFilePaths = [], {
+  focus = null,
+  visibleOnly = false,
+} = {}) {
   const role = String(packet?.recipient || "").trim().toLowerCase();
-  const exactFiles = _collectExplicitAtlasPrefetchFiles(packet);
+  const taskText = focus?.focusText || null;
+  const exactFiles = _collectExplicitAtlasPrefetchFiles(packet, { visibleOnly, taskText });
   const exactSet = _pathSet(exactFiles);
-  const lexicalFiles = _collectLexicalAtlasCandidateFiles(packet, 8);
+  const lexicalFiles = _collectLexicalAtlasCandidateFiles(packet, 8, taskText);
   const rankedFiles = _uniqueAtlasPaths([...sliceFilePaths, ...lexicalFiles], 24);
   // When explicit prefetch files exist, complement them with ATLAS-ranked
   // files that are NOT already in the exact set. The previous filter used
@@ -362,7 +394,7 @@ export function selectAtlasPrefetchTargets(packet, sliceFilePaths = []) {
     ? exactFiles
     : [];
   return {
-    sliceSeedFiles: _collectAtlasSeedFiles(packet),
+    sliceSeedFiles: _collectAtlasSeedFiles(packet, { visibleOnly, taskText }),
     exactFiles,
     skeletonFiles,
     filePaths,
@@ -440,6 +472,76 @@ function buildPlannerAtlasTaskText(packet) {
   ].map((value) => String(value || "").trim()).filter(Boolean);
   if (parts.length === 0) return "";
   return parts.join("\n\n").slice(0, 1500);
+}
+
+function _researcherGeneratedContextAllowed(packet, tools = internalAtlasTools(packet)) {
+  const allowed = packet?.context_hints?.allow_researcher_atlas_context_prefetch === true
+    || packet?.context_hints?.allow_researcher_atlas_context_prefetch === "true"
+    || packet?._raw_payload?.allow_researcher_atlas_context_prefetch === true
+    || packet?._raw_payload?.allow_researcher_atlas_context_prefetch === "true";
+  return allowed && (tools.has("context") || tools.has("agent.context"));
+}
+
+function _researchPrefetchFocusState(packet, atlasConfig = packet?.atlas_config || getAtlasIntegrationConfig()) {
+  const existing = packet?._atlasResearchPrefetchFocus;
+  if (existing?.focus && existing?.mode) return existing;
+  const state = {
+    mode: normalizeResearchPrefetchFocusMode(atlasConfig?.researchPrefetchFocusMode),
+    focus: buildResearcherVisibleTaskProjection(packet),
+    decision: null,
+  };
+  packet._atlasResearchPrefetchFocus = state;
+  return state;
+}
+
+function _recordResearchPrefetchPolicy(packet, state, {
+  effectiveLane,
+  contextAllowed,
+  contextFetched,
+  surveyAttempted,
+  treeScope,
+} = {}) {
+  if (!state?.focus || state.recorded === true) return;
+  state.recorded = true;
+  const proposed = state.decision || chooseResearcherPrefetchLane({
+    focus: state.focus,
+    treeScope,
+    contextAllowed,
+  });
+  try {
+    const context = getObservationContext() || {};
+    recordObservation({
+      work_item_id: context.work_item_id ?? packet?.work_item_id ?? null,
+      job_id: context.job_id ?? packet?.job_id ?? null,
+      attempt_id: context.attempt_id ?? null,
+      observation_type: "atlas.prefetch.research_policy",
+      summary: `Research prefetch policy ${state.mode}: ${effectiveLane || "none"} (${proposed.reason})`,
+      detail: {
+        kind: "atlas_research_prefetch_policy",
+        origin: "prefetch",
+        mode: state.mode,
+        effective_lane: effectiveLane || "none",
+        proposed_lane: proposed.lane,
+        reason: proposed.reason,
+        focus_confidence: state.focus.confidence,
+        focus_chars: String(state.focus.focusText || "").length,
+        visible_chars: String(state.focus.visibleText || "").length,
+        explicit_path_count: state.focus.explicitPaths.length,
+        explicit_identifier_count: state.focus.explicitIdentifiers.length,
+        substantive_term_count: state.focus.substantiveTerms.length,
+        context_allowed: contextAllowed === true,
+        context_fetched: contextFetched === true,
+        survey_attempted: surveyAttempted === true,
+        tree_confidence: treeScope?.confidence || null,
+        tree_scope_risk: treeScope?.scopeRisk || null,
+        tree_candidate_count: Array.isArray(treeScope?.candidateFiles)
+          ? treeScope.candidateFiles.length
+          : Number(treeScope?.candidateFileCount || 0),
+      },
+    });
+  } catch {
+    // Prefetch policy telemetry must never block a handoff.
+  }
 }
 
 function _collectAtlasDbHintPaths(packet) {
@@ -808,9 +910,11 @@ function pickFirstString(...values) {
   return null;
 }
 
-function _collectLexicalAtlasCandidateFiles(packet, maxItems = 8) {
+function _collectLexicalAtlasCandidateFiles(packet, maxItems = 8, taskTextOverride = null) {
   if (!_isPrefetchCwdUsable(packet?.cwd)) return [];
-  const taskText = buildPlannerAtlasTaskText(packet);
+  const taskText = taskTextOverride != null
+    ? String(taskTextOverride)
+    : buildPlannerAtlasTaskText(packet);
   const terms = lexicalTaskTerms(taskText);
   if (terms.length === 0) return [];
   const cacheKey = lexicalPrefetchCacheKey(packet.cwd, taskText);
@@ -1178,7 +1282,12 @@ export async function attachAtlasResearcherPrefetch(packet) {
     if (packet.recipient !== "researcher") return;
     if (!_isPrefetchCwdUsable(packet.cwd)) return;
     const tools = internalAtlasTools(packet);
-    const taskText = buildPlannerAtlasTaskText(packet);
+    const atlasConfig = packet.atlas_config || getAtlasIntegrationConfig();
+    const focusState = _researchPrefetchFocusState(packet, atlasConfig);
+    const legacyTaskText = buildPlannerAtlasTaskText(packet);
+    const taskText = focusState.mode === "on"
+      ? (focusState.focus.focusText || legacyTaskText)
+      : legacyTaskText;
     if (!taskText) return;
 
     const statusPromise = tools.has("repo.status")
@@ -1198,12 +1307,20 @@ export async function attachAtlasResearcherPrefetch(packet) {
       )
       : Promise.resolve(null);
 
-    const allowGeneratedContext = packet.context_hints?.allow_researcher_atlas_context_prefetch === true
-      || packet.context_hints?.allow_researcher_atlas_context_prefetch === "true"
-      || packet._raw_payload?.allow_researcher_atlas_context_prefetch === true
-      || packet._raw_payload?.allow_researcher_atlas_context_prefetch === "true";
-    const canFetchGeneratedContext = allowGeneratedContext && (tools.has("context") || tools.has("agent.context"));
-    const contextPromise = canFetchGeneratedContext
+    const canFetchGeneratedContext = _researcherGeneratedContextAllowed(packet, tools);
+    const treeScope = packet?.atlas_slice_context?.treeScope || null;
+    const proposedDecision = focusState.decision || chooseResearcherPrefetchLane({
+      focus: focusState.focus,
+      treeScope,
+      contextAllowed: canFetchGeneratedContext,
+    });
+    focusState.decision = proposedDecision;
+    const surveySucceeded = packet?.atlas_slice_context?.surveyContext?.ok === true;
+    const shouldFetchContext = canFetchGeneratedContext
+      && (focusState.mode !== "on"
+        || proposedDecision.lane === "context"
+        || (proposedDecision.lane === "survey" && !surveySucceeded));
+    const contextPromise = shouldFetchContext
       ? executeEmbeddedAtlasTool("context", {
         taskText,
         taskType: "explain",
@@ -1230,6 +1347,20 @@ export async function attachAtlasResearcherPrefetch(packet) {
     if (memoryStats && packet.atlas) packet.atlas.memoryStats = memoryStats;
     const failures = [context].filter((entry) => entry && !entry.ok);
     const successes = [context].filter((entry) => entry?.ok);
+    const surveyAttempted = packet?.atlas_slice_context?.surveyContext?.attempted === true;
+    _recordResearchPrefetchPolicy(packet, focusState, {
+      effectiveLane: focusState.mode !== "on" && shouldFetchContext && (surveySucceeded || surveyAttempted)
+        ? "survey+context"
+        : shouldFetchContext
+        ? "context"
+        : surveySucceeded || surveyAttempted
+          ? "survey"
+          : "none",
+      contextAllowed: canFetchGeneratedContext,
+      contextFetched: shouldFetchContext,
+      surveyAttempted,
+      treeScope,
+    });
     if (successes.length === 0 && failures.length === 0) return;
     packet.atlas_research_context = {
       ok: successes.length > 0,
@@ -1778,16 +1909,25 @@ export async function attachAtlasPlannerSlice(packet) {
     const tools = internalAtlasTools(packet);
     if (!tools.has("tree.scope") && !tools.has("slice.build")) return;
 
-    const taskText = buildPlannerAtlasTaskText(packet);
+    const atlasConfig = packet.atlas_config || getAtlasIntegrationConfig();
+    const isResearcher = packet.recipient === "researcher";
+    const focusState = isResearcher ? _researchPrefetchFocusState(packet, atlasConfig) : null;
+    const focusedResearcher = focusState?.mode === "on";
+    const legacyTaskText = buildPlannerAtlasTaskText(packet);
+    const taskText = focusedResearcher
+      ? (focusState.focus.focusText || legacyTaskText)
+      : legacyTaskText;
     if (!taskText) return;
 
     // Role-graded inputs: consume the strongest data this tier holds (see
     // resolveAtlasPrefetchPlan). Tree-first: when the tree pass is usable it
     // IS the prefetch — no graph slice runs; slice.build remains only as the
     // fallback when the tree is unavailable or produced nothing.
-    const atlasConfig = packet.atlas_config || getAtlasIntegrationConfig();
-    const plan = resolveAtlasPrefetchPlan(packet, atlasConfig);
-    const seedSymbols = _collectAtlasSeedSymbols(packet);
+    const plan = resolveAtlasPrefetchPlan(packet, atlasConfig, {
+      focus: focusState?.focus || null,
+      visibleOnly: focusedResearcher,
+    });
+    const seedSymbols = _collectAtlasSeedSymbols(packet, 24, { visibleOnly: focusedResearcher });
     const treeAction = plan.action === "tree.expand" && tools.has("tree.expand") ? "tree.expand" : "tree.scope";
     const treeToolAvailable = tools.has("tree.scope") || (plan.action === "tree.expand" && tools.has("tree.expand"));
     const wantSymbolCards = seedSymbols.length > 0 && tools.has("symbol.card");
@@ -1821,11 +1961,28 @@ export async function attachAtlasPlannerSlice(packet) {
     }
 
     if (treeScope?.ok && treeScope.candidateFiles.length > 0) {
-      await _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards, areaMap, prefetchMode: plan.mode, taskText, seedSymbols });
+      await _attachAtlasTreePrefetchContext(packet, {
+        tools,
+        treeScope,
+        seedSymbolCards,
+        areaMap,
+        prefetchMode: plan.mode,
+        taskText,
+        seedSymbols,
+        focusState,
+      });
       return;
     }
 
-    await _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedFiles: plan.seedFiles, treeScope, seedSymbolCards, areaMap });
+    await _attachAtlasSlicePrefetchContext(packet, {
+      tools,
+      taskText,
+      seedFiles: plan.seedFiles,
+      treeScope,
+      seedSymbolCards,
+      areaMap,
+      focusState,
+    });
   } catch (err) {
     packet.atlas_slice_context = {
       ok: false,
@@ -1838,8 +1995,21 @@ export async function attachAtlasPlannerSlice(packet) {
 // an empty list) so every downstream consumer — relevance classification,
 // insight promotion, step-0 insights — keeps working unchanged; `source`
 // tells the renderer which discovery pass produced the candidates.
-async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedSymbolCards = [], areaMap = [], prefetchMode = null, taskText = null, seedSymbols = [] }) {
-  const prefetchTargets = selectAtlasPrefetchTargets(packet, treeScope.candidateFiles);
+async function _attachAtlasTreePrefetchContext(packet, {
+  tools,
+  treeScope,
+  seedSymbolCards = [],
+  areaMap = [],
+  prefetchMode = null,
+  taskText = null,
+  seedSymbols = [],
+  focusState = null,
+}) {
+  const focusedResearcher = packet.recipient === "researcher" && focusState?.mode === "on";
+  const prefetchTargets = selectAtlasPrefetchTargets(packet, treeScope.candidateFiles, {
+    focus: focusState?.focus || null,
+    visibleOnly: focusedResearcher,
+  });
   packet.atlas_slice_candidates = {
     filePaths: prefetchTargets.filePaths,
     rankedFiles: prefetchTargets.rankedFiles,
@@ -1873,13 +2043,28 @@ async function _attachAtlasTreePrefetchContext(packet, { tools, treeScope, seedS
     [...(Array.isArray(prefetchTargets.rankedFiles) ? prefetchTargets.rankedFiles : []), ...wideningCallerPaths],
     MAX_SURVEY_FILES,
   );
-  const surveyContext = await _prefetchAtlasSurvey(packet, {
-    taskText,
-    rankedFiles: surveyRankedFiles,
-    candidateDirs: Array.isArray(treeScope.candidateDirs) ? treeScope.candidateDirs : [],
-    seedFiles: prefetchTargets.exactFiles,
-    keySymbols: seedSymbols,
-  });
+  const contextAllowed = packet.recipient === "researcher"
+    && _researcherGeneratedContextAllowed(packet, tools);
+  const decision = packet.recipient === "researcher" && focusState
+    ? chooseResearcherPrefetchLane({ focus: focusState.focus, treeScope, contextAllowed })
+    : { lane: "survey", reason: "non_researcher_prefetch" };
+  if (focusState) focusState.decision = decision;
+  const surveyContext = focusedResearcher && decision.lane !== "survey"
+    ? null
+    : await _prefetchAtlasSurvey(packet, {
+      taskText,
+      rankedFiles: surveyRankedFiles,
+      candidateDirs: Array.isArray(treeScope.candidateDirs) ? treeScope.candidateDirs : [],
+      seedFiles: prefetchTargets.exactFiles,
+      keySymbols: seedSymbols,
+      focusAdmission: focusedResearcher ? {
+        enabled: true,
+        treeConfidence: treeScope.confidence,
+        scopeRisk: treeScope.scopeRisk,
+        explicitPaths: focusState.focus.explicitPaths,
+        explicitIdentifiers: focusState.focus.explicitIdentifiers,
+      } : null,
+    });
   const surveyOk = surveyContext?.ok === true;
 
   // The compact survey evidence is rendered even at higher trim levels. If the
@@ -1930,7 +2115,14 @@ function _atlasSkeletonFloorFiles(prefetchTargets = {}) {
 // signal the tree pass already produced. origin:"prefetch" -> logs as
 // tool.atlas.prefetch/code.survey (system lane). Never throws; a miss returns
 // { ok:false } and the caller falls back to the skeleton pass.
-async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDirs, seedFiles, keySymbols }) {
+async function _prefetchAtlasSurvey(packet, {
+  taskText,
+  rankedFiles,
+  candidateDirs,
+  seedFiles,
+  keySymbols,
+  focusAdmission = null,
+}) {
   const startedAt = Date.now();
   let scope = null;
   try {
@@ -1967,6 +2159,7 @@ async function _prefetchAtlasSurvey(packet, { taskText, rankedFiles, candidateDi
     const lifecycleExpansion = await _prefetchLifecycleSurveyBodies(packet, {
       taskText,
       files: data.files,
+      focusAdmission,
     });
     const dependencyBoundaries = detectUnavailableDependencySources({
       repoRoot: packet.cwd,
@@ -2022,15 +2215,17 @@ async function _resolveLifecycleSurveySymbolIds(packet, targets) {
   }
 }
 
-async function _prefetchLifecycleSurveyBodies(packet, { taskText, files }) {
+async function _prefetchLifecycleSurveyBodies(packet, { taskText, files, focusAdmission = null }) {
   const plan = planLifecycleSurveyExpansion(taskText, files, {
     maxBodies: LIFECYCLE_SURVEY_MAX_BODIES,
+    focusAdmission,
   });
   const base = {
     active: plan.active,
     reason: plan.reason,
     taskFamilies: plan.taskFamilies || [],
     focusLanes: plan.focusLanes || [],
+    focusGateRejected: Number(plan.focusGateRejected || 0),
     maxBodies: LIFECYCLE_SURVEY_MAX_BODIES,
     totalMaxTokens: LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS,
     selected: plan.targets.map(({ file, symbol, kind, families, focuses, reason, estimatedLines }) => ({
@@ -2317,6 +2512,7 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
           focus_lanes: Array.isArray(result.lifecycleExpansion.focusLanes)
             ? result.lifecycleExpansion.focusLanes.slice(0, 16)
             : [],
+          focus_gate_rejected: Number(result.lifecycleExpansion.focusGateRejected || 0),
           selected: (Array.isArray(result.lifecycleExpansion.selected) ? result.lifecycleExpansion.selected : [])
             .slice(0, LIFECYCLE_SURVEY_MAX_BODIES)
             .map((item) => ({
@@ -2387,7 +2583,15 @@ function _formatSurveyScopeTarget(scope) {
 // Fallback graph-slice prefetch — runs only when tree.scope was unavailable
 // or returned nothing. `treeScope` (the failed/empty attempt, if any) rides
 // along so the rendered section can say why the tree pass didn't apply.
-async function _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedFiles, treeScope, seedSymbolCards = [], areaMap = [] }) {
+async function _attachAtlasSlicePrefetchContext(packet, {
+  tools,
+  taskText,
+  seedFiles,
+  treeScope,
+  seedSymbolCards = [],
+  areaMap = [],
+  focusState = null,
+}) {
   if (!tools.has("slice.build")) {
     if (treeScope && !treeScope.ok) {
       packet.atlas_slice_context = {
@@ -2463,7 +2667,11 @@ async function _attachAtlasSlicePrefetchContext(packet, { tools, taskText, seedF
     .map((card) => _normalizeSliceCard(card, filePaths))
     .filter(Boolean);
 
-  const prefetchTargets = selectAtlasPrefetchTargets(packet, filePaths);
+  const focusedResearcher = packet.recipient === "researcher" && focusState?.mode === "on";
+  const prefetchTargets = selectAtlasPrefetchTargets(packet, filePaths, {
+    focus: focusState?.focus || null,
+    visibleOnly: focusedResearcher,
+  });
   packet.atlas_slice_candidates = {
     filePaths: prefetchTargets.filePaths,
     rankedFiles: prefetchTargets.rankedFiles,

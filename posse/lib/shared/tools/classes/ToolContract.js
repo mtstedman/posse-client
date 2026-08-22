@@ -1,5 +1,6 @@
 import { normPath, normalizeRoots } from "../../scope/functions/path.js";
 import { TOOL_REFS } from "../../../catalog/tool-references.js";
+import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
 import { renderAtlasGuidance, renderToolBatchingGuidance } from "../functions/provider-surface.js";
 import { projectAgentToolDefinition } from "../functions/agent-schema.js";
@@ -136,6 +137,10 @@ function normalizeContractShape(contract = {}) {
   const allowTests = typeof contract.allowTests === "boolean"
     ? contract.allowTests
     : tools.some((tool) => TEST_CAPABILITY_TOOL_NAMES.has(canonicalToolName(tool)));
+  const atlasCodeWindowPolicy = contract.atlasCodeWindowPolicy
+    && typeof contract.atlasCodeWindowPolicy === "object"
+    ? normalizeAtlasCodeWindowPolicy(contract.atlasCodeWindowPolicy)
+    : null;
   return {
     provider: contract.provider || "generic",
     role: contract.role || "planner",
@@ -148,6 +153,7 @@ function normalizeContractShape(contract = {}) {
     fallbackReads: optionalNonNegativeNumber(contract.fallbackReads),
     agentHandoffCompactV1: contract.agentHandoffCompactV1 === true,
     agentHandoffCompactV3: contract.agentHandoffCompactV3 === true,
+    atlasCodeWindowPolicy,
     scope: {
       modifyFiles: Array.isArray(contract?.scope?.modifyFiles) ? [...contract.scope.modifyFiles] : [],
       createFiles: Array.isArray(contract?.scope?.createFiles) ? [...contract.scope.createFiles] : [],
@@ -525,6 +531,7 @@ export class ToolContract {
     issuedToolSurface = null,
     agentHandoffCompactV1 = false,
     agentHandoffCompactV3 = false,
+    atlasCodeWindowPolicy = null,
   } = {}) {
     const toolNames = includeBaseTools
       ? ToolCatalog.forRole(role, {
@@ -559,6 +566,7 @@ export class ToolContract {
       fallbackReads: optionalNonNegativeNumber(fallbackReads),
       agentHandoffCompactV1: agentHandoffCompactV1 === true,
       agentHandoffCompactV3: agentHandoffCompactV3 === true,
+      atlasCodeWindowPolicy,
       issuedToolSurface: Array.isArray(issuedToolSurface) ? issuedToolSurface : null,
       scope: {
         modifyFiles: Array.isArray(scopedFiles) ? scopedFiles : [],

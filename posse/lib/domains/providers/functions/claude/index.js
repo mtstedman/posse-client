@@ -13,7 +13,7 @@ import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract,
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
-import { logAtlasAttachment, resolveAtlasAssignmentUnit } from "../../../integrations/functions/atlas.js";
+import { logAtlasAttachment, resolveAtlasAssignmentUnit, withAtlasExecutionPolicySnapshot } from "../../../integrations/functions/atlas.js";
 import { releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-gateway.js";
@@ -436,6 +436,7 @@ export async function callProvider(promptText, {
     const spawnCwd = loaderCwd ? path.resolve(loaderCwd) : providerPaths.cwd;
     const assignmentUnit = assignmentUnitForAtlas;
     const { attachment: atlasAttachment, payload: atlasMcpPayload } = preparedAtlasMcp;
+    const executionAtlasConfig = withAtlasExecutionPolicySnapshot(atlasConfig, atlasAttachment);
     const atlasMethodForStats = disableAtlas ? null : (atlasAttachment?.method || "baseline");
     logAtlasAttachment({
       attachment: atlasAttachment,
@@ -480,7 +481,7 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
-      atlasConfig,
+      atlasConfig: executionAtlasConfig,
       remoteToolSurface: _remoteToolSurface,
       mcpGate,
       disableAgentTools,
@@ -543,6 +544,7 @@ export async function callProvider(promptText, {
       issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
       agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
       agentHandoffCompactV3: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
+      atlasCodeWindowPolicy: promptAtlasAttachment?.codeWindowPolicy || null,
       scopedFiles,
       createFiles,
       createRoots,

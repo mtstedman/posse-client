@@ -8,7 +8,7 @@ import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderT
 import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
-import { logAtlasAttachment, resolveAtlasAssignmentUnit } from "../../../integrations/functions/atlas.js";
+import { logAtlasAttachment, resolveAtlasAssignmentUnit, withAtlasExecutionPolicySnapshot } from "../../../integrations/functions/atlas.js";
 import { releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { resolveDisableSystemTools, resolveWebToolsEnabled } from "../shared/tool-policy-settings.js";
@@ -165,6 +165,7 @@ export async function callProvider(promptText, {
     const spawnCwd = resumeSessionHandle ? workingDir : (loaderCwd ? path.resolve(loaderCwd) : workingDir);
     const assignmentUnit = assignmentUnitForAtlas;
     const { attachment: atlasAttachment, configOverrides: atlasConfigOverrides, serverKey: atlasMcpServerKey } = preparedAtlasConfig;
+    const executionAtlasConfig = withAtlasExecutionPolicySnapshot(atlasConfig, atlasAttachment);
     const atlasMethodForStats = disableAtlas ? null : (atlasAttachment?.method || "baseline");
     logAtlasAttachment({
       attachment: atlasAttachment,
@@ -210,7 +211,7 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAvailable: atlasReadyForMcp,
       atlasGateEnabled: atlasToolGateEnabled,
-      atlasConfig,
+      atlasConfig: executionAtlasConfig,
       remoteToolSurface: _remoteToolSurface,
       mcpGate,
       disableAgentTools,
@@ -284,6 +285,7 @@ export async function callProvider(promptText, {
       issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
       agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
       agentHandoffCompactV3: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
+      atlasCodeWindowPolicy: atlasAttachment?.codeWindowPolicy || null,
       scopedFiles,
       createFiles,
       createRoots,

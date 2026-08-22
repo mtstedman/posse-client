@@ -4,10 +4,14 @@
 // slice, memory, and runtime decisions do not depend on the original ATLAS server.
 
 import { okEnvelope, errorEnvelope } from "./envelope.js";
+import {
+  ATLAS_CODE_WINDOW_DEFAULT_POLICY,
+  ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS,
+  normalizeAtlasCodeWindowPolicy,
+} from "../../../../../catalog/atlas-tools.js";
 
 export const DEFAULT_ATLAS_POLICY = Object.freeze({
-  maxWindowLines: 500,
-  maxWindowTokens: 8000,
+  ...ATLAS_CODE_WINDOW_DEFAULT_POLICY,
   requireIdentifiers: true,
   allowBreakGlass: false,
   defaultMinCallConfidence: 0.5,
@@ -122,6 +126,10 @@ export function getEffectivePolicy(ledger, repoId = "default") {
   }
 }
 
+export function getEffectiveCodeWindowPolicy(ledger, repoId = "default") {
+  return normalizeAtlasCodeWindowPolicy(getEffectivePolicy(ledger, repoId));
+}
+
 function ledgerDb(ledger) {
   return typeof /** @type {any} */ (ledger)?._unsafeDb === "function"
     ? /** @type {any} */ (ledger)._unsafeDb()
@@ -144,8 +152,8 @@ function effectiveRepo(ctxRepoId, paramRepoId) {
 
 function normalizePolicyPatch(patch) {
   const out = {};
-  if ("maxWindowLines" in patch) out.maxWindowLines = clampInt(patch.maxWindowLines, 1, 20_000, DEFAULT_ATLAS_POLICY.maxWindowLines);
-  if ("maxWindowTokens" in patch) out.maxWindowTokens = clampInt(patch.maxWindowTokens, 1, 200_000, DEFAULT_ATLAS_POLICY.maxWindowTokens);
+  if ("maxWindowLines" in patch) out.maxWindowLines = clampInt(patch.maxWindowLines, 1, ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowLines, DEFAULT_ATLAS_POLICY.maxWindowLines);
+  if ("maxWindowTokens" in patch) out.maxWindowTokens = clampInt(patch.maxWindowTokens, 1, ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, DEFAULT_ATLAS_POLICY.maxWindowTokens);
   if ("requireIdentifiers" in patch) out.requireIdentifiers = !!patch.requireIdentifiers;
   if ("allowBreakGlass" in patch) out.allowBreakGlass = !!patch.allowBreakGlass;
   if ("defaultMinCallConfidence" in patch) out.defaultMinCallConfidence = clampNumber(patch.defaultMinCallConfidence, 0, 1, DEFAULT_ATLAS_POLICY.defaultMinCallConfidence);
@@ -164,8 +172,7 @@ function normalizePolicyPatch(patch) {
 
 function normalizePolicy(policy) {
   return {
-    maxWindowLines: clampInt(policy.maxWindowLines, 1, 20_000, DEFAULT_ATLAS_POLICY.maxWindowLines),
-    maxWindowTokens: clampInt(policy.maxWindowTokens, 1, 200_000, DEFAULT_ATLAS_POLICY.maxWindowTokens),
+    ...normalizeAtlasCodeWindowPolicy(policy),
     requireIdentifiers: policy.requireIdentifiers !== false,
     allowBreakGlass: !!policy.allowBreakGlass,
     defaultMinCallConfidence: clampNumber(policy.defaultMinCallConfidence, 0, 1, DEFAULT_ATLAS_POLICY.defaultMinCallConfidence),
