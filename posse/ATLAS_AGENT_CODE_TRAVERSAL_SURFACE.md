@@ -33,31 +33,31 @@ agent call. Prefetch support does not remove its callable definition.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
 
-Atlas: `atlas.fetch_ref`.
+Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 ### `assessor`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
 
 ### `dev`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
 
 ### `planner`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
 
 ### `researcher`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
 
 ### `subagent`
 
@@ -261,7 +261,7 @@ Focused localization for named identifiers, usages, or branches within one ident
 |---|---|---|---|---|
 | `contextLines` | `integer` | Optional | min 0; max 100 | Context lines around each match. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path fallback when you have a file but not an opaque symbolId. |
-| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | All identifiers needed from the selected file or symbol, matched together. |
+| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
 ### `atlas.code.skeleton`
@@ -331,7 +331,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | Yes |
 
-Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, widen to the nearest credible parent scope; surveyRef and pagination retain the full surveyed inventory.
+Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, widen to the nearest credible parent scope; traversal_ref pagination retains the omitted surveyed inventory.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -361,8 +361,8 @@ One bounded exact-source verification for an identified symbol or anchored file 
 | `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Approximate total line count as an integer for a file-mode slice, for example 220. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path when no symbolId is available. |
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Symbol, enclosing block, or containing-file selection. |
-| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice. |
-| `maxTokens` | `integer` | Optional | min 1; max 200000 | Inline token cap for this exact selection. |
+| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. |
+| `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped. |
 | `reason` | `string` | Required | max length 20000 | Unresolved code fact absent from visible evidence; a revisit names the uncovered branch or range. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
@@ -381,7 +381,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Citation storage. Store inline text, a materialized ref slice, or a batch of chunks and receive #ref stubs. The optional note remains attached to the stored ref.
+Citation storage. Store inline text, a materialized ref slice, or a batch of chunks and receive evidence_ref identities for the already-visible chunks. The optional note remains attached to the stored ref.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -391,7 +391,7 @@ Citation storage. Store inline text, a materialized ref slice, or a batch of chu
 | `note` | `string` | Optional | max length 300 | Optional 'what is this' (max 300 chars). Surfaces inside the stub and stays sticky through handoffs. |
 | `object_type` | `string` | Optional | max length 80 | Optional object type label for the stub. Default agent.chunk. |
 | `offset` | `integer` | Optional | min 0 | Character offset within source_ref payload. Default 0. |
-| `owner_scope` | `string` | Optional | values "work_item", "job" | Visibility scope. Default work_item so any later agent in the work item can fetch it. |
+| `owner_scope` | `string` | Optional | values "work_item", "job" | Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item. |
 | `source_ref` | `string` | Conditional | max length 512 | Existing materialized ref alias such as #a3f9 for a server-side slice. Combine with lines or offset and limit. |
 | `text` | `string` | Conditional | min length 1; max length 60000 | Inline authored or assembled content to store, up to 60000 characters. Existing stored material can be selected with source_ref. |
 
@@ -463,7 +463,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Reference retrieval for unseen stored #ref content. Follow an eligible survey or continuation ref before retrieving the same source again. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.
+Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. Each non-empty result returns an evidence reference for the visible text and a continuation capability when more stored content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1092,6 +1092,32 @@ Repository symbol discovery when the target or its location is unknown. One name
 | `scope` | `string` | Optional | default "either"; values "name", "body", "either" | Search symbol names, symbol-body identifier tokens, or both. Default either. |
 | `semantic` | `boolean` | Optional |  | Enable semantic reranking when supported. |
 
+### `atlas.traverse_ref`
+
+Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `traverse_ref` |
+| Gateway MCP name | `atlas.traverse_ref` |
+| Local MCP name | `atlas.traverse_ref` |
+| Embedded function name | `atlas_traverse_ref` |
+| Access | `atlas` |
+| Batchable input | Yes |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. Each non-empty result returns evidence_ref for its visible text and next_traversal_ref only when more stored content remains.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs. |
+| `offset` | `integer` | Optional | min 0 | Character offset for paged materialized refs; for search mode, matched-row offset. Prefer the value carried by next_traversal_ref. |
+| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
+| `search` | `string` | Optional | max length 512 | Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. |
+| `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto. |
+| `traversal_ref` | `string | array` | Required | max length 512; max items 100 | One explicitly issued traversal ref such as #a3f9, or every independently needed traversal ref as one array batch. |
+
 ### `atlas.tree.branch`
 
 Remote roles: `assessor`, `dev`, `planner`, `researcher`.
@@ -1221,5 +1247,6 @@ compatibility. The agent projection removes them.
 - `tools.inspect_file`: `paths`
 - `atlas.symbol.card`: `ifNoneMatch`, `includeResolutionMetadata`, `minCallConfidence`, `sessionId`, `symbolIds`, `symbolRefs`
 - `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
+- `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`
 - `atlas.tree.branch`: `includeLatestRun`, `includeRefs`, `includeTerms`
 - `atlas.tree.expand`: `branchFileCap`, `editedFiles`, `maxBranches`, `path`, `refId`, `refMatchLimit`, `refType`, `symbolId`

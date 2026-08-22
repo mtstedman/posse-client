@@ -16,6 +16,7 @@ import {
   delegatedEvidenceBounds,
   parseLeadingJsonValue,
 } from "../functions/delegated-evidence.js";
+import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
 import { getSetting } from "../../queue/functions/index.js";
 import {
   getAgentHandoffRecord,
@@ -268,10 +269,7 @@ function structuredSourceToolEvidence(parsed, tool, args = {}) {
 function deterministicToolEvidence(raw, tool, args = {}) {
   const rawText = typeof raw === "string" ? raw : JSON.stringify(raw);
   const provenance = { kind: "Tool Result", source: tool, object_type: "tool_result" };
-  const structuredText = String(rawText ?? "").replace(
-    /\n+\[ref_hash [^\n]*\]\s*$/,
-    "",
-  );
+  const structuredText = stripHashRefSurfaceSuffix(rawText);
   let parsed;
   try {
     parsed = JSON.parse(structuredText);
@@ -283,7 +281,7 @@ function deterministicToolEvidence(raw, tool, args = {}) {
   }
   const structuredSource = structuredSourceToolEvidence(parsed, tool, args);
   if (structuredSource) return structuredSource;
-  if (tool === "atlas.fetch_ref" && parsed?.ok === true && typeof parsed.text === "string") {
+  if (["atlas.fetch_ref", "atlas.traverse_ref"].includes(tool) && parsed?.ok === true && typeof parsed.text === "string") {
     return {
       text: parsed.text,
       provenance: {
@@ -814,7 +812,7 @@ export class SubAgentRuntime {
         if (outcome.outcome === SUB_AGENT_EVIDENCE_OUTCOMES.COVERED) {
           if (!outcome.recovery) throw delegatedOutcomeError(outcome, selected.tool);
           covered = outcome.parsed;
-          evidenceTool = "atlas.fetch_ref";
+          evidenceTool = "atlas.traverse_ref";
           evidenceArguments = outcome.recovery;
           raw = await entry.executeInput({
             tool: evidenceTool,

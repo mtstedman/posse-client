@@ -272,6 +272,18 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     includePolicy: b(),
     includeCounts: b(),
   }),
+  traverse_ref: o({
+    traversal_ref: { type: ["string", "array"], items: s({ maxLength: 512 }), maxItems: 100, maxLength: 512 },
+    traversal_refs: a(s({ maxLength: 512 }), { maxItems: 100 }),
+    ref: { type: ["string", "array"], items: s({ maxLength: 512 }), maxItems: 100, maxLength: 512 },
+    refs: a(s({ maxLength: 512 }), { maxItems: 100 }),
+    hashes: a(s({ maxLength: 512 }), { maxItems: 100 }),
+    offset: i({ minimum: 0 }),
+    limit: i({ minimum: 1, maximum: 60000 }),
+    search: s({ maxLength: 512 }),
+    search_mode: s({ enum: ["auto", "literal", "regex"] }),
+    reaccessAuthorization: s({ minLength: 16, maxLength: 512 }),
+  }, ["traversal_ref"]),
   fetch_ref: o({
     ref: { type: ["string", "array"], items: s({ maxLength: 512 }), maxItems: 100, maxLength: 512 },
     refs: a(s({ maxLength: 512 }), { maxItems: 100 }),

@@ -34,6 +34,13 @@ import {
   consumeSourceReaccessAuthorization,
   sourceSelectorFingerprint,
 } from "../../../domains/research/classes/SourceCoverageOwner.js";
+import {
+  evidenceRefSurface,
+  hashRefSurfaceInput,
+  renderEvidenceRefStub,
+  renderTraversalRefStub,
+  traversalRefSurface,
+} from "./ref-surface.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -59,7 +66,7 @@ const EVIDENCE_REF_TOOLS = new Set([
   "read_file",
 ]);
 const DEFAULT_MATERIALIZE_CHAR_CAP = CONTEXT_HASH_REF_MATERIALIZE_CHAR_CAP;
-const HASH_ADDER_BLOCKED_TOOLS = new Set(["fetch_ref", "create_ref"]);
+const HASH_ADDER_BLOCKED_TOOLS = new Set(["fetch_ref", "traverse_ref", "create_ref"]);
 const CREATE_REF_MAX_TEXT_CHARS = 60000;
 const CREATE_REF_MAX_NOTE_CHARS = 300;
 const CREATE_REF_MAX_BATCH = 24;
@@ -101,10 +108,9 @@ function refInputs(args = {}) {
     }
     push(value);
   };
-  addMany(args.refs);
-  addMany(args.hashes);
-  if (out.length === 0) addMany(args.ref || args.hash);
-  return out;
+  const surface = hashRefSurfaceInput(args);
+  addMany(surface.value);
+  return { refs: out, requestedCapability: surface.requested_capability };
 }
 
 function lineFingerprintMap(text, chunkLines = 80) {
@@ -498,7 +504,7 @@ function hasHashRefScope(context = {}) {
 
 /**
  * Keep the highest-value tree.scope candidates in context while making the
- * remainder available through the same fetch_ref path as every other value.
+ * remainder available through the same traversal_ref path as every other value.
  * If refs cannot be created, return the original result so no candidates are
  * silently lost.
  */
@@ -540,7 +546,13 @@ export function compactTreeScopeResult(toolName, result, {
         action: "tree.scope.candidates",
         ranks: { start: rankStart, end: rankEnd },
         candidateFiles: pageCandidates,
-        ...(nextPage ? { nextCandidateFiles: nextPage } : {}),
+        ...(nextPage ? {
+          next_traversal_ref: traversalRefSurface(nextPage.ref, {
+            kind: "tree_scope_page",
+            ranks: nextPage.ranks,
+            count: nextPage.count,
+          }),
+        } : {}),
       }, null, 2);
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",
@@ -559,7 +571,7 @@ export function compactTreeScopeResult(toolName, result, {
         metadata: {
           surfaced_by: "tree_scope_rank_compactor",
           fetch_class: "cursor_page",
-          ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
           tool: "tree.scope",
           rank_start: rankStart,
           rank_end: rankEnd,
@@ -580,7 +592,11 @@ export function compactTreeScopeResult(toolName, result, {
   if (!nextPage) return { result, compacted: false };
 
   envelope.data.candidateFiles = candidates.slice(0, TREE_SCOPE_INLINE_CANDIDATES);
-  envelope.data.nextCandidateFiles = nextPage;
+  envelope.data.next_traversal_ref = traversalRefSurface(nextPage.ref, {
+    kind: "tree_scope_page",
+    ranks: nextPage.ranks,
+    count: nextPage.count,
+  });
   envelope.data.candidateFilesTotal = candidates.length;
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
@@ -606,16 +622,22 @@ function surfaceMinCharsFor(toolName, { ambient = null } = {}) {
 // ---- code.survey snapshot paging -------------------------------------------
 // A survey is materialized once as ordinary hash-map pages. Page 1 owns the
 // survey-wide call map/metrics and the first ten file records; every page owns
-// at most ten files and carries a backed fetch_ref cursor to the next page.
+// at most ten files and carries a backed traversal_ref cursor to the next page.
 // There is deliberately no second, monolithic copy of the full survey.
 const SURVEY_PAGE_FILES = 10;
 
 function surveyFetchCursor(page) {
   if (!page?.ref) return null;
+  const traversalRef = traversalRefSurface(page.ref, {
+    kind: "survey_page",
+    ranks: page.ranks,
+    count: page.count,
+  });
   return {
     label: "next 10",
-    call: "atlas.fetch_ref",
-    args: { ref: page.ref },
+    call: "atlas.traverse_ref",
+    args: { traversal_ref: page.ref },
+    traversal_ref: traversalRef,
     ranks: page.ranks,
     count: page.count,
   };
@@ -684,7 +706,7 @@ export function materializeCodeSurveyPages(data, {
         metadata: {
           surfaced_by: "survey_snapshot_pager",
           fetch_class: "survey_page",
-          ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
           // A cursor is only useful while every frozen page remains
           // materialized. Keep survey pages out of the ordinary LRU budget so
           // storing a later page cannot degrade an earlier cursor to a
@@ -777,11 +799,11 @@ export function compactCodeSurveyResult(toolName, result, {
       cursor: snapshot.cursor,
     };
   }
-  data.surveyRef = {
-    ref: snapshot.ref,
-    objectType: snapshot.objectType,
-    sizeChars: snapshot.sizeChars,
-  };
+  data.traversal_ref = traversalRefSurface(snapshot.ref, {
+    kind: "survey_page",
+    ranks: snapshot.ranks,
+    count: snapshot.count,
+  });
   return { result: JSON.stringify(envelope, null, 2), compacted: true };
 }
 
@@ -790,7 +812,7 @@ export function compactCodeSurveyResult(toolName, result, {
 // when the full result exceeds the min-chars threshold. code.lens carries a
 // matches[] array — page the lower-ranked tail. code.window is a monolithic
 // content string — keep the head lines inline (up to the char budget) and page
-// the tail lines behind one fetch_ref. Threshold from atlas_result_ref_paging_min_chars.
+// the tail lines behind one traversal_ref. Threshold from atlas_result_ref_paging_min_chars.
 const RESULT_REF_PAGING_DEFAULT_MIN_CHARS = 12000;
 const LENS_INLINE_MATCHES = 8;
 
@@ -936,7 +958,7 @@ export function compactCodeWindowLensResult(toolName, result, {
             metadata: {
               surfaced_by: "returned_function_anchor",
               fetch_class: "source_anchor",
-              ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+              ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
               tool: "code.window",
               repo_rel_path: data.repo_rel_path,
               start_line: startLine,
@@ -947,7 +969,11 @@ export function compactCodeWindowLensResult(toolName, result, {
         } catch (err) {
           recordHashSurfaceFailure(hashContext, tool, entry.content.length, err?.message || err);
         }
-        if (surfaced?.ok && surfaced?.entry?.ref) visible.ref = surfaced.entry.ref;
+        if (surfaced?.ok && surfaced?.entry?.ref) {
+          visible.traversal_ref = traversalRefSurface(surfaced.entry.ref, {
+            kind: "returned_function",
+          });
+        }
       }
       anchorMap.push(visible);
     }
@@ -1017,7 +1043,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         requestedWindows: continuation,
       };
       // Compact encoding makes every complete window's payload span exact and
-      // stable. fetch_ref can therefore promote only fully delivered windows.
+      // stable. Ref traversal can therefore promote only fully delivered windows.
       const continuationPayload = JSON.stringify(continuationEnvelope);
       let continuationSearchOffset = 0;
       const continuationSourceWindows = continuation.map((entry) => {
@@ -1051,7 +1077,7 @@ export function compactCodeWindowLensResult(toolName, result, {
           metadata: {
             surfaced_by: "requested_region_continuation",
             fetch_class: "result_continuation",
-            ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+            ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
             tool: "code.window",
             windows: continuation.length,
             source_windows: continuationSourceWindows,
@@ -1061,7 +1087,9 @@ export function compactCodeWindowLensResult(toolName, result, {
         recordHashSurfaceFailure(hashContext, tool, continuationPayload.length, err?.message || err);
       }
       if (surfaced?.ok && surfaced?.entry?.ref) {
-        data.continuationRef = surfaced.entry.ref;
+        data.traversal_ref = traversalRefSurface(surfaced.entry.ref, {
+          kind: "code_window_continuation",
+        });
         data.continuationWindows = continuation.length;
         data.continuationRanges = continuation.map((entry) => `${entry.startLine}-${entry.endLine}`);
         for (const entry of hashContext.attempt_id != null ? continuationSourceWindows : []) {
@@ -1172,7 +1200,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         metadata: {
           surfaced_by: "result_ref_paging",
           fetch_class: "result_tail",
-          ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
           tool: "code.lens",
           matches: tail.length,
         },
@@ -1183,7 +1211,9 @@ export function compactCodeWindowLensResult(toolName, result, {
     }
     if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
     data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
-    data.tailMatchesRef = surfaced.entry.ref;
+    data.traversal_ref = traversalRefSurface(surfaced.entry.ref, {
+      kind: "code_lens_tail",
+    });
     data.tailMatchesTotal = LENS_INLINE_MATCHES + tail.length;
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
@@ -1206,19 +1236,15 @@ function shouldSurfaceHashRef(toolName, result, {
 }
 
 function refStub({ entry, toolName, sizeChars, refRole = "citation" }) {
-  const ref = entry?.ref || "";
-  const objectType = String(entry?.object_type || toolName || "tool_result")
-    .replace(/[^0-9A-Za-z_.:-]+/g, "_")
-    .slice(0, 80) || "tool_result";
-  const noteValue = String(entry?.note || "")
-    .replace(/["\\\]\r\n]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 140);
-  const note = noteValue ? ` note="${noteValue}"` : "";
-  const normalizedRole = refRole === "continuation" ? "continuation" : "citation";
-  const currentFetch = normalizedRole === "continuation" ? "allowed" : "not_needed";
-  return `\n\n[ref_hash ${objectType} ${sizeChars} chars ${ref} ref_role=${normalizedRole} current_fetch=${currentFetch}${note}]`;
+  const input = {
+    ref: entry?.ref || "",
+    objectType: entry?.object_type || toolName || "tool_result",
+    sizeChars,
+    note: entry?.note || "",
+  };
+  return refRole === "continuation"
+    ? renderTraversalRefStub({ ...input, kind: "continuation" })
+    : renderEvidenceRefStub(input);
 }
 
 function recordHashObservation(context, surfaced, toolName, sizeChars, {
@@ -1240,6 +1266,7 @@ function recordHashObservation(context, surfaced, toolName, sizeChars, {
       fetch_class: surfaced.entry?.metadata?.fetch_class || null,
       ref_role: refRole === "continuation" ? "continuation" : "citation",
       current_fetch: refRole === "continuation" ? "allowed" : "not_needed",
+      surface_kind: refRole === "continuation" ? "traversal" : "evidence",
     },
   });
 }
@@ -1429,7 +1456,7 @@ export function appendHashRefIfMajor(toolName, result, {
             original_size_chars: sizeChars,
             original_char_start: slices.omittedStart,
             original_char_end: slices.omittedEnd,
-            ...hashRefModelVisibility(hashContext, { visibility: "hidden" }),
+            ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
           },
         }, { ownerScope: resolvedOwnerScope });
       } catch (err) {
@@ -1465,6 +1492,7 @@ export function appendHashRefIfMajor(toolName, result, {
           ...hashRefModelVisibility(hashContext, {
             visibility: "full",
             ranges: [{ start: 0, end: boundedAnchor.length }],
+            issuedAs: "evidence",
           }),
         },
       }, { ownerScope: resolvedOwnerScope });
@@ -1493,7 +1521,6 @@ export function appendHashRefIfMajor(toolName, result, {
         refRole: "citation",
       }),
       ...(continuationAvailable ? [
-        `\n\n[bounded_continuation_ref ${continuation.entry.ref}]`,
         refStub({
           entry: continuation.entry,
           toolName: `${effectiveObjectType}.continuation`,
@@ -1542,6 +1569,7 @@ export function appendHashRefIfMajor(toolName, result, {
         ...hashRefModelVisibility(hashContext, {
           visibility: "full",
           ranges: initiallyVisibleHashRefRanges(null, sizeChars),
+          issuedAs: "evidence",
         }),
       },
     }, { ownerScope: resolvedOwnerScope });
@@ -1692,6 +1720,7 @@ function attachFetchedViewRef(renderedText, {
         ...hashRefModelVisibility(hashContext, {
           visibility: "full",
           ranges: [{ start: 0, end: viewText.length }],
+          issuedAs: "evidence",
         }),
       },
     }, {
@@ -1709,14 +1738,20 @@ function attachFetchedViewRef(renderedText, {
     return renderedText;
   }
   recordHashObservation(hashContext, surfaced, "fetch_ref.view", viewText.length, { refRole: "citation" });
-  rendered.view_ref = {
-    ref: surfaced.entry.ref,
-    ref_role: "citation",
-    current_fetch: "not_needed",
-    exact_field: "text",
+  rendered.evidence_ref = evidenceRefSurface(surfaced.entry.ref, {
+    exactField: "text",
     chars: viewText.length,
     lines: normalizedLinesForHandoff(viewText),
-  };
+  });
+  if (rendered?.page?.has_more === true && rendered.page.next_offset != null) {
+    rendered.next_traversal_ref = traversalRefSurface(sourceEntry?.ref, {
+      kind: rendered.page.mode === "search" ? "search_page" : "offset_page",
+      offset: rendered.page.next_offset,
+      limit: rendered.page.limit,
+      search: fetchArgs?.search,
+      searchMode: fetchArgs?.search_mode ?? fetchArgs?.searchMode,
+    });
+  }
   return JSON.stringify(rendered, null, 2);
 }
 
@@ -1892,6 +1927,8 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null, p
     skipped_visible_chars: policy.skipped_visible_chars ?? 0,
     research_phase: policy.research_phase || null,
     visible_ledger_enforced: policy.visible_ledger_enforced === true,
+    requested_capability: policy.requested_capability || "legacy",
+    legacy_alias: policy.requested_capability !== "traversal",
     agent_call_id: hashContext.agent_call_id ?? null,
     ...delivery,
   };
@@ -1970,9 +2007,10 @@ export function fetchHashRefTool(args = {}, {
   context = {},
   researchPhase = null,
   enforcePolicy = false,
+  requireTraversal = false,
 } = {}) {
   const hashContext = contextForHashRefs(context);
-  const refs = refInputs(args);
+  const { refs, requestedCapability } = refInputs(args);
   if (enforcePolicy && refs.length > RESEARCH_FETCH_REF_MAX_REFS) {
     return JSON.stringify({
       ok: false,
@@ -1987,7 +2025,7 @@ export function fetchHashRefTool(args = {}, {
     ? researchFetchDeliveryBudget(refs.length)
     : null;
   recordFetchBatchObservation(hashContext, refs, args, { researchPhase, enforcePolicy, deliveryBudget });
-  if (refs.length === 0) return JSON.stringify({ ok: false, error: "fetch_ref requires ref or refs" }, null, 2);
+  if (refs.length === 0) return JSON.stringify({ ok: false, error: "traverse_ref requires traversal_ref" }, null, 2);
   const requestedReaccessAuthorization = String(args.reaccessAuthorization || "").trim();
   if (requestedReaccessAuthorization && refs.length !== 1) {
     return JSON.stringify({
@@ -2050,6 +2088,7 @@ export function fetchHashRefTool(args = {}, {
       history,
       context: hashContext,
       enforce: reaccess?.allowed ? false : enforcePolicy,
+      requireTraversal: reaccess?.allowed ? false : requireTraversal,
     });
     let rendered;
     if (policy.allowed === false) {
@@ -2077,11 +2116,16 @@ export function fetchHashRefTool(args = {}, {
       reaccess_consumed: reaccessAuthorization ? reaccess?.allowed === true : false,
       research_phase: researchPhase,
       visible_ledger_enforced: enforcePolicy,
+      requested_capability: requestedCapability,
     });
     return rendered;
   };
 
-  const batchRequested = Array.isArray(args.ref) || Array.isArray(args.refs) || Array.isArray(args.hashes);
+  const batchRequested = Array.isArray(args.traversal_ref)
+    || Array.isArray(args.traversal_refs)
+    || Array.isArray(args.ref)
+    || Array.isArray(args.refs)
+    || Array.isArray(args.hashes);
   if (refs.length === 1 && !batchRequested) {
     const rendered = enforceResearchFetchSerializedBudget(fetchOne(refs[0]), deliveryBudget, refs);
     recordFetchBatchDeliveryObservation(hashContext, refs, rendered, {
@@ -2170,7 +2214,7 @@ function createOneHashRef(hashContext, item = {}) {
     const visible = hashRefModelVisibleScope(fetched.entry, hashContext);
     if (visible.contracted && !visible.fully_visible) {
       return createRefError(
-        "source_ref_not_visible (fetch the continuation and use the returned view_ref as source_ref)",
+        "source_ref_not_visible (traverse an explicitly issued traversal_ref and use the returned evidence_ref as source_ref)",
         { source_ref: sourceAlias },
       );
     }
@@ -2214,6 +2258,12 @@ function createOneHashRef(hashContext, item = {}) {
       recomputable: false,
       metadata: {
         surfaced_by: "create_ref",
+        fetch_class: "visible_copy",
+        ...hashRefModelVisibility(hashContext, {
+          visibility: "full",
+          ranges: [{ start: 0, end: payload.length }],
+          issuedAs: "evidence",
+        }),
         ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
       },
     }, { ownerScope });
@@ -2243,7 +2293,11 @@ function createOneHashRef(hashContext, item = {}) {
   const handoffLineCount = normalizedLinesForHandoff(payload);
   return {
     ok: true,
-    ref: surfaced.entry.ref,
+    evidence_ref: evidenceRefSurface(surfaced.entry.ref, {
+      exactField: sourceAlias ? "source_ref slice" : "request text",
+      chars: payload.length,
+      lines: handoffLineCount,
+    }),
     stub: refStub({ entry: { ref: surfaced.entry.ref, object_type: objectType, note }, toolName: "create_ref", sizeChars: payload.length }).trim(),
     object_type: objectType,
     owner_scope: ownerScope,

@@ -10,6 +10,8 @@ import {
   fetchHashRefForContext,
   surfaceHashRefForContext,
 } from "../../../queue/functions/hash-refs.js";
+import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch-ref-policy.js";
+import { renderTraversalRefStub } from "../../../../shared/tools/functions/ref-surface.js";
 
 const DEFAULT_MAX_REFS_PER_LANE = 24;
 const DEFAULT_MAX_WHY_CHARS = 180;
@@ -314,6 +316,7 @@ function resurfaceEntry(fetchResult, laneEntry, {
     versionId: sourceEntry.version_id,
     metadata: {
       ...(sourceEntry.metadata || {}),
+      ...hashRefModelVisibility(targetContext, { visibility: "hidden", issuedAs: "traversal" }),
       reissued_by: "hash_ref_handoff",
       source_ref: laneEntry.ref,
       ...(laneEntry.lines ? { source_lines: laneEntry.lines, source_selector: sourceSelector } : {}),
@@ -360,12 +363,6 @@ export function reissueHashRefHandoffPacket(input, {
       } catch {
         targetFetchResult = null;
       }
-      if (!laneEntry.lines && targetFetchResult?.ok && targetFetchResult?.found && targetFetchResult.entry) {
-        packet.lanes[lane].push(laneEntry);
-        reissued += 1;
-        continue;
-      }
-
       let fetchResult = targetFetchResult?.ok && targetFetchResult?.found && targetFetchResult.entry
         ? targetFetchResult
         : null;
@@ -433,7 +430,7 @@ function proofExpansionForFetch(fetchResult, laneEntry) {
     degraded: true,
     descriptor: entry.descriptor,
     fingerprint_map: entry.fingerprint_map,
-    notice: "Descriptor-backed proof could not be recomputed by the handoff renderer; fetch_ref can report the current descriptor state.",
+    notice: "Descriptor-backed proof could not be recomputed by the handoff renderer; traverse_ref can report the current descriptor state when this ref is issued for traversal.",
   };
 }
 
@@ -607,7 +604,7 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
   if (!packet || packet.source !== "atlas") return "";
   const lines = [
     "ATLAS HASH REF HANDOFF PACKET:",
-    "Compact durable evidence map. Use fetch_ref for exact evidence when needed; proof evidence appears below only when a local renderer has already expanded it.",
+    "Compact durable evidence map. Expanded proof and previews are already visible evidence; use them directly. Only explicit traversal_ref stubs are callable for missing content.",
   ];
   if (packet.synthesis) {
     lines.push("");
@@ -629,7 +626,13 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
         entry.unresolved ? `unresolved=${entry.error || "true"}` : "",
         entry.why ? entry.why : "",
       ].filter(Boolean);
-      lines.push(`- ${selector}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`);
+      const expanded = lane === "proof"
+        && packet.proof_expansions?.some((candidate) => candidate.ref === entry.ref);
+      const visiblePreview = lane !== "proof" && entry.preview;
+      const renderedRef = expanded || visiblePreview
+        ? `[evidence_ref ${selector} usage=cite_or_handoff]`
+        : renderTraversalRefStub({ ref: entry.ref, kind: entry.object_type || lane }).trim();
+      lines.push(`- ${renderedRef}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`);
       const previewLines = lane === "proof" ? [] : renderPreview(entry.preview);
       for (const previewLine of previewLines) {
         lines.push(`  ${previewLine}`);

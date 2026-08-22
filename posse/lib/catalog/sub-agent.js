@@ -57,6 +57,7 @@ export const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS = Object.freeze([
   "atlas.action.search",
   "atlas.manual",
   "atlas.info",
+  "atlas.traverse_ref",
   "atlas.fetch_ref",
   "atlas.repo.status",
   "atlas.repo.overview",

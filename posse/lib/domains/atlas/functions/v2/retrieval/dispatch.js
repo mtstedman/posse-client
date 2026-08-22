@@ -176,6 +176,8 @@ function dispatchImpl(call, ctx) {
         repoId: ctx.repoId,
         viewPath: ctx.viewPath,
       }));
+    case "traverse_ref":
+      return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx, requireTraversal: true }));
     case "fetch_ref":
       return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx }));
     case "create_ref":
@@ -442,6 +444,9 @@ const FIELD_ALIASES = Object.freeze({
   relative_cwd: "relativeCwd",
   identifiers: "identifiersToFind",
   identifiers_to_find: "identifiersToFind",
+  search_mode: "search_mode",
+  traversal_ref: "traversal_ref",
+  traversal_refs: "traversal_refs",
   expected_lines: "expectedLines",
   max_tokens: "maxTokens",
   max_depth: "maxDepth",
@@ -485,16 +490,17 @@ function dispatchGateway({ gateway, call, ctx }) {
 }
 
 /**
- * @param {{ versionId: string, params: ToolCall, ctx: DispatchContext }} input
+ * @param {{ versionId: string, params: ToolCall, ctx: DispatchContext, requireTraversal?: boolean }} input
  * @returns {AnyToolResult}
  */
-function fetchRef({ versionId, params, ctx }) {
+function fetchRef({ versionId, params, ctx, requireTraversal = false }) {
   try {
     const text = fetchHashRefTool(params, {
       context: {
         ...(ctx.hashRefContext || {}),
         ...(ctx.config?.hashRefContext && typeof ctx.config.hashRefContext === "object" ? ctx.config.hashRefContext : {}),
       },
+      requireTraversal,
     });
     let data;
     try {
@@ -503,13 +509,13 @@ function fetchRef({ versionId, params, ctx }) {
       data = { ok: false, error: "invalid_fetch_ref_payload", text };
     }
     return /** @type {AnyToolResult} */ (/** @type {any} */ (okEnvelope({
-      action: "fetch_ref",
+      action: requireTraversal ? "traverse_ref" : "fetch_ref",
       versionId,
       data,
     })));
   } catch (err) {
     return /** @type {AnyToolResult} */ (/** @type {any} */ (errorEnvelope({
-      action: "fetch_ref",
+      action: requireTraversal ? "traverse_ref" : "fetch_ref",
       versionId,
       code: "fetch_ref_failed",
       message: err?.message || String(err),

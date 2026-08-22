@@ -58,17 +58,24 @@ function visibleScope(entry, context) {
     ? entry.metadata.model_visible_scopes
     : [];
   const matching = scopes.filter((scope) => sameVisibleScope(scope, context));
-  if (matching.length === 0) return { visibility: "hidden", ranges: [] };
+  if (matching.length === 0) return { visibility: "hidden", ranges: [], issued_as: null };
   let visibility = "hidden";
+  let issuedAs = null;
   const ranges = [];
   for (const scope of matching) {
     const candidate = String(scope?.visibility || "hidden");
     if ((VISIBILITY_RANK[candidate] ?? 0) > (VISIBILITY_RANK[visibility] ?? 0)) {
       visibility = candidate;
     }
+    if (
+      Number(scope?.agent_call_id) > 0
+      && (scope?.issued_as === "evidence" || scope?.issued_as === "traversal")
+    ) {
+      issuedAs = scope.issued_as;
+    }
     if (Array.isArray(scope?.ranges)) ranges.push(...scope.ranges);
   }
-  return { visibility, ranges };
+  return { visibility, ranges, issued_as: issuedAs };
 }
 
 /**
@@ -157,6 +164,7 @@ function allowed(classification, args, extra = {}) {
 export function hashRefModelVisibility(context = {}, {
   visibility = "hidden",
   ranges = [],
+  issuedAs = null,
 } = {}) {
   const identity = normalizedIdentity(context);
   return {
@@ -164,6 +172,12 @@ export function hashRefModelVisibility(context = {}, {
       ...identity,
       visibility: VISIBILITY_RANK[visibility] == null ? "hidden" : visibility,
       ranges: mergeRanges(ranges),
+      ...(
+        identity.agent_call_id != null
+        && ["evidence", "traversal"].includes(String(issuedAs || ""))
+          ? { issued_as: issuedAs }
+          : {}
+      ),
     }],
   };
 }
@@ -178,19 +192,39 @@ export function admitHashRefFetch({
   history = [],
   context = {},
   enforce = false,
+  requireTraversal = false,
 } = {}) {
-  if (!entry) return allowed("fetch_miss", args);
+  if (!entry) {
+    if (requireTraversal) {
+      return rejection(
+        "traversal_ref_not_issued",
+        "not_issued_for_traversal",
+        "This identity was not issued as missing-content traversal for the current agent call. Follow an explicit traversal_ref from visible context.",
+        { fetch_class: "missing", initial_visibility: "none", issued_as: null },
+      );
+    }
+    return allowed("fetch_miss", args);
+  }
   const fetchClass = fetchClassForEntry(entry);
   const fullSize = Math.max(0, String(entry.payload_text || "").length || Number(entry.size_chars || 0));
   const initial = visibleScope(entry, context);
   const searchSignature = normalizeSearchSignature(args);
+
+  if (requireTraversal && initial.issued_as !== "traversal") {
+    return rejection(
+      "traversal_ref_not_issued",
+      "not_issued_for_traversal",
+      "This stored identity was not issued as missing-content traversal for the current agent call. Use visible evidence directly or follow an explicit traversal_ref.",
+      { fetch_class: fetchClass, initial_visibility: initial.visibility, issued_as: initial.issued_as },
+    );
+  }
 
   if (enforce && initial.visibility === "full") {
     return rejection(
       "fetch_ref_duplicate_visible",
       "duplicate_visible",
       "This ref's complete payload was already present in this agent's tool response. Use the visible evidence; do not fetch the ref.",
-      { fetch_class: fetchClass, initial_visibility: initial.visibility },
+      { fetch_class: fetchClass, initial_visibility: initial.visibility, issued_as: initial.issued_as },
     );
   }
 
@@ -299,6 +333,7 @@ export function admitHashRefFetch({
   return allowed(classification, effectiveArgs, {
     fetch_class: fetchClass,
     initial_visibility: initial.visibility,
+    issued_as: initial.issued_as,
     requested_offset: requestedOffset,
     requested_limit: requestedLimit,
     effective_offset: enforce ? start : requestedOffset,

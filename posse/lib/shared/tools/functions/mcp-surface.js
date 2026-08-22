@@ -23,6 +23,7 @@ const ATLAS_DISPLAY_ACTIONS = Object.freeze({
   // fetch_ref normalizes to "fetch.ref" (underscores become dots) but displays
   // under its canonical issued name.
   "fetch.ref": "fetch_ref",
+  "traverse.ref": "traverse_ref",
   "create.ref": "create_ref",
   "file.read": "file.read",
   "file.write": "file.write",

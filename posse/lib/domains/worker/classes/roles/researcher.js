@@ -653,7 +653,7 @@ export class ResearcherRole extends BaseRole {
         data: {
           // Prefetch runs inside handoff. Supply machine identity before that
           // work begins so materialized Atlas evidence can be owned by this
-          // job and exposed as durable fetch_ref cursor pages. The remote
+          // job and exposed as durable traversal_ref cursor pages. The remote
           // request compiler keeps these fields out of researcher prompts.
           ...packetFields,
           cwd: projectDir,

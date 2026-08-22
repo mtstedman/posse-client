@@ -3,9 +3,10 @@
 // Prompt context rendering for handoff packets.
 
 import { renderAtlasHandoffSectionsWithMeta } from "./atlas-context.js";
-import { renderHashRefHandoffPacket } from "./hash-ref-packet.js";
+import { reissueHashRefHandoffPacket, renderHashRefHandoffPacket } from "./hash-ref-packet.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
+import { getObservationContext } from "../../../observability/functions/observations.js";
 
 export function packetToContextString(packet) {
   return renderPacketContextString(packet, { includeStable: true, includeDynamic: true });
@@ -76,6 +77,23 @@ function renderPlannerDevBrief(brief) {
     }
   }
   return lines.join("\n");
+}
+
+function issueHandoffTraversalRefsForCurrentCall(packet, hashRefPacket) {
+  const observation = getObservationContext() || {};
+  if (!hashRefPacket || observation.agent_call_id == null) return hashRefPacket;
+  const context = {
+    work_item_id: packet?.work_item_id ?? observation.work_item_id ?? null,
+    job_id: packet?.job_id ?? observation.job_id ?? null,
+    attempt_id: observation.attempt_id ?? null,
+    agent_call_id: observation.agent_call_id,
+  };
+  const issued = reissueHashRefHandoffPacket(hashRefPacket, {
+    sourceContext: context,
+    targetContext: context,
+    targetOwnerScope: context.job_id != null ? "job" : "work_item",
+  });
+  return issued.packet || hashRefPacket;
 }
 
 function renderPacketContextString(packet, {
@@ -271,7 +289,11 @@ function renderPacketContextString(packet, {
 
   if (includeStable && (packet.recipient === "dev" || packet.job_type === "fix")) {
     addSection(renderPlannerDevBrief(packet.dev_brief), { required: true, key: "planner_dev_brief" });
-    addSection(renderHashRefHandoffPacket(packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet), {
+    const hashRefPacket = issueHandoffTraversalRefsForCurrentCall(
+      packet,
+      packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet,
+    );
+    addSection(renderHashRefHandoffPacket(hashRefPacket), {
       required: true,
       key: "hash_ref_packet",
     });

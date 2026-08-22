@@ -8,10 +8,12 @@ import { execFileSync } from "node:child_process";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 import { getAtlasDeterministicToolDefinitions } from "../../../../shared/tools/functions/toolkit/atlas.js";
 import { materializeCodeSurveyPages } from "../../../../shared/tools/functions/hash-adder.js";
+import { renderTraversalRefStub } from "../../../../shared/tools/functions/ref-surface.js";
+import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch-ref-policy.js";
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
-import { surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
+import { fetchHashRefForContext, surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
 import {
   planLifecycleSurveyExpansion,
@@ -825,6 +827,36 @@ function _surfaceAtlasSurveyRef(packet, data) {
     objectType: "atlas.code.survey",
     pageSize: SURVEY_REF_PAGE_FILES,
   });
+}
+
+function _issueAtlasTraversalRefForCurrentCall(packet, ref) {
+  const context = _hashRefContextForPacket(packet);
+  if (!context.agent_call_id || !ref) return ref;
+  const fetched = fetchHashRefForContext(context, ref);
+  if (!fetched?.ok || !fetched?.found || !fetched.entry) return ref;
+  const entry = fetched.entry;
+  const surfaced = surfaceHashRefForContext(context, {
+    ...(entry.entry_kind === "materialized"
+      ? { entryKind: "materialized", payloadText: entry.payload_text }
+      : {
+          entryKind: "descriptor",
+          descriptor: entry.descriptor,
+          fingerprintMap: entry.fingerprint_map,
+          recomputable: entry.recomputable === true,
+          degraded: entry.degraded === true,
+        }),
+    contentHash: entry.content_hash,
+    objectType: entry.object_type,
+    source: entry.source,
+    note: entry.note,
+    sizeChars: entry.size_chars,
+    versionId: entry.version_id,
+    metadata: {
+      ...(entry.metadata || {}),
+      ...hashRefModelVisibility(context, { visibility: "hidden", issuedAs: "traversal" }),
+    },
+  }, { ownerScope: context.job_id != null ? "job" : "work_item" });
+  return surfaced?.ok && surfaced.entry?.ref ? surfaced.entry.ref : ref;
 }
 
 export function __testSurfaceAtlasSurveyRef(packet, data) {
@@ -2155,7 +2187,7 @@ async function _prefetchAtlasSurvey(packet, {
         retries,
       }, startedAt);
     }
-    const evidenceRef = _surfaceAtlasSurveyRef(packet, data);
+    const traversalRef = _surfaceAtlasSurveyRef(packet, data);
     const lifecycleExpansion = await _prefetchLifecycleSurveyBodies(packet, {
       taskText,
       files: data.files,
@@ -2175,7 +2207,7 @@ async function _prefetchAtlasSurvey(packet, {
       metrics: data.metrics || null,
       granularity: data.granularity || null,
       truncated: !!data.truncated,
-      evidenceRef,
+      traversalRef,
       lifecycleExpansion,
       dependencyBoundaries,
       retries,
@@ -2356,7 +2388,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     fileSummaries,
     topFiles: fileSummaries.map((file) => file.path),
     callMapSummary: summary,
-    evidenceRef: result.evidenceRef || null,
+    traversalRef: result.traversalRef || null,
     dependencyBoundaries: Array.isArray(result.dependencyBoundaries)
       ? result.dependencyBoundaries.slice(0, 6)
       : [],
@@ -2495,7 +2527,7 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
           }))
           .filter((file) => file.path),
         truncated: result?.truncated === true,
-        survey_ref: String(result?.evidenceRef?.ref || "").trim() || null,
+        survey_ref: String(result?.traversalRef?.ref || "").trim() || null,
         dependency_boundaries: (Array.isArray(result?.dependencyBoundaries) ? result.dependencyBoundaries : [])
           .slice(0, 6)
           .map((entry) => ({
@@ -3127,19 +3159,16 @@ function _renderExactFileBlock(item, trim) {
   return lines;
 }
 
-function _surveyRefStub(evidenceRef) {
-  const ref = String(evidenceRef?.ref || "").trim();
+function _surveyRefStub(traversalRef) {
+  const ref = String(traversalRef?.ref || "").trim();
   if (!/^#[a-z0-9]{4,12}$/i.test(ref)) return null;
-  const objectType = String(evidenceRef?.objectType || "atlas.code.survey")
-    .replace(/[^0-9A-Za-z_.:-]+/g, "_")
-    .slice(0, 80);
-  const sizeChars = Math.max(0, Number(evidenceRef?.sizeChars) || 0);
-  const note = String(evidenceRef?.note || "prefetched survey page 1")
-    .replace(/["\\\]\r\n]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 180);
-  return `[ref_hash ${objectType} ${sizeChars} chars ${ref} ref_role=continuation current_fetch=allowed${note ? ` note="${note}"` : ""}]`;
+  return renderTraversalRefStub({
+    ref,
+    kind: "survey_page",
+    objectType: String(traversalRef?.objectType || "atlas.code.survey"),
+    sizeChars: Math.max(0, Number(traversalRef?.sizeChars) || 0),
+    note: String(traversalRef?.note || "prefetched survey page 1"),
+  }).trim();
 }
 
 function _surveyFileSummaries(sc) {
@@ -3153,7 +3182,7 @@ function _surveyFileSummaries(sc) {
 }
 
 // Render the compact inline part of an already-prefetched code.survey. The
-// exact survey is stored as ten-file evidenceRef pages so the agent can walk
+// exact survey is stored as ten-file traversal-ref pages so the agent can walk
 // that snapshot without paying to execute code.survey a second time.
 function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   const lines = [];
@@ -3161,11 +3190,19 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   const target = _formatSurveyScopeTarget(sc?.scope) || `${Number(sc.fileCount || 0)} files`;
   const dig = sc.symbols ? `, dig: ${sc.symbols.join(", ")}` : "";
   lines.push(`Area survey (prefetched with ${label} over ${target}${dig}):`);
-  const refStub = _surveyRefStub(sc?.evidenceRef);
+  const storedTraversalRef = sc?.traversalRef || sc?.evidenceRef;
+  const traversalRef = storedTraversalRef?.ref
+    ? {
+        ...storedTraversalRef,
+        ref: _issueAtlasTraversalRefForCurrentCall(packet, storedTraversalRef.ref),
+      }
+    : storedTraversalRef;
+  const refStub = _surveyRefStub(traversalRef);
   if (refStub) {
     lines.push(`  survey page 1: ${refStub}`);
-    const cursor = sc?.evidenceRef?.cursor || sc?.evidenceRef?.nextPage;
-    const cursorRef = cursor?.args?.ref || cursor?.ref;
+    const cursor = traversalRef?.cursor || traversalRef?.nextPage;
+    const rawCursorRef = cursor?.args?.traversal_ref || cursor?.args?.ref || cursor?.ref;
+    const cursorRef = _issueAtlasTraversalRefForCurrentCall(packet, rawCursorRef);
     if (cursorRef) {
       lines.push(`  next survey page: ${cursorRef}`);
     }

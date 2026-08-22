@@ -425,7 +425,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
     if (!exactView) {
       fail(
         "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE",
-        `Evidence ${sourceRef} is a continuation or partial ref and no exact fetched view is visible to this agent call. Fetch it and use the returned view_ref, or use the original citation anchor.`,
+        `Evidence ${sourceRef} is a traversal or partial ref and no exact delivered view is visible to this agent call. Traverse an explicitly issued traversal_ref and use the returned evidence_ref, or use the original visible evidence anchor.`,
       );
     }
     entry = exactView;

@@ -33,7 +33,7 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
   // (~29KB observed in run28/29). Bounding is a transport invariant
   // (atlas_search_result_paging defaults on; explicit "off" is an operator
   // escape hatch checked in boundingPolicyFor); the full result stays one
-  // fetch_ref page away.
+  // traversal_ref page away.
   "symbol.search": Object.freeze({
     capChars: 10000,
     headChars: 7600,
@@ -48,7 +48,7 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
   }),
   // A batch symbol.card response can easily exceed the Claude terminal's
   // tool-result ceiling because every card carries hydrated callers/callees.
-  // Keep a useful inline window and retain the complete JSON behind fetch_ref.
+  // Keep a useful inline window and retain the complete JSON behind traversal_ref.
   // Unlike the search experiment this is an unconditional transport-safety
   // bound: an oversized MCP success must not be rewritten into a client error.
   "symbol.card": Object.freeze({
@@ -67,7 +67,7 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
   // on large repositories. Claude spills results above its inline ceiling to
   // a temporary file, which adds a redundant native read (and can prompt a
   // Windows-only Get-Content command on Linux). Keep the full result behind
-  // fetch_ref and deliver a transport-safe preview.
+  // traversal_ref and deliver a transport-safe preview.
   "code.structure": Object.freeze({
     capChars: 18000,
     headChars: 13000,

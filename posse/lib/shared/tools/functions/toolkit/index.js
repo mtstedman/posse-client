@@ -964,6 +964,14 @@ export function createDeterministicToolkit({
     }
   }
 
+  function execTraverseRef(args, _cwd = null, _scopePredicates = null, context = {}) {
+    try {
+      return fetchHashRefTool(args || {}, { context, requireTraversal: true });
+    } catch (err) {
+      return `Error: traverse_ref failed - ${err?.message || String(err)}`;
+    }
+  }
+
   function execCreateHash(args, _cwd = null, _scopePredicates = null, context = {}) {
     try {
       return createHashRefTool(args || {}, { context });
@@ -1967,6 +1975,7 @@ export function createDeterministicToolkit({
     ),
     execInspectFile: wrapDeterministicExecutor("inspect_file", createInspectFileExecutor(safePathImpl)),
     execHashFile: wrapDeterministicExecutor("hash_file", execHashFile),
+    execTraverseRef: wrapDeterministicExecutor("traverse_ref", execTraverseRef),
     execFetchRef: wrapDeterministicExecutor("fetch_ref", execFetchRef),
     execCreateRef: wrapDeterministicExecutor("create_ref", execCreateHash),
     execValidateArtifactOutput: wrapDeterministicExecutor("validate_artifact_output", execValidateArtifactOutput),

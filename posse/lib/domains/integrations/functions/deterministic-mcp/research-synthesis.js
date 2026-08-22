@@ -24,12 +24,13 @@ export const RESEARCH_SYNTHESIS_FRESH_NOVELTY_MAX_STALE_STEPS = 1;
 export const RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES = 2;
 // Exploration-time traversal remains available for omitted or bounded stored
 // payloads. The gate only becomes terminal after closeout has admitted one
-// final batched fetch_ref request.
+// final batched traverse_ref request.
 export const RESEARCH_CITATION_FETCH_GATE_ENABLED = true;
 const NON_EXPLORATION_ATLAS_ACTIONS = new Set([
   "buffer.push",
   "create.ref",
   "fetch.ref",
+  "traverse.ref",
   "file.write",
   "index.refresh",
   "policy.set",
@@ -46,7 +47,7 @@ export function normalizeResearchAtlasAction(action) {
 }
 
 export function isResearchAtlasCitationFetchAction(action) {
-  return normalizeResearchAtlasAction(action) === "fetch.ref";
+  return ["fetch.ref", "traverse.ref"].includes(normalizeResearchAtlasAction(action));
 }
 
 export function isResearchAtlasExplorationAction(action) {
@@ -166,36 +167,36 @@ export function createNativeExplorationNoveltyTracker({ maxEntries = 1024, scope
 export function buildResearchCitationFetchGateText({ reason = "before_synthesis" } = {}) {
   if (reason === "budget_exhausted") {
     return [
-      "FINAL FETCH BATCH ALREADY USED: the one synthesis-phase atlas.fetch_ref batch has completed.",
+      "FINAL TRAVERSAL BATCH ALREADY USED: the one synthesis-phase atlas.traverse_ref batch has completed.",
       "Do not call another tool. Submit the best-supported terminal report using the evidence already gathered.",
     ].join("\n");
   }
   return [
-    "FETCH_REF NOT ELIGIBLE: early stored-ref traversal is limited to omitted, bounded, cursor, survey, or otherwise unseen payloads.",
-    "Do not fetch content already delivered in full. A ref marked ref_role=citation is already usable as evidence in the current context; only ref_role=continuation or an explicit cursor/continuation field advertises unseen content.",
-    "During exploration, wait to accumulate at least two eligible refs before fetching. Use a singleton only when one required cursor or omitted region blocks the next traversal step.",
+    "TRAVERSAL_REF NOT ELIGIBLE: early stored-result traversal is limited to explicit traversal_ref or next_traversal_ref capabilities for omitted, bounded, cursor, survey, or otherwise unseen payloads.",
+    "Do not traverse evidence_ref content already delivered in full. Evidence refs are usable for citation or handoff in the current context; only an explicit traversal capability advertises unseen content.",
+    "During exploration, wait to accumulate at least two eligible traversal refs before traversing. Use a singleton only when one required cursor or omitted region blocks the next traversal step.",
   ].join("\n");
 }
 
 export function buildResearchEarlyFetchBatchingText() {
   return [
-    "FETCH BATCHING CHECKPOINT: this exploration fetch contained one ref.",
-    "Do not fetch another singleton merely because a citation ref is visible. Accumulate at least two eligible continuation refs; use a singleton only when one required cursor or omitted region blocks the next traversal step.",
+    "TRAVERSAL BATCHING CHECKPOINT: this exploration traversal contained one ref.",
+    "Do not traverse another singleton merely because an evidence_ref is visible. Accumulate at least two eligible traversal refs; use a singleton only when one required cursor or omitted region blocks the next traversal step.",
   ].join("\n");
 }
 
 export function buildResearchEarlyFetchSynthesisAuditText({ fetchBatches = 0 } = {}) {
   return [
-    `SYNTHESIS AUDIT: ${Math.max(0, Number(fetchBatches) || 0)} exploration fetch batches have been used.`,
+    `SYNTHESIS AUDIT: ${Math.max(0, Number(fetchBatches) || 0)} exploration traversal batches have been used.`,
     "Compare the gathered evidence with every requested flow, branch, and boundary. If each material item has direct support, synthesize now instead of gathering corroboration.",
-    "If a material gap remains, make only the highest-value targeted lookup and accumulate any further continuation refs into one batch.",
+    "If a material gap remains, make only the highest-value targeted lookup and accumulate any further traversal refs into one batch.",
   ].join("\n");
 }
 
 export function buildResearchFinalFetchBatchText() {
   return [
-    "FINAL FETCH BATCH COMPLETE.",
-    "No further discovery or stored-ref calls are available. Call agent_handoff now with the terminal researcher report synthesized from the gathered evidence; do not end the turn with prose alone.",
+    "FINAL TRAVERSAL BATCH COMPLETE.",
+    "No further discovery or stored-result traversal calls are available. Call agent_handoff now with the terminal researcher report synthesized from the gathered evidence; do not end the turn with prose alone.",
   ].join("\n");
 }
 
@@ -250,6 +251,6 @@ export function buildResearchSynthesisRequiredText({
     absoluteCeilingReached
       ? "The evidence-gathering window is closed."
       : "Recent exploration is no longer producing new relevant evidence.",
-    `No further discovery calls are available. If essential unseen stored evidence remains, issue one final batched atlas.fetch_ref call containing all eligible refs. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
+    `No further discovery calls are available. If essential unseen stored evidence remains, issue one final batched atlas.traverse_ref call containing all eligible traversal refs. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }

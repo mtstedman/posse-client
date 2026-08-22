@@ -374,7 +374,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     identifiersOmitted: stringArray(result.identifiersOmitted),
     ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
     // Private native-to-owner transport. The hash-ref pager removes this
-    // before model delivery and exposes a continuationRef instead.
+    // before model delivery and exposes a traversal_ref instead.
     ...(continuationWindows.length > 0 ? { _continuationWindows: continuationWindows } : {}),
     // Private native-to-owner transport. The owner materializes each exact
     // callable body once and replaces this carrier with a compact ref map.

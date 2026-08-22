@@ -244,10 +244,10 @@ export function fetchHashRefForContext(context = {}, ref, opts = {}) {
 }
 
 /**
- * Find exact fetch_ref views derived from one stored ref and visible through
+ * Find exact traversal views derived from one stored ref and visible through
  * the current hash-ref scope. Terminal handoff validation uses this to
  * canonicalize a model's source-ref citation after that same model fetched an
- * exact view but repeated the source alias instead of the returned view_ref.
+ * exact view but repeated the source alias instead of the returned evidence_ref.
  */
 export function findFetchedHashRefViewsForContext(context = {}, sourceRef, opts = {}) {
   const db = opts.db || getDb();

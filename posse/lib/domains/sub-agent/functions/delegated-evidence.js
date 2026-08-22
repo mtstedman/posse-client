@@ -69,10 +69,10 @@ export function parseLeadingJsonValue(text) {
 }
 
 function coveredRecovery(parsed) {
-  const ref = String(parsed?.reaccess?.ref || parsed?.evidenceRef?.ref || "").trim();
+  const ref = String(parsed?.reaccess?.ref || parsed?.evidence_ref?.ref || parsed?.evidenceRef?.ref || "").trim();
   const authorization = String(parsed?.reaccess?.authorization || "").trim();
   if (!ref || !authorization) return null;
-  return { ref, reaccessAuthorization: authorization };
+  return { traversal_ref: ref, reaccessAuthorization: authorization };
 }
 
 export function classifyDelegatedToolResult(raw) {

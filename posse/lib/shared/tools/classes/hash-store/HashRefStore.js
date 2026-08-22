@@ -131,16 +131,19 @@ function mergeVisibleScopes(existing = [], incoming = []) {
     }
     const prior = out[index];
     const rank = { hidden: 0, partial: 1, full: 2 };
-    const visibility = (rank[candidate.visibility] ?? 0) > (rank[prior.visibility] ?? 0)
-      ? candidate.visibility
-      : prior.visibility;
+    const candidateRank = rank[candidate.visibility] ?? 0;
+    const priorRank = rank[prior.visibility] ?? 0;
+    const visibility = candidateRank > priorRank ? candidate.visibility : prior.visibility;
     const ranges = [...(Array.isArray(prior.ranges) ? prior.ranges : [])];
     for (const range of Array.isArray(candidate.ranges) ? candidate.ranges : []) {
       if (!ranges.some((entry) => entry?.start === range?.start && entry?.end === range?.end)) {
         ranges.push(range);
       }
     }
-    out[index] = { ...prior, ...candidate, visibility, ranges };
+    const issuedAs = candidateRank >= priorRank
+      ? (candidate.issued_as || prior.issued_as)
+      : (prior.issued_as || candidate.issued_as);
+    out[index] = { ...prior, ...candidate, visibility, ranges, ...(issuedAs ? { issued_as: issuedAs } : {}) };
   }
   return out.slice(-64);
 }

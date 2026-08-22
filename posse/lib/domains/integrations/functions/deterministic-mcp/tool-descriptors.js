@@ -468,6 +468,7 @@ export const TOOL_CATALOG = {
 };
 
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
+  "traverse_ref",
   "fetch_ref",
   "create_ref",
   "repo.overview",
@@ -588,8 +589,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     artificer: Object.freeze({
       phase: null,
       tools: Object.freeze([]),
-      internalTools: Object.freeze(["fetch_ref"]),
-      rationale: "Artificer produces non-code deliverables; ATLAS retrieval is not in scope, but remote policy may issue citation ref fetches.",
+      internalTools: Object.freeze(["traverse_ref", "fetch_ref"]),
+      rationale: "Artificer produces non-code deliverables; ATLAS retrieval is not in scope, but remote policy may issue missing-content traversal.",
     }),
     delegator: Object.freeze({
       phase: null,

@@ -15,10 +15,17 @@ export function projectFunctionToolSurface(contract = {}, toolDefinitions = []) 
     if (name && !definitionsByName.has(name)) definitionsByName.set(name, definition);
   }
 
+  const contractedTools = Array.isArray(contract?.tools) ? contract.tools : [];
+  const hasCanonicalTraversal = contractedTools.some((tool) => canonicalToolName(tool) === "traverse_ref")
+    && definitionsByName.has(String(ToolCatalog.getSchema("traverse_ref", { role: contract?.role })?.name || ""));
   const tools = [];
-  for (const tool of Array.isArray(contract?.tools) ? contract.tools : []) {
+  for (const tool of contractedTools) {
     const canonicalName = canonicalToolName(tool);
     if (!canonicalName) continue;
+    // During the negotiated rollout, Remote advertises both names so older
+    // clients retain fetch_ref. A client that knows traverse_ref exposes only
+    // the canonical capability and keeps fetch_ref as an execution alias.
+    if (canonicalName === "fetch_ref" && hasCanonicalTraversal) continue;
     const schemaName = String(ToolCatalog.getSchema(canonicalName, {
       role: contract?.role,
       compactCompletion: contract?.agentHandoffCompactV1 === true,
@@ -61,7 +68,8 @@ export function renderAtlasGuidance(contract = {}) {
   if (!hasAtlas) return [];
   const lines = [
     "Atlas symbol tracing: To get new information about a symbol, choose a different Atlas tool suited to the unresolved fact.",
-    "Atlas reference traversal: Use citation refs directly for citation or handoff. Fetch continuation refs, explicit cursor, survey, or continuation fields, bounded or omitted content, and focused matches within stored payloads. Group concurrently ready refs into one fetch; use one ref when it unlocks the next cursor. Follow returned cursors in order while task-relevant content remains, and use each returned view ref for citation, slicing, or handoff. Start a fresh producer call for a materially different scope.",
+    "Atlas evidence refs: evidence_ref identifies content already visible in this context. Use it directly for citation, slicing, or handoff; do not call it for the same content.",
+    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref or next_traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Each returned evidence_ref identifies the visible text, while next_traversal_ref alone advertises more missing content. Start a fresh producer call for a materially different scope.",
   ];
   const hasCodeWindow = tools.some((tool) => canonicalToolName(tool) === "code.window");
   const policy = contract?.atlasCodeWindowPolicy;

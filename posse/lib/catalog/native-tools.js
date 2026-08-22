@@ -509,7 +509,7 @@ const HANDOFF_EVIDENCE_SELECTOR = {
       type: "object",
       description:
         "Optional 1-based window into this exact ref. For source-backed refs, start/count use source-file line numbers shown in gutters or source metadata, not lines in a stored JSON/tool envelope; the range must fit wholly within one source window from the same ref. " +
-        "For materialized non-source refs, start/count address ref-text lines. Omitted lines select the entire stored ref. A citation ref resolves to the exact visible anchor or fetched view. Omitted content has a separate continuation ref whose returned view_ref identifies the delivered text.",
+        "For materialized non-source refs, start/count address ref-text lines. Omitted lines select the entire stored ref. An evidence_ref identifies already-visible text and should be cited directly. Missing content has a separate traversal_ref; traverse it and cite the returned evidence_ref.",
       properties: {
         start: { type: "integer", minimum: 1 },
         count: { type: "integer", minimum: 1, maximum: 2000 },

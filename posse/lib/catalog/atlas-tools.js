@@ -248,10 +248,32 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       additionalProperties: false,
     },
   },
+  "traverse_ref": {
+    type: "function",
+    name: "atlas_traverse_ref",
+    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. Each non-empty result returns evidence_ref for its visible text and next_traversal_ref only when more stored content remains.",
+    parameters: {
+      type: "object",
+      properties: {
+        traversal_ref: { type: ["string", "array"], items: { type: "string" }, description: "One explicitly issued traversal ref such as #a3f9, or every independently needed traversal ref as one array batch." },
+        traversal_refs: { type: "array", items: { type: "string" }, description: "Compatibility batch spelling for traversal_ref.", internalOnly: true },
+        ref: { type: ["string", "array"], items: { type: "string" }, description: "Legacy fetch_ref input alias.", internalOnly: true },
+        refs: { type: "array", items: { type: "string" }, description: "Legacy fetch_ref batch alias.", internalOnly: true },
+        hashes: { type: "array", items: { type: "string" }, description: "Legacy hash alias.", internalOnly: true },
+        offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Prefer the value carried by next_traversal_ref." },
+        limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs." },
+        search: { type: "string", description: "Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists." },
+        search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto." },
+        reaccessAuthorization: { type: "string", description: "One-use attempt-scoped authorization returned with a covered source response. This exceptional recovery does not turn evidence_ref into ordinary traversal." },
+      },
+      required: ["traversal_ref"],
+      additionalProperties: false,
+    },
+  },
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Reference retrieval for unseen stored #ref content. Follow an eligible survey or continuation ref before retrieving the same source again. Batch every independently needed ref in one request, with paging, slicing, and focused search for missing spans. Each non-empty result includes a view_ref whose payload is the returned text.",
+    description: "Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. Each non-empty result returns an evidence reference for the visible text and a continuation capability when more stored content remains.",
     parameters: {
       type: "object",
       properties: {
@@ -271,7 +293,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "create_ref": {
     type: "function",
     name: "atlas_create_ref",
-    description: "Citation storage. Store inline text, a materialized ref slice, or a batch of chunks and receive #ref stubs. The optional note remains attached to the stored ref.",
+    description: "Citation storage. Store inline text, a materialized ref slice, or a batch of chunks and receive evidence_ref identities for the already-visible chunks. The optional note remains attached to the stored ref.",
     parameters: {
       type: "object",
       properties: {
@@ -282,7 +304,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         limit: { type: "integer", description: "Maximum characters to take from source_ref payload." },
         note: { type: "string", description: "Optional 'what is this' (max 300 chars). Surfaces inside the stub and stays sticky through handoffs." },
         object_type: { type: "string", description: "Optional object type label for the stub. Default agent.chunk." },
-        owner_scope: { type: "string", enum: ["work_item", "job"], description: "Visibility scope. Default work_item so any later agent in the work item can fetch it." },
+        owner_scope: { type: "string", enum: ["work_item", "job"], description: "Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item." },
         chunks: {
           type: "array",
           description: "Batch form: mint several chunks in one call (max 24) with per-item errors. Each item takes the same fields as the single form.",
@@ -691,7 +713,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Ranked task-scope discovery. Returns the ten highest-ranked candidate files inline and stores additional ranked pages in nextCandidateFiles.",
+    description: "Ranked task-scope discovery. Returns the ten highest-ranked candidate files inline and stores additional ranked pages in next_traversal_ref.",
     parameters: {
       type: "object",
       properties: {
@@ -811,7 +833,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, widen to the nearest credible parent scope; surveyRef and pagination retain the full surveyed inventory.",
+    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, widen to the nearest credible parent scope; traversal_ref pagination retains the omitted surveyed inventory.",
     parameters: {
       type: "object",
       properties: {

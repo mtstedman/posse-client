@@ -131,11 +131,13 @@
  */
 
 // ============================================================================
-// fetch_ref — Hash-store citation fetch
+// traverse_ref / fetch_ref — Stored missing-content traversal
 // ============================================================================
 
 /**
  * @typedef {Object} FetchRefParams
+ * @property {string | string[]} [traversal_ref]
+ * @property {string[]} [traversal_refs]
  * @property {string | string[]} [ref]
  * @property {string[]} [refs]
  * @property {string[]} [hashes]
@@ -678,6 +680,7 @@
  *   | { action: "manual" } & ManualParams
  *   | { action: "workflow" } & WorkflowParams
  *   | { action: "info" } & InfoParams
+ *   | { action: "traverse_ref" } & FetchRefParams
  *   | { action: "fetch_ref" } & FetchRefParams
  *   | { action: "create_ref" } & CreateRefParams
  *   | { action: "repo.register" } & RepoRegisterParams
@@ -737,6 +740,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "manual",
   "workflow",
   "info",
+  "traverse_ref",
   "fetch_ref",
   "create_ref",
   "repo.register",

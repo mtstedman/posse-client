@@ -57,6 +57,7 @@ import {
   subAgentCompletionSignal,
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
+import { evidenceRefSurface } from "../functions/ref-surface.js";
 import {
   subAgentDispatchIdentities,
   subAgentEvidenceCallIdentities,
@@ -984,7 +985,7 @@ function tagOwnerModelControlNotice(result, text, detail = {}) {
 function sourceEvidenceReuseNotice(coverageOwner, admission) {
   const attemptId = Number(coverageOwner?.attemptId) || null;
   const db = coverageOwner?.db;
-  const ref = String(admission?.result?.evidenceRef?.ref || "").trim();
+  const ref = String(admission?.result?.evidence_ref?.ref || admission?.result?.evidenceRef?.ref || "").trim();
   if (!attemptId || !db || !ref) return null;
 
   let issuedAttempts = sourceEvidenceReuseNoticeAttempts.get(db);
@@ -1182,7 +1183,7 @@ function surveyAwareSkeletonRedirect(session, requested, toolArgs = {}) {
     code: "structure_already_visible",
     structureAlreadyVisible: true,
     file: coverage.file,
-    surveyRef: coverage.surveyRef,
+    evidence_ref: evidenceRefSurface(coverage.surveyRef),
     surveyBounded: coverage.surveyTruncated || coverage.fileTruncated,
     message: "The prefetched code.survey already supplied this file's structural outline. Use that survey evidence and request exact unresolved code with code.window.",
     nextAction: {
@@ -1221,7 +1222,7 @@ function recordSurveyAwareSkeletonRedirect(session, toolName, toolArgs, result) 
       action: "code.skeleton",
       tool: toolName || null,
       file: toolArgs?.file || null,
-      survey_ref: parsed?.surveyRef || null,
+      survey_ref: parsed?.evidence_ref?.ref || parsed?.surveyRef || null,
       survey_bounded: parsed?.surveyBounded === true,
       redirected: true,
     },
@@ -1396,7 +1397,12 @@ function hashRefToolContext(session) {
 
 function isAtlasFetchRefTool(toolName, toolArgs) {
   const requested = requestedToolPolicyName(toolName, toolArgs);
-  return requested.suite === "atlas" && requested.name === "fetch_ref";
+  return requested.suite === "atlas" && ["traverse_ref", "fetch_ref"].includes(requested.name);
+}
+
+function isCanonicalAtlasTraversalTool(toolName, toolArgs) {
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  return requested.suite === "atlas" && requested.name === "traverse_ref";
 }
 
 function isAtlasCreateHashTool(toolName, toolArgs) {
@@ -1545,7 +1551,7 @@ function normalizedEvidenceDigestValue(value, key = "") {
     const out = {};
     for (const childKey of Object.keys(value).sort()) {
       if (/^(?:_?meta|runtimeTelemetry|timings?|duration|created_at|updated_at)$/i.test(childKey)) continue;
-      if (/^(?:view_ref|surveyRef|ref)$/i.test(childKey)) continue;
+      if (/^(?:evidence_ref|traversal_ref|next_traversal_ref|view_ref|surveyRef|ref)$/i.test(childKey)) continue;
       out[childKey] = normalizedEvidenceDigestValue(value[childKey], childKey);
     }
     return out;
@@ -3822,6 +3828,7 @@ export class PersistentMcpOwner {
               ...hashContext,
               researchPhase: synthesisAdmission.researchPhase || null,
               enforcePolicy: String(session?.bootConfig?.role || "") === "researcher",
+              requireTraversal: isCanonicalAtlasTraversalTool(toolName, toolArgs),
             }));
         result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
         result = appendOwnerResearchEarlyFetchNotice(

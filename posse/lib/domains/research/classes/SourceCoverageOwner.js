@@ -6,6 +6,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { fetchHashRefForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
+import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.js";
 import { normalizeAtlasIdentifierList } from "../../atlas/functions/v2/contracts/identifiers.js";
 
 const COVERAGE_OBSERVATION = "source.coverage";
@@ -168,7 +169,7 @@ export class SourceCoverageOwner {
         startLine: coverage.start_line,
         endLine: coverage.end_line,
         contentSha256: coverage.content_sha256,
-        evidenceRef: { ref: coverage.evidence_ref },
+        evidence_ref: evidenceRefSurface(coverage.evidence_ref),
         reaccess: {
           ref: coverage.evidence_ref,
           authorization,
@@ -344,7 +345,10 @@ export class SourceCoverageOwner {
       const stored = fetchHashRefForContext(contextFor(this), existingCoverage.evidence_ref, { db: this.db });
       if (stored?.ok && stored?.found) {
         data.contentSha256 = contentSha256;
-        data.evidenceRef = { ref: existingCoverage.evidence_ref };
+        data.evidence_ref = evidenceRefSurface(existingCoverage.evidence_ref, {
+          exactField: "content",
+          chars: content.length,
+        });
         delete data.sourceVersion;
         delete data.repositoryIdentity;
         return { ref: existingCoverage.evidence_ref, contentSha256, storedChars: content.length, reused: true };
@@ -378,6 +382,7 @@ export class SourceCoverageOwner {
         ...hashRefModelVisibility(contextFor(this), {
           visibility: deliveryState === "delivered" ? "full" : "hidden",
           ranges: deliveryState === "delivered" ? [{ start: 0, end: content.length }] : [],
+          issuedAs: deliveryState === "delivered" ? "evidence" : "traversal",
         }),
       },
     }, { ownerScope: "job", db: this.db });
@@ -387,7 +392,10 @@ export class SourceCoverageOwner {
       return null;
     }
     data.contentSha256 = contentSha256;
-    data.evidenceRef = { ref: surfaced.entry.ref };
+    data.evidence_ref = evidenceRefSurface(surfaced.entry.ref, {
+      exactField: "content",
+      chars: content.length,
+    });
     recordObservation({
       work_item_id: this.workItemId,
       job_id: this.jobId,
