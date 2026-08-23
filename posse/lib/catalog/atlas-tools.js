@@ -815,7 +815,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Structural code outline for one file or symbol. Returns signatures, declarations, and containment relationships with compact body-free orientation.",
+    description: "Use for compact orientation within one known file or symbol. Returns a body-free structural outline of signatures, declarations, and containment relationships.",
     parameters: {
       type: "object",
       properties: {
@@ -836,7 +836,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, widen to the nearest credible parent scope; traversal_ref pagination retains the omitted surveyed inventory.",
+    description: "Use when the exact target is unknown or behavior spans files or owners. Returns a ranked multi-file symbol preview and call map; submit known paths together, and traverse its continuation only when omitted survey results are relevant.",
     parameters: {
       type: "object",
       properties: {
@@ -852,7 +852,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.structure": {
     type: "function",
     name: "atlas_code_structure",
-    description: "Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges. Submit known paths together and select the relationship kinds needed for the decision.",
+    description: "Use when code relationships matter more than bodies. Returns an exact body-free inventory of files, symbols, imports, and selected fan-in and fan-out edges for known paths.",
     parameters: {
       type: "object",
       properties: {
@@ -883,7 +883,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows. Each match reports its enclosing symbol (kind, name, signature, line range) with up to 8 context lines per side; a call that would exceed 600 lines keeps every match and trims context evenly.",
+    description: "Use when one file or symbol is known but relevant identifiers, usages, or branches are scattered within it. Returns focused locations and enclosing-symbol context; include all known same-target identifiers in one request.",
     parameters: {
       type: "object",
       properties: {
@@ -905,13 +905,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "One bounded exact-source verification for an identified symbol or anchored file region; it is not target discovery. Call it only for a named code fact absent from visible or eligible ref-backed evidence, using a path or symbol ID taken exactly from an indexed result. A same-target revisit must identify an uncovered branch or range; a covered repeat returns its existing evidence ref.",
+    description: "Use only when exact source is needed for a known symbol or anchored file region. Returns one bounded source selection, not target discovery. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path when no symbolId is available." },
-        reason: { type: "string", description: "Unresolved code fact absent from visible evidence; a revisit names the uncovered branch or range." },
+        reason: { type: "string", description: "Why exact source is needed for this known symbol or anchored file region." },
         identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All known same-file anchors for one bounded file-mode slice. Declared names resolve here: function, class, method, and variable names written exactly as they are declared." },
         expectedLines: { type: "integer", description: "Approximate total line count as an integer for a file-mode slice, for example 220." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Symbol, enclosing block, or containing-file selection." },

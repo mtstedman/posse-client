@@ -54,6 +54,7 @@ import {
   recordHandoffProofDegradation,
   runWithHandoffFieldDiagnostics,
 } from "./helpers/field-diagnostics.js";
+import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -818,24 +819,153 @@ function deliveredSourceCoverageCandidates(context) {
   return candidates;
 }
 
-function surfacedPathCandidates(context) {
-  const byPath = new Map();
-  for (const candidate of deliveredSourceCoverageCandidates(context)) {
-    byPath.set(candidate.path, candidate);
+function observedToolReadPath(detail, context) {
+  const rawPath = String(detail?.path || "").trim();
+  if (!rawPath) return null;
+  const projectDir = String(context?.projectDir || context?.cwd || "").trim();
+  if (!projectDir) return canonicalSourcePath(rawPath);
+  const projectRoot = path.resolve(projectDir);
+  const observedCwd = String(detail?.cwd || projectRoot).trim();
+  const absolute = path.isAbsolute(rawPath)
+    ? path.resolve(rawPath)
+    : path.resolve(observedCwd || projectRoot, rawPath);
+  const relative = path.relative(projectRoot, absolute).replace(/\\/g, "/");
+  if (!relative || relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) return null;
+  return canonicalSourcePath(relative);
+}
+
+function successfulToolReadCandidates(context) {
+  const attemptId = Number(context?.attemptId ?? context?.attempt_id) || null;
+  const agentCallId = Number(context?.agentCallId ?? context?.agent_call_id) || null;
+  if (!attemptId || !agentCallId) return [];
+  const database = context?.db || getDb();
+  let rows = [];
+  try {
+    rows = database.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'tool.read'
+      ORDER BY id ASC
+    `).all(attemptId);
+  } catch {
+    return [];
   }
-  for (const sourcePath of findVisibleHashRefSourcePathsForContext(context, {
-    db: context?.db || getDb(),
-  })) {
-    const canonical = canonicalSourcePath(sourcePath);
-    if (canonical && !byPath.has(canonical)) {
-      byPath.set(canonical, {
-        path: canonical,
+  const candidates = [];
+  for (const row of rows) {
+    let detail;
+    try { detail = JSON.parse(row.detail_json || "{}"); } catch { continue; }
+    if (Number(detail?.agent_call_id) !== agentCallId) continue;
+    if (detail?.phase && detail.phase !== "finish") continue;
+    if (detail?.ok === false) continue;
+    if (detail?.outcome && detail.outcome !== "succeeded") continue;
+    const sourcePath = observedToolReadPath(detail, context);
+    const start = Number(detail?.offset) || 1;
+    const resultLines = Number(detail?.result_lines);
+    if (!sourcePath || !Number.isInteger(start) || start < 1 || !Number.isInteger(resultLines) || resultLines < 1) continue;
+    candidates.push({ path: sourcePath, start, end: start + resultLines - 1 });
+  }
+  return candidates;
+}
+
+function successfulAtlasSourceCandidates(context) {
+  const attemptId = Number(context?.attemptId ?? context?.attempt_id) || null;
+  const agentCallId = Number(context?.agentCallId ?? context?.agent_call_id) || null;
+  if (!attemptId || !agentCallId) return [];
+  const database = context?.db || getDb();
+  let rows = [];
+  try {
+    rows = database.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'tool.atlas'
+      ORDER BY id ASC
+    `).all(attemptId);
+  } catch {
+    return [];
+  }
+  const candidates = new Map();
+  for (const row of rows) {
+    let detail;
+    try { detail = JSON.parse(row.detail_json || "{}"); } catch { continue; }
+    if (Number(detail?.agent_call_id) !== agentCallId) continue;
+    if (detail?.ok === false || detail?.outcome !== "succeeded") continue;
+    if (detail?.response?.is_error === true || Number(detail?.response?.content_blocks) < 1) continue;
+    for (const rawPath of Array.isArray(detail?.source_paths) ? detail.source_paths : []) {
+      const sourcePath = canonicalSourcePath(rawPath);
+      if (!sourcePath) continue;
+      candidates.set(sourcePath, {
+        path: sourcePath,
         repository_identity: null,
         source_version: null,
       });
     }
   }
-  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+  return [...candidates.values()];
+}
+
+function mergedLineRanges(ranges = []) {
+  const sorted = ranges
+    .filter((range) => Number.isInteger(range?.start) && Number.isInteger(range?.end) && range.start > 0 && range.end >= range.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const out = [];
+  for (const range of sorted) {
+    const previous = out.at(-1);
+    if (previous && range.start <= previous.end + 1) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      out.push({ start: range.start, end: range.end });
+    }
+  }
+  return out;
+}
+
+function surfacedPathCandidates(context) {
+  const byPath = new Map();
+  for (const candidate of deliveredSourceCoverageCandidates(context)) {
+    byPath.set(candidate.path, { ...candidate, restrict_to_opened_ranges: false, opened_ranges: [] });
+  }
+  for (const candidate of successfulToolReadCandidates(context)) {
+    const existing = byPath.get(candidate.path);
+    if (existing) {
+      if (existing.restrict_to_opened_ranges) existing.opened_ranges.push({ start: candidate.start, end: candidate.end });
+      continue;
+    }
+    byPath.set(candidate.path, {
+      path: candidate.path,
+      repository_identity: null,
+      source_version: null,
+      restrict_to_opened_ranges: true,
+      opened_ranges: [{ start: candidate.start, end: candidate.end }],
+    });
+  }
+  for (const candidate of successfulAtlasSourceCandidates(context)) {
+    if (byPath.has(candidate.path)) continue;
+    byPath.set(candidate.path, {
+      ...candidate,
+      restrict_to_opened_ranges: false,
+      opened_ranges: [],
+    });
+  }
+  for (const sourcePath of findVisibleHashRefSourcePathsForContext(context, {
+    db: context?.db || getDb(),
+    excludeSurfacedBy: ["agent_handoff_path_selector"],
+  })) {
+    const canonical = canonicalSourcePath(sourcePath);
+    if (canonical) {
+      byPath.set(canonical, {
+        path: canonical,
+        repository_identity: null,
+        source_version: null,
+        restrict_to_opened_ranges: false,
+        opened_ranges: [],
+      });
+    }
+  }
+  return [...byPath.values()]
+    .map((candidate) => ({ ...candidate, opened_ranges: mergedLineRanges(candidate.opened_ranges) }))
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function resolveSurfacedEvidencePath(requestedPath, context) {
@@ -875,13 +1005,6 @@ function materializeWorktreeEvidenceSelector(selector, context) {
     fail("AGENT_HANDOFF_CONTEXT_INVALID", "File-backed evidence requires the current job worktree");
   }
   const resolved = resolveSurfacedEvidencePath(selector.path, context);
-  const selectedLineCount = selector.end - selector.start + 1;
-  if (selectedLineCount > AGENT_HANDOFF_LIMITS.maxSelectorLines) {
-    fail(
-      "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
-      `Evidence ${resolved.path}:${selector.start}-${selector.end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorLines} lines`,
-    );
-  }
   const readable = resolveDeterministicReadableFile(
     projectDir,
     resolved.path,
@@ -896,34 +1019,49 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   }
   const content = fs.readFileSync(readable.path, "utf8");
   const lines = splitEditableLines(content).lines;
-  if (selector.start > lines.length || selector.end > lines.length) {
+  if (selector.start > lines.length) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
       `Evidence path ${resolved.path} has ${lines.length} lines; requested ${selector.start}-${selector.end}`,
     );
   }
-  const excerpt = lines.slice(selector.start - 1, selector.end).join("\n");
+  const endLine = Math.min(selector.end, lines.length);
+  const selectedLineCount = endLine - selector.start + 1;
+  if (selectedLineCount > AGENT_HANDOFF_LIMITS.maxSelectorLines) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
+      `Evidence ${resolved.path}:${selector.start}-${endLine} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorLines} lines`,
+    );
+  }
+  if (resolved.restrict_to_opened_ranges
+    && !resolved.opened_ranges.some((range) => selector.start >= range.start && endLine <= range.end)) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+      `Evidence ${resolved.path}:${selector.start}-${endLine} was not opened by read_file in the current agent call`,
+    );
+  }
+  const excerpt = lines.slice(selector.start - 1, endLine).join("\n");
   if (!excerpt.trim()) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_EMPTY",
-      `Evidence ${resolved.path}:${selector.start}-${selector.end} contains only whitespace`,
+      `Evidence ${resolved.path}:${selector.start}-${endLine} contains only whitespace`,
     );
   }
   if (excerpt.length > AGENT_HANDOFF_LIMITS.maxSelectorChars) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
-      `Evidence ${resolved.path}:${selector.start}-${selector.end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorChars} characters`,
+      `Evidence ${resolved.path}:${selector.start}-${endLine} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorChars} characters`,
     );
   }
   const identity = JSON.stringify({
     path: resolved.path,
     start_line: selector.start,
-    end_line: selector.end,
+    end_line: endLine,
     repository_identity: resolved.repository_identity,
     source_version: resolved.source_version,
   });
   const payload = `[posse.worktree_evidence.v1 ${identity}]\n${excerpt}`;
-  const excerptLineCount = selector.end - selector.start + 1;
+  const excerptLineCount = endLine - selector.start + 1;
   const surfaced = surfaceHashRefForContext(context, {
     entryKind: "materialized",
     payloadText: payload,
@@ -932,13 +1070,13 @@ function materializeWorktreeEvidenceSelector(selector, context) {
       tool: "read_file",
       path: resolved.path,
       start_line: selector.start,
-      end_line: selector.end,
+      end_line: endLine,
       repository_identity: resolved.repository_identity,
       source_version: resolved.source_version,
     },
     objectType: "tool_result",
     source: "system:worktree_read",
-    note: `${resolved.path}:${selector.start}-${selector.end}`,
+    note: `${resolved.path}:${selector.start}-${endLine}`,
     sizeChars: payload.length,
     recomputable: false,
     versionId: resolved.source_version,
@@ -955,7 +1093,7 @@ function materializeWorktreeEvidenceSelector(selector, context) {
       source_windows: [{
         path: resolved.path,
         source_start_line: selector.start,
-        source_end_line: selector.end,
+        source_end_line: endLine,
         materialized_start_line: 2,
         materialized_end_line: excerptLineCount + 1,
       }],
@@ -969,17 +1107,17 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   if (!surfaced?.ok || !surfaced.entry?.ref) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED",
-      `Evidence path ${resolved.path}:${selector.start}-${selector.end} could not be stored`,
+      `Evidence path ${resolved.path}:${selector.start}-${endLine} could not be stored`,
     );
   }
   const materialized = materializeAgentHandoffEvidenceSelector({
     ref: surfaced.entry.ref,
-    lines: { start: selector.start, end: selector.end },
+    lines: { start: selector.start, end: endLine },
   }, context, { expectedLineSemantics: "source" });
   return {
     ...materialized,
     selector_kind: "path",
-    source_selector: `${resolved.path}:${selector.start}-${selector.end}`,
+    source_selector: `${resolved.path}:${selector.start}-${endLine}`,
   };
 }
 
@@ -2197,7 +2335,8 @@ function normalizeResearcherTerminalArgs(source, context) {
     research.key_symbols,
     research.keySymbols,
     source.key_symbols,
-  ).filter((value) => /^[0-9a-f]{64}:[0-9]+$/.test(value)).slice(0, 12);
+  );
+  const normalizedKeySymbols = normalizeResearchSymbolSeeds(keySymbols, 12);
   const patternsInput = [
     first.patterns,
     research.patterns,
@@ -2227,9 +2366,10 @@ function normalizeResearcherTerminalArgs(source, context) {
       title: compactResearcherText(title).slice(0, 120),
       content: compactResearcherText(content).slice(0, 1200),
       key_files: researcherStringArray(entry.key_files, entry.keyFiles).slice(0, 12),
-      key_symbols: researcherStringArray(entry.key_symbols, entry.keySymbols)
-        .filter((value) => /^[0-9a-f]{64}:[0-9]+$/.test(value))
-        .slice(0, 12),
+      key_symbols: normalizeResearchSymbolSeeds(
+        researcherStringArray(entry.key_symbols, entry.keySymbols),
+        12,
+      ),
     }];
   }).slice(0, 2);
   const absenceChecks = [
@@ -2283,7 +2423,7 @@ function normalizeResearcherTerminalArgs(source, context) {
           source.questions,
         ),
         research: {
-          key_symbols: keySymbols,
+          key_symbols: normalizedKeySymbols,
           memories,
           planner_file_priorities: researcherFilePriorities(priorities, keyFiles),
           patterns,
@@ -2361,7 +2501,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
           success_criteria: [],
           questions: compact.questions ?? [],
           research: {
-            key_symbols: compact.key_symbols ?? [],
+            key_symbols: normalizeResearchSymbolSeeds(compact.key_symbols, 12),
             memories: compact.memories ?? [],
             planner_file_priorities: priorities,
             patterns: compact.patterns ?? [],
@@ -3301,8 +3441,19 @@ export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = get
   return true;
 }
 
-function renderEvidence(evidence, lane) {
-  return `${lane}: ${evidence.selector}`;
+function renderedEvidenceSelector(evidence) {
+  if (evidence?.path && Number.isInteger(evidence.source_start_line)
+    && Number.isInteger(evidence.source_end_line)) {
+    return `${evidence.path}:${evidence.source_start_line}-${evidence.source_end_line}`;
+  }
+  if (evidence?.provenance?.line_semantics === "source"
+    && Array.isArray(evidence.provenance.source_windows)
+    && evidence.provenance.source_windows.length > 0) {
+    return evidence.provenance.source_windows.map((window) => (
+      `${window.path}:${window.source_start_line}-${window.source_end_line}`
+    )).join(", ");
+  }
+  return evidence?.selector || evidence?.ref || "unavailable";
 }
 
 function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommendedEvidenceChars) {
@@ -3381,17 +3532,49 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   return `## Expanded evidence\n\n${expanded.slice(0, maxChars).trimEnd()}\n\n[Expanded evidence truncated: ${omitted} additional characters remain available through the cited proof selectors.]`;
 }
 
-function renderReport(report, { expandEvidence = false, citedFacts = false } = {}) {
+function renderEvidenceAppendix(report) {
+  const rows = [];
+  for (const [index, claim] of (report.claims || []).entries()) {
+    const detail = claim[1] || {};
+    const marker = `[E${index + 1}]`;
+    const claimLabel = String(claim[0] || "").replace(/\s+/g, " ").trim();
+    const legacyLabel = String(report.summary || "").includes(marker) || !claimLabel
+      ? ""
+      : `${claimLabel.slice(0, 180)}${claimLabel.length > 180 ? "…" : ""} — `;
+    const lanes = [];
+    for (const lane of ["proof", "support"]) {
+      const selectors = [...new Set(
+        (detail[lane] || []).map(renderedEvidenceSelector).filter(Boolean),
+      )];
+      if (selectors.length > 0) {
+        lanes.push(`${lane[0].toUpperCase()}${lane.slice(1)}: ${selectors.join(", ")}`);
+      }
+    }
+    for (const [evidence, reason] of detail.decoy || []) {
+      lanes.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
+    }
+    if (lanes.length > 0) rows.push(`- ${marker} ${legacyLabel}${lanes.join("; ")}`);
+  }
+  return rows.length > 0 ? `Evidence:\n${rows.join("\n")}` : "";
+}
+
+function renderReport(report, { expandEvidence = false, evidenceAppendix = false } = {}) {
   const parts = [];
   if (report.summary) parts.push(`Summary: ${report.summary}`);
-  for (const claim of report.claims) {
-    parts.push(`${citedFacts ? "Cited fact" : "Claim"}: ${claim[0]}`);
-    const detail = claim[1] || {};
-    for (const lane of ["proof", "support"]) {
-      for (const evidence of detail[lane] || []) parts.push(renderEvidence(evidence, lane[0].toUpperCase() + lane.slice(1)));
+  if (!evidenceAppendix) {
+    for (const claim of report.claims) {
+      parts.push(`Claim: ${claim[0]}`);
+      const detail = claim[1] || {};
+      for (const lane of ["proof", "support"]) {
+        for (const evidence of detail[lane] || []) {
+          parts.push(`${lane[0].toUpperCase()}${lane.slice(1)}: ${renderedEvidenceSelector(evidence)}`);
+        }
+      }
+      for (const [evidence, reason] of detail.decoy || []) {
+        parts.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
+      }
+      if (detail.prose) parts.push(`Agent synthesis: ${detail.prose}`);
     }
-    for (const [evidence, reason] of detail.decoy || []) parts.push(`${renderEvidence(evidence, "Decoy")} — ${reason}`);
-    if (detail.prose) parts.push(`Agent synthesis: ${detail.prose}`);
   }
   if (report.constraints.length) parts.push(`Constraints:\n${report.constraints.map((entry) => `- ${entry}`).join("\n")}`);
   if (report.success_criteria.length) parts.push(`Success criteria:\n${report.success_criteria.map((entry) => `- ${entry}`).join("\n")}`);
@@ -3399,6 +3582,10 @@ function renderReport(report, { expandEvidence = false, citedFacts = false } = {
   if (expandEvidence) {
     const evidence = renderExpandedEvidence(report);
     if (evidence) parts.push(evidence);
+  }
+  if (evidenceAppendix) {
+    const appendix = renderEvidenceAppendix(report);
+    if (appendix) parts.push(appendix);
   }
   return parts.join("\n\n");
 }
@@ -3642,8 +3829,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   }
   const first = packet.handoffs[0];
   const report = renderReport(first.report, {
-    expandEvidence: packet.profile === "researcher.report.v1",
-    citedFacts: packet.profile === "researcher.report.v1",
+    evidenceAppendix: packet.profile === "researcher.report.v1",
   });
   if (packet.profile === "assessor.verdict.v1") {
     const reasons = [...new Set(

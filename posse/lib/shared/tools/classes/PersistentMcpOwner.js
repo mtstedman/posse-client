@@ -1531,6 +1531,11 @@ const OWNER_EVIDENCE_MATERIAL_KEY_NAMES = new Set([
   "source_text",
   "text",
 ]);
+const OWNER_SOURCE_BEARING_ACTIONS = new Set([
+  "code.lens",
+  "code.window",
+  "file.read",
+]);
 
 function ownerResultTextWithoutControls(result = null) {
   let text = Array.isArray(result?.content)
@@ -1660,6 +1665,50 @@ function ownerAtlasEvidenceIdentities({ session, toolName, toolArgs, result, out
   return [...identities].slice(0, OWNER_EVIDENCE_IDENTITY_MAX);
 }
 
+function normalizedOwnerSourcePath(value) {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+/g, "/");
+  if (!normalized || path.posix.isAbsolute(normalized)) return null;
+  if (normalized.split("/").some((segment) => segment === "." || segment === "..")) return null;
+  return normalized;
+}
+
+function collectOwnerSourcePaths(value, paths, depth = 0) {
+  if (depth > 8 || paths.size >= OWNER_EVIDENCE_IDENTITY_MAX) return;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 200)) collectOwnerSourcePaths(item, paths, depth + 1);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value)) {
+    if (["repo_rel_path", "repoRelPath"].includes(key)) {
+      const sourcePath = normalizedOwnerSourcePath(child);
+      if (sourcePath) paths.add(sourcePath);
+    }
+    if (child && typeof child === "object") collectOwnerSourcePaths(child, paths, depth + 1);
+  }
+}
+
+function ownerAtlasSourcePaths({ toolName, toolArgs, result, outcome } = {}) {
+  const action = effectiveAtlasResearchAction(requestedToolPolicyName(toolName, toolArgs));
+  if (!OWNER_SOURCE_BEARING_ACTIONS.has(action) || outcome !== "succeeded" || result?.isError === true) {
+    return null;
+  }
+  const text = ownerResultTextWithoutControls(result);
+  if (!text || /^(?:Error:|AUDIT ERROR:)/i.test(text)) return [];
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { /* bounded or plain-text source result */ }
+  if (String(parsed?.status || parsed?.data?.status || "").toLowerCase() === "covered") return [];
+  const paths = new Set();
+  const requestedPath = normalizedOwnerSourcePath(toolArgs?.file);
+  if (requestedPath) paths.add(requestedPath);
+  collectOwnerSourcePaths(parsed, paths);
+  return [...paths].slice(0, OWNER_EVIDENCE_IDENTITY_MAX);
+}
+
 function mcpToolResultErrorText(result = null) {
   const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
   if (structured) return capString(structured, 700);
@@ -1745,6 +1794,12 @@ function recordOwnerToolObservation({
     result: evidenceResult || result,
     outcome,
   });
+  const sourcePaths = ownerAtlasSourcePaths({
+    toolName,
+    toolArgs,
+    result: evidenceResult || result,
+    outcome,
+  });
   try {
     recordToolUseObservations({
       work_item_id: boot.workItemId ?? null,
@@ -1762,6 +1817,7 @@ function recordOwnerToolObservation({
         ...(outcome === "failed" && errorText ? { status: "failed", error: errorText } : {}),
         ...(outcome === "rejected" && errorText ? { status: "rejected", rejection: errorText } : {}),
         observation_detail: {
+          agent_call_id: boot.agentCallId ?? null,
           duration_ms: durationMs == null ? null : Number(durationMs),
           queue_wait_ms: queueWaitMs == null ? null : Number(queueWaitMs),
           result_chars: resultChars,
@@ -1781,6 +1837,7 @@ function recordOwnerToolObservation({
             evidence_identity_version: OWNER_EVIDENCE_IDENTITY_VERSION,
             evidence_identities: evidenceIdentities,
           }),
+          ...(sourcePaths == null ? {} : { source_paths: sourcePaths }),
           response: {
             result_chars: resultChars,
             content_blocks: Array.isArray(result?.content) ? result.content.length : 0,

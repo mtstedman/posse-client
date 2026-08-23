@@ -248,7 +248,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows. Each match reports its enclosing symbol (kind, name, signature, line range) with up to 8 context lines per side; a call that would exceed 600 lines keeps every match and trims context evenly.
+Use when one file or symbol is known but relevant identifiers, usages, or branches are scattered within it. Returns focused locations and enclosing-symbol context; include all known same-target identifiers in one request.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -271,7 +271,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Structural code outline for one file or symbol. Returns signatures, declarations, and containment relationships with compact body-free orientation.
+Use for compact orientation within one known file or symbol. Returns a body-free structural outline of signatures, declarations, and containment relationships.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -297,7 +297,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Exact body-free inventory of files, symbols, imports, and fan-in and fan-out edges. Submit known paths together and select the relationship kinds needed for the decision.
+Use when code relationships matter more than bodies. Returns an exact body-free inventory of files, symbols, imports, and selected fan-in and fan-out edges for known paths.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -321,7 +321,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | Yes |
 
-Ranked multi-file symbol preview and call map for behavior spanning files or owners, or when the exact target file is unknown. Submit all known paths together. When location is uncertain, widen to the nearest credible parent scope; traversal_ref pagination retains the omitted surveyed inventory.
+Use when the exact target is unknown or behavior spans files or owners. Returns a ranked multi-file symbol preview and call map; submit known paths together, and traverse its continuation only when omitted survey results are relevant.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -343,7 +343,7 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-One bounded exact-source verification for an identified symbol or anchored file region; it is not target discovery. Call it only for a named code fact absent from visible or eligible ref-backed evidence, using a path or symbol ID taken exactly from an indexed result. A same-target revisit must identify an uncovered branch or range; a covered repeat returns its existing evidence ref.
+Use only when exact source is needed for a known symbol or anchored file region. Returns one bounded source selection, not target discovery. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -352,7 +352,7 @@ One bounded exact-source verification for an identified symbol or anchored file 
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Symbol, enclosing block, or containing-file selection. |
 | `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped. |
-| `reason` | `string` | Required | max length 20000 | Unresolved code fact absent from visible evidence; a revisit names the uncovered branch or range. |
+| `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
 ### `atlas.create_ref`

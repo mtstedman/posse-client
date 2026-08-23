@@ -49,6 +49,8 @@ import {
   chooseResearcherPrefetchLane,
   normalizeResearchPrefetchFocusMode,
 } from "./research-prefetch-policy.js";
+import { isAtlasSymbolId } from "../../../atlas/functions/v2/symbol-id.js";
+import { atlasSymbolRefFromResearchSeed } from "./research-symbols.js";
 
 const ATLAS_EXACT_PREFETCH_MAX_FILES = 6;
 const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
@@ -1913,11 +1915,19 @@ async function _prefetchAtlasAreaMap(packet) {
   }
 }
 
-// Batch-hydrate the brief's key symbols (researcher-validated symbol IDs) so
-// planner/dev open with the cards already in hand instead of re-searching.
-async function _prefetchSeedSymbolCards(packet, { symbolIds }) {
+// Batch-hydrate the brief's key symbol seeds so planner/dev open with the
+// cards already in hand instead of re-searching. Opaque IDs stay exact;
+// qualified names use ATLAS's symbolRef resolution path.
+async function _prefetchSeedSymbolCards(packet, { symbolSeeds }) {
   try {
-    const raw = await executeEmbeddedAtlasTool("symbol.card", { symbolIds }, {
+    const symbolIds = symbolSeeds.filter((seed) => isAtlasSymbolId(seed));
+    const symbolRefs = symbolSeeds
+      .map(atlasSymbolRefFromResearchSeed)
+      .filter(Boolean);
+    const raw = await executeEmbeddedAtlasTool("symbol.card", {
+      ...(symbolIds.length > 0 ? { symbolIds } : {}),
+      ...(symbolRefs.length > 0 ? { symbolRefs } : {}),
+    }, {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
@@ -1985,7 +1995,7 @@ export async function attachAtlasPlannerSlice(packet) {
           })
           : Promise.resolve(null),
         wantSymbolCards
-          ? _prefetchSeedSymbolCards(packet, { symbolIds: seedSymbols })
+          ? _prefetchSeedSymbolCards(packet, { symbolSeeds: seedSymbols })
           : Promise.resolve([]),
       ]);
     }
@@ -3520,7 +3530,7 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
     atlasHeading("ATLAS RESEARCH PREFETCH"),
     "These are the initial ATLAS calls already made for you. Use them before making additional ATLAS or native file/search calls.",
     "Wrap up as soon as the gathered evidence supports the requested result. Do not seek corroboration or spend additional calls merely because they are available.",
-    "Choose retrieval by the shape of the unresolved fact; these are routing choices, not required stages. Before another call, compare visible, prefetched, and eligible ref-backed evidence with the requested result. If it is sufficient, hand off. Otherwise name the specific missing fact and use the tool that answers it directly: discovery when the target or location is unknown, code.lens to localize multiple named facts within a known target, and code.window only for exact source in a known symbol or region. Follow eligible survey or continuation refs before retrieving the same source again. Do not invent paths or symbol IDs, reopen source supplied in full, or retry an invalid path or ID with another guess; return to discovery. Batch independent gaps.",
+    "Use the smallest retrieval operation that advances the task: survey when the target is unknown or behavior spans files, structure for relationships, lens for scattered details within one known target, and window for exact source in a known symbol or anchored region. Reuse source already visible or available by reference. Traverse a ref only when its described omitted content is relevant; traversal continues a stored result, not the code relationship graph.",
   ];
 
   if (context) {

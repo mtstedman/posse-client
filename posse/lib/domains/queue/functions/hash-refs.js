@@ -694,6 +694,9 @@ export function findFetchedHashRefViewsForContext(context = {}, sourceRef, opts 
  */
 export function findVisibleHashRefSourcePathsForContext(context = {}, opts = {}) {
   const db = opts.db || getDb();
+  const excludedSurfaces = new Set(
+    Array.isArray(opts.excludeSurfacedBy) ? opts.excludeSurfacedBy.map(String) : [],
+  );
   const resolved = resolveHashRefContext(context, db);
   if (resolved.error) return [];
 
@@ -753,6 +756,7 @@ export function findVisibleHashRefSourcePathsForContext(context = {}, opts = {})
     const fetched = fetchHashRefForContext(context, ref, { db });
     const entry = fetched?.found ? fetched.entry : null;
     if (!entry || !hashRefModelVisibleScope(entry, resolved).fully_visible) continue;
+    if (excludedSurfaces.has(String(entry.metadata?.surfaced_by || ""))) continue;
     addPath(entry.metadata?.path);
     addPath(entry.metadata?.repo_rel_path);
     for (const window of Array.isArray(entry.metadata?.source_windows)

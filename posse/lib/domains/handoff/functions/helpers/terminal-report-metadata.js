@@ -1,6 +1,7 @@
 import { DEV_MODE_ORDER } from "../../../../shared/policies/functions/dev-modes.js";
 import { detectSensitiveAgentHandoffText } from "../agent-handoff-boundaries.js";
 import { filterKnownHandoffFields } from "./field-diagnostics.js";
+import { normalizeResearchSymbolSeeds } from "./research-symbols.js";
 
 export const PLANNER_REPORT_METADATA_KEYS = Object.freeze([
   "dev_mode",
@@ -17,7 +18,6 @@ export const PLANNER_REPORT_METADATA_KEYS = Object.freeze([
 ]);
 
 const RESEARCHER_PROFILES = new Set(["researcher.pipeline.v1", "researcher.report.v1"]);
-const ATLAS_SYMBOL_ID_RE = /^[0-9a-f]{64}:[0-9]+$/;
 const PLANNER_METADATA_ENUMS = Object.freeze({
   dev_mode: new Set(DEV_MODE_ORDER),
   scope_confidence: new Set(["high", "medium", "low"]),
@@ -95,26 +95,14 @@ export function normalizeResearchData(value, label, profile) {
     ["key_symbols", "memories", "planner_file_priorities", "patterns", "scope_estimate", "absence_checks", "question_details"],
     label,
   );
-  const keySymbols = stringArray(source.key_symbols, `${label}.key_symbols`, 12, 80);
-  for (const [index, symbolId] of keySymbols.entries()) {
-    if (!ATLAS_SYMBOL_ID_RE.test(symbolId)) {
-      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.key_symbols[${index}] must be an opaque ATLAS symbol ID`);
-    }
-  }
+  const keySymbols = normalizeResearchSymbolSeeds(source.key_symbols, 12);
 
   if (!Array.isArray(source.memories) || source.memories.length > 2) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.memories must be an array with at most 2 entries`);
   }
   const memories = source.memories.map((raw, index) => {
     const entry = exactKeys(raw, ["title", "content", "key_files", "key_symbols"], `${label}.memories[${index}]`);
-    const memorySymbols = entry.key_symbols == null
-      ? []
-      : stringArray(entry.key_symbols, `${label}.memories[${index}].key_symbols`, 12, 80);
-    for (const [symbolIndex, symbolId] of memorySymbols.entries()) {
-      if (!ATLAS_SYMBOL_ID_RE.test(symbolId)) {
-        fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.memories[${index}].key_symbols[${symbolIndex}] must be an opaque ATLAS symbol ID`);
-      }
-    }
+    const memorySymbols = normalizeResearchSymbolSeeds(entry.key_symbols, 12);
     return {
       title: boundedString(entry.title, `${label}.memories[${index}].title`, 120),
       content: boundedString(entry.content, `${label}.memories[${index}].content`, 1200),

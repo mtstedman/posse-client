@@ -4,6 +4,7 @@
 
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
+import { normalizeResearchSymbolSeeds } from "./research-symbols.js";
 import {
   formatHashRefSelector,
   HASH_REF_LANES,
@@ -246,10 +247,9 @@ export function normalizeResearcherMemories(parsed, maxItems = 5) {
 }
 
 /**
- * Normalize researcher-provided key_symbols (opaque ATLAS symbol IDs) for
- * downstream seeding. Symbols that fail the ATLAS id shape are dropped —
- * the brief's symbol list is a seed contract, not free text. Entries may be
- * bare id strings or { symbolId, name?, why? } objects.
+ * Normalize researcher-provided key_symbols for downstream seeding. Opaque
+ * ATLAS ids and language-level qualified names are retained; malformed
+ * optional entries are dropped instead of invalidating the research brief.
  *
  * @param {any} parsed
  * @param {number} [maxItems]
@@ -257,10 +257,10 @@ export function normalizeResearcherMemories(parsed, maxItems = 5) {
  */
 export function normalizeResearcherKeySymbols(parsed, maxItems = 24) {
   const source = Array.isArray(parsed?.key_symbols) ? parsed.key_symbols : [];
-  const rawIds = source
+  const rawSeeds = source
     .map((entry) => (typeof entry === "string" ? entry : entry?.symbolId || entry?.symbol_id || ""))
     .filter(Boolean);
-  return resilientSymbolIdList(rawIds, maxItems, "researcher key_symbols");
+  return normalizeResearchSymbolSeeds(rawSeeds, maxItems);
 }
 
 function filePathFromResearcherValue(value) {

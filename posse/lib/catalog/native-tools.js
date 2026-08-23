@@ -204,17 +204,17 @@ const TERMINAL_COMPLETION_PARAMETERS = {
   additionalProperties: false,
 };
 
-const AGENT_HANDOFF_ATLAS_SYMBOL_ID = {
+const AGENT_HANDOFF_SYMBOL_SEED = {
   type: "string",
-  pattern: "^[0-9a-f]{64}:[0-9]+$",
-  description: "Opaque ATLAS symbol ID copied verbatim from an ATLAS result.",
+  maxLength: 300,
+  description: "Opaque ATLAS symbol ID copied from an ATLAS result, or a language-level fully qualified symbol name. Malformed optional seeds are ignored.",
 };
 
 const AGENT_HANDOFF_RESEARCH_DATA = {
   type: "object",
   description: "Structured researcher metadata that the compatibility pipeline preserves for downstream planning and memory persistence.",
   properties: {
-    key_symbols: { type: "array", maxItems: 12, items: AGENT_HANDOFF_ATLAS_SYMBOL_ID },
+    key_symbols: { type: "array", maxItems: 12, items: AGENT_HANDOFF_SYMBOL_SEED },
     memories: {
       type: "array",
       maxItems: 2,
@@ -224,7 +224,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
           title: { type: "string", minLength: 1, maxLength: 120 },
           content: { type: "string", minLength: 1, maxLength: 1200 },
           key_files: { type: "array", maxItems: 12, items: { type: "string", minLength: 1, maxLength: 500 } },
-          key_symbols: { type: "array", maxItems: 12, items: AGENT_HANDOFF_ATLAS_SYMBOL_ID },
+          key_symbols: { type: "array", maxItems: 12, items: AGENT_HANDOFF_SYMBOL_SEED },
         },
         required: ["title", "content"],
         additionalProperties: false,
@@ -531,14 +531,14 @@ export const TOOL_AGENT_HANDOFF = {
                 summary: {
                   type: "string",
                   description:
-                    "The complete terminal report for researcher.report.v1; the planning synthesis for researcher.pipeline.v1. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
+                    "The complete researcher.report.v1 prose, using [E1], [E2], ... for ordered claim evidence; or the researcher.pipeline.v1 synthesis. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
                 },
                 claims: {
                   type: "array",
                   maxItems: 12,
                   description:
-                    "Optional in both researcher profiles. For researcher.report.v1 these are the cited facts the report rests on; the report body is summary. " +
-                    'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["src/x.js:23-40"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
+                    "Optional. In researcher.report.v1 claim N supplies [EN]; use a short evidence label, not repeated summary prose. " +
+                    'Exact tuple form: [["short evidence label", {"proof":["#ref:1-3"], "support":["src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
                     "For researcher profiles, every claim must carry at least one proof or support selector; put uncited narrative in summary. A prose #ref or path:line citation alone does not satisfy this rule. Only proof, support, and decoy selector positions are deterministically resolved, range-validated, and expanded. " +
                     "Proof accepts only storage-owned tool evidence; agent-created prose refs may appear only in support or decoy. " +
                     "Evidence lanes accept visible stored refs and already-surfaced file ranges in string or object form.",
@@ -740,7 +740,7 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "One cited research claim. Every claim carries at least one proof or support selector; a prose #ref or path:line does not satisfy this. Put uncited narrative in summary.",
+    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. A proof or support selector establishes evidence; prose citations are informational.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
@@ -751,7 +751,7 @@ const RESEARCHER_HANDOFF_CLAIM = {
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "Optional in both profiles. For researcher.report.v1 these are the cited facts the report rests on; the report body is summary.",
+    "Optional. In report mode ordered entries supply [E1], [E2], ...; summary is the only report prose.",
   items: RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -1007,7 +1007,7 @@ const V2_HANDOFF_CLAIMS = {
 const V2_RESEARCHER_HANDOFF_CLAIM = {
   ...V2_HANDOFF_CLAIM,
   description:
-    "One cited research claim. Every claim carries at least one proof or support selector; a prose #ref or path:line does not satisfy this. Put uncited narrative in summary.",
+    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. A proof or support selector establishes evidence; prose citations are informational.",
   properties: {
     ...V2_HANDOFF_CLAIM.properties,
     summary: { ...V2_HANDOFF_CLAIM.properties.summary, description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
@@ -1017,7 +1017,7 @@ const V2_RESEARCHER_HANDOFF_CLAIM = {
 const V2_RESEARCHER_HANDOFF_CLAIMS = {
   ...V2_HANDOFF_CLAIMS,
   description:
-    "Optional in both profiles. For researcher.report.v1 these are the cited facts the report rests on; the report body is summary.",
+    "Optional. In report mode ordered entries supply [E1], [E2], ...; summary is the only report prose.",
   items: V2_RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -1040,7 +1040,7 @@ const V2_RESEARCHER_REPORT = exactReport({
   claims: V2_RESEARCHER_HANDOFF_CLAIMS,
   summaryMaxLength: null,
   summaryDescription:
-    "The complete terminal report for researcher.report.v1; the planning synthesis for researcher.pipeline.v1.",
+    "The complete researcher.report.v1 prose, using [E1], [E2], ... for ordered claim evidence; or the researcher.pipeline.v1 synthesis.",
 });
 
 const V2_PLANNER_COMPACT_TASK = {
@@ -1074,7 +1074,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. In report mode put the report in summary and cited facts in claims. Every claim carries at least one proof or support selector; put uncited narrative in summary. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. Submit the selected profile's report fields. The receipt ends provider generation.",
+    "Finish research with the active profile and target. In report mode summary is the only prose: use [E1], [E2], ... and put matching selectors in claims order without restating it. Every claim needs proof or support. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -1157,7 +1157,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode put the report in summary and cited facts in claims. Every claim carries at least one proof or support selector; put uncited narrative in summary. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. Follow the schema exactly. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode summary is the only prose: use [E1], [E2], ... and put matching selectors in claims order without restating it. Every claim needs proof or support. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1173,7 +1173,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         minLength: 1,
         description:
-          "The complete terminal report for researcher.report.v1; the planning synthesis for researcher.pipeline.v1.",
+          "The complete researcher.report.v1 prose, using [E1], [E2], ... for ordered claim evidence; or the researcher.pipeline.v1 synthesis.",
       },
       claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
@@ -1189,7 +1189,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
       key_symbols: {
         type: "array",
         maxItems: 8,
-        items: AGENT_HANDOFF_ATLAS_SYMBOL_ID,
+        items: AGENT_HANDOFF_SYMBOL_SEED,
       },
       memories: {
         type: "array",

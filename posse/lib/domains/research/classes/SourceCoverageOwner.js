@@ -7,6 +7,7 @@ import { fetchHashRefForContext, surfaceHashRefForContext } from "../../queue/fu
 import { recordObservation } from "../../observability/functions/observations.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.js";
+import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
 import { normalizeAtlasIdentifierList } from "../../atlas/functions/v2/contracts/identifiers.js";
 
 const COVERAGE_OBSERVATION = "source.coverage";
@@ -92,6 +93,16 @@ function contextFor(owner) {
     attempt_id: owner.attemptId,
     agent_call_id: owner.agentCallId,
   };
+}
+
+function isCompleteSourceDelivery(data = {}) {
+  if (data.truncated === true || data.selectionBounded === true || data.outputTruncated === true) return false;
+  if (Array.isArray(data.additionalWindows) && data.additionalWindows.length > 0) return false;
+  if (Number(data.returnedFunctionAnchorsOmitted) > 0) return false;
+  if (String(data.traversal_ref?.ref || data.traversal_ref || data.continuationRef || "").trim()) return false;
+  if (Number(data.continuationWindows) > 0) return false;
+  if (Array.isArray(data._continuationWindows) && data._continuationWindows.length > 0) return false;
+  return true;
 }
 
 function releaseReservation(reservation, outcome) {
@@ -181,6 +192,19 @@ export class SourceCoverageOwner {
 
   admit(args = {}) {
     if (!this.attemptId) return { covered: false, reason: "missing_attempt" };
+    const requestedFile = args.symbolId ? "" : normalizePath(args.file);
+    if (requestedFile) {
+      for (const row of this.#rows()) {
+        const coverage = rowDetail(row);
+        if (!coverage || coverage.delivery_state !== "delivered" || coverage.complete_file !== true) continue;
+        if (coverage.repository_identity !== this.repositoryIdentity) continue;
+        if (normalizePath(coverage.repo_rel_path) !== requestedFile) continue;
+        const fresh = this.#freshSource(requestedFile);
+        if (!fresh || fresh.sourceVersion !== coverage.source_version) continue;
+        const result = this.#coveredResult(row, coverage, "complete_file");
+        if (result) return result;
+      }
+    }
     const fingerprint = sourceSelectorFingerprint(args);
     const completeSymbolFingerprint = completeSymbolSelectorFingerprint(args);
     const current = [];
@@ -306,17 +330,30 @@ export class SourceCoverageOwner {
     }
     const fresh = this.#freshSource(data.repo_rel_path);
     if (!fresh) return null;
-    const startLine = Math.max(1, Number(data.startLine) || 1);
-    const endLine = Math.max(startLine, Number(data.endLine) || startLine);
+    const startLine = Math.max(1, Math.floor(Number(data.startLine) || 1));
+    const requestedEndLine = Math.max(startLine, Math.floor(Number(data.endLine) || startLine));
+    const sourceLines = splitEditableLines(fresh.source).lines;
+    if (startLine > sourceLines.length) return null;
+    const endLine = Math.min(requestedEndLine, sourceLines.length);
     const content = data.content.replace(/\r\n/g, "\n");
     const contentSha256 = sha256(content);
-    const sourceSlice = fresh.source.split("\n").slice(startLine - 1, endLine).join("\n");
-    if (sourceSlice !== content) return null;
+    const sourceSlice = sourceLines.slice(startLine - 1, endLine).join("\n");
+    const sourceSliceWithFinalEol = endLine === sourceLines.length && fresh.source.endsWith("\n")
+      ? `${sourceSlice}\n`
+      : null;
+    if (sourceSlice !== content && sourceSliceWithFinalEol !== content) return null;
     const selectorFingerprint = sourceSelectorFingerprint(args);
+    const completeFile = !args.symbolId
+      && normalizePath(args.file) === fresh.relative
+      && startLine === 1
+      && endLine === sourceLines.length
+      && isCompleteSourceDelivery(data);
+    data.startLine = startLine;
+    data.endLine = endLine;
     data.contentSha256 = contentSha256;
     data.sourceVersion = fresh.sourceVersion;
     data.repositoryIdentity = this.repositoryIdentity;
-    return { fresh, startLine, endLine, content, contentSha256, selectorFingerprint };
+    return { fresh, startLine, endLine, content, contentSha256, selectorFingerprint, completeFile };
   }
 
   materializeData(data, args = {}, {
@@ -327,6 +364,7 @@ export class SourceCoverageOwner {
     const prepared = this.prepareData(data, args);
     if (!prepared) return null;
     const { fresh, startLine, endLine, content, contentSha256, selectorFingerprint } = prepared;
+    const completeFile = origin === "primary" && prepared.completeFile;
     const completeSymbolFingerprint = completeSymbolSelectorFingerprint(completeSymbolSelector || {});
     const existing = this.#rows().find((row) => {
       const coverage = rowDetail(row);
@@ -338,6 +376,7 @@ export class SourceCoverageOwner {
         && Number(coverage.end_line) === endLine
         && coverage.content_sha256 === contentSha256
         && coverage.selector_fingerprint === selectorFingerprint
+        && coverage.complete_file === completeFile
         && (coverage.complete_symbol_selector_fingerprint || null) === completeSymbolFingerprint;
     });
     const existingCoverage = rowDetail(existing);
@@ -447,6 +486,7 @@ export class SourceCoverageOwner {
         end_line: endLine,
         content_sha256: contentSha256,
         selector_fingerprint: selectorFingerprint,
+        complete_file: completeFile,
         complete_symbol_selector_fingerprint: completeSymbolFingerprint,
         evidence_ref: surfaced.entry.ref,
         delivery_state: deliveryState,
