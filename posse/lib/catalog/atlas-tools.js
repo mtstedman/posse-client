@@ -905,7 +905,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "Use only when exact source is needed for a known symbol or anchored file region. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.",
+    description: "Use only when exact source is needed for a known symbol or anchored file region. Reuse source evidence already visible in context before calling this tool. Each call must target source outside delivered ranges; a new same-file window must target a named unresolved symbol or branch beyond existing evidence. Context, confidence, and corroboration use the evidence already visible. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.",
     parameters: {
       type: "object",
       properties: {

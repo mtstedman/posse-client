@@ -654,23 +654,32 @@ function sourceLineSlice(entry, lineage, start, end, {
   };
 }
 
-function continuationViewCoordinates(entry, lineage, start, end, { sourcePath = null } = {}) {
-  const objectType = String(entry?.object_type || "").trim().toLowerCase();
-  const descriptorKind = String(entry?.descriptor?.kind || "").trim().toLowerCase();
-  const continuationView = objectType.endsWith(".continuation.view")
-    || descriptorKind === "bounded_result_continuation";
-  if (!continuationView || !Number.isInteger(start) || !Number.isInteger(end)) return null;
+// Ref-relative ("page") coordinates → source coordinates. Every materialized
+// ref the model can cite — a continuation page, a batched symbol-mode window
+// item, a single symbol body — is delivered to the model as lines 1..N of that
+// ref, and the tool labels it `cite_or_handoff`. A selector is translated when
+// it fits the materialized range of exactly one recorded window; source
+// coordinates are still tried first by the caller, so a cite that already fits
+// a window in source space never reaches this path. A single recorded window
+// without materialized coordinates is treated as materialized at 1..span.
+function refRelativeCoordinates(entry, lineage, start, end, { sourcePath = null } = {}) {
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
   const requestedPath = canonicalSourcePath(sourcePath);
-  const eligible = lineage.source_windows.filter((window) => {
-    if (requestedPath && window.path !== requestedPath) return false;
-    const materializedStart = Number(window.materialized_start_line);
-    const materializedEnd = Number(window.materialized_end_line);
-    const sourceSpan = Number(window.source_end_line) - Number(window.source_start_line);
-    const materializedSpan = materializedEnd - materializedStart;
-    return Number.isInteger(materializedStart)
-      && Number.isInteger(materializedEnd)
-      && sourceSpan === materializedSpan;
-  });
+  const scoped = lineage.source_windows.filter((window) => !requestedPath || window.path === requestedPath);
+  const eligible = scoped
+    .map((window) => {
+      const sourceSpan = Number(window.source_end_line) - Number(window.source_start_line);
+      let materializedStart = Number(window.materialized_start_line);
+      let materializedEnd = Number(window.materialized_end_line);
+      if ((!Number.isInteger(materializedStart) || !Number.isInteger(materializedEnd)) && scoped.length === 1) {
+        materializedStart = 1;
+        materializedEnd = 1 + sourceSpan;
+      }
+      if (!Number.isInteger(materializedStart) || !Number.isInteger(materializedEnd)) return null;
+      if (materializedEnd - materializedStart !== sourceSpan) return null;
+      return { ...window, materialized_start_line: materializedStart, materialized_end_line: materializedEnd };
+    })
+    .filter(Boolean);
   const candidates = eligible.filter((window) => {
     const materializedStart = Number(window.materialized_start_line);
     const materializedEnd = Number(window.materialized_end_line);
@@ -1310,7 +1319,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
       const requestedEnd = end;
       let translatedCoordinates = null;
       if (!sourceSlice.matched && selector.start != null) {
-        translatedCoordinates = continuationViewCoordinates(entry, lineage, start, end, {
+        translatedCoordinates = refRelativeCoordinates(entry, lineage, start, end, {
           sourcePath: selectedSourcePath,
         });
         if (translatedCoordinates?.matched) {
@@ -1334,7 +1343,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
           "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
           `Evidence ${selector.ref}:${requestedStart}-${requestedEnd} does not fit wholly within one recorded source window`
             + `${ranges ? ` (source coordinates: ${ranges})` : ""}`
-            + `${materializedRanges ? `; continuation page coordinates: ${materializedRanges}` : ""}`
+            + `${materializedRanges ? `; ref-relative coordinates: ${materializedRanges}` : ""}`
             + (translatedCoordinates?.matched
               ? `; translated source range: ${start}-${end}`
               : ""),
@@ -3626,9 +3635,7 @@ function renderEvidenceAppendix(report) {
     const detail = claim[1] || {};
     const marker = `[E${index + 1}]`;
     const claimLabel = String(claim[0] || "").replace(/\s+/g, " ").trim();
-    const legacyLabel = String(report.summary || "").includes(marker) || !claimLabel
-      ? ""
-      : `${claimLabel.slice(0, 180)}${claimLabel.length > 180 ? "…" : ""} — `;
+    const claimPrefix = claimLabel ? `${claimLabel} — ` : "";
     const selectors = [...new Set(
       ["evidence", "proof", "support"].flatMap((lane) => (
         (detail[lane] || []).map(renderedEvidenceSelector)
@@ -3638,7 +3645,7 @@ function renderEvidenceAppendix(report) {
     for (const [evidence, reason] of detail.decoy || []) {
       lanes.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
     }
-    if (lanes.length > 0) rows.push(`- ${marker} ${legacyLabel}${lanes.join("; ")}`);
+    if (lanes.length > 0) rows.push(`- ${marker} ${claimPrefix}${lanes.join("; ")}`);
   }
   return rows.length > 0 ? `Evidence:\n${rows.join("\n")}` : "";
 }

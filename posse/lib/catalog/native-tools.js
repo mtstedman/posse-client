@@ -531,14 +531,14 @@ export const TOOL_AGENT_HANDOFF = {
                 summary: {
                   type: "string",
                   description:
-                    "The complete researcher.report.v1 prose, using [E1], [E2], ... for ordered claim evidence; or the researcher.pipeline.v1 synthesis. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
+                    "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
                 },
                 claims: {
                   type: "array",
                   maxItems: 12,
                   description:
-                    "In researcher.report.v1 at least one claim is required and claim N supplies [EN]; use a short evidence label while prose stays in summary. " +
-                    'Exact tuple form: [["short evidence label", {"evidence":["#ref:1-3", "src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
+                    "In researcher.report.v1, claims are the primary answer: put one self-contained finding in each claim and claim N supplies [EN]. Prefer the narrowest implementation-code evidence over documentation or inference when code is available. " +
+                    'Exact tuple form: [["self-contained finding", {"evidence":["#ref:1-3", "src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
                     "Every researcher claim carries at least one evidence selector. The runtime resolves and range-validates evidence and decoy selectors and derives their provenance. " +
                     "Evidence accepts visible stored refs and already-surfaced file ranges in string or object form.",
                   items: {
@@ -757,7 +757,7 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. Runtime-owned provenance classifies every selector.",
+    "Primary report finding. State one self-contained claim, then cite the narrowest implementation-code evidence available; claim N maps to [EN]. Runtime-owned provenance classifies every selector.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
@@ -770,7 +770,7 @@ const RESEARCHER_HANDOFF_CLAIM = {
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "In report mode at least one ordered entry is required and supplies [E1], [E2], ...; summary is the only report prose.",
+    "Primary report content. In report mode at least one ordered, self-contained finding is required and supplies [E1], [E2], ...; prefer code-backed claims and keep the summary to a compact connective wireframe.",
   items: RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -1023,7 +1023,7 @@ const V2_HANDOFF_CLAIMS = {
 const V2_RESEARCHER_HANDOFF_CLAIM = {
   ...V2_HANDOFF_CLAIM,
   description:
-    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. Runtime-owned provenance classifies every selector.",
+    "Primary report finding. State one self-contained claim, then cite the narrowest implementation-code evidence available; claim N maps to [EN]. Runtime-owned provenance classifies every selector.",
   properties: {
     ...V2_HANDOFF_CLAIM.properties,
     evidence: { type: "array", minItems: 1, maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
@@ -1035,7 +1035,7 @@ const V2_RESEARCHER_HANDOFF_CLAIM = {
 const V2_RESEARCHER_HANDOFF_CLAIMS = {
   ...V2_HANDOFF_CLAIMS,
   description:
-    "In report mode at least one ordered entry is required and supplies [E1], [E2], ...; summary is the only report prose.",
+    "Primary report content. In report mode at least one ordered, self-contained finding is required and supplies [E1], [E2], ...; prefer code-backed claims and keep the summary to a compact connective wireframe.",
   items: V2_RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -1058,7 +1058,7 @@ const V2_RESEARCHER_REPORT = exactReport({
   claims: V2_RESEARCHER_HANDOFF_CLAIMS,
   summaryMaxLength: null,
   summaryDescription:
-    "The complete researcher.report.v1 prose, using [E1], [E2], ... for ordered claim evidence; or the researcher.pipeline.v1 synthesis.",
+    "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
 });
 
 const V2_PLANNER_COMPACT_TASK = {
@@ -1092,7 +1092,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the active profile and target. In report mode summary is the only prose: use [E1], [E2], ... and put matching evidence selectors in claims order. Every claim needs evidence. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
+    "Finish research with the active profile and target. In report mode claims are the primary answer: state one self-contained finding per claim and back it with the narrowest relevant implementation-code evidence. Prefer code evidence over documentation or inference when code is available. Keep summary to a compact wireframe that orders or connects the claims; use as little prose as possible while covering the request. Claim detail and source excerpts stay in claims and evidence. Claim order supplies [E1], [E2], ... labels. Every claim needs evidence. The receipt ends generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -1197,7 +1197,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode summary is the only prose: use [E1], [E2], ... and put matching evidence selectors in claims order. Every claim needs evidence. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
+    "Finish research using the active profile. In report mode claims are the primary answer: state one self-contained finding per claim and back it with the narrowest relevant implementation-code evidence. Prefer code evidence over documentation or inference when code is available. Keep summary to a compact wireframe that orders or connects the claims; use as little prose as possible while covering the request. Claim detail and source excerpts stay in claims and evidence. Claim order supplies [E1], [E2], ... labels. Every claim needs evidence. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1213,7 +1213,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         minLength: 1,
         description:
-          "The complete researcher.report.v1 prose, using [E1], [E2], ... for ordered claim evidence; or the researcher.pipeline.v1 synthesis.",
+          "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
       },
       claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
