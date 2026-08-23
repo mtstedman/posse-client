@@ -829,9 +829,7 @@
  * @property {string[]} identifiersOmitted
  * @property {{reason:"identifiers_not_in_requested_file",requestedFile:string,searchedRepository:true,nextAction:"code.window"}} [redirect] Repository-wide recovery metadata for an all-anchor file miss.
  * @property {Array<{identifier:string,matches:SymbolHit[]}>} [identifierRedirects] Lexical symbol locations found outside the requested file; task text is never used for this recovery search.
- * @property {"file_skeleton"} [contentKind] Present when an oversized file-mode request returns a skeleton instead of another raw file slice.
- * @property {SymbolHit[]} [symbolTargets] Indexed targets suitable for whole-body symbol-mode follow-ups from an oversized file skeleton.
- * @property {string} [note] Compact follow-up guidance for oversized file skeletons.
+ * @property {CodeWindowMap} [map] Bounded orientation for oversized file-mode requests. It supplements rather than replaces the native source selection.
  * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [additionalWindows]
  * @property {boolean} [continuationInline]    True when additionalWindows contains continuation data restored inline after ref materialization was unavailable.
  * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [_continuationWindows] Exact selected regions omitted from the native inline line/token budget; private owner transport, never model-visible.
@@ -841,6 +839,43 @@
  * @property {Array<{content:string,startLine:number,endLine:number,rangeStart:number,rangeEnd:number,signature:string,callableKind:string,owner?:string,anchor:string}>} [_returnedFunctionAnchors] Private owner transport; replaced with returnedFunctionAnchors before model delivery.
  * @property {Array<{anchor:string,owner?:string,signature:string,callableKind:string,startLine:number,endLine:number,ref?:string}>} [returnedFunctionAnchors] Temporary fetchable anchors for directly returned anonymous functions visible in this result.
  * @property {number} [returnedFunctionAnchorsOmitted]
+ */
+
+/**
+ * @typedef {Object} CodeWindowMapTarget
+ * @property {SymbolId} symbolId
+ * @property {string} name
+ * @property {string} kind
+ * @property {string} lang
+ * @property {SymbolLocation} location
+ * @property {string} [qualifiedName]
+ * @property {"full"|"partial"|"none"} coverage Coverage of this indexed declaration by inlineRanges, never by an unseen continuation.
+ * @property {string[]} inlineRanges Exact inline intersections formatted as inclusive start-end lines.
+ */
+
+/**
+ * @typedef {Object} CodeWindowMapRequest
+ * @property {string} identifier
+ * @property {"indexed"|"textually_found_unindexed"|"absent"} state
+ * @property {"full"|"partial"|"none"} coverage
+ * @property {CodeWindowMapTarget[]} [targets]
+ * @property {number} [targetsOmitted]
+ */
+
+/**
+ * @typedef {Object} CodeWindowMap
+ * @property {1} version
+ * @property {number} fileLines
+ * @property {string[]} inlineRanges Exact source ranges present inline in the delivered result.
+ * @property {CodeWindowMapRequest[]} requested
+ * @property {number} requestedTotal
+ * @property {number} requestedShown
+ * @property {number} requestedOmitted
+ * @property {CodeWindowMapTarget[]} symbolIndex
+ * @property {number} indexedSymbolsTotal
+ * @property {number} indexedSymbolsShown
+ * @property {number} indexedSymbolsOmitted
+ * @property {string} note
  */
 
 /**

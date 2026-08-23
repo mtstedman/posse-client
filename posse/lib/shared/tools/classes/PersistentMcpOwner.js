@@ -128,6 +128,11 @@ const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
 const SOURCE_EVIDENCE_REUSE_NOTICE_KIND = "source_evidence_reuse";
 const sourceEvidenceReuseNoticeAttempts = new WeakMap();
+// Codex can emit one read batch but dispatch it through the MCP transport in
+// several short waves. Keep the final admitted emission alive across the
+// zero-active gap between those waves; a later model turn takes materially
+// longer and is admitted against the now-closed durable research lane.
+const RESEARCH_ATLAS_TERMINAL_BATCH_IDLE_MS = 250;
 const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set([
   "action.search",
   "repo.status",
@@ -1165,6 +1170,20 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   };
 }
 
+function isTerminalResearchExplorationAdmission(admission) {
+  if (
+    !admission?.tracked
+    || admission.blocked
+    || admission.citationFetch
+    || !Number.isSafeInteger(admission.assignedExplorationStep)
+  ) {
+    return false;
+  }
+  return admission.assignedExplorationStep >= researchSynthesisExplorationCeiling({
+    staleSteps: admission.staleSteps,
+  });
+}
+
 function surveyAwareSkeletonRedirect(session, requested, toolArgs = {}) {
   const boot = session?.bootConfig || {};
   if (String(boot.role || "") !== "researcher") return null;
@@ -1692,7 +1711,16 @@ function collectOwnerSourcePaths(value, paths, depth = 0) {
   }
 }
 
-function ownerAtlasSourcePaths({ toolName, toolArgs, result, outcome } = {}) {
+/**
+ * @param {{
+ *   toolName?: string,
+ *   toolArgs?: Record<string, unknown>,
+ *   result?: Record<string, unknown> | null,
+ *   outcome?: string,
+ * }} [input]
+ */
+function ownerAtlasSourcePaths(input = {}) {
+  const { toolName, toolArgs, result, outcome } = input;
   const action = effectiveAtlasResearchAction(requestedToolPolicyName(toolName, toolArgs));
   if (!OWNER_SOURCE_BEARING_ACTIONS.has(action) || outcome !== "succeeded" || result?.isError === true) {
     return null;
@@ -2519,6 +2547,7 @@ export class PersistentMcpOwner {
     pipePath = null,
     token = randomToken(),
     spawnImpl = spawn,
+    researchAtlasTerminalBatchIdleMs = RESEARCH_ATLAS_TERMINAL_BATCH_IDLE_MS,
   } = {}) {
     this.bootId = crypto.randomUUID();
     this.pipePath = pipePath || defaultPipePath(this.bootId);
@@ -2532,14 +2561,19 @@ export class PersistentMcpOwner {
     this._sessionIdsByTokenHash = new Map();
     this._gatewaySession = null;
     this._gatewayRetirements = new Set();
-    // Stateful ATLAS actions remain ordered per attempt. Read-only researcher
-    // calls reserve absolute exploration slots synchronously and bypass this
-    // queue, so provider-emitted batches can execute concurrently without
-    // racing the deterministic closeout ceiling.
+    // Stateful ATLAS actions remain ordered per attempt. Researcher emissions
+    // reserve absolute exploration slots synchronously; read-only actions may
+    // execute concurrently while serialized siblings retain the same emission
+    // admission without racing the deterministic closeout ceiling.
     this._atlasToolCallQueues = new Map();
     this._activeResearchAtlasReads = new Map();
     this._activeResearchAtlasBatches = new Map();
     this._researchAdmissionReservations = new Map();
+    const terminalBatchIdleMs = Number(researchAtlasTerminalBatchIdleMs);
+    this._researchAtlasTerminalBatchIdleMs = Number.isFinite(terminalBatchIdleMs)
+      && terminalBatchIdleMs >= 0
+      ? Math.floor(terminalBatchIdleMs)
+      : RESEARCH_ATLAS_TERMINAL_BATCH_IDLE_MS;
     // A memory failure is terminal only for the agent session that observed
     // it. Weak keys avoid extending the lifetime of detached MCP sessions.
     this._terminalMemoryToolSessions = new WeakSet();
@@ -2780,8 +2814,10 @@ export class PersistentMcpOwner {
     for (const key of this._activeResearchAtlasReads.keys()) {
       if (key.endsWith(`:${id}`)) this._activeResearchAtlasReads.delete(key);
     }
-    for (const key of this._activeResearchAtlasBatches.keys()) {
-      if (key.endsWith(`:${id}`)) this._activeResearchAtlasBatches.delete(key);
+    for (const [key, batch] of this._activeResearchAtlasBatches.entries()) {
+      if (!key.endsWith(`:${id}`)) continue;
+      if (batch?.idleTimer) clearTimeout(batch.idleTimer);
+      this._activeResearchAtlasBatches.delete(key);
     }
     const gatewayScopeReleaseNotified = this._notifyGatewaySessionRelease(session);
     let gatewayReleased = false;
@@ -2958,6 +2994,9 @@ export class PersistentMcpOwner {
     this._gatewayRetirements.clear();
     this._atlasToolCallQueues.clear();
     this._activeResearchAtlasReads.clear();
+    for (const batch of this._activeResearchAtlasBatches.values()) {
+      if (batch?.idleTimer) clearTimeout(batch.idleTimer);
+    }
     this._activeResearchAtlasBatches.clear();
     this._researchAdmissionReservations.clear();
     this._sessions.clear();
@@ -3667,6 +3706,53 @@ export class PersistentMcpOwner {
     };
   }
 
+  _deleteResearchAtlasBatch(queueKey, expectedBatch = null) {
+    const batch = this._activeResearchAtlasBatches.get(queueKey);
+    if (!batch || (expectedBatch && batch !== expectedBatch)) return false;
+    if (batch.idleTimer) clearTimeout(batch.idleTimer);
+    batch.idleTimer = null;
+    this._activeResearchAtlasBatches.delete(queueKey);
+    return true;
+  }
+
+  _trackResearchAtlasBatchRequest(queueKey, batch, request, { concurrentRead = false } = {}) {
+    if (!batch) return;
+    if (batch.idleTimer) clearTimeout(batch.idleTimer);
+    batch.idleTimer = null;
+    batch.active.add(request);
+    if (concurrentRead) {
+      batch.reads.add(request);
+      this._activeResearchAtlasReads.set(queueKey, batch.reads);
+    }
+    const release = () => {
+      batch.active.delete(request);
+      if (concurrentRead) {
+        batch.reads.delete(request);
+        if (
+          batch.reads.size === 0
+          && this._activeResearchAtlasReads.get(queueKey) === batch.reads
+        ) {
+          this._activeResearchAtlasReads.delete(queueKey);
+        }
+      }
+      if (
+        batch.active.size > 0
+        || this._activeResearchAtlasBatches.get(queueKey) !== batch
+      ) {
+        return;
+      }
+      if (!batch.terminal) {
+        this._deleteResearchAtlasBatch(queueKey, batch);
+        return;
+      }
+      batch.idleTimer = setTimeout(() => {
+        if (batch.active.size === 0) this._deleteResearchAtlasBatch(queueKey, batch);
+      }, this._researchAtlasTerminalBatchIdleMs);
+      batch.idleTimer.unref?.();
+    };
+    void request.then(release, release);
+  }
+
   async _executeAtlasToolCall(args) {
     const binding = args?.binding || gatewayBindingSnapshot(args?.session);
     const boot = binding.bootConfig;
@@ -3679,38 +3765,41 @@ export class PersistentMcpOwner {
     const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
     const effectiveAction = effectiveAtlasResearchAction(requested);
     const enqueuedAt = Date.now();
-    const concurrentResearchRead = String(boot.role || "") === "researcher"
-      && isResearchAtlasExplorationAction(effectiveAction)
+    const researchExploration = String(boot.role || "") === "researcher"
+      && isResearchAtlasExplorationAction(effectiveAction);
+    let researchBatch = this._activeResearchAtlasBatches.get(queueKey) || null;
+    if (researchExploration && !researchBatch) {
+      const admission = this._admitResearchExploration(
+        args?.session,
+        effectiveAction,
+        {
+          explorationUnitKind: CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
+            ? "concurrent_read_batch"
+            : "request",
+        },
+      );
+      researchBatch = {
+        admission,
+        active: new Set(),
+        reads: new Set(),
+        idleTimer: null,
+        terminal: isTerminalResearchExplorationAdmission(admission),
+      };
+      this._activeResearchAtlasBatches.set(queueKey, researchBatch);
+    } else if (!researchExploration && !researchBatch?.terminal) {
+      researchBatch = null;
+    }
+    const synthesisAdmission = researchExploration
+      ? researchBatch?.admission || null
+      : null;
+    const concurrentResearchRead = researchExploration
       && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
       && !this._atlasToolCallQueues.has(queueKey);
     if (concurrentResearchRead) {
-      let activeBatch = this._activeResearchAtlasBatches.get(queueKey);
-      if (!activeBatch) {
-        activeBatch = {
-          admission: this._admitResearchExploration(
-            args?.session,
-            effectiveAction,
-            { explorationUnitKind: "concurrent_read_batch" },
-          ),
-          active: new Set(),
-        };
-        this._activeResearchAtlasBatches.set(queueKey, activeBatch);
-      }
-      const synthesisAdmission = activeBatch.admission;
       const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt });
-      const active = activeBatch.active;
-      active.add(current);
-      this._activeResearchAtlasReads.set(queueKey, active);
-      const release = () => {
-        active.delete(current);
-        if (active.size === 0 && this._activeResearchAtlasReads.get(queueKey) === active) {
-          this._activeResearchAtlasReads.delete(queueKey);
-          if (this._activeResearchAtlasBatches.get(queueKey) === activeBatch) {
-            this._activeResearchAtlasBatches.delete(queueKey);
-          }
-        }
-      };
-      void current.then(release, release);
+      this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current, {
+        concurrentRead: true,
+      });
       return current;
     }
     const prior = this._atlasToolCallQueues.get(queueKey) || Promise.resolve();
@@ -3719,8 +3808,14 @@ export class PersistentMcpOwner {
       .then(async () => {
         const activeReads = [...(this._activeResearchAtlasReads.get(queueKey) || [])];
         if (activeReads.length > 0) await Promise.allSettled(activeReads);
-        return this._executeAtlasToolCallNow({ ...args, binding, enqueuedAt });
+        return this._executeAtlasToolCallNow({
+          ...args,
+          binding,
+          synthesisAdmission,
+          enqueuedAt,
+        });
       });
+    this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current);
     const tail = current.catch(() => {});
     this._atlasToolCallQueues.set(queueKey, tail);
     void tail.finally(() => {

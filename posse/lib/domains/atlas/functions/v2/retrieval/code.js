@@ -40,6 +40,11 @@ export const MAX_LENS_CONTEXT_LINES_JS = 8;
 // map never trades completeness for lines nobody asked about.
 export const MAX_LENS_TOTAL_LINES_JS = 600;
 const MAX_LENS_SCOPE_SIGNATURE_CHARS = 160;
+export const CODE_WINDOW_MAP_MAX_CHARS = 4000;
+const CODE_WINDOW_MAP_MAX_REQUESTS = 12;
+const CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST = 3;
+const CODE_WINDOW_MAP_MAX_INDEX_ENTRIES = 32;
+const CODE_WINDOW_MAP_TEXT_MAX_CHARS = 160;
 
 export function normalizeCodeLensContextLines(value) {
   return typeof value === "number" ? Math.min(value, MAX_LENS_CONTEXT_LINES_JS) : 2;
@@ -137,6 +142,179 @@ export function enclosingLensScope(index, line) {
     };
   }
   return null;
+}
+
+function boundedCodeMapText(value) {
+  return String(value || "").trim().slice(0, CODE_WINDOW_MAP_TEXT_MAX_CHARS);
+}
+
+function normalizedInlineRanges(value) {
+  const ranges = (Array.isArray(value) ? value : [])
+    .filter((entry) => entry && typeof entry === "object" && String(entry.content || "").length > 0)
+    .map((entry) => ({
+      startLine: Math.max(1, Number(entry.startLine) || 1),
+      endLine: Math.max(
+        Math.max(1, Number(entry.startLine) || 1),
+        Number(entry.endLine) || Number(entry.startLine) || 1,
+      ),
+    }))
+    .sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.startLine <= previous.endLine + 1) {
+      previous.endLine = Math.max(previous.endLine, range.endLine);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+function targetInlineCoverage(startLine, endLine, inlineRanges) {
+  const intersections = [];
+  for (const range of inlineRanges) {
+    const start = Math.max(startLine, range.startLine);
+    const end = Math.min(endLine, range.endLine);
+    if (end >= start) intersections.push({ startLine: start, endLine: end });
+  }
+  if (intersections.length === 0) return { coverage: "none", inlineRanges: [] };
+  let cursor = startLine;
+  for (const range of intersections) {
+    if (range.startLine > cursor) {
+      return {
+        coverage: "partial",
+        inlineRanges: intersections.map((entry) => `${entry.startLine}-${entry.endLine}`),
+      };
+    }
+    cursor = Math.max(cursor, range.endLine + 1);
+  }
+  return {
+    coverage: cursor > endLine ? "full" : "partial",
+    inlineRanges: intersections.map((entry) => `${entry.startLine}-${entry.endLine}`),
+  };
+}
+
+function codeWindowMapTarget(entry, inlineRanges) {
+  const hit = symbolHit(entry.symbol);
+  hit.location.startLine = entry.startLine;
+  hit.location.endLine = entry.endLine;
+  hit.name = boundedCodeMapText(hit.name);
+  if (hit.qualifiedName) hit.qualifiedName = boundedCodeMapText(hit.qualifiedName);
+  return {
+    ...hit,
+    ...targetInlineCoverage(entry.startLine, entry.endLine, inlineRanges),
+  };
+}
+
+function requestedCoverage(targets, textualReturned) {
+  if (targets.some((entry) => entry.coverage === "full")) return "full";
+  if (targets.some((entry) => entry.coverage === "partial") || textualReturned) return "partial";
+  return "none";
+}
+
+function codeWindowMapFits(map, maxChars) {
+  return JSON.stringify(map).length <= maxChars;
+}
+
+/**
+ * Build the bounded orientation attached to oversized file-mode windows.
+ * The map describes only source that is actually inline; continuation ranges
+ * are deliberately excluded so an indexed address is never mistaken for
+ * delivered evidence.
+ *
+ * @param {{
+ *   source:string,
+ *   symbols:ViewSymbol[],
+ *   identifiers:string[],
+ *   identifiersFound:string[],
+ *   identifiersReturned:string[],
+ *   inlineWindows:Array<{content:string,startLine:number,endLine:number}>,
+ *   maxChars?:number,
+ * }} args
+ */
+export function buildCodeWindowMap({
+  source,
+  symbols,
+  identifiers,
+  identifiersFound,
+  identifiersReturned,
+  inlineWindows,
+  maxChars = CODE_WINDOW_MAP_MAX_CHARS,
+}) {
+  const inlineRanges = normalizedInlineRanges(inlineWindows);
+  const entries = lensScopeIndex(symbols, source)
+    .sort((left, right) => (
+      left.startLine - right.startLine
+      || left.endLine - right.endLine
+      || String(left.symbol.name || "").localeCompare(String(right.symbol.name || ""))
+      || Number(left.symbol.local_id || 0) - Number(right.symbol.local_id || 0)
+    ));
+  const found = new Set(
+    [...stringArray(identifiersFound), ...stringArray(identifiersReturned)]
+      .map((entry) => entry.toLowerCase()),
+  );
+  const returned = new Set(stringArray(identifiersReturned).map((entry) => entry.toLowerCase()));
+  const requested = [...new Set(stringArray(identifiers))];
+  const map = {
+    version: /** @type {1} */ (1),
+    fileLines: String(source || "").split(/\r?\n/u).length,
+    inlineRanges: inlineRanges.map((entry) => `${entry.startLine}-${entry.endLine}`),
+    requested: [],
+    requestedTotal: requested.length,
+    requestedShown: 0,
+    requestedOmitted: requested.length,
+    symbolIndex: [],
+    indexedSymbolsTotal: entries.length,
+    indexedSymbolsShown: 0,
+    indexedSymbolsOmitted: entries.length,
+    note: "Coverage refers only to inline source ranges. Symbol-mode follow-ups remain bounded by the configured line and token caps.",
+  };
+
+  for (const identifier of requested.slice(0, CODE_WINDOW_MAP_MAX_REQUESTS)) {
+    const normalized = identifier.toLowerCase();
+    const matches = entries.filter(({ symbol }) => (
+      String(symbol.name || "").toLowerCase() === normalized
+      || String(symbol.qualified_name || "").toLowerCase() === normalized
+    ));
+    const targets = matches
+      .slice(0, CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST)
+      .map((entry) => codeWindowMapTarget(entry, inlineRanges));
+    const textualFound = found.has(normalized);
+    const textualReturned = returned.has(normalized);
+    const item = {
+      identifier: boundedCodeMapText(identifier),
+      state: matches.length > 0
+        ? "indexed"
+        : (textualFound ? "textually_found_unindexed" : "absent"),
+      coverage: requestedCoverage(targets, textualReturned),
+      ...(targets.length > 0 ? { targets } : {}),
+      ...(matches.length > targets.length ? { targetsOmitted: matches.length - targets.length } : {}),
+    };
+    map.requested.push(item);
+    map.requestedShown = map.requested.length;
+    map.requestedOmitted = Math.max(0, requested.length - map.requestedShown);
+    if (!codeWindowMapFits(map, maxChars)) {
+      map.requested.pop();
+      map.requestedShown = map.requested.length;
+      map.requestedOmitted = Math.max(0, requested.length - map.requestedShown);
+      break;
+    }
+  }
+
+  for (const entry of entries.slice(0, CODE_WINDOW_MAP_MAX_INDEX_ENTRIES)) {
+    const target = codeWindowMapTarget(entry, inlineRanges);
+    map.symbolIndex.push(target);
+    map.indexedSymbolsShown = map.symbolIndex.length;
+    map.indexedSymbolsOmitted = Math.max(0, entries.length - map.indexedSymbolsShown);
+    if (!codeWindowMapFits(map, maxChars)) {
+      map.symbolIndex.pop();
+      map.indexedSymbolsShown = map.symbolIndex.length;
+      map.indexedSymbolsOmitted = Math.max(0, entries.length - map.indexedSymbolsShown);
+      break;
+    }
+  }
+  return map;
 }
 
 /**
@@ -508,10 +686,8 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   let identifierRedirects = [];
   /** @type {CodeWindowData["redirect"] | null} */
   let redirect = null;
-  /** @type {CodeWindowData["contentKind"] | null} */
-  let contentKind = null;
-  let symbolTargets = [];
-  let note = null;
+  /** @type {CodeWindowData["map"] | null} */
+  let codeMap = null;
   const matchedIdentifiers = new Set(
     [...identifiersFound, ...identifiersReturned].map((entry) => entry.toLowerCase()),
   );
@@ -561,36 +737,17 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     const fileSymbols = typeof view.query.symbolsInFile === "function"
       ? await view.query.symbolsInFile(targetPath)
       : [];
-    const skeleton = await codeSkeletonNative({
-      repo_rel_path: targetPath,
+    codeMap = buildCodeWindowMap({
       source,
       symbols: fileSymbols,
-      identifiersToFind: [],
-      exportedOnly: false,
-      maxLines: codeWindowPolicy.maxWindowLines,
-      maxTokens,
+      identifiers,
+      identifiersFound,
+      identifiersReturned,
+      inlineWindows: [
+        ...(content ? [{ content, startLine, endLine }] : []),
+        ...additionalWindows,
+      ],
     });
-    const originalWindow = content
-      ? [{ content, startLine, endLine, identifiers: identifiersReturned }]
-      : [];
-    continuationWindows = dedupeCodeWindowSlices([
-      ...originalWindow,
-      ...additionalWindows,
-      ...continuationWindows,
-    ]);
-    content = String(skeleton.content || "");
-    startLine = Number(skeleton.startLine || 1);
-    endLine = Number(skeleton.endLine || startLine);
-    estimatedTokens = Math.ceil(content.length / 4);
-    truncated = true;
-    selectionBounded = true;
-    additionalWindows = [];
-    contentKind = "file_skeleton";
-    const selectedSymbols = Array.isArray(skeleton.selectedSymbols)
-      ? skeleton.selectedSymbols
-      : fileSymbols;
-    symbolTargets = selectedSymbols.map((symbol) => symbolHit(symbol));
-    note = "This file exceeds the configured line cap. Use the returned symbolId values for symbol-mode code.window calls, which return whole bodies; use traversal_ref for the retained file-mode range.";
   }
   const returnedFunctionAnchors = normalizeReturnedFunctionAnchors(result._returnedFunctionAnchors);
   const ownerSymbols = returnedFunctionAnchors.length > 0
@@ -622,7 +779,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     identifiersMissing,
     identifiersOmitted: stringArray(result.identifiersOmitted),
     ...(redirect ? { redirect, identifierRedirects } : {}),
-    ...(contentKind ? { contentKind, symbolTargets, note } : {}),
+    ...(codeMap ? { map: codeMap } : {}),
     ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
     // Private native-to-owner transport. The hash-ref pager removes this
     // before model delivery and exposes a traversal_ref instead.

@@ -98,11 +98,11 @@ export const AGENT_HANDOFF_PROFILE_POLICY = Object.freeze({
 });
 
 // Prompt-facing disclosure for the runtime's researcher evidence rule. Every
-// structured claim must be independently checkable through a proof or support
-// selector; uncited narrative belongs in the report summary.
+// structured claim must be independently checkable through the canonical
+// evidence lane; uncited narrative belongs in the report summary.
 export const AGENT_HANDOFF_RESEARCH_EVIDENCE_POLICY = Object.freeze({
   profiles: Object.freeze(["researcher.pipeline.v1", "researcher.report.v1"]),
-  requiredLanes: Object.freeze(["proof", "support"]),
+  requiredLanes: Object.freeze(["evidence"]),
   rule: "every_claim",
 });
 
@@ -136,6 +136,16 @@ export const AGENT_HANDOFF_ALIAS_POLICY = Object.freeze({
         alias: "prose",
         contexts: Object.freeze(["handoff.claim"]),
       }),
+      researcherClaimProof: Object.freeze({
+        canonical: "evidence",
+        alias: "proof",
+        contexts: Object.freeze(["handoff.claim", "trusted_legacy"]),
+      }),
+      researcherClaimSupport: Object.freeze({
+        canonical: "evidence",
+        alias: "support",
+        contexts: Object.freeze(["handoff.claim", "trusted_legacy"]),
+      }),
       decoyReason: Object.freeze({
         canonical: "reason",
         alias: "summary",
@@ -145,7 +155,7 @@ export const AGENT_HANDOFF_ALIAS_POLICY = Object.freeze({
     shapeAliases: Object.freeze([
       Object.freeze({
         id: "claim_tuple",
-        canonical: "claims[].{claim,summary,proof,support,decoy}",
+        canonical: "claims[].{claim,summary,evidence,decoy}",
         accepted: "claims[].[claim,detail]",
         contexts: Object.freeze(["trusted_legacy", "compatibility_repair"]),
       }),

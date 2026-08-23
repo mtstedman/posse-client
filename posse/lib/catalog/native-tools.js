@@ -274,7 +274,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
     absence_checks: {
       type: "array",
       maxItems: 20,
-      description: "Repository-absence claims backed by one exact repository-wide search receipt. Each check must match a claim with identical text, and that claim's proof must select the same ref as evidence_ref. Omit when making no absence claim.",
+      description: "Repository-absence claims backed by one exact repository-wide search receipt. Each check must match a claim with identical text, and that claim's evidence must select the same ref as evidence_ref. Omit when making no absence claim.",
       items: {
         type: "object",
         properties: {
@@ -451,7 +451,7 @@ const HANDOFF_EVIDENCE_SELECTOR = evidenceSelector({
     "Select bounded evidence from a visible stored ref or an already-surfaced file path. Prefer slices of at most 40 lines and 4000 characters; 300 lines and 24000 characters per selector are compactness recommendations, not rejection gates. " +
     "For larger refs, select a tighter server-side source_ref slice when practical. Keep total evidence near 12000 characters; 32000 is the recommended non-child packet target. " +
     "The runtime accepts complete evidence up to hard safety ceilings of 2000 lines and 131072 characters per selector, and 196608 characters total. " +
-    "Inline authored chunks belong in support or decoy; direct tool refs and verified source_ref slices may be proof. File-backed selectors are support by default and may be proof only when the selected range is at most 40 lines.",
+    "The runtime derives storage, source, and authored provenance directly from every selector.",
 });
 
 const COMPACT_HANDOFF_SELECTOR = evidenceSelector({
@@ -537,11 +537,10 @@ export const TOOL_AGENT_HANDOFF = {
                   type: "array",
                   maxItems: 12,
                   description:
-                    "Optional. In researcher.report.v1 claim N supplies [EN]; use a short evidence label, not repeated summary prose. " +
-                    'Exact tuple form: [["short evidence label", {"proof":["#ref:1-3"], "support":["src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
-                    "For researcher profiles, every claim must carry at least one proof or support selector; put uncited narrative in summary. A prose #ref or path:line citation alone does not satisfy this rule. Only proof, support, and decoy selector positions are deterministically resolved, range-validated, and expanded. " +
-                    "Proof accepts only storage-owned tool evidence; agent-created prose refs may appear only in support or decoy. " +
-                    "Evidence lanes accept visible stored refs and already-surfaced file ranges in string or object form.",
+                    "In researcher.report.v1 at least one claim is required and claim N supplies [EN]; use a short evidence label while prose stays in summary. " +
+                    'Exact tuple form: [["short evidence label", {"evidence":["#ref:1-3", "src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
+                    "Every researcher claim carries at least one evidence selector. The runtime resolves and range-validates evidence and decoy selectors and derives their provenance. " +
+                    "Evidence accepts visible stored refs and already-surfaced file ranges in string or object form.",
                   items: {
                     type: "array",
                     minItems: 1,
@@ -552,8 +551,7 @@ export const TOOL_AGENT_HANDOFF = {
                         {
                           type: "object",
                           properties: {
-                            proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
-                            support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+                            evidence: { type: "array", minItems: 1, maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
                             decoy: { type: "array", maxItems: 8, items: { type: "array", minItems: 2, maxItems: 2 } },
                             prose: { type: "string", maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
                           },
@@ -619,6 +617,26 @@ export const TOOL_AGENT_HANDOFF = {
                         properties: {
                           summary: { maxLength: 4000 },
                         },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          {
+            if: {
+              properties: { profile: { const: "researcher.report.v1" } },
+              required: ["profile"],
+            },
+            then: {
+              properties: {
+                handoffs: {
+                  items: {
+                    properties: {
+                      report: {
+                        required: ["summary", "claims"],
+                        properties: { claims: { minItems: 1 } },
                       },
                     },
                   },
@@ -722,8 +740,7 @@ const HANDOFF_CLAIM = {
     "One concise claim with evidence selected by bounded stored-ref or surfaced-file ranges.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 240 },
-    proof: { type: "array", maxItems: 4, items: COMPACT_HANDOFF_SELECTOR },
-    support: { type: "array", maxItems: 4, items: COMPACT_HANDOFF_SELECTOR },
+    evidence: { type: "array", maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
     decoy: { type: "array", maxItems: 2, items: HANDOFF_DECOY },
     summary: { type: "string", maxLength: 300 },
   },
@@ -740,18 +757,20 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. A proof or support selector establishes evidence; prose citations are informational.",
+    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. Runtime-owned provenance classifies every selector.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
+    evidence: { type: "array", minItems: 1, maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
     summary: { type: "string", description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
   },
+  required: ["claim", "evidence"],
 };
 
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "Optional. In report mode ordered entries supply [E1], [E2], ...; summary is the only report prose.",
+    "In report mode at least one ordered entry is required and supplies [E1], [E2], ...; summary is the only report prose.",
   items: RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -951,12 +970,11 @@ const CITATION_CLAIM = {
   description: "Concise citation-child claim with optional evidence and synthesis.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 160 },
-    proof: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
-    support: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
+    evidence: { type: "array", minItems: 1, maxItems: 16, items: CITATION_EVIDENCE_SELECTOR },
     decoy: { type: "array", maxItems: 1, items: CITATION_DECOY },
     summary: { type: "string", maxLength: 100 },
   },
-  required: ["claim"],
+  required: ["claim", "evidence"],
   additionalProperties: false,
 };
 
@@ -985,12 +1003,10 @@ const V2_HANDOFF_DECOY = {
 const V2_HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One specific claim with optional evidence. Use summary for brief synthesis. Place visible stored refs or surfaced file ranges in proof, support, or decoy selectors, while claim and summary contain narrative text. " +
-    "Proof uses a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs belong in support or decoy.",
+    "One specific claim with optional evidence. Use summary for brief synthesis. Place visible stored refs or surfaced file ranges in evidence or decoy selectors while runtime-owned provenance classifies each selector.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 1000 },
-    proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
-    support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+    evidence: { type: "array", maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
     decoy: { type: "array", maxItems: 8, items: V2_HANDOFF_DECOY },
     summary: { type: "string", maxLength: 4000, description: "Optional claim synthesis. Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
   },
@@ -1007,17 +1023,19 @@ const V2_HANDOFF_CLAIMS = {
 const V2_RESEARCHER_HANDOFF_CLAIM = {
   ...V2_HANDOFF_CLAIM,
   description:
-    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. A proof or support selector establishes evidence; prose citations are informational.",
+    "Cited evidence record. In report mode claim N maps to [EN] in summary while prose stays solely in summary. Runtime-owned provenance classifies every selector.",
   properties: {
     ...V2_HANDOFF_CLAIM.properties,
+    evidence: { type: "array", minItems: 1, maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
     summary: { ...V2_HANDOFF_CLAIM.properties.summary, description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
   },
+  required: ["claim", "evidence"],
 };
 
 const V2_RESEARCHER_HANDOFF_CLAIMS = {
   ...V2_HANDOFF_CLAIMS,
   description:
-    "Optional. In report mode ordered entries supply [E1], [E2], ...; summary is the only report prose.",
+    "In report mode at least one ordered entry is required and supplies [E1], [E2], ...; summary is the only report prose.",
   items: V2_RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -1074,7 +1092,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the active profile and target. In report mode summary is the only prose: use [E1], [E2], ... and put matching selectors in claims order without restating it. Every claim needs proof or support. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
+    "Finish research with the active profile and target. In report mode summary is the only prose: use [E1], [E2], ... and put matching evidence selectors in claims order. Every claim needs evidence. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -1082,19 +1100,21 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
     oneOf: [exactTarget("pipeline", "$pipeline"), exactTarget("result", "$result")],
   }, V2_RESEARCHER_REPORT),
   maxHandoffs: 1,
-  rules: [{
-    if: {
-      properties: { profile: { const: "researcher.pipeline.v1" } },
-      required: ["profile"],
-    },
-    then: {
-      properties: {
-        handoffs: {
-          items: {
-            properties: {
-              report: {
-                properties: {
-                  summary: { maxLength: RESEARCHER_PIPELINE_LIMITS.maxSummaryChars },
+  rules: [
+    {
+      if: {
+        properties: { profile: { const: "researcher.pipeline.v1" } },
+        required: ["profile"],
+      },
+      then: {
+        properties: {
+          handoffs: {
+            items: {
+              properties: {
+                report: {
+                  properties: {
+                    summary: { maxLength: RESEARCHER_PIPELINE_LIMITS.maxSummaryChars },
+                  },
                 },
               },
             },
@@ -1102,7 +1122,27 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
         },
       },
     },
-  }],
+    {
+      if: {
+        properties: { profile: { const: "researcher.report.v1" } },
+        required: ["profile"],
+      },
+      then: {
+        properties: {
+          handoffs: {
+            items: {
+              properties: {
+                report: {
+                  required: ["summary", "claims"],
+                  properties: { claims: { minItems: 1 } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  ],
 });
 
 export const TOOL_AGENT_HANDOFF_PLANNER = {
@@ -1112,7 +1152,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
     "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
-    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
+    "Claims use claim plus optional evidence, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
     "Submit the fields shown in the task schema directly in the tasks array. The receipt ends provider generation.",
@@ -1157,7 +1197,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode summary is the only prose: use [E1], [E2], ... and put matching selectors in claims order without restating it. Every claim needs proof or support. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
+    "Finish research using the active profile. In report mode summary is the only prose: use [E1], [E2], ... and put matching evidence selectors in claims order. Every claim needs evidence. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1270,6 +1310,16 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
           },
         },
       },
+      {
+        if: {
+          properties: { profile: { const: "researcher.report.v1" } },
+          required: ["profile"],
+        },
+        then: {
+          required: ["claims"],
+          properties: { claims: { minItems: 1 } },
+        },
+      },
     ],
     additionalProperties: false,
   },
@@ -1282,7 +1332,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
     "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
-    "Claims use claim plus optional proof, support, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
+    "Claims use claim plus optional evidence, decoy, and summary. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
     "Submit the fields shown in the task schema directly in the tasks array. The receipt ends provider generation.",

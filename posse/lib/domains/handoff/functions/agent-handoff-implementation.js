@@ -51,7 +51,6 @@ import {
 } from "./helpers/terminal-report-metadata.js";
 import {
   filterKnownHandoffFields,
-  recordHandoffProofDegradation,
   runWithHandoffFieldDiagnostics,
 } from "./helpers/field-diagnostics.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
@@ -1354,12 +1353,12 @@ function normalizeClaimInput(value, claimIndex) {
   const source = exactKeys(value, uniqueKeys(
     compatibilityAliasKeys("claimName"),
     compatibilityAliasKeys("claimSummary"),
-    ["proof", "support", "decoy"],
+    ["evidence", "proof", "support", "decoy"],
   ), label);
   const claim = compatibilityAlias(source, "claimName", label);
   const prose = compatibilityAlias(source, "claimSummary", label);
   const detail = {};
-  for (const lane of ["proof", "support", "decoy"]) {
+  for (const lane of ["evidence", "proof", "support", "decoy"]) {
     if (source[lane] != null) detail[lane] = source[lane];
   }
   if (prose != null) detail.prose = prose;
@@ -1369,12 +1368,21 @@ function normalizeClaimInput(value, claimIndex) {
 function normalizeClaimDetail(value, label) {
   const source = exactKeys(value, uniqueKeys(
     compatibilityAliasKeys("claimSummary"),
-    ["proof", "support", "decoy"],
+    ["evidence", "proof", "support", "decoy"],
   ), label);
   const prose = compatibilityAlias(source, "claimSummary", label);
+  const evidence = [];
+  let hasEvidence = false;
+  for (const lane of ["evidence", "proof", "support"]) {
+    if (source[lane] == null) continue;
+    hasEvidence = true;
+    if (!Array.isArray(source[lane])) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.${lane} must be an array`);
+    }
+    evidence.push(...source[lane]);
+  }
   return {
-    ...(source.proof == null ? {} : { proof: source.proof }),
-    ...(source.support == null ? {} : { support: source.support }),
+    ...(hasEvidence ? { evidence } : {}),
     ...(source.decoy == null ? {} : { decoy: source.decoy }),
     ...(prose == null ? {} : { prose }),
   };
@@ -1402,14 +1410,9 @@ function normalizeDecoyInput(value, label) {
   return [selector, reason ?? "Excluded from supporting evidence."];
 }
 
-function isAllowedProofProvenance(evidence, { allowAgentProse = false } = {}) {
+function isCompatibilityProofProvenance(evidence) {
   const kind = evidence?.provenance?.kind;
-  return ["Tool Result", "Full Tool Call"].includes(kind)
-    || (allowAgentProse && kind === "Agent Prose");
-}
-
-function isDegradableAgentProof(evidence, { allowAgentProse = false } = {}) {
-  return !allowAgentProse && evidence?.provenance?.kind === "Agent Prose";
+  return ["Tool Result", "Full Tool Call"].includes(kind);
 }
 
 function materializeClaim(
@@ -1418,8 +1421,6 @@ function materializeClaim(
   context,
   counters,
   {
-    allowAgentProseProof = false,
-    handoffIndex = 0,
     maxClaimChars = AGENT_HANDOFF_LIMITS.maxClaimChars,
     maxProseChars = AGENT_HANDOFF_LIMITS.maxSummaryChars,
   } = {},
@@ -1438,43 +1439,15 @@ function materializeClaim(
   const detail = normalizeClaimDetail(normalized[1], `claims[${claimIndex}][1]`);
   const out = {};
   const selectors = new Set();
-  for (const lane of ["proof", "support"]) {
-    if (detail[lane] == null) continue;
-    if (!Array.isArray(detail[lane])) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${lane} must be an array`);
-    const materialized = [];
-    for (const selector of detail[lane]) {
+  if (detail.evidence != null) {
+    const materialized = new Map();
+    for (const selector of detail.evidence) {
       const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
       selectors.add(evidence.selector);
-      const selectedLines = Number(evidence?.lines?.end) - Number(evidence?.lines?.start) + 1;
-      if (lane === "proof" && evidence.selector_kind === "path"
-        && selectedLines > AGENT_HANDOFF_LIMITS.targetSelectorLines) {
-        out.support ||= [];
-        out.support.push(evidence);
-      } else if (lane === "proof" && !isAllowedProofProvenance(evidence, {
-        allowAgentProse: allowAgentProseProof,
-      })) {
-        if (!isDegradableAgentProof(evidence, { allowAgentProse: allowAgentProseProof })) {
-          fail(
-            "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
-            `claims[${claimIndex}] proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
-          );
-        }
-        out.support ||= [];
-        out.support.push(evidence);
-        recordHandoffProofDegradation({
-          path: `handoffs[${handoffIndex}].report.claims[${claimIndex}]`,
-          selector: evidence.selector,
-          ref: evidence.ref,
-          provenance: evidence.provenance.kind,
-        });
-      } else {
-        materialized.push(evidence);
-      }
+      materialized.set(evidence.selector, evidence);
       counters.evidence += evidence.excerpt.length;
     }
-    if (materialized.length > 0) {
-      out[lane] = [...(out[lane] || []), ...materialized];
-    }
+    if (materialized.size > 0) out.evidence = [...materialized.values()];
   }
   if (detail.decoy != null) {
     if (!Array.isArray(detail.decoy)) fail("AGENT_HANDOFF_SCHEMA_INVALID", "decoy must be an array");
@@ -1522,12 +1495,12 @@ function validateResearchAbsenceClaims(research, claims, label) {
       );
     }
     const matchingClaim = claims.find((claim) => String(claim?.[0] || "").trim() === check.claim);
-    const proof = matchingClaim?.[1]?.proof || [];
-    const matchesExpected = proof.some((evidence) => (
-      evidence?.ref === expected.ref
+    const evidence = matchingClaim?.[1]?.evidence || [];
+    const matchesExpected = evidence.some((entry) => (
+      entry?.ref === expected.ref
       && (expected.start == null || (
-        Number(evidence?.lines?.start) === expected.start
-        && Number(evidence?.lines?.end) === expected.end
+        Number(entry?.lines?.start) === expected.start
+        && Number(entry?.lines?.end) === expected.end
       ))
     ));
     const expectedSelector = expected.start == null
@@ -1536,7 +1509,7 @@ function validateResearchAbsenceClaims(research, claims, label) {
     if (!matchingClaim || !matchesExpected) {
       fail(
         "AGENT_HANDOFF_SCHEMA_INVALID",
-        `${label}.absence_checks[${index}] must match a claim with the same text and a proof selector for ${expectedSelector}`,
+        `${label}.absence_checks[${index}] must match a claim with the same text and an evidence selector for ${expectedSelector}`,
       );
     }
   }
@@ -1545,14 +1518,11 @@ function validateResearchAbsenceClaims(research, claims, label) {
 function validateResearchClaimEvidence(claims, label) {
   for (const [index, claim] of claims.entries()) {
     const detail = plainObject(claim?.[1]) || {};
-    const evidence = [
-      ...(Array.isArray(detail.proof) ? detail.proof : []),
-      ...(Array.isArray(detail.support) ? detail.support : []),
-    ];
+    const evidence = Array.isArray(detail.evidence) ? detail.evidence : [];
     if (evidence.length > 0) continue;
     fail(
       "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
-      `${label}.claims[${index}] has no proof/support selector. This is the closeout correction pass: move uncited prose to summary or attach the ref you already hold before retrying agent_handoff.`,
+      `${label}.claims[${index}] has no evidence selector. Put narrative in summary and attach at least one existing ref or surfaced source range to evidence.`,
     );
   }
 }
@@ -1732,7 +1702,7 @@ function validateNarrativeEvidenceBoundary(handoff, handoffIndex) {
   const evidence = [];
   for (const claim of handoff.report?.claims || []) {
     const detail = claim[1] || {};
-    for (const lane of ["proof", "support"]) {
+    for (const lane of ["evidence", "proof", "support"]) {
       evidence.push(...(detail[lane] || []).map((entry) => entry.excerpt));
     }
     evidence.push(...(detail.decoy || []).map(([entry]) => entry.excerpt));
@@ -2131,14 +2101,15 @@ function compactResearcherClaims(value, context) {
     const tuple = Array.isArray(raw);
     const detail = tuple ? plainObject(raw[1]) : plainObject(raw);
     if (!detail) return raw;
+    const { proof, support, evidence, ...rest } = detail;
+    const selectors = researcherEvidenceSelectors([
+      ...(Array.isArray(evidence) ? evidence : []),
+      ...(Array.isArray(proof) ? proof : []),
+      ...(Array.isArray(support) ? support : []),
+    ], context);
     const narrowed = {
-      ...detail,
-      ...(Array.isArray(detail.proof)
-        ? { proof: researcherEvidenceSelectors(detail.proof, context) }
-        : {}),
-      ...(Array.isArray(detail.support)
-        ? { support: researcherEvidenceSelectors(detail.support, context) }
-        : {}),
+      ...rest,
+      ...(selectors.length > 0 ? { evidence: selectors } : {}),
     };
     return tuple ? [raw[0], narrowed, ...raw.slice(2)] : narrowed;
   });
@@ -2167,7 +2138,9 @@ function researcherClaimFromNarrative(value, index) {
   return { claim, prose: text };
 }
 
-function researcherClaims(value, { proof = [], support = [], context = {} } = {}) {
+function researcherClaims(value, {
+  evidence = [], proof = [], support = [], context = {},
+} = {}) {
   const inputs = Array.isArray(value) ? value : [];
   const claims = inputs.flatMap((raw, index) => {
     if (Array.isArray(raw)) return [raw];
@@ -2198,20 +2171,22 @@ function researcherClaims(value, { proof = [], support = [], context = {} } = {}
       ? { claim: compactResearcherText(explicitClaim), prose: compactResearcherText(narrative) }
       : researcherClaimFromNarrative(narrative, index);
     const detail = {};
-    const claimProof = researcherEvidenceSelectors(source.proof, context);
-    const claimSupport = researcherEvidenceSelectors(source.support, context);
-    if (claimProof.length) detail.proof = claimProof;
-    if (claimSupport.length) detail.support = claimSupport;
+    const claimEvidence = researcherEvidenceSelectors([
+      ...(Array.isArray(source.evidence) ? source.evidence : []),
+      ...(Array.isArray(source.proof) ? source.proof : []),
+      ...(Array.isArray(source.support) ? source.support : []),
+    ], context);
+    if (claimEvidence.length) detail.evidence = claimEvidence;
     if (normalized.prose) detail.prose = normalized.prose;
     return [[normalized.claim, detail]];
   });
-  const globalProof = researcherEvidenceSelectors(proof, context);
-  const globalSupport = researcherEvidenceSelectors(support, context);
-  if (globalProof.length || globalSupport.length) {
-    const detail = {};
-    if (globalProof.length) detail.proof = globalProof;
-    if (globalSupport.length) detail.support = globalSupport;
-    claims.push(["Research evidence", detail]);
+  const globalEvidence = researcherEvidenceSelectors([
+    ...(Array.isArray(evidence) ? evidence : []),
+    ...(Array.isArray(proof) ? proof : []),
+    ...(Array.isArray(support) ? support : []),
+  ], context);
+  if (globalEvidence.length) {
+    claims.push(["Research evidence", { evidence: globalEvidence }]);
   }
   return claims;
 }
@@ -2382,6 +2357,7 @@ function normalizeResearcherTerminalArgs(source, context) {
   const claims = researcherClaims(
     first.claims ?? report.claims ?? research.claims ?? source.claims,
     {
+      evidence: first.evidence ?? report.evidence ?? research.evidence ?? source.evidence,
       proof: first.proof ?? report.proof ?? research.proof ?? source.proof,
       support: first.support ?? report.support ?? research.support ?? source.support,
       context,
@@ -2726,8 +2702,6 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
   }
   const normalizedRole = String(role || "").trim().toLowerCase();
   const profile = capture(() => boundedString(source.profile, "profile", 80));
-  const allowAgentProseProof = normalizedRole === "assessor"
-    && profile === "assessor.verdict.v1";
   const policy = profile ? AGENT_HANDOFF_PROFILE_POLICY[profile] : null;
   if (profile && !policy) {
     issues.push({ code: "AGENT_HANDOFF_PROFILE_INVALID", message: `Unsupported profile: ${profile}` });
@@ -2831,6 +2805,12 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${label}.report.claims must be an array` });
       continue;
     }
+    if (researcherReport && report.claims.length === 0) {
+      issues.push({
+        code: "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
+        message: `${label}.report.claims requires at least one evidence-backed claim`,
+      });
+    }
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {
       issues.push({
         code: "AGENT_HANDOFF_TOO_LARGE",
@@ -2867,25 +2847,10 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         { required: false },
       ));
       const selectors = new Set();
-      for (const lane of ["proof", "support"]) {
-        if (detail[lane] == null) continue;
-        if (!Array.isArray(detail[lane])) {
-          issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${claimLabel}.${lane} must be an array` });
-          continue;
-        }
-        for (const selector of detail[lane]) {
+      if (detail.evidence != null) {
+        for (const selector of detail.evidence) {
           const evidence = capture(() => materializeAgentHandoffEvidenceSelector(selector, context));
           if (evidence?.selector) selectors.add(evidence.selector);
-          if (lane === "proof" && evidence && !isAllowedProofProvenance(evidence, {
-            allowAgentProse: allowAgentProseProof,
-          }) && !isDegradableAgentProof(evidence, {
-            allowAgentProse: allowAgentProseProof,
-          })) {
-            issues.push({
-              code: "AGENT_HANDOFF_PROOF_PROVENANCE_INVALID",
-              message: `${claimLabel}.proof requires storage-owned tool evidence; ${evidence.ref} is ${evidence.provenance.kind}`,
-            });
-          }
         }
       }
       if (detail.decoy != null) {
@@ -3015,6 +2980,12 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     if (!Array.isArray(report.claims)) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `handoffs[${index}].report.claims must be an array`);
     }
+    if (researcherReport && report.claims.length === 0) {
+      fail(
+        "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
+        `handoffs[${index}].report.claims requires at least one evidence-backed claim`,
+      );
+    }
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${claimCountLimit} claims`);
     }
@@ -3024,9 +2995,6 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       materializationContext,
       entryCounters,
       {
-        allowAgentProseProof: normalizedRole === "assessor"
-          && profile === "assessor.verdict.v1",
-        handoffIndex: index,
         maxClaimChars: claimLengthLimit,
         maxProseChars: claimSummaryLimit,
       },
@@ -3136,8 +3104,6 @@ export function materializeAgentHandoff(args, options = {}) {
     value: packet,
     ignoredFieldCount,
     ignoredFields,
-    degradedProofCount,
-    degradedProofs,
   } = runWithHandoffFieldDiagnostics(() => materializeAgentHandoffStrict(args, options));
   if (ignoredFieldCount > 0) {
     Object.defineProperties(packet, {
@@ -3147,18 +3113,6 @@ export function materializeAgentHandoff(args, options = {}) {
       },
       ignored_fields: {
         value: Object.freeze(ignoredFields),
-        enumerable: false,
-      },
-    });
-  }
-  if (degradedProofCount > 0) {
-    Object.defineProperties(packet, {
-      degraded_proof_count: {
-        value: degradedProofCount,
-        enumerable: false,
-      },
-      degraded_proofs: {
-        value: Object.freeze(degradedProofs),
         enumerable: false,
       },
     });
@@ -3261,7 +3215,7 @@ function mapStoredClaimEvidence(claim, mapEvidence) {
   const detail = claim?.[1];
   if (!detail || typeof detail !== "object") return claim;
   const mapped = { ...detail };
-  for (const lane of ["proof", "support"]) {
+  for (const lane of ["evidence", "proof", "support"]) {
     if (Array.isArray(detail[lane])) mapped[lane] = detail[lane].map(mapEvidence);
   }
   if (Array.isArray(detail.decoy)) {
@@ -3351,10 +3305,6 @@ export function stageAgentHandoff(args, {
     ...(packet.ignored_field_count > 0 ? {
       ignored_field_count: packet.ignored_field_count,
       ignored_fields: packet.ignored_fields,
-    } : {}),
-    ...(packet.degraded_proof_count > 0 ? {
-      degraded_proof_count: packet.degraded_proof_count,
-      degraded_proofs: packet.degraded_proofs,
     } : {}),
   };
   const hasDiagnostics = Object.keys(diagnostics).length > 0;
@@ -3474,7 +3424,7 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   };
   for (const claim of report.claims || []) {
     const detail = claim[1] || {};
-    for (const lane of ["proof", "support"]) {
+    for (const lane of ["evidence", "proof", "support"]) {
       for (const evidence of detail[lane] || []) add(evidence, lane);
     }
     for (const [evidence, reason] of detail.decoy || []) add(evidence, "decoy", reason);
@@ -3529,7 +3479,7 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   const expanded = sections.join("\n\n");
   if (expanded.length <= maxChars) return `## Expanded evidence\n\n${expanded}`;
   const omitted = expanded.length - maxChars;
-  return `## Expanded evidence\n\n${expanded.slice(0, maxChars).trimEnd()}\n\n[Expanded evidence truncated: ${omitted} additional characters remain available through the cited proof selectors.]`;
+  return `## Expanded evidence\n\n${expanded.slice(0, maxChars).trimEnd()}\n\n[Expanded evidence truncated: ${omitted} additional characters remain available through the cited evidence selectors.]`;
 }
 
 function renderEvidenceAppendix(report) {
@@ -3541,15 +3491,12 @@ function renderEvidenceAppendix(report) {
     const legacyLabel = String(report.summary || "").includes(marker) || !claimLabel
       ? ""
       : `${claimLabel.slice(0, 180)}${claimLabel.length > 180 ? "…" : ""} — `;
-    const lanes = [];
-    for (const lane of ["proof", "support"]) {
-      const selectors = [...new Set(
-        (detail[lane] || []).map(renderedEvidenceSelector).filter(Boolean),
-      )];
-      if (selectors.length > 0) {
-        lanes.push(`${lane[0].toUpperCase()}${lane.slice(1)}: ${selectors.join(", ")}`);
-      }
-    }
+    const selectors = [...new Set(
+      ["evidence", "proof", "support"].flatMap((lane) => (
+        (detail[lane] || []).map(renderedEvidenceSelector)
+      )).filter(Boolean),
+    )];
+    const lanes = selectors.length > 0 ? [`Evidence: ${selectors.join(", ")}`] : [];
     for (const [evidence, reason] of detail.decoy || []) {
       lanes.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
     }
@@ -3565,10 +3512,9 @@ function renderReport(report, { expandEvidence = false, evidenceAppendix = false
     for (const claim of report.claims) {
       parts.push(`Claim: ${claim[0]}`);
       const detail = claim[1] || {};
-      for (const lane of ["proof", "support"]) {
-        for (const evidence of detail[lane] || []) {
-          parts.push(`${lane[0].toUpperCase()}${lane.slice(1)}: ${renderedEvidenceSelector(evidence)}`);
-        }
+      for (const evidence of ["evidence", "proof", "support"]
+        .flatMap((lane) => detail[lane] || [])) {
+        parts.push(`Evidence: ${renderedEvidenceSelector(evidence)}`);
       }
       for (const [evidence, reason] of detail.decoy || []) {
         parts.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
@@ -3603,8 +3549,11 @@ function evidenceRefs(report) {
   });
   for (const claim of report.claims || []) {
     const detail = claim[1] || {};
-    for (const lane of ["proof", "support"]) {
-      for (const item of detail[lane] || []) lanes[lane].push(selector(item));
+    for (const item of ["evidence", "proof", "support"].flatMap((lane) => detail[lane] || [])) {
+      const lane = item?.selector_kind === "path" || item?.path
+        ? "support"
+        : (isCompatibilityProofProvenance(item) ? "proof" : "support");
+      lanes[lane].push(selector(item));
     }
     for (const [item, reason] of detail.decoy || []) lanes.decoy.push({
       ...selector(item),
@@ -3645,7 +3594,7 @@ function packetEvidence(packet) {
   for (const handoff of packet.handoffs || []) {
     for (const claim of handoff.report?.claims || []) {
       const detail = claim[1] || {};
-      for (const lane of ["proof", "support"]) {
+      for (const lane of ["evidence", "proof", "support"]) {
         for (const evidence of detail[lane] || []) add(evidence);
       }
       for (const [evidence] of detail.decoy || []) add(evidence);

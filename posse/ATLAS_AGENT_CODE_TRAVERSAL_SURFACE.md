@@ -343,7 +343,7 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use only when exact source is needed for a known symbol or anchored file region. Returns one bounded source selection, not target discovery. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
+Use only when exact source is needed for a known symbol or anchored file region. Returns one bounded source selection, not target discovery. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -448,7 +448,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. When the input is an issued traversal identity, a successful non-empty call promotes that same identity to evidence and returns a different opaque continuation only when more content remains.
+Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. When the input is an issued traversal identity, a successful non-empty offset page promotes that same identity to evidence and returns a different opaque continuation only when more content remains. Search pages are inspect-only and non-citable; use their parent ref to create or cite a validated source-coordinate slice.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1065,7 +1065,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty call promotes that same identity to evidence_ref; a different opaque next_traversal_ref is returned only when more content remains.
+Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

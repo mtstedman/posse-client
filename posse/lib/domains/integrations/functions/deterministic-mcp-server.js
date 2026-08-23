@@ -2413,23 +2413,6 @@ function executeAgentHandoff(args = {}) {
         });
       } catch { /* best effort */ }
     }
-    if (receipt.diagnostics.degraded_proof_count > 0) {
-      try {
-        _recordObservation({
-          work_item_id: mcpWorkItemId ?? undefined,
-          job_id: mcpJobId ?? undefined,
-          attempt_id: mcpAttemptId ?? undefined,
-          observation_type: "handoff.proofs_degraded",
-          summary: `Agent handoff moved ${receipt.diagnostics.degraded_proof_count} agent-authored proof ref(s) to support`,
-          detail: {
-            severity: "warn",
-            agent_call_id: mcpAgentCallId ?? null,
-            degraded_proof_count: receipt.diagnostics.degraded_proof_count,
-            degraded_proofs: receipt.diagnostics.degraded_proofs,
-          },
-        });
-      } catch { /* best effort */ }
-    }
   }
   if (preparedSubAgentHandoff) sealSubAgentHandoff(mcpAgentCallId);
   return JSON.stringify({

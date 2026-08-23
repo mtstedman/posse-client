@@ -739,6 +739,74 @@ function dedupeCodeWindowContinuationWindows(entries) {
   return windows;
 }
 
+function mergedCodeWindowInlineRanges(data) {
+  const ranges = [];
+  const push = (entry) => {
+    if (!entry || typeof entry !== "object" || !String(entry.content || "")) return;
+    const startLine = Math.max(1, Number(entry.startLine) || 1);
+    ranges.push({ startLine, endLine: Math.max(startLine, Number(entry.endLine) || startLine) });
+  };
+  push(data);
+  for (const entry of Array.isArray(data?.additionalWindows) ? data.additionalWindows : []) push(entry);
+  ranges.sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.startLine <= previous.endLine + 1) {
+      previous.endLine = Math.max(previous.endLine, range.endLine);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+function codeWindowTargetCoverage(target, ranges) {
+  const startLine = Math.max(1, Number(target?.location?.startLine) || 1);
+  const endLine = Math.max(startLine, Number(target?.location?.endLine) || startLine);
+  const intersections = ranges
+    .map((range) => ({
+      startLine: Math.max(startLine, range.startLine),
+      endLine: Math.min(endLine, range.endLine),
+    }))
+    .filter((range) => range.endLine >= range.startLine);
+  let coverage = "none";
+  if (intersections.length > 0) {
+    let cursor = startLine;
+    coverage = "full";
+    for (const range of intersections) {
+      if (range.startLine > cursor) coverage = "partial";
+      cursor = Math.max(cursor, range.endLine + 1);
+    }
+    if (cursor <= endLine) coverage = "partial";
+  }
+  target.coverage = coverage;
+  target.inlineRanges = intersections.map((range) => `${range.startLine}-${range.endLine}`);
+}
+
+function refreshCodeWindowMapCoverage(data) {
+  const map = data?.map;
+  if (!map || typeof map !== "object") return;
+  const ranges = mergedCodeWindowInlineRanges(data);
+  map.inlineRanges = ranges.map((range) => `${range.startLine}-${range.endLine}`);
+  for (const target of Array.isArray(map.symbolIndex) ? map.symbolIndex : []) {
+    codeWindowTargetCoverage(target, ranges);
+  }
+  const returned = new Set(
+    (Array.isArray(data.identifiersReturned) ? data.identifiersReturned : [])
+      .map((entry) => String(entry || "").toLowerCase()),
+  );
+  for (const request of Array.isArray(map.requested) ? map.requested : []) {
+    const targets = Array.isArray(request.targets) ? request.targets : [];
+    for (const target of targets) codeWindowTargetCoverage(target, ranges);
+    if (targets.some((target) => target.coverage === "full")) request.coverage = "full";
+    else if (targets.some((target) => target.coverage === "partial")) request.coverage = "partial";
+    else if (request.state === "textually_found_unindexed"
+      && returned.has(String(request.identifier || "").toLowerCase())) request.coverage = "partial";
+    else request.coverage = "none";
+  }
+}
+
 export function compactCodeWindowLensResult(toolName, result, {
   args = {},
   context = {},
@@ -863,7 +931,7 @@ export function compactCodeWindowLensResult(toolName, result, {
   // intentional bounded selections.
   if (tool === "code.window" || tool === "code.lens") {
     const continuationTool = tool;
-    const nativeContinuation = Array.isArray(data._continuationWindows)
+    let nativeContinuation = Array.isArray(data._continuationWindows)
       ? data._continuationWindows
       : [];
     const carriedNativeContinuation = Array.isArray(data._continuationWindows);
@@ -874,18 +942,51 @@ export function compactCodeWindowLensResult(toolName, result, {
       tool === "code.window" && pagingEnabled
       && result.length > min
       && hasHashRefScope(hashContext)
+      && Array.isArray(data.additionalWindows)
+      && data.additionalWindows.length > 0
+    ) {
+      const deferredAdditional = data.additionalWindows;
+      nativeContinuation = dedupeCodeWindowContinuationWindows([
+        ...nativeContinuation,
+        ...deferredAdditional,
+      ]);
+      const deferredIdentifiers = new Set(deferredAdditional.flatMap((entry) => (
+        Array.isArray(entry?.identifiers) ? entry.identifiers.map(String) : []
+      )));
+      data.identifiersReturned = (Array.isArray(data.identifiersReturned) ? data.identifiersReturned : [])
+        .filter((identifier) => !deferredIdentifiers.has(String(identifier)));
+      data.identifiersOmitted = [...new Set([
+        ...(Array.isArray(data.identifiersOmitted) ? data.identifiersOmitted.map(String) : []),
+        ...deferredIdentifiers,
+      ])];
+      data.outputTruncated = true;
+      data.truncated = true;
+      delete data.additionalWindows;
+      compacted = true;
+    }
+    const originalContent = typeof data.content === "string" ? data.content : "";
+    let inlineContentBudget = min;
+    if (tool === "code.window" && originalContent) {
+      data.content = "";
+      const structuralChars = JSON.stringify(envelope, null, 2).length;
+      data.content = originalContent;
+      inlineContentBudget = Math.max(1000, min - structuralChars - 1200);
+    }
+    if (
+      tool === "code.window" && pagingEnabled
+      && result.length > min
+      && hasHashRefScope(hashContext)
       && typeof data.content === "string"
-      && data.content.length > min
+      && data.content.length > inlineContentBudget
     ) {
       const lines = data.content.split("\n");
       let headChars = 0;
-      let splitAt = lines.length;
+      let splitAt = 0;
       for (let index = 0; index < lines.length; index++) {
-        headChars += lines[index].length + 1;
-        if (headChars >= min) {
-          splitAt = index + 1;
-          break;
-        }
+        const nextChars = lines[index].length + (index > 0 ? 1 : 0);
+        if (splitAt > 0 && headChars + nextChars > inlineContentBudget) break;
+        headChars += nextChars;
+        splitAt = index + 1;
       }
       if (splitAt < lines.length) {
         const startLine = Number(data.startLine) || 1;
@@ -1090,6 +1191,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     }
     // Source-version identity is durable coverage metadata, not model-facing
     // evidence. Keep the response focused after continuation materialization.
+    if (tool === "code.window") refreshCodeWindowMapCoverage(data);
     delete data.sourceVersion;
     delete data.repositoryIdentity;
   }
@@ -1859,6 +1961,13 @@ function attachFetchedCapabilityRefs(renderedText, {
     chars: viewText.length,
     lines: normalizedLinesForHandoff(viewText),
   });
+  if (selector.mode === "search") {
+    rendered.evidence_ref.usage = "inspect_only";
+    rendered.evidence_ref.citable = false;
+    rendered.evidence_ref.non_citable_reason = "search_result_view";
+    if (sourceEntry?.ref) rendered.evidence_ref.parent_ref = sourceEntry.ref;
+    rendered.evidence_ref.next_action = "Use a validated coordinate or slice from parent_ref; numbered search-result rows are navigation, not citable source.";
+  }
   // The traversal identity itself is now the evidence identity. Do not leave
   // the backing source alias in the primary ref field, especially for opaque
   // continuation cursors where it may identify a different visible page.
