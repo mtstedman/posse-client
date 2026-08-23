@@ -25,6 +25,10 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import {
+  resolveVendoredSourcePromotions,
+  vendoredPromotionForPath,
+} from "../../../atlas/functions/v2/retrieval/vendored-dependencies.js";
 
 const CODE_EXT_RE = /\.(js|mjs|cjs|ts|tsx|jsx|py|php|rs|go|java|rb)$/;
 // Repo-relative path tokens the task text might name (top-level source roots).
@@ -134,13 +138,32 @@ function demoteTestFiles(files, taskText) {
   return src.length > 0 ? [...src, ...tst] : files;
 }
 
+function promoteVendoredRuntimeFiles(files, promotions) {
+  const promoted = [];
+  const runtime = [];
+  const discounted = [];
+  for (const file of files) {
+    if (vendoredPromotionForPath(file, promotions)) promoted.push(file);
+    else if (isTestPath(file) || /(?:^|\/)(?:vendor|third[_-]party)(?:\/|$)/i.test(file)) discounted.push(file);
+    else runtime.push(file);
+  }
+  if (promoted.length === 0) return files;
+  const balanced = [];
+  const count = Math.max(runtime.length, promoted.length);
+  for (let index = 0; index < count; index++) {
+    if (index < runtime.length) balanced.push(runtime[index]);
+    if (index < promoted.length) balanced.push(promoted[index]);
+  }
+  return [...balanced, ...discounted];
+}
+
 function decide(source, mode, paths, symbols, extra = {}) {
   return { inject: true, source, mode, paths, symbols: symbols || null, ...extra };
 }
 
 /**
  * @param {{taskText?:string, rankedFiles?:string[], candidateDirs?:string[], seedFiles?:string[], keySymbols?:string[]}} input
- * @param {{pathKind?:(p:string)=>('dir'|'file'|null), dirFileCount?:(dir:string)=>number}} [deps]
+ * @param {{pathKind?:(p:string)=>('dir'|'file'|null), dirFileCount?:(dir:string)=>number, vendoredPromotions?:Array<{dependency:string,root:string,sourcePrefix:string}>}} [deps]
  */
 export function chooseSurveyScope(input = {}, deps = {}) {
   const {
@@ -152,6 +175,15 @@ export function chooseSurveyScope(input = {}, deps = {}) {
   } = input;
   const pathKind = typeof deps.pathKind === "function" ? deps.pathKind : () => null;
   const dirFileCount = typeof deps.dirFileCount === "function" ? deps.dirFileCount : () => -1;
+  const vendoredPromotions = Array.isArray(deps.vendoredPromotions) ? deps.vendoredPromotions : [];
+  const promotionDetail = vendoredPromotions.map(({ dependency, root, sourcePrefix }) => ({
+    dependency,
+    root,
+    source_prefix: sourcePrefix,
+  }));
+  const withPromotions = (result) => promotionDetail.length > 0
+    ? { ...result, vendoredPromoted: promotionDetail }
+    : result;
 
   const symbols = deriveSymbols(taskText, keySymbols);
   // A relational/enumerative task must never collapse to one dir (rungs 2-3):
@@ -166,39 +198,42 @@ export function chooseSurveyScope(input = {}, deps = {}) {
   if (explicitDir) {
     const n = dirFileCount(explicitDir.path);
     if (n >= 1 && n <= MAX_SURVEY_FILES) {
-      return decide("explicit-path", "directory", explicitDir.path, symbols, { files: n });
+      return withPromotions(decide("explicit-path", "directory", explicitDir.path, symbols, { files: n }));
     }
     // named dir too big: keep the ranked files that live under it, if any
     const under = uniq(rankedFiles).filter((f) => f.startsWith(`${explicitDir.path}/`));
-    if (under.length >= 2) return decide("explicit-path", "file-list", under.slice(0, MAX_SURVEY_FILES), symbols, { note: "named dir over cap; ranked hits under it" });
+    if (under.length >= 2) return withPromotions(decide("explicit-path", "file-list", under.slice(0, MAX_SURVEY_FILES), symbols, { note: "named dir over cap; ranked hits under it" }));
   }
   const explicitFiles = explicit.filter((e) => e.kind === "file").map((e) => e.path);
-  if (explicitFiles.length) return decide("explicit-path", "file-list", explicitFiles.slice(0, MAX_SURVEY_FILES), symbols);
+  if (explicitFiles.length) return withPromotions(decide("explicit-path", "file-list", explicitFiles.slice(0, MAX_SURVEY_FILES), symbols));
 
   // (2) seeds (explicit scope / validated research key_files)
   const seeds = demoteTestFiles(uniq(seedFiles).filter((f) => CODE_EXT_RE.test(f)), taskText);
   if (seeds.length >= MIN_AREA_FILES) {
     const dom = crossCutting ? null : dominantDir(seeds, uniq(seeds.map(parentDir)), dirFileCount);
-    if (dom) return decide("seeds", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage });
-    return decide("seeds", "file-list", seeds.slice(0, fileListCap), symbols, crossCutting ? { crossCutting: true } : {});
+    if (dom) return withPromotions(decide("seeds", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage }));
+    return withPromotions(decide("seeds", "file-list", seeds.slice(0, fileListCap), symbols, crossCutting ? { crossCutting: true } : {}));
   }
 
   // area gate
-  const ranked = demoteTestFiles(uniq(rankedFiles).filter((f) => CODE_EXT_RE.test(f)), taskText);
+  const ranked = promoteVendoredRuntimeFiles(
+    demoteTestFiles(uniq(rankedFiles).filter((f) => CODE_EXT_RE.test(f)), taskText),
+    vendoredPromotions,
+  );
   if (ranked.length < MIN_AREA_FILES) {
-    return { inject: false, reason: `no area: ${ranked.length} ranked files, no explicit/seed scope`, symbols: null };
+    return withPromotions({ inject: false, reason: `no area: ${ranked.length} ranked files, no explicit/seed scope`, symbols: null });
   }
 
   // (3) dominant candidateDir — skipped for cross-cutting tasks, whose callers/
   // writers/decoys live outside the dominant dir a directory survey would fence.
   const dom = crossCutting ? null : dominantDir(ranked.slice(0, TOP_K), candidateDirs, dirFileCount);
-  if (dom) return decide("candidateDir", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage });
+  if (dom) return withPromotions(decide("candidateDir", "directory", dom.dir, symbols, { files: dom.files, coverage: dom.coverage }));
 
   // (4) file-list over the ranked hits (cross-cutting)
-  return decide("ranked-file-list", "file-list", ranked.slice(0, fileListCap), symbols, {
+  return withPromotions(decide("ranked-file-list", "file-list", ranked.slice(0, fileListCap), symbols, {
     note: crossCutting ? "cross-cutting task; file-list spans sibling dirs" : "no dominant bounded dir; scattered hits",
     ...(crossCutting ? { crossCutting: true } : {}),
-  });
+  }));
 }
 
 // Disk-backed probes for production (Phase 2). A reasonable proxy for the ATLAS
@@ -230,5 +265,5 @@ export function defaultSurveyScopeDeps(repoRoot) {
     } catch { return -1; }
     return n;
   };
-  return { pathKind, dirFileCount };
+  return { pathKind, dirFileCount, vendoredPromotions: resolveVendoredSourcePromotions(root) };
 }

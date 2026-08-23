@@ -28,6 +28,8 @@ import {
   applyPathQualityPriors,
   pathQualityPriorsEnabled,
 } from "../../functions/v2/retrieval/path-priors.js";
+import { boundSymbolSearchEnvelope } from "../../functions/v2/retrieval/search.js";
+import { resolveVendoredSourcePromotions } from "../../functions/v2/retrieval/vendored-dependencies.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
 
@@ -334,15 +336,20 @@ function nativeCompleteToolArgs(action, args = {}) {
   };
 }
 
-function applyNativeSymbolSearchPriors(envelope, args = {}) {
+function applyNativeSymbolSearchPriors(envelope, args = {}, repoRoot = null) {
   if (!pathQualityPriorsEnabled(args) || envelope?.ok === false || envelope?.error) return envelope;
-  if (envelope?.meta?.pathPriors?.enabled) return envelope;
+  const vendoredPromotions = args.filterToolingPaths === true && repoRoot
+    ? resolveVendoredSourcePromotions(repoRoot)
+    : [];
+  if (envelope?.meta?.pathPriors?.enabled && vendoredPromotions.length === 0) return envelope;
   const items = Array.isArray(envelope?.data?.items) ? envelope.data.items : null;
   if (!items) return envelope;
   const callerLimit = Math.max(1, Math.min(Math.trunc(Number(args.limit) || 50), 500));
   const entries = items.map((item, index) => ({
     id: String(item?.symbolId || item?.id || `native-symbol-${index}`),
-    score: Number.isFinite(Number(item?.score)) ? Number(item.score) : 1 / (RRF_SCORE_K + index + 1),
+    score: Number.isFinite(Number(item?.ranking?.pathPrior?.rawFusedScore))
+      ? Number(item.ranking.pathPrior.rawFusedScore)
+      : (Number.isFinite(Number(item?.score)) ? Number(item.score) : 1 / (RRF_SCORE_K + index + 1)),
     payload: item,
     contributions: {},
   }));
@@ -350,7 +357,7 @@ function applyNativeSymbolSearchPriors(envelope, args = {}) {
   const result = applyPathQualityPriors(entries, {
     query: String(args.query || ""),
     plan: envelope?.meta?.queryPlan || null,
-    options: args,
+    options: { ...args, vendoredPromotions },
     rawScoreById,
   });
   const rankedItems = result.entries.slice(0, callerLimit).map((entry) => ({
@@ -978,6 +985,12 @@ export class AtlasToolExecutor {
           throw new Error(`ATLAS ${request.action} requires a resolved native read context`);
         }
         const timeoutMs = request.waitMs || this.#waitMs;
+        const nativeRepoRoot = readPayload.readRoot
+          || request.config?.repoRoot
+          || request.session?.bootConfig?.atlas?.repoPath
+          || request.session?.bootConfig?.cwd
+          || request.session?.cwd
+          || process.cwd();
         const vectorQuery = request.action === "symbol.search"
           ? String(request.args?.query || "")
           : request.action === "tree.scope"
@@ -994,12 +1007,7 @@ export class AtlasToolExecutor {
             candidateLimit: request.args?.vectorCandidateLimit == null
               ? undefined
               : Number(request.args.vectorCandidateLimit),
-            repoRoot: readPayload.readRoot
-              || request.config?.repoRoot
-              || request.session?.bootConfig?.atlas?.repoPath
-              || request.session?.bootConfig?.cwd
-              || request.session?.cwd
-              || process.cwd(),
+            repoRoot: nativeRepoRoot,
             config: readPayload.config || {},
           })
           : null;
@@ -1034,12 +1042,7 @@ export class AtlasToolExecutor {
             args: cloneJson(completeToolArgs) || {},
             viewPath: readPayload.viewPath,
             ledgerPath: readPayload.ledgerPath,
-            repoRoot: readPayload.readRoot
-              || request.config?.repoRoot
-              || request.session?.bootConfig?.atlas?.repoPath
-              || request.session?.bootConfig?.cwd
-              || request.session?.cwd
-              || process.cwd(),
+            repoRoot: nativeRepoRoot,
             repoId: readPayload.repoId,
             versionId: readPayload.versionId,
             config: readPayload.config || {},
@@ -1063,11 +1066,14 @@ export class AtlasToolExecutor {
         }
         const nativeCallMs = Math.max(0, this.#now() - nativeStartedAt);
         const transformStartedAt = this.#now();
-        const converted = conductorEnvelopeToToolResult(
-          request.action === "symbol.search"
-            ? applyNativeSymbolSearchPriors(envelope, request.args || {})
-            : envelope,
-        );
+        const transformedEnvelope = request.action === "symbol.search"
+          ? boundSymbolSearchEnvelope(applyNativeSymbolSearchPriors(
+              envelope,
+              request.args || {},
+              nativeRepoRoot,
+            ))
+          : envelope;
+        const converted = conductorEnvelopeToToolResult(transformedEnvelope);
         const resultTransformMs = Math.max(0, this.#now() - transformStartedAt);
         return withExecutorDiagnostics(converted, {
           via: "native_complete",

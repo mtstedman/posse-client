@@ -75,6 +75,7 @@ import {
   RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES,
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
+  RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
   RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
@@ -1089,7 +1090,12 @@ function staleGatewayBindingToolResult(message) {
   ));
 }
 
-function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExplorationStep = null } = {}) {
+function ownerResearchSynthesisAdmission(session, requestedAction, {
+  assignedExplorationStep = null,
+  assignedPhysicalCallStep = null,
+  explorationUnitWeight = 1,
+  symbolFollowupDiscounted = false,
+} = {}) {
   const boot = session?.bootConfig || {};
   const citationFetch = RESEARCH_CITATION_FETCH_GATE_ENABLED
     && isResearchAtlasCitationFetchAction(requestedAction);
@@ -1099,6 +1105,7 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
       tracked: false,
       blocked: false,
       explorationSteps: 0,
+      callSteps: 0,
       assignedExplorationStep: null,
       fetchBatchesTotal: 0,
       explorationFetchBatches: 0,
@@ -1118,6 +1125,7 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   const multiFetchBatches = Math.max(0, Number(status.multi_fetch_batches || 0));
   const progressDecision = researchSynthesisDecision({
     explorationSteps: status.exploration_steps,
+    callSteps: status.call_steps,
     staleSteps: status.stale_steps,
     synthesisRequired: status.synthesis_required,
   });
@@ -1135,6 +1143,8 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
       singletonFetchBatches,
       multiFetchBatches,
       explorationSteps: Math.max(0, Number(status.exploration_steps || 0)),
+      callSteps: Math.max(0, Number(status.call_steps || 0)),
+      symbolFollowupsDiscounted: Math.max(0, Number(status.symbol_followups_discounted || 0)),
       staleSteps: Math.max(0, Number(status.stale_steps || 0)),
       lastNovelEvidenceStep: Math.max(0, Number(status.last_novel_evidence_step || 0)),
       assignedExplorationStep: null,
@@ -1147,13 +1157,21 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
   const assignedStep = Number.isSafeInteger(assignedExplorationStep)
     ? assignedExplorationStep
     : observedExplorationSteps + 1;
-  const assignedAbsoluteCeiling = assignedStep > researchSynthesisExplorationCeiling({
+  const unitWeight = explorationUnitWeight === 0 ? 0 : 1;
+  const assignedUnitCeiling = unitWeight > 0 && assignedStep > researchSynthesisExplorationCeiling({
     staleSteps: status.stale_steps,
   });
+  const assignedCallStep = Number.isSafeInteger(assignedPhysicalCallStep)
+    ? assignedPhysicalCallStep
+    : Math.max(0, Number(status.call_steps || 0)) + 1;
+  const assignedPhysicalCeiling = assignedCallStep > RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
+  const assignedAbsoluteCeiling = assignedUnitCeiling || assignedPhysicalCeiling;
   return {
     tracked: true,
     blocked: progressDecision.required || assignedAbsoluteCeiling,
-    blockReason: progressDecision.reason || (assignedAbsoluteCeiling ? "exploration_ceiling" : null),
+    blockReason: progressDecision.reason || (assignedPhysicalCeiling
+      ? "physical_call_ceiling"
+      : (assignedUnitCeiling ? "exploration_ceiling" : null)),
     citationFetch: false,
     citationFetches,
     citationFetchBatches,
@@ -1161,12 +1179,24 @@ function ownerResearchSynthesisAdmission(session, requestedAction, { assignedExp
     explorationFetchBatches,
     singletonFetchBatches,
     multiFetchBatches,
-    explorationSteps: Math.max(observedExplorationSteps, assignedStep - 1),
+    explorationSteps: unitWeight === 0
+      ? observedExplorationSteps
+      : Math.max(observedExplorationSteps, assignedStep - 1),
+    callSteps: Math.min(
+      RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
+      Math.max(0, Number(status.call_steps || 0), assignedCallStep - 1),
+    ),
+    symbolFollowupsDiscounted: Math.max(0, Number(status.symbol_followups_discounted || 0)),
     staleSteps: Math.max(0, Number(status.stale_steps || 0)),
     lastNovelEvidenceStep: Math.max(0, Number(status.last_novel_evidence_step || 0)),
     assignedExplorationStep: assignedStep,
+    assignedPhysicalCallStep: assignedCallStep,
+    explorationUnitWeight: unitWeight,
+    symbolFollowupDiscounted: symbolFollowupDiscounted === true,
     synthesisRequired: progressDecision.required || assignedAbsoluteCeiling,
-    synthesisReason: progressDecision.reason || (assignedAbsoluteCeiling ? "exploration_ceiling" : null),
+    synthesisReason: progressDecision.reason || (assignedPhysicalCeiling
+      ? "physical_call_ceiling"
+      : (assignedUnitCeiling ? "exploration_ceiling" : null)),
   };
 }
 
@@ -1181,7 +1211,7 @@ function isTerminalResearchExplorationAdmission(admission) {
   }
   return admission.assignedExplorationStep >= researchSynthesisExplorationCeiling({
     staleSteps: admission.staleSteps,
-  });
+  }) || admission.assignedPhysicalCallStep >= RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
 }
 
 function surveyAwareSkeletonRedirect(session, requested, toolArgs = {}) {
@@ -1321,21 +1351,29 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
     0,
     Number(progress.explorationSteps ?? current.exploration_steps) || 0,
   );
+  const callSteps = Math.max(0, Number(progress.callSteps ?? current.call_steps) || 0);
+  const symbolFollowupsDiscounted = Math.max(
+    0,
+    Number(progress.symbolFollowupsDiscounted ?? current.symbol_followups_discounted) || 0,
+  );
   const staleSteps = Math.max(0, Number(progress.staleSteps ?? current.stale_steps) || 0);
   const lastNovelEvidenceStep = Math.max(
     0,
     Number(progress.lastNovelEvidenceStep ?? current.last_novel_evidence_step) || 0,
   );
-  const decision = researchSynthesisDecision({ explorationSteps, staleSteps });
+  const decision = researchSynthesisDecision({ explorationSteps, callSteps, staleSteps });
   recordObservation({
     work_item_id: boot.workItemId ?? null,
     job_id: boot.jobId ?? null,
     attempt_id: boot.attemptId ?? null,
     observation_type: "research.synthesis_required",
-    summary: `Research synthesis required after ${explorationSteps} exploration calls with ${staleSteps} stale calls`,
+    summary: `Research synthesis required after ${explorationSteps} exploration units across ${callSteps} calls`,
     detail: {
       kind: "research_synthesis_required",
       exploration_steps: explorationSteps,
+      unit_steps: explorationSteps,
+      call_steps: callSteps,
+      symbol_followups_discounted: symbolFollowupsDiscounted,
       stale_steps: staleSteps,
       min_exploration_steps: RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
       stale_exploration_steps: RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
@@ -1349,9 +1387,14 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.tracked || admission.citationFetch) return result;
-  const explorationSteps = admission.assignedExplorationStep
-    ?? admission.explorationSteps + 1;
+  const explorationSteps = admission.explorationUnitWeight === 0
+    ? admission.explorationSteps
+    : (admission.assignedExplorationStep ?? admission.explorationSteps + 1);
+  const callSteps = admission.assignedPhysicalCallStep
+    ?? admission.callSteps + 1;
   const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
+    - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
+  const physicalCurtainStart = RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
   const flags = researchNoticeFlagsFor(session);
   const explorationCeiling = researchSynthesisExplorationCeiling({
@@ -1359,14 +1402,17 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
   });
   let notice = null;
   let noticeKind = null;
-  if (explorationSteps >= explorationCeiling) {
+  if (explorationSteps >= explorationCeiling || callSteps >= RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS) {
     flags.midpoint = true;
     flags.curtain = true;
     recordOwnerResearchSynthesisRequired(session, {
       explorationSteps,
+      callSteps,
       staleSteps: admission.staleSteps,
       lastNovelEvidenceStep: admission.lastNovelEvidenceStep,
       synthesisReason: admission.synthesisReason || "exploration_ceiling",
+      symbolFollowupsDiscounted: admission.symbolFollowupsDiscounted
+        + (admission.symbolFollowupDiscounted ? 1 : 0),
     }, toolName);
     notice = buildResearchSynthesisRequiredText({
       explorationSteps,
@@ -1374,10 +1420,12 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
       explorationCeiling,
     });
     noticeKind = "research_closeout";
-  } else if (explorationSteps >= curtainStart && !flags.curtain) {
+  } else if ((explorationSteps >= curtainStart || callSteps >= physicalCurtainStart) && !flags.curtain) {
     flags.midpoint = true;
     flags.curtain = true;
-    notice = buildResearchCurtainCallText({ explorationSteps });
+    notice = buildResearchCurtainCallText({
+      explorationSteps: callSteps >= physicalCurtainStart ? callSteps : explorationSteps,
+    });
     noticeKind = "research_curtain";
   } else if (
     explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
@@ -1711,6 +1759,43 @@ function collectOwnerSourcePaths(value, paths, depth = 0) {
   }
 }
 
+function collectOwnerSymbolSourcePaths(value, mappings, depth = 0) {
+  if (depth > 8 || mappings.size >= OWNER_EVIDENCE_IDENTITY_MAX) return;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 200)) collectOwnerSymbolSourcePaths(item, mappings, depth + 1);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const symbolId = String(value.symbolId || value.symbol_id || "").trim().toLowerCase();
+  const sourcePath = normalizedOwnerSourcePath(
+    value.location?.repo_rel_path
+      || value.location?.repoRelPath
+      || value.sourceExcerpt?.repo_rel_path
+      || value.sourceExcerpt?.repoRelPath,
+  );
+  if (symbolId && sourcePath) mappings.set(symbolId, sourcePath);
+  for (const child of Object.values(value)) {
+    if (child && typeof child === "object") collectOwnerSymbolSourcePaths(child, mappings, depth + 1);
+  }
+}
+
+/**
+ * @param {{result?:any,outcome?:string|null}} [input]
+ */
+function ownerAtlasSymbolSourcePaths({ result, outcome } = {}) {
+  if (outcome !== "succeeded" || result?.isError === true) return [];
+  const text = ownerResultTextWithoutControls(result);
+  if (!text) return [];
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return []; }
+  const mappings = new Map();
+  collectOwnerSymbolSourcePaths(parsed, mappings);
+  return [...mappings].slice(0, OWNER_EVIDENCE_IDENTITY_MAX).map(([symbol_id, repo_rel_path]) => ({
+    symbol_id,
+    repo_rel_path,
+  }));
+}
+
 /**
  * @param {{
  *   toolName?: string,
@@ -1828,6 +1913,7 @@ function recordOwnerToolObservation({
     result: evidenceResult || result,
     outcome,
   });
+  const symbolSourcePaths = ownerAtlasSymbolSourcePaths({ result: evidenceResult || result, outcome });
   try {
     recordToolUseObservations({
       work_item_id: boot.workItemId ?? null,
@@ -1856,6 +1942,9 @@ function recordOwnerToolObservation({
             research_exploration_unit_id: synthesisAdmission.explorationUnitId,
             research_exploration_step: synthesisAdmission.assignedExplorationStep,
             research_exploration_unit_kind: synthesisAdmission.explorationUnitKind || "request",
+            research_exploration_unit_weight: synthesisAdmission.explorationUnitWeight === 0 ? 0 : 1,
+            physical_call_step: synthesisAdmission.assignedPhysicalCallStep ?? null,
+            symbol_followup_discounted: synthesisAdmission.symbolFollowupDiscounted === true,
             physical_request: 1,
           } : {}),
           ...(observationDetail && typeof observationDetail === "object" ? observationDetail : {}),
@@ -1866,6 +1955,7 @@ function recordOwnerToolObservation({
             evidence_identities: evidenceIdentities,
           }),
           ...(sourcePaths == null ? {} : { source_paths: sourcePaths }),
+          ...(symbolSourcePaths.length > 0 ? { symbol_source_paths: symbolSourcePaths } : {}),
           response: {
             result_chars: resultChars,
             content_blocks: Array.isArray(result?.content) ? result.content.length : 0,
@@ -2569,6 +2659,8 @@ export class PersistentMcpOwner {
     this._activeResearchAtlasReads = new Map();
     this._activeResearchAtlasBatches = new Map();
     this._researchAdmissionReservations = new Map();
+    this._researchCallReservations = new Map();
+    this._researchExplorationUnitSequence = 0;
     const terminalBatchIdleMs = Number(researchAtlasTerminalBatchIdleMs);
     this._researchAtlasTerminalBatchIdleMs = Number.isFinite(terminalBatchIdleMs)
       && terminalBatchIdleMs >= 0
@@ -2810,7 +2902,10 @@ export class PersistentMcpOwner {
     const reservationShared = [...this._sessions.values()].some((other) => (
       researchBudgetKey(other?.bootConfig || {}) === reservationKey
     ));
-    if (!reservationShared) this._researchAdmissionReservations.delete(reservationKey);
+    if (!reservationShared) {
+      this._researchAdmissionReservations.delete(reservationKey);
+      this._researchCallReservations.delete(reservationKey);
+    }
     for (const key of this._activeResearchAtlasReads.keys()) {
       if (key.endsWith(`:${id}`)) this._activeResearchAtlasReads.delete(key);
     }
@@ -2999,6 +3094,7 @@ export class PersistentMcpOwner {
     }
     this._activeResearchAtlasBatches.clear();
     this._researchAdmissionReservations.clear();
+    this._researchCallReservations.clear();
     this._sessions.clear();
     this._sessionIdsByTokenHash.clear();
     const server = this._server;
@@ -3669,7 +3765,56 @@ export class PersistentMcpOwner {
   // parallel admissions cannot race the exploration ceiling. Consulting the
   // reservation map on the serial path also keeps a swallowed observation
   // write from re-admitting an already-consumed step number.
-  _admitResearchExploration(session, effectiveAction, { explorationUnitKind = "request" } = {}) {
+  _mappedSymbolFollowup(session, effectiveAction, toolArgs = {}) {
+    if (effectiveAction !== "code.window" || !toolArgs?.symbolId || toolArgs?.file) return false;
+    const boot = session?.bootConfig || {};
+    const attemptId = Number(boot.attemptId) || null;
+    if (!attemptId) return false;
+    const owner = sourceCoverageOwnerForSession(session, boot);
+    const wanted = String(toolArgs.symbolId).trim().toLowerCase();
+    try {
+      const rows = owner.db.prepare(`
+        SELECT detail_json
+        FROM job_observations
+        WHERE attempt_id = ? AND observation_type = 'tool.atlas'
+        ORDER BY id DESC
+      `).all(attemptId);
+      for (const row of rows) {
+        let detail;
+        try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+        const mapping = (Array.isArray(detail?.symbol_source_paths) ? detail.symbol_source_paths : [])
+          .find((entry) => String(entry?.symbol_id || "").trim().toLowerCase() === wanted);
+        if (!mapping?.repo_rel_path) continue;
+        return owner.hasDeliveredCoverageForPath(mapping.repo_rel_path);
+      }
+    } catch { /* fail safe: charge the unit */ }
+    return false;
+  }
+
+  _reserveResearchPhysicalCall(session, effectiveAction) {
+    const boot = session?.bootConfig || {};
+    if (
+      String(boot.role || "") !== "researcher"
+      || !isResearchAtlasExplorationAction(effectiveAction)
+    ) return null;
+    const reservationKey = researchBudgetKey(boot);
+    const observed = researchExplorationObservationStatus({
+      jobId: boot.jobId ?? null,
+      attemptId: boot.attemptId ?? null,
+    });
+    const assigned = Math.max(
+      Math.max(0, Number(observed.call_steps || 0)),
+      Number(this._researchCallReservations.get(reservationKey) || 0),
+    ) + 1;
+    this._researchCallReservations.set(reservationKey, assigned);
+    return assigned;
+  }
+
+  _admitResearchExploration(session, effectiveAction, {
+    explorationUnitKind = "request",
+    explorationUnitWeight = 1,
+    symbolFollowupDiscounted = false,
+  } = {}) {
     const boot = session?.bootConfig || {};
     if (
       String(boot.role || "") !== "researcher"
@@ -3691,18 +3836,20 @@ export class PersistentMcpOwner {
     const reservableCeiling = researchSynthesisExplorationCeiling({
       staleSteps: observed.stale_steps,
     });
-    if (assignedExplorationStep <= reservableCeiling) {
+    if (explorationUnitWeight !== 0 && assignedExplorationStep <= reservableCeiling) {
       this._researchAdmissionReservations.set(reservationKey, assignedExplorationStep);
     }
     const admission = ownerResearchSynthesisAdmission(
       session,
       effectiveAction,
-      { assignedExplorationStep },
+      { assignedExplorationStep, explorationUnitWeight, symbolFollowupDiscounted },
     );
     return {
       ...admission,
-      explorationUnitId: `${reservationKey}:${assignedExplorationStep}`,
+      explorationUnitId: `${reservationKey}:${assignedExplorationStep}:${this.bootId}:${this._researchExplorationUnitSequence += 1}`,
       explorationUnitKind,
+      explorationUnitWeight: explorationUnitWeight === 0 ? 0 : 1,
+      symbolFollowupDiscounted: symbolFollowupDiscounted === true,
     };
   }
 
@@ -3741,10 +3888,9 @@ export class PersistentMcpOwner {
       ) {
         return;
       }
-      if (!batch.terminal) {
-        this._deleteResearchAtlasBatch(queueKey, batch);
-        return;
-      }
+      // Provider transports can deliver one structured parallel emission in
+      // several short waves. Retain every concurrent-read unit across that
+      // idle gap, not only the terminal unit.
       batch.idleTimer = setTimeout(() => {
         if (batch.active.size === 0) this._deleteResearchAtlasBatch(queueKey, batch);
       }, this._researchAtlasTerminalBatchIdleMs);
@@ -3767,6 +3913,8 @@ export class PersistentMcpOwner {
     const enqueuedAt = Date.now();
     const researchExploration = String(boot.role || "") === "researcher"
       && isResearchAtlasExplorationAction(effectiveAction);
+    const symbolFollowupDiscounted = researchExploration
+      && this._mappedSymbolFollowup(args?.session, effectiveAction, args?.toolArgs || {});
     let researchBatch = this._activeResearchAtlasBatches.get(queueKey) || null;
     if (researchExploration && !researchBatch) {
       const admission = this._admitResearchExploration(
@@ -3776,6 +3924,8 @@ export class PersistentMcpOwner {
           explorationUnitKind: CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
             ? "concurrent_read_batch"
             : "request",
+          explorationUnitWeight: symbolFollowupDiscounted ? 0 : 1,
+          symbolFollowupDiscounted,
         },
       );
       researchBatch = {
@@ -3786,12 +3936,37 @@ export class PersistentMcpOwner {
         terminal: isTerminalResearchExplorationAdmission(admission),
       };
       this._activeResearchAtlasBatches.set(queueKey, researchBatch);
+    } else if (researchExploration && researchBatch?.admission?.explorationUnitWeight === 0 && !symbolFollowupDiscounted) {
+      researchBatch.admission.explorationUnitWeight = 1;
+      researchBatch.admission.symbolFollowupDiscounted = false;
+      const reservationKey = researchBudgetKey(boot);
+      this._researchAdmissionReservations.set(
+        reservationKey,
+        researchBatch.admission.assignedExplorationStep,
+      );
     } else if (!researchExploration && !researchBatch?.terminal) {
       researchBatch = null;
     }
-    const synthesisAdmission = researchExploration
-      ? researchBatch?.admission || null
+    const assignedPhysicalCallStep = researchExploration
+      ? this._reserveResearchPhysicalCall(args?.session, effectiveAction)
       : null;
+    const synthesisAdmission = researchExploration && researchBatch?.admission
+      ? {
+          ...ownerResearchSynthesisAdmission(args?.session, effectiveAction, {
+            assignedExplorationStep: researchBatch.admission.assignedExplorationStep,
+            assignedPhysicalCallStep,
+            explorationUnitWeight: researchBatch.admission.explorationUnitWeight,
+            symbolFollowupDiscounted,
+          }),
+          explorationUnitId: researchBatch.admission.explorationUnitId,
+          explorationUnitKind: researchBatch.admission.explorationUnitKind,
+          explorationUnitWeight: researchBatch.admission.explorationUnitWeight,
+          symbolFollowupDiscounted,
+        }
+      : null;
+    if (researchBatch && isTerminalResearchExplorationAdmission(synthesisAdmission)) {
+      researchBatch.terminal = true;
+    }
     const concurrentResearchRead = researchExploration
       && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
       && !this._atlasToolCallQueues.has(queueKey);
@@ -3911,6 +4086,9 @@ export class PersistentMcpOwner {
             physical_request: 1,
             consumed_step: false,
             exploration_steps: synthesisAdmission.explorationSteps,
+            unit_steps: synthesisAdmission.explorationSteps,
+            call_steps: synthesisAdmission.callSteps,
+            symbol_followups_discounted: synthesisAdmission.symbolFollowupsDiscounted,
             stale_steps: synthesisAdmission.staleSteps,
             reason: synthesisAdmission.blockReason || "closeout",
           },
@@ -3921,7 +4099,7 @@ export class PersistentMcpOwner {
         : buildResearchSynthesisRequiredText({
           explorationSteps: synthesisAdmission.explorationSteps,
           staleSteps: synthesisAdmission.staleSteps,
-          absoluteCeilingReached: synthesisAdmission.blockReason === "exploration_ceiling",
+          absoluteCeilingReached: ["exploration_ceiling", "physical_call_ceiling"].includes(synthesisAdmission.blockReason),
         });
       const result = tagOwnerModelControlNotice({
         content: [{
@@ -3950,6 +4128,9 @@ export class PersistentMcpOwner {
         outcome: "rejected",
         tool_name: toolName,
         exploration_steps: synthesisAdmission.explorationSteps,
+        unit_steps: synthesisAdmission.explorationSteps,
+        call_steps: synthesisAdmission.callSteps,
+        symbol_followups_discounted: synthesisAdmission.symbolFollowupsDiscounted,
         citation_fetches: synthesisAdmission.citationFetches,
         citation_fetch_batches: synthesisAdmission.citationFetchBatches,
         reason: synthesisAdmission.blockReason,
@@ -4053,17 +4234,18 @@ export class PersistentMcpOwner {
         });
         return mcpToolResultMessage(message, result);
       }
-      const coverageOwner = requested.name === "code.window"
+      const sourceAdmissionOwner = requested.name === "code.window";
+      const coverageOwner = sourceAdmissionOwner || requested.name === "symbol.card"
         ? sourceCoverageOwnerForSession(session, binding?.bootConfig)
         : null;
       activeCoverageOwner = coverageOwner;
       coverageObservationCursor = sourceSelectionCoverageCursor(coverageOwner);
-      const windowSelections = coverageOwner
+      const windowSelections = sourceAdmissionOwner
         ? [toolArgs || {}]
         : [];
       /** @type {any[]} */
       const coverageAdmissions = [];
-      if (coverageOwner) {
+      if (sourceAdmissionOwner) {
         for (const selection of windowSelections) {
           const admission = await coverageOwner.admitOrReserve(selection);
           coverageAdmissions.push(admission);
@@ -4076,7 +4258,7 @@ export class PersistentMcpOwner {
       const uncoveredIndexes = coverageAdmissions
         .map((admission, index) => (admission.covered ? null : index))
         .filter((index) => index != null);
-      if (coverageOwner && uncoveredIndexes.length === 0) {
+      if (sourceAdmissionOwner && uncoveredIndexes.length === 0) {
         const coveredAdmission = coverageAdmissions[0];
         const reuseNotice = sourceEvidenceReuseNotice(coverageOwner, coveredAdmission);
         const coveredPayload = reuseNotice
@@ -4115,7 +4297,7 @@ export class PersistentMcpOwner {
         return mcpToolResultMessage(message, result);
       }
       const executorArgs = toolArgs && typeof toolArgs === "object" ? toolArgs : {};
-      const contextHeadroom = coverageOwner && !delegatedEvidence
+      const contextHeadroom = sourceAdmissionOwner && !delegatedEvidence
         ? admitSourceContextHeadroom({
             boot: session?.bootConfig || {},
             args: executorArgs,
@@ -4182,7 +4364,7 @@ export class PersistentMcpOwner {
       }
       const executor = getSharedAtlasToolExecutor();
       const executorStartedAt = Date.now();
-      nativeSourceExecutionStarted = coverageOwner != null;
+      nativeSourceExecutionStarted = sourceAdmissionOwner;
       const executed = await executor.executeTool({
         toolName,
         args: executorArgs,
@@ -4213,7 +4395,9 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
-      if (coverageOwner) result = prepareSourceCoverage(result, coverageOwner, toolArgs || {});
+      if (coverageOwner) {
+        result = prepareSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name });
+      }
       const evidenceResult = result;
       const executorCompletedAt = Date.now();
       const transformStartedAt = Date.now();
@@ -4227,7 +4411,9 @@ export class PersistentMcpOwner {
         ...atlasGateResultState(result),
       });
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
-      if (coverageOwner) result = materializeSourceCoverage(result, coverageOwner, toolArgs || {});
+      if (coverageOwner) {
+        result = materializeSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name });
+      }
       for (const admission of coverageAdmissions) {
         coverageOwner?.settleReservation(admission.reservation, result?.isError ? "failed" : "confirmed");
       }

@@ -304,7 +304,7 @@ export const TOOL_CATALOG = {
   search_files: {
     schema: TOOL_SEARCH_FILES,
     access: "read",
-    summary: "Search file contents deterministically through the required ripgrep-backed search_files tool.",
+    summary: "Search file contents deterministically through bounded ripgrep output (one context line, total/continuation offset footer when truncated).",
     observation: { type: "tool.search", label: "Search", format: "search", targetKeys: ["path", "directory", "file_path"] },
   },
   git_history: {

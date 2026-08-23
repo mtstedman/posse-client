@@ -32,22 +32,31 @@ function replaceMcpTextResult(result, parsed, value) {
   };
 }
 
-function visitSourceData(result, toolArgs, visit) {
+function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } = {}) {
   const parsed = parsedMcpTextResult(result);
   if (!parsed) return result;
   const envelope = parsed.value;
   const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : envelope;
   if (data && typeof data === "object" && data.status !== "covered") {
-    visit(data, toolArgs, "primary");
-    for (const additional of Array.isArray(data.additionalWindows) ? data.additionalWindows : []) {
-      visit({ ...additional, repo_rel_path: data.repo_rel_path }, toolArgs, "additional");
+    if (toolName === "symbol.card") {
+      const cards = Array.isArray(data.cards) ? data.cards : [data];
+      for (const card of cards) {
+        const source = card?.sourceExcerpt || (typeof card?.source === "object" ? card.source : null);
+        if (!source) continue;
+        visit(source, { ...toolArgs, symbolId: card.symbolId || toolArgs.symbolId }, "primary", toolName);
+      }
+    } else {
+      visit(data, toolArgs, "primary", toolName);
+      for (const additional of Array.isArray(data.additionalWindows) ? data.additionalWindows : []) {
+        visit({ ...additional, repo_rel_path: data.repo_rel_path }, toolArgs, "additional", toolName);
+      }
     }
   }
   return replaceMcpTextResult(result, parsed, envelope);
 }
 
-export function prepareSourceCoverage(result, coverageOwner, toolArgs = {}) {
-  return visitSourceData(result, toolArgs, (data, args) => coverageOwner.prepareData(data, args));
+export function prepareSourceCoverage(result, coverageOwner, toolArgs = {}, options = {}) {
+  return visitSourceData(result, toolArgs, (data, args) => coverageOwner.prepareData(data, args), options);
 }
 
 function lowered(value) {
@@ -93,11 +102,12 @@ export function liveCompleteSymbolSelector(data = {}, args = {}, origin = "prima
   };
 }
 
-export function materializeSourceCoverage(result, coverageOwner, toolArgs = {}) {
-  return visitSourceData(result, toolArgs, (data, args, origin) => (
+export function materializeSourceCoverage(result, coverageOwner, toolArgs = {}, options = {}) {
+  return visitSourceData(result, toolArgs, (data, args, origin, tool) => (
     coverageOwner.materializeData(data, args, {
       origin,
       completeSymbolSelector: liveCompleteSymbolSelector(data, args, origin),
+      tool,
     })
-  ));
+  ), options);
 }

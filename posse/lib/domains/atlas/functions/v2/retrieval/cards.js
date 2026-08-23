@@ -231,19 +231,21 @@ export async function buildSymbolCard(args) {
     const callerCap = detail === "full" ? 100 : 25;
     const calleeCap = detail === "full" ? 100 : 25;
     const neighborhood = await view.query.symbolNeighborhood(symbol.global_id);
-    const callers = visibleResolvedEdges(neighborhood.callers, "from", minCallConfidence)
-      .slice(0, callerCap);
-    const callees = visibleResolvedEdges(neighborhood.callees, "to", minCallConfidence)
-      .slice(0, calleeCap);
+    const allCallers = visibleResolvedEdges(neighborhood.callers, "from", minCallConfidence);
+    const allCallees = visibleResolvedEdges(neighborhood.callees, "to", minCallConfidence);
     enrichCardWithEdges(
       card,
       symbol,
-      callers.map((entry) => entry.edge),
-      callees.map((entry) => entry.edge),
+      allCallers.map((entry) => entry.edge),
+      allCallees.map((entry) => entry.edge),
       detail,
     );
-    card.callers = callers.map(resolvedEdgeAsHit);
-    card.callees = callees.map(resolvedEdgeAsHit);
+    card.callers = allCallers.slice(0, callerCap).map(resolvedEdgeAsHit);
+    card.callees = allCallees.slice(0, calleeCap).map(resolvedEdgeAsHit);
+    /** @type {any} */ (card).callerCount = allCallers.length;
+    /** @type {any} */ (card).calleeCount = allCallees.length;
+    /** @type {any} */ (card).callersTruncated = allCallers.length > card.callers.length;
+    /** @type {any} */ (card).calleesTruncated = allCallees.length > card.callees.length;
   } else if (detail !== "minimal") {
     enrichCardWithEdges(card, symbol, [], [], detail);
   }

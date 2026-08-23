@@ -3,6 +3,9 @@
 // symbol.card handler. Resolves the symbol by ID or ref and produces
 // a SymbolCard envelope.
 
+import fs from "node:fs";
+import path from "node:path";
+
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { bareSymbolCard, buildSymbolCard, parseSymbolId, symbolIdOf, etagOf, locationOf, symbolHit } from "./cards.js";
 import { applyDbAccessToCard } from "./db-symbol-access.js";
@@ -10,6 +13,8 @@ import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { findOverlaySymbol, findOverlaySymbolByRef, getOverlaySymbols } from "./buffer.js";
 import { getEffectivePolicy } from "./policy.js";
 import { recordPrefetchAccess } from "./prefetch.js";
+import { splitEditableLines } from "../../../../../shared/tools/functions/toolkit/structured-read.js";
+import { CONTEXT_SYMBOL_CARD_SELF_BOUND_CHARS } from "../../../../../catalog/context.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -99,11 +104,13 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
       return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
     }
-    return okEnvelope({
+    return finishCardEnvelope({
       action: "symbol.card",
       versionId,
-      data: card,
+      card,
       meta: { etag },
+      repoRoot,
+      sourceText: overlayTarget.entry.content,
     });
   }
 
@@ -128,11 +135,12 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
     if (params.ifNoneMatch && params.ifNoneMatch === etag) {
       return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
     }
-    return okEnvelope({
+    return finishCardEnvelope({
       action: "symbol.card",
       versionId,
-      data: cachedCard,
+      card: cachedCard,
       meta: { etag },
+      repoRoot,
     });
   }
 
@@ -149,11 +157,12 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
     return notModifiedEnvelope({ action: "symbol.card", versionId, etag });
   }
 
-  return okEnvelope({
+  return finishCardEnvelope({
     action: "symbol.card",
     versionId,
-    data: card,
+    card,
     meta: { etag },
+    repoRoot,
   });
 }
 
@@ -207,7 +216,7 @@ export async function symbolGetCards({ view, versionId, params, repoRoot, ledger
     }
   }
 
-  return okEnvelope({
+  return boundSymbolCardEnvelope(okEnvelope({
     action,
     versionId,
     data: {
@@ -215,10 +224,154 @@ export async function symbolGetCards({ view, versionId, params, repoRoot, ledger
       errors,
       total: requests.length,
       okCount: cards.length,
+      returnedCount: cards.length,
+      omittedCount: 0,
       errorCount: errors.length,
       partial: cards.length > 0 && errors.length > 0,
     },
-  });
+  }));
+}
+
+function finishCardEnvelope({ action, versionId, card, meta, repoRoot, sourceText = null }) {
+  const materialized = cloneCard(card);
+  const sourceExcerpt = sourceExcerptForCard({ repoRoot, card: materialized, sourceText });
+  if (sourceExcerpt) materialized.sourceExcerpt = sourceExcerpt;
+  return boundSymbolCardEnvelope(okEnvelope({ action, versionId, data: materialized, meta }));
+}
+
+function cloneCard(card) {
+  return JSON.parse(JSON.stringify(card));
+}
+
+function sourceExcerptForCard({ repoRoot, card, sourceText }) {
+  const relative = String(card?.location?.repo_rel_path || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!relative) return null;
+  let source = typeof sourceText === "string" ? sourceText : null;
+  if (source == null) {
+    if (!repoRoot) return null;
+    const root = path.resolve(repoRoot);
+    const absolute = path.resolve(root, relative);
+    if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) return null;
+    try { source = fs.readFileSync(absolute, "utf8"); } catch { return null; }
+  }
+  source = source.replace(/\r\n/g, "\n");
+  const lines = splitEditableLines(source).lines;
+  const startLine = Math.max(1, Math.floor(Number(card?.location?.startLine) || 1));
+  const requestedEnd = Math.max(startLine, Math.floor(Number(card?.location?.endLine) || startLine));
+  if (startLine > lines.length) return null;
+  const maximumEnd = Math.min(requestedEnd, lines.length, startLine + 119);
+  let endLine = maximumEnd;
+  let content = lines.slice(startLine - 1, endLine).join("\n");
+  while (content.length > 3600 && endLine > startLine) {
+    endLine -= 1;
+    content = lines.slice(startLine - 1, endLine).join("\n");
+  }
+  // A partial physical line cannot be registered as exact source coverage.
+  if (content.length > 3600) return null;
+  if (endLine === lines.length && source.endsWith("\n")) content += "\n";
+  return {
+    repo_rel_path: relative,
+    startLine,
+    endLine,
+    content,
+    truncated: endLine < requestedEnd,
+  };
+}
+
+/**
+ * Keep symbol cards below the transport pager. Counts describe the complete
+ * graph neighborhood even when address lists or batch cards are omitted.
+ *
+ * @param {any} envelope
+ * @param {number} [maxChars]
+ */
+export function boundSymbolCardEnvelope(envelope, maxChars = CONTEXT_SYMBOL_CARD_SELF_BOUND_CHARS) {
+  if (!envelope?.data || JSON.stringify(envelope).length <= maxChars) return envelope;
+  const data = envelope.data;
+  if (Array.isArray(data.cards)) {
+    while (data.cards.length > 0 && JSON.stringify(envelope).length > maxChars) data.cards.pop();
+    data.returnedCount = data.cards.length;
+    data.omittedCount = Math.max(0, Number(data.okCount || 0) - data.cards.length);
+    data.truncated = data.omittedCount > 0;
+    data.partial = data.partial || data.truncated;
+    while (Array.isArray(data.errors) && data.errors.length > 0 && JSON.stringify(envelope).length > maxChars) {
+      data.errors.pop();
+      data.truncated = true;
+    }
+    if (JSON.stringify(envelope).length > maxChars) {
+      envelope.data = {
+        cards: [],
+        errors: [],
+        total: Number(data.total || 0),
+        okCount: Number(data.okCount || 0),
+        returnedCount: 0,
+        omittedCount: Number(data.okCount || 0),
+        errorCount: Number(data.errorCount || 0),
+        partial: true,
+        truncated: true,
+      };
+    }
+    if (JSON.stringify(envelope).length > maxChars) delete envelope.meta;
+    return envelope;
+  }
+
+  const card = data;
+  for (const key of ["callers", "callees"]) {
+    while (Array.isArray(card[key]) && card[key].length > 0 && JSON.stringify(envelope).length > maxChars) {
+      card[key].pop();
+      card[`${key}Truncated`] = true;
+    }
+  }
+  while (card.sourceExcerpt?.content && card.sourceExcerpt.endLine > card.sourceExcerpt.startLine
+    && JSON.stringify(envelope).length > maxChars) {
+    const lines = splitEditableLines(card.sourceExcerpt.content).lines;
+    lines.pop();
+    card.sourceExcerpt.endLine -= 1;
+    card.sourceExcerpt.content = lines.join("\n");
+    card.sourceExcerpt.truncated = true;
+  }
+  for (const key of ["deps", "resolution", "summary", "dbAccess"]) {
+    if (JSON.stringify(envelope).length <= maxChars) break;
+    delete card[key];
+    card.truncated = true;
+  }
+  if (JSON.stringify(envelope).length > maxChars && typeof card.signature === "string") {
+    card.signature = `${card.signature.slice(0, 157)}…`;
+    card.truncated = true;
+  }
+  if (JSON.stringify(envelope).length > maxChars) {
+    delete card.sourceExcerpt;
+    card.truncated = true;
+  }
+  if (JSON.stringify(envelope).length > maxChars) {
+    envelope.data = {
+      symbolId: compactCardText(card.symbolId, 96),
+      name: compactCardText(card.name, 160),
+      ...(card.qualifiedName ? { qualifiedName: compactCardText(card.qualifiedName, 240) } : {}),
+      kind: compactCardText(card.kind, 40),
+      lang: compactCardText(card.lang, 24),
+      location: {
+        repo_rel_path: compactCardText(card.location?.repo_rel_path, 320),
+        startLine: card.location?.startLine,
+        endLine: card.location?.endLine,
+      },
+      ...(card.signature ? { signature: compactCardText(card.signature, 160) } : {}),
+      callerCount: Number(card.callerCount || 0),
+      calleeCount: Number(card.calleeCount || 0),
+      callers: [],
+      callees: [],
+      callersTruncated: Number(card.callerCount || 0) > 0,
+      calleesTruncated: Number(card.calleeCount || 0) > 0,
+      truncated: true,
+    };
+  }
+  if (JSON.stringify(envelope).length > maxChars) delete envelope.meta;
+  return envelope;
+}
+
+function compactCardText(value, maxChars) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
 /**
@@ -385,9 +538,10 @@ async function buildOverlayCard({ repoRoot, sessionId, target, minCallConfidence
   const edges = entry.parseResult?.edges || [];
   const overlaySymbols = await getOverlaySymbols({ repoRoot, sessionId });
   const bySymbolId = new Map(overlaySymbols.map((item) => [`${item.symbol.content_hash}:${item.symbol.local_id}`, item.symbol]));
-  card.callees = edges
+  const allCalleeEdges = edges
     .filter((edge) => edge.from_content_hash === symbol.content_hash && edge.from_local_id === symbol.local_id)
-    .filter((edge) => edge.confidence / 100 >= minCallConfidence)
+    .filter((edge) => edge.confidence / 100 >= minCallConfidence);
+  card.callees = allCalleeEdges
     .slice(0, 25)
     .map((edge) => {
       const resolved = edge.to_content_hash != null && edge.to_local_id != null
@@ -422,6 +576,10 @@ async function buildOverlayCard({ repoRoot, sessionId, target, minCallConfidence
       };
     });
   card.callers = [];
+  /** @type {any} */ (card).callerCount = 0;
+  /** @type {any} */ (card).calleeCount = allCalleeEdges.length;
+  /** @type {any} */ (card).callersTruncated = false;
+  /** @type {any} */ (card).calleesTruncated = allCalleeEdges.length > card.callees.length;
   if (includeResolutionMetadata) {
     card.resolution = { confidence: 0.95, method: "buffer-parse" };
   }

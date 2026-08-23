@@ -5,6 +5,13 @@ export const CONTEXT_FETCH_REF_MAX_LIMIT_CHARS = 60000;
 
 export const CONTEXT_CHAIN_READ_DEFAULT_LIMIT_LINES = 2000;
 
+// Lookup constructors must fit below transport paging on their own. These are
+// deliberately stricter than the generic transport bounds: addresses and one
+// target source excerpt are useful inline; continuation pages are not.
+export const CONTEXT_SYMBOL_SEARCH_SELF_BOUND_CHARS = 4000;
+export const CONTEXT_SYMBOL_CARD_SELF_BOUND_CHARS = 11000;
+export const CONTEXT_SEARCH_FILES_SELF_BOUND_CHARS = 7600;
+
 export const CONTEXT_HASH_REF_MATERIALIZE_CHAR_CAP = 1024 * 1024;
 export const CONTEXT_BOUNDED_RETENTION_CHAR_CAP = 16 * 1024 * 1024;
 

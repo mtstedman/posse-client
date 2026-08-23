@@ -284,6 +284,21 @@ export class SourceCoverageOwner {
     return { covered: false, reason: "uncovered" };
   }
 
+  hasDeliveredCoverageForPath(repoRelativePath) {
+    if (!this.attemptId) return false;
+    const relative = normalizePath(repoRelativePath);
+    if (!relative) return false;
+    const fresh = this.#freshSource(relative);
+    if (!fresh) return false;
+    return this.#rows().some((row) => {
+      const coverage = rowDetail(row);
+      return coverage?.delivery_state === "delivered"
+        && coverage.repository_identity === this.repositoryIdentity
+        && normalizePath(coverage.repo_rel_path) === relative
+        && coverage.source_version === fresh.sourceVersion;
+    });
+  }
+
   async admitOrReserve(args = {}) {
     const admitted = this.admit(args);
     if (admitted.covered || !this.attemptId) return admitted;
@@ -360,6 +375,7 @@ export class SourceCoverageOwner {
     origin = "primary",
     deliveryState = "delivered",
     completeSymbolSelector = null,
+    tool = "code.window",
   } = {}) {
     const prepared = this.prepareData(data, args);
     if (!prepared) return null;
@@ -400,14 +416,14 @@ export class SourceCoverageOwner {
         payloadText: content,
         descriptor: {
           kind: "source_coverage",
-          tool: "code.window",
+          tool,
           args,
           repo_rel_path: fresh.relative,
           start_line: startLine,
           end_line: endLine,
         },
-        objectType: "atlas.code.window.source_region",
-        source: "tool:code.window",
+        objectType: `atlas.${tool}.source_region`,
+        source: `tool:${tool}`,
         note: `${fresh.relative}:${startLine}-${endLine}`,
         sizeChars: content.length,
         recomputable: true,
@@ -444,9 +460,9 @@ export class SourceCoverageOwner {
           job_id: this.jobId,
           attempt_id: this.attemptId,
           observation_type: "hash_ref.surface_failed",
-          summary: "Failed to surface code.window source coverage as hash ref",
+          summary: `Failed to surface ${tool} source coverage as hash ref`,
           detail: {
-            tool: "code.window",
+            tool,
             path: fresh.relative,
             start_line: startLine,
             end_line: endLine,
@@ -490,6 +506,7 @@ export class SourceCoverageOwner {
         complete_symbol_selector_fingerprint: completeSymbolFingerprint,
         evidence_ref: surfaced.entry.ref,
         delivery_state: deliveryState,
+        tool,
         origin,
         agent_call_id: this.agentCallId,
         stored_chars: content.length,

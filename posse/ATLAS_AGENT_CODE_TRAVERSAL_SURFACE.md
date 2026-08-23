@@ -343,7 +343,7 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use only when exact source is needed for a known symbol or anchored file region. Returns one bounded source selection, not target discovery. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
+Use only when exact source is needed for a known symbol or anchored file region. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -997,7 +997,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Compact relationship summary for an identified symbol or batch: signatures, summaries, callers, callees, metrics, and source locations. Submit every symbol needed for the same decision as one batch.
+Compact relationship summary for an identified symbol or batch. Bounded output includes the target signature/source excerpt, source location, true caller/callee counts, and capped neighbour addresses. Submit every symbol needed for the same decision as one batch.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1042,7 +1042,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Repository symbol discovery when the target or its location is unknown. One name, concept, or semantic query searches indexed declarations and bodies and returns stable symbol IDs and locations. Reuse returned IDs exactly as issued.
+Repository symbol discovery when the target or its location is unknown. Returns a bounded address-only hit list with stable symbol IDs, locations, and short signatures. Reuse returned IDs exactly as issued.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

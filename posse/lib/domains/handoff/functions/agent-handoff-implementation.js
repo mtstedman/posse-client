@@ -654,6 +654,63 @@ function sourceLineSlice(entry, lineage, start, end, {
   };
 }
 
+function continuationViewCoordinates(entry, lineage, start, end, { sourcePath = null } = {}) {
+  const objectType = String(entry?.object_type || "").trim().toLowerCase();
+  const descriptorKind = String(entry?.descriptor?.kind || "").trim().toLowerCase();
+  const continuationView = objectType.endsWith(".continuation.view")
+    || descriptorKind === "bounded_result_continuation";
+  if (!continuationView || !Number.isInteger(start) || !Number.isInteger(end)) return null;
+  const requestedPath = canonicalSourcePath(sourcePath);
+  const eligible = lineage.source_windows.filter((window) => {
+    if (requestedPath && window.path !== requestedPath) return false;
+    const materializedStart = Number(window.materialized_start_line);
+    const materializedEnd = Number(window.materialized_end_line);
+    const sourceSpan = Number(window.source_end_line) - Number(window.source_start_line);
+    const materializedSpan = materializedEnd - materializedStart;
+    return Number.isInteger(materializedStart)
+      && Number.isInteger(materializedEnd)
+      && sourceSpan === materializedSpan;
+  });
+  const candidates = eligible.filter((window) => {
+    const materializedStart = Number(window.materialized_start_line);
+    const materializedEnd = Number(window.materialized_end_line);
+    return start >= materializedStart
+      && end <= materializedEnd;
+  });
+  const translatable = candidates.length === 1
+    ? candidates
+    : (candidates.length === 0 && eligible.length === 1 ? eligible : []);
+  if (translatable.length !== 1) {
+    return {
+      matched: false,
+      ambiguous: candidates.length > 1,
+      materializedRanges: lineage.source_windows.map((window) => ({
+        path: window.path,
+        start: window.materialized_start_line,
+        end: window.materialized_end_line,
+      })),
+    };
+  }
+  const window = translatable[0];
+  const translatedStart = window.source_start_line + start - window.materialized_start_line;
+  const translatedEnd = window.source_start_line + end - window.materialized_start_line;
+  return {
+    matched: true,
+    path: window.path,
+    translatedStart,
+    translatedEnd,
+    materializedRange: {
+      start: window.materialized_start_line,
+      end: window.materialized_end_line,
+    },
+    materializedRanges: [{
+      path: window.path,
+      start: window.materialized_start_line,
+      end: window.materialized_end_line,
+    }],
+  };
+}
+
 function disjointSourceMaterialization(entry, lineage) {
   const contentWindows = coalescedSourceContentWindows(lineage.content_entry || entry, lineage);
   if (contentWindows.length === 0
@@ -1245,17 +1302,42 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
       end = selector.end;
     }
     if (excerpt == null) {
-      const sourceSlice = sourceLineSlice(entry, lineage, start, end, {
+      let sourceSlice = sourceLineSlice(entry, lineage, start, end, {
         sourcePath: selectedSourcePath,
         sourceWindow: stagedSourceWindow,
       });
+      const requestedStart = start;
+      const requestedEnd = end;
+      let translatedCoordinates = null;
+      if (!sourceSlice.matched && selector.start != null) {
+        translatedCoordinates = continuationViewCoordinates(entry, lineage, start, end, {
+          sourcePath: selectedSourcePath,
+        });
+        if (translatedCoordinates?.matched) {
+          start = translatedCoordinates.translatedStart;
+          end = translatedCoordinates.translatedEnd;
+          sourceSlice = sourceLineSlice(entry, lineage, start, end, {
+            sourcePath: translatedCoordinates.path,
+            sourceWindow: stagedSourceWindow,
+          });
+        }
+      }
       if (!sourceSlice.matched) {
         const ranges = sourceSlice.sourceRanges
           .map((range) => `${range.path}:${range.start}-${range.end}`)
           .join(", ");
+        const materializedRanges = (translatedCoordinates?.materializedRanges || [])
+          .filter((range) => Number.isInteger(range.start) && Number.isInteger(range.end))
+          .map((range) => `${range.path}:${range.start}-${range.end}`)
+          .join(", ");
         fail(
           "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
-          `Evidence ${selector.ref}:${start}-${end} does not fit wholly within one recorded source window${ranges ? ` (${ranges})` : ""}`,
+          `Evidence ${selector.ref}:${requestedStart}-${requestedEnd} does not fit wholly within one recorded source window`
+            + `${ranges ? ` (source coordinates: ${ranges})` : ""}`
+            + `${materializedRanges ? `; continuation page coordinates: ${materializedRanges}` : ""}`
+            + (translatedCoordinates?.matched
+              ? `; translated source range: ${start}-${end}`
+              : ""),
         );
       }
       excerpt = sourceSlice.excerpt;
@@ -2672,16 +2754,27 @@ function materializeTerminalCompletion(args, role) {
 function collectAgentHandoffValidationIssues(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const issues = [];
   const seen = new Set();
-  const capture = (fn) => {
+  const capture = (fn, { selector = null } = {}) => {
     try {
       return fn();
     } catch (error) {
       const code = String(error?.code || "AGENT_HANDOFF_SCHEMA_INVALID");
       const message = String(error?.message || "Invalid agent_handoff arguments");
-      const key = `${code}\0${message}`;
+      const selectorText = selector == null
+        ? null
+        : (typeof selector === "string" ? selector : JSON.stringify(selector));
+      const hint = selectorText == null ? null : handoffSelectorFailureHint(code);
+      const key = `${code}\0${message}\0${selectorText || ""}`;
       if (!seen.has(key) && issues.length < 24) {
         seen.add(key);
-        issues.push({ code, message });
+        issues.push({
+          code,
+          message,
+          ...(selectorText == null ? {} : {
+            selector: selectorText.slice(0, 500),
+            hint,
+          }),
+        });
       }
       return null;
     }
@@ -2849,7 +2942,10 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       const selectors = new Set();
       if (detail.evidence != null) {
         for (const selector of detail.evidence) {
-          const evidence = capture(() => materializeAgentHandoffEvidenceSelector(selector, context));
+          const evidence = capture(
+            () => materializeAgentHandoffEvidenceSelector(selector, context),
+            { selector },
+          );
           if (evidence?.selector) selectors.add(evidence.selector);
         }
       }
@@ -2863,7 +2959,10 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
               `${claimLabel}.decoy[${decoyIndex}]`,
             ));
             if (!decoy || decoy.length !== 2) continue;
-            const evidence = capture(() => materializeAgentHandoffEvidenceSelector(decoy[0], context));
+            const evidence = capture(
+              () => materializeAgentHandoffEvidenceSelector(decoy[0], context),
+              { selector: decoy[0] },
+            );
             if (evidence?.selector) selectors.add(evidence.selector);
             capture(() => boundedString(decoy[1], `${claimLabel}.decoy[${decoyIndex}].reason`, 500));
           }
@@ -2880,14 +2979,36 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
   return issues;
 }
 
+function handoffSelectorFailureHint(code) {
+  if (code === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") {
+    return "Choose a range wholly inside one recorded source window; continuation views accept source or page coordinates.";
+  }
+  if (["AGENT_HANDOFF_EVIDENCE_NOT_FOUND", "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE"].includes(code)) {
+    return "Fetch the traversal ref first or cite an evidence ref already visible to this agent call.";
+  }
+  if (code === "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED") {
+    return "Read the cited source range before retrying the handoff.";
+  }
+  return "Correct this selector and retry the handoff.";
+}
+
 function failCollectedAgentHandoffIssues(issues) {
   if (!Array.isArray(issues) || issues.length === 0) return;
-  if (issues.length === 1) fail(issues[0].code, issues[0].message);
+  const failingSelectors = issues
+    .filter((issue) => issue?.selector)
+    .map((issue) => ({ selector: issue.selector, code: issue.code, hint: issue.hint }));
+  if (issues.length === 1) {
+    const error = new Error(issues[0].message);
+    error.code = issues[0].code;
+    if (failingSelectors.length > 0) error.failing_selectors = failingSelectors;
+    throw error;
+  }
   const error = new Error(
     `agent_handoff rejected with ${issues.length} issues: ${issues.map((issue, index) => `${index + 1}. ${issue.message}`).join(" | ")}`,
   );
   error.code = "AGENT_HANDOFF_VALIDATION_FAILED";
   error.issues = issues;
+  if (failingSelectors.length > 0) error.failing_selectors = failingSelectors;
   throw error;
 }
 
@@ -3145,9 +3266,22 @@ function boundedHandoffRejection(error) {
     ? error.issues.slice(0, 24).map((issue) => ({
         code: String(issue?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
         message: String(issue?.message || "Invalid agent_handoff arguments").slice(0, 500),
+        ...(issue?.selector ? { selector: String(issue.selector).slice(0, 500) } : {}),
+        ...(issue?.hint ? { hint: String(issue.hint).slice(0, 500) } : {}),
       }))
     : [];
-  return { code, message, issues };
+  const failing_selectors = Array.isArray(error?.failing_selectors)
+    ? error.failing_selectors.slice(0, 24).map((failure) => ({
+        selector: String(failure?.selector || "").slice(0, 500),
+        code: String(failure?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
+        hint: String(failure?.hint || "Correct this selector and retry the handoff.").slice(0, 500),
+      })).filter((failure) => failure.selector)
+    : issues.filter((issue) => issue.selector).map((issue) => ({
+        selector: issue.selector,
+        code: issue.code,
+        hint: issue.hint || "Correct this selector and retry the handoff.",
+      }));
+  return { code, message, issues, failing_selectors };
 }
 
 export function recordAgentHandoffRejection(agentCallId, error, { db = getDb() } = {}) {
@@ -3173,6 +3307,9 @@ export function recordAgentHandoffRejection(agentCallId, error, { db = getDb() }
         code: rejection.code,
         message: rejection.message,
         ...(rejection.issues.length > 0 ? { issues: rejection.issues } : {}),
+        ...(rejection.failing_selectors.length > 0
+          ? { failing_selectors: rejection.failing_selectors }
+          : {}),
       },
     });
   } catch {
@@ -3199,6 +3336,7 @@ function latestAgentHandoffRejection(agentCallId, db = getDb()) {
       code: detail.code,
       message: detail.message,
       issues: detail.issues,
+      failing_selectors: detail.failing_selectors,
     }) : null;
   } catch {
     return null;
@@ -3856,6 +3994,9 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
       error.code = "TERMINAL_PROTOCOL_ERROR";
       error.handoffCode = rejection.code;
       if (rejection.issues.length > 0) error.issues = rejection.issues;
+      if (rejection.failing_selectors.length > 0) {
+        error.failing_selectors = rejection.failing_selectors;
+      }
       throw error;
     }
     fail("TERMINAL_PROTOCOL_ERROR", "agent_handoff was required but no report was staged");

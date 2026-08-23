@@ -16,6 +16,9 @@ export const RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS =
         + RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS
   ? configuredExplorationCeiling
   : DEFAULT_RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS;
+// Physical executions remain a fixed fail-safe even when concurrent emissions
+// or mapped-symbol follow-ups consume fewer logical exploration units.
+export const RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS = 30;
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
 // Atlas137: close at the base ceiling. Eligibility for a future extension may
 // be observed, but it never changes admission in this release.
@@ -69,13 +72,17 @@ export function researchSynthesisExplorationCeiling({ staleSteps = 0 } = {}) {
 
 export function researchSynthesisDecision({
   explorationSteps = 0,
+  callSteps = 0,
   staleSteps = 0,
   synthesisRequired = false,
 } = {}) {
   const steps = Math.max(0, Number(explorationSteps) || 0);
+  const calls = Math.max(0, Number(callSteps) || 0);
   const stale = Math.max(0, Number(staleSteps) || 0);
   const explorationCeiling = researchSynthesisExplorationCeiling({ staleSteps: stale });
-  const absoluteCeilingReached = steps >= explorationCeiling;
+  const unitCeilingReached = steps >= explorationCeiling;
+  const physicalCallCeilingReached = calls >= RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
+  const absoluteCeilingReached = unitCeilingReached || physicalCallCeilingReached;
   const staleCeilingReached = steps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
     && stale >= RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS;
   const required = synthesisRequired === true || absoluteCeilingReached || staleCeilingReached;
@@ -84,11 +91,14 @@ export function researchSynthesisDecision({
     absoluteCeilingReached,
     staleCeilingReached,
     explorationSteps: steps,
+    callSteps: calls,
     staleSteps: stale,
     explorationCeiling,
-    reason: absoluteCeilingReached
-      ? "exploration_ceiling"
-      : (staleCeilingReached ? "stale_evidence" : (synthesisRequired ? "already_required" : null)),
+    reason: physicalCallCeilingReached
+      ? "physical_call_ceiling"
+      : (unitCeilingReached
+        ? "exploration_ceiling"
+        : (staleCeilingReached ? "stale_evidence" : (synthesisRequired ? "already_required" : null))),
   };
 }
 

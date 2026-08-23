@@ -4,6 +4,8 @@
 // The baseline path never calls this module; callers opt in with one or more
 // of the four path-prior options after backend fusion and before result trim.
 
+import { vendoredPromotionForPath } from "./vendored-dependencies.js";
+
 export const PATH_PRIOR_MULTIPLIERS = Object.freeze({
   implementation: 1,
   declaration: 0.58,
@@ -144,6 +146,7 @@ export function queryPathIntent(query, plan) {
  *   rawFusedScore?: number,
  *   generic?: boolean,
  *   genericRepresentative?: boolean,
+ *   vendoredPromotions?: Array<{dependency:string,root:string,sourcePrefix:string}>,
  * }} options
  */
 export function pathPriorForCandidate(candidate, intent, options = {}) {
@@ -175,6 +178,10 @@ export function pathPriorForCandidate(candidate, intent, options = {}) {
   if (!exactProtected && options.filterToolingPaths) {
     for (const pathClass of classification.classes) {
       if (!TOOLING_PATH_CLASSES.has(pathClass)) continue;
+      if (pathClass === "vendor" && vendoredPromotionForPath(path, options.vendoredPromotions)) {
+        exceptions.push("vendored_runtime_dependency");
+        continue;
+      }
       const exception = intentExceptionForClass(pathClass, intent);
       if (exception) {
         exceptions.push(exception);
@@ -226,6 +233,7 @@ export function pathPriorForCandidate(candidate, intent, options = {}) {
  *     genericSymbolFrequencyThreshold?: number,
  *     hierarchicalFileLimit?: number,
  *     monorepoPackagePriors?: boolean,
+ *     vendoredPromotions?: Array<{dependency:string,root:string,sourcePrefix:string}>,
  *   },
  *   rawScoreById?: Map<string, number> | Record<string, number>,
  * }} context
@@ -249,6 +257,7 @@ export function applyPathQualityPriors(entries, context) {
       filterDeclarationFiles: options.filterDeclarationFiles === true,
       filterToolingPaths: options.filterToolingPaths === true,
       rawFusedScore: rawScoreFor(entry, context?.rawScoreById),
+      vendoredPromotions: options.vendoredPromotions,
     });
     const packagePrior = options.monorepoPackagePriors === true
       ? monorepoPackagePrior(entry, context?.query || "", evidence)
@@ -272,6 +281,7 @@ export function applyPathQualityPriors(entries, context) {
       filterDeclarationFiles: options.filterDeclarationFiles === true,
       filterToolingPaths: options.filterToolingPaths === true,
       rawFusedScore: entry.pathPrior.rawFusedScore,
+      vendoredPromotions: options.vendoredPromotions,
       generic: true,
       genericRepresentative: representatives.get(name) === entry.id,
     });

@@ -601,6 +601,8 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   if (!useAttempt && !useJob) {
     return {
       exploration_steps: 0,
+      call_steps: 0,
+      symbol_followups_discounted: 0,
       last_successful_owner_exploration_step: 0,
       last_novel_evidence_step: 0,
       stale_steps: 0,
@@ -632,16 +634,38 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       ORDER BY id ASC
     `).all(...scopeParams, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
     let explorationCount = 0;
+    let physicalCallCount = 0;
+    let symbolFollowupsDiscounted = 0;
     let lastSuccessfulOwnerExplorationStep = 0;
     let lastNovelEvidenceStep = 0;
     const seenEvidenceIdentities = new Set();
     const explorationUnitSteps = new Map();
+    const explorationUnitWeights = new Map();
+    for (const row of explorationRows) {
+      if (row.observation_type !== "tool.atlas") continue;
+      try {
+        const detail = JSON.parse(String(row.detail_json || "{}"));
+        const unitId = Number(detail?.research_exploration_unit_version) === 1
+          ? String(detail?.research_exploration_unit_id || "").trim().slice(0, 300)
+          : "";
+        if (!unitId) continue;
+        const weight = Number(detail?.research_exploration_unit_weight) === 0 ? 0 : 1;
+        explorationUnitWeights.set(unitId, Math.max(explorationUnitWeights.get(unitId) || 0, weight));
+      } catch { /* counted conservatively below */ }
+    }
     const explorationStepForDetail = (detail) => {
       const unitId = Number(detail?.research_exploration_unit_version) === 1
         ? String(detail?.research_exploration_unit_id || "").trim().slice(0, 300)
         : "";
       if (unitId && explorationUnitSteps.has(unitId)) {
         return explorationUnitSteps.get(unitId);
+      }
+      const unitWeight = unitId
+        ? (explorationUnitWeights.get(unitId) ?? 1)
+        : (Number(detail?.research_exploration_unit_weight) === 0 ? 0 : 1);
+      if (unitWeight === 0) {
+        if (unitId) explorationUnitSteps.set(unitId, explorationCount);
+        return explorationCount;
       }
       const explicitStep = Number(detail?.research_exploration_step);
       const step = Number.isSafeInteger(explicitStep) && explicitStep > 0
@@ -668,6 +692,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
           const detail = JSON.parse(String(row.detail_json || "{}"));
           const guidancePath = normPath(detail?.path).toUpperCase();
           if (guidancePath === "AGENTS.MD" || guidancePath === "CLAUDE.MD") continue;
+          physicalCallCount += 1;
           explorationCount += 1;
           if (detail?.novel_relevant_file === true || String(detail?.verdict || "") === "relevant") {
             const pathIdentity = normPath(detail?.path || "").toLowerCase();
@@ -681,12 +706,14 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
           continue;
         } catch {
           // Malformed verdict telemetry remains conservatively counted.
+          physicalCallCount += 1;
           explorationCount += 1;
           lastNovelEvidenceStep = explorationCount;
           continue;
         }
       }
       if (row.observation_type !== "tool.atlas") {
+        physicalCallCount += 1;
         explorationCount += 1;
         // Historic native observations do not carry evidence identities.
         // Conservatively credit them so a mixed-version deployment cannot
@@ -697,6 +724,8 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
         if (!isResearchAtlasExplorationAction(detail?.action)) continue;
+        physicalCallCount += 1;
+        if (detail?.symbol_followup_discounted === true) symbolFollowupsDiscounted += 1;
         const explorationStep = explorationStepForDetail(detail);
         if (detail?.outcome === "succeeded" || detail?.ok === true) {
           lastSuccessfulOwnerExplorationStep = Math.max(
@@ -719,6 +748,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       } catch {
         // A malformed historic Atlas observation remains conservatively
         // counted so damaged telemetry cannot silently reopen discovery.
+        physicalCallCount += 1;
         explorationCount += 1;
       }
     }
@@ -758,6 +788,8 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     `).get(...scopeParams);
     return {
       exploration_steps: Math.max(0, explorationCount),
+      call_steps: Math.max(0, physicalCallCount),
+      symbol_followups_discounted: Math.max(0, symbolFollowupsDiscounted),
       last_successful_owner_exploration_step: Math.max(0, lastSuccessfulOwnerExplorationStep),
       last_novel_evidence_step: Math.max(0, lastNovelEvidenceStep),
       stale_steps: Math.max(0, explorationCount - lastNovelEvidenceStep),
@@ -774,6 +806,8 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   } catch {
     return {
       exploration_steps: 0,
+      call_steps: 0,
+      symbol_followups_discounted: 0,
       last_successful_owner_exploration_step: 0,
       last_novel_evidence_step: 0,
       stale_steps: 0,

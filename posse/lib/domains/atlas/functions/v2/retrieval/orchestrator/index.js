@@ -54,6 +54,7 @@ import { combineVectorResults, normalizedSemanticQuery } from "./semantic-query.
  * @property {boolean} [withinFileSymbolRerank] Reorder symbols only within slots belonging to the same file.
  * @property {number} [fileLexicalOverlapWeight] Native lexical file-score weight, 0..1.
  * @property {boolean} [monorepoPackagePriors] Apply generic monorepo package/path agreement priors.
+ * @property {Array<{dependency:string,root:string,sourcePrefix:string}>} [vendoredPromotions] Manifest-proven in-tree runtime source roots.
  * @property {boolean} [semanticQueryNormalization] Add a normalized semantic vector probe.
  * @property {import("./query-planner-types.js").QueryPlan} [plan]
  * @property {(input: string) => import("./query-planner-types.js").QueryPlan | Promise<import("./query-planner-types.js").QueryPlan>} [planner]

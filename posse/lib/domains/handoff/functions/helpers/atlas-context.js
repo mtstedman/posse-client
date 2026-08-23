@@ -2534,6 +2534,8 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
         duration_ms: Number(result?.durationMs || 0),
         retries: Number(result?.retries || 0),
         scope: _summarizeSurveyScope(result?.scope),
+        vendored_promoted: (Array.isArray(result?.scope?.vendoredPromoted) ? result.scope.vendoredPromoted : [])
+          .slice(0, 16),
         files: (Array.isArray(result?.files) ? result.files : [])
           .slice(0, MAX_SURVEY_FILES)
           .map((file) => ({
@@ -2609,6 +2611,7 @@ function _summarizeSurveyScope(scope) {
     fileCount: Number.isFinite(Number(scope.files)) ? Number(scope.files) : null,
     symbols: Array.isArray(scope.symbols) ? scope.symbols.slice(0, 16).map((s) => String(s)) : null,
     reason: scope.reason || null,
+    vendoredPromoted: Array.isArray(scope.vendoredPromoted) ? scope.vendoredPromoted.slice(0, 16) : [],
   };
 }
 

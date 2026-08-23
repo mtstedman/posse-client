@@ -76,6 +76,7 @@ import {
   TOOL_WRITE_FILE,
 } from "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
+import { CONTEXT_SEARCH_FILES_SELF_BOUND_CHARS } from "../../../../catalog/context.js";
 import {
   buildManifest,
   getArtifactProtocol,
@@ -315,6 +316,26 @@ function toNonNegativeInt(value, fallback = 0) {
 function isSuccessfulToolResult(result) {
   const text = typeof result === "string" ? result : String(result ?? "");
   return !/^(?:Error:|AUDIT ERROR:)/i.test(text);
+}
+
+function boundedSearchRows(rows, { offset, headLimit, maxChars = CONTEXT_SEARCH_FILES_SELF_BOUND_CHARS } = {}) {
+  const total = rows.length;
+  const candidates = rows.slice(offset, offset + headLimit);
+  if (candidates.length === 0) return "No matches found.";
+  const output = [];
+  for (const candidate of candidates) {
+    const next = [...output, candidate].join("\n");
+    if (next.length > maxChars - 160) break;
+    output.push(candidate);
+  }
+  if (output.length === 0) output.push(String(candidates[0]).slice(0, Math.max(1, maxChars - 180)));
+  const returned = output.length;
+  const nextOffset = offset + returned;
+  const truncated = nextOffset < total;
+  if (truncated) {
+    output.push(`[search_files matchesTotal=${total} returned=${returned} offset=${offset} nextOffset=${nextOffset} truncated=true]`);
+  }
+  return output.join("\n").slice(0, maxChars);
 }
 
 
@@ -657,6 +678,8 @@ export function createDeterministicToolkit({
     let afterContext = sharedContext != null ? sharedContext : 0;
     if (args.before_context != null) beforeContext = toNonNegativeInt(args.before_context, 0);
     if (args.after_context != null) afterContext = toNonNegativeInt(args.after_context, 0);
+    beforeContext = Math.min(beforeContext, 1);
+    afterContext = Math.min(afterContext, 1);
 
     const offset = toNonNegativeInt(args.offset, 0);
     const headLimit = Math.min(toNonNegativeInt(args.head_limit, SEARCH_DEFAULT_HEAD_LIMIT), SEARCH_MAX_HEAD_LIMIT);
@@ -743,16 +766,14 @@ export function createDeterministicToolkit({
 
       if (outputMode === "files_with_matches") {
         const rows = [...filesWithMatches].sort((a, b) => a.localeCompare(b));
-        const page = rows.slice(offset, offset + headLimit);
-        return page.join("\n") || "No matches found.";
+        return boundedSearchRows(rows, { offset, headLimit });
       }
 
       if (outputMode === "count") {
         const rows = [...fileMatchCounts.entries()]
           .sort((a, b) => a[0].localeCompare(b[0]))
           .map(([file, count]) => `${file}:${count}`);
-        const page = rows.slice(offset, offset + headLimit);
-        return page.join("\n") || "No matches found.";
+        return boundedSearchRows(rows, { offset, headLimit });
       }
 
       const rows = contentRows
@@ -766,8 +787,7 @@ export function createDeterministicToolkit({
           }
           return out.join("\n");
         });
-      const page = rows.slice(offset, offset + headLimit);
-      return page.join("\n") || "No matches found.";
+      return boundedSearchRows(rows, { offset, headLimit });
     } catch (err) {
       return `Error: search_files failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }
