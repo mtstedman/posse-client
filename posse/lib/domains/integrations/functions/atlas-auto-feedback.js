@@ -15,7 +15,7 @@ const DIRECT_USEFUL_ACTIONS = new Set([
 
 export function resolveAtlasAutoFeedbackMode(config = null) {
   const configured = config?.autoFeedbackMode;
-  const raw = String(configured || "write").trim().toLowerCase();
+  const raw = String(configured || "off").trim().toLowerCase();
   if (raw === "1" || raw === "true" || raw === "write") return "write";
   if (raw === "dry-run" || raw === "dryrun" || raw === "preview") return "dry-run";
   return "off";

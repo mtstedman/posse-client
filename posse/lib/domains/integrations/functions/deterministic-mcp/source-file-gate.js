@@ -6,6 +6,7 @@ import { hasWindowsPathRoot, toRepoRelativePath } from "../../../../shared/forma
 export { ATLAS_INDEXABLE_SOURCE_EXTENSIONS };
 
 const NATIVE_EXACT_READ_TOOLS = new Set(["read_file", "chain_read"]);
+export const ATLAS_CHAIN_READ_MAX_LINES = 250;
 const DIRECT_FILE_KEYS = ["file", "filePath", "path"];
 const ARRAY_FILE_KEYS = [
   "files",
@@ -100,6 +101,12 @@ export function nativeIndexedReadTargets(toolName, args = {}, { cwd = null } = {
   const out = new Map();
   addPath(out, args?.path || args?.file || args?.filePath, { cwd, onlyIndexable: true });
   return [...out.values()];
+}
+
+export function applyNativeReadLineLimit(args = {}, decision = {}) {
+  const effectiveLineLimit = Number(decision?.effectiveLineLimit);
+  if (!Number.isInteger(effectiveLineLimit) || effectiveLineLimit <= 0) return args;
+  return { ...args, limit: effectiveLineLimit };
 }
 
 export function atlasDiscoveryFileTargets(action, args = {}, artifacts = null, { cwd = null } = {}) {

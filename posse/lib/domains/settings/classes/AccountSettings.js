@@ -437,6 +437,7 @@ export class AccountSettings {
   }
 
   _seedDefaults() {
+    this._migrateAtlasAutoFeedbackDefault();
     this._migrateAtlasToolGateDefault();
     this._migrateAtlasResultRefPagingDefault();
     this._migrateAtlasSearchResultPagingDefault();
@@ -454,6 +455,31 @@ export class AccountSettings {
     // repo and can poison every run when stored globally. Repo target now resolves
     // from cwd or explicit in-memory config objects only.
     this._db.prepare(`DELETE FROM account_settings WHERE setting_key IN ('atlas_repo_id', 'atlas_repo_path', 'target_branch')`).run();
+  }
+
+  _migrateAtlasAutoFeedbackDefault() {
+    const markerKey = "atlas_auto_feedback_default_migrated_at";
+    const marker = this._db
+      .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
+      .get(markerKey);
+    if (marker) return;
+
+    // `write` was previously seeded into every account DB, so it cannot be
+    // distinguished from an explicit opt-in. Fail closed once; a later
+    // operator choice is preserved because the marker makes this migration
+    // one-shot.
+    this._db
+      .prepare(
+        `UPDATE account_settings
+           SET setting_value = 'off',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE setting_key = 'atlas_auto_feedback'
+           AND lower(trim(setting_value)) = 'write'`,
+      )
+      .run();
+    this._db
+      .prepare(`INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .run(markerKey);
   }
 
   _migrateAtlasResultRefPagingDefault() {

@@ -1,5 +1,8 @@
 // @ts-check
 
+import { validateToolArguments } from "../../../../shared/tools/functions/schema-validation.js";
+import { expandSchemaBranches } from "../../../../shared/tools/functions/schema-summary.js";
+
 export const LOCAL_PLANNER_TOOL_TURN_LIMIT = 4;
 export const MAX_LOCAL_TOOL_RESULT_CHARS = 24_000;
 const LOCAL_MUTATION_TOOL_NAMES = new Set(["write_file", "edit_file"]);
@@ -11,7 +14,18 @@ function plainObject(value) {
 function localToolResultFailed(result) {
   return result?.isError === true
     || result?.ok === false
-    || /^Error:/i.test(String(result || "").trim());
+    || /^(?:Error:|AUDIT ERROR:)/i.test(String(result || "").trim());
+}
+
+function localSchemaType(schema = {}) {
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return `${Array.isArray(schema.type) ? schema.type.join("|") : String(schema.type || "value")}(${schema.enum.map(String).join("|")})`;
+  }
+  if (Array.isArray(schema.type)) return schema.type.join("|");
+  if (schema.type === "array") return `array<${localSchemaType(schema.items || {})}>`;
+  if (schema.type) return String(schema.type);
+  if (schema.properties) return "object";
+  return "value";
 }
 
 function protocolToolDefinition(tool) {
@@ -22,14 +36,22 @@ function protocolToolDefinition(tool) {
     .split(/(?<=[.!?])\s/, 1)[0]
     .slice(0, 180);
   const parameters = plainObject(tool?.parameters);
-  const properties = plainObject(parameters?.properties) || {};
-  const required = new Set(Array.isArray(parameters?.required) ? parameters.required : []);
-  const argumentsSummary = Object.entries(properties).map(([key, value]) => {
-    const schema = plainObject(value) || {};
-    const type = Array.isArray(schema.enum) && schema.enum.length > 0
-      ? `${String(schema.type || "value")}(${schema.enum.map(String).join("|")})`
-      : String(schema.type || "value");
-    return `${key}:${type}:${required.has(key) ? "required" : "optional"}`;
+  const branches = expandSchemaBranches(parameters);
+  const properties = new Map();
+  for (const branch of branches) {
+    for (const [key, value] of Object.entries(branch.properties || {})) {
+      const entry = properties.get(key) || { schemas: [], requiredCount: 0 };
+      entry.schemas.push(plainObject(value) || {});
+      if ((branch.required || []).includes(key)) entry.requiredCount += 1;
+      properties.set(key, entry);
+    }
+  }
+  const argumentsSummary = [...properties].map(([key, entry]) => {
+    const types = [...new Set(entry.schemas.map(localSchemaType))].join("|");
+    const requirement = entry.requiredCount === branches.length
+      ? "required"
+      : (entry.requiredCount > 0 ? "conditional" : "optional");
+    return `${key}:${types}:${requirement}`;
   });
   return {
     name,
@@ -37,53 +59,11 @@ function protocolToolDefinition(tool) {
   };
 }
 
-function localSchemaTypeError(value, schema, label) {
-  if (!schema || typeof schema !== "object") return null;
-  if (Array.isArray(schema.enum) && !schema.enum.some((entry) => Object.is(entry, value))) {
-    return `${label} must be one of: ${schema.enum.map(String).join(", ")}`;
-  }
-  if (Array.isArray(schema.anyOf) && !schema.anyOf.some((candidate) => !localSchemaTypeError(value, candidate, label))) {
-    return `${label} does not match any allowed schema`;
-  }
-  if (Array.isArray(schema.oneOf) && schema.oneOf.filter((candidate) => !localSchemaTypeError(value, candidate, label)).length !== 1) {
-    return `${label} must match exactly one allowed schema`;
-  }
-  const type = String(schema.type || "").trim();
-  if (!type) return null;
-  if (type === "string" && typeof value !== "string") return `${label} must be a string`;
-  if (type === "boolean" && typeof value !== "boolean") return `${label} must be a boolean`;
-  if (type === "number" && (typeof value !== "number" || !Number.isFinite(value))) return `${label} must be a finite number`;
-  if (type === "integer" && (!Number.isInteger(value))) return `${label} must be an integer`;
-  if (type === "array") {
-    if (!Array.isArray(value)) return `${label} must be an array`;
-    for (let index = 0; index < value.length; index += 1) {
-      const itemError = localSchemaTypeError(value[index], schema.items, `${label}[${index}]`);
-      if (itemError) return itemError;
-    }
-  }
-  if (type === "object") {
-    const object = plainObject(value);
-    if (!object) return `${label} must be an object`;
-    const properties = plainObject(schema.properties) || {};
-    for (const required of Array.isArray(schema.required) ? schema.required : []) {
-      if (!Object.hasOwn(object, required)) return `${label}.${required} is required`;
-    }
-    if (schema.additionalProperties === false) {
-      const extra = Object.keys(object).find((key) => !Object.hasOwn(properties, key));
-      if (extra) return `${label}.${extra} is not allowed`;
-    }
-    for (const [key, child] of Object.entries(properties)) {
-      if (!Object.hasOwn(object, key)) continue;
-      const childError = localSchemaTypeError(object[key], child, `${label}.${key}`);
-      if (childError) return childError;
-    }
-  }
-  return null;
-}
-
 function validateLocalToolArguments(tool, args) {
-  const error = localSchemaTypeError(args, plainObject(tool?.parameters) || { type: "object" }, "arguments");
-  return error ? `Error: Invalid ${tool?.name || "tool"} arguments: ${error}. No tool ran.` : null;
+  const validation = validateToolArguments(tool, args);
+  return validation.ok
+    ? null
+    : `Error: Invalid ${tool?.name || "tool"} arguments: ${validation.message}. No tool ran.`;
 }
 
 export function buildLocalPlannerToolInstructions(

@@ -34,7 +34,7 @@ import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
 import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
-import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
+import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 import { reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
 
@@ -556,17 +556,30 @@ export async function callProvider(promptText, {
         if (usage.inputTokens != null || usage.outputTokens != null || usage.cachedInputTokens != null) {
           terminalUsageFlush.noteUsage();
         }
-        if (!resumeSessionHandle && (totals.inputTokens != null || totals.outputTokens != null)) {
-          const progressKey = JSON.stringify(totals);
+        const liveRequestUsage = extractLiveRequestUsageFromEvent(msg);
+        const aggregateProgressAvailable = !resumeSessionHandle
+          && (totals.inputTokens != null || totals.outputTokens != null);
+        if (liveRequestUsage || aggregateProgressAvailable) {
+          const progress = liveRequestUsage
+            ? {
+              provider: "codex",
+              modelName: modelToUse,
+              ...totals,
+              ...liveRequestUsage,
+            }
+            : {
+              provider: "codex",
+              modelName: modelToUse,
+              ...totals,
+              precision: "aggregate_only",
+            };
+          const progressKey = JSON.stringify(progress);
           if (progressKey !== previousUsageProgress) {
             previousUsageProgress = progressKey;
             try {
               onUsageProgress?.({
                 sequenceId: ++usageProgressSequence,
-                provider: "codex",
-                modelName: modelToUse,
-                ...totals,
-                precision: "aggregate_only",
+                ...progress,
               });
             } catch { /* progress telemetry cannot break provider execution */ }
           }

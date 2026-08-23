@@ -1,4 +1,4 @@
-function toolReference(suite, canonicalName) {
+export function toolReference(suite, canonicalName) {
   return Object.freeze({
     suite: String(suite || "").trim(),
     canonicalName: String(canonicalName || "").trim(),
@@ -32,4 +32,9 @@ export function normalizeToolReference(reference) {
     throw new TypeError("Tool references require suite and canonicalName");
   }
   return { suite, canonicalName };
+}
+
+export function formatToolReference(reference) {
+  const { suite, canonicalName } = normalizeToolReference(reference);
+  return `${suite}.${canonicalName}`;
 }

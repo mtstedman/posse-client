@@ -8,7 +8,10 @@
 // live in
 // lib/domains/integrations/functions/deterministic-mcp/tool-descriptors.js.
 
-import { AGENT_HANDOFF_PROTOCOL } from "./handoff.js";
+import {
+  AGENT_HANDOFF_PROTOCOL,
+  AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
+} from "./handoff.js";
 import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
 
 // Compatibility facade. Existing consumers retain this path while catalog
@@ -26,10 +29,10 @@ export const TOOL_READ_FILE = {
     properties: {
       path: { type: "string", description: "File path (absolute or relative to working directory)" },
       offset: { type: "integer", description: "Starting line number, 1-based. Default: 1" },
-      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000" },
+      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds." },
       maxBytes: { type: "integer", description: "Maximum bytes to return in structured mode." },
-      search: { type: "string", description: "Case-insensitive regex pattern to search within the selected line range." },
-      searchContext: { type: "integer", description: "Context lines around each search match in structured mode." },
+      search: { type: "string", maxLength: 200, description: "Case-insensitive regex pattern to search within the selected line range. Unsafe nested-quantifier patterns are treated as literal text; results are capped at 100 matches." },
+      searchContext: { type: "integer", minimum: 0, description: "Context lines around each search match in structured mode. Used only with search; default 2." },
       jsonPath: { type: "string", description: "Dot-separated JSON path to extract from a JSON file." },
     },
     required: ["path"],
@@ -59,6 +62,16 @@ export const TOOL_WRITE_FILE = {
   },
 };
 
+function exclusiveEditMode(...fields) {
+  const allowed = ["path", ...fields];
+  return {
+    type: "object",
+    properties: Object.fromEntries(allowed.map((name) => [name, {}])),
+    required: allowed,
+    additionalProperties: false,
+  };
+}
+
 export const TOOL_EDIT_FILE = {
   type: "function",
   name: "edit_file",
@@ -84,9 +97,9 @@ export const TOOL_EDIT_FILE = {
       },
       replacePattern: {
         type: "object",
-        description: "Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Replacement uses JavaScript replacement syntax ($1, $$).",
+        description: "Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Patterns longer than 500 characters or with unsafe nested quantifiers are rejected. Replacement uses JavaScript replacement syntax ($1, $$).",
         properties: {
-          pattern: { type: "string", description: "Regex pattern to replace" },
+          pattern: { type: "string", minLength: 1, maxLength: 500, description: "Regex pattern to replace. Unsafe nested quantifiers are rejected." },
           replacement: { type: "string", description: "Replacement text. Supports JavaScript replacement tokens such as $1 for capture groups and $$ for a literal dollar sign." },
           global: { type: "boolean", description: "Replace all matches. Default: false" },
         },
@@ -112,6 +125,15 @@ export const TOOL_EDIT_FILE = {
       },
     },
     required: ["path"],
+    oneOf: [
+      exclusiveEditMode("old_string", "new_string"),
+      exclusiveEditMode("replaceLines"),
+      exclusiveEditMode("replacePattern"),
+      exclusiveEditMode("insertAt"),
+      exclusiveEditMode("append"),
+      exclusiveEditMode("jsonPath", "jsonValue"),
+      exclusiveEditMode("executable"),
+    ],
     additionalProperties: false,
   },
 };
@@ -215,7 +237,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
         type: "object",
         properties: {
           path: { type: "string", minLength: 1, maxLength: 500 },
-          rank: { type: "integer", minimum: 1, maximum: 100 },
+          rank: { type: "integer", minimum: 1, maximum: 100, description: "One-based priority order; must equal this entry's position in the array." },
           usefulness: { type: "string", enum: ["primary", "supporting", "context", "low"] },
           evidence: { type: "string", enum: ["audited_file_read", "atlas", "search", "prior_research", "web"] },
           reason: { type: "string", minLength: 1, maxLength: 240 },
@@ -227,7 +249,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
     patterns: {
       type: "array",
       maxItems: 50,
-      description: "Terminal array form of the fallback pattern-name to description object.",
+      description: "Terminal array form of the fallback pattern-name to description object. Pattern names must be unique.",
       items: {
         type: "object",
         properties: {
@@ -252,7 +274,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
     absence_checks: {
       type: "array",
       maxItems: 20,
-      description: "Repository-absence claims backed by one exact repository-wide search receipt. Omit when making no absence claim.",
+      description: "Repository-absence claims backed by one exact repository-wide search receipt. Each check must match a claim with identical text, and that claim's proof must select the same ref as evidence_ref. Omit when making no absence claim.",
       items: {
         type: "object",
         properties: {
@@ -304,12 +326,145 @@ const AGENT_HANDOFF_PLANNER_REPORT_FIELDS = {
   test_command: { type: "string", minLength: 1, maxLength: 1000 },
 };
 
+function forbidAgentHandoffScopeFields(fields) {
+  return {
+    properties: {
+      handoffs: {
+        items: {
+          properties: {
+            report: {
+              properties: {
+                scope: {
+                  not: { anyOf: fields.map((field) => ({ required: [field] })) },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+const AGENT_HANDOFF_PLANNER_TASK_REQUIREMENTS = {
+  properties: {
+    handoffs: {
+      items: {
+        allOf: [{
+          if: {
+            properties: {
+              target: {
+                properties: { kind: { const: "agent" } },
+                required: ["kind"],
+              },
+            },
+            required: ["target"],
+          },
+          then: {
+            properties: {
+              report: {
+                properties: { success_criteria: { minItems: 1 } },
+                required: ["success_criteria"],
+              },
+            },
+          },
+        }],
+      },
+    },
+  },
+};
+
+const HANDOFF_REF = {
+  type: "string",
+  pattern: "^#[0-9a-z]{4,12}$",
+  description: "Opaque stored evidence ref such as #a3f9.",
+};
+
+const HANDOFF_SELECTOR_STRING_PATTERN =
+  "^(?:#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?|[^#\\r\\n]+:L?[0-9]+(?:-L?[0-9]+)?)$";
+const HANDOFF_REF_SELECTOR_STRING_PATTERN =
+  "^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$";
+
+function evidenceSelector({
+  maxLineCount = 2000,
+  description,
+  allowPath = true,
+} = {}) {
+  const lines = {
+    type: "object",
+    description:
+      "A 1-based source window for a path selector. For source-backed refs, start/count use source-file line numbers shown in gutters or source metadata, and the range must fit wholly within one recorded source window. " +
+      "For materialized non-source refs, start/count address stored payload lines. Omitted lines on a ref object select the entire stored ref. An evidence_ref identifies already-visible text and should be cited directly; calling a traversal_ref first promotes that same identity to evidence.",
+    properties: {
+      start: { type: "integer", minimum: 1 },
+      count: { type: "integer", minimum: 1, maximum: maxLineCount },
+    },
+    required: ["start", "count"],
+    additionalProperties: false,
+  };
+  const selectorVariants = [
+    {
+      type: "string",
+      pattern: allowPath
+        ? HANDOFF_SELECTOR_STRING_PATTERN
+        : HANDOFF_REF_SELECTOR_STRING_PATTERN,
+      description: allowPath
+        ? "A visible stored ref such as #abcd:23-40, or a surfaced file path such as src/x.js:23-40 (src/x.js:23 selects one line)."
+        : "An immutable stored evidence ref returned by the child cursor, such as #abcd:23-40.",
+    },
+    {
+      type: "object",
+      properties: {
+        ref: HANDOFF_REF,
+        path: { type: "string" },
+        lines,
+      },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  ];
+  if (allowPath) {
+    selectorVariants.push({
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500,
+          description:
+            "An exact, uniquely suffixed, or uniquely basenamed canonical path already surfaced to this agent call.",
+        },
+        lines,
+      },
+      required: ["path", "lines"],
+      additionalProperties: false,
+    });
+  }
+  return {
+    description,
+    oneOf: selectorVariants,
+  };
+}
+
+const HANDOFF_EVIDENCE_SELECTOR = evidenceSelector({
+  description:
+    "Select bounded evidence from a visible stored ref or an already-surfaced file path. Prefer slices of at most 40 lines and 4000 characters; 300 lines and 24000 characters per selector are compactness recommendations, not rejection gates. " +
+    "For larger refs, select a tighter server-side source_ref slice when practical. Keep total evidence near 12000 characters; 32000 is the recommended non-child packet target. " +
+    "The runtime accepts complete evidence up to hard safety ceilings of 2000 lines and 131072 characters per selector, and 196608 characters total. " +
+    "Inline authored chunks belong in support or decoy; direct tool refs and verified source_ref slices may be proof. File-backed selectors are support by default and may be proof only when the selected range is at most 40 lines.",
+});
+
+const COMPACT_HANDOFF_SELECTOR = evidenceSelector({
+  description:
+    "Visible evidence selected by a stored ref such as #abcd:23-40, a surfaced path such as src/x.js:23-40, or the equivalent {path,lines} object. Use bare range numbers in canonical output.",
+});
+
 export const TOOL_AGENT_HANDOFF = {
   type: "function",
   name: "agent_handoff",
   description:
     "Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. " +
-    `Other roles submit ${AGENT_HANDOFF_PROTOCOL} with hash-ref selectors. Posse ends provider generation after acknowledging the receipt.`,
+    `Other roles submit ${AGENT_HANDOFF_PROTOCOL} with evidence selectors. Posse ends provider generation after acknowledging the receipt.`,
   parameters: {
     oneOf: [
       TERMINAL_COMPLETION_PARAMETERS,
@@ -342,7 +497,7 @@ export const TOOL_AGENT_HANDOFF = {
         type: "string",
         enum: ["low", "medium", "high"],
         description:
-          "Assessor confidence in the terminal verdict. Required by the assessor role projection; accepted here for staggered client/prompt rollout.",
+          "Assessor-only confidence in the terminal verdict. Required for assessor.verdict.v1 and invalid for every other profile.",
       },
       handoffs: {
         type: "array",
@@ -358,7 +513,7 @@ export const TOOL_AGENT_HANDOFF = {
               description:
                 "Profile target: researcher.pipeline.v1, dev.result.v1, artificer.result.v1, and assessor.verdict.v1 use pipeline/$pipeline; " +
                 "researcher.report.v1 uses result/$result; planner.plan.v1 uses agent/dev|artificer or system/promote; " +
-                "citation_synthesis.v1 uses parent/$parent. For system/promote, put each exact repository destination file in report.scope.files_to_create or files_to_modify; Posse derives deterministic mappings.",
+                "planner.plan.v1 may also use system/human_input; citation_synthesis.v1 uses parent/$parent. For system/promote, put each exact repository destination file in report.scope.files_to_create or files_to_modify; Posse derives deterministic mappings.",
               properties: {
                 kind: { type: "string", enum: ["agent", "system", "pipeline", "result", "parent"] },
                 role: { type: "string", enum: ["dev", "artificer", "human_input", "promote", "$pipeline", "$result", "$parent"] },
@@ -373,15 +528,20 @@ export const TOOL_AGENT_HANDOFF = {
                 "Allowed fields are summary, claims, scope, constraints, success_criteria, questions, research, planner execution metadata, and payload. " +
                 "Omit payload or pass {}; put repository paths in scope and explanation in summary or claims.",
               properties: {
-                summary: { type: "string", maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
+                summary: {
+                  type: "string",
+                  description:
+                    "The complete terminal report for researcher.report.v1; the planning synthesis for researcher.pipeline.v1. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
+                },
                 claims: {
                   type: "array",
                   maxItems: 12,
                   description:
-                    'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["#ref"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
-                    "The evidence object is optional. Hash refs are legal in narrative text and remain compact opaque references there. Only proof, support, and decoy selector positions are deterministically resolved, range-validated, and expanded. " +
+                    "Optional in both researcher profiles. For researcher.report.v1 these are the cited facts the report rests on; the report body is summary. " +
+                    'Exact tuple form: [["specific claim text", {"proof":["#ref:1-3"], "support":["src/x.js:23-40"], "decoy":[["#ref","reason"]], "prose":"optional synthesis"}]]. ' +
+                    "For researcher profiles, every claim must carry at least one proof or support selector; put uncited narrative in summary. A prose #ref or path:line citation alone does not satisfy this rule. Only proof, support, and decoy selector positions are deterministically resolved, range-validated, and expanded. " +
                     "Proof accepts only storage-owned tool evidence; agent-created prose refs may appear only in support or decoy. " +
-                    "Evidence lanes contain opaque hash-ref selectors. File paths and path:line citations belong in narrative text.",
+                    "Evidence lanes accept visible stored refs and already-surfaced file ranges in string or object form.",
                   items: {
                     type: "array",
                     minItems: 1,
@@ -392,8 +552,8 @@ export const TOOL_AGENT_HANDOFF = {
                         {
                           type: "object",
                           properties: {
-                            proof: { type: "array", maxItems: 8, items: { oneOf: [{ type: "string" }, { type: "object" }] } },
-                            support: { type: "array", maxItems: 8, items: { oneOf: [{ type: "string" }, { type: "object" }] } },
+                            proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
+                            support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
                             decoy: { type: "array", maxItems: 8, items: { type: "array", minItems: 2, maxItems: 2 } },
                             prose: { type: "string", maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
                           },
@@ -417,9 +577,9 @@ export const TOOL_AGENT_HANDOFF = {
                     files_to_create: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
-                    output_root: { type: "string", maxLength: 500 },
-                    key_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
-                    related_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
+                    output_root: { type: "string", maxLength: 500, description: "Planner-only output root. Invalid for non-planner profiles." },
+                    key_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 }, description: "Researcher-only verified seed files. Invalid for non-researcher profiles." },
+                    related_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 }, description: "Researcher-only related seed files. Invalid for non-researcher profiles." },
                   },
                   additionalProperties: false,
                 },
@@ -435,15 +595,71 @@ export const TOOL_AGENT_HANDOFF = {
                   additionalProperties: false,
                 },
               },
-              required: ["summary", "claims"],
+              required: ["summary"],
               additionalProperties: false,
             },
           },
-          required: ["id", "depends_on", "target", "intent", "report"],
+          required: ["target", "report"],
           additionalProperties: false,
         },
         },
         },
+        allOf: [
+          {
+            if: {
+              properties: { profile: { not: { const: "researcher.report.v1" } } },
+              required: ["profile"],
+            },
+            then: {
+              properties: {
+                handoffs: {
+                  items: {
+                    properties: {
+                      report: {
+                        properties: {
+                          summary: { maxLength: 4000 },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          {
+            if: {
+              properties: { profile: { const: "assessor.verdict.v1" } },
+              required: ["profile"],
+            },
+            then: { required: ["confidence"] },
+            else: { not: { required: ["confidence"] } },
+          },
+          {
+            if: {
+              properties: {
+                profile: {
+                  not: { enum: ["researcher.pipeline.v1", "researcher.report.v1"] },
+                },
+              },
+              required: ["profile"],
+            },
+            then: forbidAgentHandoffScopeFields(["key_files", "related_files"]),
+          },
+          {
+            if: {
+              properties: { profile: { not: { const: "planner.plan.v1" } } },
+              required: ["profile"],
+            },
+            then: forbidAgentHandoffScopeFields(["output_root"]),
+          },
+          {
+            if: {
+              properties: { profile: { const: "planner.plan.v1" } },
+              required: ["profile"],
+            },
+            then: AGENT_HANDOFF_PLANNER_TASK_REQUIREMENTS,
+          },
+        ],
         required: ["protocol", "profile", "outcome", "handoffs"],
         additionalProperties: false,
       },
@@ -490,44 +706,6 @@ export const TOOL_AGENT_HANDOFF_ARTIFICER = {
   },
 };
 
-const HANDOFF_REF = {
-  type: "string",
-  pattern: "^#[0-9a-z]{4,12}$",
-  description: "Opaque hash ref such as #a3f9. File paths and path:line citations belong in narrative text.",
-};
-
-const HANDOFF_EVIDENCE_SELECTOR = {
-  type: "object",
-  description:
-    "Select bounded stored evidence. Prefer slices of at most 40 lines and 4000 characters; 300 lines and 24000 characters per selector are compactness recommendations, not rejection gates. " +
-    "For larger refs, select a tighter server-side source_ref slice when practical. Keep total evidence near 12000 characters; 32000 is the recommended non-child packet target. " +
-    "The runtime accepts complete evidence up to hard safety ceilings of 2000 lines and 131072 characters per selector, and 196608 characters total. " +
-    "Inline authored chunks belong in support or decoy; direct tool refs and verified source_ref slices may be proof.",
-  properties: {
-    ref: HANDOFF_REF,
-    lines: {
-      type: "object",
-      description:
-        "Optional 1-based window into this exact ref. For source-backed refs, start/count use source-file line numbers shown in gutters or source metadata, not lines in a stored JSON/tool envelope; the range must fit wholly within one source window from the same ref. " +
-        "For materialized non-source refs, start/count address ref-text lines. Omitted lines select the entire stored ref. An evidence_ref identifies already-visible text and should be cited directly. Missing content has a separate traversal_ref; traverse it and cite the returned evidence_ref.",
-      properties: {
-        start: { type: "integer", minimum: 1 },
-        count: { type: "integer", minimum: 1, maximum: 2000 },
-      },
-      required: ["start", "count"],
-      additionalProperties: false,
-    },
-  },
-  required: ["ref"],
-  additionalProperties: false,
-};
-
-const COMPACT_HANDOFF_SELECTOR = {
-  type: "string",
-  pattern: "^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$",
-  description: "Opaque stored ref, preferably narrowed to an inclusive line range such as #abcd:L23-L40.",
-};
-
 const HANDOFF_DECOY = {
   type: "object",
   properties: {
@@ -541,7 +719,7 @@ const HANDOFF_DECOY = {
 const HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One concise claim with stored evidence selected by bounded ref line ranges.",
+    "One concise claim with evidence selected by bounded stored-ref or surfaced-file ranges.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 240 },
     proof: { type: "array", maxItems: 4, items: COMPACT_HANDOFF_SELECTOR },
@@ -562,7 +740,7 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "One section of the terminal research report. Put the complete substantive section in claim. For researcher.report.v1, reserve the optional summary for distinct framing; researcher.pipeline.v1 may use it for planning synthesis. Ordinary repository path:line citations are allowed in narrative text. Evidence refs are optional.",
+    "One cited research claim. Every claim carries at least one proof or support selector; a prose #ref or path:line does not satisfy this. Put uncited narrative in summary.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
@@ -573,9 +751,12 @@ const RESEARCHER_HANDOFF_CLAIM = {
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "For researcher.report.v1 this must be non-empty and contain the substantive terminal report; a summary-only report is rejected. The complete claims batch is accepted intact. researcher.pipeline.v1 may leave it empty.",
+    "Optional in both profiles. For researcher.report.v1 these are the cited facts the report rests on; the report body is summary.",
   items: RESEARCHER_HANDOFF_CLAIM,
 };
+
+const RESEARCHER_PIPELINE_LIMITS =
+  AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY["researcher.pipeline.v1"];
 
 const HANDOFF_STRING_LIST = {
   type: "array",
@@ -656,7 +837,11 @@ function exactReport(properties, required = ["summary"], {
   return {
     type: "object",
     properties: {
-      summary: { type: "string", maxLength: summaryMaxLength, description: summaryDescription },
+      summary: {
+        type: "string",
+        ...(Number.isInteger(summaryMaxLength) ? { maxLength: summaryMaxLength } : {}),
+        description: summaryDescription,
+      },
       claims: { ...claims, default: [] },
       ...properties,
     },
@@ -668,18 +853,23 @@ function exactReport(properties, required = ["summary"], {
 function exactHandoff(target, report, { commonFields = COMMON_HANDOFF_FIELDS } = {}) {
   return {
     type: "object",
-    description: "Use nested report. Flat report fields remain accepted as migration aliases.",
-    properties: { ...commonFields, target, report, ...report.properties },
-    required: ["target"],
-    anyOf: [
-      { type: "object", required: ["report"] },
-      ...Object.keys(report.properties).map((key) => ({ type: "object", required: [key] })),
-    ],
+    description: "Submit terminal content in the nested report object. Flat report fields are rejected by the agent-facing schema.",
+    properties: { ...commonFields, target, report },
+    required: ["target", "report"],
     additionalProperties: false,
   };
 }
 
-function semanticRoleTool({ description, profile, profiles = [profile], outcomes, handoff, maxHandoffs, confidence = false }) {
+function semanticRoleTool({
+  description,
+  profile,
+  profiles = [profile],
+  outcomes,
+  handoff,
+  maxHandoffs,
+  confidence = false,
+  rules = [],
+}) {
   return {
     type: "function",
     name: "agent_handoff",
@@ -704,6 +894,7 @@ function semanticRoleTool({ description, profile, profiles = [profile], outcomes
           items: handoff,
         },
       },
+      ...(rules.length > 0 ? { allOf: rules } : {}),
       required: ["protocol", "profile", "outcome", ...(confidence ? ["confidence"] : []), "handoffs"],
       additionalProperties: false,
     },
@@ -719,7 +910,6 @@ const PLANNER_COMPACT_TASK_V3 = {
     id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates task-N when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
     depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
     role: { type: "string", enum: ["dev", "artificer", "human_input", "promote"] },
-    job_type: { type: "string", enum: ["dev", "artificer", "human_input", "promote"], description: "Deprecated migration alias for role." },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
     summary: {
       type: "string",
@@ -735,61 +925,38 @@ const PLANNER_COMPACT_TASK_V3 = {
     success_criteria: { ...HANDOFF_STRING_LIST, minItems: 1 },
     ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
   },
-  required: ["summary", "scope", "success_criteria"],
-  anyOf: [
-    { type: "object", required: ["role"] },
-    { type: "object", required: ["job_type"] },
-  ],
+  required: ["role", "summary", "scope", "success_criteria"],
   additionalProperties: false,
 };
 
-const CITATION_EVIDENCE_SELECTOR = {
-  ...HANDOFF_EVIDENCE_SELECTOR,
-  description: "Citation-child selector. The selected evidence is limited to 40 lines and the 4000-character child evidence budget. Narrow it before the first handoff; normally select no more than 10 decisive lines from one input.",
-  properties: {
-    ...HANDOFF_EVIDENCE_SELECTOR.properties,
-    lines: {
-      ...HANDOFF_EVIDENCE_SELECTOR.properties.lines,
-      properties: {
-        ...HANDOFF_EVIDENCE_SELECTOR.properties.lines.properties,
-        count: { type: "integer", minimum: 1, maximum: 40 },
-      },
-    },
-  },
-};
+const CITATION_EVIDENCE_SELECTOR = evidenceSelector({
+  maxLineCount: 40,
+  allowPath: false,
+  description:
+    "Citation-child selector for an immutable ref returned by the private cursor. Paths are not accepted. Prefer at most 40 selected lines while staying within the 4000-character child evidence budget. Narrow it before the first handoff; normally select no more than 10 decisive lines from one input.",
+});
 
 const CITATION_DECOY = {
   type: "object",
   properties: {
     selector: CITATION_EVIDENCE_SELECTOR,
-    ref: HANDOFF_REF,
-    lines: CITATION_EVIDENCE_SELECTOR.properties.lines,
     reason: { type: "string", minLength: 1, maxLength: 80 },
-    summary: { type: "string", minLength: 1, maxLength: 80 },
   },
-  anyOf: [
-    { type: "object", required: ["selector"] },
-    { type: "object", required: ["ref"] },
-  ],
+  required: ["selector", "reason"],
   additionalProperties: false,
 };
 
 const CITATION_CLAIM = {
   type: "object",
-  description: "Concise citation-child claim. claim/name and summary/prose are migration aliases; prefer claim and summary.",
+  description: "Concise citation-child claim with optional evidence and synthesis.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 160 },
-    name: { type: "string", minLength: 1, maxLength: 160 },
     proof: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
     support: { type: "array", maxItems: 8, items: CITATION_EVIDENCE_SELECTOR },
     decoy: { type: "array", maxItems: 1, items: CITATION_DECOY },
     summary: { type: "string", maxLength: 100 },
-    prose: { type: "string", maxLength: 100 },
   },
-  anyOf: [
-    { type: "object", required: ["claim"] },
-    { type: "object", required: ["name"] },
-  ],
+  required: ["claim"],
   additionalProperties: false,
 };
 
@@ -806,39 +973,28 @@ const CITATION_HANDOFF_FIELDS = {
 
 const V2_HANDOFF_DECOY = {
   type: "object",
-  description: "Canonical selector/reason decoy. Flat ref/lines and summary are accepted as migration aliases.",
+  description: "Canonical selector/reason decoy.",
   properties: {
     selector: HANDOFF_EVIDENCE_SELECTOR,
-    ref: HANDOFF_REF,
-    lines: HANDOFF_EVIDENCE_SELECTOR.properties.lines,
     reason: { type: "string", minLength: 1, maxLength: 500 },
-    summary: { type: "string", minLength: 1, maxLength: 500 },
   },
-  anyOf: [
-    { type: "object", required: ["selector"] },
-    { type: "object", required: ["ref"] },
-  ],
+  required: ["selector", "reason"],
   additionalProperties: false,
 };
 
 const V2_HANDOFF_CLAIM = {
   type: "object",
   description:
-    "One specific claim with optional evidence. Use summary for brief synthesis. Place hash refs in proof, support, or decoy selectors, while claim and summary contain narrative text. " +
+    "One specific claim with optional evidence. Use summary for brief synthesis. Place visible stored refs or surfaced file ranges in proof, support, or decoy selectors, while claim and summary contain narrative text. " +
     "Proof uses a direct storage-owned tool ref or a verified server-side source_ref slice; inline agent-authored refs belong in support or decoy.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 1000 },
-    name: { type: "string", minLength: 1, maxLength: 1000, description: "Deprecated migration alias for claim." },
     proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
     support: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
     decoy: { type: "array", maxItems: 8, items: V2_HANDOFF_DECOY },
     summary: { type: "string", maxLength: 4000, description: "Optional claim synthesis. Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
-    prose: { type: "string", maxLength: 4000, description: "Deprecated migration alias for summary." },
   },
-  anyOf: [
-    { type: "object", required: ["claim"] },
-    { type: "object", required: ["name"] },
-  ],
+  required: ["claim"],
   additionalProperties: false,
 };
 
@@ -851,16 +1007,17 @@ const V2_HANDOFF_CLAIMS = {
 const V2_RESEARCHER_HANDOFF_CLAIM = {
   ...V2_HANDOFF_CLAIM,
   description:
-    "One specific research claim with optional evidence. For researcher.report.v1 put the complete answer section in claim and omit summary/prose; researcher.pipeline.v1 may use summary for distinct planning synthesis.",
+    "One cited research claim. Every claim carries at least one proof or support selector; a prose #ref or path:line does not satisfy this. Put uncited narrative in summary.",
   properties: {
     ...V2_HANDOFF_CLAIM.properties,
     summary: { ...V2_HANDOFF_CLAIM.properties.summary, description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
-    prose: { ...V2_HANDOFF_CLAIM.properties.prose, description: "Deprecated pipeline-only alias for summary. Omit for researcher.report.v1." },
   },
 };
 
 const V2_RESEARCHER_HANDOFF_CLAIMS = {
   ...V2_HANDOFF_CLAIMS,
+  description:
+    "Optional in both profiles. For researcher.report.v1 these are the cited facts the report rests on; the report body is summary.",
   items: V2_RESEARCHER_HANDOFF_CLAIM,
 };
 
@@ -881,7 +1038,9 @@ const V2_RESEARCHER_REPORT = exactReport({
   research: AGENT_HANDOFF_RESEARCH_DATA,
 }, ["summary"], {
   claims: V2_RESEARCHER_HANDOFF_CLAIMS,
-  summaryDescription: "Brief report introduction with framing distinct from the substantive answer in claims.",
+  summaryMaxLength: null,
+  summaryDescription:
+    "The complete terminal report for researcher.report.v1; the planning synthesis for researcher.pipeline.v1.",
 });
 
 const V2_PLANNER_COMPACT_TASK = {
@@ -896,11 +1055,11 @@ const V2_ASSESSOR_CLAIM = {
   type: "object",
   description:
     "One verdict claim. Use exactly claim plus optional summary and optional proof. " +
-    "proof contains visible stored hash-ref strings such as #abcd; terminal assessor proof may use either tool-owned evidence or agent-authored prose refs.",
+    "proof contains visible stored refs or surfaced file ranges; terminal assessor proof may use either tool-owned evidence or agent-authored prose refs.",
   properties: {
     claim: { type: "string", minLength: 1, maxLength: 1000 },
     summary: { type: "string", maxLength: 4000 },
-    proof: { type: "array", maxItems: 8, items: HANDOFF_REF },
+    proof: { type: "array", maxItems: 8, items: HANDOFF_EVIDENCE_SELECTOR },
   },
   required: ["claim"],
   additionalProperties: false,
@@ -915,7 +1074,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. In report mode put each complete answer section in claim and use report.summary as a distinct brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional and come from narrow refs already available; 40-line slices are preferred when refs add value. Submit the selected profile's report fields. The receipt ends provider generation.",
+    "Finish research with the profile named by the active prompt: pipeline research targets pipeline/$pipeline; report research targets result/$result. In report mode put the report in summary and cited facts in claims. Every claim carries at least one proof or support selector; put uncited narrative in summary. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. Submit the selected profile's report fields. The receipt ends provider generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -923,6 +1082,27 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
     oneOf: [exactTarget("pipeline", "$pipeline"), exactTarget("result", "$result")],
   }, V2_RESEARCHER_REPORT),
   maxHandoffs: 1,
+  rules: [{
+    if: {
+      properties: { profile: { const: "researcher.pipeline.v1" } },
+      required: ["profile"],
+    },
+    then: {
+      properties: {
+        handoffs: {
+          items: {
+            properties: {
+              report: {
+                properties: {
+                  summary: { maxLength: RESEARCHER_PIPELINE_LIMITS.maxSummaryChars },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  }],
 });
 
 export const TOOL_AGENT_HANDOFF_PLANNER = {
@@ -977,7 +1157,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode, claims contain the substantive terminal report and the top-level summary provides a distinct brief introduction. Target fewer than 900 characters per claim and 12000 characters overall. Evidence refs are optional and come from narrow refs already available. Follow the schema exactly. The receipt ends provider generation.",
+    "Finish research using the active profile. In report mode put the report in summary and cited facts in claims. Every claim carries at least one proof or support selector; put uncited narrative in summary. Use narrow visible refs or surfaced file ranges, preferably no more than 40 lines. Follow the schema exactly. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -989,7 +1169,12 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         enum: ["success", "gap", "input_required", "complete"],
       },
-      summary: { type: "string", minLength: 1, description: "For researcher.report.v1 this is a brief introduction with framing distinct from claim text." },
+      summary: {
+        type: "string",
+        minLength: 1,
+        description:
+          "The complete terminal report for researcher.report.v1; the planning synthesis for researcher.pipeline.v1.",
+      },
       claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
       key_files: {
         type: "array",
@@ -1031,7 +1216,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
           type: "object",
           properties: {
             path: { type: "string", minLength: 1, maxLength: 300 },
-            rank: { type: "integer", minimum: 1, maximum: 12 },
+            rank: { type: "integer", minimum: 1, maximum: 12, description: "One-based priority order; must equal this entry's position in the array." },
             usefulness: { type: "string", enum: ["primary", "supporting", "context", "low"] },
             evidence: { type: "string", enum: ["audited_file_read", "atlas", "search", "prior_research", "web"] },
             reason: { type: "string", minLength: 1, maxLength: 160 },
@@ -1043,6 +1228,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
       patterns: {
         type: "array",
         maxItems: 8,
+        description: "Observed pattern names and descriptions. Pattern names must be unique.",
         items: {
           type: "object",
           properties: {
@@ -1061,16 +1247,30 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
       },
     },
     required: ["profile", "outcome", "summary"],
-    allOf: [{
-      if: {
-        properties: { profile: { const: "researcher.report.v1" } },
-        required: ["profile"],
+    allOf: [
+      {
+        if: {
+          properties: { profile: { const: "researcher.pipeline.v1" } },
+          required: ["profile"],
+        },
+        then: {
+          properties: {
+            summary: {
+              maxLength: RESEARCHER_PIPELINE_LIMITS.maxSummaryChars,
+            },
+            claims: {
+              maxItems: RESEARCHER_PIPELINE_LIMITS.maxClaims,
+              items: {
+                properties: {
+                  claim: { maxLength: RESEARCHER_PIPELINE_LIMITS.maxClaimChars },
+                  summary: { maxLength: RESEARCHER_PIPELINE_LIMITS.maxClaimSummaryChars },
+                },
+              },
+            },
+          },
+        },
       },
-      then: {
-        properties: { claims: { ...RESEARCHER_HANDOFF_CLAIMS, minItems: 1 } },
-        required: ["claims"],
-      },
-    }],
+    ],
     additionalProperties: false,
   },
 };
@@ -1103,7 +1303,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
 
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
-    "Finish citation synthesis with one parent report containing supported findings in named claim objects and optional summaries. Before the first handoff, narrow every evidence selector and keep the sum of all selected line counts at 30 or fewer. Submit the citation report fields present in the schema. The receipt ends provider generation.",
+    "Finish citation synthesis with one parent report containing supported findings in named claim objects and optional summaries. Before the first handoff, narrow every evidence selector and target a sum of 30 or fewer selected lines. Submit the citation report fields present in the schema. The receipt ends provider generation.",
   profile: "citation_synthesis.v1",
   outcomes: ["complete", "partial", "failed"],
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
@@ -1122,13 +1322,18 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish assessment with one verdict and a brief prose proof drawn from the evidence already available. The receipt ends provider generation.",
+    "Finish assessment with one verdict, explicit confidence, and a brief prose proof drawn from the evidence already available. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
       verdict: {
         type: "string",
         enum: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
+      },
+      confidence: {
+        type: "string",
+        enum: ["low", "medium", "high"],
+        description: "Required confidence in the terminal verdict.",
       },
       proof: {
         type: "string",
@@ -1142,7 +1347,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
         items: { type: "string", minLength: 1, maxLength: 240 },
       },
     },
-    required: ["verdict", "proof"],
+    required: ["verdict", "confidence", "proof"],
     additionalProperties: false,
   },
 };
@@ -1164,13 +1369,13 @@ export function getAgentHandoffToolSchemaForRole(role, {
   if (normalizedRole === "planner") {
     return compactV3 ? TOOL_AGENT_HANDOFF_PLANNER_V3 : TOOL_AGENT_HANDOFF_PLANNER;
   }
-  if (["citation_synthesis", "subagent"].includes(normalizedRole)) return TOOL_AGENT_HANDOFF_CITATION;
+  if (normalizedRole === "subagent") return TOOL_AGENT_HANDOFF_CITATION;
   return TOOL_AGENT_HANDOFF;
 }
 
 // Provider-facing schemas intentionally differ from the permissive migration
-// schema in TOOL_AGENT_HANDOFF. Runtime accepts legacy tuple claims, `prose`
-// aliases, and selector strings while prompts advertise one canonical shape.
+// schema in TOOL_AGENT_HANDOFF. Runtime additionally accepts legacy tuple
+// claims and `prose` aliases at compatibility boundaries.
 
 export const TOOL_SUB_AGENT_NEXT_INPUT = {
   type: "function",
@@ -1207,7 +1412,7 @@ const SUB_AGENT_REQUEST = {
             properties: {
               id: { type: "string", minLength: 1, maxLength: 40 },
               kind: { type: "string", enum: ["ref"] },
-              ref: { type: "string", pattern: "^#[0-9A-Za-z]{4,12}(?::(?:L)?[0-9]+-(?:L)?[0-9]+)?$" },
+              ref: { type: "string", pattern: "^#[0-9a-z]{4,12}(?::[Ll]?[0-9]+(?:-[Ll]?[0-9]+)?)?$" },
             },
             required: ["id", "kind", "ref"],
             additionalProperties: false,
@@ -1298,7 +1503,7 @@ export const TOOL_LIST_FILES = {
   type: "function",
   name: "list_files",
   description:
-    "List files in a directory, optionally filtering by name pattern. Returns file paths.",
+    "List files in a directory, optionally filtering by name pattern. Returns at most 200 file paths and marks the result when additional matches were truncated.",
   parameters: {
     type: "object",
     properties: {
@@ -1320,7 +1525,7 @@ export const TOOL_SEARCH_FILES = {
   parameters: {
     type: "object",
     properties: {
-      pattern: { type: "string", description: "Regex pattern to search for" },
+      pattern: { type: "string", description: "Search pattern. Interpreted as a regex unless literal is true." },
       path: { type: "string", description: "File or directory to search in. Default: working directory" },
       include: { type: "string", description: "Glob pattern to filter files, e.g. '*.js', '*.{ts,tsx}'" },
       case_insensitive: { type: "boolean", description: "Match case-insensitively. Default: false." },
@@ -1626,7 +1831,7 @@ export const TOOL_AGENT_FEEDBACK = {
       status: {
         type: "string",
         enum: ["running", "blocked", "waiting", "verifying", "done"],
-        description: "Current visible status.",
+        description: "Current visible status. Defaults to running when omitted.",
       },
       summary: {
         type: "string",
@@ -1685,10 +1890,19 @@ export const TOOL_ACK_OPERATOR_FEEDBACK = {
       },
       reason: {
         type: "string",
+        minLength: 1,
+        maxLength: 500,
         description: "Required for rejected or deferred; optional for accepted.",
       },
     },
     required: ["interaction_id"],
+    allOf: [{
+      if: {
+        properties: { decision: { enum: ["rejected", "deferred"] } },
+        required: ["decision"],
+      },
+      then: { required: ["reason"] },
+    }],
     additionalProperties: false,
   },
 };
@@ -1704,7 +1918,7 @@ export const TOOL_BASH = {
     type: "object",
     properties: {
       command: { type: "string", description: "Shell command to execute" },
-      timeout: { type: "integer", description: "Timeout in milliseconds. Default: 60000" },
+      timeout: { type: "integer", minimum: 1, maximum: 120000, description: "Timeout in milliseconds. Default: 60000; maximum: 120000." },
     },
     required: ["command"],
     additionalProperties: false,
@@ -1716,7 +1930,7 @@ export const TOOL_RUN_SCOPED_CHECKS = {
   name: "run_scoped_checks",
   description:
     "Run the canonical deterministic lint/typecheck checks for the declared job scope in one batch, including scoped PHP syntax lint when PHP files are present. " +
-    "Returns only all-checks-passed or compact failure feedback with file/line/rule details.",
+    "Returns all-checks-passed, compact failure feedback with file/line/rule details, or an unavailable result when no supported/requested runner can execute.",
   parameters: {
     type: "object",
     properties: {
@@ -1731,6 +1945,7 @@ export const TOOL_RUN_SCOPED_CHECKS = {
         properties: {
           files: { type: "array", items: { type: "string" } },
           modifyFiles: { type: "array", items: { type: "string" } },
+          scopedFiles: { type: "array", items: { type: "string" }, description: "Additional files included in the explicit check scope." },
           createFiles: { type: "array", items: { type: "string" } },
           deleteFiles: { type: "array", items: { type: "string" } },
           roots: { type: "array", items: { type: "string" } },
@@ -1865,6 +2080,20 @@ export const TOOL_CREATE_TEST = {
         },
       },
     },
+    allOf: [
+      {
+        anyOf: [
+          { required: ["suite_id"] },
+          { required: ["suite"] },
+        ],
+      },
+      {
+        anyOf: [
+          { required: ["tests"] },
+          { required: ["name", "explanation", "language", "target_files", "test"] },
+        ],
+      },
+    ],
     required: [],
     additionalProperties: false,
   },
@@ -1875,7 +2104,7 @@ export const TOOL_RUN_TEST = {
   name: "run_test",
   description:
     "Run one or many registered Posse tests. Select one by id or by suite plus test name/slug; for a batch, provide tests (max 24). " +
-    "Returns per-test suite/name identity, pass/fail, and compact failure feedback without stopping the batch after one failure.",
+    "Only tests whose registered target files overlap the current job file scope run; others return skipped_out_of_scope. Returns per-test suite/name identity, pass/fail, and compact failure feedback without stopping the batch after one failure.",
   parameters: {
     type: "object",
     properties: {
@@ -1911,7 +2140,7 @@ export const TOOL_RUN_TEST_SUITE = {
   type: "function",
   name: "run_test_suite",
   description:
-    "Run all active tests in one registered suite. Requires a suite id/name and intentionally does not expose the full suite catalog.",
+    "Run active tests in one registered suite whose target files overlap the current job file scope. Out-of-scope tests return skipped_out_of_scope. Requires a suite id/name and intentionally does not expose the full suite catalog.",
   parameters: {
     type: "object",
     properties: {
@@ -1936,9 +2165,9 @@ export const TOOL_CHAIN_READ = {
     "unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you " +
     "classify that file as relevant or irrelevant. Large files may be paged with " +
     "offset/limit; after the file is tagged relevant, later continuation pages inherit " +
-    "that verdict. When ATLAS already returned " +
-    "source content for an indexed file, request an explicit slice of at most 250 lines " +
-    "or use search/jsonPath. " +
+    "that verdict. When ATLAS is active, indexed evidence and withheld ranges stay on the issued ATLAS " +
+    "retrieval surface; raw indexed reads are reserved for changed files or the ATLAS unavailable/strikeout " +
+    "escape hatch. " +
     "A previously relevant file restored from the audit ledger retains its verdict. " +
     "Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.",
   parameters: {
@@ -1949,10 +2178,10 @@ export const TOOL_CHAIN_READ = {
         description: "Path to the file to read (relative to project root).",
       },
       offset: { type: "integer", description: "Starting line number, 1-based. Default: 1" },
-      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000" },
+      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds." },
       maxBytes: { type: "integer", description: "Maximum bytes to return in structured mode." },
-      search: { type: "string", description: "Case-insensitive regex pattern to search within the selected line range." },
-      searchContext: { type: "integer", description: "Context lines around each search match in structured mode." },
+      search: { type: "string", maxLength: 200, description: "Case-insensitive regex pattern to search within the selected line range. Unsafe nested-quantifier patterns are treated as literal text; results are capped at 100 matches." },
+      searchContext: { type: "integer", minimum: 0, description: "Context lines around each search match in structured mode. Used only with search; default 2." },
       jsonPath: { type: "string", description: "Dot-separated JSON path to extract from a JSON file." },
     },
     required: ["path"],
@@ -1979,10 +2208,18 @@ export const TOOL_CHAIN_VERDICT = {
       },
       summary: {
         type: "string",
+        minLength: 1,
         description: "What you found. Required for irrelevant verdicts so later pruning preserves why the file was excluded.",
       },
     },
     required: ["verdict"],
+    allOf: [{
+      if: {
+        properties: { verdict: { const: "irrelevant" } },
+        required: ["verdict"],
+      },
+      then: { required: ["summary"] },
+    }],
     additionalProperties: false,
   },
 };
@@ -2007,13 +2244,15 @@ export const TOOL_PULL_BRIEF = {
       },
       missing: {
         type: "array",
+        maxItems: 20,
         items: { type: "string" },
-        description: "Optional missing file hints or identifiers to prioritize in gap_fill mode.",
+        description: "Optional missing file hints or identifiers to prioritize in gap_fill mode, up to 20.",
       },
       seed_paths: {
         type: "array",
+        maxItems: 30,
         items: { type: "string" },
-        description: "Optional relative paths to prioritize before scanning.",
+        description: "Optional relative paths to prioritize before scanning, up to 30.",
       },
       max_files: {
         type: "integer",
@@ -2025,8 +2264,8 @@ export const TOOL_PULL_BRIEF = {
       },
       include_ext: {
         type: "array",
-        items: { type: "string" },
-        description: "Optional extension allowlist, e.g. ['.js','.php'].",
+        items: { type: "string", pattern: "^\\.[^./\\\\]+$" },
+        description: "Optional extension allowlist with a leading dot on every entry, e.g. ['.js','.php']. Entries without a leading dot are ignored.",
       },
     },
     required: ["query"],
@@ -2092,8 +2331,8 @@ export const TOOL_PROJECT_DB_QUERY = {
   description:
     "Run a single SQL statement against this project's configured application database " +
     "(sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement " +
-    "types you may run depend on the granted permissions (READ→SELECT, WRITE→UPDATE, " +
-    "INSERT, DELETE, CREATE, ALTER) plus read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). " +
+    "types you may run depend on separate per-verb grants: READ enables SELECT, WRITE enables UPDATE, " +
+    "and INSERT, DELETE, CREATE, and ALTER each require their matching grant. Read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE) follows the read grant. " +
     "Read-phase roles are capped to SELECT/inspection regardless of the grant. The capability " +
     "accepts only granted statement families and excludes destructive DDL such as DROP and TRUNCATE. One statement " +
     "per call; read results are row- and byte-capped.",

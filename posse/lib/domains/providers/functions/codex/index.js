@@ -45,6 +45,7 @@ export {
   codexAgentMessageText as __testCodexAgentMessageText,
   summarizeJsonEvent as __testSummarizeCodexJsonEvent,
   extractUsageFromEvent as __testExtractCodexUsageFromEvent,
+  extractLiveRequestUsageFromEvent as __testExtractCodexLiveRequestUsageFromEvent,
   extractTurnCountFromEvent as __testExtractCodexTurnCountFromEvent,
   isTurnCompletedEvent as __testIsCodexTurnCompletedEvent,
   codexUsageEventDedupeKey as __testCodexUsageEventDedupeKey,

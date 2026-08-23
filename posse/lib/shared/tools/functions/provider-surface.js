@@ -69,7 +69,7 @@ export function renderAtlasGuidance(contract = {}) {
   const lines = [
     "Atlas symbol tracing: To get new information about a symbol, choose a different Atlas tool suited to the unresolved fact.",
     "Atlas evidence refs: evidence_ref identifies content already visible in this context. Use it directly for citation, slicing, or handoff; do not call it for the same content.",
-    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref or next_traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Each returned evidence_ref identifies the visible text, while next_traversal_ref alone advertises more missing content. Start a fresh producer call for a materially different scope.",
+    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref or next_traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different next_traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.",
   ];
   const hasCodeWindow = tools.some((tool) => canonicalToolName(tool) === "code.window");
   const policy = contract?.atlasCodeWindowPolicy;

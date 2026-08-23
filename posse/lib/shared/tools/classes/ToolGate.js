@@ -1,9 +1,12 @@
 import {
   nativeIndexedReadTargets,
   atlasDiscoveryFileTargets,
+  ATLAS_CHAIN_READ_MAX_LINES,
   isEmptySourceFileForGate,
   sourceFileVersionForGate,
 } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
+
+export { ATLAS_CHAIN_READ_MAX_LINES } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
 
 function stripAtlasPrefix(action) {
   const raw = String(action || "");
@@ -15,7 +18,6 @@ const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
 // that the exact body of every surveyed file was supplied. Only exact-code
 // retrieval should trigger the narrower repeat-read policy.
 const ATLAS_SOURCE_CONTENT_ACTIONS = new Set(["code.window", "code.lens"]);
-export const ATLAS_CHAIN_READ_MAX_LINES = 250;
 
 function effectiveAtlasAction(action, args = {}) {
   const normalized = stripAtlasPrefix(action);
@@ -34,7 +36,8 @@ function isUnavailableUnlockReason(reason) {
   const normalized = String(reason || "");
   return normalized.startsWith("atlas_")
     || normalized.startsWith("prefetch_")
-    || normalized === "atlas_unavailable";
+    || normalized === "atlas_unavailable"
+    || normalized === "fallback";
 }
 
 export class ToolGate {
@@ -204,9 +207,27 @@ export class ToolGate {
     if (indexedReadTargets.length > 0) {
       const gatedTargets = indexedReadTargets
         .filter((target) => !isEmptySourceFileForGate(target, { cwd }));
+      if (gatedTargets.length === 0) {
+        return { allowed: true, reason: "indexed_file_empty", targets: indexedReadTargets };
+      }
+
+      if (exactReadTool) {
+        const evidence = this.sourceEvidenceFiles.get(gatedTargets[0].toLowerCase());
+        if (evidence) {
+          const currentVersion = sourceFileVersionForGate(evidence.path, { cwd });
+          if (evidence.version && evidence.version !== currentVersion) {
+            return { allowed: true, reason: "indexed_file_changed_since_atlas", targets: indexedReadTargets };
+          }
+        }
+      }
+
+      if (isUnavailableUnlockReason(this.unlockReason)) {
+        return { allowed: true, reason: this.unlockReason || "atlas_unavailable", targets: indexedReadTargets };
+      }
+
       const lockedTargets = gatedTargets
         .filter((target) => !this.discoveredFiles.has(target.toLowerCase()));
-      if (lockedTargets.length > 0 && !isUnavailableUnlockReason(this.unlockReason)) {
+      if (lockedTargets.length > 0) {
         return {
           allowed: false,
           reason: "indexed_file_discovery_required",
@@ -214,51 +235,29 @@ export class ToolGate {
           targets: lockedTargets,
         };
       }
-      if (gatedTargets.length === 0) {
-        return { allowed: true, reason: "indexed_file_empty", targets: indexedReadTargets };
-      }
-      if (["read_file", "chain_read"].includes(toolName)
-        && !isUnavailableUnlockReason(this.unlockReason)) {
-        const evidence = this.sourceEvidenceFiles.get(gatedTargets[0].toLowerCase());
-        if (evidence) {
-          const currentVersion = sourceFileVersionForGate(evidence.path, { cwd });
-          if (evidence.version && evidence.version !== currentVersion) {
-            this.sourceEvidenceFiles.delete(gatedTargets[0].toLowerCase());
-            return { allowed: true, reason: "indexed_file_changed_since_atlas", targets: indexedReadTargets };
-          }
-
-          const structured = String(args?.search || "").trim() || String(args?.jsonPath || "").trim();
-          if (structured) {
-            return { allowed: true, reason: "atlas_source_structured_fallback", targets: indexedReadTargets };
-          }
-
-          const requestedLimit = Number.parseInt(String(args?.limit ?? ""), 10);
-          if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) {
-            return {
-              allowed: false,
-              reason: "atlas_source_range_required",
-              target: gatedTargets[0],
-              targets: gatedTargets,
-              maxLines: ATLAS_CHAIN_READ_MAX_LINES,
-            };
-          }
-          if (requestedLimit > ATLAS_CHAIN_READ_MAX_LINES) {
-            return {
-              allowed: false,
-              reason: "atlas_source_range_too_broad",
-              target: gatedTargets[0],
-              targets: gatedTargets,
-              maxLines: ATLAS_CHAIN_READ_MAX_LINES,
-              requestedLines: requestedLimit,
-            };
-          }
-          return { allowed: true, reason: "atlas_source_targeted_fallback", targets: indexedReadTargets };
-        }
+      if (exactReadTool) {
+        return {
+          allowed: false,
+          reason: "atlas_indexed_read_disallowed",
+          target: gatedTargets[0],
+          targets: gatedTargets,
+        };
       }
       return { allowed: true, reason: "indexed_file_discovered", targets: indexedReadTargets };
     }
     if (exactReadTool) {
-      return { allowed: true, reason: "non_indexed_or_unresolved_read" };
+      const requestedPath = String(args?.path || args?.file || args?.filePath || "").trim();
+      if (!requestedPath) return { allowed: true, reason: "non_indexed_or_unresolved_read" };
+      const requestedLimit = Number.parseInt(String(args?.limit ?? ""), 10);
+      const effectiveLineLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, ATLAS_CHAIN_READ_MAX_LINES)
+        : ATLAS_CHAIN_READ_MAX_LINES;
+      return {
+        allowed: true,
+        reason: "non_indexed_read_limited",
+        maxLines: ATLAS_CHAIN_READ_MAX_LINES,
+        effectiveLineLimit,
+      };
     }
 
     if (this.unlocked) {
@@ -272,11 +271,8 @@ export class ToolGate {
     void atlasNameStyle;
     const label = this.atlasLabel || "ATLAS";
     const decision = this.checkNativeToolAllowed(toolName, args, { cwd });
-    if (decision.reason === "atlas_source_range_required") {
-      return `${label} already supplied source evidence for ${decision.target}. Request only the exact missing slice with limit at most ${decision.maxLines}, use structured search/jsonPath, or continue synthesis.`;
-    }
-    if (decision.reason === "atlas_source_range_too_broad") {
-      return `${label} already supplied source evidence for ${decision.target}. Narrow this fallback from ${decision.requestedLines} to at most ${decision.maxLines} lines, use structured search/jsonPath, or continue synthesis.`;
+    if (decision.reason === "atlas_indexed_read_disallowed") {
+      return `${label} indexed source ${decision.target} cannot be read with ${toolName}. Use code.window in file mode with anchors (a fitting file returns whole), follow its continuation handle for withheld ranges, or use code.lens.`;
     }
     const indexedReadTargets = nativeIndexedReadTargets(toolName, args, { cwd });
     const lockedIndexedTargets = indexedReadTargets

@@ -18,7 +18,7 @@ export const TOOL_GIT_HISTORY = {
         enum: ["log", "show", "blame", "diff"],
         description: "Git history operation to run.",
       },
-      path: { type: "string", description: "Optional file path filter. Required for blame." },
+      path: { type: "string", minLength: 1, description: "Optional file path filter. Required for blame." },
       ref: { type: "string", description: "Optional git ref/revision selector (e.g. HEAD~5). For diff, two safe refs separated by whitespace are normalized to A..B." },
       limit: { type: "integer", description: "log-only result cap. Default: 20, max: 100." },
       since: { type: "string", description: "log-only --since value (e.g. 2025-01-01)." },
@@ -26,6 +26,13 @@ export const TOOL_GIT_HISTORY = {
       grep: { type: "string", description: "log-only --grep commit-message filter." },
     },
     required: ["op"],
+    allOf: [{
+      if: {
+        properties: { op: { const: "blame" } },
+        required: ["op"],
+      },
+      then: { required: ["path"] },
+    }],
     additionalProperties: false,
   },
 };
@@ -74,6 +81,7 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
         return `Error: ${err.message}`;
       }
     }
+    if (op === "blame" && !relPath) return "Error: path is required for git_history blame.";
 
     const scopeLists = scopeListsFromPredicates(scopePredicates);
     const nativePayload = {

@@ -43,6 +43,7 @@ import { combineVectorResults, normalizedSemanticQuery } from "./semantic-query.
  * @property {string} [feedbackSinceTs]          Override feedback window. Default 30 days.
  * @property {number} [feedbackHalfLifeDays]     When set, decay feedback signals by exp(-age/halfLife).
  *                                               Unset = equal-weight within the window (v1 default).
+ * @property {boolean} [feedbackEnabled]         False skips historical feedback weighting entirely.
  * @property {number} [rrfK]                     Override the RRF k constant. Default 60.
  * @property {string[]} [entities]               Optional extra ledger entity types: "feedback". (Memories moved to the per-repo memory DB; they are not an FTS entity here.)
  * @property {"name" | "body" | "either"} [searchScope]
@@ -185,6 +186,7 @@ async function hybridSearchWithPlan(args, plan) {
     taskText: options?.taskText,
     feedbackSinceTs: options?.feedbackSinceTs,
     feedbackHalfLifeDays: options?.feedbackHalfLifeDays,
+    feedbackEnabled: options?.feedbackEnabled,
     k: options?.rrfK,
   });
   const symbolRanked = options?.withinFileSymbolRerank === true
@@ -263,6 +265,7 @@ function assembleHybridResult({ fused, limit, plan, backendStatus, ledger, query
  *   taskText?: string,
  *   feedbackSinceTs?: string,
  *   feedbackHalfLifeDays?: number,
+ *   feedbackEnabled?: boolean,
  *   k?: number,
  * }} args
  * @returns {Promise<{fused:FusedSymbolEntry[], separation:RetrievalSeparation, rawScoreById:Map<string, number>}>}
@@ -276,13 +279,16 @@ async function fuseAndAdjust({
   taskText,
   feedbackSinceTs,
   feedbackHalfLifeDays,
+  feedbackEnabled = false,
   k,
 }) {
   const lists = buildFusionLists(fts, vector, graph);
   const fused = await rrfFuse(lists, { k: typeof k === "number" ? k : RRF_K });
   const separation = assessRetrievalSeparation(fused, lists);
   const rawScoreById = new Map(fused.map((entry) => [entry.id, entry.score]));
-  applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
+  if (feedbackEnabled) {
+    applyFusedFeedbackBoost(fused, { ledger, taskType, taskText, feedbackSinceTs, feedbackHalfLifeDays });
+  }
   await applyTaskQueryRanking(fused, taskText);
   return { fused, separation, rawScoreById };
 }

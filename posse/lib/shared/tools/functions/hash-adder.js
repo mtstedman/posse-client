@@ -6,7 +6,13 @@ import {
   recordObservation,
 } from "../../../domains/observability/functions/observations.js";
 import {
+  createHashRefEvidenceForContext,
+  fetchHashRefEvidenceForContext,
   fetchHashRefForContext,
+  fetchHashRefTraversalForContext,
+  issueHashRefTraversalForContext,
+  materializeHashRefEvidenceForContext,
+  promoteHashRefTraversalForContext,
   surfaceHashRefForContext,
 } from "../../../domains/queue/functions/hash-refs.js";
 import {
@@ -41,6 +47,12 @@ import {
   renderTraversalRefStub,
   traversalRefSurface,
 } from "./ref-surface.js";
+import {
+  hashRefViewSelector,
+  materializeHashRefView,
+  nextHashRefViewSelector,
+} from "./hash-ref-view.js";
+import { canonicalEvidenceSourcePath } from "./source-evidence.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -71,8 +83,6 @@ const CREATE_REF_MAX_TEXT_CHARS = 60000;
 const CREATE_REF_MAX_NOTE_CHARS = 300;
 const CREATE_REF_MAX_BATCH = 24;
 const CREATE_REF_OWNER_SCOPES = new Set(["work_item", "job"]);
-const FETCH_REF_SEARCH_MODES = new Set(["auto", "literal", "regex"]);
-const FETCH_REF_REGEX_HINT = /[\\^$.*+?()[\]{}|]/;
 const RESEARCH_FETCH_REF_MAX_REFS = 24;
 const RESEARCH_FETCH_REF_PER_REF_CHARS = 8000;
 const RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS = 32000;
@@ -336,141 +346,6 @@ function renderBoundedResult(text, {
   return lines.join("\n");
 }
 
-function boundedSearchRow({
-  line,
-  lineNumber,
-  matchStart = 0,
-  matchLength = 0,
-  maxChars,
-}) {
-  const prefix = `${lineNumber}:`;
-  const value = String(line || "");
-  const budget = Math.max(0, Number(maxChars) || 0);
-  if (budget <= prefix.length) {
-    return {
-      text: prefix.slice(0, budget),
-      truncated: value.length > 0,
-    };
-  }
-  const available = budget - prefix.length;
-  if (value.length <= available) {
-    return { text: `${prefix}${value}`, truncated: false };
-  }
-
-  const marker = "…";
-  const rawBudget = Math.max(1, available - (marker.length * 2));
-  const safeMatchStart = Math.max(0, Math.min(Number(matchStart) || 0, value.length));
-  const safeMatchLength = Math.max(0, Math.min(Number(matchLength) || 0, value.length - safeMatchStart));
-  const matchCenter = safeMatchStart + Math.floor(safeMatchLength / 2);
-  let start = Math.max(0, matchCenter - Math.floor(rawBudget / 2));
-  start = Math.min(start, Math.max(0, value.length - rawBudget));
-  let end = Math.min(value.length, start + rawBudget);
-  const leading = start > 0 ? marker : "";
-  const trailing = end < value.length ? marker : "";
-  const exactBudget = Math.max(1, available - leading.length - trailing.length);
-  if (end - start > exactBudget) end = start + exactBudget;
-  return {
-    text: `${prefix}${leading}${value.slice(start, end)}${trailing}`.slice(0, budget),
-    truncated: true,
-  };
-}
-
-function pageMaterializedText(text, args = {}) {
-  const limit = parsePositiveInt(args.limit, CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS, CONTEXT_FETCH_REF_MAX_LIMIT_CHARS);
-  const search = String(args.search || "").trim();
-  if (search) {
-    const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
-    const requestedModeValue = String(args.search_mode ?? args.searchMode ?? "auto").trim().toLowerCase();
-    const requestedMode = FETCH_REF_SEARCH_MODES.has(requestedModeValue) ? requestedModeValue : "auto";
-    const literalNeedle = search.toLowerCase();
-    const literalRows = [];
-    for (let i = 0; i < lines.length; i += 1) {
-      const matchStart = lines[i].toLowerCase().indexOf(literalNeedle);
-      if (matchStart >= 0) {
-        literalRows.push({
-          line: lines[i],
-          lineNumber: i + 1,
-          matchStart,
-          matchLength: search.length,
-        });
-      }
-    }
-
-    let rows = literalRows;
-    let searchMode = "literal";
-    let searchError = null;
-    const shouldTryRegex = requestedMode === "regex"
-      || (requestedMode === "auto" && literalRows.length === 0 && FETCH_REF_REGEX_HINT.test(search));
-    if (shouldTryRegex) {
-      try {
-        const expression = new RegExp(search, "i");
-        rows = [];
-        for (let i = 0; i < lines.length; i += 1) {
-          const match = expression.exec(lines[i]);
-          if (match) {
-            rows.push({
-              line: lines[i],
-              lineNumber: i + 1,
-              matchStart: match.index,
-              matchLength: match[0]?.length || 0,
-            });
-          }
-        }
-        searchMode = "regex";
-      } catch (err) {
-        searchError = `invalid_regex: ${err?.message || err}`;
-        if (requestedMode === "regex") rows = [];
-      }
-    }
-    const rowOffset = parsePositiveInt(args.offset, 0);
-    const selected = [];
-    let chars = 0;
-    let truncatedMatchRows = 0;
-    for (const row of rows.slice(rowOffset)) {
-      const separatorChars = selected.length > 0 ? 1 : 0;
-      const remaining = limit - chars - separatorChars;
-      if (remaining <= 0) break;
-      const rendered = boundedSearchRow({ ...row, maxChars: remaining });
-      if (!rendered.text) break;
-      selected.push(rendered.text);
-      if (rendered.truncated) truncatedMatchRows += 1;
-      chars += rendered.text.length + separatorChars;
-      if (chars >= limit) break;
-    }
-    const selectedRowCount = selected.length;
-    return {
-      text: selected.join("\n"),
-      page: {
-        mode: "search",
-        search,
-        search_mode: searchMode,
-        requested_search_mode: requestedMode,
-        search_error: searchError,
-        offset: rowOffset,
-        limit,
-        returned_chars: selected.join("\n").length,
-        match_count: rows.length,
-        truncated_match_rows: truncatedMatchRows,
-        next_offset: rowOffset + selectedRowCount < rows.length ? rowOffset + selectedRowCount : null,
-        has_more: rowOffset + selectedRowCount < rows.length,
-      },
-    };
-  }
-  const offset = parsePositiveInt(args.offset, 0);
-  const page = String(text || "").slice(offset, offset + limit);
-  return {
-    text: page,
-    page: {
-      mode: "offset",
-      offset,
-      limit,
-      returned_chars: page.length,
-      next_offset: offset + page.length < String(text || "").length ? offset + page.length : null,
-      has_more: offset + page.length < String(text || "").length,
-    },
-  };
-}
-
 function contextForHashRefs(explicitContext = {}) {
   const ambient = getObservationContext() || {};
   const explicitKeys = [
@@ -582,7 +457,7 @@ export function compactTreeScopeResult(toolName, result, {
       nextPage = {
         ranks: `${rankStart}-${rankEnd}`,
         count: pageCandidates.length,
-        ref: surfaced.entry.ref,
+        ref: surfaced.model_ref || surfaced.entry.ref,
       };
     }
   } catch (err) {
@@ -723,7 +598,7 @@ export function materializeCodeSurveyPages(data, {
       const currentPage = {
         ranks: `${rankStart}-${rankEnd}`,
         count: pageFiles.length,
-        ref: surfaced.entry.ref,
+        ref: surfaced.model_ref || surfaced.entry.ref,
       };
       if (start === 0) {
         firstPage = {
@@ -970,7 +845,7 @@ export function compactCodeWindowLensResult(toolName, result, {
           recordHashSurfaceFailure(hashContext, tool, entry.content.length, err?.message || err);
         }
         if (surfaced?.ok && surfaced?.entry?.ref) {
-          visible.traversal_ref = traversalRefSurface(surfaced.entry.ref, {
+          visible.traversal_ref = traversalRefSurface(surfaced.model_ref || surfaced.entry.ref, {
             kind: "returned_function",
           });
         }
@@ -986,7 +861,8 @@ export function compactCodeWindowLensResult(toolName, result, {
   // materialization so one ordered ref owns every omitted line exactly once.
   // Never infer a continuation from the legacy `truncated` bit: it also marks
   // intentional bounded selections.
-  if (tool === "code.window") {
+  if (tool === "code.window" || tool === "code.lens") {
+    const continuationTool = tool;
     const nativeContinuation = Array.isArray(data._continuationWindows)
       ? data._continuationWindows
       : [];
@@ -995,7 +871,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     let displayTail = null;
     let displayOriginal = null;
     if (
-      pagingEnabled
+      tool === "code.window" && pagingEnabled
       && result.length > min
       && hasHashRefScope(hashContext)
       && typeof data.content === "string"
@@ -1036,11 +912,20 @@ export function compactCodeWindowLensResult(toolName, result, {
       ...nativeContinuation,
       ...(displayTail ? [displayTail] : []),
     ]);
+    const lensTail = tool === "code.lens"
+      && pagingEnabled
+      && result.length > min
+      && hasHashRefScope(hashContext)
+      && Array.isArray(data.matches)
+      && data.matches.length > LENS_INLINE_MATCHES
+      ? data.matches.slice(LENS_INLINE_MATCHES)
+      : [];
     if (continuation.length > 0 && hasHashRefScope(hashContext)) {
       const continuationEnvelope = {
-        tool: "code.window",
+        tool: continuationTool,
         repo_rel_path: data.repo_rel_path,
         requestedWindows: continuation,
+        ...(lensTail.length > 0 ? { tailMatches: lensTail } : {}),
       };
       // Compact encoding makes every complete window's payload span exact and
       // stable. Ref traversal can therefore promote only fully delivered windows.
@@ -1057,6 +942,11 @@ export function compactCodeWindowLensResult(toolName, result, {
           repo_rel_path: data.repo_rel_path || null,
           start_line: Number(entry.startLine) || null,
           end_line: Number(entry.endLine) || null,
+          path: data.repo_rel_path || null,
+          source_start_line: Number(entry.startLine) || null,
+          source_end_line: Number(entry.endLine) || null,
+          materialized_start_line: materializedLineAt(continuationPayload, payloadStart),
+          materialized_end_line: materializedLineAt(continuationPayload, Math.max(payloadStart, payloadEnd - 1)),
           payload_start: payloadStart,
           payload_end: payloadEnd,
           content_sha256: crypto.createHash("sha256").update(String(entry.content || "").replace(/\r\n/g, "\n")).digest("hex"),
@@ -1068,18 +958,22 @@ export function compactCodeWindowLensResult(toolName, result, {
         surfaced = surfaceHashRefForContext(hashContext, {
           entryKind: "materialized",
           payloadText: continuationPayload,
-          descriptor: { kind: "tool_result", tool: "code.window", args, source: "tool:code.window" },
-          objectType: "code.window.continuation",
-          source: "tool:code.window",
-          note: `${continuation.length} selected code.window region(s) omitted from the inline display`,
+          descriptor: { kind: "tool_result", tool: continuationTool, args, source: `tool:${continuationTool}` },
+          objectType: `${continuationTool}.continuation`,
+          source: `tool:${continuationTool}`,
+          note: `${continuation.length} selected ${continuationTool} source region(s) omitted from the inline display`,
           sizeChars: continuationPayload.length,
           recomputable: true,
           metadata: {
             surfaced_by: "requested_region_continuation",
             fetch_class: "result_continuation",
             ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
-            tool: "code.window",
+            tool: continuationTool,
             windows: continuation.length,
+            line_semantics: "source",
+            ...(data.repo_rel_path ? { path: data.repo_rel_path } : {}),
+            ...(data.repositoryIdentity ? { repository_identity: data.repositoryIdentity } : {}),
+            ...(data.sourceVersion ? { source_version: data.sourceVersion } : {}),
             source_windows: continuationSourceWindows,
           },
         }, scope);
@@ -1087,11 +981,19 @@ export function compactCodeWindowLensResult(toolName, result, {
         recordHashSurfaceFailure(hashContext, tool, continuationPayload.length, err?.message || err);
       }
       if (surfaced?.ok && surfaced?.entry?.ref) {
-        data.traversal_ref = traversalRefSurface(surfaced.entry.ref, {
-          kind: "code_window_continuation",
+        data.traversal_ref = traversalRefSurface(surfaced.model_ref || surfaced.entry.ref, {
+          kind: `${continuationTool.replace(".", "_")}_continuation`,
         });
         data.continuationWindows = continuation.length;
         data.continuationRanges = continuation.map((entry) => `${entry.startLine}-${entry.endLine}`);
+        if (lensTail.length > 0) {
+          data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
+          data.inlineMatchCount = data.matches.length;
+          data.deferredMatchCount = lensTail.length;
+          data.tailMatchesTotal = data.inlineMatchCount + data.deferredMatchCount;
+          data.totalMatchCount = data.tailMatchesTotal
+            + Math.max(0, Number(data.omittedMatchCount) || 0);
+        }
         for (const entry of hashContext.attempt_id != null ? continuationSourceWindows : []) {
           recordObservation({
             work_item_id: hashContext.work_item_id ?? null,
@@ -1101,7 +1003,7 @@ export function compactCodeWindowLensResult(toolName, result, {
             summary: `available_unseen source coverage ${entry.repo_rel_path}:${entry.start_line}-${entry.end_line}`,
             detail: {
               ...entry,
-              evidence_ref: surfaced.entry.ref,
+              evidence_ref: surfaced.model_ref || surfaced.entry.ref,
               delivery_state: "available_unseen",
               origin: "continuation",
               stored_chars: Math.max(0, entry.payload_end - entry.payload_start),
@@ -1123,6 +1025,14 @@ export function compactCodeWindowLensResult(toolName, result, {
           && entry.startLine === displayTail.startLine
           && entry.endLine === displayTail.endLine
           && entry.content === displayTail.content));
+        if (tool === "code.lens") {
+          data.continuationWindowsInline = nativeInline;
+          data.continuationInline = true;
+          compacted = true;
+          delete data.sourceVersion;
+          delete data.repositoryIdentity;
+          return { result: JSON.stringify(envelope, null, 2), compacted: true };
+        }
         data.additionalWindows = [
           ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
           ...nativeInline,
@@ -1151,6 +1061,14 @@ export function compactCodeWindowLensResult(toolName, result, {
         && entry.startLine === displayTail.startLine
         && entry.endLine === displayTail.endLine
         && entry.content === displayTail.content));
+      if (tool === "code.lens") {
+        data.continuationWindowsInline = nativeInline;
+        data.continuationInline = true;
+        compacted = true;
+        delete data.sourceVersion;
+        delete data.repositoryIdentity;
+        return { result: JSON.stringify(envelope, null, 2), compacted: true };
+      }
       data.additionalWindows = [
         ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
         ...nativeInline,
@@ -1211,10 +1129,14 @@ export function compactCodeWindowLensResult(toolName, result, {
     }
     if (!surfaced?.ok || !surfaced?.entry?.ref) return { result, compacted: false };
     data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
-    data.traversal_ref = traversalRefSurface(surfaced.entry.ref, {
+    data.traversal_ref = traversalRefSurface(surfaced.model_ref || surfaced.entry.ref, {
       kind: "code_lens_tail",
     });
-    data.tailMatchesTotal = LENS_INLINE_MATCHES + tail.length;
+    data.inlineMatchCount = data.matches.length;
+    data.deferredMatchCount = tail.length;
+    data.tailMatchesTotal = data.inlineMatchCount + data.deferredMatchCount;
+    data.totalMatchCount = data.tailMatchesTotal
+      + Math.max(0, Number(data.omittedMatchCount) || 0);
     return { result: JSON.stringify(envelope, null, 2), compacted: true };
   }
 
@@ -1256,9 +1178,9 @@ function recordHashObservation(context, surfaced, toolName, sizeChars, {
     job_id: context.job_id ?? null,
     attempt_id: context.attempt_id ?? null,
     observation_type: "hash_ref.surface",
-    summary: `Surfaced ${toolName || "tool_result"} as ${surfaced.entry.ref}`,
+    summary: `Surfaced ${toolName || "tool_result"} as ${surfaced.model_ref || surfaced.entry.ref}`,
     detail: {
-      ref: surfaced.entry.ref,
+      ref: surfaced.model_ref || surfaced.entry.ref,
       object_type: surfaced.entry.object_type,
       content_hash: surfaced.entry.content_hash,
       size_chars: sizeChars,
@@ -1364,6 +1286,198 @@ function initiallyVisibleHashRefRanges(policy, sizeChars) {
   ];
 }
 
+function materializedLineAt(text, offset) {
+  if (!Number.isInteger(offset) || offset < 0) return null;
+  let line = 1;
+  for (let index = 0; index < offset; index += 1) {
+    if (text.charCodeAt(index) === 10) line += 1;
+  }
+  return line;
+}
+
+function encodedContentMaterializedRange(payload, content, cursor = 0) {
+  const encoded = JSON.stringify(String(content || ""));
+  const start = payload.indexOf(encoded, Math.max(0, cursor));
+  if (start < 0) return { start: null, end: null, cursor };
+  const endOffset = start + encoded.length;
+  return {
+    start: materializedLineAt(payload, start),
+    end: materializedLineAt(payload, Math.max(start, endOffset - 1)),
+    cursor: endOffset,
+  };
+}
+
+function mergeSourceWindows(windows) {
+  const ordered = windows
+    .filter((window) => window?.path
+      && Number.isInteger(window.source_start_line)
+      && Number.isInteger(window.source_end_line)
+      && window.source_start_line > 0
+      && window.source_end_line >= window.source_start_line)
+    .sort((left, right) => (
+      left.path.localeCompare(right.path)
+      || left.source_start_line - right.source_start_line
+      || left.source_end_line - right.source_end_line
+    ));
+  const merged = [];
+  for (const window of ordered) {
+    const prior = merged.at(-1);
+    let compatible = true;
+    if (prior?.path === window.path && window.source_start_line <= prior.source_end_line) {
+      const overlapStart = window.source_start_line;
+      const overlapEnd = Math.min(prior.source_end_line, window.source_end_line);
+      for (let line = overlapStart; line <= overlapEnd; line += 1) {
+        const priorText = prior.content_lines?.[line - prior.source_start_line];
+        const nextText = window.content_lines?.[line - window.source_start_line];
+        if (priorText != null && nextText != null && priorText !== nextText) {
+          compatible = false;
+          break;
+        }
+      }
+    }
+    if (prior?.path === window.path
+      && window.source_start_line <= prior.source_end_line + 1
+      && compatible) {
+      if (Array.isArray(prior.content_lines) && Array.isArray(window.content_lines)) {
+        const appendFrom = Math.max(0, prior.source_end_line - window.source_start_line + 1);
+        prior.content_lines.push(...window.content_lines.slice(appendFrom));
+      }
+      prior.source_end_line = Math.max(prior.source_end_line, window.source_end_line);
+      if (Number.isInteger(window.materialized_start_line)) {
+        prior.materialized_start_line = Number.isInteger(prior.materialized_start_line)
+          ? Math.min(prior.materialized_start_line, window.materialized_start_line)
+          : window.materialized_start_line;
+      }
+      if (Number.isInteger(window.materialized_end_line)) {
+        prior.materialized_end_line = Number.isInteger(prior.materialized_end_line)
+          ? Math.max(prior.materialized_end_line, window.materialized_end_line)
+          : window.materialized_end_line;
+      }
+      continue;
+    }
+    merged.push({ ...window, ...(Array.isArray(window.content_lines) ? { content_lines: [...window.content_lines] } : {}) });
+  }
+  return merged.map(({ content_lines: _contentLines, ...window }) => window);
+}
+
+function structuredSourceMetadata(toolName, payload, args = {}) {
+  const normalizedTool = String(toolName || "").toLowerCase().replace(/^tools[.:]/, "");
+  const isRead = ["read_file", "chain_read", "inspect_file"].includes(normalizedTool);
+  const isWindow = normalizedTool.endsWith("code.window");
+  const isLens = normalizedTool.endsWith("code.lens");
+  if (!isRead && !isWindow && !isLens) return null;
+
+  let parsed;
+  try { parsed = JSON.parse(payload); } catch { parsed = null; }
+  const envelope = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const fallbackPath = canonicalEvidenceSourcePath(
+    envelope?.repo_rel_path
+      || envelope?.repoRelPath
+      || envelope?.path
+      || args.file
+      || args.path,
+  );
+  const windows = [];
+
+  if ((isRead || isWindow) && envelope && typeof envelope === "object") {
+    const candidates = [
+      envelope,
+      ...(Array.isArray(envelope.additionalWindows) ? envelope.additionalWindows : []),
+      ...(Array.isArray(envelope.additional_windows) ? envelope.additional_windows : []),
+    ];
+    let cursor = 0;
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate.content !== "string") continue;
+      const sourceStart = Number(candidate.startLine ?? candidate.start_line);
+      const declaredEnd = Number(candidate.endLine ?? candidate.end_line);
+      const contentLines = normalizedLinesForHandoff(candidate.content);
+      const sourceEnd = Number.isInteger(declaredEnd) && declaredEnd >= sourceStart
+        ? declaredEnd
+        : sourceStart + contentLines - 1;
+      const sourcePath = canonicalEvidenceSourcePath(
+        candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
+      );
+      if (!sourcePath || !Number.isInteger(sourceStart) || sourceStart < 1 || sourceEnd < sourceStart) continue;
+      const materialized = encodedContentMaterializedRange(payload, candidate.content, cursor);
+      cursor = materialized.cursor;
+      windows.push({
+        path: sourcePath,
+        source_start_line: sourceStart,
+        source_end_line: sourceEnd,
+        materialized_start_line: materialized.start,
+        materialized_end_line: materialized.end,
+        content_lines: String(candidate.content).replace(/\r\n?/g, "\n").split("\n"),
+      });
+    }
+  }
+
+  if (isLens && envelope && typeof envelope === "object") {
+    let cursor = 0;
+    for (const match of Array.isArray(envelope.matches) ? envelope.matches : []) {
+      const sourceLine = Number(match?.line);
+      const before = Array.isArray(match?.context?.before) ? match.context.before.map(String) : [];
+      const after = Array.isArray(match?.context?.after) ? match.context.after.map(String) : [];
+      const sourcePath = canonicalEvidenceSourcePath(match?.repo_rel_path || match?.repoRelPath || fallbackPath);
+      if (!sourcePath || !Number.isInteger(sourceLine) || sourceLine < 1 || typeof match?.text !== "string") continue;
+      const materializedLines = [...before, match.text, ...after].map((line) => {
+        const located = encodedContentMaterializedRange(payload, line, cursor);
+        cursor = located.cursor;
+        return located;
+      });
+      const starts = materializedLines.map((line) => line.start).filter(Number.isInteger);
+      const ends = materializedLines.map((line) => line.end).filter(Number.isInteger);
+      windows.push({
+        path: sourcePath,
+        source_start_line: Math.max(1, sourceLine - before.length),
+        source_end_line: sourceLine + after.length,
+        materialized_start_line: starts.length > 0 ? Math.min(...starts) : null,
+        materialized_end_line: ends.length > 0 ? Math.max(...ends) : null,
+        content_lines: [...before, match.text, ...after],
+      });
+    }
+  }
+
+  if (isRead && windows.length === 0) {
+    let current = null;
+    for (const [index, line] of payload.replace(/\r\n?/g, "\n").split("\n").entries()) {
+      const matched = /^\s*(\d+)\t(.*)$/.exec(line);
+      const sourceLine = Number(matched?.[1]);
+      if (!matched || !Number.isInteger(sourceLine) || sourceLine < 1) {
+        current = null;
+        continue;
+      }
+      if (!current || sourceLine !== current.source_end_line + 1) {
+        current = {
+          path: fallbackPath,
+          source_start_line: sourceLine,
+          source_end_line: sourceLine,
+          materialized_start_line: index + 1,
+          materialized_end_line: index + 1,
+        };
+        windows.push(current);
+      } else {
+        current.source_end_line = sourceLine;
+        current.materialized_end_line = index + 1;
+      }
+    }
+  }
+
+  const sourceWindows = mergeSourceWindows(windows);
+  if (sourceWindows.length === 0) return null;
+  const paths = [...new Set(sourceWindows.map((window) => window.path))];
+  return {
+    line_semantics: "source",
+    source_windows: sourceWindows,
+    ...(paths.length === 1 ? { path: paths[0] } : {}),
+    ...(envelope?.repositoryIdentity || parsed?.repositoryIdentity
+      ? { repository_identity: envelope?.repositoryIdentity || parsed?.repositoryIdentity }
+      : {}),
+    ...(envelope?.sourceVersion || parsed?.sourceVersion
+      ? { source_version: envelope?.sourceVersion || parsed?.sourceVersion }
+      : {}),
+  };
+}
+
 export function appendHashRefIfMajor(toolName, result, {
   args = {},
   context = {},
@@ -1401,6 +1515,9 @@ export function appendHashRefIfMajor(toolName, result, {
     source: source || `tool:${toolName}`,
   };
   const resolvedOwnerScope = ownerScope || (hashContext.job_id != null ? "job" : null);
+  const sourceMetadata = boundPolicy && sizeChars > boundPolicy.capChars
+    ? null
+    : structuredSourceMetadata(toolName, text, args);
 
   if (boundedIngress) {
     const slices = boundedResultSlices(text, boundPolicy, sizeChars);
@@ -1515,14 +1632,14 @@ export function appendHashRefIfMajor(toolName, result, {
     const bounded = [
       boundedAnchor,
       refStub({
-        entry: anchor.entry,
+        entry: { ...anchor.entry, ref: anchor.model_ref || anchor.entry.ref },
         toolName: effectiveObjectType,
         sizeChars: boundedAnchor.length,
         refRole: "citation",
       }),
       ...(continuationAvailable ? [
         refStub({
-          entry: continuation.entry,
+          entry: { ...continuation.entry, ref: continuation.model_ref || continuation.entry.ref },
           toolName: `${effectiveObjectType}.continuation`,
           sizeChars: slices.omitted.length,
           refRole: "continuation",
@@ -1566,6 +1683,7 @@ export function appendHashRefIfMajor(toolName, result, {
         fetch_class: "visible_copy",
         tool: toolName || null,
         materialized,
+        ...(sourceMetadata || { line_semantics: "materialized" }),
         ...hashRefModelVisibility(hashContext, {
           visibility: "full",
           ranges: initiallyVisibleHashRefRanges(null, sizeChars),
@@ -1592,7 +1710,12 @@ export function appendHashRefIfMajor(toolName, result, {
     return result;
   }
   recordHashObservation(hashContext, surfaced, toolName, sizeChars, { refRole: "citation" });
-  const stamped = `${result}${refStub({ entry: surfaced.entry, toolName, sizeChars, refRole: "citation" })}`;
+  const stamped = `${result}${refStub({
+    entry: { ...surfaced.entry, ref: surfaced.model_ref || surfaced.entry.ref },
+    toolName,
+    sizeChars,
+    refRole: "citation",
+  })}`;
   recordContextMeterSample(hashContext, toolName, {
     fullSizeChars: sizeChars,
     emittedSizeChars: stamped.length,
@@ -1639,7 +1762,7 @@ function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
   const entry = result.entry;
   if (entry.entry_kind === "materialized") {
     const fullText = entry.payload_text || "";
-    const paged = pageMaterializedText(fullText, args);
+    const paged = materializeHashRefView(fullText, args);
     const handoffLines = String(fullText).replace(/\r\n?/g, "\n").split("\n");
     if (handoffLines.length > 1 && handoffLines.at(-1) === "") handoffLines.pop();
     return JSON.stringify({
@@ -1676,9 +1799,11 @@ function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
   }, null, 2);
 }
 
-function attachFetchedViewRef(renderedText, {
+function attachFetchedCapabilityRefs(renderedText, {
   hashContext,
+  requestedRef,
   sourceEntry,
+  traversalCapability = null,
   fetchArgs = {},
 } = {}) {
   let rendered;
@@ -1691,65 +1816,62 @@ function attachFetchedViewRef(renderedText, {
     return renderedText;
   }
   const viewText = rendered.text;
-  let surfaced;
-  try {
-    surfaced = surfaceHashRefForContext(hashContext, {
-      entryKind: "materialized",
-      payloadText: viewText,
-      descriptor: {
-        kind: "fetch_ref_view",
-        tool: sourceEntry?.descriptor?.tool || sourceEntry?.metadata?.tool || "fetch_ref",
-        source_ref: sourceEntry?.ref || null,
-        fetch: {
-          offset: Number(rendered?.page?.offset) || 0,
-          limit: Number(rendered?.page?.returned_chars) || viewText.length,
-          mode: rendered?.page?.mode || "offset",
-          ...(fetchArgs?.search ? { search: String(fetchArgs.search) } : {}),
-        },
-      },
-      objectType: `${normalizeObjectType(sourceEntry?.object_type || "stored_ref")}.view`,
-      source: sourceEntry?.source || "tool:fetch_ref",
-      note: `exact fetched view of ${sourceEntry?.ref || "stored ref"}`,
-      sizeChars: viewText.length,
-      recomputable: true,
-      metadata: {
-        surfaced_by: "fetch_ref_view",
-        fetch_class: "visible_copy",
-        source_ref: sourceEntry?.ref || null,
-        exact_visible_field: "text",
-        ...hashRefModelVisibility(hashContext, {
-          visibility: "full",
-          ranges: [{ start: 0, end: viewText.length }],
-          issuedAs: "evidence",
-        }),
-      },
-    }, {
-      // Keep fetched views beside ordinary tool refs so an all-content page
-      // reuses the continuation row instead of materializing the same bytes a
-      // second time. Model visibility remains scoped to this agent call.
-      ownerScope: hashContext?.job_id != null ? "job" : "work_item",
+  const selector = hashRefViewSelector(rendered, fetchArgs);
+  let evidenceRef = null;
+  if (traversalCapability?.ref) {
+    const promoted = promoteHashRefTraversalForContext(hashContext, traversalCapability.ref, {
+      selector,
+      viewText,
+      sourceContentHash: sourceEntry?.content_hash || null,
     });
-  } catch (err) {
-    recordHashSurfaceFailure(hashContext, "fetch_ref.view", viewText.length, err?.message || err);
+    if (promoted?.ok) evidenceRef = promoted.evidence.ref;
+  } else {
+    const existing = fetchHashRefEvidenceForContext(hashContext, requestedRef);
+    const sameSelector = existing?.found
+      && JSON.stringify(existing.capability?.selector || null) === JSON.stringify(selector);
+    if (sameSelector) {
+      evidenceRef = existing.capability.ref;
+    } else {
+      const created = createHashRefEvidenceForContext(hashContext, {
+        sourceRef: sourceEntry?.ref,
+        selector,
+        viewText,
+        sourceContentHash: sourceEntry?.content_hash || null,
+      });
+      if (created?.ok) evidenceRef = created.evidence.ref;
+    }
+  }
+  if (!evidenceRef) {
+    recordHashSurfaceFailure(hashContext, "fetch_ref.promote", viewText.length, "capability_promotion_failed");
     return renderedText;
   }
-  if (!surfaced?.ok || !surfaced?.entry?.ref) {
-    recordHashSurfaceFailure(hashContext, "fetch_ref.view", viewText.length, surfaced || "surface_failed");
-    return renderedText;
-  }
-  recordHashObservation(hashContext, surfaced, "fetch_ref.view", viewText.length, { refRole: "citation" });
-  rendered.evidence_ref = evidenceRefSurface(surfaced.entry.ref, {
+  recordHashObservation(hashContext, {
+    ok: true,
+    entry: {
+      ref: evidenceRef,
+      object_type: `${normalizeObjectType(sourceEntry?.object_type || "stored_ref")}.view`,
+      content_hash: crypto.createHash("sha256").update(viewText).digest("hex"),
+      metadata: { fetch_class: "visible_view" },
+    },
+  }, "fetch_ref.promote", viewText.length, { refRole: "citation" });
+  rendered.evidence_ref = evidenceRefSurface(evidenceRef, {
     exactField: "text",
     chars: viewText.length,
     lines: normalizedLinesForHandoff(viewText),
   });
-  if (rendered?.page?.has_more === true && rendered.page.next_offset != null) {
-    rendered.next_traversal_ref = traversalRefSurface(sourceEntry?.ref, {
+  // The traversal identity itself is now the evidence identity. Do not leave
+  // the backing source alias in the primary ref field, especially for opaque
+  // continuation cursors where it may identify a different visible page.
+  rendered.ref = evidenceRef;
+  const nextSelector = nextHashRefViewSelector(rendered);
+  if (nextSelector) {
+    const issued = issueHashRefTraversalForContext(hashContext, {
+      sourceRef: sourceEntry?.ref,
+      selector: nextSelector,
+      sourceContentHash: sourceEntry?.content_hash || null,
+    });
+    if (issued?.ok) rendered.next_traversal_ref = traversalRefSurface(issued.capability.ref, {
       kind: rendered.page.mode === "search" ? "search_page" : "offset_page",
-      offset: rendered.page.next_offset,
-      limit: rendered.page.limit,
-      search: fetchArgs?.search,
-      searchMode: fetchArgs?.search_mode ?? fetchArgs?.searchMode,
     });
   }
   return JSON.stringify(rendered, null, 2);
@@ -1964,6 +2086,9 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null, p
     && detail.delivered_range_end != null
   ) {
     for (const window of sourceWindows) {
+      if (!Number.isFinite(Number(window.payload_start))
+        || !Number.isFinite(Number(window.payload_end))
+        || !window.repo_rel_path) continue;
       if (detail.delivered_range_start > Number(window.payload_start)) continue;
       if (detail.delivered_range_end < Number(window.payload_end)) continue;
       recordObservation({
@@ -2050,7 +2175,30 @@ export function fetchHashRefTool(args = {}, {
     : args;
 
   const fetchOne = (ref) => {
-    const result = isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref);
+    const traversal = isHashRefAlias(ref)
+      ? fetchHashRefTraversalForContext(hashContext, ref)
+      : { found: false };
+    const result = traversal?.found
+      ? {
+          ok: true,
+          found: true,
+          ref: traversal.source.ref,
+          entry: traversal.source,
+        }
+      : (isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref));
+    const storedSelector = traversal?.capability?.selector || null;
+    const selectorArgs = storedSelector
+      ? {
+          ...deliveryArgs,
+          ...storedSelector,
+          ...(deliveryBudget ? {
+            limit: Math.min(
+              Math.max(1, Number(storedSelector.limit) || deliveryBudget.allocated_per_ref_chars),
+              deliveryBudget.allocated_per_ref_chars,
+            ),
+          } : {}),
+        }
+      : deliveryArgs;
     const history = result?.entry?.content_hash
       ? hashRefFetchObservationLedger({
           jobId: hashContext.job_id,
@@ -2069,7 +2217,14 @@ export function fetchHashRefTool(args = {}, {
             })
           : { allowed: false, reason: "source_missing" })
       : null;
-    const policy = reaccessAuthorization && !reaccess?.allowed
+    const policy = requireTraversal && !reaccess?.allowed && !traversal?.found
+      ? {
+          allowed: false,
+          code: "traversal_ref_not_issued",
+          classification: "not_issued_for_traversal",
+          message: "This identity is not an unpromoted traversal capability for the current agent call. Use a visible evidence ref directly or follow an explicit traversal ref.",
+        }
+      : (reaccessAuthorization && !reaccess?.allowed
       ? {
           allowed: false,
           code: reaccess?.reason === "source_missing"
@@ -2084,12 +2239,14 @@ export function fetchHashRefTool(args = {}, {
         }
       : admitHashRefFetch({
       entry: result?.entry || null,
-      args: deliveryArgs,
+      args: selectorArgs,
       history,
       context: hashContext,
       enforce: reaccess?.allowed ? false : enforcePolicy,
-      requireTraversal: reaccess?.allowed ? false : requireTraversal,
-    });
+      // Table membership is now the traversal capability. Source metadata is
+      // retained only for compatibility and visibility accounting.
+      requireTraversal: false,
+    }));
     let rendered;
     if (policy.allowed === false) {
       rendered = JSON.stringify({
@@ -2101,13 +2258,15 @@ export function fetchHashRefTool(args = {}, {
         message: policy.message,
       }, null, 2);
     } else {
-      rendered = fetchResultText(result, policy.args || deliveryArgs, {
+      rendered = fetchResultText(result, policy.args || selectorArgs, {
         researchDelivery: deliveryBudget != null,
       });
-      rendered = attachFetchedViewRef(rendered, {
+      rendered = attachFetchedCapabilityRefs(rendered, {
         hashContext,
+        requestedRef: ref,
         sourceEntry: result?.entry || null,
-        fetchArgs: policy.args || deliveryArgs,
+        traversalCapability: traversal?.capability || null,
+        fetchArgs: policy.args || selectorArgs,
       });
     }
     recordFetchObservation(hashContext, ref, result, rendered, {
@@ -2201,10 +2360,14 @@ function createOneHashRef(hashContext, item = {}) {
   let payload = inlineText;
   let sliceNote = null;
   let sourceAlias = null;
+  let sourceCitationMetadata = null;
   if (sourceRef) {
     sourceAlias = normalizeRef(sourceRef);
     if (!isHashRefAlias(sourceAlias)) return createRefError("invalid_source_ref", { source_ref: String(sourceRef) });
-    const fetched = fetchHashRefForContext(hashContext, sourceAlias);
+    const evidenceView = materializeHashRefEvidenceForContext(hashContext, sourceAlias);
+    const fetched = evidenceView?.found
+      ? { ok: evidenceView.ok, found: evidenceView.ok, entry: evidenceView.entry }
+      : fetchHashRefForContext(hashContext, sourceAlias);
     if (!fetched?.ok || !fetched?.found || !fetched.entry) {
       return createRefError("source_ref_not_found_or_not_visible", { source_ref: sourceAlias });
     }
@@ -2217,6 +2380,19 @@ function createOneHashRef(hashContext, item = {}) {
         "source_ref_not_visible (traverse an explicitly issued traversal_ref and use the returned evidence_ref as source_ref)",
         { source_ref: sourceAlias },
       );
+    }
+    if (fetched.entry.metadata?.citable === false) {
+      const reason = String(fetched.entry.metadata.non_citable_reason || "").trim();
+      const parentRef = normalizeRef(
+        fetched.entry.metadata.parent_ref
+          ?? fetched.entry.metadata.capability_source_ref
+          ?? sourceAlias,
+      ) || sourceAlias;
+      sourceCitationMetadata = {
+        citable: false,
+        parent_ref: parentRef,
+        ...(reason ? { non_citable_reason: reason } : {}),
+      };
     }
     const sliced = sliceSourcePayload(fetched.entry.payload_text, item);
     if (sliced.error) return createRefError(sliced.error, { source_ref: sourceAlias });
@@ -2256,6 +2432,7 @@ function createOneHashRef(hashContext, item = {}) {
       note,
       sizeChars: payload.length,
       recomputable: false,
+      ...(sourceCitationMetadata ? { reuse: false } : {}),
       metadata: {
         surfaced_by: "create_ref",
         fetch_class: "visible_copy",
@@ -2265,6 +2442,7 @@ function createOneHashRef(hashContext, item = {}) {
           issuedAs: "evidence",
         }),
         ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
+        ...(sourceCitationMetadata || {}),
       },
     }, { ownerScope });
   } catch (err) {
@@ -2366,7 +2544,7 @@ export const __testHashAdderInternals = Object.freeze({
   surfaceMinCharsFor,
   boundingPolicyFor,
   overflowDigest,
-  pageMaterializedText,
+  pageMaterializedText: materializeHashRefView,
   renderBoundedResult,
   lineFingerprintMap,
   normalizeRef,

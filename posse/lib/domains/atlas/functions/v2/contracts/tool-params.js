@@ -471,7 +471,6 @@
  * @property {string[]} [focusSymbols]
  * @property {string[]} [focusPaths]          Canonical repo-relative paths.
  * @property {number} [maxTokens]
- * @property {number} [maxActions]
  */
 
 /**

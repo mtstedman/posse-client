@@ -74,9 +74,8 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `ack_operator_feedback` |
-| Gateway MCP name | `tools.ack_operator_feedback` |
-| Local MCP name | `ack_operator_feedback` |
-| Embedded function name | `ack_operator_feedback` |
+| Tool reference token | `tools.ack_operator_feedback` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -88,7 +87,7 @@ Acknowledge one operator feedback item attached directly to a tool result. The d
 |---|---|---|---|---|
 | `decision` | `string` | Optional | values "accepted", "rejected", "deferred" | Acknowledgement decision. Defaults to accepted. |
 | `interaction_id` | `integer` | Required |  | The item id in the direct operator-feedback delivery. |
-| `reason` | `string` | Optional |  | Required for rejected or deferred; optional for accepted. |
+| `reason` | `string` | Conditional | min length 1; max length 500 | Required for rejected or deferred; optional for accepted. |
 
 ### `tools.agent_handoff`
 
@@ -97,23 +96,22 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`, `subagent
 | Contract field | Value |
 |---|---|
 | Canonical name | `agent_handoff` |
-| Gateway MCP name | `tools.agent_handoff` |
-| Local MCP name | `agent_handoff` |
-| Embedded function name | `agent_handoff` |
+| Tool reference token | `tools.agent_handoff` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `coordination` |
 | Batchable input | No |
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. Other roles submit posse.agent_handoff.v1 with hash-ref selectors. Posse ends provider generation after acknowledging the receipt.
+Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. Other roles submit posse.agent_handoff.v1 with evidence selectors. Posse ends provider generation after acknowledging the receipt.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `blocker` | `string` | Optional | min length 1; max length 1000 |  |
-| `confidence` | `string` | Optional | values "low", "medium", "high" | Assessor confidence in the terminal verdict. Required by the assessor role projection; accepted here for staggered client/prompt rollout. |
+| `confidence` | `string` | Conditional | values "low", "medium", "high" | Assessor-only confidence in the terminal verdict. Required for assessor.verdict.v1 and invalid for every other profile. |
 | `evidence_gap` | `string` | Optional | min length 1; max length 1000 |  |
 | `file_requests` | `array<object>` | Optional | min items 1; max items 16 |  |
-| `handoffs` | `array<object>` | Conditional | min items 1; max items 50 |  |
+| `handoffs` | `any | array<object>` | Conditional | min items 1; max items 50 |  |
 | `no_change_rationale` | `string` | Optional | min length 1; max length 1000 |  |
 | `outcome` | `string` | Conditional | values "success", "complete", "partial", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review" | Profile-specific outcome: researcher.pipeline.v1=success\|gap\|input_required; researcher.report.v1=complete; planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete\|failed\|blocked; assessor.verdict.v1=pass\|fail\|needs_replan\|needs_review\|blocked; citation_synthesis.v1=complete\|partial\|failed. |
 | `profile` | `string` | Conditional | values "researcher.pipeline.v1", "researcher.report.v1", "planner.plan.v1", "dev.result.v1", "artificer.result.v1", "assessor.verdict.v1", "citation_synthesis.v1" |  |
@@ -127,7 +125,7 @@ Runtime handoff projection by role:
 | Role | Full fields | Compact v1 fields | Compact v3 fields |
 |---|---|---|---|
 | `artificer` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `evidence_gap`, `remaining_work`, `status` | `blocker`, `evidence_gap`, `remaining_work`, `status` |
-| `assessor` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome`, `profile`, `protocol` | `proof`, `questions`, `verdict` |
+| `assessor` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome`, `profile`, `protocol` | `confidence`, `proof`, `questions`, `verdict` |
 | `dev` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` |
 | `planner` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `tasks` | `tasks` |
 | `researcher` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `profile`, `questions`, `related_files`, `summary` |
@@ -142,9 +140,8 @@ Remote roles: `artificer`, `assessor`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `bash` |
-| Gateway MCP name | `tools.bash` |
-| Local MCP name | `bash` |
-| Embedded function name | `bash` |
+| Tool reference token | `tools.bash` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `shell` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -155,7 +152,7 @@ Execute a read-only inspection command or test/build runner and return stdout+st
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `command` | `string` | Required |  | Shell command to execute |
-| `timeout` | `integer` | Optional |  | Timeout in milliseconds. Default: 60000 |
+| `timeout` | `integer` | Optional | min 1; max 120000 | Timeout in milliseconds. Default: 60000; maximum: 120000. |
 
 ### `tools.chain_read`
 
@@ -164,25 +161,24 @@ Remote roles: `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `chain_read` |
-| Gateway MCP name | `tools.chain_read` |
-| Local MCP name | `chain_read` |
-| Embedded function name | `chain_read` |
+| Tool reference token | `tools.chain_read` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read exact missing file context through the deterministic fallback. When ATLAS is active, successful ATLAS source retrieval already counts as file-content evidence. This reader covers remaining ATLAS evidence gaps, exact mutated or non-indexed state, an unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you classify that file as relevant or irrelevant. Large files may be paged with offset/limit; after the file is tagged relevant, later continuation pages inherit that verdict. When ATLAS already returned source content for an indexed file, request an explicit slice of at most 250 lines or use search/jsonPath. A previously relevant file restored from the audit ledger retains its verdict. Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.
+Read exact missing file context through the deterministic fallback. When ATLAS is active, successful ATLAS source retrieval already counts as file-content evidence. This reader covers remaining ATLAS evidence gaps, exact mutated or non-indexed state, an unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you classify that file as relevant or irrelevant. Large files may be paged with offset/limit; after the file is tagged relevant, later continuation pages inherit that verdict. When ATLAS is active, indexed evidence and withheld ranges stay on the issued ATLAS retrieval surface; raw indexed reads are reserved for changed files or the ATLAS unavailable/strikeout escape hatch. A previously relevant file restored from the audit ledger retains its verdict. Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `jsonPath` | `string` | Optional |  | Dot-separated JSON path to extract from a JSON file. |
-| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000 |
+| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds. |
 | `maxBytes` | `integer` | Optional |  | Maximum bytes to return in structured mode. |
 | `offset` | `integer` | Optional |  | Starting line number, 1-based. Default: 1 |
 | `path` | `string` | Required |  | Path to the file to read (relative to project root). |
-| `search` | `string` | Optional |  | Case-insensitive regex pattern to search within the selected line range. |
-| `searchContext` | `integer` | Optional |  | Context lines around each search match in structured mode. |
+| `search` | `string` | Optional | max length 200 | Case-insensitive regex pattern to search within the selected line range. Unsafe nested-quantifier patterns are treated as literal text; results are capped at 100 matches. |
+| `searchContext` | `integer` | Optional | min 0 | Context lines around each search match in structured mode. Used only with search; default 2. |
 
 ### `tools.chain_verdict`
 
@@ -191,9 +187,8 @@ Remote roles: `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `chain_verdict` |
-| Gateway MCP name | `tools.chain_verdict` |
-| Local MCP name | `chain_verdict` |
-| Embedded function name | `chain_verdict` |
+| Tool reference token | `tools.chain_verdict` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -203,7 +198,7 @@ Classify the currently locked file as relevant or irrelevant, unlocking the next
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `summary` | `string` | Optional |  | What you found. Required for irrelevant verdicts so later pruning preserves why the file was excluded. |
+| `summary` | `string` | Conditional | min length 1 | What you found. Required for irrelevant verdicts so later pruning preserves why the file was excluded. |
 | `verdict` | `string` | Required | values "relevant", "irrelevant" | Whether this file is relevant to the research task. |
 
 ### `tools.clean_image`
@@ -213,9 +208,8 @@ Remote roles: `artificer`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `clean_image` |
-| Gateway MCP name | `tools.clean_image` |
-| Local MCP name | `clean_image` |
-| Embedded function name | `clean_image` |
+| Tool reference token | `tools.clean_image` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -247,19 +241,18 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `code.lens` |
-| Gateway MCP name | `atlas.code.lens` |
-| Local MCP name | `atlas.code.lens` |
-| Embedded function name | `atlas_code_lens` |
+| Tool reference token | `atlas.code.lens` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows.
+Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows. Each match reports its enclosing symbol (kind, name, signature, line range) with up to 8 context lines per side; a call that would exceed 600 lines keeps every match and trims context evenly.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `contextLines` | `integer` | Optional | min 0; max 100 | Context lines around each match. |
+| `contextLines` | `integer` | Optional | min 0; max 8 | Context lines around each match, from 0 through 8. Use code.window for a bounded source read. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path fallback when you have a file but not an opaque symbolId. |
 | `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
@@ -271,9 +264,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `code.skeleton` |
-| Gateway MCP name | `atlas.code.skeleton` |
-| Local MCP name | `atlas.code.skeleton` |
-| Embedded function name | `atlas_code_skeleton` |
+| Tool reference token | `atlas.code.skeleton` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -285,10 +277,10 @@ Structural code outline for one file or symbol. Returns signatures, declarations
 |---|---|---|---|---|
 | `exportedOnly` | `boolean` | Optional |  | Prefer exported symbols only when possible. |
 | `file` | `string` | Optional | min length 1 | Optional relative file path to inspect. |
-| `identifiersToFind` | `array | string` | Optional | max length 5000; max items 50 |  |
-| `maxLines` | `integer` | Optional | min 1; max 5000 |  |
-| `maxTokens` | `integer` | Optional | min 1; max 200000 |  |
-| `surveyGap` | `string` | Optional | min length 3; max length 1000 | Named structural fact absent from the delivered orientation. Supplying it requests an outline focused on that gap. |
+| `identifiersToFind` | `array | string` | Optional | max length 5000; max items 50 | Optional identifier names used to focus the outline, up to 50. |
+| `maxLines` | `integer` | Optional | min 1; max 5000 | Maximum rendered outline lines. Minimum 1, maximum 5000. |
+| `maxTokens` | `integer` | Optional | min 1; max 200000 | Maximum rendered outline tokens. Minimum 1, maximum 200000. |
+| `surveyGap` | `string` | Optional | min length 3; max length 1000 | Named structural fact absent from the delivered orientation. This justifies bypassing the survey-first redirect; it does not otherwise change skeleton retrieval. |
 | `symbolId` | `string` | Optional |  | Opaque ATLAS symbol ID selecting one indexed symbol. The file field selects a path. |
 
 ### `atlas.code.structure`
@@ -298,9 +290,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `code.structure` |
-| Gateway MCP name | `atlas.code.structure` |
-| Local MCP name | `atlas.code.structure` |
-| Embedded function name | `atlas_code_structure` |
+| Tool reference token | `atlas.code.structure` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -323,9 +314,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `code.survey` |
-| Gateway MCP name | `atlas.code.survey` |
-| Local MCP name | `atlas.code.survey` |
-| Embedded function name | `atlas_code_survey` |
+| Tool reference token | `atlas.code.survey` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -346,9 +336,8 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `code.window` |
-| Gateway MCP name | `atlas.code.window` |
-| Local MCP name | `atlas.code.window` |
-| Embedded function name | `atlas_code_window` |
+| Tool reference token | `atlas.code.window` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -373,9 +362,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `create_ref` |
-| Gateway MCP name | `atlas.create_ref` |
-| Local MCP name | `atlas.create_ref` |
-| Embedded function name | `atlas_create_ref` |
+| Tool reference token | `atlas.create_ref` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -402,9 +390,8 @@ Remote roles: `artificer`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `edit_file` |
-| Gateway MCP name | `tools.edit_file` |
-| Local MCP name | `edit_file` |
-| Embedded function name | `edit_file` |
+| Tool reference token | `tools.edit_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -414,16 +401,16 @@ Edit an existing file within the allowed scope. Provide exactly one mode: exact 
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `append` | `string` | Optional |  | Content to append to the file. |
-| `executable` | `boolean` | Optional |  | Set or clear the file's executable permission bits without changing its content. |
-| `insertAt` | `object` | Optional |  | Insert content before a 1-based line number. Use line_count + 1 to insert after the last line. |
-| `jsonPath` | `string` | Optional |  | Dot-separated JSON path to update. |
-| `jsonValue` | `any` | Optional |  | Value to write when jsonPath is used. |
-| `new_string` | `string` | Optional |  | Replacement text |
-| `old_string` | `string` | Optional |  | Exact text to find (must be unique in file) |
+| `append` | `string` | Conditional |  | Content to append to the file. |
+| `executable` | `boolean` | Conditional |  | Set or clear the file's executable permission bits without changing its content. |
+| `insertAt` | `object` | Conditional |  | Insert content before a 1-based line number. Use line_count + 1 to insert after the last line. |
+| `jsonPath` | `string` | Conditional |  | Dot-separated JSON path to update. |
+| `jsonValue` | `any` | Conditional |  | Value to write when jsonPath is used. |
+| `new_string` | `string` | Conditional |  | Replacement text |
+| `old_string` | `string` | Conditional |  | Exact text to find (must be unique in file) |
 | `path` | `string` | Required |  | File path to edit |
-| `replaceLines` | `object` | Optional |  | Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention. |
-| `replacePattern` | `object` | Optional |  | Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Replacement uses JavaScript replacement syntax ($1, $$). |
+| `replaceLines` | `object` | Conditional |  | Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention. |
+| `replacePattern` | `object` | Conditional |  | Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Patterns longer than 500 characters or with unsafe nested quantifiers are rejected. Replacement uses JavaScript replacement syntax ($1, $$). |
 
 ### `tools.extract_image_text`
 
@@ -432,9 +419,8 @@ Remote roles: `artificer`, `assessor`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `extract_image_text` |
-| Gateway MCP name | `tools.extract_image_text` |
-| Local MCP name | `extract_image_text` |
-| Embedded function name | `extract_image_text` |
+| Tool reference token | `tools.extract_image_text` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -455,15 +441,14 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `fetch_ref` |
-| Gateway MCP name | `atlas.fetch_ref` |
-| Local MCP name | `atlas.fetch_ref` |
-| Embedded function name | `atlas_fetch_ref` |
+| Tool reference token | `atlas.fetch_ref` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. Each non-empty result returns an evidence reference for the visible text and a continuation capability when more stored content remains.
+Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. When the input is an issued traversal identity, a successful non-empty call promotes that same identity to evidence and returns a different opaque continuation only when more content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -481,9 +466,8 @@ Remote roles: `artificer`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `generate_image` |
-| Gateway MCP name | `tools.generate_image` |
-| Local MCP name | `generate_image` |
-| Embedded function name | `generate_image` |
+| Tool reference token | `tools.generate_image` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -506,9 +490,8 @@ Remote roles: `planner`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `get_brief` |
-| Gateway MCP name | `tools.get_brief` |
-| Local MCP name | `get_brief` |
-| Embedded function name | `get_brief` |
+| Tool reference token | `tools.get_brief` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -525,9 +508,8 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `git_history` |
-| Gateway MCP name | `tools.git_history` |
-| Local MCP name | `git_history` |
-| Embedded function name | `git_history` |
+| Tool reference token | `tools.git_history` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -541,7 +523,7 @@ Inspect git history deterministically (log, show, blame, diff) without shell acc
 | `grep` | `string` | Optional |  | log-only --grep commit-message filter. |
 | `limit` | `integer` | Optional |  | log-only result cap. Default: 20, max: 100. |
 | `op` | `string` | Required | values "log", "show", "blame", "diff" | Git history operation to run. |
-| `path` | `string` | Optional |  | Optional file path filter. Required for blame. |
+| `path` | `string` | Conditional | min length 1 | Optional file path filter. Required for blame. |
 | `ref` | `string` | Optional |  | Optional git ref/revision selector (e.g. HEAD~5). For diff, two safe refs separated by whitespace are normalized to A..B. |
 | `since` | `string` | Optional |  | log-only --since value (e.g. 2025-01-01). |
 
@@ -552,9 +534,8 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `hash_file` |
-| Gateway MCP name | `tools.hash_file` |
-| Local MCP name | `hash_file` |
-| Embedded function name | `hash_file` |
+| Tool reference token | `tools.hash_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -574,9 +555,8 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `inspect_file` |
-| Gateway MCP name | `tools.inspect_file` |
-| Local MCP name | `inspect_file` |
-| Embedded function name | `inspect_file` |
+| Tool reference token | `tools.inspect_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -586,7 +566,7 @@ Structured metadata for one file path or an array of paths, including existence,
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `path` | `string | array` | Optional |  | One file path or an array of file paths, absolute or relative to the working directory. |
+| `path` | `string | array` | Required | min length 1; min items 1 | One file path or an array of file paths, absolute or relative to the working directory. |
 
 ### `tools.list_files`
 
@@ -595,15 +575,14 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `list_files` |
-| Gateway MCP name | `tools.list_files` |
-| Local MCP name | `list_files` |
-| Embedded function name | `list_files` |
+| Tool reference token | `tools.list_files` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-List files in a directory, optionally filtering by name pattern. Returns file paths.
+List files in a directory, optionally filtering by name pattern. Returns at most 200 file paths and marks the result when additional matches were truncated.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -618,9 +597,8 @@ Remote roles: `artificer`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `make_dir` |
-| Gateway MCP name | `tools.make_dir` |
-| Local MCP name | `make_dir` |
-| Embedded function name | `make_dir` |
+| Tool reference token | `tools.make_dir` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -639,9 +617,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `memory.feedback` |
-| Gateway MCP name | `atlas.memory.feedback` |
-| Local MCP name | `atlas.memory.feedback` |
-| Embedded function name | `atlas_memory_feedback` |
+| Tool reference token | `atlas.memory.feedback` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -653,7 +630,7 @@ Evidence-based feedback for one existing memory. Records that the memory was use
 |---|---|---|---|---|
 | `detail` | `string` | Optional | max length 500 | Optional short evidence note (one sentence). |
 | `memoryId` | `string` | Required | min length 1; max length 256 | Exact existing memory ID. |
-| `verdict` | `string` | Required | values "used", "stale", "wrong", "duplicate", "suppress" | Evidence-backed verdict. Used means the memory materially informed the work; stale, wrong, and duplicate identify a verified defect. |
+| `verdict` | `string` | Required | values "used", "stale", "wrong", "duplicate" | Evidence-backed verdict. Used means the memory materially informed the work; stale, wrong, and duplicate identify a verified defect. |
 
 ### `atlas.memory.get`
 
@@ -662,9 +639,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `memory.get` |
-| Gateway MCP name | `atlas.memory.get` |
-| Local MCP name | `atlas.memory.get` |
-| Embedded function name | `atlas_memory_get` |
+| Tool reference token | `atlas.memory.get` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -674,7 +650,7 @@ Full memory retrieval for exact symbol and file anchors. Returns memory bodies g
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `domains` | `array<string>` | Optional | max items 5 |  |
+| `domains` | `array<string>` | Optional | max items 5 | Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering. |
 | `fileRelPaths` | `array<string>` | Optional | max items 500 | Files whose attached memories should be fetched. |
 | `symbolIds` | `array<string>` | Optional | max items 500 | Symbols whose attached memories should be fetched. |
 
@@ -685,9 +661,8 @@ Remote roles: `assessor`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `memory.store` |
-| Gateway MCP name | `atlas.memory.store` |
-| Local MCP name | `atlas.memory.store` |
-| Embedded function name | `atlas_memory_store` |
+| Tool reference token | `atlas.memory.store` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -711,9 +686,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `memory.surface` |
-| Gateway MCP name | `atlas.memory.surface` |
-| Local MCP name | `atlas.memory.surface` |
-| Embedded function name | `atlas_memory_surface` |
+| Tool reference token | `atlas.memory.surface` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -723,7 +697,7 @@ Memory-presence probe for exact symbol and file anchors. Returns which anchors h
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `domains` | `array<string>` | Optional | max items 5 |  |
+| `domains` | `array<string>` | Optional | max items 5 | Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering. |
 | `fileRelPaths` | `array<string>` | Optional | max items 500 | Files to probe. |
 | `symbolIds` | `array<string>` | Optional | max items 500 | Symbols to probe. |
 
@@ -734,9 +708,8 @@ Remote roles: `artificer`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `move_file` |
-| Gateway MCP name | `tools.move_file` |
-| Local MCP name | `move_file` |
-| Embedded function name | `move_file` |
+| Tool reference token | `tools.move_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -757,15 +730,14 @@ Remote roles: `assessor`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `project_db_query` |
-| Gateway MCP name | `tools.project_db_query` |
-| Local MCP name | `project_db_query` |
-| Embedded function name | `project_db_query` |
+| Tool reference token | `tools.project_db_query` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Run a single SQL statement against this project's configured application database (sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement types you may run depend on the granted permissions (READ→SELECT, WRITE→UPDATE, INSERT, DELETE, CREATE, ALTER) plus read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE). Read-phase roles are capped to SELECT/inspection regardless of the grant. The capability accepts only granted statement families and excludes destructive DDL such as DROP and TRUNCATE. One statement per call; read results are row- and byte-capped.
+Run a single SQL statement against this project's configured application database (sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement types you may run depend on separate per-verb grants: READ enables SELECT, WRITE enables UPDATE, and INSERT, DELETE, CREATE, and ALTER each require their matching grant. Read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE) follows the read grant. Read-phase roles are capped to SELECT/inspection regardless of the grant. The capability accepts only granted statement families and excludes destructive DDL such as DROP and TRUNCATE. One statement per call; read results are row- and byte-capped.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -779,9 +751,8 @@ Remote roles: `artificer`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `prune_artifact_output` |
-| Gateway MCP name | `tools.prune_artifact_output` |
-| Local MCP name | `prune_artifact_output` |
-| Embedded function name | `prune_artifact_output` |
+| Tool reference token | `tools.prune_artifact_output` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -806,9 +777,8 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `read_file` |
-| Gateway MCP name | `tools.read_file` |
-| Local MCP name | `read_file` |
-| Embedded function name | `read_file` |
+| Tool reference token | `tools.read_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -819,12 +789,12 @@ Read the contents of a file. Returns numbered lines for precise references. Use 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `jsonPath` | `string` | Optional |  | Dot-separated JSON path to extract from a JSON file. |
-| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000 |
+| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds. |
 | `maxBytes` | `integer` | Optional |  | Maximum bytes to return in structured mode. |
 | `offset` | `integer` | Optional |  | Starting line number, 1-based. Default: 1 |
 | `path` | `string` | Required |  | File path (absolute or relative to working directory) |
-| `search` | `string` | Optional |  | Case-insensitive regex pattern to search within the selected line range. |
-| `searchContext` | `integer` | Optional |  | Context lines around each search match in structured mode. |
+| `search` | `string` | Optional | max length 200 | Case-insensitive regex pattern to search within the selected line range. Unsafe nested-quantifier patterns are treated as literal text; results are capped at 100 matches. |
+| `searchContext` | `integer` | Optional | min 0 | Context lines around each search match in structured mode. Used only with search; default 2. |
 
 ### `tools.read_image_metadata`
 
@@ -833,9 +803,8 @@ Remote roles: `artificer`, `assessor`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `read_image_metadata` |
-| Gateway MCP name | `tools.read_image_metadata` |
-| Local MCP name | `read_image_metadata` |
-| Embedded function name | `read_image_metadata` |
+| Tool reference token | `tools.read_image_metadata` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -854,9 +823,8 @@ Remote roles: `assessor`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `review.analyze` |
-| Gateway MCP name | `atlas.review.analyze` |
-| Local MCP name | `atlas.review.analyze` |
-| Embedded function name | `atlas_review_analyze` |
+| Tool reference token | `atlas.review.analyze` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -877,9 +845,8 @@ Remote roles: `assessor`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `review.delta` |
-| Gateway MCP name | `atlas.review.delta` |
-| Local MCP name | `atlas.review.delta` |
-| Embedded function name | `atlas_review_delta` |
+| Tool reference token | `atlas.review.delta` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -901,9 +868,8 @@ Remote roles: `assessor`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `review.risk` |
-| Gateway MCP name | `atlas.review.risk` |
-| Local MCP name | `atlas.review.risk` |
-| Embedded function name | `atlas_review_risk` |
+| Tool reference token | `atlas.review.risk` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -926,15 +892,14 @@ Remote roles: `assessor`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `run_scoped_checks` |
-| Gateway MCP name | `tools.run_scoped_checks` |
-| Local MCP name | `run_scoped_checks` |
-| Embedded function name | `run_scoped_checks` |
+| Tool reference token | `tools.run_scoped_checks` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `shell` |
 | Batchable input | No |
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Run the canonical deterministic lint/typecheck checks for the declared job scope in one batch, including scoped PHP syntax lint when PHP files are present. Returns only all-checks-passed or compact failure feedback with file/line/rule details.
+Run the canonical deterministic lint/typecheck checks for the declared job scope in one batch, including scoped PHP syntax lint when PHP files are present. Returns all-checks-passed, compact failure feedback with file/line/rule details, or an unavailable result when no supported/requested runner can execute.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -948,9 +913,8 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `search_files` |
-| Gateway MCP name | `tools.search_files` |
-| Local MCP name | `search_files` |
-| Embedded function name | `search_files` |
+| Tool reference token | `tools.search_files` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -971,7 +935,7 @@ Search file contents deterministically with ripgrep (rg), using regex or literal
 | `offset` | `integer` | Optional |  | Skip this many result rows before returning output. |
 | `output_mode` | `string` | Optional | values "content", "files_with_matches", "count" | Result format. Default: content. |
 | `path` | `string` | Optional |  | File or directory to search in. Default: working directory |
-| `pattern` | `string` | Required |  | Regex pattern to search for |
+| `pattern` | `string` | Required |  | Search pattern. Interpreted as a regex unless literal is true. |
 
 ### `tools.sub_agent`
 
@@ -980,9 +944,8 @@ Remote roles: `artificer`, `dev`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `sub_agent` |
-| Gateway MCP name | `tools.sub_agent` |
-| Local MCP name | `sub_agent` |
-| Embedded function name | `sub_agent` |
+| Tool reference token | `tools.sub_agent` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `coordination` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -1006,9 +969,8 @@ Remote roles: `subagent`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `sub_agent_next_input` |
-| Gateway MCP name | `tools.sub_agent_next_input` |
-| Local MCP name | `sub_agent_next_input` |
-| Embedded function name | `sub_agent_next_input` |
+| Tool reference token | `tools.sub_agent_next_input` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `coordination` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -1028,9 +990,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `symbol.card` |
-| Gateway MCP name | `atlas.symbol.card` |
-| Local MCP name | `atlas.symbol.card` |
-| Embedded function name | `atlas_symbol_card` |
+| Tool reference token | `atlas.symbol.card` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
@@ -1050,9 +1011,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `symbol.overview` |
-| Gateway MCP name | `atlas.symbol.overview` |
-| Local MCP name | `atlas.symbol.overview` |
-| Embedded function name | `atlas_symbol_overview` |
+| Tool reference token | `atlas.symbol.overview` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -1075,9 +1035,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `symbol.search` |
-| Gateway MCP name | `atlas.symbol.search` |
-| Local MCP name | `atlas.symbol.search` |
-| Embedded function name | `atlas_symbol_search` |
+| Tool reference token | `atlas.symbol.search` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -1099,20 +1058,19 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `traverse_ref` |
-| Gateway MCP name | `atlas.traverse_ref` |
-| Local MCP name | `atlas.traverse_ref` |
-| Embedded function name | `atlas_traverse_ref` |
+| Tool reference token | `atlas.traverse_ref` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | Yes |
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. Each non-empty result returns evidence_ref for its visible text and next_traversal_ref only when more stored content remains.
+Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty call promotes that same identity to evidence_ref; a different opaque next_traversal_ref is returned only when more content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs. |
-| `offset` | `integer` | Optional | min 0 | Character offset for paged materialized refs; for search mode, matched-row offset. Prefer the value carried by next_traversal_ref. |
+| `offset` | `integer` | Optional | min 0 | Compatibility selector for an initial or legacy traversal. Opaque next_traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent. |
 | `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto. |
@@ -1125,9 +1083,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `tree.branch` |
-| Gateway MCP name | `atlas.tree.branch` |
-| Local MCP name | `atlas.tree.branch` |
-| Embedded function name | `atlas_tree_branch` |
+| Tool reference token | `atlas.tree.branch` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -1154,9 +1111,8 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `tree.expand` |
-| Gateway MCP name | `atlas.tree.expand` |
-| Local MCP name | `atlas.tree.expand` |
-| Embedded function name | `atlas_tree_expand` |
+| Tool reference token | `atlas.tree.expand` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `atlas` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -1179,9 +1135,8 @@ Remote roles: `artificer`, `assessor`, `dev`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `validate_artifact_output` |
-| Gateway MCP name | `tools.validate_artifact_output` |
-| Local MCP name | `validate_artifact_output` |
-| Embedded function name | `validate_artifact_output` |
+| Tool reference token | `tools.validate_artifact_output` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `read` |
 | Batchable input | No |
 | Parallel calls | Yes |
@@ -1205,9 +1160,8 @@ Remote roles: `artificer`.
 | Contract field | Value |
 |---|---|
 | Canonical name | `write_file` |
-| Gateway MCP name | `tools.write_file` |
-| Local MCP name | `write_file` |
-| Embedded function name | `write_file` |
+| Tool reference token | `tools.write_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
 | Access | `write` |
 | Batchable input | No |
 | Parallel calls | No |
@@ -1244,7 +1198,6 @@ compatibility. The agent projection removes them.
 - `atlas.code.survey`: `sessionId`
 - `atlas.code.window`: `sessionId`, `sliceContext`
 - `atlas.fetch_ref`: `hashes`, `refs`
-- `tools.inspect_file`: `paths`
 - `atlas.symbol.card`: `ifNoneMatch`, `includeResolutionMetadata`, `minCallConfidence`, `sessionId`, `symbolIds`, `symbolRefs`
 - `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
 - `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`

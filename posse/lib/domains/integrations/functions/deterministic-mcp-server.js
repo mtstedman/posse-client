@@ -112,6 +112,8 @@ import {
   isGatedTool,
   isUnlocked as isGateUnlocked,
   checkNativeToolAllowed,
+  applyNativeReadLineLimit,
+  ATLAS_CHAIN_READ_MAX_LINES,
   buildLockedToolError,
   noteAtlasCall,
   releaseGate,
@@ -1376,12 +1378,23 @@ function addToolSchema(schema) {
 
 function readFileSchemaForCurrentBoot() {
   if (!atlasAvailable) return TOOL_READ_FILE;
-  const atlasUseDescription = writeEnabled
-    ? "Use this tool only for documentation, configuration, manifests, other non source artifacts, content that Atlas cannot access, or verification after a file has been modified during this run. For unmodified source code, use the Atlas tools instead."
-    : "Use this tool only for documentation, configuration, manifests, other non source artifacts, or content that Atlas cannot access. For source code, use the Atlas tools instead.";
+  const changedSourceUse = writeEnabled
+    ? "verification after source changed during this run"
+    : "exact source that changed after Atlas retrieval";
+  const atlasUseDescription = `While the Atlas-first source gate is active, non-indexed reads default to and are capped at ${ATLAS_CHAIN_READ_MAX_LINES} lines. Use this tool only for documentation, configuration, manifests, other non-source artifacts, ${changedSourceUse}, or the Atlas unavailable/strikeout escape hatch. For other indexed source, use code.window in file mode, its continuation handle, or code.lens.`;
   return {
     ...TOOL_READ_FILE,
     description: `${TOOL_READ_FILE.description} ${atlasUseDescription}`,
+    parameters: {
+      ...TOOL_READ_FILE.parameters,
+      properties: {
+        ...TOOL_READ_FILE.parameters.properties,
+        limit: {
+          ...TOOL_READ_FILE.parameters.properties.limit,
+          description: `Maximum number of lines to read. Under the active Atlas-first source gate, non-indexed reads default to and are capped at ${ATLAS_CHAIN_READ_MAX_LINES}; changed/unavailable indexed escape reads retain the native reader bounds.`,
+        },
+      },
+    },
   };
 }
 
@@ -3407,7 +3420,7 @@ async function handleRequest(msg) {
     const normalizedRequestToolName = _normalizeGatewayToolRequestName(requestedToolName);
     const requestedAtlasTool = normalizedRequestToolName.startsWith("atlas.") || normalizedRequestToolName.startsWith("atlas_");
     const toolName = requestedAtlasTool ? normalizedRequestToolName : _stripToolsPrefix(normalizedRequestToolName);
-    const args = params?.arguments || {};
+    let args = params?.arguments || {};
     const start = Date.now();
     let nativeAllowedToolNames;
     let atlasAllowedActions;
@@ -3567,7 +3580,7 @@ async function handleRequest(msg) {
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS tool ${toolName} is intentionally not exposed. Use deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} as the raw-read fallback after ATLAS discovery, or when ATLAS is unavailable or insufficient.`,
+            text: `ATLAS tool ${toolName} is intentionally not exposed. Use code.window in file mode, its continuation handle, or code.lens for indexed source. Deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.`,
           }],
           isError: true,
         }));
@@ -3677,17 +3690,9 @@ async function handleRequest(msg) {
     // and the tool is still locked. Return a verbose isError so the LLM reads
     // the rule and redirects to an ATLAS call.
     if (!delegatedEvidenceCursor && isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
-      let gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
-      // Ordinary native-read defaults are intentionally broad. When an exact
-      // ATLAS result already covered the file, turn an omitted limit into the
-      // gate's bounded fallback rather than rejecting a recoverable call and
-      // making the model spend another turn restating it.
-      if (["read_file", "chain_read"].includes(toolName)
-        && gateDecision.reason === "atlas_source_range_required") {
-        args.limit = gateDecision.maxLines;
-        gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
-      }
+      const gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
       if (gateDecision.allowed) {
+        args = applyNativeReadLineLimit(args, gateDecision);
         // Continue to the native handler below.
       } else {
         const errorText = buildLockedToolError(toolName, { args, cwd: workspaceCwd, scopeKey: gateScopeKey });

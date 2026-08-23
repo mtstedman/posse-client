@@ -388,6 +388,23 @@ export function prepareVerdictForDispatch(job, verdict) {
   const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
 
+  const normalizedPassConfidence = normalizeAssessorConfidence(prepared.confidence, {
+    fallback: "medium",
+    allowNone: true,
+  });
+  if (prepared.verdict === "pass" && normalizedPassConfidence === "low") {
+    prepared = {
+      ...prepared,
+      verdict: "needs_review",
+      confidence: "low",
+      _disable_internal_retry: true,
+      reasons: [
+        "A low-confidence pass is non-terminal and requires human review.",
+        ...(Array.isArray(prepared.reasons) ? prepared.reasons : []),
+      ],
+    };
+  }
+
   const configuredPassConfidenceFloor = normalizeAssessorConfidence(payload?._assess_pass_confidence_floor, {
     fallback: null,
     allowNone: true,

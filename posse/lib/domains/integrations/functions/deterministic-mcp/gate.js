@@ -2,6 +2,12 @@ import { getObservationContext, recordObservation } from "../../../observability
 import { getAccountSetting } from "../../../settings/functions/account-settings.js";
 import { ToolGate } from "../../../../shared/tools/classes/ToolGate.js";
 import {
+  applyNativeReadLineLimit,
+  ATLAS_CHAIN_READ_MAX_LINES,
+} from "./source-file-gate.js";
+
+export { applyNativeReadLineLimit, ATLAS_CHAIN_READ_MAX_LINES };
+import {
   GATED_NATIVE_TOOLS,
   GATED_ROLES,
   MEANINGFUL_ATLAS_ACTIONS,

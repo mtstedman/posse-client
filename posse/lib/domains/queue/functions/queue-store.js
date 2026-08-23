@@ -3386,6 +3386,8 @@ export function clearAll() {
       db.prepare(`DELETE FROM agent_run_hash_ref_aliases`).run();
       db.prepare(`DELETE FROM job_hash_ref_aliases`).run();
       db.prepare(`DELETE FROM work_item_hash_ref_aliases`).run();
+      db.prepare(`DELETE FROM hash_ref_traversal_refs`).run();
+      db.prepare(`DELETE FROM hash_ref_evidence_refs`).run();
       db.prepare(`DELETE FROM agent_run_hash_refs`).run();
       db.prepare(`DELETE FROM job_hash_refs`).run();
       db.prepare(`DELETE FROM work_item_hash_refs`).run();

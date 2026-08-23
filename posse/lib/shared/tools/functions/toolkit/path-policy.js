@@ -1,16 +1,21 @@
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 
 import { isInsideRoot, realpathExistingPrefix } from "../../../../domains/runtime/functions/fs-safety.js";
 import {
   isSensitiveEnvFileOrTargetPath,
   isSensitiveEnvFilePath,
 } from "../../../../domains/runtime/functions/sensitive-paths.js";
-import { normalizeDisplaySlashes } from "../../../format/functions/display-paths.js";
+import {
+  normalizeDisplaySlashes,
+  toDisplayPath,
+} from "../../../format/functions/display-paths.js";
 import { MutationPolicy, splitShellSubcommands as policySplitShellSubcommands } from "../../../scope/classes/MutationPolicy.js";
 import { agentHiddenReadablePathReason } from "../../../scope/functions/agent-hidden-paths.js";
 
 const PRIVATE_WORKSPACE_DOT_DIRS = new Set([".git", ".claude", ".codex", ".posse-worktrees", ".posse-test-suites"]);
 const PRIVATE_POSSE_ROOTS = new Set(["agent-loaders", "db", "logs", "mcp", "research-state", "atlas"]);
+export const DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES = 5 * 1024 * 1024;
 
 export function safePath(cwd, filePath, scopePredicates = null) {
   const resolved = path.resolve(cwd, filePath);
@@ -48,6 +53,52 @@ export function agentHiddenPathReasonForAbsolute(cwd, resolvedPath) {
 export function agentHiddenPathError(cwd, resolvedPath, displayPath) {
   const reason = agentHiddenPathReasonForAbsolute(cwd, resolvedPath);
   return reason ? `Access to hidden workspace path is blocked: ${displayPath} (${reason}).` : null;
+}
+
+/**
+ * Resolve one existing regular file through the deterministic read_file path
+ * policy. Callers own text decoding and range selection, but must share this
+ * gate so handoff evidence cannot read anything read_file itself would reject.
+ */
+export function resolveDeterministicReadableFile(cwd, displayPath, scopePredicates = null, {
+  maxSizeBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
+  safePathImpl = safePath,
+} = {}) {
+  let filePath;
+  try {
+    filePath = safePathImpl(cwd, displayPath, scopePredicates);
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+  const hiddenErr = agentHiddenPathError(cwd, filePath, displayPath);
+  if (hiddenErr) return { ok: false, error: hiddenErr };
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `File not found: ${toDisplayPath(cwd, filePath)}` };
+  }
+  if (isSensitiveEnvFileOrTargetPath(filePath)) {
+    return {
+      ok: false,
+      error: "Access to .env files is blocked. Use documented config examples or code paths instead.",
+    };
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    return { ok: false, error: `Could not inspect file: ${err?.message || String(err)}` };
+  }
+  if (!stat.isFile()) {
+    const kind = stat.isDirectory() ? "a directory, not a file" : "not a regular file";
+    return { ok: false, error: `Path is ${kind}: ${toDisplayPath(cwd, filePath)}` };
+  }
+  if (stat.size > maxSizeBytes) {
+    return {
+      ok: false,
+      error: `File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use offset/limit to read a portion.`,
+    };
+  }
+  return { ok: true, path: filePath, stat };
 }
 
 export function buildScopePredicates(cwd, scope) {

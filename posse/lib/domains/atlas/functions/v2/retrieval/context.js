@@ -39,11 +39,12 @@ import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
  *   repoId?: string | null,
  *   embeddingIndex?: import("../contracts/embeddings.js").EmbeddingIndex,
  *   encoder?: import("../contracts/embeddings.js").EmbeddingEncoder,
+ *   feedbackEnabled?: boolean,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
  * @returns {Promise<ReturnType<typeof okEnvelope<ContextData>> | ReturnType<typeof errorEnvelope>>}
  */
-export async function contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
+export async function contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, feedbackEnabled = false, planner }) {
   const maxTokens = params.maxTokens || 6000;
   const sliceEnv = /** @type {any} */ (await sliceBuild({
     view,
@@ -53,6 +54,7 @@ export async function contextBuild({ view, versionId, params, ledger, repoRoot, 
     repoId,
     embeddingIndex,
     encoder,
+    feedbackEnabled,
     planner,
     taskType: params.taskType,
     params: {
@@ -161,12 +163,13 @@ function finishContextBuild({ sliceEnv, versionId, params, maxTokens }) {
  *   repoId?: string | null,
  *   embeddingIndex?: import("../contracts/embeddings.js").EmbeddingIndex,
  *   encoder?: import("../contracts/embeddings.js").EmbeddingEncoder,
+ *   feedbackEnabled?: boolean,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  * }} args
  * @returns {Promise<ReturnType<typeof okEnvelope<ContextSummaryData>> | ReturnType<typeof errorEnvelope>>}
  */
-export async function contextSummary({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner }) {
-  const contextEnv = await contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, planner });
+export async function contextSummary({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, feedbackEnabled = false, planner }) {
+  const contextEnv = await contextBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, feedbackEnabled, planner });
   return finishContextSummary({
     contextEnv,
     versionId,

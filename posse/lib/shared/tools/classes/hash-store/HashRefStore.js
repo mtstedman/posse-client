@@ -38,6 +38,11 @@ const DEFAULT_MAX_MATERIALIZED_ROWS_PER_OWNER = 256;
 const DEFAULT_MAX_MATERIALIZED_BYTES_PER_OWNER = 4 * 1024 * 1024;
 const PINNED_PRESSURE_BUDGET_MULTIPLIER = 2;
 const READY_OWNER_SCHEMAS_BY_DB = new WeakMap();
+const SOURCE_WINDOW_PROVENANCE_KEYS = Object.freeze([
+  "repository_identity",
+  "source_version",
+  "source_payload_encoding",
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -148,18 +153,110 @@ function mergeVisibleScopes(existing = [], incoming = []) {
   return out.slice(-64);
 }
 
+function sourceWindowWithProvenance(window, metadata) {
+  const normalized = { ...(window || {}) };
+  for (const key of SOURCE_WINDOW_PROVENANCE_KEYS) {
+    if (normalized[key] == null && metadata?.[key] != null) {
+      normalized[key] = metadata[key];
+    }
+  }
+  return normalized;
+}
+
+function applyAggregateSourceProvenance(metadata, windows) {
+  for (const key of SOURCE_WINDOW_PROVENANCE_KEYS) {
+    const conflictKey = `${key}_conflict`;
+    const values = windows.map((window) => window?.[key]);
+    const knownValues = values.filter((value) => value != null && String(value).trim() !== "");
+    const distinctValues = new Set(knownValues.map((value) => String(value)));
+    if (windows.length > 0 && knownValues.length === windows.length && distinctValues.size === 1) {
+      metadata[key] = knownValues[0];
+      delete metadata[conflictKey];
+    } else {
+      delete metadata[key];
+      if (distinctValues.size > 1) metadata[conflictKey] = true;
+      else delete metadata[conflictKey];
+    }
+  }
+}
+
+function metadataWithSourceWindowProvenance(value) {
+  if (!value || typeof value !== "object"
+    || String(value.line_semantics || "").toLowerCase() !== "source"
+    || !Array.isArray(value.source_windows)
+    || value.source_windows.length === 0) return value;
+  const normalized = { ...value };
+  normalized.source_windows = value.source_windows
+    .map((window) => sourceWindowWithProvenance(window, value));
+  applyAggregateSourceProvenance(normalized, normalized.source_windows);
+  return normalized;
+}
+
 function mergedHashRefMetadata(existing, incoming, { pinBounded = false } = {}) {
   const current = existing && typeof existing === "object" ? existing : null;
   const next = incoming && typeof incoming === "object" ? incoming : null;
   if (!current && !next && !pinBounded) return null;
-  const merged = { ...(current || next || {}) };
+  const currentLineSemantics = String(current?.line_semantics || "").toLowerCase();
+  const nextLineSemantics = String(next?.line_semantics || "").toLowerCase();
+  // Content reuse is byte-oriented, but source identity is not. Identical
+  // payloads legitimately occur at multiple paths and source locations, so
+  // retain every verified source window instead of treating a later identity
+  // as an exceptional collision.
+  const merged = { ...(current || {}) };
   if (next?.model_visible_scopes) {
     merged.model_visible_scopes = mergeVisibleScopes(
       current?.model_visible_scopes,
       next.model_visible_scopes,
     );
   }
-  if (pinBounded) merged.bounded_ingress = true;
+  const currentWindows = Array.isArray(current?.source_windows)
+    ? current.source_windows.map((window) => sourceWindowWithProvenance(window, current))
+    : [];
+  const nextWindows = Array.isArray(next?.source_windows)
+    ? next.source_windows.map((window) => sourceWindowWithProvenance(window, next))
+    : [];
+  const sourcePaths = (metadata, windows) => new Set([
+    String(metadata?.path ?? metadata?.repo_rel_path ?? "").trim(),
+    ...windows.map((window) => String(window?.path ?? window?.repo_rel_path ?? "").trim()),
+  ].filter(Boolean));
+  if (currentLineSemantics === "source") {
+    if (nextLineSemantics === "source") {
+      for (const window of nextWindows) {
+        const identity = stableJsonStringify(window);
+        if (!currentWindows.some((candidate) => stableJsonStringify(candidate) === identity)) {
+          currentWindows.push({ ...window });
+        }
+      }
+    }
+    const sourceWindows = currentWindows.map((window) => ({ ...window }));
+    merged.line_semantics = "source";
+    merged.source_windows = sourceWindows;
+    applyAggregateSourceProvenance(merged, sourceWindows);
+    const paths = [...sourcePaths(current, sourceWindows)];
+    if (paths.length === 1) merged.path = paths[0];
+    else {
+      delete merged.path;
+      delete merged.repo_rel_path;
+    }
+  } else {
+    // A legacy/materialized identity cannot acquire source coordinates merely
+    // because the same bytes are later observed through a source tool.
+    merged.line_semantics = "materialized";
+    merged.source_windows = currentWindows.map((window) => ({ ...window }));
+    for (const key of ["path", "repo_rel_path", "repository_identity", "source_version"]) {
+      if (Object.hasOwn(current || {}, key)) merged[key] = current[key];
+      else delete merged[key];
+    }
+  }
+  if (pinBounded || current?.bounded_ingress === true || current?.bounded_ingress === 1) {
+    merged.bounded_ingress = true;
+  }
+  if (current?.handoff_evidence_pinned === true || next?.handoff_evidence_pinned === true) {
+    merged.handoff_evidence_pinned = true;
+  }
+  if (current?.retention_exceeded === true || next?.retention_exceeded === true) {
+    merged.retention_exceeded = true;
+  }
   return merged;
 }
 
@@ -270,6 +367,7 @@ export class HashRefStore {
         version_id TEXT,
         recomputable INTEGER NOT NULL DEFAULT 0 CHECK (recomputable IN (0, 1)),
         degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
+        reuse_excluded INTEGER NOT NULL DEFAULT 0 CHECK (reuse_excluded IN (0, 1)),
         metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -280,9 +378,24 @@ export class HashRefStore {
         FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE
       )
     `);
+    const columns = new Set(this.db.pragma(`table_info(${table})`).map((column) => column.name));
+    if (!columns.has("reuse_excluded")) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN reuse_excluded INTEGER NOT NULL DEFAULT 0 CHECK (reuse_excluded IN (0, 1))`);
+      this.db.prepare(`
+        UPDATE ${table}
+        SET reuse_excluded = 1
+        WHERE json_extract(metadata_json, '$.protocol') = 'posse.sub_agent.v1'
+          AND json_type(metadata_json, '$.batch_id') IS NOT NULL
+          AND json_type(metadata_json, '$.dispatch_id') IS NOT NULL
+          AND json_type(metadata_json, '$.input_id') IS NOT NULL
+      `).run();
+    }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_ref ON ${table}(ref)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_content ON ${table}(${this.config.ownerColumn}, content_hash)`);
-    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_owner_content_unique ON ${table}(${this.config.ownerColumn}, content_hash)`);
+    // Default surfacing still reuses content inside the immediate transaction,
+    // while callers such as citation-child minting may request a distinct
+    // delegation identity for identical bytes.
+    this.db.exec(`DROP INDEX IF EXISTS idx_${table}_owner_content_unique`);
 
     const aliasTable = this.config.aliasTable;
     this.db.exec(`
@@ -336,12 +449,13 @@ export class HashRefStore {
     const objectType = String(entry.objectType || entry.object_type || "text").trim() || "text";
     const note = entry.note == null ? null : String(entry.note).trim() || null;
     const versionId = entry.versionId ?? entry.version_id ?? null;
-    const metadata = entry.metadata ?? null;
+    const metadata = metadataWithSourceWindowProvenance(entry.metadata ?? null);
     const sizeChars = Number.isFinite(Number(entry.sizeChars ?? entry.size_chars))
       ? Math.max(0, Number(entry.sizeChars ?? entry.size_chars))
       : (payloadText == null ? 0 : String(payloadText).length);
     const recomputable = entry.recomputable === true ? 1 : 0;
     const degraded = entry.degraded === true ? 1 : 0;
+    const reuseContent = entry.reuse !== false;
 
     const run = () => {
       if (preferredRef) {
@@ -382,7 +496,7 @@ export class HashRefStore {
           };
         }
       }
-      const existing = this._selectByContentHash(contentHash);
+      const existing = reuseContent ? this._selectByContentHash(contentHash) : null;
       if (existing) {
         const reused = this._reuseRow(existing, {
           payloadText,
@@ -423,10 +537,10 @@ export class HashRefStore {
             work_item_id, job_id, attempt_id, agent_call_id,
             ref, content_hash, object_type, source, entry_kind,
             payload_text, descriptor_json, fingerprint_json, note,
-            size_chars, version_id, recomputable, degraded, metadata_json,
+            size_chars, version_id, recomputable, degraded, reuse_excluded, metadata_json,
             created_at, updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           this.workItemId,
           this.jobId,
@@ -445,6 +559,7 @@ export class HashRefStore {
           versionId == null ? null : String(versionId),
           recomputable,
           degraded,
+          reuseContent ? 0 : 1,
           jsonText(metadata),
           nowIso(),
           nowIso(),
@@ -452,6 +567,7 @@ export class HashRefStore {
       } catch (err) {
         if (!isUniqueConstraintError(err)) throw err;
         if (!preferredRef || reservedPreferred) this.minter.release(minted.ref);
+        if (!reuseContent) throw err;
         const raced = this._selectByContentHash(contentHash);
         if (!raced) throw err;
         const reused = this._reuseRow(raced, {
@@ -720,6 +836,7 @@ export class HashRefStore {
       WHERE ${this.config.ownerColumn} = ?
         AND entry_kind = 'materialized'
         AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) != 1
+        AND COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) != 1
     `);
     while (true) {
       const stats = statsQuery.get(this.ownerId);
@@ -733,6 +850,7 @@ export class HashRefStore {
         WHERE ${this.config.ownerColumn} = ?
           AND entry_kind = 'materialized'
           AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) != 1
+          AND COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) != 1
         ORDER BY updated_at ASC,
                  CASE WHEN ref = ? THEN 1 ELSE 0 END ASC,
                  id ASC
@@ -753,7 +871,10 @@ export class HashRefStore {
       FROM ${this.config.table}
       WHERE ${this.config.ownerColumn} = ?
         AND entry_kind = 'materialized'
-        AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
+        AND (
+          COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
+          OR COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) = 1
+        )
     `).get(this.ownerId);
     const pinnedChars = Number(stats?.chars || 0);
     const thresholdChars = this.maxMaterializedChars * PINNED_PRESSURE_BUDGET_MULTIPLIER;
@@ -767,7 +888,10 @@ export class HashRefStore {
         FROM ${this.config.table}
         WHERE ${this.config.ownerColumn} = ?
           AND entry_kind = 'materialized'
-          AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
+          AND (
+            COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
+            OR COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) = 1
+          )
         ORDER BY updated_at DESC, id DESC
         LIMIT 1
       )
@@ -830,7 +954,10 @@ export class HashRefStore {
   _selectByContentHash(contentHash) {
     return this.db.prepare(`
       SELECT * FROM ${this.config.table}
-      WHERE ${this.config.ownerColumn} = ? AND content_hash = ?
+      WHERE ${this.config.ownerColumn} = ?
+        AND content_hash = ?
+        AND reuse_excluded = 0
+      ORDER BY created_at ASC, id ASC
       LIMIT 1
     `).get(this.ownerId, contentHash);
   }

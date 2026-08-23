@@ -697,7 +697,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     ? parseBool(explicitLiveFunnel)
     : (dbLiveFunnel != null ? dbLiveFunnel : true);
   const rawAutoFeedback = String(firstProvided(explicitValue("autoFeedbackMode", "atlas_auto_feedback", "POSSE_ATLAS_AUTO_FEEDBACK"), dbAutoFeedback, "")).trim().toLowerCase();
-  const autoFeedbackMode = VALID_ATLAS_AUTO_FEEDBACK_MODES.has(rawAutoFeedback) ? rawAutoFeedback : "write";
+  const autoFeedbackMode = VALID_ATLAS_AUTO_FEEDBACK_MODES.has(rawAutoFeedback) ? rawAutoFeedback : "off";
   const explicitLiveIndex = explicitValue("liveIndexEnabled", "atlas_live_index", "POSSE_ATLAS_LIVE_INDEX");
   const liveIndexEnabled = provided(explicitLiveIndex) && String(explicitLiveIndex).trim() !== ""
     ? parseBool(explicitLiveIndex)

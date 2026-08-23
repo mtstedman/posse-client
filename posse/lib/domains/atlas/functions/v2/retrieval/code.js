@@ -7,7 +7,7 @@
 // `readFile` function so this module stays pure — the dispatcher decides
 // where to read from (worktree fs, in-memory fixture, etc.).
 
-import { parseSymbolId } from "./cards.js";
+import { parseSymbolId, symbolHit } from "./cards.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import { findOverlaySymbol, getOverlaySymbols } from "./buffer.js";
@@ -20,6 +20,7 @@ import {
 } from "../native/code-context.js";
 import { calledFromBreadcrumbs } from "./usages.js";
 import { readRepoFileResult } from "./repo-read.js";
+import { redactSecrets } from "./redaction.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -28,9 +29,115 @@ import { readRepoFileResult } from "./repo-read.js";
 /** @typedef {import("../contracts/tool-params.js").CodeNeedWindowParams} CodeNeedWindowParams */
 /** @typedef {import("../contracts/tool-results.js").CodeSkeletonData} CodeSkeletonData */
 /** @typedef {import("../contracts/tool-results.js").CodeLensData} CodeLensData */
+/** @typedef {import("../contracts/tool-results.js").CodeLensMatch} CodeLensMatch */
 /** @typedef {import("../contracts/tool-results.js").CodeWindowData} CodeWindowData */
 
 /** @typedef {(path: string) => string | null} ReadFile */
+
+export const MAX_LENS_CONTEXT_LINES_JS = 8;
+// Per-call ceiling on match lines plus context. A dense file keeps every
+// match; context is trimmed evenly across matches instead, so the occurrence
+// map never trades completeness for lines nobody asked about.
+export const MAX_LENS_TOTAL_LINES_JS = 600;
+const MAX_LENS_SCOPE_SIGNATURE_CHARS = 160;
+
+export function normalizeCodeLensContextLines(value) {
+  return typeof value === "number" ? Math.min(value, MAX_LENS_CONTEXT_LINES_JS) : 2;
+}
+
+/**
+ * @param {CodeLensMatch[]} matches
+ * @param {number} [maxTotalLines]
+ * @returns {{ matches: CodeLensMatch[], contextLinesApplied: number | null, contextTrimmed: boolean }}
+ */
+export function fitLensContextBudget(matches, maxTotalLines = MAX_LENS_TOTAL_LINES_JS) {
+  const rows = Array.isArray(matches) ? matches : [];
+  if (rows.length === 0) return { matches: rows, contextLinesApplied: null, contextTrimmed: false };
+  const total = rows.reduce((sum, match) => (
+    sum + 1 + (match?.context?.before?.length || 0) + (match?.context?.after?.length || 0)
+  ), 0);
+  if (total <= maxTotalLines) return { matches: rows, contextLinesApplied: null, contextTrimmed: false };
+  const perSide = Math.max(0, Math.floor((maxTotalLines - rows.length) / (2 * rows.length)));
+  const trimmed = rows.map((match) => {
+    const before = Array.isArray(match?.context?.before) ? match.context.before : [];
+    const after = Array.isArray(match?.context?.after) ? match.context.after : [];
+    return {
+      ...match,
+      context: {
+        before: before.slice(Math.max(0, before.length - perSide)),
+        after: after.slice(0, perSide),
+      },
+    };
+  });
+  return { matches: trimmed, contextLinesApplied: perSide, contextTrimmed: true };
+}
+
+function lineStartOffsets(source) {
+  const offsets = [0];
+  const text = String(source || "");
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) offsets.push(index + 1);
+  }
+  return offsets;
+}
+
+function lineForOffset(offsets, offset) {
+  const target = Math.max(0, Number(offset) || 0);
+  let low = 0;
+  let high = offsets.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (offsets[mid] <= target) low = mid;
+    else high = mid - 1;
+  }
+  return low + 1;
+}
+
+/**
+ * Innermost-first index of the file's symbols by line span. Line columns are
+ * preferred; legacy rows (line column 1) fall back to the character range.
+ *
+ * @param {ViewSymbol[]} symbols
+ * @param {string} source
+ */
+export function lensScopeIndex(symbols, source) {
+  const offsets = lineStartOffsets(source);
+  const entries = [];
+  for (const symbol of Array.isArray(symbols) ? symbols : []) {
+    if (!symbol || typeof symbol !== "object" || !symbol.name) continue;
+    const startLine = Number(symbol.range_start_line) > 1
+      ? Number(symbol.range_start_line)
+      : lineForOffset(offsets, symbol.range_start);
+    const endLine = Number(symbol.range_end_line) > 1
+      ? Number(symbol.range_end_line)
+      : lineForOffset(offsets, Math.max(0, Number(symbol.range_end) - 1));
+    if (!(startLine >= 1) || !(endLine >= startLine)) continue;
+    entries.push({ symbol, startLine, endLine, span: endLine - startLine });
+  }
+  entries.sort((left, right) => left.span - right.span || left.startLine - right.startLine);
+  return entries;
+}
+
+/**
+ * @param {ReturnType<typeof lensScopeIndex>} index
+ * @param {number} line
+ * @returns {import("../contracts/tool-results.js").CodeLensScope | null}
+ */
+export function enclosingLensScope(index, line) {
+  for (const entry of index) {
+    if (line < entry.startLine || line > entry.endLine) continue;
+    const signature = String(entry.symbol.signature_text || "").trim();
+    return {
+      kind: String(entry.symbol.kind || ""),
+      name: String(entry.symbol.name || ""),
+      ...(entry.symbol.qualified_name ? { qualifiedName: String(entry.symbol.qualified_name) } : {}),
+      ...(signature ? { signature: signature.slice(0, MAX_LENS_SCOPE_SIGNATURE_CHARS) } : {}),
+      startLine: entry.startLine,
+      endLine: entry.endLine,
+    };
+  }
+  return null;
+}
 
 /**
  * @param {{
@@ -200,13 +307,14 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
       message: "code.lens requires at least one identifier in identifiersToFind",
     });
   }
-  const contextLines = typeof params.contextLines === "number" ? params.contextLines : 2;
+  const contextLines = normalizeCodeLensContextLines(params.contextLines);
   // Breadcrumbs for the definitions the agent is actually looking at: the
   // resolved target plus any requested identifiers defined in this file.
   const identSet = new Set(idents.map((ident) => String(ident || "").toLowerCase()));
   const lensTargets = new Map();
   if (resolved.target?.global_id != null) lensTargets.set(resolved.target.global_id, resolved.target);
-  for (const symbol of await view.query.symbolsInFile(targetPath)) {
+  const fileSymbols = await view.query.symbolsInFile(targetPath);
+  for (const symbol of fileSymbols) {
     if (symbol?.global_id != null && identSet.has(String(symbol.name || "").toLowerCase())) {
       lensTargets.set(symbol.global_id, symbol);
     }
@@ -220,26 +328,45 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     identifiersToFind: idents,
     contextLines,
   });
-  return finishCodeLens({
+  return await finishCodeLens({
     versionId,
     params,
     targetPath,
     symbolId,
+    source,
     lens: resolvedLens,
     calledFrom,
+    scopeIndex: lensScopeIndex(fileSymbols, source),
   });
 }
 
-function finishCodeLens({ versionId, params, targetPath, symbolId, lens, calledFrom = [] }) {
+async function finishCodeLens({
+  versionId, params, targetPath, symbolId, source, lens, calledFrom = [], scopeIndex = [],
+}) {
   const etag = String(lens.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
     return notModifiedEnvelope({ action: "code.lens", versionId, etag });
   }
+  const continuationWindows = dedupeCodeWindowSlices([
+    ...normalizeCodeWindowSlices(lens._continuationWindows),
+    ...await materializeLensContinuationRanges(source, lens._continuationRanges),
+  ]);
+  // A match is only as useful as the declaration and branch it sits in; the
+  // enclosing symbol tells the caller where it is without a source read.
+  const scoped = (Array.isArray(lens.matches) ? lens.matches : []).map((match) => {
+    if (!match || typeof match !== "object" || match.scope !== undefined) return match;
+    const scope = enclosingLensScope(scopeIndex, Number(match.line));
+    return scope ? { ...match, scope } : match;
+  });
+  const fitted = fitLensContextBudget(scoped);
   /** @type {CodeLensData} */
   const data = {
     ...(symbolId ? { symbolId } : {}),
     repo_rel_path: targetPath,
-    matches: Array.isArray(lens.matches) ? lens.matches : [],
+    matches: fitted.matches,
+    ...(fitted.contextTrimmed
+      ? { contextLinesApplied: fitted.contextLinesApplied, contextTrimmed: true }
+      : {}),
     identifiersFound: Array.isArray(lens.identifiersFound) ? lens.identifiersFound : [],
     ...(lens.identifiersFoundInText?.length
       ? { identifiersFoundInText: lens.identifiersFoundInText }
@@ -247,6 +374,9 @@ function finishCodeLens({ versionId, params, targetPath, symbolId, lens, calledF
     identifiersMissing: Array.isArray(lens.identifiersMissing) ? lens.identifiersMissing : [],
     truncated: lens.truncated === true,
     omittedMatchCount: Math.max(0, Number(lens.omittedMatchCount) || 0),
+    // Private native-to-owner carrier. The hash materializer replaces this
+    // with one traversal_ref before the result reaches the model.
+    ...(continuationWindows.length > 0 ? { _continuationWindows: continuationWindows } : {}),
     ...(typeof lens.degradedReason === "string" && lens.degradedReason
       ? { degradedReason: lens.degradedReason }
       : {}),
@@ -261,6 +391,28 @@ function finishCodeLens({ versionId, params, targetPath, symbolId, lens, calledF
   });
 }
 
+async function materializeLensContinuationRanges(source, value) {
+  if (!Array.isArray(value) || value.length === 0) return [];
+  const lines = String(source || "").split(/\r?\n/u);
+  const windows = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const startLine = Math.max(1, Math.trunc(Number(entry.startLine || 1)));
+    const endLine = Math.min(
+      lines.length,
+      Math.max(startLine, Math.trunc(Number(entry.endLine || startLine))),
+    );
+    if (startLine > lines.length) continue;
+    windows.push({
+      content: await redactSecrets(lines.slice(startLine - 1, endLine).join("\n")),
+      startLine,
+      endLine,
+      identifiers: stringArray(entry.identifiers),
+    });
+  }
+  return windows;
+}
+
 /**
  * @param {{
  *   view: View,
@@ -271,9 +423,10 @@ function finishCodeLens({ versionId, params, targetPath, symbolId, lens, calledF
  *   ledger?: import("../contracts/api.js").Ledger,
  *   repoId?: string | null,
  *   config?: Record<string, any>,
+ *   findIdentifierRedirects?: (identifiers: string[], requestedFile: string) => Promise<Array<{identifier:string,matches:any[]}>>,
  * }} args
  */
-export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId, config }) {
+export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects }) {
   if (Array.isArray(/** @type {any} */ (params).items)) {
     return errorEnvelope({
       action: "code.window",
@@ -282,10 +435,10 @@ export async function codeNeedWindow({ view, versionId, params, readFile, repoRo
       message: "code.window multi-selection is disabled; issue independent scalar calls together",
     });
   }
-  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config }, codeWindowNative);
+  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects }, codeWindowNative);
 }
 
-async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config }, buildWindow) {
+async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects }, buildWindow) {
   const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
   if (!resolved.ok) return errorEnvelope({
     action: "code.window",
@@ -339,8 +492,106 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     maxWindowLines: codeWindowPolicy.maxWindowLines,
     maxTokens,
   });
-  const additionalWindows = normalizeCodeWindowSlices(result.additionalWindows);
-  const continuationWindows = normalizeCodeWindowSlices(result._continuationWindows);
+  let content = String(result.content || "");
+  let startLine = Number(result.startLine || 1);
+  let endLine = Number(result.endLine || 1);
+  let estimatedTokens = Number(result.estimatedTokens || 0);
+  let truncated = result.truncated === true;
+  let selectionBounded = result.selectionBounded == null
+    ? truncated
+    : result.selectionBounded === true;
+  let additionalWindows = normalizeCodeWindowSlices(result.additionalWindows);
+  let continuationWindows = normalizeCodeWindowSlices(result._continuationWindows);
+  const identifiersFound = stringArray(result.identifiersFound);
+  const identifiersReturned = stringArray(result.identifiersReturned);
+  const identifiersMissing = stringArray(result.identifiersMissing);
+  let identifierRedirects = [];
+  /** @type {CodeWindowData["redirect"] | null} */
+  let redirect = null;
+  /** @type {CodeWindowData["contentKind"] | null} */
+  let contentKind = null;
+  let symbolTargets = [];
+  let note = null;
+  const matchedIdentifiers = new Set(
+    [...identifiersFound, ...identifiersReturned].map((entry) => entry.toLowerCase()),
+  );
+  const missingIdentifiers = new Set(identifiersMissing.map((entry) => entry.toLowerCase()));
+  const allRequestedAnchorsMissed = Boolean(
+    params.file
+    && !params.symbolId
+    && identifiers.length > 0
+    && identifiers.every((entry) => (
+      !matchedIdentifiers.has(entry.toLowerCase())
+      && missingIdentifiers.has(entry.toLowerCase())
+    )),
+  );
+  if (allRequestedAnchorsMissed) {
+    try {
+      identifierRedirects = typeof findIdentifierRedirects === "function"
+        ? await findIdentifierRedirects(identifiers, targetPath)
+        : identifiers.map((identifier) => ({ identifier, matches: [] }));
+    } catch {
+      identifierRedirects = identifiers.map((identifier) => ({ identifier, matches: [] }));
+    }
+    const originalWindow = content
+      ? [{
+          content,
+          startLine: Number(result.startLine || 1),
+          endLine: Number(result.endLine || result.startLine || 1),
+          identifiers: [],
+        }]
+      : [];
+    continuationWindows = dedupeCodeWindowSlices([
+      ...originalWindow,
+      ...additionalWindows,
+      ...continuationWindows,
+    ]);
+    content = "";
+    estimatedTokens = 0;
+    truncated = true;
+    selectionBounded = true;
+    additionalWindows = [];
+    redirect = {
+      reason: "identifiers_not_in_requested_file",
+      requestedFile: targetPath,
+      searchedRepository: true,
+      nextAction: "code.window",
+    };
+  } else if (params.file && !params.symbolId && source.split(/\r?\n/u).length > codeWindowPolicy.maxWindowLines) {
+    const fileSymbols = typeof view.query.symbolsInFile === "function"
+      ? await view.query.symbolsInFile(targetPath)
+      : [];
+    const skeleton = await codeSkeletonNative({
+      repo_rel_path: targetPath,
+      source,
+      symbols: fileSymbols,
+      identifiersToFind: [],
+      exportedOnly: false,
+      maxLines: codeWindowPolicy.maxWindowLines,
+      maxTokens,
+    });
+    const originalWindow = content
+      ? [{ content, startLine, endLine, identifiers: identifiersReturned }]
+      : [];
+    continuationWindows = dedupeCodeWindowSlices([
+      ...originalWindow,
+      ...additionalWindows,
+      ...continuationWindows,
+    ]);
+    content = String(skeleton.content || "");
+    startLine = Number(skeleton.startLine || 1);
+    endLine = Number(skeleton.endLine || startLine);
+    estimatedTokens = Math.ceil(content.length / 4);
+    truncated = true;
+    selectionBounded = true;
+    additionalWindows = [];
+    contentKind = "file_skeleton";
+    const selectedSymbols = Array.isArray(skeleton.selectedSymbols)
+      ? skeleton.selectedSymbols
+      : fileSymbols;
+    symbolTargets = selectedSymbols.map((symbol) => symbolHit(symbol));
+    note = "This file exceeds the configured line cap. Use the returned symbolId values for symbol-mode code.window calls, which return whole bodies; use traversal_ref for the retained file-mode range.";
+  }
   const returnedFunctionAnchors = normalizeReturnedFunctionAnchors(result._returnedFunctionAnchors);
   const ownerSymbols = returnedFunctionAnchors.length > 0
     ? [
@@ -359,19 +610,19 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   const data = {
     ...(symbolId ? { symbolId } : {}),
     repo_rel_path: targetPath,
-    content: String(result.content || ""),
-    startLine: Number(result.startLine || 1),
-    endLine: Number(result.endLine || 1),
-    estimatedTokens: Number(result.estimatedTokens || 0),
-    truncated: result.truncated === true,
-    selectionBounded: result.selectionBounded == null
-      ? result.truncated === true
-      : result.selectionBounded === true,
+    content,
+    startLine,
+    endLine,
+    estimatedTokens,
+    truncated,
+    selectionBounded,
     outputTruncated: result.outputTruncated === true,
-    identifiersFound: stringArray(result.identifiersFound),
-    identifiersReturned: stringArray(result.identifiersReturned),
-    identifiersMissing: stringArray(result.identifiersMissing),
+    identifiersFound,
+    identifiersReturned,
+    identifiersMissing,
     identifiersOmitted: stringArray(result.identifiersOmitted),
+    ...(redirect ? { redirect, identifierRedirects } : {}),
+    ...(contentKind ? { contentKind, symbolTargets, note } : {}),
     ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
     // Private native-to-owner transport. The hash-ref pager removes this
     // before model delivery and exposes a traversal_ref instead.
@@ -403,6 +654,16 @@ function normalizeCodeWindowSlices(value) {
       identifiers: stringArray(entry.identifiers),
     }))
     .filter((entry) => entry.content.length > 0);
+}
+
+function dedupeCodeWindowSlices(value) {
+  const seen = new Set();
+  return normalizeCodeWindowSlices(value).filter((entry) => {
+    const key = `${entry.startLine}:${entry.endLine}:${entry.content}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeReturnedFunctionAnchors(value) {

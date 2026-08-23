@@ -284,7 +284,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   const payload = { ...(args || {}) };
   const fallbackOnlyNested = nestedFallbackOnlyAction(payload);
   if (ATLAS_FALLBACK_ONLY_ACTIONS.has(normalizedAction) || fallbackOnlyNested) {
-    throw new Error("ATLAS file.read is intentionally not exposed. Use deterministic read_file/chain_read as the raw-read fallback after ATLAS discovery, or when ATLAS is unavailable or insufficient.");
+    throw new Error("ATLAS file.read is intentionally not exposed. Use code.window in file mode, its continuation handle, or code.lens for indexed source. Deterministic read_file/chain_read is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.");
   }
   if (payload.repo_id && !payload.repoId) payload.repoId = String(payload.repo_id);
   if (atlasActionSupportsRepoId(normalizedAction)) {
@@ -440,11 +440,6 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       ...(editedFiles.length > 0 ? { focusPaths: editedFiles } : {}),
     };
     const maxTokens = clampInt(payload.maxTokens ?? payload.budget?.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, 1600);
-    const maxActions = payload.maxActions ?? payload.budget?.maxActions;
-    const budget = {
-      maxTokens,
-      ...(maxActions == null ? {} : { maxActions: clampInt(maxActions, 1, 20, 6) }),
-    };
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
@@ -454,8 +449,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
         ...(options.contextMode ? { contextMode: options.contextMode } : {}),
         ...(options.focusSymbols ? { focusSymbols: options.focusSymbols } : {}),
         ...(options.focusPaths ? { focusPaths: options.focusPaths } : {}),
-        maxTokens: budget.maxTokens,
-        ...(budget.maxActions == null ? {} : { maxActions: budget.maxActions }),
+        maxTokens,
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };

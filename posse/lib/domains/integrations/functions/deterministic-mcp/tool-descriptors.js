@@ -149,6 +149,23 @@ export function isAtlasActionSurfaced(action) {
   return !HIDDEN_ATLAS_SURFACE_ACTIONS.has(String(action || "").trim());
 }
 
+const CATALOG_SCHEMA_OVERRIDE_KEYS = Object.freeze([
+  "const",
+  "enum",
+  "exclusiveMaximum",
+  "exclusiveMinimum",
+  "maximum",
+  "maxItems",
+  "maxLength",
+  "maxProperties",
+  "minimum",
+  "minItems",
+  "minLength",
+  "minProperties",
+  "pattern",
+  "uniqueItems",
+]);
+
 export const ATLAS_TOOL_DEFS = Object.freeze(withNativeAtlasSchemas(ATLAS_TOOL_DEFS_RAW));
 export const SURFACED_ATLAS_TOOL_DEFS = Object.freeze(
   Object.fromEntries(Object.entries(ATLAS_TOOL_DEFS).filter(([action]) => isAtlasActionSurfaced(action))),
@@ -163,7 +180,7 @@ function withNativeAtlasSchemas(defs) {
   for (const [action, def] of Object.entries(defs)) {
     const generated = atlasDescriptorSchemaForAction(action);
     const parameters = generated
-      ? mergeSchemaDescriptions(generated, def.parameters)
+      ? mergeCatalogSchemaMetadata(generated, def.parameters)
       : cloneJson(def.parameters);
     out[action] = {
       ...def,
@@ -184,32 +201,33 @@ function filterFallbackOnlyAtlasSchema(action, parameters) {
   return parameters;
 }
 
-function mergeSchemaDescriptions(generated, existing) {
+function mergeCatalogSchemaMetadata(generated, existing) {
   const out = cloneJson(generated);
-  mergeDescriptionsInPlace(out, existing || {});
+  mergeCatalogSchemaMetadataInPlace(out, existing || {});
   return out;
 }
 
-function mergeDescriptionsInPlace(target, source) {
+function mergeCatalogSchemaMetadataInPlace(target, source) {
   if (!target || typeof target !== "object" || !source || typeof source !== "object") return;
-  if (!target.description && typeof source.description === "string") target.description = source.description;
-  if (!Object.prototype.hasOwnProperty.call(target, "default") && Object.prototype.hasOwnProperty.call(source, "default")) {
-    target.default = source.default;
+  if (typeof source.description === "string") target.description = source.description;
+  if (Object.prototype.hasOwnProperty.call(source, "default")) target.default = cloneJson(source.default);
+  for (const key of CATALOG_SCHEMA_OVERRIDE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) target[key] = cloneJson(source[key]);
   }
   if (source.internalOnly === true) target.internalOnly = true;
   const targetProps = target.properties && typeof target.properties === "object" ? target.properties : {};
   const sourceProps = source.properties && typeof source.properties === "object" ? source.properties : {};
   for (const [key, child] of Object.entries(targetProps)) {
-    mergeDescriptionsInPlace(child, sourceProps[key]);
+    mergeCatalogSchemaMetadataInPlace(child, sourceProps[key]);
   }
-  if (target.items && source.items) mergeDescriptionsInPlace(target.items, source.items);
+  if (target.items && source.items) mergeCatalogSchemaMetadataInPlace(target.items, source.items);
   if (
     target.additionalProperties
     && typeof target.additionalProperties === "object"
     && source.additionalProperties
     && typeof source.additionalProperties === "object"
   ) {
-    mergeDescriptionsInPlace(target.additionalProperties, source.additionalProperties);
+    mergeCatalogSchemaMetadataInPlace(target.additionalProperties, source.additionalProperties);
   }
 }
 

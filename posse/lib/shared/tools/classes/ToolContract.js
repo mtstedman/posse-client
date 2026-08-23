@@ -4,6 +4,7 @@ import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js"
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
 import { renderAtlasGuidance, renderToolBatchingGuidance } from "../functions/provider-surface.js";
 import { projectAgentToolDefinition } from "../functions/agent-schema.js";
+import { projectProviderToolDefinition } from "../functions/provider-schema.js";
 import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
@@ -508,7 +509,7 @@ export class ToolContract {
     const tools = [];
     for (const tool of (this.contract.tools || [])) {
       const def = toolMap[canonicalToolName(tool)];
-      if (def) tools.push(projectAgentToolDefinition(def));
+      if (def) tools.push(projectProviderToolDefinition(def, this.contract.provider));
     }
     return tools;
   }

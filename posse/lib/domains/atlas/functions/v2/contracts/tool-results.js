@@ -775,7 +775,17 @@
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
  * @property {boolean} truncated
- * @property {number} omittedMatchCount
+ * @property {number} omittedMatchCount        Matches unavailable because the native hard cap omitted them; excludes traversal-backed display paging.
+ * @property {number} [contextLinesApplied]  Context lines kept per side after the per-call line budget trimmed every match evenly; absent when nothing was trimmed.
+ * @property {boolean} [contextTrimmed]      True when the per-call line budget reduced context; matches are never dropped by the budget.
+ * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [_continuationWindows] Exact redacted source ranges omitted by native lens caps; private owner transport.
+ * @property {object} [traversal_ref]          Stored continuation containing deferred display matches or native continuation windows.
+ * @property {number} [inlineMatchCount]       Matches retained in the inline display after owner paging.
+ * @property {number} [deferredMatchCount]     Matches available behind traversal_ref after owner display paging.
+ * @property {number} [totalMatchCount]        Inline, deferred, and natively omitted matches combined.
+ * @property {number} [tailMatchesTotal]       Compatibility total for inline plus deferred matches.
+ * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [continuationWindowsInline] Native continuation windows restored inline when ref materialization is unavailable.
+ * @property {boolean} [continuationInline]    True when continuation data was restored inline instead of stored behind traversal_ref.
  * @property {string} [degradedReason]         Stable degradation reason; omitted when the result is complete.
  * @property {CalledFromBreadcrumb[]} [calledFrom]  Breadcrumbs for the definitions being read.
  * @property {string} [etag]
@@ -789,6 +799,17 @@
  * @property {string} identifier
  * @property {"text"} [matchKind]  Absent for AST usage matches; "text" when the identifier was only found inside string/comment text.
  * @property {{ before: string[], after: string[] }} context
+ * @property {CodeLensScope} [scope]  Innermost indexed symbol enclosing the match line; absent when the line is outside every indexed symbol.
+ */
+
+/**
+ * @typedef {Object} CodeLensScope
+ * @property {string} kind
+ * @property {string} name
+ * @property {string} [qualifiedName]
+ * @property {string} [signature]   Declaration signature text, capped at 160 characters.
+ * @property {number} startLine
+ * @property {number} endLine
  */
 
 /**
@@ -806,7 +827,13 @@
  * @property {string[]} identifiersReturned
  * @property {string[]} identifiersMissing
  * @property {string[]} identifiersOmitted
+ * @property {{reason:"identifiers_not_in_requested_file",requestedFile:string,searchedRepository:true,nextAction:"code.window"}} [redirect] Repository-wide recovery metadata for an all-anchor file miss.
+ * @property {Array<{identifier:string,matches:SymbolHit[]}>} [identifierRedirects] Lexical symbol locations found outside the requested file; task text is never used for this recovery search.
+ * @property {"file_skeleton"} [contentKind] Present when an oversized file-mode request returns a skeleton instead of another raw file slice.
+ * @property {SymbolHit[]} [symbolTargets] Indexed targets suitable for whole-body symbol-mode follow-ups from an oversized file skeleton.
+ * @property {string} [note] Compact follow-up guidance for oversized file skeletons.
  * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [additionalWindows]
+ * @property {boolean} [continuationInline]    True when additionalWindows contains continuation data restored inline after ref materialization was unavailable.
  * @property {Array<{content:string,startLine:number,endLine:number,identifiers:string[]}>} [_continuationWindows] Exact selected regions omitted from the native inline line/token budget; private owner transport, never model-visible.
  * @property {object} [traversal_ref]         One stored, ordered, de-duplicated traversal capability containing every selected region omitted from the inline display.
  * @property {number} [continuationWindows]

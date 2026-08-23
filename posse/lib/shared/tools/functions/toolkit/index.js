@@ -36,8 +36,10 @@ import {
   agentHiddenPathError,
   agentHiddenPathReasonForAbsolute,
   buildScopePredicates,
+  DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
   isSensitiveEnvFileOrTargetPath,
   isSensitiveEnvFilePath,
+  resolveDeterministicReadableFile,
   safePath,
   splitShellSubcommands,
 } from "./path-policy.js";
@@ -46,7 +48,9 @@ import { createObservationWrapper } from "./factory.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
 import {
   buildStructuredReadResult as buildStructuredReadResultFromModule,
+  formatNumberedLines as formatNumberedLinesFromModule,
   hasStructuredReadOptions as hasStructuredReadOptionsFromModule,
+  looksReDosProne as looksReDosProneFromModule,
   splitEditableLines as splitEditableLinesFromModule,
 } from "./structured-read.js";
 import {
@@ -80,9 +84,6 @@ import {
 import { normPath, resolvePathWithin } from "../../../scope/functions/path.js";
 
 const READ_FILE_DEFAULT_LIMIT = 2000;
-const READ_FILE_MAX_SIZE_BYTES = 5 * 1024 * 1024;
-const READ_FILE_MAX_SEARCH_MATCHES = 100;
-const READ_FILE_MAX_SEARCH_PATTERN_CHARS = 200;
 const EDIT_FILE_MAX_PATTERN_CHARS = 500;
 const EDIT_FILE_REPLACE_PATTERN_TIMEOUT_MS = 2000;
 const EDIT_FILE_MAX_PATTERN_MATCHES = 10000;
@@ -123,56 +124,6 @@ try {
 function toPositiveInt(value, fallback) {
   const n = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function hasStructuredReadOptions(args = {}) {
-  return args.maxBytes != null || args.search != null || args.jsonPath != null;
-}
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function looksReDosProne(pattern) {
-  return /\([^)]*[+*][^)]*\)[+*{]/.test(pattern)
-    || /(\.\*){3,}/.test(pattern)
-    || /\[[^\]]+\][+*]\s*[+*{]/.test(pattern);
-}
-
-function compileReadSearchPattern(pattern) {
-  const raw = String(pattern || "");
-  if (raw.length > READ_FILE_MAX_SEARCH_PATTERN_CHARS) {
-    return {
-      ok: false,
-      message: `search pattern exceeds ${READ_FILE_MAX_SEARCH_PATTERN_CHARS} characters`,
-    };
-  }
-  const source = looksReDosProne(raw) ? escapeRegExp(raw) : raw;
-  try {
-    return { ok: true, re: new RegExp(source, "i") };
-  } catch (err) {
-    return { ok: false, message: `Invalid search regex: ${err?.message || String(err)}` };
-  }
-}
-
-function extractJsonPath(root, jsonPath) {
-  const segments = String(jsonPath || "").split(".").filter(Boolean);
-  let cursor = root;
-  for (const segment of segments) {
-    if (cursor == null) return undefined;
-    if (Array.isArray(cursor) && /^\d+$/.test(segment)) {
-      cursor = cursor[Number(segment)];
-    } else if (typeof cursor === "object" && Object.prototype.hasOwnProperty.call(cursor, segment)) {
-      cursor = cursor[segment];
-    } else {
-      return undefined;
-    }
-  }
-  return cursor;
-}
-
-function firstDefined(...values) {
-  return values.find((value) => value !== undefined);
 }
 
 function hasOwn(value, key) {
@@ -223,14 +174,6 @@ function setJsonPathValue(root, segments, value) {
   }
   cursor[leaf] = value;
   return { ok: true };
-}
-
-function splitEditableLines(content) {
-  const eol = content.includes("\r\n") ? "\r\n" : "\n";
-  const hadFinalEol = content.endsWith("\n");
-  const body = hadFinalEol ? content.replace(/\r?\n$/, "") : content;
-  const lines = body.length > 0 ? body.split(/\r?\n/) : [];
-  return { eol, hadFinalEol, lines };
 }
 
 function splitReplacementLines(value) {
@@ -298,85 +241,6 @@ function applyReplacePatternWithBudget({ content, pattern, replacement, global, 
     matchCount: Number(payload.matchCount) || 0,
     ambiguous: payload.ambiguous === true,
   };
-}
-
-function formatNumberedLines(lines, startLine) {
-  return lines.map((line, i) => `${String(startLine + i).padStart(6)}\t${line}`).join("\n");
-}
-
-function buildStructuredReadResult({
-  args,
-  displayPath,
-  content,
-  selectedLines,
-  startLine,
-  totalBytes,
-  totalLines,
-  truncated,
-}) {
-  let returnedLines = selectedLines;
-  let rawContent = selectedLines.join("\n");
-  let clipped = false;
-  const maxBytes = toPositiveInt(args.maxBytes, null);
-  if (maxBytes != null) {
-    const buf = Buffer.from(rawContent, "utf8");
-    if (buf.length > maxBytes) {
-      rawContent = buf.subarray(0, maxBytes).toString("utf8");
-      returnedLines = rawContent.split("\n");
-      clipped = true;
-    }
-  }
-
-  const data = {
-    ok: true,
-    path: displayPath,
-    totalBytes,
-    totalLines,
-    startLine,
-    returnedLines: returnedLines.length,
-    truncated: Boolean(truncated || clipped),
-    content: rawContent,
-    numberedContent: formatNumberedLines(returnedLines, startLine),
-  };
-
-  if (args.search != null) {
-    const compiled = compileReadSearchPattern(args.search);
-    if (!compiled.ok) return `Error: ${compiled.message}`;
-    const ctxLines = toNonNegativeInt(args.searchContext, 2);
-    const matches = [];
-    for (let li = 0; li < selectedLines.length; li += 1) {
-      compiled.re.lastIndex = 0;
-      if (compiled.re.test(selectedLines[li])) {
-        matches.push({
-          line: startLine + li,
-          text: selectedLines[li],
-          context: {
-            before: selectedLines.slice(Math.max(0, li - ctxLines), li),
-            after: selectedLines.slice(li + 1, Math.min(selectedLines.length, li + 1 + ctxLines)),
-          },
-        });
-        if (matches.length >= READ_FILE_MAX_SEARCH_MATCHES) {
-          data.truncated = true;
-          break;
-        }
-      }
-    }
-    data.matches = matches;
-  }
-
-  if (args.jsonPath != null) {
-    try {
-      const parsed = JSON.parse(content);
-      const value = extractJsonPath(parsed, args.jsonPath);
-      data.jsonPathValue = value;
-      data.jsonPathMatched = value !== undefined;
-    } catch (err) {
-      data.jsonPathMatched = false;
-      data.jsonPathError = `Invalid JSON: ${err?.message || String(err)}`;
-    }
-  }
-
-  return JSON.stringify(data, null, 2);
 }
 
 export {
@@ -475,24 +339,13 @@ export function createDeterministicToolkit({
   const wrapDeterministicExecutor = createObservationWrapper({ skipObservationLogging });
 
   function execReadFile(args, cwd, scopePredicates) {
-    let filePath;
-    try {
-      filePath = safePathImpl(cwd, args.path, scopePredicates);
-    } catch (err) {
-      return `Error: ${err.message}`;
-    }
-    const hiddenErr = agentHiddenPathError(cwd, filePath, args.path);
-    if (hiddenErr) return `Error: ${hiddenErr}`;
-    if (!fs.existsSync(filePath)) return `Error: File not found: ${toDisplayPath(cwd, filePath)}`;
-    if (isSensitiveEnvFileOrTargetPath(filePath)) {
-      return "Error: Access to .env files is blocked. Use documented config examples or code paths instead.";
-    }
-
-    const stat = fs.statSync(filePath);
-    if (stat.isDirectory()) return `Error: Path is a directory, not a file: ${toDisplayPath(cwd, filePath)}`;
-    if (stat.size > READ_FILE_MAX_SIZE_BYTES) {
-      return `Error: File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use offset/limit to read a portion.`;
-    }
+    const readable = resolveDeterministicReadableFile(cwd, args.path, scopePredicates, {
+      maxSizeBytes: DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
+      safePathImpl,
+    });
+    if (!readable.ok) return `Error: ${readable.error}`;
+    const filePath = readable.path;
+    const stat = readable.stat;
 
     const content = fs.readFileSync(filePath, "utf-8");
     const { lines } = splitEditableLinesFromModule(content);
@@ -515,7 +368,7 @@ export function createDeterministicToolkit({
         truncated: remaining > 0,
       });
     }
-    const numbered = formatNumberedLines(selected, offset + 1);
+    const numbered = formatNumberedLinesFromModule(selected, offset + 1);
     return numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : "");
   }
 
@@ -567,12 +420,12 @@ export function createDeterministicToolkit({
     let content = originalContent;
 
     const exactRequested = args.old_string !== undefined || args.new_string !== undefined;
-    const replaceLines = firstDefined(args.replaceLines, args.replace_lines);
-    const replacePattern = firstDefined(args.replacePattern, args.replace_pattern);
-    const insertAt = firstDefined(args.insertAt, args.insert_at);
+    const replaceLines = args.replaceLines;
+    const replacePattern = args.replacePattern;
+    const insertAt = args.insertAt;
     const append = args.append;
-    const jsonPath = firstDefined(args.jsonPath, args.json_path);
-    const jsonValueProvided = hasOwn(args, "jsonValue") || hasOwn(args, "json_value");
+    const jsonPath = args.jsonPath;
+    const jsonValueProvided = hasOwn(args, "jsonValue");
     const executableRequested = args.executable !== undefined;
     const modes = [
       exactRequested && "old_string/new_string",
@@ -602,7 +455,7 @@ export function createDeterministicToolkit({
       if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
         return "Error: replaceLines requires a 1-based inclusive integer range with 1 <= start <= end.";
       }
-      const { eol, hadFinalEol, lines } = splitEditableLines(content);
+      const { eol, hadFinalEol, lines } = splitEditableLinesFromModule(content);
       if (end > lines.length) {
         return `Error: replaceLines range ${start}:${end} is outside ${displayPath} (${lines.length} lines).`;
       }
@@ -620,7 +473,7 @@ export function createDeterministicToolkit({
       if (pattern.length > EDIT_FILE_MAX_PATTERN_CHARS) {
         return `Error: replacePattern pattern exceeds ${EDIT_FILE_MAX_PATTERN_CHARS} characters.`;
       }
-      if (looksReDosProne(pattern)) {
+      if (looksReDosProneFromModule(pattern)) {
         return "Error: replacePattern contains an unsafe nested quantifier.";
       }
       try {
@@ -651,7 +504,7 @@ export function createDeterministicToolkit({
       const source = insertAt && typeof insertAt === "object" && !Array.isArray(insertAt) ? insertAt : {};
       const line = Number(source.line);
       if (!Number.isInteger(line) || line < 1) return "Error: insertAt requires a positive 1-based integer line.";
-      const { eol, hadFinalEol, lines } = splitEditableLines(content);
+      const { eol, hadFinalEol, lines } = splitEditableLinesFromModule(content);
       if (line > lines.length + 1) return `Error: insertAt line ${line} is outside ${displayPath} (${lines.length} lines).`;
       lines.splice(line - 1, 0, ...splitReplacementLines(source.content));
       content = joinEditableLines(lines, eol, hadFinalEol);
@@ -677,7 +530,7 @@ export function createDeterministicToolkit({
       } catch (err) {
         return `Error: jsonPath mode requires valid JSON: ${err?.message || String(err)}`;
       }
-      const jsonValue = hasOwn(args, "jsonValue") ? args.jsonValue : args.json_value;
+      const jsonValue = args.jsonValue;
       const updated = setJsonPathValue(parsed, parsedPath.segments, jsonValue);
       if (!updated.ok) return `Error: ${updated.message}`;
       const eol = content.includes("\r\n") ? "\r\n" : "\n";
@@ -740,14 +593,15 @@ export function createDeterministicToolkit({
     const globRegex = pattern ? new RegExp("^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$") : null;
     const results = [];
     const maxResults = 200;
+    let truncated = false;
     const isGitIgnored = makeGitIgnoreChecker(cwd);
 
     function walk(currentDir) {
-      if (results.length >= maxResults) return;
+      if (truncated) return;
       let entries;
       try { entries = fs.readdirSync(currentDir, { withFileTypes: true }); } catch { return; }
       for (const entry of entries) {
-        if (results.length >= maxResults) return;
+        if (truncated) return;
         if (skipDirs.has(entry.name)) continue;
         const full = path.join(currentDir, entry.name);
         if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
@@ -755,6 +609,10 @@ export function createDeterministicToolkit({
         if (entry.isDirectory()) {
           if (recursive) walk(full);
         } else if (entry.isFile() && (!globRegex || globRegex.test(entry.name))) {
+          if (results.length >= maxResults) {
+            truncated = true;
+            return;
+          }
           results.push(toDisplayPath(cwd, full));
         }
       }
@@ -766,17 +624,21 @@ export function createDeterministicToolkit({
       } else {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
-          if (results.length >= maxResults) break;
           if (skipDirs.has(entry.name)) continue;
           const full = path.join(dir, entry.name);
           if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
           if (isGitIgnored(full)) continue;
           if (entry.isFile() && (!globRegex || globRegex.test(entry.name))) {
+            if (results.length >= maxResults) {
+              truncated = true;
+              break;
+            }
             results.push(toDisplayPath(cwd, full));
           }
         }
       }
-      return results.join("\n") || "No files found.";
+      const output = results.join("\n") || "No files found.";
+      return truncated ? `${output}\n... (truncated after 200 files)` : output;
     } catch (err) {
       return `Error listing files: ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }

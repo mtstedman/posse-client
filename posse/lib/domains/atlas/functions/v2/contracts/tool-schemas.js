@@ -43,6 +43,9 @@ const ENUM_VALUE_ALIASES = Object.freeze({
     columnar: "packed",
     columns: "packed",
   }),
+  "$.granularity": Object.freeze({
+    file: "fileWindow",
+  }),
 });
 const s = (opts = {}) => ({ type: "string", ...opts });
 const b = (opts = {}) => ({ type: "boolean", ...opts });
@@ -543,7 +546,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
-    contextLines: i({ minimum: 0, maximum: 100 }),
+    contextLines: i({ minimum: 0, maximum: 8 }),
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
   }, ["identifiersToFind"], targetRequired()),
@@ -588,7 +591,6 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     focusSymbols: symbolIds(100),
     focusPaths: repoPaths(100),
     maxTokens: i({ minimum: 1, maximum: 500_000 }),
-    maxActions: i({ minimum: 1, maximum: 100 }),
   }, ["taskText"]),
   "context.summary": o({
     taskText: s({ minLength: 1, maxLength: 200_000 }),
@@ -597,7 +599,6 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     focusSymbols: symbolIds(100),
     focusPaths: repoPaths(100),
     maxTokens: i({ minimum: 1, maximum: 500_000 }),
-    maxActions: i({ minimum: 1, maximum: 100 }),
     maxEvidence: i({ minimum: 1, maximum: 100 }),
     includeCards: b(),
   }, ["taskText"]),

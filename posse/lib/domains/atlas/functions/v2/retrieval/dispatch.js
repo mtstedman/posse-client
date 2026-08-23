@@ -116,6 +116,7 @@ export function dispatch(call, ctx) {
 function dispatchImpl(call, ctx) {
   call = normalizeAtlasToolCall(normalizeToolCall(call));
   const action = call.action;
+  const feedbackEnabled = atlasFeedbackEnabled(ctx.config);
   if (!ATLAS_TOOL_ACTIONS.includes(action)) {
     return /** @type {any} */ (
       errorEnvelope({
@@ -242,6 +243,7 @@ function dispatchImpl(call, ctx) {
         encoder: ctx.encoder,
         taskText: ctx.taskText || (typeof /** @type {any} */ (call).taskText === "string" ? /** @type {any} */ (call).taskText : undefined),
         taskType: ctx.taskType || (typeof /** @type {any} */ (call).taskType === "string" ? /** @type {any} */ (call).taskType : undefined),
+        feedbackEnabled,
         repoId: ctx.repoId,
         repoRoot: ctx.repoRoot,
         planner: ctx.planner,
@@ -283,6 +285,7 @@ function dispatchImpl(call, ctx) {
         embeddingIndex: ctx.embeddingIndex,
         encoder: ctx.encoder,
         taskType: ctx.taskType || (typeof /** @type {any} */ (call).taskType === "string" ? /** @type {any} */ (call).taskType : undefined),
+        feedbackEnabled,
         planner: ctx.planner,
         onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
       }));
@@ -303,7 +306,31 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (codeLens({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot }));
     case "code.window":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (codeNeedWindow({ view: ctx.view, versionId: ctx.versionId, params: call, readFile, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId, config: ctx.config }));
+      return /** @type {any} */ (codeNeedWindow({
+        view: ctx.view,
+        versionId: ctx.versionId,
+        params: call,
+        readFile,
+        repoRoot: ctx.repoRoot,
+        ledger: ctx.ledger,
+        repoId: ctx.repoId,
+        config: ctx.config,
+        findIdentifierRedirects: async (identifiers, requestedFile) => await Promise.all(
+          identifiers.map(async (identifier) => {
+            const search = await symbolSearch({
+              view: ctx.view,
+              versionId: ctx.versionId,
+              params: /** @type {any} */ ({ query: identifier, limit: 5, semantic: false }),
+              repoRoot: ctx.repoRoot,
+              onDemandEmbeddingFill: false,
+            });
+            const matches = search?.ok && Array.isArray(search.data?.items)
+              ? search.data.items.filter((hit) => hit?.location?.repo_rel_path !== requestedFile)
+              : [];
+            return { identifier, matches };
+          }),
+        ),
+      }));
     case "code.survey":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (codeSurvey({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
@@ -315,10 +342,10 @@ function dispatchImpl(call, ctx) {
       return /** @type {any} */ (codeDb({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot }));
     case "context":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
+      return /** @type {any} */ (contextBuild({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, feedbackEnabled, planner: ctx.planner }));
     case "context.summary":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
-      return /** @type {any} */ (contextSummary({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, planner: ctx.planner }));
+      return /** @type {any} */ (contextSummary({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger, repoRoot: ctx.repoRoot, repoId: ctx.repoId, embeddingIndex: ctx.embeddingIndex, encoder: ctx.encoder, feedbackEnabled, planner: ctx.planner }));
     case "agent.feedback":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (agentFeedback({ view: ctx.view, versionId: ctx.versionId, params: call, ledger: ctx.ledger }));
@@ -384,6 +411,11 @@ function dispatchImpl(call, ctx) {
         })
       );
   }
+}
+
+function atlasFeedbackEnabled(config) {
+  const mode = String(config?.autoFeedbackMode || "off").trim().toLowerCase();
+  return mode === "dry-run" || mode === "write";
 }
 
 function validationErrorCodeForAction(action, errors = []) {

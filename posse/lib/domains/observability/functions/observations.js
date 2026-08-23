@@ -635,7 +635,23 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     let lastSuccessfulOwnerExplorationStep = 0;
     let lastNovelEvidenceStep = 0;
     const seenEvidenceIdentities = new Set();
-    const noteNovelIdentities = (identities) => {
+    const explorationUnitSteps = new Map();
+    const explorationStepForDetail = (detail) => {
+      const unitId = Number(detail?.research_exploration_unit_version) === 1
+        ? String(detail?.research_exploration_unit_id || "").trim().slice(0, 300)
+        : "";
+      if (unitId && explorationUnitSteps.has(unitId)) {
+        return explorationUnitSteps.get(unitId);
+      }
+      const explicitStep = Number(detail?.research_exploration_step);
+      const step = Number.isSafeInteger(explicitStep) && explicitStep > 0
+        ? Math.max(explorationCount + 1, explicitStep)
+        : explorationCount + 1;
+      explorationCount = step;
+      if (unitId) explorationUnitSteps.set(unitId, step);
+      return step;
+    };
+    const noteNovelIdentities = (identities, explorationStep = explorationCount) => {
       let novel = false;
       for (const identity of Array.isArray(identities) ? identities : []) {
         const normalized = String(identity || "").trim().slice(0, 300);
@@ -643,7 +659,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         seenEvidenceIdentities.add(normalized);
         novel = true;
       }
-      if (novel) lastNovelEvidenceStep = explorationCount;
+      if (novel) lastNovelEvidenceStep = Math.max(lastNovelEvidenceStep, explorationStep);
       return novel;
     };
     for (const row of explorationRows) {
@@ -681,19 +697,24 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
         if (!isResearchAtlasExplorationAction(detail?.action)) continue;
-        explorationCount += 1;
+        const explorationStep = explorationStepForDetail(detail);
         if (detail?.outcome === "succeeded" || detail?.ok === true) {
-          lastSuccessfulOwnerExplorationStep = explorationCount;
+          lastSuccessfulOwnerExplorationStep = Math.max(
+            lastSuccessfulOwnerExplorationStep,
+            explorationStep,
+          );
           if (detail?.focus_grace === true) {
-            lastNovelEvidenceStep = explorationCount;
+            lastNovelEvidenceStep = Math.max(lastNovelEvidenceStep, explorationStep);
             continue;
           }
           const explicitEvidenceContract = Number(detail?.evidence_identity_version) === 1;
-          const novel = noteNovelIdentities(detail?.evidence_identities);
+          const novel = noteNovelIdentities(detail?.evidence_identities, explorationStep);
           // Before evidence identity v1, success was the only available owner
           // progress signal. Retain that conservative fallback across rolling
           // deployments; an explicit empty v1 identity set is stale.
-          if (!explicitEvidenceContract && !novel) lastNovelEvidenceStep = explorationCount;
+          if (!explicitEvidenceContract && !novel) {
+            lastNovelEvidenceStep = Math.max(lastNovelEvidenceStep, explorationStep);
+          }
         }
       } catch {
         // A malformed historic Atlas observation remains conservatively

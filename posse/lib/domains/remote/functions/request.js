@@ -585,6 +585,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
     || packet?._raw_payload?.deepthink_budget
     || null;
   const deepthink = packet?.deepthink === true || isResearchBudgetDeep(researchBudget);
+  const fallbackReads = nonNegativeInteger(packet?.budgets?.fallback_reads_remaining);
   const renderJobIdentity = role !== "researcher";
   const selectedSkills = Array.isArray(packet?.skills_attached)
     ? packet.skills_attached
@@ -639,6 +640,9 @@ export function buildRemoteCompileRequest(packet, instructions, {
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
     },
     capabilities: capabilitiesFromPacket(packet, provider),
+    ...(fallbackReads == null ? {} : {
+      tool_policy: { fallback_reads: fallbackReads },
+    }),
     skills: selectedSkills,
     requested_skills: Array.isArray(packet?.requested_skills) ? packet.requested_skills : [],
     limits: {

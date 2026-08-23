@@ -18,15 +18,12 @@ export const TOOL_INSPECT_FILE = {
       path: {
         type: ["string", "array"],
         description: "One file path or an array of file paths, absolute or relative to the working directory.",
-        items: { type: "string" },
-      },
-      paths: {
-        type: "array",
-        description: "Compatibility alias for a batch of file paths.",
-        items: { type: "string" },
-        internalOnly: true,
+        minLength: 1,
+        minItems: 1,
+        items: { type: "string", minLength: 1 },
       },
     },
+    required: ["path"],
     additionalProperties: false,
   },
 };
@@ -158,15 +155,20 @@ function inspectOne(inputLoc, cwd, scopePredicates, safePath, { includeLoc }) {
 
 export function createInspectFileExecutor(safePath) {
   return function execInspectFile(args, cwd, scopePredicates) {
+    // Normalize the retired trusted-caller alias before applying the public
+    // contract. It is intentionally absent from the advertised schema.
     const batchPaths = Array.isArray(args?.path)
       ? args.path
       : (Array.isArray(args?.paths) ? args.paths : null);
     if (batchPaths) {
+      if (batchPaths.length === 0 || batchPaths.some((value) => typeof value !== "string" || !value.trim())) {
+        return "Error: inspect_file `path` arrays must contain at least one non-empty string.";
+      }
       const results = batchPaths.map((p) => inspectOne(p, cwd, scopePredicates, safePath, { includeLoc: true }));
       return JSON.stringify({ results }, null, 2);
     }
-    if (args?.path == null) {
-      return JSON.stringify({ error: "inspect_file requires `path` as a string or an array of strings" }, null, 2);
+    if (typeof args?.path !== "string" || !args.path.trim()) {
+      return "Error: inspect_file requires `path` as a string or an array of strings.";
     }
     const payload = inspectOne(args.path, cwd, scopePredicates, safePath, { includeLoc: false });
     return JSON.stringify(payload, null, 2);

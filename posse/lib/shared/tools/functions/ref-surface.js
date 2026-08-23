@@ -30,8 +30,8 @@ export function evidenceRefSurface(ref, {
     ref: normalized,
     usage: "cite_or_handoff",
     ...(exactField ? { exact_field: String(exactField) } : {}),
-    ...(Number.isFinite(Number(chars)) ? { chars: Math.max(0, Number(chars)) } : {}),
-    ...(Number.isFinite(Number(lines)) ? { lines: Math.max(0, Number(lines)) } : {}),
+    ...(chars != null && Number.isFinite(Number(chars)) ? { chars: Math.max(0, Number(chars)) } : {}),
+    ...(lines != null && Number.isFinite(Number(lines)) ? { lines: Math.max(0, Number(lines)) } : {}),
   };
 }
 
@@ -50,12 +50,12 @@ export function traversalRefSurface(ref, {
     ref: normalized,
     usage: "fetch_missing_content",
     kind: String(kind || "continuation"),
-    ...(Number.isFinite(Number(offset)) ? { offset: Math.max(0, Number(offset)) } : {}),
-    ...(Number.isFinite(Number(limit)) ? { limit: Math.max(1, Number(limit)) } : {}),
+    ...(offset != null && Number.isFinite(Number(offset)) ? { offset: Math.max(0, Number(offset)) } : {}),
+    ...(limit != null && Number.isFinite(Number(limit)) ? { limit: Math.max(1, Number(limit)) } : {}),
     ...(search ? { search: String(search) } : {}),
     ...(searchMode ? { search_mode: String(searchMode) } : {}),
     ...(ranks ? { ranks: String(ranks) } : {}),
-    ...(Number.isFinite(Number(count)) ? { count: Math.max(0, Number(count)) } : {}),
+    ...(count != null && Number.isFinite(Number(count)) ? { count: Math.max(0, Number(count)) } : {}),
   };
 }
 

@@ -13,7 +13,11 @@ import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { executeEmbeddedAtlasTool } from "../../../integrations/functions/atlas-embedded.js";
 import { getObservationContext, recordObservation } from "../../../observability/functions/observations.js";
-import { fetchHashRefForContext, surfaceHashRefForContext } from "../../../queue/functions/hash-refs.js";
+import {
+  fetchHashRefForContext,
+  materializeHashRefEvidenceForContext,
+  surfaceHashRefForContext,
+} from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
 import {
   planLifecycleSurveyExpansion,
@@ -832,7 +836,8 @@ function _surfaceAtlasSurveyRef(packet, data) {
 function _issueAtlasTraversalRefForCurrentCall(packet, ref) {
   const context = _hashRefContextForPacket(packet);
   if (!context.agent_call_id || !ref) return ref;
-  const fetched = fetchHashRefForContext(context, ref);
+  const evidence = materializeHashRefEvidenceForContext(context, ref);
+  const fetched = evidence?.found ? evidence : fetchHashRefForContext(context, ref);
   if (!fetched?.ok || !fetched?.found || !fetched.entry) return ref;
   const entry = fetched.entry;
   const surfaced = surfaceHashRefForContext(context, {
@@ -856,7 +861,7 @@ function _issueAtlasTraversalRefForCurrentCall(packet, ref) {
       ...hashRefModelVisibility(context, { visibility: "hidden", issuedAs: "traversal" }),
     },
   }, { ownerScope: context.job_id != null ? "job" : "work_item" });
-  return surfaced?.ok && surfaced.entry?.ref ? surfaced.entry.ref : ref;
+  return surfaced?.ok && surfaced.entry?.ref ? (surfaced.model_ref || surfaced.entry.ref) : ref;
 }
 
 export function __testSurfaceAtlasSurveyRef(packet, data) {

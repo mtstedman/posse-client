@@ -1247,6 +1247,9 @@ export class TrackedProviderClient {
     const upstreamAgentCommentary = typeof effectiveCapabilityOpts.onAgentCommentary === "function"
       ? effectiveCapabilityOpts.onAgentCommentary
       : null;
+    const upstreamUsageProgress = typeof effectiveCapabilityOpts.onUsageProgress === "function"
+      ? effectiveCapabilityOpts.onUsageProgress
+      : null;
     const seenAgentCommentary = new Set();
     const attemptOpts = {
       ...effectiveCapabilityOpts,
@@ -1276,6 +1279,36 @@ export class TrackedProviderClient {
             precision: persisted.precision,
           });
         }
+      },
+      onUsageProgress: (progress) => {
+        try { upstreamUsageProgress?.(progress); } catch { /* caller telemetry is best effort */ }
+        const precision = String(progress?.precision || "").trim();
+        const sequenceId = positiveIntegerOrNull(progress?.sequenceId ?? progress?.sequence_id);
+        const attemptId = observationContext?.attempt_id ?? opts.attemptId ?? null;
+        const requestContextInputTokens = nonNegativeTokenCount(
+          progress?.requestContextInputTokens ?? progress?.request_context_input_tokens,
+        );
+        if (
+          !["exact", "recovered_exact"].includes(precision)
+          || sequenceId == null
+          || attemptId == null
+          || requestContextInputTokens == null
+        ) return;
+        try {
+          this.deps.publishContextBudgetCheckpoint({
+            agentCallId,
+            attemptId,
+            providerSessionId: `agent-call:${agentCallId}`,
+            sequenceId,
+            provider: progress?.provider || providerName,
+            modelName: progress?.modelName || progress?.model_name || modelName,
+            requestContextInputTokens,
+            outputTokensSinceRequest: nonNegativeTokenCount(
+              progress?.outputTokensSinceRequest ?? progress?.output_tokens_since_request,
+            ) ?? 0,
+            precision,
+          });
+        } catch { /* a live checkpoint must not interrupt provider execution */ }
       },
       onAgentCommentary: (value) => {
         try { upstreamAgentCommentary?.(value); } catch { /* caller telemetry is best effort */ }

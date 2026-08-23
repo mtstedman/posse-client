@@ -354,38 +354,75 @@ export class SourceCoverageOwner {
         return { ref: existingCoverage.evidence_ref, contentSha256, storedChars: content.length, reused: true };
       }
     }
-    const surfaced = surfaceHashRefForContext(contextFor(this), {
-      entryKind: "materialized",
-      payloadText: content,
-      descriptor: {
-        kind: "source_coverage",
-        tool: "code.window",
-        args,
-        repo_rel_path: fresh.relative,
-        start_line: startLine,
-        end_line: endLine,
-      },
-      objectType: "atlas.code.window.source_region",
-      source: "tool:code.window",
-      note: `${fresh.relative}:${startLine}-${endLine}`,
-      sizeChars: content.length,
-      recomputable: true,
-      metadata: {
-        surfaced_by: "source_coverage_owner",
-        fetch_class: "source_reaccess",
-        repository_identity: this.repositoryIdentity,
-        source_version: fresh.sourceVersion,
-        repo_rel_path: fresh.relative,
-        start_line: startLine,
-        end_line: endLine,
-        content_sha256: contentSha256,
-        ...hashRefModelVisibility(contextFor(this), {
-          visibility: deliveryState === "delivered" ? "full" : "hidden",
-          ranges: deliveryState === "delivered" ? [{ start: 0, end: content.length }] : [],
-          issuedAs: deliveryState === "delivered" ? "evidence" : "traversal",
-        }),
-      },
-    }, { ownerScope: "job", db: this.db });
+    let surfaced;
+    try {
+      surfaced = surfaceHashRefForContext(contextFor(this), {
+        entryKind: "materialized",
+        payloadText: content,
+        descriptor: {
+          kind: "source_coverage",
+          tool: "code.window",
+          args,
+          repo_rel_path: fresh.relative,
+          start_line: startLine,
+          end_line: endLine,
+        },
+        objectType: "atlas.code.window.source_region",
+        source: "tool:code.window",
+        note: `${fresh.relative}:${startLine}-${endLine}`,
+        sizeChars: content.length,
+        recomputable: true,
+        metadata: {
+          surfaced_by: "source_coverage_owner",
+          fetch_class: "source_reaccess",
+          repository_identity: this.repositoryIdentity,
+          source_version: fresh.sourceVersion,
+          repo_rel_path: fresh.relative,
+          path: fresh.relative,
+          start_line: startLine,
+          end_line: endLine,
+          line_semantics: "source",
+          source_payload_encoding: "raw_source_lines",
+          source_windows: [{
+            path: fresh.relative,
+            source_start_line: startLine,
+            source_end_line: endLine,
+            materialized_start_line: 1,
+            materialized_end_line: endLine - startLine + 1,
+          }],
+          content_sha256: contentSha256,
+          ...hashRefModelVisibility(contextFor(this), {
+            visibility: deliveryState === "delivered" ? "full" : "hidden",
+            ranges: deliveryState === "delivered" ? [{ start: 0, end: content.length }] : [],
+            issuedAs: deliveryState === "delivered" ? "evidence" : "traversal",
+          }),
+        },
+      }, { ownerScope: "job", db: this.db });
+    } catch (error) {
+      try {
+        recordObservation({
+          work_item_id: this.workItemId,
+          job_id: this.jobId,
+          attempt_id: this.attemptId,
+          observation_type: "hash_ref.surface_failed",
+          summary: "Failed to surface code.window source coverage as hash ref",
+          detail: {
+            tool: "code.window",
+            path: fresh.relative,
+            start_line: startLine,
+            end_line: endLine,
+            size_chars: content.length,
+            error: String(error?.message || error).slice(0, 500),
+            agent_call_id: this.agentCallId,
+          },
+        });
+      } catch {
+        // Evidence surfacing already failed; telemetry must not fail the read.
+      }
+      delete data.sourceVersion;
+      delete data.repositoryIdentity;
+      return null;
+    }
     if (!surfaced?.ok || !surfaced?.entry?.ref) {
       delete data.sourceVersion;
       delete data.repositoryIdentity;

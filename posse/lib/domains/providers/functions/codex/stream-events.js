@@ -466,6 +466,23 @@ function pickUsageMetric(candidate, cumulativeNames, deltaNames, ambiguousNames)
 //
 // Cost numbers for codex calls inherit the heuristic's accuracy; if codex
 // updates its event schema, audit pickUsageMetric below first.
+export function extractLiveRequestUsageFromEvent(msg) {
+  if (!msg || typeof msg !== "object") return null;
+  const body = _extractCodexEventBody(msg);
+  const last = body?.type === "token_count" ? body?.info?.last_token_usage : null;
+  if (!last || typeof last !== "object") return null;
+  const requestContextInputTokens = pickUsageValue(last, ["input_tokens", "inputTokens"]);
+  const outputTokensSinceRequest = pickUsageValue(last, ["output_tokens", "outputTokens"]);
+  const cachedInputTokens = pickUsageValue(last, ["cached_input_tokens", "cachedInputTokens"]);
+  if (requestContextInputTokens == null) return null;
+  return {
+    requestContextInputTokens,
+    outputTokensSinceRequest: outputTokensSinceRequest ?? 0,
+    ...(cachedInputTokens == null ? {} : { cachedInputTokens }),
+    precision: "exact",
+  };
+}
+
 export function extractUsageFromEvent(msg) {
   if (!msg || typeof msg !== "object") {
     return { inputTokens: null, outputTokens: null, inputKind: null, outputKind: null };

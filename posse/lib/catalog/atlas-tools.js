@@ -251,7 +251,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "traverse_ref": {
     type: "function",
     name: "atlas_traverse_ref",
-    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. Each non-empty result returns evidence_ref for its visible text and next_traversal_ref only when more stored content remains.",
+    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty call promotes that same identity to evidence_ref; a different opaque next_traversal_ref is returned only when more content remains.",
     parameters: {
       type: "object",
       properties: {
@@ -260,7 +260,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         ref: { type: ["string", "array"], items: { type: "string" }, description: "Legacy fetch_ref input alias.", internalOnly: true },
         refs: { type: "array", items: { type: "string" }, description: "Legacy fetch_ref batch alias.", internalOnly: true },
         hashes: { type: "array", items: { type: "string" }, description: "Legacy hash alias.", internalOnly: true },
-        offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Prefer the value carried by next_traversal_ref." },
+        offset: { type: "integer", description: "Compatibility selector for an initial or legacy traversal. Opaque next_traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent." },
         limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs." },
         search: { type: "string", description: "Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists." },
         search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto." },
@@ -273,7 +273,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "fetch_ref": {
     type: "function",
     name: "atlas_fetch_ref",
-    description: "Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. Each non-empty result returns an evidence reference for the visible text and a continuation capability when more stored content remains.",
+    description: "Compatibility traversal for unseen stored #ref content. Batch every independently needed ref and use paging, slicing, or focused search for omitted spans. When the input is an issued traversal identity, a successful non-empty call promotes that same identity to evidence and returns a different opaque continuation only when more content remains.",
     parameters: {
       type: "object",
       properties: {
@@ -822,9 +822,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID selecting one indexed symbol. The file field selects a path." },
         file: { type: "string", description: "Optional relative file path to inspect." },
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
+        maxLines: { type: "integer", description: "Maximum rendered outline lines. Minimum 1, maximum 5000." },
+        maxTokens: { type: "integer", description: "Maximum rendered outline tokens. Minimum 1, maximum 200000." },
+        identifiersToFind: { type: "array", items: { type: "string" }, description: "Optional identifier names used to focus the outline, up to 50." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
-        surveyGap: { type: "string", minLength: 3, description: "Named structural fact absent from the delivered orientation. Supplying it requests an outline focused on that gap." },
+        surveyGap: { type: "string", minLength: 3, description: "Named structural fact absent from the delivered orientation. This justifies bypassing the survey-first redirect; it does not otherwise change skeleton retrieval." },
       },
       required: [],
       additionalProperties: false,
@@ -880,14 +883,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows.",
+    description: "Focused localization for named identifiers, usages, or branches within one identified file or symbol. Use it when the target is known but the exact source region is not. Put every same-target identifier needed for the decision into one request before opening multiple exact-source windows. Each match reports its enclosing symbol (kind, name, signature, line range) with up to 8 context lines per side; a call that would exceed 600 lines keeps every match and trims context evenly.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
         identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText." },
-        contextLines: { type: "integer", description: "Context lines around each match." },
+        contextLines: { type: "integer", minimum: 0, maximum: 8, description: "Context lines around each match, from 0 through 8. Use code.window for a bounded source read." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },
@@ -937,7 +940,6 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         focusSymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Optional opaque ATLAS symbol IDs returned by ATLAS results." },
         focusPaths: { type: "array", items: { type: "string" }, description: "Optional file paths to focus." },
         maxTokens: { type: "integer", description: "Budget: maximum generated context tokens." },
-        maxActions: { type: "integer", description: "Budget: maximum retrieval actions." },
       },
       required: ["taskText"],
       additionalProperties: false,
@@ -956,7 +958,6 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         focusSymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Optional opaque ATLAS symbol IDs returned by ATLAS results." },
         focusPaths: { type: "array", items: { type: "string" }, description: "Optional file paths to focus." },
         maxTokens: { type: "integer", description: "Budget: maximum generated context tokens." },
-        maxActions: { type: "integer", description: "Budget: maximum retrieval actions." },
         maxEvidence: { type: "integer", description: "Maximum evidence items to include in the compact summary." },
         includeCards: { type: "boolean", description: "Include compact symbol cards beside the summary evidence." },
       },
@@ -972,8 +973,8 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         sliceHandle: { type: "string", description: "Slice handle used during the task." },
-        usefulSymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs that were helpful. Non-ID placeholders are accepted for diagnostics but do not improve symbol ranking." },
-        missingSymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Opaque ATLAS symbol IDs that were missing or needed. Non-ID placeholders are accepted for diagnostics but do not improve symbol ranking." },
+        usefulSymbols: { type: "array", items: { type: "string" }, description: "Opaque ATLAS symbol IDs that were helpful. Non-ID placeholders are accepted for diagnostics but do not improve symbol ranking." },
+        missingSymbols: { type: "array", items: { type: "string" }, description: "Opaque ATLAS symbol IDs that were missing or needed. Non-ID placeholders are accepted for diagnostics but do not improve symbol ranking." },
         taskType: { type: "string", description: "Task type such as debug, review, implement, or explain." },
         taskText: { type: "string", description: "Short description of the task context." },
         taskTags: { type: "array", items: { type: "string" }, description: "Short outcome/context tags such as role:dev or outcome:succeeded." },
@@ -1088,6 +1089,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Symbols to probe." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Files to probe." },
+        domains: { type: "array", items: { type: "string", enum: ["general", "ux", "schema", "security", "performance"] }, description: "Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering." },
       },
       required: [],
       additionalProperties: false,
@@ -1102,6 +1104,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Symbols whose attached memories should be fetched." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Files whose attached memories should be fetched." },
+        domains: { type: "array", items: { type: "string", enum: ["general", "ux", "schema", "security", "performance"] }, description: "Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering." },
       },
       required: [],
       additionalProperties: false,
@@ -1181,7 +1184,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         repoId: { type: "string", description: "Optional repository identifier; policy is scoped by repo." },
-        runtime: { type: "string", enum: ["node", "python", "python3", "shell"], description: "Runtime family to execute." },
+        runtime: { type: "string", description: "Runtime family or supported runtime alias to execute." },
         executable: { type: "string", description: "Optional PATH command override. Paths are denied." },
         args: { type: "array", items: { type: "string" }, description: "Arguments passed directly to the executable without a shell." },
         code: { type: "string", description: "Optional code snippet written to a temporary ATLAS artifact file and executed." },

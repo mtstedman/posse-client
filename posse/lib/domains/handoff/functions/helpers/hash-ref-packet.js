@@ -8,6 +8,7 @@ import {
 } from "../../../../catalog/hash-store.js";
 import {
   fetchHashRefForContext,
+  materializeHashRefEvidenceForContext,
   surfaceHashRefForContext,
 } from "../../../queue/functions/hash-refs.js";
 import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch-ref-policy.js";
@@ -16,6 +17,12 @@ import { renderTraversalRefStub } from "../../../../shared/tools/functions/ref-s
 const DEFAULT_MAX_REFS_PER_LANE = 24;
 const DEFAULT_MAX_WHY_CHARS = 180;
 const PROOF_EXPANSION_GENERATOR = "hash_ref_store";
+
+function fetchEvidenceOrSource(context, ref) {
+  const evidence = materializeHashRefEvidenceForContext(context, ref);
+  if (evidence?.found) return evidence;
+  return fetchHashRefForContext(context, ref);
+}
 
 function compactText(value, max = 180) {
   return String(value || "")
@@ -325,7 +332,7 @@ function resurfaceEntry(fetchResult, laneEntry, {
   }, { ownerScope: targetOwnerScope });
   if (!surfaced?.ok || !surfaced.entry?.ref) return null;
   return {
-    ref: surfaced.entry.ref,
+    ref: surfaced.model_ref || surfaced.entry.ref,
     source_ref: laneEntry.ref,
     ...(laneEntry.lines ? { source_selector: sourceSelector } : {}),
     ...(laneEntry.why ? { why: laneEntry.why } : {}),
@@ -359,7 +366,7 @@ export function reissueHashRefHandoffPacket(input, {
     for (const laneEntry of normalized.packet.lanes[lane]) {
       let targetFetchResult = null;
       try {
-        targetFetchResult = fetchHashRefForContext(targetContext, laneEntry.ref);
+        targetFetchResult = fetchEvidenceOrSource(targetContext, laneEntry.ref);
       } catch {
         targetFetchResult = null;
       }
@@ -367,7 +374,7 @@ export function reissueHashRefHandoffPacket(input, {
         ? targetFetchResult
         : null;
       try {
-        if (!fetchResult) fetchResult = fetchHashRefForContext(sourceContext, laneEntry.ref);
+        if (!fetchResult) fetchResult = fetchEvidenceOrSource(sourceContext, laneEntry.ref);
       } catch (err) {
         fetchResult = { ok: false, found: false, ref: laneEntry.ref, error: err?.message || "fetch_failed" };
       }
@@ -525,7 +532,7 @@ export function expandHashRefHandoffPacketProofs(input, {
     }
     let fetchResult = null;
     try {
-      fetchResult = fetchHashRefForContext(context, proof.ref);
+      fetchResult = fetchEvidenceOrSource(context, proof.ref);
     } catch (err) {
       fetchResult = { ok: false, found: false, ref: proof.ref, error: err?.message || "fetch_failed" };
     }
@@ -549,7 +556,7 @@ export function expandHashRefHandoffPacketProofs(input, {
       if (entry.unresolved || entry.preview) continue;
       let fetchResult = null;
       try {
-        fetchResult = fetchHashRefForContext(context, entry.ref);
+        fetchResult = fetchEvidenceOrSource(context, entry.ref);
       } catch (err) {
         fetchResult = { ok: false, found: false, ref: entry.ref, error: err?.message || "fetch_failed" };
       }

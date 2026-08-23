@@ -9,6 +9,7 @@ import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
+import { normalizeCodeLensContextLines } from "../../functions/v2/retrieval/code.js";
 import { recordAtlasUsageEvent } from "../../functions/v2/retrieval/usage.js";
 import {
   ledgerBranchForWi,
@@ -312,15 +313,18 @@ function nativeCompleteToolArgs(action, args = {}) {
   const effectiveArgs = nativeSymbolSearchArgs(action, args);
   if (action !== "code.lens" && action !== "code.window") return effectiveArgs;
   const normalizeSelection = (selection) => {
-    if (!selection || typeof selection !== "object" || !Array.isArray(selection.identifiersToFind)) {
-      return selection;
-    }
-    return {
-      ...selection,
-      identifiersToFind: selection.identifiersToFind.map((value) => (
-        normalizeAtlasIdentifier(value) || value
-      )),
-    };
+    if (!selection || typeof selection !== "object") return selection;
+    const normalized = Array.isArray(selection.identifiersToFind)
+      ? {
+          ...selection,
+          identifiersToFind: selection.identifiersToFind.map((value) => (
+            normalizeAtlasIdentifier(value) || value
+          )),
+        }
+      : selection;
+    return action === "code.lens"
+      ? { ...normalized, contextLines: normalizeCodeLensContextLines(selection.contextLines) }
+      : normalized;
   };
   const normalized = normalizeSelection(effectiveArgs);
   if (!Array.isArray(effectiveArgs.items)) return normalized;

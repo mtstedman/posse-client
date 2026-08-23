@@ -617,6 +617,7 @@ function hashRefObjectTableSql({
       version_id TEXT,
       recomputable INTEGER NOT NULL DEFAULT 0 CHECK (recomputable IN (0, 1)),
       degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
+      reuse_excluded INTEGER NOT NULL DEFAULT 0 CHECK (reuse_excluded IN (0, 1)),
       metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -652,6 +653,35 @@ function hashRefAliasTableSql({
       FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE SET NULL,
       FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE,
       FOREIGN KEY (target_ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE
+    )
+  `;
+}
+
+function hashRefCapabilityTableSql(tableName, { evidence = false } = {}) {
+  return `
+    CREATE TABLE IF NOT EXISTS ${quoteIdent(tableName)} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ref TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      selector_json TEXT CHECK (selector_json IS NULL OR json_valid(selector_json)),
+      work_item_id INTEGER,
+      job_id INTEGER,
+      attempt_id INTEGER,
+      agent_call_id INTEGER,
+      source_content_hash TEXT CHECK (source_content_hash IS NULL OR length(source_content_hash) = 64),
+      view_sha256 TEXT ${evidence ? "CHECK (view_sha256 IS NULL OR length(view_sha256) = 64)" : ""},
+      view_chars INTEGER,
+      view_lines INTEGER,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      UNIQUE (ref, scope_key),
+      FOREIGN KEY (ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE,
+      FOREIGN KEY (source_ref) REFERENCES hash_ref_aliases(ref) ON DELETE CASCADE,
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE CASCADE,
+      FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE ${evidence ? "SET NULL" : "CASCADE"}
     )
   `;
 }
@@ -693,31 +723,58 @@ export function createHashRefStoreTables(db) {
     tableName: "agent_run_hash_ref_aliases",
     attemptRequired: true,
   }));
+  db.exec(hashRefCapabilityTableSql("hash_ref_traversal_refs"));
+  db.exec(hashRefCapabilityTableSql("hash_ref_evidence_refs", { evidence: true }));
 
+  for (const tableName of ["work_item_hash_refs", "job_hash_refs", "agent_run_hash_refs"]) {
+    const columns = new Set(db.pragma(`table_info(${quoteIdent(tableName)})`).map((column) => column.name));
+    if (!columns.has("reuse_excluded")) {
+      db.exec(`ALTER TABLE ${quoteIdent(tableName)} ADD COLUMN reuse_excluded INTEGER NOT NULL DEFAULT 0 CHECK (reuse_excluded IN (0, 1))`);
+      db.prepare(`
+        UPDATE ${quoteIdent(tableName)}
+        SET reuse_excluded = 1
+        WHERE json_extract(metadata_json, '$.protocol') = 'posse.sub_agent.v1'
+          AND json_type(metadata_json, '$.batch_id') IS NOT NULL
+          AND json_type(metadata_json, '$.dispatch_id') IS NOT NULL
+          AND json_type(metadata_json, '$.input_id') IS NOT NULL
+      `).run();
+    }
+  }
+
+  // Content reuse is selected transactionally by HashRefStore. Distinct
+  // delegation identities may intentionally carry identical bytes.
+  db.exec(`
+    DROP INDEX IF EXISTS idx_work_item_hash_refs_owner_content_unique;
+    DROP INDEX IF EXISTS idx_job_hash_refs_owner_content_unique;
+    DROP INDEX IF EXISTS idx_agent_run_hash_refs_owner_content_unique;
+  `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_work_item_hash_refs_ref ON work_item_hash_refs(ref);
     CREATE INDEX IF NOT EXISTS idx_work_item_hash_refs_content ON work_item_hash_refs(work_item_id, content_hash);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_hash_refs_owner_content_unique
-      ON work_item_hash_refs(work_item_id, content_hash);
     CREATE INDEX IF NOT EXISTS idx_work_item_hash_ref_aliases_ref ON work_item_hash_ref_aliases(ref);
     CREATE INDEX IF NOT EXISTS idx_work_item_hash_ref_aliases_target
       ON work_item_hash_ref_aliases(work_item_id, target_ref);
 
     CREATE INDEX IF NOT EXISTS idx_job_hash_refs_ref ON job_hash_refs(ref);
     CREATE INDEX IF NOT EXISTS idx_job_hash_refs_content ON job_hash_refs(job_id, content_hash);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_job_hash_refs_owner_content_unique
-      ON job_hash_refs(job_id, content_hash);
     CREATE INDEX IF NOT EXISTS idx_job_hash_ref_aliases_ref ON job_hash_ref_aliases(ref);
     CREATE INDEX IF NOT EXISTS idx_job_hash_ref_aliases_target
       ON job_hash_ref_aliases(job_id, target_ref);
 
     CREATE INDEX IF NOT EXISTS idx_agent_run_hash_refs_ref ON agent_run_hash_refs(ref);
     CREATE INDEX IF NOT EXISTS idx_agent_run_hash_refs_content ON agent_run_hash_refs(attempt_id, content_hash);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_hash_refs_owner_content_unique
-      ON agent_run_hash_refs(attempt_id, content_hash);
     CREATE INDEX IF NOT EXISTS idx_agent_run_hash_ref_aliases_ref ON agent_run_hash_ref_aliases(ref);
     CREATE INDEX IF NOT EXISTS idx_agent_run_hash_ref_aliases_target
       ON agent_run_hash_ref_aliases(attempt_id, target_ref);
+
+    CREATE INDEX IF NOT EXISTS idx_hash_ref_traversal_refs_scope
+      ON hash_ref_traversal_refs(scope_key, ref);
+    CREATE INDEX IF NOT EXISTS idx_hash_ref_traversal_refs_source
+      ON hash_ref_traversal_refs(source_ref);
+    CREATE INDEX IF NOT EXISTS idx_hash_ref_evidence_refs_scope
+      ON hash_ref_evidence_refs(scope_key, ref);
+    CREATE INDEX IF NOT EXISTS idx_hash_ref_evidence_refs_source
+      ON hash_ref_evidence_refs(source_ref);
   `);
 }
 

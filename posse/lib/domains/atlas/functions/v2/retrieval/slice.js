@@ -98,12 +98,13 @@ const REFRESH_DIFF_LIMIT = 100;
  *   embeddingIndex?: EmbeddingIndex,
  *   encoder?: EmbeddingEncoder,
  *   taskType?: TaskType,
+ *   feedbackEnabled?: boolean,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  *   onDemandEmbeddingFill?: boolean,
  * }} args
  * @returns {Promise<SliceBuildEnvelope>}
  */
-export async function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, planner, onDemandEmbeddingFill = true }) {
+export async function sliceBuild({ view, versionId, params, ledger, repoRoot, repoId, embeddingIndex, encoder, taskType, feedbackEnabled = false, planner, onDemandEmbeddingFill = true }) {
   const detail = /** @type {CardDetail} */ (params.cardDetail || "compact");
   const budget = params.budget || {};
   const maxCards = budget.maxCards ?? DEFAULT_BUDGET_CARDS;
@@ -127,6 +128,7 @@ export async function sliceBuild({ view, versionId, params, ledger, repoRoot, re
     ...(params.taskText ? { semantic: semanticEntryDiscovery } : {}),
     ...(semanticEntryDiscovery ? { semanticModel: `${encoder.model || "unknown"}:${encoder.model_version || "unknown"}:${encoder.dim}` } : {}),
     ...(effectiveTaskType ? { taskType: effectiveTaskType } : {}),
+    ...(feedbackEnabled === false ? { feedbackEnabled: false } : {}),
     minCallConfidence,
   });
   delete cacheParams.ifNoneMatch;
@@ -197,6 +199,7 @@ export async function sliceBuild({ view, versionId, params, ledger, repoRoot, re
         semantic,
         taskText: params.taskText,
         taskType: effectiveTaskType,
+        feedbackEnabled,
         limit: 25,
         planner,
       },
@@ -230,6 +233,7 @@ export async function sliceBuild({ view, versionId, params, ledger, repoRoot, re
         semantic: false,
         taskText: params.taskText,
         taskType: effectiveTaskType,
+        feedbackEnabled,
         limit: 25,
         searchScope: "either",
         planner,

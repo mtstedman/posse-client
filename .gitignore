@@ -70,6 +70,7 @@ logs/
 # whose drift checker requires an identical copy in all three repositories.
 posse/docs/*
 !posse/docs/control-protocol.md
+!posse/docs/prompt-catalog-change-policy.md
 posse/benchmarks/
 
 # Agent guidance — private, kept local, out of the (public) repo

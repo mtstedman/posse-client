@@ -65,6 +65,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, { role = "" } = {}) 
         tools: [],
         directTools: [],
         lazyTools: [],
+        lazyDiscoveryEnabled: false,
         atlasTools: [],
         requiredTools: [],
         contractTools: [],
@@ -131,6 +132,11 @@ function buildCodexDeterministicMcpAttachment(serverConfig, { role = "" } = {}) 
     tools: toolNames,
     directTools,
     lazyTools,
+    // Codex creates its deferred tool-search surface only when this catalog
+    // contains at least one tool. Keep the state explicit for launch audits:
+    // ordinary repository/Atlas runs must not advertise an empty discovery
+    // call, while DB and future optional services may opt into it here.
+    lazyDiscoveryEnabled: lazyTools.length > 0,
     atlasTools,
     requiredTools: Array.isArray(serverConfig.requiredTools) ? serverConfig.requiredTools : [],
     contractTools,

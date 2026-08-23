@@ -1716,6 +1716,7 @@ function recordOwnerModelControlNotice(session, toolName, notice = {}) {
  *   queueWaitMs?: number | null,
  *   executor?: Record<string, any> | null,
  *   observationDetail?: Record<string, any> | null,
+ *   synthesisAdmission?: Record<string, any> | null,
  * }} [observation]
  */
 function recordOwnerToolObservation({
@@ -1729,6 +1730,7 @@ function recordOwnerToolObservation({
   queueWaitMs = null,
   executor = null,
   observationDetail = null,
+  synthesisAdmission = null,
 } = {}) {
   const boot = session?.bootConfig || {};
   const outcome = error ? "failed" : classifyMcpToolResult(result);
@@ -1765,6 +1767,13 @@ function recordOwnerToolObservation({
           result_chars: resultChars,
           transport: "mcp_owner",
           executor: executor && typeof executor === "object" ? executor : null,
+          ...(synthesisAdmission?.explorationUnitId ? {
+            research_exploration_unit_version: 1,
+            research_exploration_unit_id: synthesisAdmission.explorationUnitId,
+            research_exploration_step: synthesisAdmission.assignedExplorationStep,
+            research_exploration_unit_kind: synthesisAdmission.explorationUnitKind || "request",
+            physical_request: 1,
+          } : {}),
           ...(observationDetail && typeof observationDetail === "object" ? observationDetail : {}),
           atlas_artifacts: result?._meta?.atlasArtifacts || null,
           atlas_batch: result?._meta?.atlasBatch || null,
@@ -2472,6 +2481,7 @@ export class PersistentMcpOwner {
     // racing the deterministic closeout ceiling.
     this._atlasToolCallQueues = new Map();
     this._activeResearchAtlasReads = new Map();
+    this._activeResearchAtlasBatches = new Map();
     this._researchAdmissionReservations = new Map();
     // A memory failure is terminal only for the agent session that observed
     // it. Weak keys avoid extending the lifetime of detached MCP sessions.
@@ -2713,6 +2723,9 @@ export class PersistentMcpOwner {
     for (const key of this._activeResearchAtlasReads.keys()) {
       if (key.endsWith(`:${id}`)) this._activeResearchAtlasReads.delete(key);
     }
+    for (const key of this._activeResearchAtlasBatches.keys()) {
+      if (key.endsWith(`:${id}`)) this._activeResearchAtlasBatches.delete(key);
+    }
     const gatewayScopeReleaseNotified = this._notifyGatewaySessionRelease(session);
     let gatewayReleased = false;
     let gatewayStopped = false;
@@ -2888,6 +2901,7 @@ export class PersistentMcpOwner {
     this._gatewayRetirements.clear();
     this._atlasToolCallQueues.clear();
     this._activeResearchAtlasReads.clear();
+    this._activeResearchAtlasBatches.clear();
     this._researchAdmissionReservations.clear();
     this._sessions.clear();
     this._sessionIdsByTokenHash.clear();
@@ -3559,7 +3573,7 @@ export class PersistentMcpOwner {
   // parallel admissions cannot race the exploration ceiling. Consulting the
   // reservation map on the serial path also keeps a swallowed observation
   // write from re-admitting an already-consumed step number.
-  _admitResearchExploration(session, effectiveAction) {
+  _admitResearchExploration(session, effectiveAction, { explorationUnitKind = "request" } = {}) {
     const boot = session?.bootConfig || {};
     if (
       String(boot.role || "") !== "researcher"
@@ -3584,11 +3598,16 @@ export class PersistentMcpOwner {
     if (assignedExplorationStep <= reservableCeiling) {
       this._researchAdmissionReservations.set(reservationKey, assignedExplorationStep);
     }
-    return ownerResearchSynthesisAdmission(
+    const admission = ownerResearchSynthesisAdmission(
       session,
       effectiveAction,
       { assignedExplorationStep },
     );
+    return {
+      ...admission,
+      explorationUnitId: `${reservationKey}:${assignedExplorationStep}`,
+      explorationUnitKind,
+    };
   }
 
   async _executeAtlasToolCall(args) {
@@ -3608,15 +3627,30 @@ export class PersistentMcpOwner {
       && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
       && !this._atlasToolCallQueues.has(queueKey);
     if (concurrentResearchRead) {
-      const synthesisAdmission = this._admitResearchExploration(args?.session, effectiveAction);
+      let activeBatch = this._activeResearchAtlasBatches.get(queueKey);
+      if (!activeBatch) {
+        activeBatch = {
+          admission: this._admitResearchExploration(
+            args?.session,
+            effectiveAction,
+            { explorationUnitKind: "concurrent_read_batch" },
+          ),
+          active: new Set(),
+        };
+        this._activeResearchAtlasBatches.set(queueKey, activeBatch);
+      }
+      const synthesisAdmission = activeBatch.admission;
       const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt });
-      const active = this._activeResearchAtlasReads.get(queueKey) || new Set();
+      const active = activeBatch.active;
       active.add(current);
       this._activeResearchAtlasReads.set(queueKey, active);
       const release = () => {
         active.delete(current);
         if (active.size === 0 && this._activeResearchAtlasReads.get(queueKey) === active) {
           this._activeResearchAtlasReads.delete(queueKey);
+          if (this._activeResearchAtlasBatches.get(queueKey) === activeBatch) {
+            this._activeResearchAtlasBatches.delete(queueKey);
+          }
         }
       };
       void current.then(release, release);
@@ -3807,6 +3841,7 @@ export class PersistentMcpOwner {
           durationMs: Date.now() - startedAt,
           queueWaitMs,
           executor: { via: "survey_aware_skeleton_redirect" },
+          synthesisAdmission,
         });
         appendRunTelemetry("diagnostics", {
           kind: "mcp.owner.atlas_skeleton_after_survey",
@@ -3852,6 +3887,7 @@ export class PersistentMcpOwner {
           durationMs: Date.now() - startedAt,
           queueWaitMs,
           executor: { via: "hash_ref_store" },
+          synthesisAdmission,
         });
         appendRunTelemetry("diagnostics", {
           kind: "mcp.owner.atlas_tool_call",
@@ -3908,6 +3944,7 @@ export class PersistentMcpOwner {
           durationMs: Date.now() - startedAt,
           queueWaitMs,
           executor: { via: "source_coverage" },
+          synthesisAdmission,
         });
         recordSourceSelectionObservations({
           session,
@@ -3968,6 +4005,7 @@ export class PersistentMcpOwner {
           durationMs: Date.now() - startedAt,
           queueWaitMs,
           executor: { via: "context_headroom" },
+          synthesisAdmission,
         });
         recordSourceSelectionObservations({
           session,
@@ -4082,6 +4120,7 @@ export class PersistentMcpOwner {
         durationMs: Date.now() - startedAt,
         queueWaitMs,
         executor: executorDiagnostics,
+        synthesisAdmission,
       });
       if (coverageOwner) {
         recordSourceSelectionObservations({
@@ -4160,6 +4199,7 @@ export class PersistentMcpOwner {
         error: err,
         durationMs: Date.now() - startedAt,
         queueWaitMs,
+        synthesisAdmission,
       });
       if (requested.name === "code.window") {
         recordSourceSelectionObservations({

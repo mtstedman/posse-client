@@ -1,11 +1,16 @@
 import crypto from "crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
+  AGENT_HANDOFF_ALIAS_POLICY,
   AGENT_HANDOFF_LIMITS,
   AGENT_HANDOFF_PLANNER_CONTRACT_KEYS,
   AGENT_HANDOFF_PLANNER_CONTRACT_VERSION,
   AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES,
+  AGENT_HANDOFF_PROFILE_POLICY,
   AGENT_HANDOFF_PROTOCOL,
+  AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
   AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
 } from "../../../catalog/handoff.js";
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
@@ -13,10 +18,24 @@ import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../..
 import {
   fetchHashRefForContext,
   findFetchedHashRefViewsForContext,
+  findVisibleHashRefSourcePathsForContext,
+  materializeHashRefEvidenceForContext,
+  surfaceHashRefForContext,
 } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
-import { hashRefModelVisibleScope } from "../../../shared/tools/functions/fetch-ref-policy.js";
+import {
+  hashRefModelVisibility,
+  hashRefModelVisibleScope,
+} from "../../../shared/tools/functions/fetch-ref-policy.js";
+import {
+  resolveDeterministicReadableFile,
+} from "../../../shared/tools/functions/toolkit/path-policy.js";
+import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
+import {
+  canonicalEvidenceSourcePath,
+  normalizedEvidenceSourceWindow,
+} from "../../../shared/tools/functions/source-evidence.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
 import { validatePlannerPacketFileKinds } from "../../planning/functions/scope-reconciliation.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
@@ -62,8 +81,7 @@ const PLANNER_REPORT_KEYS = Object.freeze([
 const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
   "id",
   "depends_on",
-  "role",
-  "job_type",
+  ...compatibilityAliasKeys("plannerTaskRole"),
   "intent",
   "summary",
   "claims",
@@ -72,16 +90,6 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
   "success_criteria",
   ...PLANNER_REPORT_METADATA_KEYS,
 ]);
-
-const PROFILE_POLICY = Object.freeze({
-  "researcher.pipeline.v1": Object.freeze({ roles: ["researcher"], outcomes: ["success", "gap", "input_required"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
-  "researcher.report.v1": Object.freeze({ roles: ["researcher"], outcomes: ["complete"], targetKinds: ["result"], maxHandoffs: 1 }),
-  "planner.plan.v1": Object.freeze({ roles: ["planner"], outcomes: ["success"], targetKinds: ["agent", "system"], maxHandoffs: 50 }),
-  "dev.result.v1": Object.freeze({ roles: ["dev", "fix"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
-  "artificer.result.v1": Object.freeze({ roles: ["artificer"], outcomes: ["complete", "failed", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
-  "assessor.verdict.v1": Object.freeze({ roles: ["assessor"], outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"], targetKinds: ["pipeline"], maxHandoffs: 1 }),
-  "citation_synthesis.v1": Object.freeze({ roles: ["subagent"], outcomes: ["complete", "partial", "failed"], targetKinds: ["parent"], maxHandoffs: 1 }),
-});
 
 const TABLE = "agent_handoff_packets";
 const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materialization_cache");
@@ -113,7 +121,23 @@ function sameCompatibilityValue(left, right) {
   }
 }
 
-function compatibilityAlias(source, canonicalKey, aliasKey, label) {
+function acceptedFieldAliasPolicy(aliasId) {
+  const policy = AGENT_HANDOFF_ALIAS_POLICY.accepted.fieldAliases[aliasId];
+  if (!policy) throw new Error(`Unknown agent_handoff compatibility alias policy: ${aliasId}`);
+  return policy;
+}
+
+function compatibilityAliasKeys(aliasId) {
+  const policy = acceptedFieldAliasPolicy(aliasId);
+  return [policy.canonical, policy.alias];
+}
+
+function uniqueKeys(...groups) {
+  return [...new Set(groups.flat())];
+}
+
+function compatibilityAlias(source, aliasId, label) {
+  const { canonical: canonicalKey, alias: aliasKey } = acceptedFieldAliasPolicy(aliasId);
   const canonicalPresent = source[canonicalKey] != null;
   const aliasPresent = source[aliasKey] != null;
   if (canonicalPresent && aliasPresent
@@ -155,21 +179,60 @@ function stringArray(value, label, maxItems = 50, maxChars = 1000) {
   return value.map((entry, index) => boundedString(entry, `${label}[${index}]`, maxChars));
 }
 
+function evidenceSourcePathSyntaxError(value) {
+  const raw = String(value || "");
+  if (!raw || raw !== raw.trim()) return "evidence selector.path must be a non-empty trimmed path";
+  if (path.isAbsolute(raw) || /^[A-Za-z]:/.test(raw)) {
+    return "evidence selector.path must be repo-relative, not absolute";
+  }
+  if (/[\r\n\t]/.test(raw)) return "evidence selector.path must be a single-line path";
+  const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized || normalized === "." || normalized === ".."
+    || normalized.split("/").some((segment) => segment === "." || segment === "..")) {
+    return "evidence selector.path must not traverse directories";
+  }
+  return null;
+}
+
 export function parseAgentHandoffEvidenceSelector(value) {
-  let ref;
+  let ref = null;
+  let sourcePath = null;
+  let qualifiedPath = null;
   let start = null;
   let end = null;
   if (typeof value === "string") {
-    const match = value.trim().toLowerCase().match(/^(#[0-9a-z]{4,12})(?::(?:l)?(\d+)(?:-(?:l)?(\d+))?)?$/);
-    if (!match) fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence selector: ${String(value).slice(0, 80)}`);
-    [, ref] = match;
-    if (match[2]) {
-      start = Number(match[2]);
-      end = Number(match[3] || match[2]);
+    const raw = value.trim();
+    const refMatch = raw.toLowerCase().match(/^(#[0-9a-z]{4,12})(?::(?:l)?(\d+)(?:-(?:l)?(\d+))?)?$/);
+    const pathMatch = refMatch
+      ? null
+      : raw.match(/^(.+):(?:l)?(\d+)(?:-(?:l)?(\d+))?$/i);
+    if (!refMatch && !pathMatch) {
+      fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence selector: ${String(value).slice(0, 80)}`);
+    }
+    if (refMatch) {
+      [, ref] = refMatch;
+      if (refMatch[2]) {
+        start = Number(refMatch[2]);
+        end = Number(refMatch[3] || refMatch[2]);
+      }
+    } else {
+      sourcePath = String(pathMatch[1] || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+      start = Number(pathMatch[2]);
+      end = Number(pathMatch[3] || pathMatch[2]);
     }
   } else {
-    const selector = exactKeys(value, ["ref", "lines"], "evidence selector");
-    ref = normalizeHashRefAlias(selector.ref);
+    const selector = exactKeys(value, ["ref", "path", "lines"], "evidence selector");
+    if (selector.ref == null && selector.path == null) {
+      fail("AGENT_HANDOFF_SELECTOR_INVALID", "Evidence selector must contain ref or path");
+    }
+    if (selector.ref != null) {
+      ref = normalizeHashRefAlias(selector.ref);
+      if (selector.path != null) {
+        qualifiedPath = String(selector.path || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+      }
+    } else {
+      sourcePath = String(selector.path || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+    }
     if (selector.lines != null) {
       const lines = exactKeys(selector.lines, ["start", "end", "count"], "evidence selector.lines");
       start = Number(lines.start);
@@ -181,17 +244,37 @@ export function parseAgentHandoffEvidenceSelector(value) {
       if (count != null && (!Number.isInteger(count) || count < 1 || count > AGENT_HANDOFF_LIMITS.maxSelectorLines)) {
         fail(
           "AGENT_HANDOFF_SELECTOR_INVALID",
-          `Evidence line count for ${ref} must be an integer from 1 through ${AGENT_HANDOFF_LIMITS.maxSelectorLines}`,
+          `Evidence line count for ${ref || sourcePath} must be an integer from 1 through ${AGENT_HANDOFF_LIMITS.maxSelectorLines}`,
         );
       }
     }
   }
-  if (!HASH_REF_ALIAS_PATTERN.test(ref || "")) fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence ref: ${String(ref || "")}`);
-  if ((start == null) !== (end == null)) fail("AGENT_HANDOFF_SELECTOR_INVALID", `Evidence line range must include start and end for ${ref}`);
-  if (start != null && (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start)) {
-    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid 1-based inclusive line range for ${ref}`);
+  if (ref != null && !HASH_REF_ALIAS_PATTERN.test(ref)) {
+    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence ref: ${String(ref || "")}`);
   }
-  return { ref, start, end };
+  if (sourcePath != null) {
+    const pathError = evidenceSourcePathSyntaxError(sourcePath);
+    if (pathError) fail("AGENT_HANDOFF_SELECTOR_INVALID", pathError);
+    if (start == null) {
+      fail("AGENT_HANDOFF_SELECTOR_INVALID", `File-backed evidence selector ${sourcePath} requires a line range`);
+    }
+  }
+  if (qualifiedPath != null) {
+    const pathError = evidenceSourcePathSyntaxError(qualifiedPath);
+    if (pathError) fail("AGENT_HANDOFF_SELECTOR_INVALID", pathError);
+    if (start == null) {
+      fail("AGENT_HANDOFF_SELECTOR_INVALID", `Path-qualified evidence selector ${ref} requires a line range`);
+    }
+  }
+  if ((start == null) !== (end == null)) {
+    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Evidence line range must include start and end for ${ref || sourcePath}`);
+  }
+  if (start != null && (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start)) {
+    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid 1-based inclusive line range for ${ref || sourcePath}`);
+  }
+  return sourcePath == null
+    ? { ref, ...(qualifiedPath == null ? {} : { path: qualifiedPath }), start, end }
+    : { path: sourcePath, start, end };
 }
 
 function normalizedLines(payload) {
@@ -201,97 +284,405 @@ function normalizedLines(payload) {
   return lines;
 }
 
-function gutteredSourceLineSlice(entry, start, end) {
-  const tool = String(entry?.descriptor?.tool || entry?.metadata?.tool || "")
-    .toLowerCase()
-    .replace(/^tools[.:]/, "");
-  const objectType = String(entry?.object_type || "").toLowerCase();
-  if (!["chain_read", "read_file", "inspect_file"].includes(tool)
-    && !["chain_read", "read_file", "inspect_file"].includes(objectType)) return null;
-  const windows = [];
-  let current = null;
-  for (const line of normalizedLines(entry?.payload_text)) {
-    const matched = /^\s*(\d+)\t(.*)$/.exec(line);
-    if (!matched) {
-      current = null;
-      continue;
-    }
-    const sourceLine = Number(matched[1]);
-    if (!Number.isInteger(sourceLine) || sourceLine < 1) {
-      current = null;
-      continue;
-    }
-    if (!current || sourceLine !== current.sourceEnd + 1) {
-      current = { sourceStart: sourceLine, sourceEnd: sourceLine, contentLines: [] };
-      windows.push(current);
-    }
-    current.sourceEnd = sourceLine;
-    current.contentLines.push(matched[2]);
-  }
-  if (windows.length === 0) return null;
-  const sourceRanges = windows.map((window) => ({ start: window.sourceStart, end: window.sourceEnd }));
-  const matched = windows.find((window) => start >= window.sourceStart && end <= window.sourceEnd);
-  if (!matched) {
+function canonicalSourcePath(value) {
+  return evidenceSourcePathSyntaxError(value) ? null : canonicalEvidenceSourcePath(value);
+}
+
+function sourceLineage(entry, context, seen = new Set()) {
+  const recorded = String(entry?.metadata?.line_semantics || "").toLowerCase();
+  const recordedWindows = (Array.isArray(entry?.metadata?.source_windows)
+    ? entry.metadata.source_windows
+    : []).map(normalizedEvidenceSourceWindow).filter(Boolean);
+  if (recorded === "source" && recordedWindows.length > 0) {
     return {
-      matched: false,
-      sourceStart: windows[0].sourceStart,
-      sourceEnd: windows[0].sourceEnd,
-      sourceRanges,
-      preferSourceLines: true,
+      line_semantics: "source",
+      source_windows: recordedWindows,
+      content_entry: entry,
+      source_metadata: entry.metadata || {},
     };
+  }
+  if (recorded === "materialized") {
+    return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  }
+
+  const source = String(entry?.source || "").trim().toLowerCase();
+  if (source !== "agent:create_ref") {
+    // Compatibility for refs created before source-window metadata existed:
+    // preserve the original stored-result coordinate contract explicitly.
+    return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  }
+  const sourceRef = normalizeHashRefAlias(entry?.descriptor?.source_ref ?? entry?.metadata?.source_ref);
+  const slice = entry?.descriptor?.slice ?? entry?.metadata?.slice;
+  if (!sourceRef || !slice || seen.has(sourceRef)) {
+    return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  }
+  const fetched = fetchHashRefForContext(context, sourceRef);
+  const sourceEntry = fetched?.found ? fetched.entry : null;
+  if (!sourceEntry || sourceEntry.entry_kind !== "materialized" || sourceEntry.payload_text == null) {
+    return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  }
+  const derived = exactDerivedSlice(sourceEntry.payload_text, slice);
+  if (derived == null || derived !== String(entry?.payload_text ?? "")) {
+    return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  }
+  const lineMatch = /^lines:(\d+)-(\d+)$/.exec(String(slice));
+  if (!lineMatch) return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  const sliceStart = Number(lineMatch[1]);
+  const sliceEnd = Number(lineMatch[2]);
+  const nextSeen = new Set(seen);
+  nextSeen.add(sourceRef);
+  const parent = sourceLineage(sourceEntry, context, nextSeen);
+  if (parent.line_semantics !== "source") {
+    return { line_semantics: "materialized", source_windows: [], content_entry: entry };
+  }
+  const inherited = parent.source_windows.flatMap((window) => {
+    if (!Number.isInteger(window.materialized_start_line)
+      || !Number.isInteger(window.materialized_end_line)
+      || window.materialized_end_line < sliceStart
+      || window.materialized_start_line > sliceEnd) return [];
+    const materializedStart = Math.max(window.materialized_start_line, sliceStart);
+    const materializedEnd = Math.min(window.materialized_end_line, sliceEnd);
+    const sourceSpan = window.source_end_line - window.source_start_line;
+    const materializedSpan = window.materialized_end_line - window.materialized_start_line;
+    if (sourceSpan !== materializedSpan) return [];
+    return [{
+      ...window,
+      source_start_line: window.source_start_line
+        + materializedStart - window.materialized_start_line,
+      source_end_line: window.source_start_line
+        + materializedEnd - window.materialized_start_line,
+      materialized_start_line: materializedStart - sliceStart + 1,
+      materialized_end_line: materializedEnd - sliceStart + 1,
+    }];
+  });
+  return inherited.length > 0
+    ? {
+        line_semantics: "source",
+        source_windows: inherited,
+        content_entry: entry,
+        source_metadata: parent.source_metadata || parent.content_entry?.metadata || {},
+      }
+    : { line_semantics: "materialized", source_windows: [], content_entry: entry };
+}
+
+function mergeSourceContentRecords(records) {
+  const ordered = records
+    .filter((record) => record?.path
+      && Number.isInteger(record.source_start_line)
+      && Number.isInteger(record.source_end_line)
+      && record.source_end_line >= record.source_start_line
+      && Array.isArray(record.content_lines)
+      && record.content_lines.length === record.source_end_line - record.source_start_line + 1)
+    .sort((left, right) => (
+      left.path.localeCompare(right.path)
+      || left.source_start_line - right.source_start_line
+      || left.source_end_line - right.source_end_line
+    ));
+  const merged = [];
+  for (const record of ordered) {
+    const prior = merged.at(-1);
+    if (!prior || prior.path !== record.path
+      || record.source_start_line > prior.source_end_line + 1) {
+      merged.push({ ...record, content_lines: [...record.content_lines] });
+      continue;
+    }
+    let compatible = true;
+    const overlapEnd = Math.min(prior.source_end_line, record.source_end_line);
+    for (let line = record.source_start_line; line <= overlapEnd; line += 1) {
+      if (prior.content_lines[line - prior.source_start_line]
+        !== record.content_lines[line - record.source_start_line]) {
+        compatible = false;
+        break;
+      }
+    }
+    if (!compatible) {
+      merged.push({ ...record, content_lines: [...record.content_lines] });
+      continue;
+    }
+    const appendFrom = Math.max(0, prior.source_end_line - record.source_start_line + 1);
+    prior.content_lines.push(...record.content_lines.slice(appendFrom));
+    prior.source_end_line = Math.max(prior.source_end_line, record.source_end_line);
+  }
+  return merged;
+}
+
+function payloadSourceContentWindows(entry, lineage) {
+  const payload = String(entry?.payload_text || "");
+  const payloadLines = normalizedLines(payload);
+  const authoritative = lineage.source_windows;
+  let parsed;
+  try { parsed = JSON.parse(payload); } catch { parsed = null; }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const records = [];
+  const add = (sourcePath, sourceStart, content, expectedLineCount = null) => {
+    const canonicalPath = canonicalSourcePath(sourcePath);
+    const lines = Number.isInteger(expectedLineCount) && expectedLineCount > 0
+      ? String(content ?? "").replace(/\r\n?/g, "\n").split("\n")
+      : normalizedLines(content);
+    if (!canonicalPath || !Number.isInteger(sourceStart) || sourceStart < 1 || lines.length === 0) return;
+    if (Number.isInteger(expectedLineCount) && lines.length !== expectedLineCount) return;
+    records.push({
+      path: canonicalPath,
+      source_start_line: sourceStart,
+      source_end_line: sourceStart + lines.length - 1,
+      content_lines: lines,
+    });
+  };
+
+  const worktreeHeaderPrefix = "[posse.worktree_evidence.v1 ";
+  const worktreeHeader = payloadLines[0] || "";
+  if (worktreeHeader.startsWith(worktreeHeaderPrefix) && worktreeHeader.endsWith("]")) {
+    try {
+      const identity = JSON.parse(worktreeHeader.slice(worktreeHeaderPrefix.length, -1));
+      const headerEnd = payload.indexOf("\n");
+      const sourceLineCount = Number(identity.end_line) - Number(identity.start_line) + 1;
+      add(
+        identity.path,
+        Number(identity.start_line),
+        headerEnd >= 0 ? payload.slice(headerEnd + 1) : "",
+        sourceLineCount,
+      );
+    } catch {
+      // Invalid identity headers are not authoritative source content.
+    }
+  }
+
+  if (parsed?.kind === "posse.worktree_evidence.v1" && typeof parsed.content === "string") {
+    add(parsed.path, Number(parsed.start_line), parsed.content);
+  }
+
+  const candidates = data && typeof data === "object" ? [
+    data,
+    ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
+    ...(Array.isArray(data.additional_windows) ? data.additional_windows : []),
+  ] : [];
+  const fallbackPath = data?.repo_rel_path || data?.repoRelPath || data?.path || entry?.metadata?.path;
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate.content === "string") {
+      add(
+        candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
+        Number(candidate.startLine ?? candidate.start_line),
+        candidate.content,
+      );
+    }
+  }
+  for (const candidate of Array.isArray(data?.requestedWindows) ? data.requestedWindows : []) {
+    if (candidate && typeof candidate.content === "string") {
+      add(
+        candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
+        Number(candidate.startLine ?? candidate.start_line),
+        candidate.content,
+      );
+    }
+  }
+
+  const lensMatches = [
+    ...(Array.isArray(data?.matches) ? data.matches : []),
+    ...(Array.isArray(data?.tailMatches) ? data.tailMatches : []),
+  ];
+  if (lensMatches.length > 0) {
+    const byPath = new Map();
+    for (const match of lensMatches) {
+      const sourcePath = canonicalSourcePath(match?.repo_rel_path || match?.repoRelPath || fallbackPath);
+      const sourceLine = Number(match?.line);
+      if (!sourcePath || !Number.isInteger(sourceLine) || sourceLine < 1 || typeof match?.text !== "string") continue;
+      const lineMap = byPath.get(sourcePath) || new Map();
+      byPath.set(sourcePath, lineMap);
+      const before = Array.isArray(match?.context?.before) ? match.context.before.map(String) : [];
+      const after = Array.isArray(match?.context?.after) ? match.context.after.map(String) : [];
+      const values = [...before, match.text, ...after];
+      const firstLine = Math.max(1, sourceLine - before.length);
+      for (const [index, text] of values.entries()) {
+        const lineNumber = firstLine + index;
+        const prior = lineMap.get(lineNumber);
+        if (prior == null) lineMap.set(lineNumber, text);
+        else if (prior !== text) lineMap.set(lineNumber, null);
+      }
+    }
+    for (const [sourcePath, lineMap] of byPath) {
+      for (const window of authoritative.filter((candidate) => candidate.path === sourcePath)) {
+        const lines = [];
+        for (let line = window.source_start_line; line <= window.source_end_line; line += 1) {
+          const text = lineMap.get(line);
+          if (typeof text !== "string") {
+            lines.length = 0;
+            break;
+          }
+          lines.push(text);
+        }
+        if (lines.length > 0) records.push({ ...window, content_lines: lines });
+      }
+    }
+  }
+
+  const uniqueAuthoritativePaths = [...new Set(authoritative.map((window) => window.path))];
+  const gutterPath = canonicalSourcePath(entry?.metadata?.path)
+    || (uniqueAuthoritativePaths.length === 1 ? uniqueAuthoritativePaths[0] : null);
+  let current = null;
+  for (const line of normalizedLines(payload)) {
+    const matched = /^\s*(\d+)\t(.*)$/.exec(line);
+    const sourceLine = Number(matched?.[1]);
+    if (!gutterPath || !matched || !Number.isInteger(sourceLine) || sourceLine < 1) {
+      current = null;
+      continue;
+    }
+    if (!current || sourceLine !== current.source_end_line + 1) {
+      current = {
+        path: gutterPath,
+        source_start_line: sourceLine,
+        source_end_line: sourceLine,
+        content_lines: [],
+      };
+      records.push(current);
+    }
+    current.source_end_line = sourceLine;
+    current.content_lines.push(matched[2]);
+  }
+
+  for (const window of authoritative) {
+    if (!Number.isInteger(window.materialized_start_line)
+      || !Number.isInteger(window.materialized_end_line)) continue;
+    const selected = payloadLines.slice(
+      window.materialized_start_line - 1,
+      window.materialized_end_line,
+    );
+    const numbered = selected.map((line) => /^\s*(\d+)\t(.*)$/.exec(line));
+    if (numbered.length === window.source_end_line - window.source_start_line + 1
+      && numbered.every((match, index) => (
+        Number(match?.[1]) === window.source_start_line + index
+      ))) {
+      records.push({
+        ...window,
+        content_lines: numbered.map((match) => match[2]),
+      });
+    }
+    if (selected.length === window.source_end_line - window.source_start_line + 1) {
+      records.push({ ...window, content_lines: selected });
+    }
+  }
+
+  const mergedRecords = mergeSourceContentRecords(records);
+  return authoritative.map((window) => {
+    const record = mergedRecords.find((candidate) => (
+      candidate.path === window.path
+      && candidate.source_start_line <= window.source_start_line
+      && candidate.source_end_line >= window.source_end_line
+    ));
+    if (!record) return { ...window, content_lines: null };
+    return {
+      ...window,
+      content_lines: record.content_lines.slice(
+        window.source_start_line - record.source_start_line,
+        window.source_end_line - record.source_start_line + 1,
+      ),
+    };
+  });
+}
+
+function coalescedSourceContentWindows(entry, lineage) {
+  const windows = payloadSourceContentWindows(lineage.content_entry || entry, lineage);
+  if (windows.some((window) => !Array.isArray(window.content_lines))) return windows;
+  const merged = mergeSourceContentRecords(windows);
+  for (let index = 1; index < merged.length; index += 1) {
+    const prior = merged[index - 1];
+    const current = merged[index];
+    if (prior.path === current.path && current.source_start_line <= prior.source_end_line) {
+      return windows;
+    }
+  }
+  return merged.map((window) => {
+    const contributors = windows.filter((candidate) => (
+      candidate.path === window.path
+      && candidate.source_start_line <= window.source_end_line
+      && candidate.source_end_line >= window.source_start_line
+    ));
+    return {
+      ...window,
+      materialized_start_line: Math.min(...contributors.map((candidate) => (
+        Number(candidate.materialized_start_line) || Number.MAX_SAFE_INTEGER
+      ))),
+      materialized_end_line: Math.max(...contributors.map((candidate) => (
+        Number(candidate.materialized_end_line) || 0
+      ))),
+    };
+  });
+}
+
+function sourceLineSlice(entry, lineage, start, end, {
+  sourcePath = null,
+  sourceWindow = null,
+} = {}) {
+  const windows = coalescedSourceContentWindows(lineage.content_entry || entry, lineage);
+  const containing = windows.filter((window) => (
+    start >= window.source_start_line && end <= window.source_end_line
+  ));
+  const requestedPath = canonicalSourcePath(sourcePath || sourceWindow?.path);
+  const matches = requestedPath
+    ? containing.filter((window) => window.path === requestedPath)
+    : containing;
+  const sourceRanges = windows.map((window) => ({
+    path: window.path,
+    start: window.source_start_line,
+    end: window.source_end_line,
+  }));
+  if (matches.length === 0) return { matched: false, sourceRanges };
+  const excerpts = matches.map((window) => Array.isArray(window.content_lines)
+    ? window.content_lines.slice(
+        start - window.source_start_line,
+        end - window.source_start_line + 1,
+      ).join("\n")
+    : null);
+  const distinctPaths = new Set(matches.map((window) => window.path));
+  const distinctExcerpts = new Set(excerpts);
+  if (matches.length > 1 && (distinctPaths.size !== 1 || distinctExcerpts.size !== 1)) {
+    return { matched: false, sourceRanges };
+  }
+  const matched = matches[0];
+  if (!Array.isArray(matched.content_lines)) {
+    return { matched: false, sourceRanges, contentUnavailable: true };
   }
   return {
     matched: true,
-    sourceStart: matched.sourceStart,
-    sourceEnd: matched.sourceEnd,
+    path: matched.path,
+    sourceStart: start,
+    sourceEnd: end,
     sourceRanges,
-    preferSourceLines: true,
-    excerpt: matched.contentLines.slice(start - matched.sourceStart, end - matched.sourceStart + 1).join("\n"),
+    excerpt: excerpts[0],
+    sourceWindow: Object.fromEntries(
+      Object.entries(matched).filter(([key]) => key !== "content_lines"),
+    ),
   };
 }
 
-function materializedSourceLineSlice(entry, start, end) {
-  const tool = String(entry?.descriptor?.tool || entry?.metadata?.tool || "").toLowerCase();
-  const objectType = String(entry?.object_type || "").toLowerCase();
-  const guttered = gutteredSourceLineSlice(entry, start, end);
-  if (guttered) return guttered;
-  if (!tool.endsWith("code.window") && !objectType.includes("code.window")) return null;
-  let parsed;
-  try { parsed = JSON.parse(String(entry?.payload_text || "")); }
-  catch { return null; }
-  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
-  const candidates = [
-    data,
-    ...(Array.isArray(data?.additionalWindows) ? data.additionalWindows : []),
-    ...(Array.isArray(data?.additional_windows) ? data.additional_windows : []),
-  ];
-  const windows = candidates.flatMap((candidate) => {
-    if (!candidate || typeof candidate.content !== "string") return [];
-    const sourceStart = Number(candidate.startLine ?? candidate.start_line);
-    if (!Number.isInteger(sourceStart) || sourceStart < 1) return [];
-    const contentLines = normalizedLines(candidate.content);
-    return [{
-      sourceStart,
-      sourceEnd: sourceStart + Math.max(0, contentLines.length - 1),
-      contentLines,
-    }];
-  });
-  if (windows.length === 0) return null;
-  const matched = windows.find((window) => start >= window.sourceStart && end <= window.sourceEnd);
-  if (!matched) {
-    return {
-      matched: false,
-      sourceStart: windows[0].sourceStart,
-      sourceEnd: windows[0].sourceEnd,
-      sourceRanges: windows.map((window) => ({ start: window.sourceStart, end: window.sourceEnd })),
-    };
+function disjointSourceMaterialization(entry, lineage) {
+  const contentWindows = coalescedSourceContentWindows(lineage.content_entry || entry, lineage);
+  if (contentWindows.length === 0
+    || contentWindows.some((window) => !Array.isArray(window.content_lines))) return null;
+  const ordered = [...contentWindows].sort((left, right) => (
+    (Number(left.materialized_start_line) || Number.MAX_SAFE_INTEGER)
+    - (Number(right.materialized_start_line) || Number.MAX_SAFE_INTEGER)
+    || left.path.localeCompare(right.path)
+    || left.source_start_line - right.source_start_line
+  ));
+  const excerptLines = [];
+  const sourceWindows = [];
+  for (const window of ordered) {
+    const materializedStart = excerptLines.length + 1;
+    excerptLines.push(...window.content_lines);
+    const sourceWindow = Object.fromEntries(
+      Object.entries(window).filter(([key]) => key !== "content_lines"),
+    );
+    sourceWindows.push({
+      ...sourceWindow,
+      materialized_start_line: materializedStart,
+      materialized_end_line: excerptLines.length,
+    });
   }
   return {
-    matched: true,
-    sourceStart: matched.sourceStart,
-    sourceEnd: matched.sourceEnd,
-    sourceRanges: windows.map((window) => ({ start: window.sourceStart, end: window.sourceEnd })),
-    excerpt: matched.contentLines.slice(start - matched.sourceStart, end - matched.sourceStart + 1).join("\n"),
+    excerpt: excerptLines.join("\n"),
+    lineCount: excerptLines.length,
+    sourceWindows,
+    paths: [...new Set(sourceWindows.map((window) => window.path))],
   };
 }
 
@@ -309,6 +700,7 @@ function directProvenance(entry) {
   }
   if (
     objectType === "tool_result"
+    || source === "system:worktree_read"
     || source.startsWith("tool:")
     || source.startsWith("tools.")
     || source.startsWith("atlas:")
@@ -391,17 +783,241 @@ function evidenceProvenance(entry, context, seen = new Set()) {
   };
 }
 
+function deliveredSourceCoverageCandidates(context) {
+  const attemptId = Number(context?.attemptId ?? context?.attempt_id) || null;
+  if (!attemptId) return [];
+  const agentCallId = Number(context?.agentCallId ?? context?.agent_call_id) || null;
+  const database = context?.db || getDb();
+  let rows = [];
+  try {
+    rows = database.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'source.coverage'
+      ORDER BY id ASC
+    `).all(attemptId);
+  } catch {
+    return [];
+  }
+  const candidates = [];
+  for (const row of rows) {
+    let detail;
+    try { detail = JSON.parse(row.detail_json || "{}"); } catch { continue; }
+    if (detail?.delivery_state !== "delivered") continue;
+    const deliveredCallId = Number(detail?.agent_call_id) || null;
+    if (deliveredCallId && agentCallId && deliveredCallId !== agentCallId) continue;
+    const sourcePath = canonicalSourcePath(detail?.path ?? detail?.repo_rel_path);
+    if (!sourcePath) continue;
+    candidates.push({
+      path: sourcePath,
+      repository_identity: detail?.repository_identity || null,
+      source_version: detail?.source_version || null,
+    });
+  }
+  return candidates;
+}
+
+function surfacedPathCandidates(context) {
+  const byPath = new Map();
+  for (const candidate of deliveredSourceCoverageCandidates(context)) {
+    byPath.set(candidate.path, candidate);
+  }
+  for (const sourcePath of findVisibleHashRefSourcePathsForContext(context, {
+    db: context?.db || getDb(),
+  })) {
+    const canonical = canonicalSourcePath(sourcePath);
+    if (canonical && !byPath.has(canonical)) {
+      byPath.set(canonical, {
+        path: canonical,
+        repository_identity: null,
+        source_version: null,
+      });
+    }
+  }
+  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function resolveSurfacedEvidencePath(requestedPath, context) {
+  const requested = canonicalSourcePath(requestedPath);
+  if (!requested) {
+    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid surfaced evidence path: ${String(requestedPath || "")}`);
+  }
+  const candidates = surfacedPathCandidates(context);
+  const resolveUnique = (matches) => {
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_PATH_AMBIGUOUS",
+        `Evidence path ${requested} is ambiguous among surfaced paths: ${matches.slice(0, 12).map((entry) => entry.path).join(", ")}`,
+      );
+    }
+    return null;
+  };
+  const exact = resolveUnique(candidates.filter((candidate) => candidate.path === requested));
+  if (exact) return exact;
+  const suffix = resolveUnique(candidates.filter((candidate) => candidate.path.endsWith(`/${requested}`)));
+  if (suffix) return suffix;
+  if (!requested.includes("/")) {
+    const basename = path.posix.basename(requested);
+    const byBasename = resolveUnique(candidates.filter((candidate) => path.posix.basename(candidate.path) === basename));
+    if (byBasename) return byBasename;
+  }
+  fail(
+    "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED",
+    `Evidence path ${requested} was not surfaced to the current agent call`,
+  );
+}
+
+function materializeWorktreeEvidenceSelector(selector, context) {
+  const projectDir = String(context?.projectDir || context?.cwd || "").trim();
+  if (!projectDir) {
+    fail("AGENT_HANDOFF_CONTEXT_INVALID", "File-backed evidence requires the current job worktree");
+  }
+  const resolved = resolveSurfacedEvidencePath(selector.path, context);
+  const selectedLineCount = selector.end - selector.start + 1;
+  if (selectedLineCount > AGENT_HANDOFF_LIMITS.maxSelectorLines) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
+      `Evidence ${resolved.path}:${selector.start}-${selector.end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorLines} lines`,
+    );
+  }
+  const readable = resolveDeterministicReadableFile(
+    projectDir,
+    resolved.path,
+    context?.scopePredicates || null,
+  );
+  if (!readable.ok) {
+    const missing = /^File not found:/i.test(readable.error);
+    fail(
+      missing ? "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID" : "AGENT_HANDOFF_EVIDENCE_PATH_INVALID",
+      `Evidence path ${resolved.path} is not readable: ${readable.error}`,
+    );
+  }
+  const content = fs.readFileSync(readable.path, "utf8");
+  const lines = splitEditableLines(content).lines;
+  if (selector.start > lines.length || selector.end > lines.length) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+      `Evidence path ${resolved.path} has ${lines.length} lines; requested ${selector.start}-${selector.end}`,
+    );
+  }
+  const excerpt = lines.slice(selector.start - 1, selector.end).join("\n");
+  if (!excerpt.trim()) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_EMPTY",
+      `Evidence ${resolved.path}:${selector.start}-${selector.end} contains only whitespace`,
+    );
+  }
+  if (excerpt.length > AGENT_HANDOFF_LIMITS.maxSelectorChars) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
+      `Evidence ${resolved.path}:${selector.start}-${selector.end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorChars} characters`,
+    );
+  }
+  const identity = JSON.stringify({
+    path: resolved.path,
+    start_line: selector.start,
+    end_line: selector.end,
+    repository_identity: resolved.repository_identity,
+    source_version: resolved.source_version,
+  });
+  const payload = `[posse.worktree_evidence.v1 ${identity}]\n${excerpt}`;
+  const excerptLineCount = selector.end - selector.start + 1;
+  const surfaced = surfaceHashRefForContext(context, {
+    entryKind: "materialized",
+    payloadText: payload,
+    descriptor: {
+      kind: "worktree_evidence",
+      tool: "read_file",
+      path: resolved.path,
+      start_line: selector.start,
+      end_line: selector.end,
+      repository_identity: resolved.repository_identity,
+      source_version: resolved.source_version,
+    },
+    objectType: "tool_result",
+    source: "system:worktree_read",
+    note: `${resolved.path}:${selector.start}-${selector.end}`,
+    sizeChars: payload.length,
+    recomputable: false,
+    versionId: resolved.source_version,
+    metadata: {
+      surfaced_by: "agent_handoff_path_selector",
+      fetch_class: "visible_copy",
+      tool: "read_file",
+      handoff_evidence_pinned: true,
+      path: resolved.path,
+      repository_identity: resolved.repository_identity,
+      source_version: resolved.source_version,
+      line_semantics: "source",
+      source_payload_encoding: "worktree_excerpt",
+      source_windows: [{
+        path: resolved.path,
+        source_start_line: selector.start,
+        source_end_line: selector.end,
+        materialized_start_line: 2,
+        materialized_end_line: excerptLineCount + 1,
+      }],
+      ...hashRefModelVisibility(context, {
+        visibility: "full",
+        ranges: [{ start: 0, end: payload.length }],
+        issuedAs: "evidence",
+      }),
+    },
+  }, { ownerScope: "work_item", db: context?.db || getDb() });
+  if (!surfaced?.ok || !surfaced.entry?.ref) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED",
+      `Evidence path ${resolved.path}:${selector.start}-${selector.end} could not be stored`,
+    );
+  }
+  const materialized = materializeAgentHandoffEvidenceSelector({
+    ref: surfaced.entry.ref,
+    lines: { start: selector.start, end: selector.end },
+  }, context, { expectedLineSemantics: "source" });
+  return {
+    ...materialized,
+    selector_kind: "path",
+    source_selector: `${resolved.path}:${selector.start}-${selector.end}`,
+  };
+}
+
 export function materializeAgentHandoffEvidenceSelector(selectorValue, context, {
   expectedLineSemantics = null,
+  allowDisjointSource = false,
+  stagedSourcePath = null,
+  stagedSourceWindow = null,
 } = {}) {
   const coordinateSpace = ["materialized", "source"].includes(expectedLineSemantics)
     ? expectedLineSemantics
     : null;
   let selector = parseAgentHandoffEvidenceSelector(selectorValue);
-  const cacheKey = `${selector.ref}:${selector.start ?? "all"}-${selector.end ?? "all"}:${coordinateSpace || "infer"}`;
+  const selectorKind = selector.ref == null ? "path" : "ref";
+  const selectedSourcePath = selector.ref == null
+    ? null
+    : canonicalSourcePath(selector.path || stagedSourcePath || stagedSourceWindow?.path);
+  const stagedWindowKey = stagedSourceWindow == null
+    ? ""
+    : `${stagedSourceWindow.path || ""}:${stagedSourceWindow.source_start_line || ""}-${stagedSourceWindow.source_end_line || ""}`;
+  const cacheKey = `${selectorKind}:${selector.ref || selector.path}:${selectedSourcePath || ""}:${selector.start ?? "all"}-${selector.end ?? "all"}:${coordinateSpace || "recorded"}:${allowDisjointSource ? "disjoint" : "contiguous"}:${stagedWindowKey}`;
   const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
-  const fetched = fetchHashRefForContext(context, selector.ref);
+  if (selectorKind === "path") {
+    const materialized = materializeWorktreeEvidenceSelector(selector, context);
+    cache?.set(cacheKey, materialized);
+    return materialized;
+  }
+  const capabilityEvidence = materializeHashRefEvidenceForContext(context, selector.ref);
+  if (capabilityEvidence?.found && !capabilityEvidence.ok) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED",
+      `Evidence ${selector.ref} could not be reconstructed from its promoted traversal view`,
+    );
+  }
+  const fetched = capabilityEvidence?.found
+    ? capabilityEvidence
+    : fetchHashRefForContext(context, selector.ref);
   if (!fetched?.found || !fetched.entry) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_FOUND", `Evidence ${selector.ref} is not visible to the current agent call`);
   }
@@ -409,79 +1025,158 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   if (entry.entry_kind !== "materialized" || entry.payload_text == null) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", `Evidence ${selector.ref} is not materialized`);
   }
+  if (entry.metadata?.citable === false) {
+    const parentRef = normalizeHashRefAlias(entry.metadata?.parent_ref
+      ?? entry.metadata?.capability_source_ref);
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_NOT_CITABLE",
+      `Evidence ${selector.ref} is a non-citable search result view; cite or fetch a source-coordinate slice from ${parentRef || "the parent ref"}`,
+    );
+  }
   const visible = hashRefModelVisibleScope(entry, context);
-  if (visible.contracted && !visible.fully_visible) {
+  if (!capabilityEvidence?.found && visible.contracted && !visible.fully_visible) {
     const sourceRef = selector.ref;
     const fetchedViews = findFetchedHashRefViewsForContext(context, sourceRef)
       .filter((candidate) => {
         if (candidate?.entry_kind !== "materialized" || candidate.payload_text == null) return false;
         if (!hashRefModelVisibleScope(candidate, context).fully_visible) return false;
         if (selector.end == null) return true;
-        const candidateLines = normalizedLines(candidate.payload_text);
-        if (selector.end <= candidateLines.length) return true;
-        return materializedSourceLineSlice(candidate, selector.start, selector.end)?.matched === true;
+        const candidateLineage = sourceLineage(candidate, context);
+        if (candidateLineage.line_semantics === "source") {
+          return candidateLineage.source_windows.some((window) => (
+            selector.start >= window.source_start_line
+            && selector.end <= window.source_end_line
+            && (!selectedSourcePath || window.path === selectedSourcePath)
+          ));
+        }
+        return selector.end <= normalizedLines(candidate.payload_text).length;
       });
     const exactView = fetchedViews[0] || null;
     if (!exactView) {
       fail(
         "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE",
-        `Evidence ${sourceRef} is a traversal or partial ref and no exact delivered view is visible to this agent call. Traverse an explicitly issued traversal_ref and use the returned evidence_ref, or use the original visible evidence anchor.`,
+        `Evidence ${sourceRef} is still an unseen traversal or partial ref for this agent call. Traverse it first so the same identity is promoted to evidence, or use an already visible evidence ref.`,
       );
     }
     entry = exactView;
     selector = { ...selector, ref: entry.ref };
   }
   const lines = normalizedLines(entry.payload_text);
-  const start = selector.start ?? 1;
-  const end = selector.end ?? Math.max(1, lines.length);
-  const materializedRangeFits = start <= lines.length && end <= lines.length;
-  const sourceSlice = selector.start == null || coordinateSpace === "materialized"
-    ? null
-    : materializedSourceLineSlice(entry, start, end);
-  const useSourceLines = coordinateSpace === "source"
-    ? sourceSlice?.matched === true
-    : coordinateSpace === "materialized"
-      ? false
-      : sourceSlice?.matched === true
-        && (sourceSlice.preferSourceLines === true || !materializedRangeFits);
-  if (coordinateSpace === "source" && !useSourceLines) {
+  const lineage = sourceLineage(entry, context);
+  const lineSemantics = lineage.line_semantics;
+  if (coordinateSpace && coordinateSpace !== lineSemantics) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
-      `Evidence ${selector.ref}:${start}-${end} no longer resolves in the staged source coordinate space`,
+      `Evidence ${selector.ref} is recorded with ${lineSemantics} line semantics, not ${coordinateSpace}`,
     );
   }
-  if (!useSourceLines && (end > lines.length || start > lines.length)) {
-    const sourceRange = sourceSlice
-      ? `; embedded source ranges are ${(sourceSlice.sourceRanges || [{
-        start: sourceSlice.sourceStart,
-        end: sourceSlice.sourceEnd,
-      }]).map((range) => `${range.start}-${range.end}`).join(", ")}`
-      : "";
-    fail("AGENT_HANDOFF_EVIDENCE_RANGE_INVALID", `Evidence ${selector.ref} has ${lines.length} materialized lines${sourceRange}; requested ${start}-${end}`);
+  let start;
+  let end;
+  let excerpt;
+  let selectedPath = null;
+  let selectedSourceWindows = lineage.source_windows;
+  let selectedLineCount = null;
+  let bareDisjoint = false;
+  if (lineSemantics === "source") {
+    if (selector.start == null) {
+      if (lineage.source_windows.length !== 1) {
+        const allowBare = allowDisjointSource || entry.metadata?.bare_multi_window_citable === true;
+        const disjoint = allowBare ? disjointSourceMaterialization(entry, lineage) : null;
+        if (!disjoint) {
+          const ranges = lineage.source_windows
+            .map((window) => `${window.path}:${window.source_start_line}-${window.source_end_line}`)
+            .join(", ");
+          fail(
+            "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+            `Evidence ${selector.ref} contains disjoint source windows (${ranges}); select one range explicitly`,
+          );
+        }
+        start = Math.min(...disjoint.sourceWindows.map((window) => window.source_start_line));
+        end = Math.max(...disjoint.sourceWindows.map((window) => window.source_end_line));
+        excerpt = disjoint.excerpt;
+        selectedSourceWindows = disjoint.sourceWindows;
+        selectedLineCount = disjoint.lineCount;
+        bareDisjoint = true;
+      } else {
+        [start, end] = [
+          lineage.source_windows[0].source_start_line,
+          lineage.source_windows[0].source_end_line,
+        ];
+      }
+    } else {
+      start = selector.start;
+      end = selector.end;
+    }
+    if (excerpt == null) {
+      const sourceSlice = sourceLineSlice(entry, lineage, start, end, {
+        sourcePath: selectedSourcePath,
+        sourceWindow: stagedSourceWindow,
+      });
+      if (!sourceSlice.matched) {
+        const ranges = sourceSlice.sourceRanges
+          .map((range) => `${range.path}:${range.start}-${range.end}`)
+          .join(", ");
+        fail(
+          "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+          `Evidence ${selector.ref}:${start}-${end} does not fit wholly within one recorded source window${ranges ? ` (${ranges})` : ""}`,
+        );
+      }
+      excerpt = sourceSlice.excerpt;
+      selectedPath = sourceSlice.path;
+      selectedSourceWindows = [sourceSlice.sourceWindow];
+    }
+  } else {
+    start = selector.start ?? 1;
+    end = selector.end ?? Math.max(1, lines.length);
+    if (end > lines.length || start > lines.length) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+        `Evidence ${selector.ref} has ${lines.length} materialized lines; requested ${start}-${end}`,
+      );
+    }
+    excerpt = lines.slice(start - 1, end).join("\n");
   }
-  const lineCount = end - start + 1;
+  if (!excerpt.trim()) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_EMPTY",
+      `Evidence ${selector.ref}:${start}-${end} contains only whitespace`,
+    );
+  }
+  const lineCount = selectedLineCount ?? end - start + 1;
   if (lineCount > AGENT_HANDOFF_LIMITS.maxSelectorLines) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Evidence ${selector.ref}:${start}-${end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorLines} lines`);
-  }
-  const excerpt = useSourceLines
-    ? sourceSlice.excerpt
-    : lines.slice(start - 1, end).join("\n");
-  if (!excerpt) {
-    fail("AGENT_HANDOFF_EVIDENCE_EMPTY", `Evidence ${selector.ref}:${start}-${end} resolved to an empty excerpt`);
   }
   if (excerpt.length > AGENT_HANDOFF_LIMITS.maxSelectorChars) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Evidence ${selector.ref}:${start}-${end} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorChars} characters`);
   }
-  const provenance = evidenceProvenance(entry, context);
+  const baseProvenance = evidenceProvenance(entry, context);
+  const sourceMetadata = lineage.source_metadata || lineage.content_entry?.metadata || entry?.metadata || {};
+  const provenance = {
+    ...baseProvenance,
+    ...(sourceMetadata.repository_identity
+      ? { repository_identity: sourceMetadata.repository_identity }
+      : {}),
+    ...(sourceMetadata.source_version ? { source_version: sourceMetadata.source_version } : {}),
+    ...(selectedSourceWindows.length > 0 ? { source_windows: selectedSourceWindows } : {}),
+    ...(selectedPath ? { path: selectedPath } : {}),
+    line_semantics: lineSemantics,
+  };
+  const evidenceLines = bareDisjoint
+    ? { start: 1, end: lineCount }
+    : { start, end };
   const materialized = {
-    selector: `${selector.ref}:L${start}-L${end}`,
+    selector: bareDisjoint ? selector.ref : `${selector.ref}:${start}-${end}`,
     ref: selector.ref,
-    lines: { start, end },
+    lines: evidenceLines,
     excerpt,
     excerpt_sha256: crypto.createHash("sha256").update(excerpt).digest("hex"),
     source_content_sha256: entry.content_hash,
     provenance,
-    line_semantics: useSourceLines ? "source" : "materialized",
+    ...(selectedPath ? {
+      path: selectedPath,
+      source_start_line: start,
+      source_end_line: end,
+    } : {}),
   };
   cache?.set(cacheKey, materialized);
   return materialized;
@@ -518,9 +1213,13 @@ function normalizeScope(value, label, profile) {
 function normalizeClaimInput(value, claimIndex) {
   if (Array.isArray(value)) return value;
   const label = `claims[${claimIndex}]`;
-  const source = exactKeys(value, ["claim", "name", "proof", "support", "decoy", "prose", "summary"], label);
-  const claim = compatibilityAlias(source, "claim", "name", label);
-  const prose = compatibilityAlias(source, "prose", "summary", label);
+  const source = exactKeys(value, uniqueKeys(
+    compatibilityAliasKeys("claimName"),
+    compatibilityAliasKeys("claimSummary"),
+    ["proof", "support", "decoy"],
+  ), label);
+  const claim = compatibilityAlias(source, "claimName", label);
+  const prose = compatibilityAlias(source, "claimSummary", label);
   const detail = {};
   for (const lane of ["proof", "support", "decoy"]) {
     if (source[lane] != null) detail[lane] = source[lane];
@@ -530,8 +1229,11 @@ function normalizeClaimInput(value, claimIndex) {
 }
 
 function normalizeClaimDetail(value, label) {
-  const source = exactKeys(value, ["proof", "support", "decoy", "prose", "summary"], label);
-  const prose = compatibilityAlias(source, "prose", "summary", label);
+  const source = exactKeys(value, uniqueKeys(
+    compatibilityAliasKeys("claimSummary"),
+    ["proof", "support", "decoy"],
+  ), label);
+  const prose = compatibilityAlias(source, "claimSummary", label);
   return {
     ...(source.proof == null ? {} : { proof: source.proof }),
     ...(source.support == null ? {} : { support: source.support }),
@@ -542,7 +1244,10 @@ function normalizeClaimDetail(value, label) {
 
 function normalizeDecoyInput(value, label) {
   if (Array.isArray(value)) return value;
-  const source = exactKeys(value, ["selector", "ref", "lines", "reason", "summary"], label);
+  const source = exactKeys(value, uniqueKeys(
+    ["selector", "ref", "lines"],
+    compatibilityAliasKeys("decoyReason"),
+  ), label);
   const refSelector = source.ref == null ? null : {
     ref: source.ref,
     ...(source.lines == null ? {} : { lines: source.lines }),
@@ -555,7 +1260,7 @@ function normalizeDecoyInput(value, label) {
     );
   }
   const selector = source.selector ?? refSelector;
-  const reason = compatibilityAlias(source, "reason", "summary", label);
+  const reason = compatibilityAlias(source, "decoyReason", label);
   return [selector, reason ?? "Excluded from supporting evidence."];
 }
 
@@ -602,7 +1307,12 @@ function materializeClaim(
     for (const selector of detail[lane]) {
       const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
       selectors.add(evidence.selector);
-      if (lane === "proof" && !isAllowedProofProvenance(evidence, {
+      const selectedLines = Number(evidence?.lines?.end) - Number(evidence?.lines?.start) + 1;
+      if (lane === "proof" && evidence.selector_kind === "path"
+        && selectedLines > AGENT_HANDOFF_LIMITS.targetSelectorLines) {
+        out.support ||= [];
+        out.support.push(evidence);
+      } else if (lane === "proof" && !isAllowedProofProvenance(evidence, {
         allowAgentProse: allowAgentProseProof,
       })) {
         if (!isDegradableAgentProof(evidence, { allowAgentProse: allowAgentProseProof })) {
@@ -666,15 +1376,46 @@ function validateResearchAbsenceClaims(research, claims, label) {
         `${label}.absence_checks[${index}].result_count must be 0 for a repository-absence claim`,
       );
     }
-    const expectedRef = parseAgentHandoffEvidenceSelector(check.evidence_ref).ref;
-    const matchingClaim = claims.find((claim) => String(claim?.[0] || "").trim() === check.claim);
-    const proof = matchingClaim?.[1]?.proof || [];
-    if (!matchingClaim || !proof.some((evidence) => evidence?.ref === expectedRef)) {
+    const expected = parseAgentHandoffEvidenceSelector(check.evidence_ref);
+    if (expected.path != null) {
       fail(
         "AGENT_HANDOFF_SCHEMA_INVALID",
-        `${label}.absence_checks[${index}] must match a claim with the same text and a proof selector for ${expectedRef}`,
+        `${label}.absence_checks[${index}].evidence_ref must be a stored ref selector`,
       );
     }
+    const matchingClaim = claims.find((claim) => String(claim?.[0] || "").trim() === check.claim);
+    const proof = matchingClaim?.[1]?.proof || [];
+    const matchesExpected = proof.some((evidence) => (
+      evidence?.ref === expected.ref
+      && (expected.start == null || (
+        Number(evidence?.lines?.start) === expected.start
+        && Number(evidence?.lines?.end) === expected.end
+      ))
+    ));
+    const expectedSelector = expected.start == null
+      ? expected.ref
+      : `${expected.ref}:${expected.start}-${expected.end}`;
+    if (!matchingClaim || !matchesExpected) {
+      fail(
+        "AGENT_HANDOFF_SCHEMA_INVALID",
+        `${label}.absence_checks[${index}] must match a claim with the same text and a proof selector for ${expectedSelector}`,
+      );
+    }
+  }
+}
+
+function validateResearchClaimEvidence(claims, label) {
+  for (const [index, claim] of claims.entries()) {
+    const detail = plainObject(claim?.[1]) || {};
+    const evidence = [
+      ...(Array.isArray(detail.proof) ? detail.proof : []),
+      ...(Array.isArray(detail.support) ? detail.support : []),
+    ];
+    if (evidence.length > 0) continue;
+    fail(
+      "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
+      `${label}.claims[${index}] has no proof/support selector. This is the closeout correction pass: move uncited prose to summary or attach the ref you already hold before retrying agent_handoff.`,
+    );
   }
 }
 
@@ -919,7 +1660,7 @@ function plannerContractFromWorkItem(workItem) {
   }
   const hasExactExecutableHandoffs = Object.hasOwn(contract, "exact_executable_handoffs");
   const exactExecutableHandoffs = contract.exact_executable_handoffs;
-  const plannerLimit = PROFILE_POLICY["planner.plan.v1"].maxHandoffs;
+  const plannerLimit = AGENT_HANDOFF_PROFILE_POLICY["planner.plan.v1"].maxHandoffs;
   if (hasExactExecutableHandoffs && (
     !Number.isInteger(exactExecutableHandoffs)
     || exactExecutableHandoffs < 1
@@ -1009,7 +1750,7 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
       }
     }
     const label = `agent_handoff.tasks[${index}]`;
-    const taskRoleInput = compatibilityAlias(task, "role", "job_type", label);
+    const taskRoleInput = compatibilityAlias(task, "plannerTaskRole", label);
     if (taskRoleInput == null) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.role is required`);
     }
@@ -1153,11 +1894,18 @@ function normalizeAssessorTerminalArgs(source) {
     report.questions,
     report.human_questions,
   );
+  const confidence = source.confidence ?? first.confidence ?? report.confidence;
+  if (!["low", "medium", "high"].includes(confidence)) {
+    fail(
+      "AGENT_HANDOFF_SCHEMA_INVALID",
+      "agent_handoff.confidence must be low, medium, or high",
+    );
+  }
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile: "assessor.verdict.v1",
     outcome,
-    confidence: source.confidence || first.confidence || report.confidence || "medium",
+    confidence,
     handoffs: [{
       id: "verdict",
       depends_on: [],
@@ -1187,24 +1935,47 @@ function researcherEvidenceSelector(value, context) {
   if (Array.isArray(candidate)) candidate = candidate[0];
   const object = plainObject(candidate);
   if (object) candidate = object.selector ?? (
-    object.ref == null
-      ? null
-      : { ref: object.ref, ...(object.lines == null ? {} : { lines: object.lines }) }
+    object.ref != null
+      ? {
+          ref: object.ref,
+          ...(object.path == null ? {} : { path: object.path }),
+          ...(object.lines == null ? {} : { lines: object.lines }),
+        }
+      : object.path != null
+        ? { path: object.path, ...(object.lines == null ? {} : { lines: object.lines }) }
+        : null
   );
   if (candidate == null) return null;
   try {
     const parsed = parseAgentHandoffEvidenceSelector(candidate);
     if (parsed.start != null) return candidate;
-    const fetched = fetchHashRefForContext(context, parsed.ref);
+    const whole = materializeAgentHandoffEvidenceSelector(candidate, context);
+    return whole.selector;
+  } catch (error) {
+    if (error?.code !== "AGENT_HANDOFF_EVIDENCE_TOO_LARGE") throw error;
+    const parsed = parseAgentHandoffEvidenceSelector(candidate);
+    const evidence = materializeHashRefEvidenceForContext(context, parsed.ref);
+    const fetched = evidence?.found ? evidence : fetchHashRefForContext(context, parsed.ref);
     if (!fetched?.found || fetched.entry?.entry_kind !== "materialized"
       || fetched.entry?.payload_text == null) {
-      return null;
+      throw error;
+    }
+    const lineage = sourceLineage(fetched.entry, context);
+    if (lineage.line_semantics === "source" && lineage.source_windows.length > 0) {
+      const first = lineage.source_windows[0];
+      const count = Math.min(
+        first.source_end_line - first.source_start_line + 1,
+        AGENT_HANDOFF_LIMITS.targetSelectorLines,
+      );
+      return {
+        ref: parsed.ref,
+        path: first.path,
+        lines: { start: first.source_start_line, count },
+      };
     }
     const lineCount = normalizedLines(fetched.entry.payload_text).length;
     const end = Math.min(Math.max(1, lineCount), AGENT_HANDOFF_LIMITS.targetSelectorLines);
-    return `${parsed.ref}:L1-L${end}`;
-  } catch {
-    return null;
+    return `${parsed.ref}:1-${end}`;
   }
 }
 
@@ -1214,6 +1985,25 @@ function researcherEvidenceSelectors(value, context) {
     .map((entry) => researcherEvidenceSelector(entry, context))
     .filter(Boolean)
     .slice(0, AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim);
+}
+
+function compactResearcherClaims(value, context) {
+  if (!Array.isArray(value)) return value ?? [];
+  return value.map((raw) => {
+    const tuple = Array.isArray(raw);
+    const detail = tuple ? plainObject(raw[1]) : plainObject(raw);
+    if (!detail) return raw;
+    const narrowed = {
+      ...detail,
+      ...(Array.isArray(detail.proof)
+        ? { proof: researcherEvidenceSelectors(detail.proof, context) }
+        : {}),
+      ...(Array.isArray(detail.support)
+        ? { support: researcherEvidenceSelectors(detail.support, context) }
+        : {}),
+    };
+    return tuple ? [raw[0], narrowed, ...raw.slice(2)] : narrowed;
+  });
 }
 
 function researcherClaimFromNarrative(value, index) {
@@ -1562,7 +2352,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
         intent: "Submit terminal research",
         report: {
           summary: compact.summary,
-          claims: compact.claims ?? [],
+          claims: compactResearcherClaims(compact.claims, context),
           scope: {
             key_files: keyFiles,
             related_files: compact.related_files ?? [],
@@ -1585,12 +2375,19 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
   if (normalizedRole === "assessor" && !Array.isArray(source.handoffs)) {
     const compact = exactKeys(
       source,
-      ["verdict", "outcome", "confidence", "proof", "questions"],
+      uniqueKeys(
+        compatibilityAliasKeys("assessorCompactOutcome"),
+        ["confidence", "proof", "questions"],
+      ),
       "agent_handoff",
     );
-    const outcome = compatibilityAlias(compact, "verdict", "outcome", "agent_handoff");
+    const outcome = compatibilityAlias(compact, "assessorCompactOutcome", "agent_handoff");
     if (outcome == null) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.verdict is required");
+    }
+    const confidence = boundedString(compact.confidence, "agent_handoff.confidence", 20);
+    if (!["low", "medium", "high"].includes(confidence)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.confidence must be low, medium, or high");
     }
     const proof = boundedString(compact.proof, "agent_handoff.proof", 500);
     const questions = compact.questions == null
@@ -1600,7 +2397,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
       protocol: AGENT_HANDOFF_PROTOCOL,
       profile: "assessor.verdict.v1",
       outcome,
-      confidence: compact.confidence || "medium",
+      confidence,
       handoffs: [{
         id: "verdict",
         depends_on: [],
@@ -1619,6 +2416,10 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
     };
   }
   if (!Array.isArray(source.handoffs)) return args;
+  // Agent-facing semantic schemas advertise only handoffs[].report. Retain
+  // this fold for legacy trusted callers and transports that do not enforce
+  // the advertised JSON Schema before dispatch; normalized packets remain
+  // canonical and never preserve the flat fields.
   return {
     ...source,
     handoffs: source.handoffs.map((raw, index) => {
@@ -1633,7 +2434,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
           if (report[key] != null && !sameCompatibilityValue(report[key], entry[key])) {
             fail(
               "AGENT_HANDOFF_SCHEMA_INVALID",
-              `handoffs[${index}].report.${key} conflicts with flat compatibility field handoffs[${index}].${key}`,
+              `handoffs[${index}].report.${key} conflicts with legacy flat report field handoffs[${index}].${key}`,
             );
           }
           if (report[key] == null) report[key] = entry[key];
@@ -1787,7 +2588,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
   const profile = capture(() => boundedString(source.profile, "profile", 80));
   const allowAgentProseProof = normalizedRole === "assessor"
     && profile === "assessor.verdict.v1";
-  const policy = profile ? PROFILE_POLICY[profile] : null;
+  const policy = profile ? AGENT_HANDOFF_PROFILE_POLICY[profile] : null;
   if (profile && !policy) {
     issues.push({ code: "AGENT_HANDOFF_PROFILE_INVALID", message: `Unsupported profile: ${profile}` });
   } else if (policy && !policy.roles.includes(normalizedRole)) {
@@ -1853,12 +2654,24 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       `${label}.report`,
     ));
     if (!report) continue;
+    const researcherLimits = AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY[profile];
+    const researcherReport = profile === "researcher.report.v1";
+    const summaryLimit = researcherLimits
+      ? (researcherLimits.maxSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
+      : AGENT_HANDOFF_LIMITS.maxSummaryChars;
+    const claimCountLimit = researcherLimits
+      ? researcherLimits.maxClaims
+      : AGENT_HANDOFF_LIMITS.maxClaims;
+    const claimLengthLimit = researcherLimits
+      ? (researcherLimits.maxClaimChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
+      : AGENT_HANDOFF_LIMITS.maxClaimChars;
+    const claimSummaryLimit = researcherLimits
+      ? (researcherLimits.maxClaimSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
+      : AGENT_HANDOFF_LIMITS.maxSummaryChars;
     capture(() => boundedString(
       report.summary,
       `${label}.report.summary`,
-      profile === "researcher.report.v1"
-        ? AGENT_HANDOFF_LIMITS.maxCallBytes
-        : AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      summaryLimit,
       { required: false },
     ));
     capture(() => normalizeScope(report.scope || {}, `${label}.report.scope`, profile));
@@ -1868,8 +2681,8 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       if (report[key] != null) capture(() => stringArray(
         report[key],
         `${label}.report.${key}`,
-        profile === "researcher.report.v1" ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50,
-        profile === "researcher.report.v1" ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000,
+        researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50,
+        researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000,
       ));
     }
     if (report.payload != null) capture(() => exactKeys(report.payload, [], `${label}.report.payload`));
@@ -1878,16 +2691,15 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${label}.report.claims must be an array` });
       continue;
     }
-    const researcherReport = profile === "researcher.report.v1";
-    if (!researcherReport && report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
+    if (claimCountLimit != null && report.claims.length > claimCountLimit) {
       issues.push({
         code: "AGENT_HANDOFF_TOO_LARGE",
-        message: `${label}.report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`,
+        message: `${label}.report.claims exceeds ${claimCountLimit} claims`,
       });
     }
-    const claimsToValidate = researcherReport
+    const claimsToValidate = claimCountLimit == null
       ? report.claims
-      : report.claims.slice(0, AGENT_HANDOFF_LIMITS.maxClaims);
+      : report.claims.slice(0, claimCountLimit);
     for (const [claimIndex, rawClaim] of claimsToValidate.entries()) {
       const claimLabel = `${label}.report.claims[${claimIndex}]`;
       const claim = capture(() => normalizeClaimInput(rawClaim, claimIndex));
@@ -1903,9 +2715,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       capture(() => boundedString(
         claim[0],
         `${claimLabel}.claim`,
-        researcherReport
-          ? AGENT_HANDOFF_LIMITS.maxCallBytes
-          : AGENT_HANDOFF_LIMITS.maxClaimChars,
+        claimLengthLimit,
       ));
       if (claim.length === 1) continue;
       const detail = capture(() => normalizeClaimDetail(claim[1], `${claimLabel}.evidence`));
@@ -1913,9 +2723,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       if (detail.prose != null) capture(() => boundedString(
         detail.prose,
         `${claimLabel}.prose`,
-        researcherReport
-          ? AGENT_HANDOFF_LIMITS.maxCallBytes
-          : AGENT_HANDOFF_LIMITS.maxSummaryChars,
+        claimSummaryLimit,
         { required: false },
       ));
       const selectors = new Set();
@@ -2003,7 +2811,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const source = exactKeys(normalizedArgs, ["protocol", "profile", "outcome", "confidence", "handoffs"], "agent_handoff");
   if (source.protocol !== AGENT_HANDOFF_PROTOCOL) fail("AGENT_HANDOFF_PROTOCOL_INVALID", `protocol must be ${AGENT_HANDOFF_PROTOCOL}`);
   const profile = boundedString(source.profile, "profile", 80);
-  const policy = PROFILE_POLICY[profile];
+  const policy = AGENT_HANDOFF_PROFILE_POLICY[profile];
   if (!policy) fail("AGENT_HANDOFF_PROFILE_INVALID", `Unsupported profile: ${profile}`);
   if (!policy.roles.includes(normalizedRole)) fail("AGENT_HANDOFF_PROFILE_INVALID", `Role ${normalizedRole || "unknown"} cannot use ${profile}`);
   const outcome = boundedString(source.outcome, "outcome", 40);
@@ -2025,7 +2833,20 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const effectiveLimit = Math.min(policy.maxHandoffs, localLimit);
   if (source.handoffs.length > effectiveLimit) fail("AGENT_HANDOFF_TOO_LARGE", `handoffs exceeds ${effectiveLimit} entries`);
   const counters = { evidence: 0, narrative: 0 };
+  const researcherLimits = AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY[profile];
   const researcherReport = profile === "researcher.report.v1";
+  const summaryLimit = researcherLimits
+    ? (researcherLimits.maxSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
+    : AGENT_HANDOFF_LIMITS.maxSummaryChars;
+  const claimCountLimit = researcherLimits
+    ? researcherLimits.maxClaims
+    : AGENT_HANDOFF_LIMITS.maxClaims;
+  const claimLengthLimit = researcherLimits
+    ? (researcherLimits.maxClaimChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
+    : AGENT_HANDOFF_LIMITS.maxClaimChars;
+  const claimSummaryLimit = researcherLimits
+    ? (researcherLimits.maxClaimSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
+    : AGENT_HANDOFF_LIMITS.maxSummaryChars;
   const handoffs = source.handoffs.map((raw, index) => {
     if (!researcherReport
       && Buffer.byteLength(JSON.stringify(raw), "utf8") > AGENT_HANDOFF_LIMITS.maxEntryBytes) {
@@ -2047,17 +2868,15 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     const summary = boundedString(
       report.summary,
       `handoffs[${index}].report.summary`,
-      researcherReport
-        ? AGENT_HANDOFF_LIMITS.maxCallBytes
-        : AGENT_HANDOFF_LIMITS.maxSummaryChars,
+      summaryLimit,
       { required: false },
     );
     entryCounters.narrative += summary.length;
     if (!Array.isArray(report.claims)) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `handoffs[${index}].report.claims must be an array`);
     }
-    if (!researcherReport && report.claims.length > AGENT_HANDOFF_LIMITS.maxClaims) {
-      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} claims`);
+    if (claimCountLimit != null && report.claims.length > claimCountLimit) {
+      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${claimCountLimit} claims`);
     }
     const claims = report.claims.map((claim, claimIndex) => materializeClaim(
       claim,
@@ -2068,19 +2887,12 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         allowAgentProseProof: normalizedRole === "assessor"
           && profile === "assessor.verdict.v1",
         handoffIndex: index,
-        maxClaimChars: researcherReport
-          ? AGENT_HANDOFF_LIMITS.maxCallBytes
-          : AGENT_HANDOFF_LIMITS.maxClaimChars,
-        maxProseChars: researcherReport
-          ? AGENT_HANDOFF_LIMITS.maxCallBytes
-          : AGENT_HANDOFF_LIMITS.maxSummaryChars,
+        maxClaimChars: claimLengthLimit,
+        maxProseChars: claimSummaryLimit,
       },
     ));
-    if (profile === "researcher.report.v1" && claims.length === 0) {
-      fail(
-        "AGENT_HANDOFF_SCHEMA_INVALID",
-        "researcher.report.v1 requires at least one substantive prose claim; evidence refs remain optional",
-      );
+    if (["researcher.report.v1", "researcher.pipeline.v1"].includes(profile)) {
+      validateResearchClaimEvidence(claims, reportLabel);
     }
     const reportListMaxItems = researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50;
     const reportListMaxChars = researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000;
@@ -2372,6 +3184,7 @@ export function stageAgentHandoff(args, {
   role = "",
   maxHandoffs = null,
   projectDir = null,
+  scopePredicates = null,
   db = getDb(),
 } = {}) {
   const agentCallId = positiveInt(context.agentCallId ?? context.agent_call_id);
@@ -2388,6 +3201,9 @@ export function stageAgentHandoff(args, {
     jobId: positiveInt(call.job_id),
     attemptId: positiveInt(call.attempt_id),
     agentCallId,
+    projectDir,
+    scopePredicates,
+    db: database,
   };
   const effectiveRole = String(call.role || role || "");
   const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
@@ -2516,13 +3332,40 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   const sections = [];
   for (const { evidence, lanes, reasons } of bySelector.values()) {
     const provenance = evidence.provenance || {};
-    const source = [provenance.source, provenance.object_type].filter(Boolean).join(" · ")
-      || provenance.kind
-      || "materialized evidence";
+    const sourceWindows = provenance.line_semantics === "source"
+      && Array.isArray(provenance.source_windows)
+      ? provenance.source_windows
+      : [];
+    const sourceCoordinates = evidence.path
+      ? `${evidence.path}:${evidence.source_start_line}-${evidence.source_end_line}`
+      : sourceWindows.length > 0
+        ? sourceWindows.map((window) => (
+            `${window.path}:${window.source_start_line}-${window.source_end_line}`
+          )).join(", ")
+        : null;
+    const sourcePaths = new Set(sourceWindows.map((window) => window.path));
+    const sourceOwner = provenance.source || provenance.kind || "materialized evidence";
+    const source = sourceCoordinates
+      ? `${sourceCoordinates} (${sourceOwner})`
+      : [provenance.source, provenance.object_type].filter(Boolean).join(" · ")
+        || provenance.kind
+        || "materialized evidence";
     const quoted = String(evidence.excerpt)
       .replace(/\r\n?/g, "\n")
       .split("\n")
-      .map((line) => `> ${line}`)
+      .map((line, index) => {
+        if (evidence.path) return `> ${evidence.source_start_line + index}\t${line}`;
+        const materializedLine = index + 1;
+        const window = sourceWindows.find((candidate) => (
+          materializedLine >= candidate.materialized_start_line
+          && materializedLine <= candidate.materialized_end_line
+        ));
+        if (!window) return `> ${line}`;
+        const sourceLine = window.source_start_line
+          + materializedLine - window.materialized_start_line;
+        const gutter = sourcePaths.size > 1 ? `${window.path}:${sourceLine}` : sourceLine;
+        return `> ${gutter}\t${line}`;
+      })
       .join("\n");
     sections.push([
       `### ${evidence.selector}`,
@@ -2538,11 +3381,11 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   return `## Expanded evidence\n\n${expanded.slice(0, maxChars).trimEnd()}\n\n[Expanded evidence truncated: ${omitted} additional characters remain available through the cited proof selectors.]`;
 }
 
-function renderReport(report, { expandEvidence = false } = {}) {
+function renderReport(report, { expandEvidence = false, citedFacts = false } = {}) {
   const parts = [];
   if (report.summary) parts.push(`Summary: ${report.summary}`);
   for (const claim of report.claims) {
-    parts.push(`Claim: ${claim[0]}`);
+    parts.push(`${citedFacts ? "Cited fact" : "Claim"}: ${claim[0]}`);
     const detail = claim[1] || {};
     for (const lane of ["proof", "support"]) {
       for (const evidence of detail[lane] || []) parts.push(renderEvidence(evidence, lane[0].toUpperCase() + lane.slice(1)));
@@ -2564,7 +3407,7 @@ function evidenceRefs(report) {
   const lanes = { proof: [], support: [], decoy: [] };
   const selector = (item) => ({
     ref: item.ref,
-    ...(item.lines ? {
+    ...(item.lines && item.selector !== item.ref ? {
       lines: {
         start: item.lines.start,
         count: item.lines.end - item.lines.start + 1,
@@ -2626,16 +3469,33 @@ function packetEvidence(packet) {
 
 function packetEvidenceMetrics(packet) {
   const evidence = packetEvidence(packet);
-  const lineCounts = evidence.map((item) => (
-    Number(item?.lines?.end) - Number(item?.lines?.start) + 1
-  )).filter((count) => Number.isInteger(count) && count > 0);
+  const selectedLineCount = (item) => {
+    const windows = item?.selector === item?.ref
+      && Array.isArray(item?.provenance?.source_windows)
+      ? item.provenance.source_windows
+      : [];
+    if (windows.length > 0) {
+      const materializedLines = new Set();
+      for (const window of windows) {
+        for (let line = Number(window.materialized_start_line);
+          line <= Number(window.materialized_end_line);
+          line += 1) {
+          if (Number.isInteger(line) && line > 0) materializedLines.add(line);
+        }
+      }
+      if (materializedLines.size > 0) return materializedLines.size;
+    }
+    return Number(item?.lines?.end) - Number(item?.lines?.start) + 1;
+  };
+  const lineCounts = evidence.map(selectedLineCount)
+    .filter((count) => Number.isInteger(count) && count > 0);
   const charCounts = evidence.map((item) => String(item?.excerpt || "").length);
   return {
     selectorCount: evidence.length,
     selectorLinesMax: lineCounts.length > 0 ? Math.max(...lineCounts) : 0,
     selectorCharsMax: charCounts.length > 0 ? Math.max(...charCounts) : 0,
     selectorsOverRecommendedCount: evidence.filter((item) => {
-      const lines = Number(item?.lines?.end) - Number(item?.lines?.start) + 1;
+      const lines = selectedLineCount(item);
       const chars = String(item?.excerpt || "").length;
       return lines > AGENT_HANDOFF_LIMITS.recommendedSelectorLines
         || chars > AGENT_HANDOFF_LIMITS.recommendedSelectorChars;
@@ -2651,15 +3511,25 @@ function verifyPacketEvidenceAtCommit(packet) {
     agentCallId: positiveInt(packet.agent_call_id),
   };
   for (const evidence of packetEvidence(packet)) {
+    const expectedLineSemantics = evidence.provenance?.line_semantics
+      ?? evidence.line_semantics;
+    const stagedSourcePath = evidence.path ?? evidence.provenance?.path;
+    const stagedSourceWindow = Array.isArray(evidence.provenance?.source_windows)
+      ? evidence.provenance.source_windows[0] || null
+      : null;
     const verified = materializeAgentHandoffEvidenceSelector(
-      { ref: evidence.ref, lines: evidence.lines },
+      evidence.selector,
       context,
-      { expectedLineSemantics: evidence.line_semantics },
+      {
+        expectedLineSemantics,
+        stagedSourcePath,
+        stagedSourceWindow,
+      },
     );
     if (verified.source_content_sha256 !== evidence.source_content_sha256
       || verified.excerpt_sha256 !== evidence.excerpt_sha256
       || verified.excerpt !== evidence.excerpt
-      || verified.line_semantics !== evidence.line_semantics) {
+      || verified.provenance?.line_semantics !== expectedLineSemantics) {
       fail("AGENT_HANDOFF_EVIDENCE_CHANGED", `Evidence ${evidence.selector} changed after the report was staged`);
     }
   }
@@ -2773,6 +3643,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   const first = packet.handoffs[0];
   const report = renderReport(first.report, {
     expandEvidence: packet.profile === "researcher.report.v1",
+    citedFacts: packet.profile === "researcher.report.v1",
   });
   if (packet.profile === "assessor.verdict.v1") {
     const reasons = [...new Set(
@@ -2782,7 +3653,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
     )];
     return `\`\`\`json\n${JSON.stringify({
       verdict: packet.outcome,
-      confidence: packet.confidence || "medium",
+      confidence: packet.confidence,
       reasons,
       spawn_jobs: [],
       human_questions: first.report.questions,

@@ -506,7 +506,7 @@ function deterministicMcpCompatibilityEnv(payload = {}, atlasConfig = {}) {
     POSSE_REMOTE_URL: String(payload.remoteCatalog?.baseUrl || ""),
     POSSE_REMOTE_TIMEOUT_MS: String(payload.remoteCatalog?.timeoutMs || ""),
     POSSE_ATLAS_LIVE_BUFFERS: payload.atlas?.liveBuffers || "off",
-    POSSE_ATLAS_AUTO_FEEDBACK: String(atlasConfig?.autoFeedbackMode || "write"),
+    POSSE_ATLAS_AUTO_FEEDBACK: String(atlasConfig?.autoFeedbackMode || "off"),
   };
   if (payload.providerName) out.POSSE_DETERMINISTIC_MCP_PROVIDER = String(payload.providerName);
   if (payload.jobId != null) out.POSSE_DETERMINISTIC_MCP_JOB_ID = String(payload.jobId);

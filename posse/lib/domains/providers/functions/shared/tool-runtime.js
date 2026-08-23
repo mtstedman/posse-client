@@ -219,8 +219,8 @@ const OBSERVED_TOOL_FORMATTERS = {
     return { target: input.path || "", summary: `ChainRead: ${input.path || "?"}` };
   },
   chain_verdict(input = {}) {
-    const verdict = String(input.verdict || "").slice(0, 20);
-    return { target: input.path || "", summary: `ChainVerdict: ${input.path || "?"} → ${verdict}` };
+    const verdict = String(input.verdict || "?").slice(0, 20);
+    return { target: verdict, summary: `ChainVerdict: ${verdict}` };
   },
   agent_feedback(input = {}) {
     return { target: input.phase || "", summary: `AgentFeedback: ${input.summary || input.phase || "update"}` };
@@ -433,6 +433,7 @@ export function createStandardToolHandlerMap({
           context: ambient,
           role: ctx?.role || ctx?.declaredScope?.role || "",
           projectDir: ctx?.cwd || null,
+          scopePredicates: ctx?.scopePredicates || null,
           maxHandoffs: (ctx?.role || ctx?.declaredScope?.role) === "planner"
             ? getIntSetting("planner_max_tasks", 50)
             : 1,

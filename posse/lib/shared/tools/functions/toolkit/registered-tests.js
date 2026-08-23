@@ -542,11 +542,11 @@ function testPublic(row, suite = null) {
 
 function resolveSuite(db, args = {}) {
   ensureRegisteredTestTables(db);
-  const suiteId = Number(args.suite_id ?? args.suiteId ?? "");
+  const suiteId = Number(args.suite_id ?? "");
   if (Number.isInteger(suiteId) && suiteId > 0) {
     return db.prepare(`SELECT * FROM posse_test_suites WHERE id = ?`).get(suiteId) || null;
   }
-  const suiteName = String(args.suite ?? args.suite_name ?? args.suiteName ?? "").trim();
+  const suiteName = String(args.suite ?? "").trim();
   if (!suiteName) return null;
   return db.prepare(`
     SELECT * FROM posse_test_suites
@@ -558,13 +558,13 @@ function resolveSuite(db, args = {}) {
 
 function resolveTest(db, args = {}) {
   ensureRegisteredTestTables(db);
-  const testId = Number(args.test_id ?? args.testId ?? "");
+  const testId = Number(args.test_id ?? "");
   if (Number.isInteger(testId) && testId > 0) {
     return db.prepare(`SELECT * FROM posse_tests WHERE id = ? AND status = 'active'`).get(testId) || null;
   }
   const suite = resolveSuite(db, args);
   if (!suite) return null;
-  const testName = String(args.test ?? args.test_name ?? args.testName ?? args.name ?? "").trim();
+  const testName = String(args.test ?? "").trim();
   if (!testName) return null;
   return db.prepare(`
     SELECT * FROM posse_tests
@@ -932,8 +932,8 @@ function updateTestLastRun(db, testId, result) {
 
 export function createRegisteredTestSuite({ args = {}, cwd, actor = {}, db = getDb() } = {}) {
   ensureRegisteredTestTables(db);
-  const name = normalizeName(args.name ?? args.suite ?? args.suite_name, "suite name");
-  const explanation = normalizeOptionalText(args.explanation ?? args.description, "explanation");
+  const name = normalizeName(args.name, "suite name");
+  const explanation = normalizeOptionalText(args.explanation, "explanation");
   const slug = slugify(args.slug || name);
   const existing = db.prepare(`SELECT * FROM posse_test_suites WHERE name = ? OR slug = ?`).get(name, slug);
   if (existing) {
@@ -983,16 +983,16 @@ function createRegisteredTestSingle({ args = {}, cwd, actor = {}, scopeFiles = [
     return { ok: false, summary: "test suite not found", failure: { message: "Provide suite_id or suite name/slug for an existing suite." } };
   }
   const normalizedScopeFiles = normalizeScopeFiles(cwd, scopeFiles);
-  const name = normalizeName(args.name ?? args.test_name ?? args.testName, "test name");
-  const explanation = normalizeOptionalText(args.explanation ?? args.description, "explanation");
+  const name = normalizeName(args.name, "test name");
+  const explanation = normalizeOptionalText(args.explanation, "explanation");
   const language = normalizeLanguage(args.language);
-  const functionName = normalizeFunctionName(args.function_name ?? args.functionName);
-  const source = normalizeSource(args.test ?? args.source ?? args.code);
-  const targetFiles = normalizePathList(cwd, args.target_files ?? args.targetFiles, "target_files", { required: true });
-  const targetSymbols = normalizeSymbolList(args.target_symbols ?? args.targetSymbols ?? args.target_functions ?? args.targetFunctions, "target_symbols");
-  const targetImports = normalizeTargetImports(cwd, args.target_imports ?? args.targetImports);
+  const functionName = normalizeFunctionName(args.function_name);
+  const source = normalizeSource(args.test);
+  const targetFiles = normalizePathList(cwd, args.target_files, "target_files", { required: true });
+  const targetSymbols = normalizeSymbolList(args.target_symbols, "target_symbols");
+  const targetImports = normalizeTargetImports(cwd, args.target_imports);
   assertTargetsWithinScope(targetFiles, normalizedScopeFiles);
-  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeout_ms ?? args.timeoutMs) || DEFAULT_TIMEOUT_MS));
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeout_ms) || DEFAULT_TIMEOUT_MS));
 
   const registrationRun = runSourceWithCleanup({
     cwd,
@@ -1100,7 +1100,7 @@ function runRegisteredTestSingle({ args = {}, cwd, actor = {}, scopeFiles = [], 
     };
   }
   const suite = db.prepare(`SELECT * FROM posse_test_suites WHERE id = ?`).get(test.suite_id);
-  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeout_ms ?? args.timeoutMs) || DEFAULT_TIMEOUT_MS));
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeout_ms) || DEFAULT_TIMEOUT_MS));
   const result = runSourceWithCleanup({
     cwd,
     source: test.source,
@@ -1320,7 +1320,7 @@ export function runRegisteredTestSuite({ args = {}, cwd, actor = {}, scopeFiles 
       skipped_out_of_scope: Math.max(0, allTests.length - tests.length),
     };
   }
-  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeout_ms ?? args.timeoutMs) || DEFAULT_TIMEOUT_MS));
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeout_ms) || DEFAULT_TIMEOUT_MS));
   const results = [];
   for (const test of tests) {
     const result = runSourceWithCleanup({

@@ -13,6 +13,7 @@ import {
   isGateActive,
   isGatedTool,
   checkNativeToolAllowed,
+  applyNativeReadLineLimit,
   noteAtlasToolResult as noteGateAtlasToolResult,
 } from "../../../integrations/functions/deterministic-mcp/gate.js";
 import { buildEmbeddedToolDefinitions } from "./embedded-tools.js";
@@ -121,6 +122,7 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
       return `Error: Tool "${name}" is not authorized by the active execution contract.`;
     }
     const gateArgs = parseGateToolArgs(argsStr);
+    let executionArgsStr = argsStr;
     if (mcpGate) {
       try {
         return await mcpGate.callTool(canonicalName, gateArgs);
@@ -133,9 +135,11 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
       if (!gateDecision.allowed) {
         return buildGateLockedToolError(name, { args: gateArgs, cwd, scopeKey: gateScopeKey, atlasNameStyle: "embedded" });
       }
+      const limitedArgs = applyNativeReadLineLimit(gateArgs, gateDecision);
+      if (limitedArgs !== gateArgs) executionArgsStr = JSON.stringify(limitedArgs);
     }
 
-    const result = await executeToolWithMap(name, argsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope, abortSignal }, {
+    const result = await executeToolWithMap(name, executionArgsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope, abortSignal }, {
       handlers: standardToolHandlers,
       onUnknown: (toolName, args) => {
         if (atlasAction) {

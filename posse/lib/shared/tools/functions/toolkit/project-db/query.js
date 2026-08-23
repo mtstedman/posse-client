@@ -190,7 +190,7 @@ function tableSuffix(tables = []) {
 }
 
 /**
- * @param {{ query?: string, sql?: string, maxRows?: number, limit?: number }} args
+ * @param {{ query?: string, maxRows?: number }} args
  * @param {{ projectDir?: string|null, capability?: "read"|"write" }} [ctx]
  *   `capability` is the calling job's lane: read-lane jobs (researcher/planner,
  *   or any job without write permission) are capped to the `read` grant no
@@ -207,13 +207,13 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
     return "Error: Project DB access for this read-capability role requires the 'read' permission, which is not granted.";
   }
 
-  const sql = String(args.query ?? args.sql ?? "").trim();
+  const sql = String(args.query ?? "").trim();
   if (!sql) return "Error: No SQL query provided (pass `query`).";
 
   const auth = authorizeProjectDbStatement(sql, permissions);
   if (!auth.ok) return `Error: ${auth.error}`;
 
-  const maxRows = clampMaxRows(args.maxRows ?? args.limit);
+  const maxRows = clampMaxRows(args.maxRows);
   const readOnly = isReadOnlyGrant(permissions);
   const tables = extractProjectDbTableNames(auth.statement);
 

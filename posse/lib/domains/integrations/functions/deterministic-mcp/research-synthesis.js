@@ -173,7 +173,7 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
   }
   return [
     "TRAVERSAL_REF NOT ELIGIBLE: early stored-result traversal is limited to explicit traversal_ref or next_traversal_ref capabilities for omitted, bounded, cursor, survey, or otherwise unseen payloads.",
-    "Do not traverse evidence_ref content already delivered in full. Evidence refs are usable for citation or handoff in the current context; only an explicit traversal capability advertises unseen content.",
+    "Do not traverse evidence_ref content already delivered in full. Evidence refs are usable for citation or handoff in the current context; only an explicit traversal capability advertises unseen content. A successful traversal promotes that same ref to evidence and returns a different opaque continuation only if more remains.",
     "During exploration, wait to accumulate at least two eligible traversal refs before traversing. Use a singleton only when one required cursor or omitted region blocks the next traversal step.",
   ].join("\n");
 }
@@ -189,6 +189,7 @@ export function buildResearchEarlyFetchSynthesisAuditText({ fetchBatches = 0 } =
   return [
     `SYNTHESIS AUDIT: ${Math.max(0, Number(fetchBatches) || 0)} exploration traversal batches have been used.`,
     "Compare the gathered evidence with every requested flow, branch, and boundary. If each material item has direct support, synthesize now instead of gathering corroboration.",
+    "Before handoff, map every asserted branch condition and precedence rule to a delivered evidence ref. Split, remove, or make one targeted lookup for any unmatched assertion; never validate against task text or an answer key.",
     "If a material gap remains, make only the highest-value targeted lookup and accumulate any further traversal refs into one batch.",
   ].join("\n");
 }

@@ -15,6 +15,7 @@ import { logAgentActivity, logEvent } from "./events.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { discardHashRefTraversalsForAgentCall } from "./hash-refs.js";
 
 // Provider-native web tool uses are replayed after the agent process returns,
 // so they can land a beat after finished_at while still belonging to the call.
@@ -164,6 +165,10 @@ export function completeAgentCall(id, {
   );
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(id);
   if (row) {
+    // Traversal capabilities are call-scoped missing-content cursors. Any
+    // cursor that was actually used has already moved to durable evidence;
+    // the remainder must not leak into the next agent call.
+    discardHashRefTraversalsForAgentCall(row.id, { db });
     appendRunTelemetry("agent-calls", { phase: "completed", ...row });
     const activityStatus = row.status === "succeeded"
       ? "succeeded"
