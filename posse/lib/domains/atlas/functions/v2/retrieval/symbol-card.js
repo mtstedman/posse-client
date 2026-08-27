@@ -15,6 +15,7 @@ import { getEffectivePolicy } from "./policy.js";
 import { recordPrefetchAccess } from "./prefetch.js";
 import { splitEditableLines } from "../../../../../shared/tools/functions/toolkit/structured-read.js";
 import { CONTEXT_SYMBOL_CARD_SELF_BOUND_CHARS } from "../../../../../catalog/context.js";
+import { requestedIdentifierCandidates, resolveRequestedIdentifierSymbols } from "./code.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -62,13 +63,38 @@ export async function symbolGetCard({ view, versionId, params, repoRoot, ledger,
     const opts = /** @type {any} */ ({ fuzzy: false });
     if (ref.kind) opts.kinds = [ref.kind];
     if (ref.file) opts.pathPrefix = ref.file;
-    const matches = await view.query.findSymbol(ref.name, opts);
-    if (matches.length === 0) {
+    const exact = [];
+    for (const candidate of requestedIdentifierCandidates(ref.name)) {
+      exact.push(...await view.query.findSymbol(candidate, opts));
+    }
+    const exactResolution = resolveRequestedIdentifierSymbols(exact, ref.name);
+    if (exactResolution.ambiguousBearers.length > 0) {
+      return errorEnvelope({
+        action: "symbol.card",
+        versionId,
+        code: "ambiguous_symbol",
+        message: `Symbol ${ref.name} did not resolve exactly; its bare tail matches multiple bearers. Use one of the fully qualified names in error.details.bearers.`,
+        details: { requested: ref.name, bearers: exactResolution.ambiguousBearers },
+      });
+    }
+    target = exactResolution.matches[0] || null;
+    if (!target) {
       const fuzzyOpts = { ...opts, fuzzy: true, limit: 25 };
-      const fuzzy = await view.query.findSymbol(ref.name, fuzzyOpts);
-      target = fuzzy.find((s) => s.name === ref.name) || null;
-    } else {
-      target = matches[0];
+      const fuzzy = [];
+      for (const candidate of requestedIdentifierCandidates(ref.name)) {
+        fuzzy.push(...await view.query.findSymbol(candidate, fuzzyOpts));
+      }
+      const fuzzyResolution = resolveRequestedIdentifierSymbols(fuzzy, ref.name);
+      if (fuzzyResolution.ambiguousBearers.length > 0) {
+        return errorEnvelope({
+          action: "symbol.card",
+          versionId,
+          code: "ambiguous_symbol",
+          message: `Symbol ${ref.name} did not resolve exactly; its bare tail matches multiple bearers. Use one of the fully qualified names in error.details.bearers.`,
+          details: { requested: ref.name, bearers: fuzzyResolution.ambiguousBearers },
+        });
+      }
+      target = fuzzyResolution.matches[0] || null;
     }
     if (!target) {
       overlayTarget = await findOverlaySymbolByRef({ repoRoot, sessionId, ref });

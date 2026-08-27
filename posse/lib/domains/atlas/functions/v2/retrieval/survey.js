@@ -14,6 +14,7 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 import { nativePathEvidence } from "./native-evidence.js";
+import { requestedIdentifierCandidates, resolveRequestedIdentifierSymbols } from "./code.js";
 
 const MAX_SURVEY_FILES = 64;
 const MAX_RAW_EDGES = 20_000;
@@ -49,7 +50,7 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     .filter(Boolean)
     .slice(0, MAX_DIG_TERMS);
   const maxFiles = clampInt(params.maxFiles, MAX_SURVEY_FILES, 1, MAX_SURVEY_FILES);
-  const { paths, prefixTruncated } = await collectSurveyPaths({
+  const { paths, prefixTruncated, symbolFilterFallback = false } = await collectSurveyPaths({
     view,
     requested,
     maxFiles,
@@ -123,12 +124,17 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     files,
     edges,
     unresolved,
-    symbols_filter: digTerms,
+    symbols_filter: symbolFilterFallback ? [] : digTerms,
     max_files: maxFiles,
     max_symbols_per_file: params.maxSymbolsPerFile,
     max_edges: params.maxEdges,
   }));
   if (prefixTruncated) result.truncated = true;
+  if (symbolFilterFallback) {
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    warnings.push(`No indexed symbols matched ${digTerms.slice(0, 5).join(", ")}; returning ranked scope files.`);
+    result.warnings = warnings;
+  }
   const evidence = await nativePathEvidence({ view, repoRoot, paths, requested, terms: digTerms });
   const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);
   if (pathAmbiguity) {
@@ -183,8 +189,9 @@ export async function collectSurveyPaths({ view, requested, maxFiles, symbols = 
     return true;
   };
   if (symbols.length > 0 && typeof view.query.indexedPathsWithSymbols === "function") {
+    const symbolProbes = [...new Set(symbols.flatMap((term) => requestedIdentifierCandidates(term)))];
     for (const entry of requested) {
-      const matches = await view.query.indexedPathsWithSymbols(symbols, {
+      const matches = await view.query.indexedPathsWithSymbols(symbolProbes, {
         pathPrefix: entry,
         limit: maxFiles + seen.size + 1,
       });
@@ -193,20 +200,24 @@ export async function collectSurveyPaths({ view, requested, maxFiles, symbols = 
       }
       if (prefixTruncated) break;
     }
-    return { paths, prefixTruncated };
+    if (paths.length > 0) return { paths, prefixTruncated };
   }
-  if (symbols.length > 0 && typeof view.query.findSymbol === "function") {
+  if (paths.length === 0 && symbols.length > 0 && typeof view.query.findSymbol === "function"
+    && typeof view.query.indexedPathsWithSymbols !== "function") {
     for (const entry of requested) {
       const matchingPaths = new Set();
       for (const term of symbols) {
-        const matches = await view.query.findSymbol(term, {
-          fuzzy: false,
-          scope: "name",
-          pathPrefix: entry,
-          limit: 500,
-        });
-        for (const symbol of matches) {
-          if (String(symbol.name || "").toLowerCase() !== term.toLowerCase()) continue;
+        const matches = [];
+        for (const candidate of requestedIdentifierCandidates(term)) {
+          matches.push(...await view.query.findSymbol(candidate, {
+            fuzzy: false,
+            scope: "name",
+            pathPrefix: entry,
+            limit: 500,
+          }));
+        }
+        const resolution = resolveRequestedIdentifierSymbols(matches, term);
+        for (const symbol of resolution.matches) {
           const path = String(symbol.repo_rel_path || "").replace(/\\/g, "/");
           if (path) matchingPaths.add(path);
         }
@@ -216,8 +227,9 @@ export async function collectSurveyPaths({ view, requested, maxFiles, symbols = 
       }
       if (prefixTruncated) break;
     }
-    return { paths, prefixTruncated };
+    if (paths.length > 0) return { paths, prefixTruncated };
   }
+  const symbolFilterFallback = symbols.length > 0 && paths.length === 0;
   for (const entry of requested) {
     const matches = typeof view.query.indexedPaths === "function"
       ? await view.query.indexedPaths({ pathPrefix: entry, limit: maxFiles + 1 })
@@ -232,7 +244,11 @@ export async function collectSurveyPaths({ view, requested, maxFiles, symbols = 
     }
     if (prefixTruncated) break;
   }
-  return { paths, prefixTruncated };
+  return {
+    paths,
+    prefixTruncated,
+    ...(symbolFilterFallback ? { symbolFilterFallback: true } : {}),
+  };
 }
 
 function clampInt(value, fallback, min, max) {

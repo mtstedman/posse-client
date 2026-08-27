@@ -777,6 +777,10 @@ export function validateAtlasToolCall(call) {
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
 }
 
+function looksLikeAtlasIdentifierName(value) {
+  return /^[A-Za-z_$][\w$-]*(?:(?:\.|::|#|[\\/])[A-Za-z_$][\w$-]*)*$/u.test(String(value || "").trim());
+}
+
 /**
  * Normalize provider-supplied ATLAS params before validation. The boundary
  * stays strict for required params and unsupported keys, but optional enum
@@ -793,6 +797,46 @@ export function normalizeAtlasToolCall(call) {
   if (!schema) return call;
   const params = { .../** @type {Record<string, unknown>} */ (call) };
   delete params.action;
+  if (["code.window", "code.lens", "code.skeleton"].includes(action)
+    && typeof params.identifiersToFind === "string"
+    && params.identifiersToFind.trim()) {
+    const rawIdentifiers = params.identifiersToFind.trim();
+    let jsonIdentifiers = null;
+    if (rawIdentifiers.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(rawIdentifiers);
+        if (Array.isArray(parsed)) {
+          jsonIdentifiers = parsed
+            .filter((value) => typeof value === "string")
+            .map((value) => value.trim())
+            .filter(Boolean);
+        }
+      } catch { /* validation reports the malformed scalar shape */ }
+    }
+    if (jsonIdentifiers) {
+      params.identifiersToFind = jsonIdentifiers;
+    } else if (!rawIdentifiers.startsWith("[")) {
+      params.identifiersToFind = rawIdentifiers
+        .split(/[\n,;]+/u)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+  }
+  if (action === "code.window"
+    && typeof params.symbolId === "string"
+    && !cachedPatternRegExp(ATLAS_SYMBOL_ID_PATTERN).test(params.symbolId)
+    && looksLikeAtlasIdentifierName(params.symbolId)
+    && typeof params.file === "string"
+    && params.file.trim()) {
+    const identifiers = Array.isArray(params.identifiersToFind)
+      ? params.identifiersToFind
+      : [];
+    params.identifiersToFind = [...new Set([
+      ...identifiers,
+      params.symbolId,
+    ])];
+    delete params.symbolId;
+  }
   if (action === "code.window" && isPlainObject(params.sliceContext)) {
     const sliceContext = { .../** @type {Record<string, unknown>} */ (params.sliceContext) };
     if (Array.isArray(sliceContext.entrySymbols)) {

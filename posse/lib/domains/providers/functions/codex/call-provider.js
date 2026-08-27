@@ -256,6 +256,7 @@ export async function callProvider(promptText, {
     const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({
       disableSystemTools,
       disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
+      disableResearcherUtilities: deterministicReadMcp.atlasResearcherDispatcher === true,
     });
     const webTools = buildCodexWebToolsOverrides({
       role,

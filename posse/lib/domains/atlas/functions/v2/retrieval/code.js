@@ -41,6 +41,8 @@ export const MAX_LENS_CONTEXT_LINES_JS = 8;
 export const MAX_LENS_TOTAL_LINES_JS = 600;
 const MAX_LENS_SCOPE_SIGNATURE_CHARS = 160;
 export const CODE_WINDOW_MAP_MAX_CHARS = 4000;
+const CODE_WINDOW_RETRY_MAX_TOKENS = 4000;
+const CODE_WINDOW_RETRY_MAX_LINES = 1000;
 const CODE_WINDOW_MAP_MAX_REQUESTS = 12;
 const CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST = 3;
 const CODE_WINDOW_MAP_TEXT_MAX_CHARS = 160;
@@ -147,24 +149,125 @@ function boundedCodeMapText(value) {
   return String(value || "").trim().slice(0, CODE_WINDOW_MAP_TEXT_MAX_CHARS);
 }
 
-function normalizedQualifiedIdentifier(value) {
+export function normalizedQualifiedIdentifier(value) {
   return String(value || "")
     .trim()
     .toLowerCase()
+    .replace(/\?\./gu, ".")
+    .replace(/\[\s*["']?([a-z_$][\w$-]*)["']?\s*\]/giu, ".$1")
+    .replace(/\([^)]*\)/gu, "")
     .replace(/::/gu, ".")
     .replace(/[\\/#]/gu, ".")
+    .replace(/(^|\.)prototype(?=\.|$)/gu, ".")
+    .replace(/^(?:this|self|super)\./gu, "")
     .replace(/\.+/gu, ".")
     .replace(/^\.|\.$/gu, "");
 }
 
-function symbolMatchesRequestedIdentifier(symbol, identifier) {
-  const requested = normalizedQualifiedIdentifier(identifier);
-  if (!requested) return false;
+export function requestedIdentifierCandidates(value) {
+  const normalized = normalizedQualifiedIdentifier(value);
+  if (!normalized) return [];
+  const segments = normalized.split(".").filter(Boolean);
+  return [...new Set([
+    normalized,
+    ...(segments.length > 1 ? [segments.at(-1)] : []),
+  ].filter(Boolean))];
+}
+
+function symbolResolutionKey(symbol) {
+  if (symbol?.global_id != null) return `global:${symbol.global_id}`;
+  if (symbol?.content_hash && symbol?.local_id != null) {
+    return `local:${symbol.content_hash}:${symbol.local_id}`;
+  }
+  return [
+    normalizedQualifiedIdentifier(symbol?.qualified_name || symbol?.name),
+    String(symbol?.repo_rel_path || ""),
+    Number(symbol?.range_start_line || 0),
+    String(symbol?.kind || ""),
+  ].join(":");
+}
+
+function uniqueResolutionSymbols(symbols) {
+  const seen = new Set();
+  return (Array.isArray(symbols) ? symbols : []).filter((symbol) => {
+    const key = symbolResolutionKey(symbol);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function strictIdentifierMatches(symbol, requested) {
   const name = normalizedQualifiedIdentifier(symbol?.name);
   const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+  const qualifiedRequest = requested.includes(".");
+  if (!qualifiedRequest) {
+    return name === requested
+      || qualifiedName === requested
+      || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
+  }
   return name === requested
     || qualifiedName === requested
     || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
+}
+
+/**
+ * Resolve a requested qualified identifier without silently binding its bare
+ * tail to an unrelated bearer. A tail fallback is allowed only when every
+ * matching row names the same qualified bearer (overload rows may repeat it).
+ */
+export function resolveRequestedIdentifierSymbols(symbols, identifier) {
+  const requested = normalizedQualifiedIdentifier(identifier);
+  if (!requested) return { matches: [], ambiguousBearers: [], matchKind: "none" };
+  const candidates = uniqueResolutionSymbols(symbols);
+  const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested));
+  if (exact.length > 0) {
+    return { matches: exact, ambiguousBearers: [], matchKind: "qualified" };
+  }
+  const segments = requested.split(".").filter(Boolean);
+  if (segments.length < 2) return { matches: [], ambiguousBearers: [], matchKind: "none" };
+  const tail = segments.at(-1);
+  const tailMatches = candidates.filter((symbol) => {
+    const name = normalizedQualifiedIdentifier(symbol?.name);
+    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+    return name === tail
+      || qualifiedName === tail
+      || Boolean(qualifiedName && qualifiedName.endsWith(`.${tail}`));
+  });
+  const bearers = new Map();
+  for (const symbol of tailMatches) {
+    const display = String(symbol?.qualified_name || symbol?.name || tail).trim();
+    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+    const key = qualifiedName || `${normalizedQualifiedIdentifier(symbol?.name)}@${String(symbol?.repo_rel_path || "")}`;
+    if (!bearers.has(key)) bearers.set(key, display);
+  }
+  if (bearers.size === 1) {
+    return { matches: tailMatches, ambiguousBearers: [], matchKind: "unique_tail" };
+  }
+  return {
+    matches: [],
+    ambiguousBearers: [...bearers.values()].sort().slice(0, 12),
+    matchKind: bearers.size > 1 ? "ambiguous_tail" : "none",
+  };
+}
+
+export function symbolMatchesRequestedIdentifier(symbol, identifier) {
+  const requested = normalizedQualifiedIdentifier(identifier);
+  if (!requested) return false;
+  return strictIdentifierMatches(symbol, requested);
+}
+
+function ambiguousIdentifierEnvelope(action, versionId, ambiguity) {
+  return errorEnvelope({
+    action,
+    versionId,
+    code: "ambiguous_identifier",
+    message: `Qualified identifier ${ambiguity.identifier} did not resolve exactly; its bare tail matches multiple bearers: ${ambiguity.bearers.join(", ")}. Use one of those fully qualified names.`,
+    details: {
+      identifier: ambiguity.identifier,
+      bearers: ambiguity.bearers,
+    },
+  });
 }
 
 function normalizedInlineRanges(value) {
@@ -294,7 +397,9 @@ export function buildCodeWindowMap({
   const targetWork = [];
   for (const identifier of requestedShown) {
     const normalized = identifier.toLowerCase();
-    const matches = entries.filter(({ symbol }) => symbolMatchesRequestedIdentifier(symbol, identifier));
+    const resolved = resolveRequestedIdentifierSymbols(entries.map(({ symbol }) => symbol), identifier);
+    const matchedSymbols = new Set(resolved.matches);
+    const matches = entries.filter(({ symbol }) => matchedSymbols.has(symbol));
     const candidates = matches
       .slice(0, CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST)
       .map((entry) => codeWindowMapTarget(entry, inlineRanges));
@@ -508,12 +613,15 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
   const contextLines = normalizeCodeLensContextLines(params.contextLines);
   // Breadcrumbs for the definitions the agent is actually looking at: the
   // resolved target plus any requested identifiers defined in this file.
-  const identSet = new Set(idents.map((ident) => String(ident || "").toLowerCase()));
   const lensTargets = new Map();
   if (resolved.target?.global_id != null) lensTargets.set(resolved.target.global_id, resolved.target);
   const fileSymbols = await view.query.symbolsInFile(targetPath);
-  for (const symbol of fileSymbols) {
-    if (symbol?.global_id != null && identSet.has(String(symbol.name || "").toLowerCase())) {
+  const nativeSelection = nativeIdentifierSelection(idents, fileSymbols);
+  if (nativeSelection.ambiguities.length > 0) {
+    return ambiguousIdentifierEnvelope("code.lens", versionId, nativeSelection.ambiguities[0]);
+  }
+  for (const symbol of nativeSelection.matchedSymbols) {
+    if (symbol?.global_id != null) {
       lensTargets.set(symbol.global_id, symbol);
     }
   }
@@ -523,7 +631,7 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     source,
     target: resolved.target,
     symbolId,
-    identifiersToFind: idents,
+    identifiersToFind: nativeSelection.identifiers,
     contextLines,
   });
   return await finishCodeLens({
@@ -535,11 +643,14 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     lens: resolvedLens,
     calledFrom,
     scopeIndex: lensScopeIndex(fileSymbols, source),
+    identifierAliases: nativeSelection.aliases,
+    unresolvedIdentifiers: nativeSelection.unresolved,
   });
 }
 
 async function finishCodeLens({
   versionId, params, targetPath, symbolId, source, lens, calledFrom = [], scopeIndex = [],
+  identifierAliases = new Map(), unresolvedIdentifiers = [],
 }) {
   const etag = String(lens.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
@@ -552,11 +663,22 @@ async function finishCodeLens({
   // A match is only as useful as the declaration and branch it sits in; the
   // enclosing symbol tells the caller where it is without a source read.
   const scoped = (Array.isArray(lens.matches) ? lens.matches : []).map((match) => {
-    if (!match || typeof match !== "object" || match.scope !== undefined) return match;
-    const scope = enclosingLensScope(scopeIndex, Number(match.line));
-    return scope ? { ...match, scope } : match;
+    if (!match || typeof match !== "object") return match;
+    const mappedIdentifier = remapNativeIdentifiers([match.identifier], identifierAliases)[0] || match.identifier;
+    const mapped = mappedIdentifier === match.identifier ? match : { ...match, identifier: mappedIdentifier };
+    if (mapped.scope !== undefined) return mapped;
+    const scope = enclosingLensScope(scopeIndex, Number(mapped.line));
+    return scope ? { ...mapped, scope } : mapped;
   });
   const fitted = fitLensContextBudget(scoped);
+  const identifiersFound = remapNativeIdentifiers(lens.identifiersFound, identifierAliases);
+  const identifiersFoundInText = remapNativeIdentifiers(lens.identifiersFoundInText, identifierAliases);
+  const identifiersMissing = remapNativeIdentifiers(lens.identifiersMissing, identifierAliases);
+  const foundIdentifiers = new Set(
+    [...identifiersFound, ...identifiersFoundInText].map((entry) => entry.toLowerCase()),
+  );
+  const unresolved = stringArray(unresolvedIdentifiers)
+    .filter((entry) => !foundIdentifiers.has(entry.toLowerCase()));
   /** @type {CodeLensData} */
   const data = {
     ...(symbolId ? { symbolId } : {}),
@@ -565,11 +687,12 @@ async function finishCodeLens({
     ...(fitted.contextTrimmed
       ? { contextLinesApplied: fitted.contextLinesApplied, contextTrimmed: true }
       : {}),
-    identifiersFound: Array.isArray(lens.identifiersFound) ? lens.identifiersFound : [],
-    ...(lens.identifiersFoundInText?.length
-      ? { identifiersFoundInText: lens.identifiersFoundInText }
+    identifiersFound,
+    ...(identifiersFoundInText.length
+      ? { identifiersFoundInText }
       : {}),
-    identifiersMissing: Array.isArray(lens.identifiersMissing) ? lens.identifiersMissing : [],
+    identifiersMissing,
+    ...(unresolved.length > 0 ? { unresolved_identifiers: unresolved } : {}),
     truncated: lens.truncated === true,
     omittedMatchCount: Math.max(0, Number(lens.omittedMatchCount) || 0),
     // Private native-to-owner carrier. The hash materializer replaces this
@@ -683,13 +806,16 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   const oversizedFileMode = Boolean(
     fileMode && source.split(/\r?\n/u).length > codeWindowPolicy.maxWindowLines,
   );
-  const fileSymbols = fileMode
+  let fileSymbols = fileMode
     && (identifiers.length > 0 || oversizedFileMode)
     && typeof view.query.symbolsInFile === "function"
     ? await view.query.symbolsInFile(targetPath)
     : [];
   const nativeSelection = nativeIdentifierSelection(identifiers, fileSymbols);
-  const result = await buildWindow({
+  if (nativeSelection.ambiguities.length > 0) {
+    return ambiguousIdentifierEnvelope("code.window", versionId, nativeSelection.ambiguities[0]);
+  }
+  const windowArgs = {
     repo_rel_path: targetPath,
     source,
     target,
@@ -699,7 +825,12 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     granularity: params.granularity || "symbol",
     maxWindowLines: codeWindowPolicy.maxWindowLines,
     maxTokens,
-  });
+  };
+  const result = await buildCodeWindowWithAutoNarrow(buildWindow, windowArgs);
+  if (result._sizeCapFallback === true && fileSymbols.length === 0
+    && typeof view.query.symbolsInFile === "function") {
+    fileSymbols = await view.query.symbolsInFile(targetPath);
+  }
   let content = String(result.content || "");
   let startLine = Number(result.startLine || 1);
   let endLine = Number(result.endLine || 1);
@@ -739,7 +870,8 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   const missingIdentifiers = new Set(identifiersMissing.map((entry) => entry.toLowerCase()));
   const wholeFileDelivered = sameWholeFileSource(content, source);
   const allRequestedAnchorsMissed = Boolean(
-    fileMode
+    result._sizeCapFallback !== true
+    && fileMode
     && identifiers.length > 0
     && !wholeFileDelivered
     && identifiers.every((entry) => (
@@ -779,7 +911,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
       searchedRepository: true,
       nextAction: "code.window",
     };
-  } else if (oversizedFileMode) {
+  } else if (oversizedFileMode || result._sizeCapFallback === true) {
     codeMap = buildCodeWindowMap({
       source,
       symbols: fileSymbols,
@@ -821,6 +953,9 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     identifiersReturned,
     identifiersMissing,
     identifiersOmitted,
+    ...(typeof result.degradedReason === "string" && result.degradedReason
+      ? { degradedReason: result.degradedReason }
+      : {}),
     ...(redirect ? { redirect, identifierRedirects } : {}),
     ...(codeMap ? { map: codeMap } : {}),
     ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
@@ -837,10 +972,65 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   return okEnvelope({ action: "code.window", versionId, data });
 }
 
+export async function buildCodeWindowWithAutoNarrow(buildWindow, args) {
+  try {
+    return await buildWindow(args);
+  } catch (error) {
+    if (!isCodeWindowSizeLimitError(error)) throw error;
+  }
+
+  const narrowedArgs = {
+    ...args,
+    maxTokens: Math.min(
+      Math.max(1, Number(args?.maxTokens) || CODE_WINDOW_RETRY_MAX_TOKENS),
+      CODE_WINDOW_RETRY_MAX_TOKENS,
+    ),
+    maxWindowLines: Math.min(
+      Math.max(1, Number(args?.maxWindowLines) || CODE_WINDOW_RETRY_MAX_LINES),
+      CODE_WINDOW_RETRY_MAX_LINES,
+    ),
+  };
+  try {
+    const narrowed = await buildWindow(narrowedArgs);
+    return {
+      ...narrowed,
+      truncated: true,
+      selectionBounded: true,
+      degradedReason: "The original code.window response exceeded 2 MiB and was automatically narrowed to a bounded window.",
+    };
+  } catch (error) {
+    if (!isCodeWindowSizeLimitError(error)) throw error;
+    return {
+      content: "",
+      startLine: 1,
+      endLine: 1,
+      estimatedTokens: 0,
+      truncated: true,
+      selectionBounded: true,
+      outputTruncated: true,
+      identifiersFound: [],
+      identifiersReturned: [],
+      identifiersMissing: Array.isArray(args?.identifiersToFind) ? args.identifiersToFind : [],
+      identifiersOmitted: [],
+      _sizeCapFallback: true,
+      degradedReason: "code.window still exceeded 2 MiB after automatic narrowing; returning the bounded symbol map only. Narrow to one symbol or a smaller line range.",
+    };
+  }
+}
+
+function isCodeWindowSizeLimitError(error) {
+  const message = String(error?.message || error || "");
+  return /(?:code(?:\.|-)?window|code\.getwindow) response exceeds the 2097152-byte limit/iu.test(message)
+    || /response exceeds 2097152 serialized bytes/iu.test(message);
+}
+
 function nativeIdentifierSelection(requestedIdentifiers, symbols) {
   const identifiers = [];
   const indexed = [];
   const aliases = new Map();
+  const unresolved = [];
+  const ambiguities = [];
+  const matchedSymbols = [];
   const seenNative = new Set();
   const seenIndexed = new Set();
 
@@ -861,12 +1051,18 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols) {
   };
 
   for (const requested of stringArray(requestedIdentifiers)) {
-    const matches = (Array.isArray(symbols) ? symbols : [])
-      .filter((symbol) => symbolMatchesRequestedIdentifier(symbol, requested));
-    if (matches.length === 0) {
-      addNative(requested, requested);
+    const resolution = resolveRequestedIdentifierSymbols(symbols, requested);
+    const matches = resolution.matches;
+    if (resolution.ambiguousBearers.length > 0) {
+      ambiguities.push({ identifier: requested, bearers: resolution.ambiguousBearers });
       continue;
     }
+    if (matches.length === 0) {
+      addNative(requested, requested);
+      if (/::|\.|#|[\\/\[\]]/u.test(requested)) unresolved.push(requested);
+      continue;
+    }
+    matchedSymbols.push(...matches);
     if (!seenIndexed.has(requested.toLowerCase())) {
       seenIndexed.add(requested.toLowerCase());
       indexed.push(requested);
@@ -879,7 +1075,14 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols) {
     }
   }
 
-  return { identifiers, indexed, aliases };
+  return {
+    identifiers,
+    indexed,
+    aliases,
+    unresolved,
+    ambiguities,
+    matchedSymbols: uniqueResolutionSymbols(matchedSymbols),
+  };
 }
 
 function remapNativeIdentifiers(value, aliases) {

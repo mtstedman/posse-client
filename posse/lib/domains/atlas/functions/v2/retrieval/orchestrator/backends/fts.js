@@ -73,6 +73,16 @@ function ftsQueryFailure(usedPlan) {
   return { ok: false, entries: [], raw: [], total: 0, reason: "query_error", plan: usedPlan };
 }
 
+function orderedIdentifierProbes(identifier) {
+  const value = String(identifier || "").trim();
+  if (!value) return [];
+  const segments = value.split(/::|\.|#|\//u).map((entry) => entry.trim()).filter(Boolean);
+  return [...new Set([
+    value,
+    ...segments.reverse(),
+  ])];
+}
+
 /**
  * @param {{ view: View, query: string, limit: number, plan?: QueryPlan, scope?: "name" | "body" | "either" }} args
  * @returns {Promise<FtsBackendResult>}
@@ -133,14 +143,16 @@ async function collectFtsHits({ view, query, limit, plan, scope }) {
   // returns Greeter as the first hit regardless of FTS5 ranking.
   if (scope !== "body") {
     for (const ident of plan.identifiers) {
-      const rows = await view.query.findSymbol(ident, { limit: cap, fuzzy: false, scope });
-      for (const row of rows) {
-        if (!isSearchVisibleSymbol(query, row)) continue;
-        const id = symbolIdOf(row);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        out.push(row);
-        if (out.length >= cap) return out;
+      for (const identProbe of orderedIdentifierProbes(ident)) {
+        const rows = await view.query.findSymbol(identProbe, { limit: cap, fuzzy: false, scope });
+        for (const row of rows) {
+          if (!isSearchVisibleSymbol(query, row)) continue;
+          const id = symbolIdOf(row);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          out.push(row);
+          if (out.length >= cap) return out;
+        }
       }
     }
   }
@@ -194,7 +206,9 @@ function buildProbes(query, plan) {
   };
 
   // Identifier hits via fuzzy/prefix too.
-  for (const ident of plan.identifiers) push(ident);
+  for (const ident of plan.identifiers) {
+    for (const probe of orderedIdentifierProbes(ident)) push(probe);
+  }
 
   // File-name based probes: drop extension, also probe the stem broken
   // by separators ("user-service.ts" → "user", "service").
@@ -234,7 +248,10 @@ function buildProbes(query, plan) {
   // intentionally NOT added as FTS phrases — that was the brittle path
   // we replaced.
   if (plan.identifierLike) push(plan.raw);
-  if (isLiteralSymbolName(query)) push(query);
+  if (isLiteralSymbolName(query)) {
+    push(query);
+    for (const segment of String(query).split(/::|\.|#|\//u)) push(segment);
+  }
 
   return [...out];
 }

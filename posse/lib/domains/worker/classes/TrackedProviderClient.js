@@ -63,6 +63,12 @@ import {
   getAgentHandoffToolSchemaForRole,
 } from "../../../catalog/native-tools.js";
 import { toolSchemaTelemetry } from "../../../shared/tools/functions/tool-schema-telemetry.js";
+import {
+  resolveAtlasResearcherDispatcher,
+  resolveAtlasResearcherSchemaDiet,
+  resolveAtlasResearcherTypedDispatcher,
+  resolveAtlasResearcherWorkflow,
+} from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { AGENT_ACTIVITY_LIMITS } from "../../../catalog/event.js";
 import {
   buildCitationChildPrompt,
@@ -76,8 +82,17 @@ import {
   summarizeUsageSegments,
 } from "../../billing/functions/usage-segments.js";
 
-function agentHandoffToolSchemaTelemetry(role, compactCompletion = false, compactV3 = false) {
-  const schema = getAgentHandoffToolSchemaForRole(role, { compactCompletion, compactV3 });
+function agentHandoffToolSchemaTelemetry(
+  role,
+  compactCompletion = false,
+  compactV3 = false,
+  compactV4 = false,
+) {
+  const schema = getAgentHandoffToolSchemaForRole(role, {
+    compactCompletion,
+    compactV3,
+    compactV4,
+  });
   return toolSchemaTelemetry(schema);
 }
 
@@ -89,9 +104,18 @@ function sortedUniqueStrings(value) {
   )].sort();
 }
 
-function agentGateSurfaceFingerprint(options = {}) {
+function agentGateSurfaceFingerprint(options = {}, providerName = "") {
   const issued = options?._remoteIssuedPolicy;
   if (issued?.valid !== true) return "unissued";
+  const researcherWorkflow = String(options?.role || "").trim().toLowerCase() === "researcher"
+    && String(providerName || "").trim().toLowerCase() === "codex"
+    && resolveAtlasResearcherWorkflow();
+  const researcherTypedDispatcher = String(options?.role || "").trim().toLowerCase() === "researcher"
+    && String(providerName || "").trim().toLowerCase() === "codex"
+    && resolveAtlasResearcherTypedDispatcher();
+  const researcherDispatcher = String(options?.role || "").trim().toLowerCase() === "researcher"
+    && String(providerName || "").trim().toLowerCase() === "codex"
+    && (resolveAtlasResearcherDispatcher() || researcherTypedDispatcher || researcherWorkflow);
   return crypto.createHash("sha256").update(JSON.stringify({
     tools: sortedUniqueStrings(issued.toolAllowlist?.tools),
     atlas: sortedUniqueStrings(issued.toolAllowlist?.atlas),
@@ -111,6 +135,11 @@ function agentGateSurfaceFingerprint(options = {}) {
       subAgentV1: issued.coordination?.subAgentV1 === true,
       subAgentNextInputV1: issued.coordination?.subAgentNextInputV1 === true,
     },
+    researcherSchemaDiet: String(options?.role || "").trim().toLowerCase() === "researcher"
+      && resolveAtlasResearcherSchemaDiet(),
+    ...(researcherDispatcher ? { researcherDispatcher: true } : {}),
+    ...(researcherTypedDispatcher ? { researcherTypedDispatcher: true } : {}),
+    ...(researcherWorkflow ? { researcherWorkflow: true } : {}),
   })).digest("hex");
 }
 
@@ -124,10 +153,26 @@ function issuedAtlasAvailable(options = {}) {
 export function sessionContractFingerprint(options = {}, providerName = "") {
   const effective = narrowProviderOptionsToRemoteIssuance(options);
   const coordination = effective?._remoteIssuedPolicy?.coordination || {};
+  const researcherSchemaDiet = String(effective.role || "").trim().toLowerCase() === "researcher"
+    && coordination.agentHandoffCompactV3 === true
+    && resolveAtlasResearcherSchemaDiet();
+  const researcherWorkflow = String(effective.role || "").trim().toLowerCase() === "researcher"
+    && String(providerName || "").trim().toLowerCase() === "codex"
+    && coordination.agentHandoffCompactV3 === true
+    && resolveAtlasResearcherWorkflow();
+  const researcherTypedDispatcher = String(effective.role || "").trim().toLowerCase() === "researcher"
+    && String(providerName || "").trim().toLowerCase() === "codex"
+    && coordination.agentHandoffCompactV3 === true
+    && resolveAtlasResearcherTypedDispatcher();
+  const researcherDispatcher = String(effective.role || "").trim().toLowerCase() === "researcher"
+    && String(providerName || "").trim().toLowerCase() === "codex"
+    && coordination.agentHandoffCompactV3 === true
+    && (resolveAtlasResearcherDispatcher() || researcherTypedDispatcher || researcherWorkflow);
   const schema = agentHandoffToolSchemaTelemetry(
     effective.role,
     coordination.agentHandoffCompactV1 === true,
     coordination.agentHandoffCompactV3 === true,
+    researcherSchemaDiet || researcherDispatcher,
   );
   const packet = effective.sessionPacket || {};
   const remoteSystemPrompt = String(effective.remoteSystemPrompt || "");
@@ -148,7 +193,11 @@ export function sessionContractFingerprint(options = {}, providerName = "") {
     compactV1: coordination.agentHandoffCompactV1 === true,
     compactV2: coordination.agentHandoffCompactV2 === true,
     compactV3: coordination.agentHandoffCompactV3 === true,
-    agentGateSurfaceSha256: agentGateSurfaceFingerprint(effective),
+    researcherSchemaDiet,
+    ...(researcherDispatcher ? { researcherDispatcher: true } : {}),
+    ...(researcherTypedDispatcher ? { researcherTypedDispatcher: true } : {}),
+    ...(researcherWorkflow ? { researcherWorkflow: true } : {}),
+    agentGateSurfaceSha256: agentGateSurfaceFingerprint(effective, providerName),
   })).digest("hex");
 }
 
@@ -1277,6 +1326,13 @@ export class TrackedProviderClient {
       opts.role,
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
+      String(opts.role || "").trim().toLowerCase() === "researcher"
+        && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true
+        && (resolveAtlasResearcherSchemaDiet()
+          || (providerName === "codex"
+            && (resolveAtlasResearcherDispatcher()
+              || resolveAtlasResearcherTypedDispatcher()
+              || resolveAtlasResearcherWorkflow()))),
     );
     const terminalAbortController = handoffRequired ? new AbortController() : null;
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);

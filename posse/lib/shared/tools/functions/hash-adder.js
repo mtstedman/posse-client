@@ -1521,9 +1521,13 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
       const sourceStart = Number(candidate.startLine ?? candidate.start_line);
       const declaredEnd = Number(candidate.endLine ?? candidate.end_line);
       const contentLines = normalizedLinesForHandoff(candidate.content);
-      const sourceEnd = Number.isInteger(declaredEnd) && declaredEnd >= sourceStart
+      const contentEnd = sourceStart + contentLines - 1;
+      // Source provenance must describe the bytes actually delivered to the
+      // model. Some readers count a final newline as an extra end line; trusting
+      // that overstated bound makes every otherwise-valid subrange uncitable.
+      const sourceEnd = Number.isInteger(declaredEnd) && declaredEnd === contentEnd
         ? declaredEnd
-        : sourceStart + contentLines - 1;
+        : contentEnd;
       const sourcePath = canonicalEvidenceSourcePath(
         candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
       );
@@ -2371,6 +2375,9 @@ export function fetchHashRefTool(args = {}, {
     const traversal = isHashRefAlias(ref)
       ? fetchHashRefTraversalForContext(hashContext, ref)
       : { found: false };
+    const promotedEvidence = traversal?.found
+      ? fetchHashRefEvidenceForContext(hashContext, ref)
+      : { found: false };
     const result = traversal?.found
       ? {
           ok: true,
@@ -2384,9 +2391,28 @@ export function fetchHashRefTool(args = {}, {
       ? {
           ...deliveryArgs,
           ...storedSelector,
+          // An opaque cursor owns its position and search mode, but `limit`
+          // remains the caller's bounded delivery choice. This lets a cheap
+          // probe widen the next page without allowing the caller to move or
+          // reinterpret the issued cursor.
+          ...(args.limit != null ? { limit: requestedLimit } : {}),
+          ...(promotedEvidence?.found && args.offset != null
+            ? { offset: Math.max(0, Number(args.offset) || 0) }
+            : {}),
+          ...(promotedEvidence?.found && typeof args.search === "string" && args.search.trim()
+            ? {
+                search: args.search,
+                search_mode: args.search_mode ?? args.searchMode ?? "auto",
+                offset: Math.max(0, Number(args.offset) || 0),
+              }
+            : {}),
           ...(deliveryBudget ? {
             limit: Math.min(
-              Math.max(1, Number(storedSelector.limit) || deliveryBudget.allocated_per_ref_chars),
+              Math.max(
+                1,
+                Number(args.limit != null ? requestedLimit : storedSelector.limit)
+                  || deliveryBudget.allocated_per_ref_chars,
+              ),
               deliveryBudget.allocated_per_ref_chars,
             ),
           } : {}),
@@ -2410,14 +2436,7 @@ export function fetchHashRefTool(args = {}, {
             })
           : { allowed: false, reason: "source_missing" })
       : null;
-    const policy = requireTraversal && !reaccess?.allowed && !traversal?.found
-      ? {
-          allowed: false,
-          code: "traversal_ref_not_issued",
-          classification: "not_issued_for_traversal",
-          message: "This identity is not an unpromoted traversal capability for the current agent call. Use a visible evidence ref directly or follow an explicit traversal ref.",
-        }
-      : (reaccessAuthorization && !reaccess?.allowed
+    const policy = reaccessAuthorization && !reaccess?.allowed
       ? {
           allowed: false,
           code: reaccess?.reason === "source_missing"
@@ -2427,10 +2446,17 @@ export function fetchHashRefTool(args = {}, {
             ? "reaccess_source_missing"
             : "reaccess_invalid_or_consumed",
           message: reaccess?.reason === "source_missing"
-            ? "The stored evidence for this re-access authorization is unavailable; the authorization was not consumed."
-            : "This covered-evidence re-access authorization is invalid, mismatched, or already consumed.",
+              ? "The stored evidence for this re-access authorization is unavailable; the authorization was not consumed."
+              : "This covered-evidence re-access authorization is invalid, mismatched, or already consumed.",
         }
-      : admitHashRefFetch({
+      : (requireTraversal && !reaccess?.allowed && !traversal?.found
+        ? {
+            allowed: false,
+            code: "traversal_ref_not_issued",
+            classification: "not_issued_for_traversal",
+            message: "This identity was not issued as a traversal capability for the current attempt. Follow an explicit traversal_ref from a tool result; visible evidence refs are citation-only.",
+          }
+        : admitHashRefFetch({
       entry: result?.entry || null,
       args: selectorArgs,
       history,
@@ -2497,8 +2523,14 @@ export function fetchHashRefTool(args = {}, {
   const results = refs.map((ref) => parseFetchPayload(fetchOne(ref)));
   const found = results.filter((entry) => entry?.ok === true).length;
   const rejected = results.filter((entry) => entry?.retryable === false && entry?.classification).length;
+  const complete = found === refs.length;
   const rendered = enforceResearchFetchSerializedBudget(JSON.stringify({
-    ok: found === refs.length,
+    // A batch with usable evidence is a successful, possibly partial,
+    // delivery. Per-ref results preserve every miss/rejection while keeping
+    // terminal synthesis guidance available for the evidence that did land.
+    ok: found > 0,
+    complete,
+    partial: found > 0 && !complete,
     count: refs.length,
     found,
     missing: refs.length - found,

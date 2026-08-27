@@ -292,8 +292,57 @@ function validMaterializedSourceWindows(entry) {
     });
 }
 
+function selectStructuredSourceContent(entry, lines) {
+  let parsed;
+  try { parsed = JSON.parse(String(entry?.payload_text || "")); } catch { return null; }
+  const envelope = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  if (!envelope || typeof envelope !== "object") return null;
+  const windows = normalizedEvidenceSourceWindows(entry?.metadata?.source_windows)
+    .filter((window) => lines.start >= window.source_start_line && lines.end <= window.source_end_line);
+  if (windows.length !== 1) return null;
+  const [window] = windows;
+  const candidates = [
+    envelope,
+    ...(Array.isArray(envelope.additionalWindows) ? envelope.additionalWindows : []),
+    ...(Array.isArray(envelope.additional_windows) ? envelope.additional_windows : []),
+  ].filter((candidate) => candidate && typeof candidate.content === "string");
+  const contentCandidate = candidates.find((candidate) => {
+    const path = String(candidate.repo_rel_path || candidate.repoRelPath || candidate.path || entry?.metadata?.path || "");
+    const start = Number(candidate.startLine ?? candidate.start_line);
+    const contentLines = String(candidate.content).replace(/\r\n?/g, "\n").split("\n");
+    const end = start + contentLines.length - 1;
+    return path === window.path
+      && Number.isInteger(start)
+      && lines.start >= start
+      && lines.end <= end;
+  });
+  if (!contentCandidate) return null;
+  const contentStart = Number(contentCandidate.startLine ?? contentCandidate.start_line);
+  const contentLines = String(contentCandidate.content).replace(/\r\n?/g, "\n").split("\n");
+  const payloadText = contentLines.slice(lines.start - contentStart, lines.end - contentStart + 1).join("\n");
+  return {
+    payloadText,
+    metadata: {
+      ...(entry.metadata || {}),
+      path: window.path,
+      line_semantics: "source",
+      source_payload_encoding: "structured_content_excerpt",
+      source_windows: [{
+        ...window,
+        source_start_line: lines.start,
+        source_end_line: lines.end,
+        materialized_start_line: 1,
+        materialized_end_line: lines.end - lines.start + 1,
+        source_payload_encoding: "structured_content_excerpt",
+      }],
+    },
+  };
+}
+
 function selectSourceCoordinatePayload(entry, lines) {
   if (String(entry?.metadata?.line_semantics || "").toLowerCase() !== "source") return null;
+  const structuredSelection = selectStructuredSourceContent(entry, lines);
+  if (structuredSelection) return structuredSelection;
   const windows = validMaterializedSourceWindows(entry);
   const sourceCandidates = windows.filter((window) => (
     lines.start >= window.source_start_line && lines.end <= window.source_end_line

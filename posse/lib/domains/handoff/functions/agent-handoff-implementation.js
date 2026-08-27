@@ -93,12 +93,60 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
 
 const TABLE = "agent_handoff_packets";
 const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materialization_cache");
+const EVIDENCE_CLEANUP = Symbol("agent_handoff_evidence_cleanup");
 const READY_DBS = new WeakSet();
 
 function fail(code, message) {
   const err = new Error(message);
   err.code = code;
   throw err;
+}
+
+function evidenceSelectorText(selector) {
+  if (typeof selector === "string") return selector;
+  try { return JSON.stringify(selector); } catch { return String(selector || ""); }
+}
+
+function recordEvidenceCleanup(context, {
+  action,
+  selector,
+  normalizedSelector = null,
+  code = "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+  message = null,
+} = {}) {
+  const records = context?.[EVIDENCE_CLEANUP];
+  if (!Array.isArray(records) || !action) return;
+  const record = {
+    action,
+    selector: evidenceSelectorText(selector).slice(0, 500),
+    ...(normalizedSelector == null ? {} : {
+      normalized_selector: evidenceSelectorText(normalizedSelector).slice(0, 500),
+    }),
+    code,
+    ...(message == null ? {} : { message: String(message).slice(0, 500) }),
+  };
+  const key = JSON.stringify(record);
+  if (records.some((entry) => entry.key === key)) return;
+  if (records.length < 24) records.push({ key, ...record });
+}
+
+function isCleanableEvidenceRangeError(error) {
+  return String(error?.code || "") === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID";
+}
+
+function alternateEvidenceCleanupAction(error) {
+  const code = String(error?.code || "");
+  if (code === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") return "drop_invalid_range";
+  if (code === "AGENT_HANDOFF_EVIDENCE_EMPTY") {
+    return "drop_whitespace_only_selector_with_alternate_evidence";
+  }
+  if (code === "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED") {
+    return "drop_unsurfaced_path_with_alternate_evidence";
+  }
+  if (code === "AGENT_HANDOFF_EVIDENCE_NOT_FOUND") {
+    return "drop_invisible_ref_with_alternate_evidence";
+  }
+  return null;
 }
 
 export function isRetryableTerminalHandoffError(error) {
@@ -459,19 +507,35 @@ function payloadSourceContentWindows(entry, lineage) {
   const fallbackPath = data?.repo_rel_path || data?.repoRelPath || data?.path || entry?.metadata?.path;
   for (const candidate of candidates) {
     if (candidate && typeof candidate.content === "string") {
+      const sourceStart = Number(candidate.startLine ?? candidate.start_line);
+      const sourceEnd = Number(candidate.endLine ?? candidate.end_line);
+      const expectedLineCount = Number.isInteger(sourceStart)
+        && Number.isInteger(sourceEnd)
+        && sourceEnd >= sourceStart
+        ? sourceEnd - sourceStart + 1
+        : null;
       add(
         candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
-        Number(candidate.startLine ?? candidate.start_line),
+        sourceStart,
         candidate.content,
+        expectedLineCount,
       );
     }
   }
   for (const candidate of Array.isArray(data?.requestedWindows) ? data.requestedWindows : []) {
     if (candidate && typeof candidate.content === "string") {
+      const sourceStart = Number(candidate.startLine ?? candidate.start_line);
+      const sourceEnd = Number(candidate.endLine ?? candidate.end_line);
+      const expectedLineCount = Number.isInteger(sourceStart)
+        && Number.isInteger(sourceEnd)
+        && sourceEnd >= sourceStart
+        ? sourceEnd - sourceStart + 1
+        : null;
       add(
         candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
-        Number(candidate.startLine ?? candidate.start_line),
+        sourceStart,
         candidate.content,
+        expectedLineCount,
       );
     }
   }
@@ -686,10 +750,45 @@ function refRelativeCoordinates(entry, lineage, start, end, { sourcePath = null 
     return start >= materializedStart
       && end <= materializedEnd;
   });
+  const singleStartCovered = candidates.length === 0 && eligible.length === 1
+    && start >= eligible[0].materialized_start_line
+    && start <= eligible[0].materialized_end_line;
   const translatable = candidates.length === 1
     ? candidates
-    : (candidates.length === 0 && eligible.length === 1 ? eligible : []);
+    : (singleStartCovered ? eligible : []);
   if (translatable.length !== 1) {
+    // A compact code.window envelope can be one serialized JSON line while
+    // carrying one exact multi-line source window in its `content` field. The
+    // model cites that visible embedded body as 1..N, but the envelope's
+    // recorded materialized range is then 1..1. When there is exactly one
+    // path/window and its full source content is available, translate against
+    // that body deterministically. Never apply this across multiple windows,
+    // missing content, or a span/content mismatch.
+    const contentWindows = coalescedSourceContentWindows(lineage.content_entry || entry, lineage)
+      .filter((window) => !requestedPath || window.path === requestedPath)
+      .filter((window) => Array.isArray(window.content_lines)
+        && window.content_lines.length === window.source_end_line - window.source_start_line + 1);
+    const contentWindow = contentWindows.length === 1 ? contentWindows[0] : null;
+    if (contentWindow && start >= 1 && start <= contentWindow.content_lines.length) {
+      const clampedRelativeEnd = Math.min(end, contentWindow.content_lines.length);
+      return {
+        matched: true,
+        path: contentWindow.path,
+        translatedStart: contentWindow.source_start_line + start - 1,
+        translatedEnd: contentWindow.source_start_line + clampedRelativeEnd - 1,
+        sourceContentRelative: true,
+        ...(clampedRelativeEnd === end ? {} : {
+          requestedMaterializedEnd: end,
+          clampedMaterializedEnd: clampedRelativeEnd,
+        }),
+        materializedRange: { start: 1, end: contentWindow.content_lines.length },
+        materializedRanges: [{
+          path: contentWindow.path,
+          start: 1,
+          end: contentWindow.content_lines.length,
+        }],
+      };
+    }
     return {
       matched: false,
       ambiguous: candidates.length > 1,
@@ -701,13 +800,18 @@ function refRelativeCoordinates(entry, lineage, start, end, { sourcePath = null 
     };
   }
   const window = translatable[0];
+  const clampedMaterializedEnd = Math.min(end, window.materialized_end_line);
   const translatedStart = window.source_start_line + start - window.materialized_start_line;
-  const translatedEnd = window.source_start_line + end - window.materialized_start_line;
+  const translatedEnd = window.source_start_line + clampedMaterializedEnd - window.materialized_start_line;
   return {
     matched: true,
     path: window.path,
     translatedStart,
     translatedEnd,
+    ...(clampedMaterializedEnd === end ? {} : {
+      requestedMaterializedEnd: end,
+      clampedMaterializedEnd,
+    }),
     materializedRange: {
       start: window.materialized_start_line,
       end: window.materialized_end_line,
@@ -1186,6 +1290,55 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   };
 }
 
+function materializeRefCoordinatesAsSurfacedPath({
+  selector,
+  selectedSourcePath,
+  sourceContentWindows,
+  context,
+}) {
+  if (
+    !Number.isInteger(selector?.start)
+    || !Number.isInteger(selector?.end)
+    || selector.start < 1
+    || selector.end < selector.start
+    || !String(context?.projectDir || context?.cwd || "").trim()
+  ) return null;
+  const sourcePaths = [...new Set((sourceContentWindows || [])
+    .map((window) => canonicalSourcePath(window?.path))
+    .filter(Boolean))];
+  const requestedPath = canonicalSourcePath(selectedSourcePath);
+  const sourcePath = requestedPath || (sourcePaths.length === 1 ? sourcePaths[0] : null);
+  if (!sourcePath || (requestedPath && !sourcePaths.includes(requestedPath))) return null;
+
+  const overlapping = (sourceContentWindows || []).filter((window) => (
+    canonicalSourcePath(window?.path) === sourcePath
+    && window.source_start_line <= selector.end
+    && window.source_end_line >= selector.start
+  ));
+  // A ref may have presented several disjoint windows from one file. Never
+  // reinterpret a selector that bridges those windows as authority to fill
+  // the unseen gap. A range wholly inside one declared window is eligible
+  // only to repair inconsistent materialization metadata; a range wholly
+  // outside the ref may be treated as source coordinates only because the
+  // same unique path is already surfaced to this agent call.
+  if (overlapping.length > 1) return null;
+  if (overlapping.length === 1 && !(
+    selector.start >= overlapping[0].source_start_line
+    && selector.end <= overlapping[0].source_end_line
+  )) return null;
+
+  try {
+    return materializeWorktreeEvidenceSelector({
+      path: sourcePath,
+      start: selector.start,
+      end: selector.end,
+    }, context);
+  } catch (error) {
+    if (String(error?.code || "").startsWith("AGENT_HANDOFF_")) return null;
+    throw error;
+  }
+}
+
 export function materializeAgentHandoffEvidenceSelector(selectorValue, context, {
   expectedLineSemantics = null,
   allowDisjointSource = false,
@@ -1319,12 +1472,61 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
       const requestedEnd = end;
       let translatedCoordinates = null;
       if (!sourceSlice.matched && selector.start != null) {
-        translatedCoordinates = refRelativeCoordinates(entry, lineage, start, end, {
+        const requestedPath = canonicalSourcePath(selectedSourcePath);
+        const sourceContentWindows = coalescedSourceContentWindows(
+          lineage.content_entry || entry,
+          lineage,
+        );
+        const startCoveredWindows = sourceContentWindows.filter((window) => (
+          (!requestedPath || window.path === requestedPath)
+          && start >= window.source_start_line
+          && start <= window.source_end_line
+        ));
+        const startWindow = startCoveredWindows[0] || null;
+        const crossesAnotherWindow = startWindow != null && sourceContentWindows.some((window) => (
+          window !== startWindow
+          && window.path === startWindow.path
+          && window.source_start_line <= end
+          && window.source_end_line >= start
+        ));
+        if (startCoveredWindows.length === 1
+          && end > startWindow.source_end_line
+          && !crossesAnotherWindow) {
+          const clampedEnd = startWindow.source_end_line;
+          const clampedSlice = sourceLineSlice(entry, lineage, start, clampedEnd, {
+            sourcePath: selectedSourcePath,
+            sourceWindow: stagedSourceWindow,
+          });
+          if (clampedSlice.matched) {
+            end = clampedEnd;
+            sourceSlice = clampedSlice;
+            recordEvidenceCleanup(context, {
+              action: "clamp_source_end",
+              selector: selectorValue,
+              normalizedSelector: `${selector.ref}:${start}-${end}`,
+            });
+          }
+        }
+        if (!sourceSlice.matched) translatedCoordinates = refRelativeCoordinates(entry, lineage, start, end, {
           sourcePath: selectedSourcePath,
         });
         if (translatedCoordinates?.matched) {
           start = translatedCoordinates.translatedStart;
           end = translatedCoordinates.translatedEnd;
+          if (translatedCoordinates.sourceContentRelative === true) {
+            recordEvidenceCleanup(context, {
+              action: "normalize_compact_source_relative_range",
+              selector: selectorValue,
+              normalizedSelector: `${selector.ref}:${start}-${end}`,
+            });
+          }
+          if (translatedCoordinates.clampedMaterializedEnd != null) {
+            recordEvidenceCleanup(context, {
+              action: "clamp_ref_relative_end",
+              selector: selectorValue,
+              normalizedSelector: `${selector.ref}:${start}-${end}`,
+            });
+          }
           sourceSlice = sourceLineSlice(entry, lineage, start, end, {
             sourcePath: translatedCoordinates.path,
             sourceWindow: stagedSourceWindow,
@@ -1332,6 +1534,24 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
         }
       }
       if (!sourceSlice.matched) {
+        const surfacedPathEvidence = materializeRefCoordinatesAsSurfacedPath({
+          selector,
+          selectedSourcePath,
+          sourceContentWindows: coalescedSourceContentWindows(
+            lineage.content_entry || entry,
+            lineage,
+          ),
+          context,
+        });
+        if (surfacedPathEvidence) {
+          recordEvidenceCleanup(context, {
+            action: "normalize_ref_source_coordinates_to_surfaced_path",
+            selector: selectorValue,
+            normalizedSelector: surfacedPathEvidence.source_selector,
+          });
+          cache?.set(cacheKey, surfacedPathEvidence);
+          return surfacedPathEvidence;
+        }
         const ranges = sourceSlice.sourceRanges
           .map((range) => `${range.path}:${range.start}-${range.end}`)
           .join(", ");
@@ -1356,11 +1576,19 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   } else {
     start = selector.start ?? 1;
     end = selector.end ?? Math.max(1, lines.length);
-    if (end > lines.length || start > lines.length) {
+    if (start > lines.length) {
       fail(
         "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
         `Evidence ${selector.ref} has ${lines.length} materialized lines; requested ${start}-${end}`,
       );
+    }
+    if (end > lines.length) {
+      end = lines.length;
+      recordEvidenceCleanup(context, {
+        action: "clamp_materialized_end",
+        selector: selectorValue,
+        normalizedSelector: `${selector.ref}:${start}-${end}`,
+      });
     }
     excerpt = lines.slice(start - 1, end).join("\n");
   }
@@ -1532,11 +1760,33 @@ function materializeClaim(
   const selectors = new Set();
   if (detail.evidence != null) {
     const materialized = new Map();
+    const cleanableFailures = [];
     for (const selector of detail.evidence) {
-      const evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+      let evidence;
+      try {
+        evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+      } catch (error) {
+        const action = alternateEvidenceCleanupAction(error);
+        if (!action) throw error;
+        cleanableFailures.push({ selector, error, action });
+        continue;
+      }
       selectors.add(evidence.selector);
-      materialized.set(evidence.selector, evidence);
-      counters.evidence += evidence.excerpt.length;
+      if (!materialized.has(evidence.selector)) {
+        materialized.set(evidence.selector, evidence);
+        counters.evidence += evidence.excerpt.length;
+      }
+    }
+    if (materialized.size === 0 && cleanableFailures.length > 0) {
+      throw cleanableFailures[0].error;
+    }
+    for (const { selector, error, action } of cleanableFailures) {
+      recordEvidenceCleanup(context, {
+        action,
+        selector,
+        code: error.code,
+        message: error.message,
+      });
     }
     if (materialized.size > 0) out.evidence = [...materialized.values()];
   }
@@ -2181,7 +2431,20 @@ function researcherEvidenceSelector(value, context) {
 function researcherEvidenceSelectors(value, context) {
   if (!Array.isArray(value)) return [];
   return value
-    .map((entry) => researcherEvidenceSelector(entry, context))
+    .flatMap((entry) => {
+      try {
+        const selector = researcherEvidenceSelector(entry, context);
+        return selector == null ? [] : [selector];
+      } catch (error) {
+        if (!isCleanableEvidenceRangeError(error)) throw error;
+        recordEvidenceCleanup(context, {
+          action: "drop_invalid_range",
+          selector: entry,
+          message: error.message,
+        });
+        return [];
+      }
+    })
     .filter(Boolean)
     .slice(0, AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim);
 }
@@ -2763,29 +3026,30 @@ function materializeTerminalCompletion(args, role) {
 function collectAgentHandoffValidationIssues(args, { context = {}, role = "", maxHandoffs = null } = {}) {
   const issues = [];
   const seen = new Set();
-  const capture = (fn, { selector = null } = {}) => {
+  const collectError = (error, { selector = null } = {}) => {
+    const code = String(error?.code || "AGENT_HANDOFF_SCHEMA_INVALID");
+    const message = String(error?.message || "Invalid agent_handoff arguments");
+    const selectorText = selector == null ? null : evidenceSelectorText(selector);
+    const hint = selectorText == null ? null : handoffSelectorFailureHint(code);
+    const key = `${code}\0${message}\0${selectorText || ""}`;
+    if (!seen.has(key) && issues.length < 24) {
+      seen.add(key);
+      issues.push({
+        code,
+        message,
+        ...(selectorText == null ? {} : {
+          selector: selectorText.slice(0, 500),
+          hint,
+        }),
+      });
+    }
+    return null;
+  };
+  const capture = (fn, options = {}) => {
     try {
       return fn();
     } catch (error) {
-      const code = String(error?.code || "AGENT_HANDOFF_SCHEMA_INVALID");
-      const message = String(error?.message || "Invalid agent_handoff arguments");
-      const selectorText = selector == null
-        ? null
-        : (typeof selector === "string" ? selector : JSON.stringify(selector));
-      const hint = selectorText == null ? null : handoffSelectorFailureHint(code);
-      const key = `${code}\0${message}\0${selectorText || ""}`;
-      if (!seen.has(key) && issues.length < 24) {
-        seen.add(key);
-        issues.push({
-          code,
-          message,
-          ...(selectorText == null ? {} : {
-            selector: selectorText.slice(0, 500),
-            hint,
-          }),
-        });
-      }
-      return null;
+      return collectError(error, options);
     }
   };
 
@@ -2950,12 +3214,26 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       ));
       const selectors = new Set();
       if (detail.evidence != null) {
+        const selectorFailures = [];
         for (const selector of detail.evidence) {
-          const evidence = capture(
-            () => materializeAgentHandoffEvidenceSelector(selector, context),
-            { selector },
-          );
+          let evidence = null;
+          try {
+            evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+          } catch (error) {
+            selectorFailures.push({ selector, error });
+          }
           if (evidence?.selector) selectors.add(evidence.selector);
+        }
+        for (const { selector, error } of selectorFailures) {
+          const action = alternateEvidenceCleanupAction(error);
+          if (selectors.size > 0 && action) {
+            recordEvidenceCleanup(context, {
+              action,
+              selector,
+              code: error.code,
+              message: error.message,
+            });
+          } else collectError(error, { selector });
         }
       }
       if (detail.decoy != null) {
@@ -3026,6 +3304,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const materializationContext = {
     ...context,
     [EVIDENCE_MATERIALIZATION_CACHE]: new Map(),
+    [EVIDENCE_CLEANUP]: [],
   };
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
     normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
@@ -3212,7 +3491,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   if (evidenceChars > evidenceLimit) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Materialized evidence exceeds ${evidenceLimit} characters for role ${normalizedRole || "unknown"}`);
   }
-  return {
+  const packet = {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile,
     outcome,
@@ -3223,6 +3502,15 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     narrative_chars: counters.narrative,
     authoritative: true,
   };
+  const cleanupItems = materializationContext[EVIDENCE_CLEANUP]
+    .map(({ key: _key, ...entry }) => entry);
+  if (cleanupItems.length > 0) {
+    Object.defineProperty(packet, "evidence_cleanup", {
+      value: Object.freeze({ count: cleanupItems.length, items: Object.freeze(cleanupItems) }),
+      enumerable: false,
+    });
+  }
+  return packet;
 }
 
 export function materializeAgentHandoff(args, options = {}) {
@@ -3246,6 +3534,22 @@ export function materializeAgentHandoff(args, options = {}) {
         enumerable: false,
       },
     });
+  }
+  if (packet.evidence_cleanup?.count > 0) {
+    try {
+      const context = options?.context || {};
+      recordObservation({
+        ...(context.db ? { db: context.db } : {}),
+        work_item_id: context.work_item_id ?? context.workItemId ?? null,
+        job_id: context.job_id ?? context.jobId ?? null,
+        attempt_id: context.attempt_id ?? context.attemptId ?? null,
+        observation_type: "agent_handoff.evidence_cleanup",
+        summary: `Cleaned ${packet.evidence_cleanup.count} terminal evidence selector(s)`,
+        detail: packet.evidence_cleanup,
+      });
+    } catch {
+      // Cleanup telemetry must never turn an accepted handoff into a retry.
+    }
   }
   return packet;
 }

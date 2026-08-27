@@ -199,7 +199,7 @@ export function admitHashRefFetch({
       return rejection(
         "traversal_ref_not_issued",
         "not_issued_for_traversal",
-        "This identity was not issued as missing-content traversal for the current agent call. Follow an explicit traversal_ref from visible context.",
+        "This identity was not issued as a traversal capability for the current attempt. Follow an explicit traversal_ref from a tool result; visible evidence refs are citation-only.",
         { fetch_class: "missing", initial_visibility: "none", issued_as: null },
       );
     }
@@ -214,12 +214,12 @@ export function admitHashRefFetch({
     return rejection(
       "traversal_ref_not_issued",
       "not_issued_for_traversal",
-      "This stored identity was not issued as missing-content traversal for the current agent call. Use visible evidence directly or follow an explicit traversal_ref.",
+      "This stored identity was not issued as a traversal capability for the current attempt. Follow an explicit traversal_ref from a tool result; visible evidence refs are citation-only.",
       { fetch_class: fetchClass, initial_visibility: initial.visibility, issued_as: initial.issued_as },
     );
   }
 
-  if (enforce && initial.visibility === "full") {
+  if (enforce && initial.visibility === "full" && fetchClass !== "result_continuation") {
     return rejection(
       "fetch_ref_duplicate_visible",
       "duplicate_visible",

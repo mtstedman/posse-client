@@ -29,6 +29,7 @@ import {
   makeGitIgnoreChecker,
   normalizedGlob,
   parseRipgrepJsonMatches,
+  regexPatternNeedsMultiline,
   resolveRipgrepCommand,
 } from "./ripgrep.js";
 import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
@@ -715,7 +716,7 @@ export function createDeterministicToolkit({
       if (args.include) rgArgs.push("--glob", normalizedGlob(args.include));
       if (args.literal) rgArgs.push("--fixed-strings");
       if (args.case_insensitive) rgArgs.push("--ignore-case");
-      if (args.multiline) {
+      if (args.multiline || (!args.literal && regexPatternNeedsMultiline(args.pattern))) {
         rgArgs.push("--multiline");
         rgArgs.push("--multiline-dotall");
       }
@@ -838,7 +839,7 @@ export function createDeterministicToolkit({
 
   function execFetchRef(args, _cwd = null, _scopePredicates = null, context = {}) {
     try {
-      return fetchHashRefTool(args || {}, { context });
+      return fetchHashRefTool(args || {}, { context, requireTraversal: true });
     } catch (err) {
       return `Error: fetch_ref failed - ${err?.message || String(err)}`;
     }

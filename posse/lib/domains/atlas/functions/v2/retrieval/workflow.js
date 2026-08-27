@@ -428,6 +428,14 @@ function resolveRefs(value, priorResults, priorById) {
   return value;
 }
 
+// Owner-level typed workflow facades reuse the same reference grammar while
+// routing every step through the canonical MCP owner. Keeping one resolver
+// prevents the provider facade and native workflow from drifting on optional
+// paths, array values, or prototype-pollution guards.
+export function resolveWorkflowRefs(value, priorResults = [], priorById = new Map()) {
+  return resolveRefs(value, priorResults, priorById);
+}
+
 function resolveRefString(value, priorResults, priorById) {
   const trimmed = value.trim();
   const direct = REF_PATTERN_SINGLE.exec(trimmed);

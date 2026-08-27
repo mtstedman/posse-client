@@ -143,6 +143,22 @@ export function projectAgentToolSchema(schema) {
   return projectSchemaValue(schema);
 }
 
+function stripSchemaDescriptions(value) {
+  if (Array.isArray(value)) return value.map(stripSchemaDescriptions);
+  if (!isObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "description")
+      .map(([key, child]) => [key, stripSchemaDescriptions(child)]),
+  );
+}
+
+// Provider-only schema diet. Validation constraints and the authored tool
+// description remain intact; only nested input-field prose is omitted.
+export function stripAgentSchemaDescriptions(schema) {
+  return stripSchemaDescriptions(schema);
+}
+
 export function projectAgentToolDefinition(definition = {}) {
   if (!isObject(definition)) return definition;
   const projected = { ...definition };

@@ -24,7 +24,6 @@ export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 2;
 // be observed, but it never changes admission in this release.
 export const RESEARCH_SYNTHESIS_CEILING_EXTENSION_STEPS = 0;
 export const RESEARCH_SYNTHESIS_FRESH_NOVELTY_MAX_STALE_STEPS = 1;
-export const RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES = 2;
 // Exploration-time traversal remains available for omitted or bounded stored
 // payloads. The gate only becomes terminal after closeout has admitted one
 // final batched traverse_ref request.
@@ -178,7 +177,7 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
   if (reason === "budget_exhausted") {
     return [
       "FINAL TRAVERSAL BATCH ALREADY USED: the one synthesis-phase atlas.traverse_ref batch has completed.",
-      "Do not call another tool. Submit the best-supported terminal report using the evidence already gathered.",
+      "Do not call another tool. Call agent_handoff with the terminal researcher report.",
     ].join("\n");
   }
   return [
@@ -195,37 +194,10 @@ export function buildResearchEarlyFetchBatchingText() {
   ].join("\n");
 }
 
-export function buildResearchEarlyFetchSynthesisAuditText({ fetchBatches = 0 } = {}) {
-  return [
-    `SYNTHESIS AUDIT: ${Math.max(0, Number(fetchBatches) || 0)} exploration traversal batches have been used.`,
-    "Compare the gathered evidence with every requested flow, branch, and boundary. If each material item has direct support, synthesize now instead of gathering corroboration.",
-    "Before handoff, map every asserted branch condition and precedence rule to a delivered evidence ref. Split, remove, or make one targeted lookup for any unmatched assertion; never validate against task text or an answer key.",
-    "If a material gap remains, make only the highest-value targeted lookup and accumulate any further traversal refs into one batch.",
-  ].join("\n");
-}
-
 export function buildResearchFinalFetchBatchText() {
   return [
     "FINAL TRAVERSAL BATCH COMPLETE.",
-    "No further discovery or stored-result traversal calls are available. Call agent_handoff now with the terminal researcher report synthesized from the gathered evidence; do not end the turn with prose alone.",
-  ].join("\n");
-}
-
-export function buildResearchStopCheckpointText() {
-  // Coverage remains in telemetry/session state for diagnostics, but exposing
-  // a lane-by-lane ledger made the model expand its task and seek exhaustive
-  // corroboration. Keep the model-visible checkpoint stop-first and bounded.
-  return [
-    "If the gathered evidence supports the requested result, synthesize now.",
-    "Otherwise issue every currently known answer-critical missing target as independent calls in one parallel response. Do not seek corroboration or reread covered files.",
-  ].join("\n");
-}
-
-export function buildResearchMidpointAuditText({ coverage = {} } = {}) {
-  void coverage;
-  return [
-    "EVIDENCE CHECKPOINT: wrap up as soon as the gathered evidence supports the requested result.",
-    buildResearchStopCheckpointText(),
+    "No further discovery or stored-result traversal calls are available. Call agent_handoff now with the terminal researcher report; do not end the turn with prose alone.",
   ].join("\n");
 }
 
@@ -238,8 +210,8 @@ export function buildResearchCurtainCallText({
     RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - Number(explorationSteps || 0),
   );
   return [
-    `FINAL EVIDENCE WINDOW: You have ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} left before required closeout.`,
-    "Do not spend them merely because they are available. If the current evidence is sufficient, synthesize now; otherwise use them only for answer-critical gaps.",
+    `RESEARCH TOOL WINDOW: ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} remain before required closeout.`,
+    "Further discovery calls will be rejected after this window closes.",
   ].join("\n");
 }
 
@@ -258,10 +230,10 @@ export function buildResearchSynthesisRequiredText({
     ? "deterministic_research_tool_ceiling"
     : "deterministic_synthesize_now_no_novel_evidence";
   return [
-    "RESEARCH CLOSEOUT REQUIRED.",
+    "RESEARCH TOOL GATE CLOSED.",
     absoluteCeilingReached
-      ? "The evidence-gathering window is closed."
-      : "Recent exploration is no longer producing new relevant evidence.",
-    `No further discovery calls are available. If essential unseen stored evidence remains, issue one final batched atlas.traverse_ref call containing all eligible traversal refs. After that response—or immediately if no such evidence remains—call agent_handoff with the best-supported terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
+      ? "The deterministic discovery-call ceiling has been reached."
+      : "The deterministic no-novelty gate has closed discovery.",
+    `No further discovery calls are available. If eligible unseen traversal refs remain, one final batched atlas.traverse_ref call is available. After that response—or immediately if no eligible refs remain—call agent_handoff with the terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }

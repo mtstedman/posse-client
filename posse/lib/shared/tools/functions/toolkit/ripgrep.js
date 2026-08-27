@@ -146,6 +146,20 @@ export function normalizedGlob(value) {
   return normalizeDisplaySlashes(String(value || "").trim());
 }
 
+export function regexPatternNeedsMultiline(value) {
+  const pattern = String(value || "");
+  if (/[\r\n]/u.test(pattern)) return true;
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern[index] !== "n" && pattern[index] !== "r") continue;
+    let slashCount = 0;
+    for (let cursor = index - 1; cursor >= 0 && pattern[cursor] === "\\"; cursor -= 1) {
+      slashCount += 1;
+    }
+    if (slashCount % 2 === 1) return true;
+  }
+  return false;
+}
+
 const GIT_IGNORE_SESSION_CACHE_MAX_ENTRIES = 64;
 const GIT_IGNORE_SNAPSHOT_MAX_BUFFER = 16 * 1024 * 1024;
 const GIT_IGNORE_SNAPSHOT_TIMEOUT_MS = 5000;

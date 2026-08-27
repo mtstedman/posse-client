@@ -22,6 +22,9 @@ import {
   ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
   runAtlasNativeMethodAsync,
 } from "../../functions/v2/native/invoke.js";
+import {
+  repairNativeViewMigration,
+} from "../../functions/v2/native/view-read.js";
 import { buildNativeVectorBridge } from "../../functions/v2/embeddings/native-vector-bridge.js";
 import { grepIndexedSource } from "../../functions/v2/retrieval/nonindexed-grep.js";
 import {
@@ -637,6 +640,7 @@ function codeWindowPolicyForRequest(request = {}, action = "") {
 export class AtlasToolExecutor {
   #conductorFactory;
   #nativeToolCall;
+  #nativeViewMigrationRepair;
   #nativeVectorBridge;
   #gate;
   #dedupeWindowMs;
@@ -658,6 +662,7 @@ export class AtlasToolExecutor {
   constructor({
     conductorFactory = getSharedConductor,
     nativeToolCall = (payload, opts) => runAtlasNativeMethodAsync("execute-tool", payload, opts),
+    nativeViewMigrationRepair = repairNativeViewMigration,
     nativeVectorBridge = buildNativeVectorBridge,
     gate = new AsyncResourceGate({ name: "ATLAS tool executor", policy: "writer-priority" }),
     dedupeWindowMs = DEFAULT_DEDUPE_WINDOW_MS,
@@ -671,6 +676,7 @@ export class AtlasToolExecutor {
   } = {}) {
     this.#conductorFactory = conductorFactory;
     this.#nativeToolCall = nativeToolCall;
+    this.#nativeViewMigrationRepair = nativeViewMigrationRepair;
     this.#nativeVectorBridge = nativeVectorBridge;
     this.#gate = gate;
     this.#dedupeWindowMs = Math.max(0, Number(dedupeWindowMs) || 0);
@@ -1043,10 +1049,12 @@ export class AtlasToolExecutor {
           telemetryEnabled: usageTelemetryEnabled(readPayload.config),
         };
         const nativeDeadline = this.#now() + timeoutMs;
+        /** @type {any} */
         let envelope;
+        let nativeViewMigrationRepaired = false;
         const nativeStartedAt = this.#now();
         try {
-          envelope = await this.#nativeToolCall({
+          const nativePayload = {
             contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
             action: request.action,
             args: cloneJson(completeToolArgs) || {},
@@ -1058,10 +1066,26 @@ export class AtlasToolExecutor {
             config: readPayload.config || {},
             ...(vectorBridge ? { vectorBridge } : {}),
             deadline: nativeDeadline,
-          }, {
-            timeoutMs,
+          };
+          const callNativeComplete = () => this.#nativeToolCall(nativePayload, {
+            timeoutMs: Math.max(1, nativeDeadline - this.#now()),
             idempotent: true,
           });
+          try {
+            envelope = await callNativeComplete();
+          } catch (error) {
+            if (!await this.#nativeViewMigrationRepair(readPayload.viewPath, error)) throw error;
+            nativeViewMigrationRepaired = true;
+            envelope = await callNativeComplete();
+          }
+          if (
+            !nativeViewMigrationRepaired
+            && envelope?.ok === false
+            && await this.#nativeViewMigrationRepair(readPayload.viewPath, envelope?.error?.message || envelope?.error)
+          ) {
+            nativeViewMigrationRepaired = true;
+            envelope = await callNativeComplete();
+          }
           recordAtlasUsageEvent({ ...usage, envelope });
         } catch (err) {
           recordAtlasUsageEvent({
@@ -1115,6 +1139,7 @@ export class AtlasToolExecutor {
             result_transform: resultTransformMs,
             executor_total: Math.max(0, this.#now() - runnerStartedAt),
           },
+          ...(nativeViewMigrationRepaired ? { native_view_migration_repaired: true } : {}),
         });
       }
       if (readPayload && typeof conductor.retrieve === "function") {

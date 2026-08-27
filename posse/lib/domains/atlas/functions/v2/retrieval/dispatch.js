@@ -130,13 +130,14 @@ function dispatchImpl(call, ctx) {
   const validation = validateAtlasToolCall(call);
   if (validation.ok === false) {
     const validationCode = validationErrorCodeForAction(action, validation.errors);
+    const failure = validationFailureForAction(action, call, validation.errors);
     return /** @type {any} */ (
       errorEnvelope({
         action,
         versionId: ctx.versionId,
         code: validationCode,
-        message: `Invalid ATLAS parameters for ${action}: ${validation.errors[0]?.message || "request failed schema validation"}`,
-        details: { errors: validation.errors },
+        message: failure.message,
+        details: failure.details,
       })
     );
   }
@@ -178,9 +179,9 @@ function dispatchImpl(call, ctx) {
         viewPath: ctx.viewPath,
       }));
     case "traverse_ref":
-      return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx, requireTraversal: true }));
+      return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx, action: "traverse_ref", requireTraversal: true }));
     case "fetch_ref":
-      return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx }));
+      return /** @type {any} */ (fetchRef({ versionId: ctx.versionId, params: call, ctx, action: "fetch_ref", requireTraversal: true }));
     case "create_ref":
       return /** @type {any} */ (createHash({ versionId: ctx.versionId, params: call, ctx }));
     case "repo.register":
@@ -433,6 +434,48 @@ function validationErrorCodeForAction(action, errors = []) {
   return "invalid_params";
 }
 
+function validationFailureForAction(action, call, errors = []) {
+  if (action !== "code.window") {
+    return {
+      message: `Invalid ATLAS parameters for ${action}: ${errors[0]?.message || "request failed schema validation"}`,
+      details: { errors },
+    };
+  }
+  const sentFields = Object.keys(call || {}).filter((field) => field !== "action").sort();
+  const symbolId = typeof call?.symbolId === "string" ? call.symbolId : "";
+  const validSymbolId = /^[0-9a-f]{64}:[0-9]+$/u.test(symbolId);
+  const hasIdentifiers = Array.isArray(call?.identifiersToFind) && call.identifiersToFind.length > 0;
+  const missingFields = call?.file
+    ? [
+        ...(!call?.reason ? ["reason"] : []),
+        ...(!hasIdentifiers ? ["identifiersToFind"] : []),
+      ]
+    : (validSymbolId
+      ? (!call?.reason ? ["reason"] : [])
+      : [
+          ...(!call?.reason ? ["reason"] : []),
+          "file",
+          "identifiersToFind",
+        ]);
+  const invalidOpaqueId = errors.some((error) => error?.path === "$.symbolId" && error?.code === "pattern");
+  const acceptedShapes = [
+    "{ reason, symbolId: '<64 lowercase hex>:<local id>' }",
+    "{ reason, file, identifiersToFind: ['identifier'] }",
+  ];
+  const correction = invalidOpaqueId
+    ? "symbolId is not an opaque Atlas ID; provide a valid ID or send the name in identifiersToFind with file."
+    : "Choose the nearest accepted shape and add its missing fields.";
+  return {
+    message: `Invalid ATLAS parameters for code.window: ${correction} Accepted shapes: ${acceptedShapes.join(" or ")} You sent: ${sentFields.join(", ") || "no fields"}; nearest shape needs: ${[...new Set(missingFields)].join(", ") || "field corrections shown below"}.`,
+    details: {
+      errors,
+      acceptedShapes,
+      sentFields,
+      missingFields: [...new Set(missingFields)],
+    },
+  };
+}
+
 const GATEWAY_ACTIONS = Object.freeze(
   Object.fromEntries(
     Object.entries(ATLAS_GATEWAY_ACTION_LISTS).map(([gateway, actions]) => [gateway, new Set(actions)]),
@@ -524,10 +567,10 @@ function dispatchGateway({ gateway, call, ctx }) {
 }
 
 /**
- * @param {{ versionId: string, params: ToolCall, ctx: DispatchContext, requireTraversal?: boolean }} input
+ * @param {{ versionId: string, params: ToolCall, ctx: DispatchContext, action: "fetch_ref" | "traverse_ref", requireTraversal?: boolean }} input
  * @returns {AnyToolResult}
  */
-function fetchRef({ versionId, params, ctx, requireTraversal = false }) {
+function fetchRef({ versionId, params, ctx, action, requireTraversal = false }) {
   try {
     const text = fetchHashRefTool(params, {
       context: {
@@ -542,14 +585,23 @@ function fetchRef({ versionId, params, ctx, requireTraversal = false }) {
     } catch {
       data = { ok: false, error: "invalid_fetch_ref_payload", text };
     }
-    return /** @type {AnyToolResult} */ (/** @type {any} */ (okEnvelope({
-      action: requireTraversal ? "traverse_ref" : "fetch_ref",
-      versionId,
-      data,
-    })));
+    if (data?.ok !== true) {
+      return /** @type {AnyToolResult} */ (/** @type {any} */ (errorEnvelope({
+        action,
+        versionId,
+        code: String(data?.code || "fetch_ref_rejected"),
+        message: String(data?.message || data?.error || "fetch_ref was rejected"),
+        details: {
+          status: "rejected",
+          retryable: data?.retryable === true,
+          fetchRefResult: data,
+        },
+      })));
+    }
+    return /** @type {AnyToolResult} */ (/** @type {any} */ (okEnvelope({ action, versionId, data })));
   } catch (err) {
     return /** @type {AnyToolResult} */ (/** @type {any} */ (errorEnvelope({
-      action: requireTraversal ? "traverse_ref" : "fetch_ref",
+      action,
       versionId,
       code: "fetch_ref_failed",
       message: err?.message || String(err),

@@ -50,6 +50,38 @@ const ATLAS137_ATTEMPT_SCOPED_OBSERVATION_TYPES = new Set([
   "context.headroom_decision",
   "context.headroom_actual",
 ]);
+const RESEARCH_INFRASTRUCTURE_FAILURE_CODES = new Set([
+  "file_not_found",
+  "indexed_file_missing",
+  "repo_root_unavailable",
+  "repository_unavailable",
+  "file_unreadable",
+  "file_read_failed",
+  "native_unavailable",
+  "native_transport_error",
+  "atlas_storage_error",
+  "code_response_too_large",
+  "code_window_response_too_large",
+]);
+export const RESEARCH_INFRASTRUCTURE_REFUND_LIMIT = 2;
+
+export function isResearchInfrastructureFailure(detail = {}) {
+  const code = String(
+    detail?.error_code
+      || detail?.code
+      || detail?.error?.code
+      || "",
+  ).trim().toLowerCase();
+  if (RESEARCH_INFRASTRUCTURE_FAILURE_CODES.has(code)) return true;
+  const text = String(
+    detail?.error_message
+      || detail?.error
+      || detail?.rejection
+      || detail?.message
+      || "",
+  );
+  return /2097152-byte limit|response exceeds 2097152 serialized bytes|\bSQLITE_(?:BUSY|IOERR|CORRUPT|CANTOPEN)\b|repository root .*(?:missing|unavailable)|not (?:present|found) in (?:the )?checkout|\bENOENT\b/iu.test(text);
+}
 
 function _trimToolReplayBucket(bucket, now) {
   if (!bucket) return;
@@ -607,6 +639,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       last_novel_evidence_step: 0,
       stale_steps: 0,
       evidence_identity_count: 0,
+      infrastructure_refunds: 0,
       synthesis_required: false,
       citation_fetches: 0,
       citation_fetch_batches: 0,
@@ -627,7 +660,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       : [useAttempt ? normalizedAttemptId : normalizedJobId];
     const placeholders = RESEARCH_EXPLORATION_OBSERVATION_TYPES.map(() => "?").join(", ");
     const explorationRows = db.prepare(`
-      SELECT observation_type, detail_json
+      SELECT id, observation_type, detail_json
       FROM job_observations
       WHERE ${scopeWhere}
         AND observation_type IN (${placeholders})
@@ -641,10 +674,24 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     const seenEvidenceIdentities = new Set();
     const explorationUnitSteps = new Map();
     const explorationUnitWeights = new Map();
+    const infrastructureRefundDecisions = new Map();
+    let infrastructureRefunds = 0;
+    const isRefundedInfrastructureFailure = (row, detail) => {
+      if (!isResearchInfrastructureFailure(detail)) return false;
+      const rowId = Number(row?.id || 0);
+      if (infrastructureRefundDecisions.has(rowId)) {
+        return infrastructureRefundDecisions.get(rowId);
+      }
+      const refunded = infrastructureRefunds < RESEARCH_INFRASTRUCTURE_REFUND_LIMIT;
+      if (refunded) infrastructureRefunds += 1;
+      infrastructureRefundDecisions.set(rowId, refunded);
+      return refunded;
+    };
     for (const row of explorationRows) {
       if (row.observation_type !== "tool.atlas") continue;
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
+        if (isRefundedInfrastructureFailure(row, detail)) continue;
         const unitId = Number(detail?.research_exploration_unit_version) === 1
           ? String(detail?.research_exploration_unit_id || "").trim().slice(0, 300)
           : "";
@@ -668,7 +715,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         return explorationCount;
       }
       const explicitStep = Number(detail?.research_exploration_step);
-      const step = Number.isSafeInteger(explicitStep) && explicitStep > 0
+      const step = !unitId && Number.isSafeInteger(explicitStep) && explicitStep > 0
         ? Math.max(explorationCount + 1, explicitStep)
         : explorationCount + 1;
       explorationCount = step;
@@ -724,6 +771,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
         if (!isResearchAtlasExplorationAction(detail?.action)) continue;
+        if (isRefundedInfrastructureFailure(row, detail)) continue;
         physicalCallCount += 1;
         if (detail?.symbol_followup_discounted === true) symbolFollowupsDiscounted += 1;
         const explorationStep = explorationStepForDetail(detail);
@@ -794,6 +842,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       last_novel_evidence_step: Math.max(0, lastNovelEvidenceStep),
       stale_steps: Math.max(0, explorationCount - lastNovelEvidenceStep),
       evidence_identity_count: seenEvidenceIdentities.size,
+      infrastructure_refunds: infrastructureRefunds,
       synthesis_required: synthesis?.present === 1,
       citation_fetches: Math.max(0, Number(citationFetches?.count || 0)),
       citation_fetch_batches: Math.max(0, Number(citationFetchBatches?.count || 0)),
@@ -812,6 +861,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       last_novel_evidence_step: 0,
       stale_steps: 0,
       evidence_identity_count: 0,
+      infrastructure_refunds: 0,
       synthesis_required: false,
       citation_fetches: 0,
       citation_fetch_batches: 0,

@@ -785,6 +785,7 @@
  * @property {string[]} identifiersFound
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
+ * @property {string[]} [unresolved_identifiers] Qualified or expression identifiers that could not be mapped to a native identifier in this file.
  * @property {boolean} truncated
  * @property {number} omittedMatchCount        Matches unavailable because the native hard cap omitted them; excludes traversal-backed display paging.
  * @property {number} [contextLinesApplied]  Context lines kept per side after the per-call line budget trimmed every match evenly; absent when nothing was trimmed.
@@ -838,6 +839,7 @@
  * @property {string[]} identifiersReturned
  * @property {string[]} identifiersMissing
  * @property {string[]} identifiersOmitted
+ * @property {string} [degradedReason] Stable auto-narrowing or map-only degradation reason.
  * @property {{reason:"identifiers_not_in_requested_file",requestedFile:string,searchedRepository:true,nextAction:"code.window"}} [redirect] Repository-wide recovery metadata for an all-anchor file miss.
  * @property {Array<{identifier:string,matches:SymbolHit[]}>} [identifierRedirects] Lexical symbol locations found outside the requested file; task text is never used for this recovery search.
  * @property {CodeWindowMap} [map] Bounded orientation for oversized file-mode requests. It supplements rather than replaces the native source selection.

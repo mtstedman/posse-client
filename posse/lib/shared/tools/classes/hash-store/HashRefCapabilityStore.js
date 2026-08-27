@@ -86,10 +86,26 @@ export class HashRefCapabilityStore {
   }
 
   _row(table, ref) {
+    // A promoted traversal intentionally remains usable by later agent calls
+    // in the same attempt. Attempt ids are globally scoped by the queue, and
+    // the caller still re-checks backing-object visibility before delivery;
+    // this fallback is continuity, not cross-attempt capability widening.
     return this.db.prepare(`
       SELECT * FROM ${table}
-      WHERE ref = ? AND scope_key = ?
-    `).get(normalizeHashRefAlias(ref), this.scopeKey);
+      WHERE ref = ?
+        AND (
+          scope_key = ?
+          OR (? IS NOT NULL AND attempt_id = ?)
+        )
+      ORDER BY CASE WHEN scope_key = ? THEN 0 ELSE 1 END, updated_at DESC
+      LIMIT 1
+    `).get(
+      normalizeHashRefAlias(ref),
+      this.scopeKey,
+      this.ids.attemptId,
+      this.ids.attemptId,
+      this.scopeKey,
+    );
   }
 
   traversal(ref) {
@@ -207,10 +223,6 @@ export class HashRefCapabilityStore {
         sourceContentHash,
         viewText,
       });
-      this.db.prepare(`
-        DELETE FROM ${TABLES.traversal}
-        WHERE ref = ? AND scope_key = ?
-      `).run(publicRef, this.scopeKey);
     });
     run();
     return this.evidence(publicRef);

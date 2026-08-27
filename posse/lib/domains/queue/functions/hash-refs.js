@@ -610,6 +610,12 @@ export function discardHashRefTraversalsForAgentCall(agentCallId, opts = {}) {
   return db.prepare(`
     DELETE FROM hash_ref_traversal_refs
     WHERE agent_call_id = ?
+      AND NOT EXISTS (
+        SELECT 1
+        FROM hash_ref_evidence_refs evidence
+        WHERE evidence.ref = hash_ref_traversal_refs.ref
+          AND evidence.scope_key = hash_ref_traversal_refs.scope_key
+      )
   `).run(id).changes;
 }
 

@@ -121,12 +121,17 @@ export class ProviderAttemptLifecycle {
 
     const provider = getProvider(role, executionProvider || undefined);
     const resolveTierModel = (tier) => tierModelName(tier, { role, providerName: executionProvider || undefined });
-    const researchRetrySynthesisTier = job.job_type === "research" && executionPayload?._research_retry_synthesis === true
+    const preserveExecutionProfile = executionPayload?._preserve_execution_profile_on_retry === true;
+    const researchRetrySynthesisTier = job.job_type === "research"
+      && executionPayload?._research_retry_synthesis === true
+      && !preserveExecutionProfile
       ? "cheap"
       : null;
 
     const prelimCount = (job.attempt_count || 0) + 1;
-    let effectiveTier = researchRetrySynthesisTier || provider.escalateTier(job.model_tier, prelimCount, { resolveModel: resolveTierModel });
+    let effectiveTier = preserveExecutionProfile
+      ? job.model_tier
+      : (researchRetrySynthesisTier || provider.escalateTier(job.model_tier, prelimCount, { resolveModel: resolveTierModel }));
     let modelName = job.model_name
       || tierModelName(effectiveTier, { role, providerName: executionProvider || undefined });
 
@@ -140,7 +145,7 @@ export class ProviderAttemptLifecycle {
     const { attemptCount, attempt } = result;
 
     // Recalculate tier if attempt drifted (provider already resolved above with job.provider).
-    if (attemptCount > prelimCount && !researchRetrySynthesisTier) {
+    if (attemptCount > prelimCount && !researchRetrySynthesisTier && !preserveExecutionProfile) {
       effectiveTier = provider.escalateTier(job.model_tier, attemptCount, { resolveModel: resolveTierModel });
       const driftedModelName = job.model_name || resolveTierModel(effectiveTier);
       if (driftedModelName !== modelName) {

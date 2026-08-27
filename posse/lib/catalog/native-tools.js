@@ -1325,6 +1325,54 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   },
 };
 
+// Report-only researcher projection for sessions that have already negotiated
+// compact v3. Runtime validation remains the permissive canonical contract;
+// this provider projection removes pipeline-only metadata and object-form
+// evidence selectors from the per-turn schema tax.
+export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
+  type: "function",
+  name: "agent_handoff",
+  description:
+    "Finish research with a compact report. Put each self-contained finding in claims and cite visible stored refs or surfaced file ranges. Prefer implementation-code evidence. The receipt ends generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      profile: { type: "string", enum: ["researcher.report.v1"] },
+      outcome: { type: "string", enum: ["complete"] },
+      summary: {
+        type: "string",
+        minLength: 1,
+        description: "A compact wireframe that orders or connects the claims.",
+      },
+      claims: {
+        type: "array",
+        minItems: 1,
+        description: "Ordered primary findings; claim N supplies evidence label [EN].",
+        items: {
+          type: "object",
+          properties: {
+            claim: { type: "string", minLength: 1 },
+            evidence: {
+              type: "array",
+              minItems: 1,
+              maxItems: 8,
+              items: {
+                type: "string",
+                pattern: HANDOFF_SELECTOR_STRING_PATTERN,
+                description: "A visible #ref or surfaced path with an optional line range.",
+              },
+            },
+          },
+          required: ["claim", "evidence"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["profile", "outcome", "summary", "claims"],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   type: "function",
   name: "agent_handoff",
@@ -1405,6 +1453,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
 export function getAgentHandoffToolSchemaForRole(role, {
   compactCompletion = false,
   compactV3 = false,
+  compactV4 = false,
 } = {}) {
   if (!compactCompletion) return TOOL_AGENT_HANDOFF;
   const normalizedRole = String(role || "").trim().toLowerCase();
@@ -1414,6 +1463,7 @@ export function getAgentHandoffToolSchemaForRole(role, {
     return compactV3 ? TOOL_AGENT_HANDOFF_ASSESSOR_V3 : TOOL_AGENT_HANDOFF_ASSESSOR;
   }
   if (normalizedRole === "researcher") {
+    if (compactV3 && compactV4) return TOOL_AGENT_HANDOFF_RESEARCHER_V4;
     return compactV3 ? TOOL_AGENT_HANDOFF_RESEARCHER_V3 : TOOL_AGENT_HANDOFF_RESEARCHER;
   }
   if (normalizedRole === "planner") {

@@ -121,7 +121,22 @@ import {
   unlockForAtlasUnavailable,
   isFallbackAtlasPrefetchStatus,
 } from "./deterministic-mcp/gate.js";
-import { resolveAtlasGatewayDedupAdvertise } from "./deterministic-mcp/gate-settings.js";
+import {
+  resolveAtlasGatewayDedupAdvertise,
+  resolveAtlasResearcherDispatcher,
+  resolveAtlasResearcherSchemaDiet,
+  resolveAtlasResearcherTypedDispatcher,
+  resolveAtlasResearcherWorkflow,
+} from "./deterministic-mcp/gate-settings.js";
+import {
+  applyResearcherDispatcherNativeGuidance,
+  applyResearcherTypedNativeToolShape,
+  buildResearcherDispatcherTool,
+  buildResearcherTypedDispatcherTool,
+  buildResearcherWorkflowTool,
+  researcherTypedLanguageLeversForRootEntries,
+} from "./deterministic-mcp/researcher-dispatcher.js";
+import { applyResearcherSchemaDiet } from "./deterministic-mcp/researcher-schema-diet.js";
 import {
   bootConfigFromMcpOAuthClaims,
   buildMcpOAuthClaimsFromBootConfig,
@@ -166,7 +181,6 @@ import {
   RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
-  buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
   createNativeExplorationNoveltyTracker,
   isResearchAtlasCitationFetchAction,
@@ -439,6 +453,19 @@ const RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS = new Set([
   "inspect_file",
   "hash_file",
 ]);
+const ATLAS_RESEARCHER_ESCAPE_HATCH_TOOLS = new Set([
+  "read_file",
+  "list_files",
+  "search_files",
+]);
+// These ATLAS-first denials are temporary admission controls: the native call
+// itself is valid, but it arrived before the required ATLAS discovery state.
+// Return them as model-visible control results so providers do not enter tool
+// error recovery. Permanent source-policy denials remain hard tool errors.
+const TRANSIENT_ATLAS_GATE_CONTROL_REASONS = new Set([
+  "global_atlas_first_required",
+  "indexed_file_discovery_required",
+]);
 
 if (mcpDbPath) {
   setRuntimePathOverrides({ dbPath: mcpDbPath });
@@ -525,6 +552,16 @@ function gatewayScopeState(scopeKey = gateScopeKey, { gateConfiguration = null }
     ownerAtlasGateEventSeqByScope.delete(key);
   }
   return state;
+}
+
+function researcherTypedLanguageLevers(cwd = workspaceCwd) {
+  const root = String(cwd || "").trim();
+  if (!root) return researcherTypedLanguageLeversForRootEntries([]);
+  try {
+    return researcherTypedLanguageLeversForRootEntries(fs.readdirSync(root));
+  } catch {
+    return researcherTypedLanguageLeversForRootEntries([]);
+  }
 }
 
 function assessorToolBudgetDecision(toolName, args = {}) {
@@ -766,6 +803,11 @@ function isStaticAtlasToolName(toolName) {
 }
 
 const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
+const RESEARCHER_TYPED_DISPATCHER_QUALIFIED_ZERO_CALL_NATIVE_TOOLS = new Set([
+  "git_history",
+  "hash_file",
+  "inspect_file",
+]);
 
 function _normalizeAtlasActionForAllowlist(name) {
   const value = String(name || "").trim();
@@ -1423,9 +1465,20 @@ function compactAgentHandoffV3Issued() {
     || remoteToolCatalogPreload?.coordination?.agent_handoff_compact_v3 === true;
 }
 
+function compactAgentHandoffV4Issued() {
+  return isResearcherRole
+    && compactAgentHandoffV3Issued()
+    && (resolveAtlasResearcherSchemaDiet()
+      || (providerName === "codex"
+        && (resolveAtlasResearcherDispatcher()
+          || resolveAtlasResearcherTypedDispatcher()
+          || resolveAtlasResearcherWorkflow())));
+}
+
 addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   compactCompletion: compactAgentHandoffIssued(),
   compactV3: compactAgentHandoffV3Issued(),
+  compactV4: compactAgentHandoffV4Issued(),
 }));
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
@@ -2157,6 +2210,7 @@ function embeddedControlResult(text, kind, trigger = null) {
     content: [{ type: "text", text }],
     isError: false,
     _meta: {
+      posseControlOnly: true,
       posseControlNotices: [embeddedControlNoticeMetadata(kind, text, trigger)],
     },
   };
@@ -2174,8 +2228,8 @@ function embeddedControlResult(text, kind, trigger = null) {
 // suppress another session's notice nor make another session's evidence look
 // stale.
 
-function appendResearchExplorationNotice(text, toolName) {
-  if (!isResearcherRole || !isResearchExplorationTool(toolName)) return text;
+function researchExplorationNoticeResult(text, toolName) {
+  if (!isResearcherRole || !isResearchExplorationTool(toolName)) return { text, kind: null };
   const explorationSteps = Number(researchState.explorationSteps || 0);
   const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
@@ -2191,22 +2245,19 @@ function appendResearchExplorationNotice(text, toolName) {
     researchNoticeFlags.curtain = true;
     notice = buildResearchCurtainCallText({ explorationSteps });
     noticeKind = "research_curtain";
-  } else if (
-    explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
-    && !researchNoticeFlags.midpoint
-  ) {
-    researchNoticeFlags.midpoint = true;
-    notice = buildResearchMidpointAuditText();
-    noticeKind = "research_midpoint";
   }
-  if (!notice) return text;
+  if (!notice) return { text, kind: null };
   recordEmbeddedModelControlNotice(toolName, {
     kind: noticeKind,
     text: `\n\n${notice}`,
     trigger: noticeKind,
     explorationStep: explorationSteps,
   });
-  return `${text}\n\n${notice}`;
+  return { text: `${text}\n\n${notice}`, kind: noticeKind };
+}
+
+function appendResearchExplorationNotice(text, toolName) {
+  return researchExplorationNoticeResult(text, toolName).text;
 }
 
 function chainRead(args) {
@@ -2541,7 +2592,9 @@ for (const schemaName of TOOL_SCHEMA_MAP.keys()) {
   }
 }
 for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
-  TOOL_EXECUTORS.set(toolName, (args) => runNativeToolThroughGate(toolName, args || {}, handler));
+  TOOL_EXECUTORS.set(toolName, (args, execution = {}) => (
+    runNativeToolThroughGate(toolName, args || {}, handler, execution)
+  ));
 }
 
 let activeRuntimeSessionKey = "";
@@ -2628,6 +2681,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
     compactCompletion: compactAgentHandoffIssued(),
     compactV3: compactAgentHandoffV3Issued(),
+    compactV4: compactAgentHandoffV4Issued(),
   }));
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
@@ -2745,7 +2799,9 @@ function rebuildToolExecutors() {
     }
   }
   for (const [toolName, handler] of [...TOOL_EXECUTORS.entries()]) {
-    TOOL_EXECUTORS.set(toolName, (args) => runNativeToolThroughGate(toolName, args || {}, handler));
+    TOOL_EXECUTORS.set(toolName, (args, execution = {}) => (
+      runNativeToolThroughGate(toolName, args || {}, handler, execution)
+    ));
   }
 }
 
@@ -2998,7 +3054,9 @@ function nativeToolGateKey() {
   return `native-tools:${process.platform === "win32" ? normalized.toLowerCase() : normalized}`;
 }
 
-async function runNativeToolThroughGate(toolName, args, handler) {
+async function runNativeToolThroughGate(toolName, args, handler, {
+  atlasEscapeHatchForwarded = false,
+} = {}) {
   const label = `tool.${toolName}`;
   const key = nativeToolGateKey();
   const run = () => handler(args);
@@ -3013,7 +3071,34 @@ async function runNativeToolThroughGate(toolName, args, handler) {
       attempt_id: mcpAttemptId,
       agent_call_id: mcpAgentCallId,
     },
+    ...(atlasEscapeHatchForwarded ? { minChars: 1 } : {}),
   });
+}
+
+function atlasResearcherFacadeActive() {
+  return isResearcherRole
+    && providerName === "codex"
+    && (
+      resolveAtlasResearcherWorkflow()
+      || resolveAtlasResearcherTypedDispatcher()
+      || resolveAtlasResearcherDispatcher()
+    );
+}
+
+function shouldForwardAtlasResearcherEscapeHatch(toolName) {
+  return atlasResearcherFacadeActive()
+    && ATLAS_RESEARCHER_ESCAPE_HATCH_TOOLS.has(String(toolName || ""));
+}
+
+function boundForwardedReadArgs(toolName, args = {}) {
+  if (toolName !== "read_file") return args;
+  const requested = Number(args?.limit);
+  return {
+    ...args,
+    limit: Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, ATLAS_CHAIN_READ_MAX_LINES)
+      : ATLAS_CHAIN_READ_MAX_LINES,
+  };
 }
 
 function atlasLiveBufferMode() {
@@ -3178,6 +3263,7 @@ async function completeNativeToolCall({
   toolInvocation,
   result,
   deferred = false,
+  atlasEscapeHatchForwarded = false,
 }) {
   const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
   const controlNotices = [];
@@ -3212,14 +3298,30 @@ async function completeNativeToolCall({
     });
   }
   if (ok) {
+    if (atlasEscapeHatchForwarded) {
+      const notice = "\n\nServed through the Atlas evidence rails; use the Atlas retrieval surface directly next time.";
+      responseText += notice;
+      controlNotices.push(embeddedControlNoticeMetadata(
+        "atlas_escape_hatch_forwarded",
+        notice,
+        toolName,
+      ));
+      recordEmbeddedModelControlNotice(toolName, {
+        kind: "atlas_escape_hatch_forwarded",
+        text: notice,
+        trigger: toolName,
+        explorationStep: Number(researchState.explorationSteps || 0),
+      });
+    }
     const beforeNotice = responseText;
-    responseText = appendResearchExplorationNotice(responseText, toolName);
+    const noticeResult = researchExplorationNoticeResult(responseText, toolName);
+    responseText = noticeResult.text;
     const suffix = responseText.slice(beforeNotice.length);
     if (suffix) {
       controlNotices.push(embeddedControlNoticeMetadata(
-        "research_exploration_notice",
+        noticeResult.kind,
         suffix,
-        "research_exploration_notice",
+        noticeResult.kind,
       ));
     }
   }
@@ -3359,9 +3461,49 @@ async function handleRequest(msg) {
       sendRemoteToolCatalogError(id, err, "tools/list");
       return;
     }
+    const researcherWorkflow = isResearcherRole
+      && providerName === "codex"
+      && resolveAtlasResearcherWorkflow();
+    const researcherTypedDispatcher = !researcherWorkflow
+      && isResearcherRole
+      && providerName === "codex"
+      && resolveAtlasResearcherTypedDispatcher();
+    const researcherDispatcher = !researcherWorkflow
+      && !researcherTypedDispatcher
+      && isResearcherRole
+      && providerName === "codex"
+      && resolveAtlasResearcherDispatcher();
+    const researcherFacade = researcherWorkflow || researcherTypedDispatcher || researcherDispatcher;
+    const languageLevers = researcherTypedDispatcher
+      ? researcherTypedLanguageLevers(workspaceCwd)
+      : researcherTypedLanguageLeversForRootEntries([]);
+    const researcherTypedPurposeGuidance = researcherTypedDispatcher
+      && languageLevers.purposeGuidance;
+    const researcherTypedSymbolCardGuidance = researcherTypedDispatcher
+      && languageLevers.symbolCardGuidance;
     const nativeToolSchemas = [...TOOL_SCHEMA_MAP.values()]
-      .filter((schema) => !nativeAllowedToolNames || nativeAllowedToolNames.has(schema.name));
-    const nativeTools = nativeToolSchemas.map(buildGatewayNativeToolDescriptor);
+      .filter((schema) => !nativeAllowedToolNames || nativeAllowedToolNames.has(schema.name))
+      // Frozen Atlas192 issued read_file 19 times and every call failed the
+      // Atlas-first/source-access policy. Keep fallback execution available to
+      // every other role and mode, but do not advertise that always-invalid
+      // route beside the typed Atlas read facade.
+      .filter((schema) => !researcherTypedDispatcher || schema.name !== "read_file")
+      // These repository utilities were issued but never called in all 333
+      // qualified Atlas192 turns. Preserve the successfully used list/search
+      // routes and operator feedback, and keep every utility available outside
+      // this default-off typed researcher experiment.
+      .filter((schema) => (
+        !researcherTypedDispatcher
+        || !RESEARCHER_TYPED_DISPATCHER_QUALIFIED_ZERO_CALL_NATIVE_TOOLS.has(schema.name)
+      ));
+    const nativeTools = nativeToolSchemas
+      .map(buildGatewayNativeToolDescriptor)
+      .map((tool) => (researcherTypedDispatcher
+        ? applyResearcherTypedNativeToolShape(tool)
+        : tool))
+      .map((tool) => (researcherFacade
+        ? applyResearcherDispatcherNativeGuidance(tool)
+        : tool));
     const allAtlasTools = atlasAvailable ? getStaticAtlasToolSchemas() : [];
     const atlasToolsRawCount = allAtlasTools.length;
     // Filter to the per-role allowlist so the LLM physically can't see ATLAS
@@ -3372,14 +3514,29 @@ async function handleRequest(msg) {
     // advertisement when the flag is on. Role-scoped paths never carry the
     // gateway names in atlasAllowedActions, so this is a no-op for them.
     const dedupGateways = ownerHotGateway && resolveAtlasGatewayDedupAdvertise();
-    const atlasTools = projectCanonicalTraversalTools(allAtlasTools
-      .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
-      .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
-      .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name))),
+    const researcherSchemaDiet = isResearcherRole
+      && !researcherFacade
+      && resolveAtlasResearcherSchemaDiet();
+    const routedAtlasTools = projectCanonicalTraversalTools(
+      allAtlasTools
+        .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
+        .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
+        .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name))),
       roleName,
       bootConfig?.toolAllowlist?.atlas,
     )
-      .map((tool) => buildFoldedAtlasToolDescriptor(tool, {
+      .filter((tool) => !researcherSchemaDiet || _stripAtlasPrefix(tool?.name) !== "fetch_ref");
+    const dispatcherTool = researcherWorkflow
+      ? buildResearcherWorkflowTool(routedAtlasTools)
+      : (researcherTypedDispatcher
+          ? buildResearcherTypedDispatcherTool(routedAtlasTools, {
+            purposeGuidance: researcherTypedPurposeGuidance,
+            symbolCardGuidance: researcherTypedSymbolCardGuidance,
+          })
+        : (researcherDispatcher ? buildResearcherDispatcherTool(routedAtlasTools) : null));
+    const atlasTools = dispatcherTool
+      ? [dispatcherTool]
+      : routedAtlasTools.map((tool) => buildFoldedAtlasToolDescriptor(tool, {
         role: roleName,
         codeWindowPolicy: bootConfig?.atlas?.codeWindowPolicy || null,
       }));
@@ -3393,7 +3550,9 @@ async function handleRequest(msg) {
         atlasCatalogSource: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
       });
     }
-    const tools = [...nativeTools, ...atlasTools].map(normalizeGatewayToolInputSchema);
+    const tools = [...nativeTools, ...atlasTools]
+      .map(normalizeGatewayToolInputSchema)
+      .map((tool) => (researcherSchemaDiet ? applyResearcherSchemaDiet(tool) : tool));
     appendToolLog({
       event: "tools_list",
       requestId: id ?? null,
@@ -3403,6 +3562,10 @@ async function handleRequest(msg) {
       atlasCountFiltered: atlasToolsRawCount - atlasTools.length,
       toolCatalogSource: (nativeAllowedToolNames || (atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions)) ? "remote" : "local",
       atlasCatalogSource: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
+      researcherTypedPrimaryLanguage: languageLevers.primaryLanguage,
+      researcherTypedDetectedLanguages: languageLevers.detectedLanguages,
+      researcherTypedPurposeGuidance,
+      researcherTypedSymbolCardGuidance,
       tools: tools.map((tool) => tool.name),
     });
     sendMessage(jsonRpcSuccess(id, { tools }));
@@ -3690,13 +3853,27 @@ async function handleRequest(msg) {
     // Route 2: Native tool, but the ATLAS-first gate is active for this role
     // and the tool is still locked. Return a verbose isError so the LLM reads
     // the rule and redirects to an ATLAS call.
+    let atlasEscapeHatchForwarded = false;
     if (!delegatedEvidenceCursor && isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
       const gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
       if (gateDecision.allowed) {
         args = applyNativeReadLineLimit(args, gateDecision);
         // Continue to the native handler below.
+      } else if (shouldForwardAtlasResearcherEscapeHatch(toolName)) {
+        args = boundForwardedReadArgs(toolName, args);
+        atlasEscapeHatchForwarded = true;
+        appendToolLog({
+          event: "atlas_escape_hatch_forwarded",
+          requestId: id ?? null,
+          tool: requestedToolName,
+          canonicalTool: toolName,
+          reason: gateDecision.reason || null,
+        });
+        // Continue to the native handler. The normal native research budget
+        // and hash-ref materializer below keep the result bounded and citable.
       } else {
         const errorText = buildLockedToolError(toolName, { args, cwd: workspaceCwd, scopeKey: gateScopeKey });
+        const transientControl = TRANSIENT_ATLAS_GATE_CONTROL_REASONS.has(gateDecision.reason);
         appendToolLog({
           event: "tool_gated",
           requestId: id ?? null,
@@ -3704,11 +3881,25 @@ async function handleRequest(msg) {
           canonicalTool: toolName,
           reason: gateDecision.reason || null,
           target: gateDecision.target || null,
+          controlOnly: transientControl,
         });
-        sendMessage(jsonRpcSuccess(id, {
-          content: [{ type: "text", text: errorText }],
-          isError: true,
-        }));
+        if (transientControl) {
+          recordEmbeddedModelControlNotice(toolName, {
+            kind: "atlas_first_gate",
+            text: errorText,
+            trigger: gateDecision.reason || "atlas_first_gate",
+          });
+          sendMessage(jsonRpcSuccess(id, embeddedControlResult(
+            errorText,
+            "atlas_first_gate",
+            gateDecision.reason || "atlas_first_gate",
+          )));
+        } else {
+          sendMessage(jsonRpcSuccess(id, {
+            content: [{ type: "text", text: errorText }],
+            isError: true,
+          }));
+        }
         return;
       }
     }
@@ -3761,7 +3952,7 @@ async function handleRequest(msg) {
         });
         return;
       }
-      const result = await handler(args);
+      const result = await handler(args, { atlasEscapeHatchForwarded });
       if (result?.[LIVE_SCOPE_WAIT] === true) {
         scheduleDeferredLiveScopeTool({
           marker: result,
@@ -3796,6 +3987,7 @@ async function handleRequest(msg) {
         start,
         toolInvocation,
         result,
+        atlasEscapeHatchForwarded,
       });
     } catch (err) {
       if (toolName === "agent_handoff") {

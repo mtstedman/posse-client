@@ -4,6 +4,11 @@ import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functio
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp } from "../../../integrations/functions/deterministic-mcp.js";
+import {
+  resolveAtlasResearcherDispatcher,
+  resolveAtlasResearcherTypedDispatcher,
+  resolveAtlasResearcherWorkflow,
+} from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
@@ -45,7 +50,13 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
   });
 }
 
-function buildCodexDeterministicMcpAttachment(serverConfig, { role = "" } = {}) {
+function buildCodexDeterministicMcpAttachment(serverConfig, {
+  role = "",
+  atlasResearcherDispatcher = String(role || "").trim().toLowerCase() === "researcher"
+    && (resolveAtlasResearcherDispatcher()
+      || resolveAtlasResearcherTypedDispatcher()
+      || resolveAtlasResearcherWorkflow()),
+} = {}) {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
   const atlasTools = Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [];
@@ -67,6 +78,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, { role = "" } = {}) 
         lazyTools: [],
         lazyDiscoveryEnabled: false,
         atlasTools: [],
+        atlasResearcherDispatcher: false,
         requiredTools: [],
         contractTools: [],
         configOverrides: [],
@@ -138,6 +150,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, { role = "" } = {}) 
     // call, while DB and future optional services may opt into it here.
     lazyDiscoveryEnabled: lazyTools.length > 0,
     atlasTools,
+    atlasResearcherDispatcher: atlasResearcherDispatcher === true,
     requiredTools: Array.isArray(serverConfig.requiredTools) ? serverConfig.requiredTools : [],
     contractTools,
     configOverrides,
@@ -435,12 +448,23 @@ export function __testBuildCodexDeterministicMcpAttachment(serverConfig, options
 export function buildCodexSystemToolLockdownOverrides({
   disableSystemTools = false,
   disableNativeImageGeneration = false,
+  disableResearcherUtilities = false,
 } = {}) {
   const overrides = [];
   if (disableSystemTools) {
     overrides.push(
       "features.shell_tool=false",
       "features.unified_exec=false",
+    );
+  }
+  if (disableSystemTools && disableResearcherUtilities) {
+    overrides.push(
+      "features.goals=false",
+      "features.view_image=false",
+      "features.multi_agent=false",
+      "features.multi_agent_v2=false",
+      "tools.update_plan.enabled=false",
+      "tools.experimental_request_user_input.enabled=false",
     );
   }
   if (disableNativeImageGeneration) {

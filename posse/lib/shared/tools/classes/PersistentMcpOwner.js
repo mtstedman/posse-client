@@ -30,6 +30,7 @@ import {
   assessorToolBudgetApplies,
   assessorToolCallCeilingDecision,
 } from "../functions/assessor-tool-budget.js";
+import { compactResearcherTypedAtlasText } from "../functions/researcher-typed-result-compaction.js";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
@@ -37,7 +38,21 @@ import {
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
+import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
+import { resolveWorkflowRefs } from "../../../domains/atlas/functions/v2/retrieval/workflow.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
+import {
+  resolveAtlasResearcherDispatcher,
+  resolveAtlasResearcherTypedDispatcher,
+  resolveAtlasResearcherWorkflow,
+} from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
+import {
+  buildResearcherTypedReadyCallBatchingText,
+  normalizeResearcherWorkflowFacadeArgs,
+  researcherTypedLanguageLeversForRootEntries,
+  researcherWorkflowActions,
+  researcherWorkflowMaxSteps,
+} from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 import {
   operatorFeedbackDeliveryForJob,
   operatorFeedbackDeliveryText,
@@ -68,12 +83,18 @@ import { classifyMcpToolResult } from "../../../domains/integrations/functions/d
 import {
   recordObservation,
   recordToolUseObservations,
+  isResearchInfrastructureFailure,
+  RESEARCH_INFRASTRUCTURE_REFUND_LIMIT,
   researchExplorationObservationStatus,
   researchSurveyCoverageStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
+  fetchHashRefEvidenceForContext,
+  issueHashRefTraversalForContext,
+  listHashRefTraversalsForContext,
+} from "../../../domains/queue/functions/hash-refs.js";
+import {
   RESEARCH_CITATION_FETCH_GATE_ENABLED,
-  RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES,
   RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
@@ -82,9 +103,7 @@ import {
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
   buildResearchEarlyFetchBatchingText,
-  buildResearchEarlyFetchSynthesisAuditText,
   buildResearchFinalFetchBatchText,
-  buildResearchMidpointAuditText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
@@ -94,7 +113,6 @@ import {
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool, hashRefTraversalInputs } from "../functions/hash-adder.js";
-import { listHashRefTraversalsForContext } from "../../../domains/queue/functions/hash-refs.js";
 import {
   bindAgentAttachmentToSignedContract,
   isInternalAtlasAction,
@@ -453,6 +471,7 @@ const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
 const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
+const ATLAS_RESEARCHER_WORKFLOW_ACTIONS = new Set(researcherWorkflowActions());
 
 // Research admission/classification must see the REAL action: gateway wrappers
 // (atlas_query/atlas_code/atlas_repo/...) carry it nested in args.action, and
@@ -485,7 +504,6 @@ function researchNoticeFlagsFor(session) {
       curtain: false,
       extension: false,
       earlyFetchBatching: false,
-      earlyFetchSynthesisAudit: false,
     };
     researchNoticeFlagState.set(key, flags);
     while (researchNoticeFlagState.size > RESEARCH_NOTICE_FLAG_LIMIT) {
@@ -682,9 +700,20 @@ function suiteToolAllowlistPolicy(bootConfig = {}) {
       suites[suiteName] = new Set(names.map((name) => String(name || "").trim()).filter(Boolean));
     }
   }
+  const atlasResearcherWorkflow = String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
+    && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
+    && resolveAtlasResearcherWorkflow();
+  const atlasResearcherTypedDispatcher = String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
+    && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
+    && resolveAtlasResearcherTypedDispatcher();
   return {
     suites,
     source: source ? "token-allowlist" : "missing-token-allowlist",
+    atlasResearcherDispatcher: String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
+      && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
+      && (resolveAtlasResearcherDispatcher() || atlasResearcherTypedDispatcher || atlasResearcherWorkflow),
+    atlasResearcherTypedDispatcher,
+    atlasResearcherWorkflow,
   };
 }
 
@@ -702,6 +731,27 @@ function toolAllowedByPolicy(policy, toolName, args = {}) {
   const allowed = policy?.suites?.[requested.suite] || new Set();
   if (requested.suite === "atlas") {
     if (!requested.name || isInternalAtlasAction(requested.name)) return false;
+    if (policy?.atlasResearcherDispatcher === true && requested.name === "query") {
+      if (!requested.nested) {
+        return [...allowed].some((action) => action && !isInternalAtlasAction(action));
+      }
+      if (requested.nested === "workflow") {
+        const normalized = normalizeResearcherWorkflowFacadeArgs(args);
+        if (!normalized.ok) return false;
+        const steps = normalized.args.steps;
+        return policy?.atlasResearcherWorkflow === true
+          && steps.length >= 2
+          && steps.length <= researcherWorkflowMaxSteps()
+          && steps.every((step) => {
+            if (!step || typeof step !== "object" || Array.isArray(step)) return false;
+            const action = normalizeAtlasActionName(step.action);
+            return ATLAS_RESEARCHER_WORKFLOW_ACTIONS.has(action)
+              && !isInternalAtlasAction(action)
+              && allowed.has(action);
+          });
+      }
+      return !isInternalAtlasAction(requested.nested) && allowed.has(requested.nested);
+    }
     if (!allowed.has(requested.name)) return false;
     if (ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name) && requested.nested) {
       return !isInternalAtlasAction(requested.nested) && allowed.has(requested.nested);
@@ -709,6 +759,502 @@ function toolAllowedByPolicy(policy, toolName, args = {}) {
     return true;
   }
   return !!requested.name && allowed.has(requested.name);
+}
+
+const ATLAS_SYMBOL_HANDLE_PATTERN = /^s[1-9][0-9]{0,5}$/;
+const ATLAS_CANONICAL_SYMBOL_ID_PATTERN = /^[0-9a-f]{64}:[0-9]+$/;
+
+function atlasSymbolHandleState(session) {
+  if (!session?._atlasSymbolHandles) {
+    session._atlasSymbolHandles = {
+      next: 1,
+      byHandle: new Map(),
+      bySymbolId: new Map(),
+    };
+  }
+  return session._atlasSymbolHandles;
+}
+
+function atlasSymbolHandleForId(session, symbolId) {
+  if (!session || !ATLAS_CANONICAL_SYMBOL_ID_PATTERN.test(String(symbolId || ""))) return null;
+  const state = atlasSymbolHandleState(session);
+  const prior = state.bySymbolId.get(symbolId);
+  if (prior) return prior;
+  if (state.next > 999999) return null;
+  const handle = `s${state.next}`;
+  state.next += 1;
+  state.byHandle.set(handle, symbolId);
+  state.bySymbolId.set(symbolId, handle);
+  return handle;
+}
+
+function resolveAtlasSymbolHandle(session, value) {
+  const symbolId = String(value || "");
+  if (!ATLAS_SYMBOL_HANDLE_PATTERN.test(symbolId)) return { ok: true, value };
+  const resolved = session?._atlasSymbolHandles?.byHandle?.get(symbolId) || null;
+  return resolved
+    ? { ok: true, value: resolved }
+    : { ok: false, handle: symbolId };
+}
+
+function appendResearcherSymbolHandles(result, session) {
+  if (sessionToolPolicy(session)?.atlasResearcherTypedDispatcher !== true || result?.isError === true) {
+    return result;
+  }
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  let issued = 0;
+  const text = first.text.replace(
+    /("symbolId"\s*:\s*")([0-9a-f]{64}:[0-9]+)(")/g,
+    (match, prefix, symbolId, suffix) => {
+      const handle = atlasSymbolHandleForId(session, symbolId);
+      if (!handle) return match;
+      issued += 1;
+      return `${prefix}${symbolId}${suffix},"symbolHandle":"${handle}"`;
+    },
+  );
+  if (issued === 0 || text === first.text) return result;
+  return annotateOwnerResultTransform({
+    ...result,
+    content: [{ ...first, text }, ...result.content.slice(1)],
+  }, {
+    kind: "atlas_symbol_handles",
+    issued,
+    scope: "job_bound_agent_session",
+    before_chars: first.text.length,
+    after_chars: text.length,
+  });
+}
+
+function compactResearcherTypedAtlasResult(result, session, toolName, toolArgs = {}) {
+  if (
+    sessionToolPolicy(session)?.atlasResearcherTypedDispatcher !== true
+    || researcherTypedLanguageLeversForSession(session).resultCompaction !== true
+    || result?.isError === true
+  ) {
+    return result;
+  }
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  const compacted = compactResearcherTypedAtlasText(first.text, {
+    action: requested.suite === "atlas" ? requested.name : null,
+  });
+  if (!compacted) return result;
+  return annotateOwnerResultTransform({
+    ...result,
+    content: [{ ...first, text: compacted.text }, ...result.content.slice(1)],
+  }, {
+    kind: "atlas_typed_result_compaction",
+    action: requested.name || toolName,
+    removed_canonical_symbol_ids: compacted.removedCanonicalSymbolIds,
+    removed_digest_fields: compacted.removedDigestFields,
+    removed_default_fields: compacted.removedDefaultFields,
+    before_chars: first.text.length,
+    after_chars: compacted.text.length,
+  });
+}
+
+const TYPED_FLAT_WINDOW_FIELDS = new Set([
+  "file",
+  "granularity",
+  "identifiersToFind",
+  "maxTokens",
+  "symbolId",
+]);
+
+function normalizeResearcherTypedDispatcherEnvelope(policy, toolName, toolArgs = {}) {
+  if (policy?.atlasResearcherTypedDispatcher !== true) {
+    return { toolArgs, transforms: [] };
+  }
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  if (
+    requested.suite !== "atlas"
+    || requested.name !== "query"
+    || requested.nested
+    || !toolArgs
+    || typeof toolArgs !== "object"
+    || Array.isArray(toolArgs)
+    || Object.prototype.hasOwnProperty.call(toolArgs, "action")
+    || Object.prototype.hasOwnProperty.call(toolArgs, "args")
+  ) {
+    return { toolArgs, transforms: [] };
+  }
+  if (Object.keys(toolArgs).some((field) => !TYPED_FLAT_WINDOW_FIELDS.has(field))) {
+    return { toolArgs, transforms: [] };
+  }
+  const flatArgs = /** @type {Record<string, any>} */ (toolArgs);
+  const hasSymbol = typeof flatArgs.symbolId === "string" && flatArgs.symbolId.trim() !== "";
+  const hasAnchoredFile = typeof flatArgs.file === "string"
+    && flatArgs.file.trim() !== ""
+    && Array.isArray(flatArgs.identifiersToFind)
+    && flatArgs.identifiersToFind.length > 0;
+  if (hasSymbol === hasAnchoredFile) return { toolArgs, transforms: [] };
+  return {
+    toolArgs: { action: "code.window", args: { ...toolArgs } },
+    transforms: [{
+      kind: "atlas_typed_call_cleanup",
+      cleanup: "infer_unambiguous_flat_action",
+      inferred_action: "code.window",
+    }],
+  };
+}
+
+function normalizeTypedWindowSymbolRef(action, supplied = {}) {
+  if (
+    action !== "code.window"
+    || supplied.symbolId != null
+    || supplied.file != null
+    || !supplied.symbolRef
+    || typeof supplied.symbolRef !== "object"
+    || Array.isArray(supplied.symbolRef)
+  ) {
+    return { supplied, transforms: [] };
+  }
+  const symbolRef = supplied.symbolRef;
+  const fields = Object.keys(symbolRef);
+  if (
+    fields.some((field) => !["file", "kind", "name"].includes(field))
+    || typeof symbolRef.file !== "string"
+    || symbolRef.file.trim() === ""
+    || typeof symbolRef.name !== "string"
+    || symbolRef.name.trim() === ""
+    || (symbolRef.kind != null && (typeof symbolRef.kind !== "string" || symbolRef.kind.trim() === ""))
+  ) {
+    return { supplied, transforms: [] };
+  }
+  const { symbolRef: _symbolRef, ...rest } = supplied;
+  return {
+    supplied: {
+      ...rest,
+      file: symbolRef.file,
+      identifiersToFind: [symbolRef.name],
+    },
+    transforms: [{
+      kind: "atlas_typed_call_cleanup",
+      cleanup: "window_symbol_ref_to_file_anchor",
+      symbol_name: symbolRef.name,
+      symbol_kind: symbolRef.kind || null,
+    }],
+  };
+}
+
+function normalizeTypedFileWindowOrientation(action, supplied = {}) {
+  if (
+    action !== "code.window"
+    || typeof supplied.file !== "string"
+    || supplied.file.trim() === ""
+    || supplied.granularity !== "fileWindow"
+    || supplied.symbolId != null
+    || (Array.isArray(supplied.identifiersToFind) && supplied.identifiersToFind.length > 0)
+    || Object.keys(supplied).some((field) => ![
+      "file",
+      "granularity",
+      "identifiersToFind",
+      "maxTokens",
+    ].includes(field))
+  ) {
+    return { action, supplied, transforms: [] };
+  }
+  return {
+    action: "code.skeleton",
+    supplied: {
+      file: supplied.file,
+      ...(supplied.maxTokens == null ? {} : { maxTokens: supplied.maxTokens }),
+    },
+    transforms: [{
+      kind: "atlas_typed_call_cleanup",
+      cleanup: "window_file_only_to_skeleton_orientation",
+    }],
+  };
+}
+
+function researcherTypedLanguageLeversForSession(session) {
+  const cwd = String(session?.bootConfig?.cwd || "").trim();
+  if (!cwd) return researcherTypedLanguageLeversForRootEntries([]);
+  try {
+    return researcherTypedLanguageLeversForRootEntries(fs.readdirSync(cwd));
+  } catch {
+    return researcherTypedLanguageLeversForRootEntries([]);
+  }
+}
+
+function normalizeTypedAnchoredFileWindowBudget(session, action, supplied = {}) {
+  const maxTokens = researcherTypedLanguageLeversForSession(session).anchoredFileWindowMaxTokens;
+  const requestedMaxTokens = Number(supplied.maxTokens);
+  if (
+    action !== "code.window"
+    || !Number.isInteger(maxTokens)
+    || maxTokens <= 0
+    || typeof supplied.file !== "string"
+    || supplied.file.trim() === ""
+    || supplied.symbolId != null
+    || !Array.isArray(supplied.identifiersToFind)
+    || supplied.identifiersToFind.length === 0
+    || (Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0 && requestedMaxTokens <= maxTokens)
+  ) {
+    return { supplied, transforms: [] };
+  }
+  return {
+    supplied: { ...supplied, maxTokens },
+    transforms: [{
+      kind: "atlas_typed_call_shape",
+      shape: "bound_anchored_file_window",
+      requested_max_tokens: Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
+        ? requestedMaxTokens
+        : null,
+      effective_max_tokens: maxTokens,
+    }],
+  };
+}
+
+function promotedTraversalRefsFor(session) {
+  if (!session) return new Set();
+  if (!(session?._atlasPromotedTraversalRefs instanceof Set)) {
+    session._atlasPromotedTraversalRefs = new Set();
+  }
+  return session._atlasPromotedTraversalRefs;
+}
+
+function noteResearcherTypedTraversalPromotion(session, toolName, toolArgs = {}, result = null) {
+  if (
+    sessionToolPolicy(session)?.atlasResearcherTypedDispatcher !== true
+    || requestedToolPolicyName(toolName, toolArgs).name !== "traverse_ref"
+    || result?.isError === true
+    || typeof toolArgs.traversal_ref !== "string"
+  ) return;
+  const rendered = firstStructuredJsonValue(result?.content?.[0]?.text || "").value;
+  if (rendered?.ok !== true || rendered?.evidence_ref?.ref !== toolArgs.traversal_ref) return;
+  const refs = promotedTraversalRefsFor(session);
+  refs.add(toolArgs.traversal_ref);
+  while (refs.size > 512) refs.delete(refs.values().next().value);
+}
+
+function normalizePromotedTraversalAlias(session, action, supplied = {}) {
+  const ref = typeof supplied.traversal_ref === "string"
+    ? supplied.traversal_ref.trim()
+    : "";
+  const hasAlternateSelector = Number(supplied.offset || 0) > 0
+    || (typeof supplied.search === "string" && supplied.search !== "");
+  if (
+    action !== "traverse_ref"
+    || !ref
+    || !hasAlternateSelector
+    || !promotedTraversalRefsFor(session).has(ref)
+    || supplied.reaccessAuthorization != null
+  ) {
+    return { supplied, transforms: [] };
+  }
+  const context = hashRefToolContext(session);
+  const evidence = fetchHashRefEvidenceForContext(context, ref);
+  if (!evidence?.found || !evidence.source || !evidence.capability) {
+    return { supplied, transforms: [] };
+  }
+  const selector = typeof supplied.search === "string" && supplied.search !== ""
+    ? {
+      mode: "search",
+      search: supplied.search,
+      search_mode: supplied.search_mode || "auto",
+      offset: Math.max(0, Number(supplied.offset) || 0),
+      ...(supplied.limit != null ? { limit: Number(supplied.limit) } : {}),
+    }
+    : {
+      mode: "offset",
+      offset: Math.max(0, Number(supplied.offset) || 0),
+      ...(supplied.limit != null ? { limit: Number(supplied.limit) } : {}),
+    };
+  const traversalRequest = {
+    sourceRef: evidence.source.ref,
+    selector,
+    sourceContentHash: evidence.source.content_hash || null,
+  };
+  const issued = issueHashRefTraversalForContext(context, traversalRequest);
+  if (!issued?.ok || !issued.capability?.ref) return { supplied, transforms: [] };
+  return {
+    supplied: { ...supplied, traversal_ref: issued.capability.ref },
+    transforms: [{
+      kind: "atlas_typed_call_cleanup",
+      cleanup: "promoted_traversal_alias_to_authorized_slice",
+      selector_mode: selector.mode,
+      selector_offset: selector.offset,
+    }],
+  };
+}
+
+function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, session = null) {
+  const envelope = normalizeResearcherTypedDispatcherEnvelope(policy, toolName, toolArgs);
+  toolArgs = envelope.toolArgs;
+  const transforms = [...envelope.transforms];
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  if (
+    policy?.atlasResearcherDispatcher !== true
+    || requested.suite !== "atlas"
+    || requested.name !== "query"
+    || !requested.nested
+  ) {
+    return { toolName, toolArgs, transforms };
+  }
+  if (requested.nested === "workflow") {
+    const normalized = normalizeResearcherWorkflowFacadeArgs(toolArgs);
+    return {
+      toolName: "atlas.workflow",
+      toolArgs: normalized.ok ? normalized.args : {},
+      transforms,
+    };
+  }
+  let supplied = toolArgs?.args && typeof toolArgs.args === "object" && !Array.isArray(toolArgs.args)
+    ? toolArgs.args
+    : {};
+  const symbolRefCleanup = normalizeTypedWindowSymbolRef(requested.nested, supplied);
+  supplied = symbolRefCleanup.supplied;
+  transforms.push(...symbolRefCleanup.transforms);
+  const fileWindowCleanup = normalizeTypedFileWindowOrientation(requested.nested, supplied);
+  const routedAction = fileWindowCleanup.action;
+  supplied = fileWindowCleanup.supplied;
+  transforms.push(...fileWindowCleanup.transforms);
+  const anchoredWindowBudget = normalizeTypedAnchoredFileWindowBudget(
+    session,
+    routedAction,
+    supplied,
+  );
+  supplied = anchoredWindowBudget.supplied;
+  transforms.push(...anchoredWindowBudget.transforms);
+  const traversalCleanup = normalizePromotedTraversalAlias(session, routedAction, supplied);
+  supplied = traversalCleanup.supplied;
+  transforms.push(...traversalCleanup.transforms);
+  const schema = atlasDescriptorSchemaForAction(routedAction);
+  const properties = schema?.properties && typeof schema.properties === "object"
+    ? schema.properties
+    : {};
+  const routedArgs = {};
+  for (const [key, value] of Object.entries(supplied)) {
+    if (!Object.prototype.hasOwnProperty.call(properties, key)) continue;
+    // expectedLines is optional retrieval telemetry rather than a selector.
+    // Omitting it avoids rejecting qualitative provider guesses while leaving
+    // the source selection and canonical action validation unchanged.
+    if (routedAction === "code.window" && key === "expectedLines") continue;
+    if (key === "symbolId") {
+      const resolved = resolveAtlasSymbolHandle(session, value);
+      if (!resolved.ok) {
+        return {
+          toolName: `atlas.${routedAction}`,
+          toolArgs: supplied,
+          routingError: `Unknown Atlas symbolHandle ${resolved.handle}; reuse only a handle returned in this job-bound agent session`,
+          transforms,
+        };
+      }
+      routedArgs[key] = resolved.value;
+    } else if (key === "symbolIds" && Array.isArray(value)) {
+      const resolved = value.map((entry) => resolveAtlasSymbolHandle(session, entry));
+      const unknown = resolved.find((entry) => !entry.ok);
+      if (unknown) {
+        return {
+          toolName: `atlas.${routedAction}`,
+          toolArgs: supplied,
+          routingError: `Unknown Atlas symbolHandle ${unknown.handle}; reuse only a handle returned in this job-bound agent session`,
+          transforms,
+        };
+      }
+      routedArgs[key] = resolved.map((entry) => entry.value);
+    } else {
+      routedArgs[key] = value;
+    }
+  }
+  if (
+    policy?.atlasResearcherTypedDispatcher === true
+    && routedAction === "code.window"
+    && routedArgs.reason == null
+  ) {
+    // The typed facade itself proves that this is a researcher-owned exact
+    // source read. Avoid billing the provider for restating that invariant on
+    // every scalar window while retaining the canonical native contract.
+    routedArgs.reason = "typed researcher exact-source read";
+  }
+  return {
+    toolName: `atlas.${routedAction}`,
+    toolArgs: routedArgs,
+    transforms,
+  };
+}
+
+function firstStructuredJsonValue(text = "") {
+  const source = String(text || "");
+  const start = source.search(/[\[{]/u);
+  if (start < 0) return { value: null, remainder: source.trim() };
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === "\"") quoted = false;
+      continue;
+    }
+    if (char === "\"") {
+      quoted = true;
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    else if (char === "}" || char === "]") {
+      depth -= 1;
+      if (depth !== 0) continue;
+      try {
+        return {
+          value: JSON.parse(source.slice(start, index + 1)),
+          remainder: `${source.slice(0, start)}${source.slice(index + 1)}`.trim(),
+        };
+      } catch {
+        return { value: null, remainder: source.trim() };
+      }
+    }
+  }
+  return { value: null, remainder: source.trim() };
+}
+
+function researcherWorkflowStepOutput(result = null) {
+  const text = Array.isArray(result?.content)
+    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").filter(Boolean).join("\n")
+    : "";
+  const parsed = firstStructuredJsonValue(text);
+  return {
+    value: parsed.value ?? (text ? { text } : null),
+    ...(parsed.remainder ? { remainder: parsed.remainder } : {}),
+  };
+}
+
+function researcherWorkflowInputProblem(toolArgs = {}) {
+  const allowedKeys = new Set(["steps", "onError"]);
+  const unknownKey = Object.keys(toolArgs || {}).find((key) => !allowedKeys.has(key));
+  if (unknownKey) return `workflow field is not allowed: ${unknownKey}`;
+  if (toolArgs.onError != null && toolArgs.onError !== "stop") return "workflow onError must be stop";
+  const steps = Array.isArray(toolArgs.steps) ? toolArgs.steps : [];
+  if (steps.length < 2 || steps.length > researcherWorkflowMaxSteps()) {
+    return `workflow requires 2-${researcherWorkflowMaxSteps()} steps`;
+  }
+  const ids = new Set();
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    if (!step || typeof step !== "object" || Array.isArray(step)) return `workflow step ${index} must be an object`;
+    const stepKeys = new Set(["id", "action", "args", "maxResponseTokens"]);
+    const unknownStepKey = Object.keys(step).find((key) => !stepKeys.has(key));
+    if (unknownStepKey) return `workflow step ${index} field is not allowed: ${unknownStepKey}`;
+    if (step.maxResponseTokens != null) return `workflow step ${index} maxResponseTokens is not supported by the owner-routed facade`;
+    const action = normalizeAtlasActionName(step.action);
+    if (!ATLAS_RESEARCHER_WORKFLOW_ACTIONS.has(action)) return `workflow step ${index} action is not allowed: ${action}`;
+    if (!step.args || typeof step.args !== "object" || Array.isArray(step.args)) return `workflow step ${index} args must be an object`;
+    if (action === "traverse_ref" && Number(step.args.limit || 0) > 20_000) {
+      return `workflow step ${index} traverse_ref limit exceeds 20000`;
+    }
+    if (step.id != null) {
+      const id = String(step.id || "").trim();
+      if (!id) return `workflow step ${index} id must be non-empty`;
+      if (ids.has(id)) return `workflow step id must be unique: ${id}`;
+      ids.add(id);
+    }
+  }
+  return "";
 }
 
 function filterToolsListMessage(message, policy) {
@@ -886,6 +1432,41 @@ function deliveredTraversalRefSet(session) {
     deliveredTraversalRefsBySession.set(session, delivered);
   }
   return delivered;
+}
+
+function fetchRefMcpPayload(text) {
+  const value = String(text || "");
+  let data;
+  try {
+    data = JSON.parse(value);
+  } catch {
+    data = {
+      ok: false,
+      code: "invalid_fetch_ref_payload",
+      error: "fetch_ref returned an invalid result payload",
+    };
+  }
+  if (data?.ok === true) return mcpToolTextPayload(value);
+
+  const code = String(data?.code || "fetch_ref_rejected");
+  const message = String(data?.message || data?.error || "fetch_ref was rejected");
+  const structured = {
+    code,
+    message,
+    details: {
+      status: "rejected",
+      retryable: data?.retryable === true,
+      ...(data?.classification ? { classification: String(data.classification) } : {}),
+    },
+  };
+  return {
+    // Preserve the existing model-visible payload exactly. The failure bit and
+    // structured channels make provider/owner accounting truthful.
+    content: [{ type: "text", text: value }],
+    isError: true,
+    structuredContent: { error: structured, data },
+    _meta: { atlasError: structured, fetchRefResult: data },
+  };
 }
 
 function createRefMcpPayload(data = {}) {
@@ -1313,7 +1894,7 @@ function recordSurveyAwareSkeletonRedirect(session, toolName, toolArgs, result) 
 }
 
 function appendOwnerResearchFinalFetchNotice(result, admission) {
-  if (!admission?.citationFetch || admission.researchPhase !== "synthesis") return result;
+  if (result?.isError === true || !admission?.citationFetch || admission.researchPhase !== "synthesis") return result;
   const notice = buildResearchFinalFetchBatchText();
   return appendOwnerModelControlNotice(result, `\n\n${notice}`, {
     kind: "research_final_fetch_batch",
@@ -1345,10 +1926,9 @@ function requestedFetchRefCount(args = {}) {
 }
 
 function appendOwnerResearchEarlyFetchNotice(result, session, args, admission) {
-  if (!admission?.citationFetch || admission.researchPhase !== "exploration") return result;
+  if (result?.isError === true || !admission?.citationFetch || admission.researchPhase !== "exploration") return result;
   const flags = researchNoticeFlagsFor(session);
   const refCount = requestedFetchRefCount(args);
-  const fetchBatches = Math.max(0, Number(admission.explorationFetchBatches || 0)) + 1;
   let next = result;
   if (refCount === 1 && !flags.earlyFetchBatching) {
     flags.earlyFetchBatching = true;
@@ -1357,21 +1937,32 @@ function appendOwnerResearchEarlyFetchNotice(result, session, args, admission) {
       trigger: "exploration_singleton_fetch",
     });
   }
-  if (
-    fetchBatches >= RESEARCH_EARLY_FETCH_SYNTHESIS_AUDIT_BATCHES
-    && !flags.earlyFetchSynthesisAudit
-  ) {
-    flags.earlyFetchSynthesisAudit = true;
-    next = appendOwnerModelControlNotice(
-      next,
-      `\n\n${buildResearchEarlyFetchSynthesisAuditText({ fetchBatches })}`,
-      {
-        kind: "research_fetch_synthesis_audit",
-        trigger: "exploration_fetch_batch_threshold",
-      },
-    );
-  }
   return next;
+}
+
+function appendOwnerResearcherTypedReadyCallBatchingNotice(result, session) {
+  const boot = session?.bootConfig || {};
+  if (
+    result?.isError === true
+    || String(boot.role || "").toLowerCase() !== "researcher"
+    || String(boot.providerName || "").toLowerCase() !== "codex"
+    || !resolveAtlasResearcherTypedDispatcher()
+  ) {
+    return result;
+  }
+  const languageLevers = researcherTypedLanguageLeversForSession(session);
+  if (!languageLevers.readyCallBatching) return result;
+  const flags = researchNoticeFlagsFor(session);
+  if (flags.typedReadyCallBatching) return result;
+  flags.typedReadyCallBatching = true;
+  return appendOwnerModelControlNotice(
+    result,
+    `\n\n${buildResearcherTypedReadyCallBatchingText()}`,
+    {
+      kind: "research_typed_ready_call_batching",
+      trigger: `language:${languageLevers.primaryLanguage}`,
+    },
+  );
 }
 
 function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) {
@@ -1420,7 +2011,7 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 }
 
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
-  if (!admission?.tracked || admission.citationFetch) return result;
+  if (result?.isError === true || !admission?.tracked || admission.citationFetch) return result;
   const explorationSteps = admission.explorationUnitWeight === 0
     ? admission.explorationSteps
     : (admission.assignedExplorationStep ?? admission.explorationSteps + 1);
@@ -1461,13 +2052,6 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
       explorationSteps: callSteps >= physicalCurtainStart ? callSteps : explorationSteps,
     });
     noticeKind = "research_curtain";
-  } else if (
-    explorationSteps >= RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS
-    && !flags.midpoint
-  ) {
-    flags.midpoint = true;
-    notice = buildResearchMidpointAuditText();
-    noticeKind = "research_midpoint";
   }
   if (!notice) return result;
   return appendOwnerModelControlNotice(result, `\n\n${notice}`, {
@@ -1583,6 +2167,7 @@ function appendOwnerOperatorFeedbackDelivery(result, session, toolName = "") {
 function mcpToolCallSuccess(response = null) {
   const result = response?.result;
   if (!result || result.isError === true) return false;
+  if (result?._meta?.posseControlOnly === true) return false;
   const text = Array.isArray(result?.content)
     ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
     : "";
@@ -1866,6 +2451,23 @@ function mcpToolResultErrorText(result = null) {
   return capString(contentText || "ATLAS tool returned an error", 700);
 }
 
+function ownerToolStructuredError(result = null, error = null) {
+  const structured = result?.structuredContent?.error || result?._meta?.atlasError || null;
+  const code = String(structured?.code || error?.code || "").trim() || null;
+  const message = String(
+    structured?.message
+      || error?.message
+      || mcpToolResultErrorText(result)
+      || "",
+  ).trim() || null;
+  const status = String(structured?.details?.status || "").trim() || null;
+  return {
+    ...(code ? { error_code: code } : {}),
+    ...(message ? { error_message: message } : {}),
+    ...(status ? { error_status: status } : {}),
+  };
+}
+
 function recordOwnerModelControlNotice(session, toolName, notice = {}) {
   const boot = session?.bootConfig || {};
   try {
@@ -1934,6 +2536,9 @@ function recordOwnerToolObservation({
   const errorText = error
     ? capString(error?.message || String(error), 700)
     : mcpToolResultErrorText(result);
+  const structuredError = ownerToolStructuredError(result, error);
+  const infrastructureFailure = (error || result?.isError === true)
+    && isResearchInfrastructureFailure(structuredError);
   const evidenceIdentities = ownerAtlasEvidenceIdentities({
     session,
     toolName,
@@ -1996,6 +2601,8 @@ function recordOwnerToolObservation({
             is_error: result?.isError === true,
             over_client_clip: resultChars > CLIENT_RESULT_CLIP_CHARS,
           },
+          ...structuredError,
+          ...(infrastructureFailure ? { infrastructure_failure: true } : {}),
         },
       }],
     });
@@ -2244,6 +2851,8 @@ class PersistentMcpSession {
     this._atlasGateEventSeq = 0;
     this._atlasGateEvents = [];
     this._subAgentRouting = createSubAgentRoutingState();
+    this._atlasSymbolHandles = null;
+    this._atlasPromotedTraversalRefs = new Set();
   }
 
   _newAttachProof() {
@@ -2283,6 +2892,7 @@ class PersistentMcpSession {
         this._atlasGateEventSeq = 0;
         this._atlasGateEvents = [];
         this._subAgentRouting = createSubAgentRoutingState();
+        this._atlasSymbolHandles = null;
       }
     }
     if (serverSpec) this.serverSpec = serverSpec;
@@ -2710,6 +3320,7 @@ export class PersistentMcpOwner {
     this._activeResearchAtlasBatches = new Map();
     this._researchAdmissionReservations = new Map();
     this._researchCallReservations = new Map();
+    this._researchInfrastructureRefundReservations = new Map();
     this._researchExplorationUnitSequence = 0;
     const terminalBatchIdleMs = Number(researchAtlasTerminalBatchIdleMs);
     this._researchAtlasTerminalBatchIdleMs = Number.isFinite(terminalBatchIdleMs)
@@ -2955,6 +3566,7 @@ export class PersistentMcpOwner {
     if (!reservationShared) {
       this._researchAdmissionReservations.delete(reservationKey);
       this._researchCallReservations.delete(reservationKey);
+      this._researchInfrastructureRefundReservations.delete(reservationKey);
     }
     for (const key of this._activeResearchAtlasReads.keys()) {
       if (key.endsWith(`:${id}`)) this._activeResearchAtlasReads.delete(key);
@@ -3145,6 +3757,7 @@ export class PersistentMcpOwner {
     this._activeResearchAtlasBatches.clear();
     this._researchAdmissionReservations.clear();
     this._researchCallReservations.clear();
+    this._researchInfrastructureRefundReservations.clear();
     this._sessions.clear();
     this._sessionIdsByTokenHash.clear();
     const server = this._server;
@@ -3312,14 +3925,40 @@ export class PersistentMcpOwner {
       const policy = sessionToolPolicy(session);
       let preparedSubAgentHandoff = false;
       if (message.method === "tools/call") {
-        const toolName = String(message?.params?.name || "");
-        const toolArgs = message?.params?.arguments || {};
-        if (!toolAllowedByPolicy(policy, toolName, message?.params?.arguments || {})) {
+        const providerToolName = String(message?.params?.name || "");
+        const providerToolArgs = message?.params?.arguments || {};
+        if (!toolAllowedByPolicy(policy, providerToolName, providerToolArgs)) {
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
-            message: deniedToolCallMessage(message, toolName, policy),
+            message: deniedToolCallMessage(message, providerToolName, policy),
+          });
+          return;
+        }
+        const routedTool = routeResearcherDispatcherCall(
+          policy,
+          providerToolName,
+          providerToolArgs,
+          session,
+        );
+        const toolName = routedTool.toolName;
+        const toolArgs = routedTool.toolArgs;
+        if (routedTool.routingError) {
+          const result = mcpToolErrorPayload(routedTool.routingError);
+          recordOwnerToolObservation({
+            session,
+            toolName,
+            toolArgs,
+            result,
+            durationMs: 0,
+            executor: { via: "typed_dispatcher_symbol_handle" },
+          });
+          sendJson(res, 200, {
+            ok: true,
+            bootId: this.bootId,
+            sessionId: id,
+            message: mcpToolResultMessage(message, result),
           });
           return;
         }
@@ -3636,13 +4275,22 @@ export class PersistentMcpOwner {
           return;
         }
         if (requested.suite === "atlas") {
-          const response = await this._executeAtlasToolCall({
-            message,
-            session,
-            toolName,
-            toolArgs,
-            delegatedEvidence,
-          });
+          const response = policy?.atlasResearcherWorkflow === true
+            && requested.name === "workflow"
+            ? await this._executeResearcherWorkflowCall({
+                message,
+                session,
+                toolArgs,
+                delegatedEvidence,
+              })
+            : await this._executeAtlasToolCall({
+                message,
+                session,
+                toolName,
+                toolArgs,
+                providerTransforms: routedTool.transforms,
+                delegatedEvidence,
+              });
           if (rejectAgentHandoffForLaterTool(
             session?.bootConfig?.agentCallId,
             requested.name || toolName,
@@ -3860,6 +4508,39 @@ export class PersistentMcpOwner {
     return assigned;
   }
 
+  _refundResearchInfrastructureFailure(session, admission, result, error = null) {
+    if (!admission?.tracked || admission.citationFetch) return false;
+    const structuredError = ownerToolStructuredError(result, error);
+    if (!isResearchInfrastructureFailure(structuredError)) return false;
+    const boot = session?.bootConfig || {};
+    const reservationKey = researchBudgetKey(boot);
+    const observed = researchExplorationObservationStatus({
+      jobId: boot.jobId ?? null,
+      attemptId: boot.attemptId ?? null,
+    });
+    const refunded = Math.max(
+      Number(observed.infrastructure_refunds || 0),
+      Number(this._researchInfrastructureRefundReservations.get(reservationKey) || 0),
+    );
+    if (refunded >= RESEARCH_INFRASTRUCTURE_REFUND_LIMIT) return false;
+    this._researchInfrastructureRefundReservations.set(reservationKey, refunded + 1);
+    if (admission.explorationUnitKind === "request"
+      && admission.explorationUnitWeight !== 0
+      && Number(this._researchAdmissionReservations.get(reservationKey)) === admission.assignedExplorationStep) {
+      this._researchAdmissionReservations.set(
+        reservationKey,
+        Math.max(Number(observed.exploration_steps || 0), Number(admission.assignedExplorationStep || 1) - 1),
+      );
+    }
+    if (Number(this._researchCallReservations.get(reservationKey)) === admission.assignedPhysicalCallStep) {
+      this._researchCallReservations.set(
+        reservationKey,
+        Math.max(Number(observed.call_steps || 0), Number(admission.assignedPhysicalCallStep || 1) - 1),
+      );
+    }
+    return true;
+  }
+
   _admitResearchExploration(session, effectiveAction, {
     explorationUnitKind = "request",
     explorationUnitWeight = 1,
@@ -3947,6 +4628,152 @@ export class PersistentMcpOwner {
       batch.idleTimer.unref?.();
     };
     void request.then(release, release);
+  }
+
+  async _executeResearcherWorkflowCall({
+    message,
+    session,
+    toolArgs,
+    delegatedEvidence = false,
+  }) {
+    const startedAt = Date.now();
+    const problem = researcherWorkflowInputProblem(toolArgs);
+    if (problem) {
+      const result = mcpToolErrorPayload(`Invalid typed Atlas workflow: ${problem}`);
+      recordOwnerToolObservation({
+        session,
+        toolName: "atlas.workflow",
+        toolArgs,
+        result,
+        durationMs: Date.now() - startedAt,
+        executor: { via: "researcher_typed_workflow", stage: "validation" },
+      });
+      return mcpToolResultMessage(message, result);
+    }
+
+    const steps = toolArgs.steps;
+    const priorResults = [];
+    const priorById = new Map();
+    const results = [];
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index];
+      const action = normalizeAtlasActionName(step.action);
+      let resolvedArgs;
+      try {
+        resolvedArgs = resolveWorkflowRefs(step.args, priorResults, priorById);
+      } catch (err) {
+        const error = String(err?.message || err || "workflow reference resolution failed");
+        const result = mcpToolErrorPayload(`Typed Atlas workflow step ${index} (${action}) failed before execution: ${error}`);
+        recordOwnerToolObservation({
+          session,
+          toolName: "atlas.workflow",
+          toolArgs,
+          result,
+          durationMs: Date.now() - startedAt,
+          executor: { via: "researcher_typed_workflow", stage: "reference_resolution", step: index, action },
+        });
+        return mcpToolResultMessage(message, result);
+      }
+
+      const innerMessage = {
+        jsonrpc: "2.0",
+        id: `${String(message?.id ?? "workflow")}:${index}`,
+        method: "tools/call",
+        params: { name: `atlas.${action}`, arguments: resolvedArgs },
+      };
+      const response = await this._executeAtlasToolCall({
+        message: innerMessage,
+        session,
+        toolName: `atlas.${action}`,
+        toolArgs: resolvedArgs,
+        delegatedEvidence,
+      });
+      const innerResult = response?.result && typeof response.result === "object"
+        ? response.result
+        : mcpToolErrorPayload(`Typed Atlas workflow step ${index} (${action}) returned no MCP result`);
+      const output = researcherWorkflowStepOutput(innerResult);
+      const entry = {
+        stepIndex: index,
+        ...(step.id ? { id: String(step.id) } : {}),
+        action,
+        status: innerResult.isError === true ? "error" : "ok",
+        result: output.value,
+        ...(output.remainder ? { remainder: output.remainder } : {}),
+      };
+      results.push(entry);
+      if (innerResult.isError === true) {
+        return mcpToolResultMessage(message, {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ok: false,
+              action: "workflow",
+              failedStep: index,
+              results,
+            }),
+          }],
+          isError: true,
+          _meta: {
+            atlasResearcherWorkflow: {
+              version: 1,
+              status: "error",
+              stepsRequested: steps.length,
+              stepsExecuted: results.length,
+            },
+          },
+        });
+      }
+      priorResults.push(output.value);
+      if (step.id) priorById.set(String(step.id), output.value);
+      if ((innerResult?.[OWNER_MODEL_CONTROL_NOTICES] || []).length > 0) {
+        return mcpToolResultMessage(message, {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ok: true,
+              action: "workflow",
+              stopped: true,
+              reason: "owner_control_notice",
+              results,
+            }),
+          }],
+          isError: false,
+          _meta: {
+            atlasResearcherWorkflow: {
+              version: 1,
+              status: "stopped",
+              stepsRequested: steps.length,
+              stepsExecuted: results.length,
+            },
+          },
+        });
+      }
+    }
+
+    appendRunTelemetry("diagnostics", {
+      kind: "mcp.owner.atlas_researcher_workflow",
+      ...attachTelemetryContext(session, this.bootId),
+      outcome: "ok",
+      duration_ms: Date.now() - startedAt,
+      steps_requested: steps.length,
+      steps_executed: results.length,
+      actions: results.map((entry) => entry.action),
+    });
+    return mcpToolResultMessage(message, {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ ok: true, action: "workflow", results }),
+      }],
+      isError: false,
+      _meta: {
+        atlasResearcherWorkflow: {
+          version: 1,
+          status: "ok",
+          stepsRequested: steps.length,
+          stepsExecuted: results.length,
+        },
+      },
+    });
   }
 
   async _executeAtlasToolCall(args) {
@@ -4057,6 +4884,7 @@ export class PersistentMcpOwner {
     toolName,
     toolArgs,
     binding,
+    providerTransforms = [],
     delegatedEvidence = false,
     synthesisAdmission: reservedSynthesisAdmission = null,
     enqueuedAt = null,
@@ -4260,7 +5088,11 @@ export class PersistentMcpOwner {
         for (const ref of deliveredRefs) priorDeliveredTraversalRefs.add(ref);
         let result = createRef
           ? createRefMcpPayload(createHashRefResult(toolArgs || {}, hashContext))
-          : mcpToolTextPayload(traversalText);
+          : fetchRefMcpPayload(traversalText);
+        noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);
+        for (const transform of providerTransforms) {
+          result = annotateOwnerResultTransform(result, transform);
+        }
         result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
         result = appendOwnerResearchEarlyFetchNotice(
           result,
@@ -4470,9 +5302,15 @@ export class PersistentMcpOwner {
         args: toolArgs,
         ...atlasGateResultState(result),
       });
+      result = appendResearcherSymbolHandles(result, session);
       result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
+      noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);
       if (coverageOwner) {
         result = materializeSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name });
+      }
+      result = compactResearcherTypedAtlasResult(result, session, toolName, toolArgs);
+      for (const transform of providerTransforms) {
+        result = annotateOwnerResultTransform(result, transform);
       }
       for (const admission of coverageAdmissions) {
         coverageOwner?.settleReservation(admission.reservation, result?.isError ? "failed" : "confirmed");
@@ -4492,7 +5330,9 @@ export class PersistentMcpOwner {
       // ATLAS calls are the bulk of a retrieval-phase agent's tool traffic;
       // attaching here ensures an Atlas-only phase receives pending operator
       // feedback at its next result boundary.
+      this._refundResearchInfrastructureFailure(session, synthesisAdmission, result);
       result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
+      result = appendOwnerResearcherTypedReadyCallBatchingNotice(result, session);
       result = appendOwnerResearchSynthesisNotice(
         result,
         session,
@@ -4579,6 +5419,7 @@ export class PersistentMcpOwner {
         this._terminalMemoryToolSessions.add(session);
         result = appendTerminalMemoryToolNotice(result);
       }
+      this._refundResearchInfrastructureFailure(session, synthesisAdmission, result, err);
       result = appendOwnerResearchSynthesisNotice(
         result,
         session,

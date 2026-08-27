@@ -321,6 +321,7 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
   if (!freshJob?.id || !isTurnBudgetExhaustedError(errorDetails)) return { tuned: false };
 
   const payload = parseJobPayload(freshJob);
+  const preserveExecutionProfile = payload._preserve_execution_profile_on_retry === true;
 
   const retryCount = Number.parseInt(String(payload._turn_budget_retry_count || 0), 10) || 0;
   if (retryCount >= 1) {
@@ -346,7 +347,9 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
   const isResearchJob = String(freshJob.job_type || "").toLowerCase() === "research";
 
   if (isResearchJob) {
-    payloadChanged = applyResearchTurnBudgetRetryMode(payload, freshJob, errorDetails) || payloadChanged;
+    if (!preserveExecutionProfile) {
+      payloadChanged = applyResearchTurnBudgetRetryMode(payload, freshJob, errorDetails) || payloadChanged;
+    }
   } else if (ROLE_DRIVEN_JOB_TYPES.has(String(freshJob.job_type || "").toLowerCase())) {
     const currentBudget = String(payload.deepthink_budget || payload.research_budget || "").trim().toLowerCase();
     if (currentBudget !== "xhigh") {
@@ -376,9 +379,11 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
   }
 
   const prevTier = freshJob.model_tier || "standard";
-  const bumpedTier = isResearchJob ? "cheap" : nextTier(prevTier);
+  const bumpedTier = preserveExecutionProfile
+    ? prevTier
+    : (isResearchJob ? "cheap" : nextTier(prevTier));
   const tierChanged = bumpedTier !== prevTier;
-  const modelCleared = isResearchJob && freshJob.model_name != null;
+  const modelCleared = isResearchJob && !preserveExecutionProfile && freshJob.model_name != null;
 
   if (payloadChanged) {
     updateJobPayload(freshJob.id, JSON.stringify(payload));
@@ -394,14 +399,14 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
     const budget = payload.deepthink_budget || payload.research_budget || null;
     worker.emit(
       freshJob.id,
-      `${C.yellow}[retry-tuning]${C.reset} WI#${freshJob.work_item_id} job #${freshJob.id}: turn-budget retry tuning applied${tierChanged ? ` (${prevTier} -> ${bumpedTier})` : ""}${budget ? `, budget=${budget}` : ""}${modelCleared ? ", model=auto" : ""}`,
+      `${C.yellow}[retry-tuning]${C.reset} WI#${freshJob.work_item_id} job #${freshJob.id}: turn-budget retry tuning applied${tierChanged ? ` (${prevTier} -> ${bumpedTier})` : ""}${budget ? `, budget=${budget}` : ""}${modelCleared ? ", model=auto" : ""}${preserveExecutionProfile ? ", execution profile preserved" : ""}`,
     );
     logEvent({
       work_item_id: freshJob.work_item_id,
       job_id: freshJob.id,
       event_type: EVENT_TYPES.JOB_TURN_BUDGET_RETRY_TUNED,
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Turn-budget retry tuning applied${tierChanged ? ` (${prevTier} -> ${bumpedTier})` : ""}${budget ? `, budget=${budget}` : ""}${modelCleared ? ", model=auto" : ""}`,
+      message: `Turn-budget retry tuning applied${tierChanged ? ` (${prevTier} -> ${bumpedTier})` : ""}${budget ? `, budget=${budget}` : ""}${modelCleared ? ", model=auto" : ""}${preserveExecutionProfile ? ", execution profile preserved" : ""}`,
       event_json: JSON.stringify({
         previous_tier: prevTier,
         next_tier: bumpedTier,
@@ -409,7 +414,8 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
         deepthink: payload.deepthink === true,
         deepthink_budget: budget,
         retry_count: nextRetryCount,
-        research_retry_synthesis: isResearchJob,
+        research_retry_synthesis: isResearchJob && !preserveExecutionProfile,
+        execution_profile_preserved: preserveExecutionProfile,
       }),
     });
   }
@@ -421,7 +427,8 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
     modelCleared,
     nextTier: bumpedTier,
     retryCount: nextRetryCount,
-    researchRetrySynthesis: isResearchJob,
+    researchRetrySynthesis: isResearchJob && !preserveExecutionProfile,
+    executionProfilePreserved: preserveExecutionProfile,
   };
 }
 
