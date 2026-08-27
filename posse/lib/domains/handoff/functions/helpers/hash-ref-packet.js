@@ -9,8 +9,10 @@ import {
 import {
   fetchHashRefForContext,
   materializeHashRefEvidenceForContext,
+  promoteHashRefTraversalForContext,
   surfaceHashRefForContext,
 } from "../../../queue/functions/hash-refs.js";
+import { recordObservation } from "../../../observability/functions/observations.js";
 import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch-ref-policy.js";
 import { renderTraversalRefStub } from "../../../../shared/tools/functions/ref-surface.js";
 import { normalizedEvidenceSourceWindows } from "../../../../shared/tools/functions/source-evidence.js";
@@ -18,6 +20,10 @@ import { normalizedEvidenceSourceWindows } from "../../../../shared/tools/functi
 const DEFAULT_MAX_REFS_PER_LANE = 24;
 const DEFAULT_MAX_WHY_CHARS = 180;
 const PROOF_EXPANSION_GENERATOR = "hash_ref_store";
+const DEV_BRIEF_EXPANSION_GENERATOR = "hash_ref_store.dev_brief";
+const DEFAULT_DEV_BRIEF_EXPANSION_MAX_CHARS = 32000;
+const DEFAULT_DEV_BRIEF_EXPANSION_MAX_REFS = 16;
+const stagedDevBriefEvidence = new WeakMap();
 
 function fetchEvidenceOrSource(context, ref) {
   const evidence = materializeHashRefEvidenceForContext(context, ref);
@@ -564,6 +570,200 @@ function proofExpansionForFetch(fetchResult, laneEntry) {
     fingerprint_map: entry.fingerprint_map,
     notice: "Descriptor-backed proof could not be recomputed by the handoff renderer; traverse_ref can report the current descriptor state when this ref is issued for traversal.",
   };
+}
+
+function devBriefExpansionForFetch(fetchResult, laneEntry, lane) {
+  const expansion = proofExpansionForFetch(fetchResult, laneEntry);
+  if (!expansion || expansion.text == null) return null;
+  const sourceWindows = normalizedEvidenceSourceWindows(fetchResult?.entry?.metadata?.source_windows);
+  return {
+    ...expansion,
+    lane,
+    ...(laneEntry.source_selector ? { source_selector: laneEntry.source_selector } : {}),
+    ...(sourceWindows.length > 0 ? { source_windows: sourceWindows } : {}),
+  };
+}
+
+export function expandHashRefHandoffPacketForDevBrief(input, {
+  context = {},
+  maxChars = DEFAULT_DEV_BRIEF_EXPANSION_MAX_CHARS,
+  maxRefs = DEFAULT_DEV_BRIEF_EXPANSION_MAX_REFS,
+} = {}) {
+  const normalized = normalizeHashRefHandoffPacket(input);
+  if (!normalized.packet) {
+    return { packet: null, expansions: [], dropped: normalized.dropped, expanded: 0, missed: 0 };
+  }
+
+  const packet = {
+    ...normalized.packet,
+    dev_brief_expansions_generated: DEV_BRIEF_EXPANSION_GENERATOR,
+    dev_brief_expansions: [],
+  };
+  const dropped = [...normalized.dropped];
+  const charLimit = Math.max(0, Number(maxChars) || 0);
+  const refLimit = Math.max(0, Number(maxRefs) || 0);
+  let usedChars = 0;
+  let missed = 0;
+
+  for (const lane of ["proof", "support"]) {
+    for (const laneEntry of packet.lanes[lane] || []) {
+      if (laneEntry.unresolved) {
+        missed += 1;
+        dropped.push({ lane, ref: laneEntry.ref, reason: laneEntry.error || "unresolved_ref" });
+        continue;
+      }
+      if (packet.dev_brief_expansions.length >= refLimit) {
+        dropped.push({ lane, ref: laneEntry.ref, reason: "dev_brief_expansion_ref_cap" });
+        continue;
+      }
+      let fetchResult = null;
+      try {
+        fetchResult = fetchEvidenceOrSource(context, laneEntry.ref);
+      } catch (err) {
+        fetchResult = { ok: false, found: false, ref: laneEntry.ref, error: err?.message || "fetch_failed" };
+      }
+      if (!fetchResult?.ok || !fetchResult?.found || !fetchResult.entry) {
+        missed += 1;
+        dropped.push({ lane, ref: laneEntry.ref, reason: fetchResult?.error || "not_found_or_not_visible" });
+        continue;
+      }
+      const expansion = devBriefExpansionForFetch(fetchResult, laneEntry, lane);
+      if (!expansion) {
+        missed += 1;
+        dropped.push({ lane, ref: laneEntry.ref, reason: "dev_brief_evidence_not_materialized" });
+        continue;
+      }
+      const expansionChars = String(expansion.text || "").length;
+      if (usedChars + expansionChars > charLimit) {
+        dropped.push({ lane, ref: laneEntry.ref, reason: "dev_brief_expansion_char_cap" });
+        continue;
+      }
+      packet.dev_brief_expansions.push(expansion);
+      usedChars += expansionChars;
+    }
+  }
+
+  packet.dev_brief_expanded_count = packet.dev_brief_expansions.length;
+  packet.dev_brief_expanded_chars = usedChars;
+  return {
+    packet,
+    expansions: packet.dev_brief_expansions,
+    dropped,
+    expanded: packet.dev_brief_expansions.length,
+    missed,
+  };
+}
+
+function expansionLocation(expansion) {
+  const windows = Array.isArray(expansion?.source_windows) ? expansion.source_windows : [];
+  if (windows.length !== 1) return "";
+  const [window] = windows;
+  return `${window.path}:${window.source_start_line}-${window.source_end_line}`;
+}
+
+export function renderAutoExpandedDevBriefEvidence(input, {
+  maxChars = DEFAULT_DEV_BRIEF_EXPANSION_MAX_CHARS,
+} = {}) {
+  if (input?.dev_brief_expansions_generated !== DEV_BRIEF_EXPANSION_GENERATOR) {
+    return { text: "", expansions: [], dropped: [] };
+  }
+  const charLimit = Math.max(0, Number(maxChars) || 0);
+  const header = [
+    "PLANNER DEV BRIEF EVIDENCE (auto-expanded locally):",
+    "The planner selected this existing-code evidence as directly relevant. It is already visible in this call: use the evidence_ref directly and do not traverse it. Writable scope is unchanged.",
+  ].join("\n");
+  if (header.length > charLimit) return { text: "", expansions: [], dropped: [] };
+
+  const parts = [header];
+  const expansions = [];
+  const dropped = [];
+  let usedChars = header.length;
+  for (const expansion of Array.isArray(input.dev_brief_expansions) ? input.dev_brief_expansions : []) {
+    const location = expansionLocation(expansion);
+    const details = [
+      expansion.source_selector ? `from ${expansion.source_selector}` : (expansion.source_ref ? `from ${expansion.source_ref}` : ""),
+      location,
+      expansion.object_type ? `type=${expansion.object_type}` : "",
+    ].filter(Boolean).join("; ");
+    const block = [
+      `=== ${String(expansion.lane || "support").toUpperCase()} [evidence_ref ${expansion.ref} usage=cite_or_handoff]${details ? ` (${details})` : ""} ===`,
+      String(expansion.text || "") || "(empty evidence payload)",
+    ].join("\n");
+    const addedChars = block.length + 2;
+    if (usedChars + addedChars > charLimit) {
+      dropped.push({ lane: expansion.lane, ref: expansion.ref, reason: "dev_brief_render_char_cap" });
+      continue;
+    }
+    parts.push(block);
+    expansions.push(expansion);
+    usedChars += addedChars;
+  }
+  if (expansions.length === 0) return { text: "", expansions: [], dropped };
+  return { text: parts.join("\n\n"), expansions, dropped };
+}
+
+export function stageAutoExpandedDevBriefEvidence(packet, rendered = {}) {
+  if (!packet || typeof packet !== "object") return false;
+  const text = String(rendered?.text || "").trim();
+  const expansions = Array.isArray(rendered?.expansions) ? rendered.expansions : [];
+  if (!text || expansions.length === 0) return false;
+  stagedDevBriefEvidence.set(packet, { text, expansions });
+  return true;
+}
+
+export function bindAutoExpandedDevBriefEvidenceToAgentCall(packet, {
+  context = {},
+  deliveredPrompt = "",
+} = {}) {
+  const staged = packet && typeof packet === "object" ? stagedDevBriefEvidence.get(packet) : null;
+  const agentCallId = Number(context?.agent_call_id ?? context?.agentCallId) || null;
+  if (!staged || !agentCallId || !String(deliveredPrompt || "").includes(staged.text)) {
+    return { promoted: 0, coverage: 0, skipped: !staged ? "not_staged" : !agentCallId ? "missing_agent_call" : "not_delivered" };
+  }
+
+  const exactContext = { ...context, agent_call_id: agentCallId };
+  let promoted = 0;
+  let coverage = 0;
+  for (const expansion of staged.expansions) {
+    let result = null;
+    try {
+      result = promoteHashRefTraversalForContext(exactContext, expansion.ref, {
+        viewText: String(expansion.text || ""),
+      });
+    } catch {
+      result = null;
+    }
+    if (!result?.ok || !result.evidence) continue;
+    promoted += 1;
+    for (const window of Array.isArray(expansion.source_windows) ? expansion.source_windows : []) {
+      recordObservation({
+        work_item_id: exactContext.work_item_id ?? null,
+        job_id: exactContext.job_id ?? null,
+        attempt_id: exactContext.attempt_id ?? null,
+        observation_type: "source.coverage",
+        summary: `delivered dev-brief coverage ${window.path}:${window.source_start_line}-${window.source_end_line}`,
+        detail: {
+          repository_identity: window.repository_identity || null,
+          source_version: window.source_version || null,
+          repo_rel_path: window.path,
+          path: window.path,
+          start_line: window.source_start_line,
+          end_line: window.source_end_line,
+          source_start_line: window.source_start_line,
+          source_end_line: window.source_end_line,
+          evidence_ref: expansion.ref,
+          delivery_state: "delivered",
+          origin: "dev_brief_auto_expand",
+          tool: "planner_dev_brief",
+          stored_chars: String(expansion.text || "").length,
+          returned_chars: String(expansion.text || "").length,
+          agent_call_id: agentCallId,
+        },
+      });
+      coverage += 1;
+    }
+  }
+  return { promoted, coverage };
 }
 
 function parsePayloadJson(text) {

@@ -6,6 +6,10 @@ import {
 import { buildRemoteCompileRequest } from "../functions/request.js";
 import { renderLocalEnrichment } from "../functions/render-enrichment.js";
 import {
+  renderAutoExpandedDevBriefEvidence,
+  stageAutoExpandedDevBriefEvidence,
+} from "../../handoff/functions/helpers/hash-ref-packet.js";
+import {
   getPosseRemoteTimeoutMs,
   getPosseRemoteUrl,
 } from "../functions/mode.js";
@@ -173,9 +177,24 @@ export class RemoteComposer {
         cwd: packet?.cwd || process.cwd(),
       })
       : "";
-    const prompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment]);
-    const userPrompt = joinPromptParts([remoteUserPrompt || skeleton, localPolicyOverlay, enrichment]);
     const promptCap = Number(maxPromptChars);
+    const basePrompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment]);
+    const evidenceBudget = Number.isFinite(promptCap) && promptCap > 0
+      ? Math.max(0, Math.min(32000, promptCap - basePrompt.length - 2))
+      : undefined;
+    const localDevBriefEvidence = renderAutoExpandedDevBriefEvidence(packet?.hash_ref_packet, {
+      maxChars: evidenceBudget,
+    });
+    if (localDevBriefEvidence.text) {
+      stageAutoExpandedDevBriefEvidence(packet, localDevBriefEvidence);
+    }
+    const prompt = joinPromptParts([basePrompt, localDevBriefEvidence.text]);
+    const userPrompt = joinPromptParts([
+      remoteUserPrompt || skeleton,
+      localPolicyOverlay,
+      enrichment,
+      localDevBriefEvidence.text,
+    ]);
     if (Number.isFinite(promptCap) && promptCap > 0 && prompt.length > promptCap) {
       const err = new Error(`remote prompt exceeded max prompt chars (${prompt.length} > ${promptCap})`);
       err.code = "POSSE_PROMPT_TOO_LARGE";
@@ -189,6 +208,7 @@ export class RemoteComposer {
       stableContext,
       userPrompt,
       enrichment: enrichment || null,
+      localDevBriefEvidence: localDevBriefEvidence.text || null,
       source: "remote",
       request,
       response,
@@ -201,6 +221,8 @@ export class RemoteComposer {
         ...(bundlePromptVersion ? { bundle_prompt_version: bundlePromptVersion } : {}),
         ...(promptVersionSkew ? { prompt_version_skew: promptVersionSkew } : {}),
         local_enrichment_enabled: this.enableLocalEnrichment,
+        local_dev_brief_evidence_chars: localDevBriefEvidence.text.length,
+        local_dev_brief_evidence_refs: localDevBriefEvidence.expansions.length,
         latency_ms: latencyMs,
       },
     };

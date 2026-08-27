@@ -39,6 +39,7 @@ import {
 import { getMaxOutputTokensForProvider } from "../../providers/functions/shared/turns.js";
 import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
 import { buildResumeHandoff } from "../../handoff/functions/index.js";
+import { bindAutoExpandedDevBriefEvidenceToAgentCall } from "../../handoff/functions/helpers/hash-ref-packet.js";
 import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { isAbortError, signalAbortError } from "../../runtime/functions/yield.js";
@@ -1309,6 +1310,15 @@ export class TrackedProviderClient {
       job_id: job_id ?? observationContext?.job_id ?? null,
       agent_call_id: agentCallId,
     };
+    try {
+      bindAutoExpandedDevBriefEvidenceToAgentCall(effectiveCapabilityOpts?.sessionPacket, {
+        context: callObservationContext,
+        deliveredPrompt: prompt,
+      });
+    } catch {
+      // Planner evidence acceleration is optional. A bookkeeping failure must
+      // not prevent the provider call; normal exact-source tools remain usable.
+    }
     recordRecoveryCheckpoint?.({
       work_item_id,
       job_id,

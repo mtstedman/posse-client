@@ -205,7 +205,7 @@ export class PlannerRole extends BaseRole {
             "Claims may stay empty for genuinely new work or when no reliable source evidence is available. Never invent, pad, or guess citations merely to populate a task.",
             "A file name, manifest entry, skeleton, or remembered line range is navigation rather than surfaced source evidence. Before citing a path selector, expose that exact range in this agent call with an issued exact-source ATLAS or read tool. If a useful selector is rejected as not surfaced, expose the task-relevant range and retry; do not discard available evidence merely to bypass selector validation.",
             "Use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
-            "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Only proof, support, and decoy selector objects are deterministically resolved, range-validated, and expanded.",
+            "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Proof and support selectors are deterministically resolved, range-validated, and auto-expanded into the developer call when available; decoy selectors remain labeled routing context.",
             "",
           ].join("\n")
         : [
@@ -213,7 +213,7 @@ export class PlannerRole extends BaseRole {
           "Add a task-specific dev_brief to every dev code task supported by this ATLAS research packet. Each brief must contain only that task's scoped read guidance and evidence.",
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief or repeat task requirements in summary.",
-          "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane when it should be deterministically expanded. Refs may also appear in task_spec or success_criteria as compact opaque references; those narrative occurrences are not expanded. Dev agents fetch exact evidence on demand only when they will rely on it. Decoy refs must include a short why.",
+          "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane. Refs may also appear in task_spec or success_criteria as compact opaque references; those narrative occurrences are not expanded. Posse auto-expands available proof/support evidence into the developer call so directly relevant planner findings do not require rediscovery. Decoy refs are not auto-expanded and must include a short why.",
           "",
           ].join("\n")
       : "";
@@ -929,6 +929,7 @@ export class PlannerRole extends BaseRole {
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: ctx.attemptId || null,
+        agent_call_id: plannerStats?.agentCallId || null,
       },
     });
 

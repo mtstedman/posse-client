@@ -321,10 +321,13 @@ function compactHashRefDropped(entry) {
 }
 
 function compactHashRefPacketForRemote(packet = {}) {
-  const sourcePacket = objectValue(packet?._raw_payload?.hash_ref_packet)
-    || objectValue(packet?._raw_payload?.dev_brief?.hash_ref_packet)
-    || objectValue(packet?.hash_ref_packet)
-    || objectValue(packet?.dev_brief?.hash_ref_packet);
+  // Prompt-time issuance narrows job-owned refs into the receiving attempt.
+  // Prefer that live packet over the immutable raw payload so the remote
+  // compiler advertises refs the upcoming call can actually consume.
+  const sourcePacket = objectValue(packet?.hash_ref_packet)
+    || objectValue(packet?.dev_brief?.hash_ref_packet)
+    || objectValue(packet?._raw_payload?.hash_ref_packet)
+    || objectValue(packet?._raw_payload?.dev_brief?.hash_ref_packet);
   if (!sourcePacket) return null;
   const source = compactText(sourcePacket.source || sourcePacket.evidence_source || "atlas", 40).toLowerCase();
   if (source !== "atlas") return null;

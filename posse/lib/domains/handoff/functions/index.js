@@ -100,6 +100,9 @@ import {
   packetToDynamicContextString as packetToDynamicContextStringFromModule,
 } from "./helpers/context-render.js";
 import {
+  expandHashRefHandoffPacketForDevBrief,
+} from "./helpers/hash-ref-packet.js";
+import {
   DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
   buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule,
 } from "./helpers/traversal-completeness.js";
@@ -2115,7 +2118,18 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
       packet,
       packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet,
     );
-    if (issuedHashRefPacket) packet.hash_ref_packet = issuedHashRefPacket;
+    if (issuedHashRefPacket) {
+      const observation = getObservationContext() || {};
+      const expanded = expandHashRefHandoffPacketForDevBrief(issuedHashRefPacket, {
+        context: {
+          work_item_id: packet.work_item_id ?? observation.work_item_id ?? null,
+          job_id: packet.job_id ?? observation.job_id ?? null,
+          attempt_id: observation.attempt_id ?? packet.attempt_id ?? null,
+          agent_call_id: observation.agent_call_id ?? packet.agent_call_id ?? null,
+        },
+      });
+      packet.hash_ref_packet = expanded.packet || issuedHashRefPacket;
+    }
   }
 
   try {
@@ -2295,10 +2309,14 @@ export function sanitizeResearcherStructuredOutput(output) {
 }
 
 export {
+  bindAutoExpandedDevBriefEvidenceToAgentCall,
+  expandHashRefHandoffPacketForDevBrief,
   expandHashRefHandoffPacketProofs,
   normalizeHashRefHandoffPacket,
   reissueHashRefHandoffPacket,
+  renderAutoExpandedDevBriefEvidence,
   renderHashRefHandoffPacket,
+  stageAutoExpandedDevBriefEvidence,
 } from "./helpers/hash-ref-packet.js";
 
 // ─── Test-only exports ──────────────────────────────────────────────────────
