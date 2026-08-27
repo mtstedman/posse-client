@@ -701,12 +701,7 @@ export function findFetchedHashRefViewsForContext(context = {}, sourceRef, opts 
   return entries;
 }
 
-/**
- * Return canonical source paths carried by refs that were fully visible to
- * this exact model call. Deliberately ignore descriptor arguments and payload
- * text: only source provenance captured at surfacing is authoritative.
- */
-export function findVisibleHashRefSourcePathsForContext(context = {}, opts = {}) {
+function visibleHashRefSourceMetadataForContext(context = {}, opts = {}) {
   const db = opts.db || getDb();
   const excludedSurfaces = new Set(
     Array.isArray(opts.excludeSurfacedBy) ? opts.excludeSurfacedBy.map(String) : [],
@@ -754,16 +749,8 @@ export function findVisibleHashRefSourcePathsForContext(context = {}, opts = {})
     }
   }
 
-  const paths = new Set();
+  const metadata = [];
   const seen = new Set();
-  const addPath = (value) => {
-    const normalized = String(value || "")
-      .trim()
-      .replace(/\\/g, "/")
-      .replace(/^\.\//, "")
-      .replace(/\/+/g, "/");
-    if (normalized) paths.add(normalized);
-  };
   for (const ref of refs) {
     if (seen.has(ref)) continue;
     seen.add(ref);
@@ -771,15 +758,67 @@ export function findVisibleHashRefSourcePathsForContext(context = {}, opts = {})
     const entry = fetched?.found ? fetched.entry : null;
     if (!entry || !hashRefModelVisibleScope(entry, resolved).fully_visible) continue;
     if (excludedSurfaces.has(String(entry.metadata?.surfaced_by || ""))) continue;
-    addPath(entry.metadata?.path);
-    addPath(entry.metadata?.repo_rel_path);
-    for (const window of Array.isArray(entry.metadata?.source_windows)
-      ? entry.metadata.source_windows
-      : []) {
+    metadata.push(entry.metadata || {});
+  }
+  return metadata;
+}
+
+function normalizedVisibleSourcePath(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+/g, "/");
+}
+
+/**
+ * Return canonical source paths carried by refs that were fully visible to
+ * this exact model call. Deliberately ignore descriptor arguments and payload
+ * text: only source provenance captured at surfacing is authoritative.
+ */
+export function findVisibleHashRefSourcePathsForContext(context = {}, opts = {}) {
+  const paths = new Set();
+  const addPath = (value) => {
+    const normalized = normalizedVisibleSourcePath(value);
+    if (normalized) paths.add(normalized);
+  };
+  for (const metadata of visibleHashRefSourceMetadataForContext(context, opts)) {
+    addPath(metadata.path);
+    addPath(metadata.repo_rel_path);
+    for (const window of Array.isArray(metadata.source_windows) ? metadata.source_windows : []) {
       addPath(window?.path ?? window?.repo_rel_path);
     }
   }
   return [...paths].sort();
+}
+
+/**
+ * Return only exact source-line windows carried by refs fully visible to this
+ * model call. Paths without a verified window remain navigation, not proof.
+ */
+export function findVisibleHashRefSourceWindowsForContext(context = {}, opts = {}) {
+  const windows = new Map();
+  for (const metadata of visibleHashRefSourceMetadataForContext(context, opts)) {
+    if (String(metadata?.line_semantics || "").toLowerCase() !== "source") continue;
+    for (const window of Array.isArray(metadata.source_windows) ? metadata.source_windows : []) {
+      const sourcePath = normalizedVisibleSourcePath(window?.path ?? window?.repo_rel_path);
+      const start = Number(window?.source_start_line ?? window?.start_line);
+      const end = Number(window?.source_end_line ?? window?.end_line);
+      if (!sourcePath || !Number.isInteger(start) || !Number.isInteger(end)
+        || start < 1 || end < start) continue;
+      const key = `${sourcePath}:${start}-${end}`;
+      windows.set(key, {
+        path: sourcePath,
+        start,
+        end,
+        repository_identity: window?.repository_identity ?? metadata.repository_identity ?? null,
+        source_version: window?.source_version ?? metadata.source_version ?? null,
+      });
+    }
+  }
+  return [...windows.values()].sort((left, right) => (
+    left.path.localeCompare(right.path) || left.start - right.start || left.end - right.end
+  ));
 }
 
 export function giveHashRefToParentForContext(context = {}, ref, opts = {}) {

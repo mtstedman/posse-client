@@ -86,22 +86,23 @@ export class HashRefCapabilityStore {
   }
 
   _row(table, ref) {
-    // A promoted traversal intentionally remains usable by later agent calls
-    // in the same attempt. Attempt ids are globally scoped by the queue, and
-    // the caller still re-checks backing-object visibility before delivery;
-    // this fallback is continuity, not cross-attempt capability widening.
+    // Traversal custody intentionally remains usable by later agent calls in
+    // the same attempt. Promoted evidence does not: it must be surfaced by the
+    // exact call before that call can cite it.
+    const allowAttemptFallback = table === TABLES.traversal;
     return this.db.prepare(`
       SELECT * FROM ${table}
       WHERE ref = ?
         AND (
           scope_key = ?
-          OR (? IS NOT NULL AND attempt_id = ?)
+          OR (? = 1 AND ? IS NOT NULL AND attempt_id = ?)
         )
       ORDER BY CASE WHEN scope_key = ? THEN 0 ELSE 1 END, updated_at DESC
       LIMIT 1
     `).get(
       normalizeHashRefAlias(ref),
       this.scopeKey,
+      allowAttemptFallback ? 1 : 0,
       this.ids.attemptId,
       this.ids.attemptId,
       this.scopeKey,

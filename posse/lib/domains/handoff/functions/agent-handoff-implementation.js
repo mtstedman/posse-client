@@ -18,7 +18,7 @@ import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../..
 import {
   fetchHashRefForContext,
   findFetchedHashRefViewsForContext,
-  findVisibleHashRefSourcePathsForContext,
+  findVisibleHashRefSourceWindowsForContext,
   materializeHashRefEvidenceForContext,
   surfaceHashRefForContext,
 } from "../../queue/functions/hash-refs.js";
@@ -982,13 +982,18 @@ function deliveredSourceCoverageCandidates(context) {
     try { detail = JSON.parse(row.detail_json || "{}"); } catch { continue; }
     if (detail?.delivery_state !== "delivered") continue;
     const deliveredCallId = Number(detail?.agent_call_id) || null;
-    if (deliveredCallId && agentCallId && deliveredCallId !== agentCallId) continue;
+    if (!agentCallId || deliveredCallId !== agentCallId) continue;
     const sourcePath = canonicalSourcePath(detail?.path ?? detail?.repo_rel_path);
     if (!sourcePath) continue;
+    const start = Number(detail?.start_line ?? detail?.source_start_line);
+    const end = Number(detail?.end_line ?? detail?.source_end_line);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) continue;
     candidates.push({
       path: sourcePath,
       repository_identity: detail?.repository_identity || null,
       source_version: detail?.source_version || null,
+      start,
+      end,
     });
   }
   return candidates;
@@ -1043,43 +1048,6 @@ function successfulToolReadCandidates(context) {
   return candidates;
 }
 
-function successfulAtlasSourceCandidates(context) {
-  const attemptId = Number(context?.attemptId ?? context?.attempt_id) || null;
-  const agentCallId = Number(context?.agentCallId ?? context?.agent_call_id) || null;
-  if (!attemptId || !agentCallId) return [];
-  const database = context?.db || getDb();
-  let rows = [];
-  try {
-    rows = database.prepare(`
-      SELECT detail_json
-      FROM job_observations
-      WHERE attempt_id = ?
-        AND observation_type = 'tool.atlas'
-      ORDER BY id ASC
-    `).all(attemptId);
-  } catch {
-    return [];
-  }
-  const candidates = new Map();
-  for (const row of rows) {
-    let detail;
-    try { detail = JSON.parse(row.detail_json || "{}"); } catch { continue; }
-    if (Number(detail?.agent_call_id) !== agentCallId) continue;
-    if (detail?.ok === false || detail?.outcome !== "succeeded") continue;
-    if (detail?.response?.is_error === true || Number(detail?.response?.content_blocks) < 1) continue;
-    for (const rawPath of Array.isArray(detail?.source_paths) ? detail.source_paths : []) {
-      const sourcePath = canonicalSourcePath(rawPath);
-      if (!sourcePath) continue;
-      candidates.set(sourcePath, {
-        path: sourcePath,
-        repository_identity: null,
-        source_version: null,
-      });
-    }
-  }
-  return [...candidates.values()];
-}
-
 function mergedLineRanges(ranges = []) {
   const sorted = ranges
     .filter((range) => Number.isInteger(range?.start) && Number.isInteger(range?.end) && range.start > 0 && range.end >= range.start)
@@ -1099,7 +1067,17 @@ function mergedLineRanges(ranges = []) {
 function surfacedPathCandidates(context) {
   const byPath = new Map();
   for (const candidate of deliveredSourceCoverageCandidates(context)) {
-    byPath.set(candidate.path, { ...candidate, restrict_to_opened_ranges: false, opened_ranges: [] });
+    const exactRange = { start: candidate.start, end: candidate.end };
+    const existing = byPath.get(candidate.path);
+    if (existing) {
+      if (existing.restrict_to_opened_ranges) existing.opened_ranges.push(exactRange);
+      continue;
+    }
+    byPath.set(candidate.path, {
+      ...candidate,
+      restrict_to_opened_ranges: true,
+      opened_ranges: [exactRange],
+    });
   }
   for (const candidate of successfulToolReadCandidates(context)) {
     const existing = byPath.get(candidate.path);
@@ -1115,28 +1093,25 @@ function surfacedPathCandidates(context) {
       opened_ranges: [{ start: candidate.start, end: candidate.end }],
     });
   }
-  for (const candidate of successfulAtlasSourceCandidates(context)) {
-    if (byPath.has(candidate.path)) continue;
-    byPath.set(candidate.path, {
-      ...candidate,
-      restrict_to_opened_ranges: false,
-      opened_ranges: [],
-    });
-  }
-  for (const sourcePath of findVisibleHashRefSourcePathsForContext(context, {
+  for (const window of findVisibleHashRefSourceWindowsForContext(context, {
     db: context?.db || getDb(),
     excludeSurfacedBy: ["agent_handoff_path_selector"],
   })) {
-    const canonical = canonicalSourcePath(sourcePath);
-    if (canonical) {
-      byPath.set(canonical, {
-        path: canonical,
-        repository_identity: null,
-        source_version: null,
-        restrict_to_opened_ranges: false,
-        opened_ranges: [],
-      });
+    const canonical = canonicalSourcePath(window.path);
+    if (!canonical) continue;
+    const existing = byPath.get(canonical);
+    if (existing) {
+      if (existing.restrict_to_opened_ranges) {
+        existing.opened_ranges.push({ start: window.start, end: window.end });
+      }
+      continue;
     }
+    byPath.set(canonical, {
+      ...window,
+      path: canonical,
+      restrict_to_opened_ranges: true,
+      opened_ranges: [{ start: window.start, end: window.end }],
+    });
   }
   return [...byPath.values()]
     .map((candidate) => ({ ...candidate, opened_ranges: mergedLineRanges(candidate.opened_ranges) }))

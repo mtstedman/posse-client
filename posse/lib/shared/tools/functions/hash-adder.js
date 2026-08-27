@@ -2174,6 +2174,57 @@ function recordFetchBatchDeliveryObservation(hashContext, refs, renderedText, {
   });
 }
 
+function recordSurfacedRefSourceCoverage(hashContext, renderedText) {
+  const agentCallId = Number(hashContext.agent_call_id) || null;
+  if (!agentCallId) return;
+  let rendered;
+  try {
+    rendered = JSON.parse(String(renderedText || "{}"));
+  } catch {
+    return;
+  }
+  if (rendered?.ok !== true || rendered?.page?.mode !== "offset") return;
+  const evidenceRef = normalizeHashRefAlias(rendered?.evidence_ref?.ref || rendered?.ref || "");
+  if (!isHashRefAlias(evidenceRef)) return;
+  const materialized = materializeHashRefEvidenceForContext(hashContext, evidenceRef);
+  const entry = materialized?.ok && materialized?.found ? materialized.entry : null;
+  if (!entry || String(entry.metadata?.line_semantics || "").toLowerCase() !== "source") return;
+  const viewChars = String(entry.payload_text || "").length;
+  for (const window of Array.isArray(entry.metadata?.source_windows)
+    ? entry.metadata.source_windows
+    : []) {
+    const sourcePath = String(window?.path ?? window?.repo_rel_path ?? "").trim();
+    const startLine = Number(window?.source_start_line ?? window?.start_line);
+    const endLine = Number(window?.source_end_line ?? window?.end_line);
+    if (!sourcePath || !Number.isInteger(startLine) || !Number.isInteger(endLine)
+      || startLine < 1 || endLine < startLine) continue;
+    recordObservation({
+      work_item_id: hashContext.work_item_id ?? null,
+      job_id: hashContext.job_id ?? null,
+      attempt_id: hashContext.attempt_id ?? null,
+      observation_type: "source.coverage",
+      summary: `delivered surfaced-ref coverage ${sourcePath}:${startLine}-${endLine}`,
+      detail: {
+        repository_identity: window?.repository_identity
+          ?? entry.metadata?.repository_identity
+          ?? null,
+        source_version: window?.source_version ?? entry.metadata?.source_version ?? null,
+        repo_rel_path: sourcePath,
+        path: sourcePath,
+        start_line: startLine,
+        end_line: endLine,
+        evidence_ref: evidenceRef,
+        delivery_state: "delivered",
+        tool: "traverse_ref",
+        origin: "hash_ref_surface",
+        stored_chars: viewChars,
+        returned_chars: viewChars,
+        agent_call_id: agentCallId,
+      },
+    });
+  }
+}
+
 function researchFetchDeliveryBudget(refCount) {
   const count = Math.max(1, Math.min(RESEARCH_FETCH_REF_MAX_REFS, Number(refCount) || 1));
   const envelopeAwareTextCap = Math.max(
@@ -2273,6 +2324,11 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null, p
     summary: message,
     detail,
   });
+  // A re-issued traversal ref is only routing custody until this exact model
+  // call opens it. Promotion above minted a call-scoped evidence capability;
+  // record the exact source windows delivered by that view so path selectors
+  // cannot borrow visibility from another call in the same attempt.
+  if (admitted) recordSurfacedRefSourceCoverage(hashContext, renderedText);
   const sourceWindows = Array.isArray(result?.entry?.metadata?.source_windows)
     ? result.entry.metadata.source_windows
     : [];
