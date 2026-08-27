@@ -79,7 +79,7 @@ function renderPlannerDevBrief(brief) {
   return lines.join("\n");
 }
 
-function issueHandoffTraversalRefsForCurrentCall(packet, hashRefPacket) {
+export function issueHandoffTraversalRefsForCurrentCall(packet, hashRefPacket) {
   const observation = getObservationContext() || {};
   const attemptId = observation.attempt_id ?? packet?.attempt_id ?? null;
   const agentCallId = observation.agent_call_id ?? packet?.agent_call_id ?? null;

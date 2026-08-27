@@ -95,6 +95,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { createWorkspaceSkipDirs } from "../../runtime/functions/workspace-skip.js";
 import { getAtlasHandoffPrefetchTimeoutMs, getFixScopeHandoffGuardMode } from "../../settings/functions/tunables.js";
 import {
+  issueHandoffTraversalRefsForCurrentCall,
   packetToContextString as packetToContextStringFromModule,
   packetToDynamicContextString as packetToDynamicContextStringFromModule,
 } from "./helpers/context-render.js";
@@ -2108,6 +2109,14 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
     maxPromptChars: Number(opts.maxPromptChars) > 0 ? Number(opts.maxPromptChars) : _maxPromptChars(),
     maxContextChars: Number(opts.maxContextChars) > 0 ? Number(opts.maxContextChars) : _maxContextChars(),
   };
+
+  if (packet.recipient === "dev" || packet.job_type === "fix") {
+    const issuedHashRefPacket = issueHandoffTraversalRefsForCurrentCall(
+      packet,
+      packet.hash_ref_packet || packet.dev_brief?.hash_ref_packet,
+    );
+    if (issuedHashRefPacket) packet.hash_ref_packet = issuedHashRefPacket;
+  }
 
   try {
     const remote = await timeHandoffStep(packet, "prompt.remote_compile", () => composer.composePrompt(packet, instructions, remoteOpts), {
