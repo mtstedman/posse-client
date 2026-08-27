@@ -46,6 +46,13 @@ export class BaseProvider {
     return this.MODEL_TIERS[key] || this.MODEL_TIERS.standard || {};
   }
 
+  resolveExecutionModelName(modelName, options = {}) {
+    if (typeof this.module.resolveExecutionModelName === "function") {
+      return this.module.resolveExecutionModelName(modelName, options);
+    }
+    return modelName;
+  }
+
   hasCapability(name) {
     return Boolean(this.capabilities?.[name]);
   }

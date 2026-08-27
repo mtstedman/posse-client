@@ -255,6 +255,93 @@ export function findCodexRolloutFile(codexHome, sessionHandle, startedAtMs) {
   return null;
 }
 
+// Live per-request usage can only come from the rollout file: `codex exec
+// --json` streams thread/turn/item events whose only usage payload rides the
+// FINAL turn.completed — once per exec, and the agent-handoff kill usually
+// drops even that. The rollout, by contrast, appends a token_count event
+// after every provider request. Tailing it incrementally is what lets
+// context-budget checkpoints exist while the call is still running; without
+// this, every context-headroom admission fails open with reason "missing".
+//
+// Offset-based and allocation-bounded: each poll reads only appended bytes,
+// carries a partial trailing line, and returns one usage record per new
+// token_count event. A multibyte character split across polls can corrupt
+// that one carried line; token_count telemetry is ASCII, so a corrupted line
+// is skipped harmlessly.
+export function createCodexRolloutUsageTailer({
+  codexHome,
+  startedAtMs = null,
+  startAtEnd = false,
+} = {}) {
+  const POLL_READ_MAX_BYTES = 8 * 1024 * 1024;
+  let sessionHandle = null;
+  let filePath = null;
+  let offset = 0;
+  let carry = "";
+  return {
+    get filePath() { return filePath; },
+    setSessionHandle(handle) {
+      if (sessionHandle) return;
+      const normalized = String(handle || "").trim();
+      if (normalized) sessionHandle = normalized;
+    },
+    poll() {
+      if (!sessionHandle) return [];
+      if (!filePath) {
+        filePath = findCodexRolloutFile(codexHome, sessionHandle, startedAtMs);
+        if (!filePath) return [];
+        if (startAtEnd) {
+          // A resumed session's rollout already holds the prior calls'
+          // requests; re-publishing them would transiently shrink the
+          // current call's context estimate.
+          try { offset = fs.statSync(filePath).size; } catch { offset = 0; }
+        }
+      }
+      let stat;
+      try { stat = fs.statSync(filePath); } catch { return []; }
+      if (stat.size <= offset) return [];
+      const usages = [];
+      let fd = null;
+      try {
+        fd = fs.openSync(filePath, "r");
+        const buffer = Buffer.alloc(Math.min(stat.size - offset, POLL_READ_MAX_BYTES));
+        const read = fs.readSync(fd, buffer, 0, buffer.length, offset);
+        if (read <= 0) return [];
+        offset += read;
+        const parts = `${carry}${buffer.toString("utf8", 0, read)}`.split(/\r?\n/u);
+        carry = parts.pop() || "";
+        for (const raw of parts) {
+          if (!raw.trim()) continue;
+          let row;
+          try { row = JSON.parse(raw); } catch { continue; }
+          const payload = row?.payload && typeof row.payload === "object" ? row.payload : row;
+          if (payload?.type !== "token_count") continue;
+          const last = payload?.info?.last_token_usage;
+          if (!last || typeof last !== "object") continue;
+          const requestContextInputTokens = Number(last.input_tokens);
+          if (!Number.isFinite(requestContextInputTokens) || requestContextInputTokens < 0) continue;
+          const cachedInputTokens = Number(last.cached_input_tokens);
+          usages.push({
+            requestContextInputTokens,
+            outputTokensSinceRequest: Math.max(0, Number(last.output_tokens) || 0),
+            ...(Number.isFinite(cachedInputTokens) && cachedInputTokens >= 0
+              ? { cachedInputTokens }
+              : {}),
+            precision: "exact",
+          });
+        }
+      } catch {
+        return usages;
+      } finally {
+        if (fd != null) {
+          try { fs.closeSync(fd); } catch { /* best effort */ }
+        }
+      }
+      return usages;
+    },
+  };
+}
+
 export function recoverCodexRolloutUsage({ codexHome, sessionHandle, startedAtMs } = {}) {
   const file = findCodexRolloutFile(codexHome, sessionHandle, startedAtMs);
   if (!file) return null;

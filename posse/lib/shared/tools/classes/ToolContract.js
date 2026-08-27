@@ -53,6 +53,19 @@ const CLAUDE_AMBIENT_TOOLS = [
   "TaskOutput",
   "TaskStop",
 ].join(",");
+const CLAUDE_NATIVE_COORDINATION_TOOLS = [
+  "Agent",
+  // Task remains for compatibility with older Claude Code builds; current
+  // builds expose the same provider-native delegation surface as Agent.
+  "Task",
+  "TaskOutput",
+  "TaskStop",
+  "SendMessage",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskUpdate",
+];
 export const CLAUDE_NATIVE_TOOL_NAMES = Object.freeze([
   "Read",
   "Glob",
@@ -63,12 +76,16 @@ export const CLAUDE_NATIVE_TOOL_NAMES = Object.freeze([
   "WebFetch",
   "WebSearch",
   "NotebookEdit",
-  "Task",
+  ...CLAUDE_NATIVE_COORDINATION_TOOLS,
   "TodoWrite",
-  ...CLAUDE_AMBIENT_TOOLS.split(","),
+  ...CLAUDE_AMBIENT_TOOLS.split(",").filter((name) => !CLAUDE_NATIVE_COORDINATION_TOOLS.includes(name)),
 ]);
 const ALL_CLAUDE_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_NAMES.join(",");
 const ASSESSOR_CLAUDE_NATIVE_DISALLOW = `Read,Glob,Grep,Bash,Write,Edit,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,${CLAUDE_AMBIENT_TOOLS}`;
+const CLAUDE_NATIVE_TEAM_DISALLOW = CLAUDE_AMBIENT_TOOLS
+  .split(",")
+  .filter((name) => !CLAUDE_NATIVE_COORDINATION_TOOLS.includes(name))
+  .join(",");
 const TEST_CAPABILITY_TOOL_NAMES = new Set([
   "run_scoped_checks",
   "create_test_suite",
@@ -388,6 +405,27 @@ export class ToolContract {
         disallowedTools: CLAUDE_AMBIENT_TOOLS,
         allowedTools,
         dangerouslySkipPermissions: false,
+      };
+    }
+    if (role === "native" && allowWrite) {
+      if (deterministicReadMcpActive) {
+        return {
+          tools: null,
+          disallowedTools: allNativeDisallow,
+          dangerouslySkipPermissions: true,
+        };
+      }
+      const nativeTools = [
+        "Bash", "Read", "Write", "Edit", "Glob", "Grep",
+        ...CLAUDE_NATIVE_COORDINATION_TOOLS,
+        "TodoWrite",
+      ];
+      appendWebAllowed(nativeTools);
+      return {
+        tools: nativeTools.join(","),
+        disallowedTools: CLAUDE_NATIVE_TEAM_DISALLOW,
+        allowedTools: nativeTools.join(","),
+        dangerouslySkipPermissions: !!autoApprove,
       };
     }
     if (role === "artificer" && allowWrite) {

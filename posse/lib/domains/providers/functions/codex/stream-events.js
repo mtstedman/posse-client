@@ -469,7 +469,17 @@ function pickUsageMetric(candidate, cumulativeNames, deltaNames, ambiguousNames)
 export function extractLiveRequestUsageFromEvent(msg) {
   if (!msg || typeof msg !== "object") return null;
   const body = _extractCodexEventBody(msg);
-  const last = body?.type === "token_count" ? body?.info?.last_token_usage : null;
+  // Legacy stream schema: per-request usage rides token_count.info.last_token_usage.
+  // Newer codex CLIs (`exec --json` thread/turn/item schema) never emit token_count
+  // on stdout; per-request usage arrives only on turn.completed.usage. A turn can
+  // span multiple provider requests, in which case input_tokens aggregates them —
+  // that overestimates context and is acceptable for a headroom gate.
+  const type = String(body?.type || "").trim().toLowerCase().replaceAll("_", ".");
+  const last = type === "token.count"
+    ? body?.info?.last_token_usage
+    : type === "turn.completed" && body?.usage && typeof body.usage === "object"
+      ? body.usage
+      : null;
   if (!last || typeof last !== "object") return null;
   const requestContextInputTokens = pickUsageValue(last, ["input_tokens", "inputTokens"]);
   const outputTokensSinceRequest = pickUsageValue(last, ["output_tokens", "outputTokens"]);

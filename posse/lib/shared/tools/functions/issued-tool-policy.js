@@ -662,7 +662,14 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     agentCallId: attachment.agentCallId ?? null,
     promptChars: Math.max(0, Number(attachment.promptChars) || 0),
     modelName: String(attachment.modelName || ""),
-    providerSessionId: String(attachment.providerSessionId || ""),
+    // Context-budget checkpoints key their session as `agent-call:<id>`
+    // (TrackedProviderClient publish sites); an attachment that doesn't carry
+    // an explicit session must derive the same form or every headroom read
+    // fails the session check.
+    providerSessionId: String(
+      attachment.providerSessionId
+      || (attachment.agentCallId != null ? `agent-call:${attachment.agentCallId}` : ""),
+    ),
     scopedFiles: [],
     createFiles: [],
     deleteFiles: [],

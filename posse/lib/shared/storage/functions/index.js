@@ -407,6 +407,7 @@ export function jobAttemptsCreateSql(tableName = "job_attempts") {
           notes TEXT,
           metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
           commit_hash TEXT,
+          commit_base_hash TEXT,
           session_id INTEGER,
           session_lease_token TEXT,
           session_hop_count INTEGER,
@@ -465,6 +466,7 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           output_chars INTEGER,
           input_tokens INTEGER,
           output_tokens INTEGER,
+          reasoning_output_tokens INTEGER,
           cached_input_tokens INTEGER,
           cache_creation_input_tokens INTEGER,
           max_turns_configured INTEGER,
@@ -1336,6 +1338,13 @@ export function getDb() {
     _db.exec(`ALTER TABLE job_attempts ADD COLUMN commit_hash TEXT`);
   }
 
+  const hasCommitBaseHash = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('job_attempts') WHERE name='commit_base_hash'`
+  ).get();
+  if (hasCommitBaseHash.cnt === 0) {
+    _db.exec(`ALTER TABLE job_attempts ADD COLUMN commit_base_hash TEXT`);
+  }
+
   const hasAttemptSessionId = _db.prepare(
     `SELECT COUNT(*) as cnt FROM pragma_table_info('job_attempts') WHERE name='session_id'`
   ).get();
@@ -1709,6 +1718,13 @@ export function getDb() {
     _db.exec(`ALTER TABLE agent_calls ADD COLUMN cache_creation_input_tokens INTEGER`);
   }
 
+  const hasAgentCallReasoningOutputTokens = _db.prepare(
+    `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='reasoning_output_tokens'`
+  ).get();
+  if (hasAgentCallReasoningOutputTokens.cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN reasoning_output_tokens INTEGER`);
+  }
+
   const hasAgentCallTurnsUsed = _db.prepare(
     `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='turns_used'`
   ).get();
@@ -1826,6 +1842,7 @@ export function getDb() {
           notes TEXT,
           metadata_json TEXT,
           commit_hash TEXT,
+          commit_base_hash TEXT,
           session_id INTEGER,
           session_lease_token TEXT,
           session_hop_count INTEGER,
@@ -1874,6 +1891,7 @@ export function getDb() {
           notes TEXT,
           metadata_json TEXT,
           commit_hash TEXT,
+          commit_base_hash TEXT,
           session_id INTEGER,
           session_lease_token TEXT,
           session_hop_count INTEGER,
@@ -1980,6 +1998,7 @@ export function getDb() {
           notes TEXT,
           metadata_json TEXT,
           commit_hash TEXT,
+          commit_base_hash TEXT,
           session_id INTEGER,
           session_lease_token TEXT,
           session_hop_count INTEGER,
@@ -2186,6 +2205,7 @@ export function getDb() {
           notes TEXT,
           metadata_json TEXT,
           commit_hash TEXT,
+          commit_base_hash TEXT,
           session_id INTEGER,
           session_lease_token TEXT,
           session_hop_count INTEGER,
@@ -2637,6 +2657,7 @@ export function getDb() {
             notes TEXT,
             metadata_json TEXT,
             commit_hash TEXT,
+            commit_base_hash TEXT,
             session_id INTEGER,
             session_lease_token TEXT,
             session_hop_count INTEGER,

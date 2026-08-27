@@ -168,8 +168,9 @@ Use `posse help` for the full CLI reference.
 - `health`: show stuck-job and failure signals.
 - `dashboard`: show the TUI dashboard.
 - `review`: generate review output and collect approval decisions.
+- `gate answer <gate-job-id> <action> [--feedback ...]`: resolve a parked human gate from a headless shell.
 - `inject`: add work while a run is in progress.
-- `ask`: answer waiting human-input jobs.
+- `ask`: queue a research-only question.
 - `image`: generate an image directly.
 - `events`, `timeline`, `cost`, `fanout`, `audit`, `calls`, `prompts`,
   `usage`, `atlas-smoke`, `mcp-status`, `codex-models`: inspection commands.

@@ -2,6 +2,7 @@
 
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "../model-catalog.js";
 import { getMaxTurnsForProvider } from "../shared/turns.js";
+import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth.js";
 import { readModelSetting } from "./settings.js";
 
 export const capabilities = Object.freeze({
@@ -67,6 +68,11 @@ export function normalizeModelForAuthMode(modelName, authMode) {
   if (!model) return modelName;
   if (authMode !== "login" && authMode !== "oauth") return model;
   return resolveOauthCompatibleModel(model);
+}
+
+export function resolveExecutionModelName(modelName) {
+  const auth = resolveCodexAuthModeInternal({ configuredMode: getConfiguredCodexAuthMode() });
+  return normalizeModelForAuthMode(modelName, auth.mode);
 }
 
 export function __testNormalizeModelForAuthMode(modelName, authMode) {

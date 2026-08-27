@@ -91,6 +91,7 @@ export function completeAgentCall(id, {
   output_chars = null,
   input_tokens = null,
   output_tokens = null,
+  reasoning_output_tokens = null,
   cached_input_tokens = null,
   cache_creation_input_tokens = null,
   turns_used = null,
@@ -118,7 +119,7 @@ export function completeAgentCall(id, {
   db.prepare(`
     UPDATE agent_calls
     SET status = ?, finished_at = ?, duration_ms = ?,
-        output_chars = ?, input_tokens = ?, output_tokens = ?, cached_input_tokens = ?,
+        output_chars = ?, input_tokens = ?, output_tokens = ?, reasoning_output_tokens = ?, cached_input_tokens = ?,
         cache_creation_input_tokens = ?,
         turns_used = ?,
         max_turns_configured = COALESCE(max_turns_configured, ?),
@@ -141,7 +142,7 @@ export function completeAgentCall(id, {
     WHERE id = ?
   `).run(
     status, now(), duration_ms,
-    output_chars, input_tokens, output_tokens, cached_input_tokens,
+    output_chars, input_tokens, output_tokens, reasoning_output_tokens, cached_input_tokens,
     cache_creation_input_tokens,
     turns_used,
     max_turns_configured,

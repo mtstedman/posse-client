@@ -356,7 +356,9 @@ export function estimateBillableInputTokens({ provider, modelName, modelTier, in
   );
   const inputPerM = Math.max(0, Number(rates.inputPerM) || 0);
   const cachedInputPerM = Math.max(0, Number(rates.cachedInputPerM) || 0);
+  const outputPerM = Math.max(0, Number(rates.outputPerM) || 0);
   const cacheDiscountRatio = inputPerM > 0 ? cachedInputPerM / inputPerM : 1;
+  const outputCostRatio = inputPerM > 0 ? outputPerM / inputPerM : 1;
   // Cache-write tokens bill at a premium; reflect that in billable units so the
   // displayed figure tracks estimateCallCost.
   const billableInputTokens = uncachedInput
@@ -368,7 +370,32 @@ export function estimateBillableInputTokens({ provider, modelName, modelTier, in
     cachedInputTokens: cachedInput,
     cacheCreationInputTokens: cacheCreationInput,
     cacheDiscountRatio,
+    inputPerM,
+    cachedInputPerM,
+    outputPerM,
+    outputCostRatio,
     source: rates.source,
+  };
+}
+
+/**
+ * Convert every token lane into uncached-input-price-equivalent units.
+ *
+ * Output is not a 1:1 addend: it is weighted by the resolved output/input
+ * price ratio for the exact provider/model/rate tier. For example, GPT-5.5
+ * output is currently 6x and Claude Sonnet output is currently 5x. Deriving
+ * the ratio here keeps database overrides, remote pricing, and long-context
+ * rate adjustments authoritative.
+ */
+export function estimateBillableTokens({ outputTokens = 0, ...inputUsage } = {}) {
+  const input = estimateBillableInputTokens(inputUsage);
+  const output = Math.max(0, Number(outputTokens) || 0);
+  const billableOutputTokens = output * input.outputCostRatio;
+  return {
+    ...input,
+    outputTokens: output,
+    billableOutputTokens,
+    billableTokens: input.billableInputTokens + billableOutputTokens,
   };
 }
 

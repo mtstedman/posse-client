@@ -908,6 +908,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
  *   attempt.max          number
  *   attempt.last_error   string | null
  *   attempt.escalated    boolean (tier was bumped from base)
+ *   attempt_id           durable queue attempt identity when available
  *
  *   ── Scope ──
  *   cwd                  string
@@ -1009,6 +1010,7 @@ export function buildHandoffPacket(job, opts) {
       last_error: lastError,
       escalated: sourceModelTier != null && resolvedModelTier !== sourceModelTier,
     },
+    ...(opts.attemptId != null ? { attempt_id: opts.attemptId } : {}),
 
     // ── Scope ──
     cwd: cwd || process.cwd(),

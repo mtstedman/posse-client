@@ -32,6 +32,7 @@ import {
   getUsageSummary,
   refreshUsageSummary,
 } from "./usage-summary.js";
+import { buildClaudeNativeSubagentTelemetry, parseClaudeTaskNotification } from "./native-subagent-telemetry.js";
 import {
   getClaudeCommandAsync,
   getClaudeInfo,
@@ -348,6 +349,7 @@ export async function callProvider(promptText, {
   mcpGate = null,
   disableAgentTools = false,
   nativeColdBoot = false,
+  captureNativeSubagents = false,
 } = {}) {
   const resolvedClaude = await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
@@ -992,6 +994,8 @@ export async function callProvider(promptText, {
     const LINE_BUF_MAX = 16 * 1024 * 1024; // 16 MiB
     const toolUses = [];       // track tool calls: [{ tool, input }, ...]
     const seenToolUseKeys = new Set();
+    const nativeSubagentNotifications = [];
+    const seenNativeSubagentNotificationKeys = new Set();
     const providerToolBatches = new Map();
     const providerTurnIndexesById = new Map();
     let _providerTurnSequence = 0;
@@ -1074,6 +1078,16 @@ export async function callProvider(promptText, {
             : { providerTurnIndex: turn.providerTurnIndex }),
         });
       }
+    }
+
+    function recordNativeSubagentNotification(msg) {
+      if (!captureNativeSubagents) return;
+      const notification = parseClaudeTaskNotification(msg);
+      if (!notification) return;
+      const key = `${notification.taskId || ""}\0${notification.toolUseId || ""}\0${notification.status || ""}`;
+      if (seenNativeSubagentNotificationKeys.has(key)) return;
+      seenNativeSubagentNotificationKeys.add(key);
+      nativeSubagentNotifications.push(notification);
     }
 
     function updateProviderBatch(normalized) {
@@ -1324,6 +1338,7 @@ export async function callProvider(promptText, {
           // assistant messages with content[] tool_use blocks instead of
           // Anthropic-style content_block_start/content_block_delta events.
           recordStreamMessageToolUses(msg);
+          recordNativeSubagentNotification(msg);
 
           if (msg.type === "message_stop" || msg.type === "result") {
             _activeProviderTurn = null;
@@ -1424,6 +1439,7 @@ export async function callProvider(promptText, {
             _pendingToolInput = "";
           }
           recordStreamMessageToolUses(msg);
+          recordNativeSubagentNotification(msg);
           if (msg.type === "message_stop" || msg.type === "result") {
             _activeProviderTurn = null;
           }
@@ -1492,7 +1508,7 @@ export async function callProvider(promptText, {
         usageFinalized: resultData != null,
         usageCapturePrecision: resultData != null ? "aggregate_only" : "unknown",
         costUsd: apiEquivalentCostUsd ?? resultData?.cost_usd ?? null,
-        totalCostUsd: resultData?.total_cost_usd || null,
+        totalCostUsd: resultData?.total_cost_usd ?? null,
         numTurns: resultData?.num_turns || null,
         durationMs,
         exitCode: code,
@@ -1512,6 +1528,21 @@ export async function callProvider(promptText, {
         mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
         mcpAttachMissingProof: mcpCleanup.attachProofResult?.missingProof === true,
       };
+      if (captureNativeSubagents) {
+        stats.nativeSubagentTelemetry = buildClaudeNativeSubagentTelemetry({
+          toolUses,
+          notifications: nativeSubagentNotifications,
+          aggregateUsage: {
+            inputTokens: normalizedUsage.inputTokens,
+            outputTokens: normalizedUsage.outputTokens,
+            cachedInputTokens: normalizedUsage.cachedInputTokens,
+            cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens,
+            cacheReadInputTokens: normalizedUsage.cacheReadInputTokens,
+            reasoningOutputTokens: normalizedUsage.reasoningOutputTokens,
+          },
+          totalCostUsd: stats.totalCostUsd ?? stats.costUsd,
+        });
+      }
       if (resultData != null) {
         try {
           onUsageSegment?.({

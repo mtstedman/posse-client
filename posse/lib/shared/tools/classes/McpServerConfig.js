@@ -1314,10 +1314,18 @@ export class McpServerConfig {
       source: opts.remoteToolSurface ? "prompt_issuance" : "catalog_endpoint",
     });
     try {
+      // Citation-child issuance is consumed while minting the immutable child
+      // gate. The session packet carries only a serialized description of that
+      // issuance, so it cannot retain the WeakMap identity of the single-use
+      // permit. Once the gate exists, its already-narrowed surface is the
+      // authority for provider startup; do not treat the packet copy as a new
+      // per-Job issuance.
+      const coordinationChildGate = opts.mcpGate?.contractBootConfig?.coordinationChild === true;
       // Prompt composition already resolved this exact remote-issued policy.
       // Revalidate it below against role/provider and reuse it so a redundant
       // catalog request cannot turn a successful issuance into an outage.
-      const suppliedJobSurface = opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
+      const suppliedJobSurface = !coordinationChildGate
+        && opts.remoteToolSurface && typeof opts.remoteToolSurface === "object"
         && opts.remoteToolSurface !== opts.mcpGate.remoteToolSurface
         ? assertJobSurfaceWithinAgentGate(
             role,
@@ -1326,7 +1334,12 @@ export class McpServerConfig {
             opts.remoteToolSurface,
           )
         : null;
-      remoteResolution = suppliedJobSurface
+      remoteResolution = coordinationChildGate
+        ? {
+            surface: opts.mcpGate.remoteToolSurface,
+            mcpOAuthToken: "",
+          }
+        : suppliedJobSurface
         ? {
             surface: suppliedJobSurface,
             mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),

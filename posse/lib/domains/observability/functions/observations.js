@@ -784,7 +784,10 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
             lastNovelEvidenceStep = Math.max(lastNovelEvidenceStep, explorationStep);
             continue;
           }
-          const explicitEvidenceContract = Number(detail?.evidence_identity_version) === 1;
+          // v1 = result-derived identities (paths + content hashes); v2 adds
+          // range-normalized identities for delivered source. Both are explicit
+          // contracts; only pre-versioned rows keep the conservative fallback.
+          const explicitEvidenceContract = Number(detail?.evidence_identity_version) >= 1;
           const novel = noteNovelIdentities(detail?.evidence_identities, explorationStep);
           // Before evidence identity v1, success was the only available owner
           // progress signal. Retain that conservative fallback across rolling

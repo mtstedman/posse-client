@@ -2,6 +2,7 @@
 
 import { spawn } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { TOOL_REFS } from "../../../../catalog/tool-references.js";
 import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
@@ -36,10 +37,12 @@ import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRout
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
-import { reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
+import { createCodexRolloutUsageTailer, reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
+import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
+  nativeSystemToolsEnabled = false,
 } = {}) {
   const contractBlock = renderExecutionContractBlock(executionContract, {
     remoteComposed: skipRolePrompt,
@@ -51,6 +54,13 @@ export function buildCodexRuntimeContractBlock(executionContract, {
   // The shared renderer supplies provider-local guidance for every provider;
   // writable Codex roles additionally need Codex's local mutation route.
   if (executionContract?.allowWrite !== true) return contractBlock;
+  if (nativeSystemToolsEnabled) {
+    return [
+      contractBlock,
+      "CODEX MUTATION ROUTE: native repository tools are enabled for this isolated direct session. Use native apply_patch for file edits.",
+    ].filter(Boolean).join("\n");
+  }
+
   const tools = new ProviderToolRenderer({
     providerName: "codex",
     toolAttachmentMode: "deterministic-bridge",
@@ -125,6 +135,8 @@ export async function callProvider(promptText, {
   mcpGate = null,
   disableAgentTools = false,
   sandboxModeOverride = null,
+  disableSystemTools: disableSystemToolsOverride = null,
+  captureNativeSubagents = false,
 } = {}) {
   const readiness = await isReadyAsync();
   if (!readiness.ready) {
@@ -184,7 +196,9 @@ export async function callProvider(promptText, {
       return;
     }
     const atlasToolGateEnabled = resolveAtlasToolGateEnabled();
-    const disableSystemTools = resolveDisableSystemTools();
+    const disableSystemTools = typeof disableSystemToolsOverride === "boolean"
+      ? disableSystemToolsOverride
+      : resolveDisableSystemTools();
     const atlasReadyForMcp = hasProviderVisibleAtlasMcpTools({
       disableAtlas,
       atlasPrefetchStatus,
@@ -303,7 +317,10 @@ export async function callProvider(promptText, {
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
     // Remote owns provider-independent behavior. The shared renderer keeps
     // provider-local guidance aligned with the exact issued Codex surface.
-    const contractBlock = buildCodexRuntimeContractBlock(executionContract, { skipRolePrompt });
+    const contractBlock = buildCodexRuntimeContractBlock(executionContract, {
+      skipRolePrompt,
+      nativeSystemToolsEnabled: !disableSystemTools && !deterministicReadMcp.active,
+    });
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,
       contractBlock,
@@ -440,6 +457,12 @@ export async function callProvider(promptText, {
     delete childEnv.GITHUB_TOKEN;
     if (configRoute.codexHome) childEnv.CODEX_HOME = configRoute.codexHome;
     else if (providerHomeEnv?.isolated && providerHomeEnv.envVar) childEnv[providerHomeEnv.envVar] = providerHomeEnv.home;
+    // Codex defaults to ~/.codex when CODEX_HOME is absent. Use the same
+    // resolved location for live and close-time rollout recovery; passing an
+    // undefined CODEX_HOME silently loses native-child and request telemetry.
+    const rolloutCodexHome = childEnv.CODEX_HOME
+      || process.env.CODEX_HOME
+      || path.join(os.homedir(), ".codex");
 
     const launch = buildWindowsSpawn(codexCmd, args);
     const startTime = Date.now();
@@ -448,7 +471,7 @@ export async function callProvider(promptText, {
     // call must not account the session's historical cumulative totals.
     const resumedRolloutBaseline = resumeSessionHandle
       ? recoverCodexRolloutUsage({
-          codexHome: childEnv.CODEX_HOME,
+          codexHome: rolloutCodexHome,
           sessionHandle: resumeSessionHandle,
         })
       : null;
@@ -532,6 +555,28 @@ export async function callProvider(promptText, {
     const usageAccumulator = createCodexUsageAccumulator();
     let usageProgressSequence = 0;
     let previousUsageProgress = null;
+    const emitUsageProgress = (progress) => {
+      const progressKey = JSON.stringify(progress);
+      if (progressKey === previousUsageProgress) return;
+      previousUsageProgress = progressKey;
+      try {
+        onUsageProgress?.({
+          sequenceId: ++usageProgressSequence,
+          ...progress,
+        });
+      } catch { /* progress telemetry cannot break provider execution */ }
+    };
+    // Per-request usage never rides the live `exec --json` stream (a codex
+    // turn spans the whole tool loop, and its single terminal turn.completed
+    // is usually lost to the handoff kill). The rollout file appends a
+    // token_count event after every provider request — tail it so context
+    // checkpoints exist while the call is still running.
+    const rolloutUsageTailer = createCodexRolloutUsageTailer({
+      codexHome: rolloutCodexHome,
+      startedAtMs: startTime,
+      startAtEnd: !!resumeSessionHandle,
+    });
+    let lastRolloutUsagePollMs = 0;
     let killedByStallDetector = false;
     let stallKillReason = "no_output";
     let lastActivity = Date.now();
@@ -558,6 +603,12 @@ export async function callProvider(promptText, {
           terminalUsageFlush.noteUsage();
         }
         const liveRequestUsage = extractLiveRequestUsageFromEvent(msg);
+        if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
+          try {
+            const bodyType = msg?.msg?.type || msg?.payload?.type || msg?.type || "?";
+            console.error(`[ctx-debug] stdout event type=${bodyType} live=${liveRequestUsage ? JSON.stringify(liveRequestUsage) : "null"}`);
+          } catch { /* debug only */ }
+        }
         const aggregateProgressAvailable = !resumeSessionHandle
           && (totals.inputTokens != null || totals.outputTokens != null);
         if (liveRequestUsage || aggregateProgressAvailable) {
@@ -574,16 +625,7 @@ export async function callProvider(promptText, {
               ...totals,
               precision: "aggregate_only",
             };
-          const progressKey = JSON.stringify(progress);
-          if (progressKey !== previousUsageProgress) {
-            previousUsageProgress = progressKey;
-            try {
-              onUsageProgress?.({
-                sequenceId: ++usageProgressSequence,
-                ...progress,
-              });
-            } catch { /* progress telemetry cannot break provider execution */ }
-          }
+          emitUsageProgress(progress);
         }
         const turnCount = extractTurnCountFromEvent(msg);
         if (turnCount != null) latestTurnCount = Math.max(latestTurnCount ?? 0, turnCount);
@@ -614,6 +656,18 @@ export async function callProvider(promptText, {
 
     const heartbeat = setInterval(() => {
       const now = Date.now();
+      if (now - lastRolloutUsagePollMs >= 2_000) {
+        lastRolloutUsagePollMs = now;
+        try {
+          rolloutUsageTailer.setSessionHandle(latestSessionHandle);
+          for (const usage of rolloutUsageTailer.poll()) {
+            if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
+              console.error(`[ctx-debug] rollout tail usage ${JSON.stringify(usage)}`);
+            }
+            emitUsageProgress({ provider: "codex", modelName: modelToUse, ...usage });
+          }
+        } catch { /* rollout tailing must not break provider execution */ }
+      }
       if (liveScopeWaitPausesProviderStall(jobId)) {
         lastActivity = now;
         lastMeaningfulActivity = now;
@@ -699,7 +753,7 @@ export async function callProvider(promptText, {
       let rolloutRecoveryIncomplete = false;
       if (latestSessionHandle) {
         const currentRolloutUsage = recoverCodexRolloutUsage({
-          codexHome: childEnv.CODEX_HOME,
+          codexHome: rolloutCodexHome,
           sessionHandle: latestSessionHandle,
           startedAtMs: startTime,
         });
@@ -740,6 +794,14 @@ export async function callProvider(promptText, {
             } catch { /* accounting persistence cannot break provider execution */ }
           }
         }
+      }
+      let nativeSubagentTelemetry = null;
+      if (captureNativeSubagents && latestSessionHandle) {
+        nativeSubagentTelemetry = recoverCodexNativeSubagentTelemetry({
+          codexHome: rolloutCodexHome,
+          parentSessionHandle: latestSessionHandle,
+          startedAtMs: startTime,
+        });
       }
       let finalOutput = "";
       let mcpCleanup = null;
@@ -807,6 +869,7 @@ export async function callProvider(promptText, {
       } else {
         stats.usageCapturePrecision = "unknown";
       }
+      if (captureNativeSubagents) stats.nativeSubagentTelemetry = nativeSubagentTelemetry;
 
       // Persist MCP-relevant CLI stderr (only when present) so a gateway
       // attach-under-load failure leaves a trace even on a clean exit.

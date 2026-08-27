@@ -86,6 +86,10 @@ function rowDetail(row) {
   try { return JSON.parse(String(row?.detail_json || "{}")); } catch { return null; }
 }
 
+function isReusableCoverageState(value) {
+  return value === "delivered" || value === "reused";
+}
+
 function contextFor(owner) {
   return {
     work_item_id: owner.workItemId,
@@ -247,7 +251,7 @@ export class SourceCoverageOwner {
     if (requestedFile) {
       for (const row of this.#rows()) {
         const coverage = rowDetail(row);
-        if (!coverage || coverage.delivery_state !== "delivered" || coverage.complete_file !== true) continue;
+        if (!coverage || !isReusableCoverageState(coverage.delivery_state) || coverage.complete_file !== true) continue;
         if (coverage.repository_identity !== this.repositoryIdentity) continue;
         if (normalizePath(coverage.repo_rel_path) !== requestedFile) continue;
         const fresh = this.#freshSource(requestedFile);
@@ -290,7 +294,7 @@ export class SourceCoverageOwner {
     }
     const delivered = new Map();
     for (const entry of latest) {
-      if (entry.coverage.delivery_state !== "delivered") continue;
+      if (!isReusableCoverageState(entry.coverage.delivery_state)) continue;
       delivered.set([
         entry.coverage.repo_rel_path,
         entry.coverage.start_line,
@@ -323,16 +327,90 @@ export class SourceCoverageOwner {
     const requestedEnd = rawEnd;
     for (const row of this.#rows()) {
       const coverage = rowDetail(row);
-      if (!coverage || coverage.delivery_state !== "delivered") continue;
+      if (!coverage || !isReusableCoverageState(coverage.delivery_state)) continue;
       if (coverage.repository_identity !== this.repositoryIdentity) continue;
       if (normalizePath(coverage.repo_rel_path) !== relative) continue;
       if (Number(coverage.start_line) > requestedStart || Number(coverage.end_line) < requestedEnd) continue;
       const fresh = this.#freshSource(relative);
       if (!fresh || fresh.sourceVersion !== coverage.source_version) continue;
       const result = this.#coveredResult(row, coverage, "contained_interval");
-      if (result) return result;
+      if (result) {
+        // Interval admission happens after the native selector has resolved.
+        // Surface the interval that this call resolved, not the potentially
+        // wider stored coverage region backing the evidence ref. The ref is
+        // the durable source identity; a content hash for the wider region
+        // beside narrower line bounds would be ambiguous.
+        const compactResult = {
+          ...result.result,
+          repo_rel_path: relative,
+          startLine: requestedStart,
+          endLine: requestedEnd,
+        };
+        delete compactResult.contentSha256;
+        return { ...result, result: compactResult, coverageRecord: coverage };
+      }
     }
     return { covered: false, reason: "uncovered" };
+  }
+
+  recordResolvedIntervalReuse(args = {}, admission = {}) {
+    if (
+      !this.attemptId
+      || admission?.covered !== true
+      || admission?.coverageScope !== "current_attempt"
+      || !admission?.coverageRecord
+    ) return false;
+    const coverage = admission.coverageRecord;
+    const selectorFingerprint = sourceSelectorFingerprint(args);
+    const exists = this.#rows().some((row) => {
+      const detail = rowDetail(row);
+      return isReusableCoverageState(detail?.delivery_state)
+        && detail.repository_identity === this.repositoryIdentity
+        && detail.source_version === coverage.source_version
+        && detail.selector_fingerprint === selectorFingerprint
+        && normalizePath(detail.repo_rel_path) === normalizePath(coverage.repo_rel_path)
+        && Number(detail.start_line) === Number(coverage.start_line)
+        && Number(detail.end_line) === Number(coverage.end_line)
+        && detail.content_sha256 === coverage.content_sha256
+        && detail.evidence_ref === coverage.evidence_ref;
+    });
+    if (exists) return true;
+    try {
+      recordObservation({
+        work_item_id: this.workItemId,
+        job_id: this.jobId,
+        attempt_id: this.attemptId,
+        observation_type: COVERAGE_OBSERVATION,
+        summary: `reused resolved source coverage ${coverage.repo_rel_path}:${coverage.start_line}-${coverage.end_line}`,
+        detail: {
+          repository_identity: this.repositoryIdentity,
+          source_version: coverage.source_version,
+          repo_rel_path: normalizePath(coverage.repo_rel_path),
+          start_line: Number(coverage.start_line),
+          end_line: Number(coverage.end_line),
+          content_sha256: coverage.content_sha256,
+          selector_fingerprint: selectorFingerprint,
+          complete_file: false,
+          complete_symbol_selector_fingerprint: null,
+          evidence_ref: coverage.evidence_ref,
+          delivery_state: "reused",
+          tool: "code.window",
+          origin: "resolved_interval_reuse",
+          agent_call_id: this.agentCallId,
+          stored_chars: 0,
+          returned_chars: 0,
+          novel_source: false,
+          reuse_origin_job_id: admission.coverageOrigin?.job_id || null,
+          reuse_origin_attempt_id: admission.coverageOrigin?.attempt_id || null,
+        },
+        db: this.db,
+      });
+      return true;
+    } catch {
+      // Alias telemetry is an optimization. The compact response remains safe
+      // because the original delivered coverage row is still authoritative.
+      return false;
+    }
   }
 
   hasDeliveredCoverageForPath(repoRelativePath) {
@@ -343,7 +421,7 @@ export class SourceCoverageOwner {
     if (!fresh) return false;
     return this.#rows().some((row) => {
       const coverage = rowDetail(row);
-      return coverage?.delivery_state === "delivered"
+      return isReusableCoverageState(coverage?.delivery_state)
         && coverage.repository_identity === this.repositoryIdentity
         && normalizePath(coverage.repo_rel_path) === relative
         && coverage.source_version === fresh.sourceVersion;

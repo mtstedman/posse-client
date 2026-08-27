@@ -17,6 +17,7 @@ const POLICY_ENTRIES = [
   { name: "doctor", requiresWritableArtifacts: false },
   { name: "update", requiresWritableArtifacts: false },
   { name: "review", requiresWritableArtifacts: true, refreshContextAfter: true },
+  { name: "gate", requiresWritableArtifacts: false },
   { name: "inject", requiresWritableArtifacts: true },
   { name: "ask", requiresWritableArtifacts: true },
   { name: "image", requiresWritableArtifacts: true },

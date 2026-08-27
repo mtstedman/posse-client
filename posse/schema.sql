@@ -673,6 +673,7 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   output_chars INTEGER,
   input_tokens INTEGER,
   output_tokens INTEGER,
+  reasoning_output_tokens INTEGER,
   cached_input_tokens INTEGER,
   cache_creation_input_tokens INTEGER,
 

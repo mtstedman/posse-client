@@ -812,7 +812,7 @@ export async function handlePostExecutionForWorker({
             if (commitHash !== headBefore) {
               hasFileChanges = true;
               committedHash = commitHash;
-              setAttemptCommitHash(attempt.id, commitHash);
+              setAttemptCommitHash(attempt.id, commitHash, headBefore);
               // Capture what was actually committed (ground truth for assessor)
               try {
                 filesCommitted = (await gitExecAsync(["diff", "--no-renames", "--name-only", "--relative", headBefore, commitHash], wtPath))

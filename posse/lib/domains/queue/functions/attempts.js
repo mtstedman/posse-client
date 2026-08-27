@@ -219,9 +219,12 @@ export function completeAttempt(attemptId, {
   );
 }
 
-export function setAttemptCommitHash(attemptId, commitHash) {
+export function setAttemptCommitHash(attemptId, commitHash, commitBaseHash = null) {
   const db = getDb();
-  db.prepare(`UPDATE job_attempts SET commit_hash = ? WHERE id = ?`).run(commitHash, attemptId);
+  // COALESCE keeps a previously recorded base when a later caller (partial
+  // commits, promote) only knows the head hash.
+  db.prepare(`UPDATE job_attempts SET commit_hash = ?, commit_base_hash = COALESCE(?, commit_base_hash) WHERE id = ?`)
+    .run(commitHash, commitBaseHash || null, attemptId);
 }
 
 export function setAttemptModelName(attemptId, modelName) {

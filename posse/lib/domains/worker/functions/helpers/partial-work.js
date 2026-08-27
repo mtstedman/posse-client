@@ -407,7 +407,7 @@ export function commitScopedPartialWork(worker, job, attempt, wtPath, {
     filesCommitted = state.inScopePaths;
   }
 
-  if (attempt?.id) setAttemptCommitHash(attempt.id, commitHash);
+  if (attempt?.id) setAttemptCommitHash(attempt.id, commitHash, headBefore);
   setJobResult(job.id, {
     partial_work: true,
     output_length: String(output || "").length,
@@ -496,7 +496,7 @@ export async function commitScopedPartialWorkAsync(worker, job, attempt, wtPath,
     filesCommitted = state.inScopePaths;
   }
 
-  if (attempt?.id) setAttemptCommitHash(attempt.id, commitHash);
+  if (attempt?.id) setAttemptCommitHash(attempt.id, commitHash, headBefore);
   setJobResult(job.id, {
     partial_work: true,
     output_length: String(output || "").length,

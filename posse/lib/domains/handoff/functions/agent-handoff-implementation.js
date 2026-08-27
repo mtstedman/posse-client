@@ -456,7 +456,13 @@ function mergeSourceContentRecords(records) {
 
 function payloadSourceContentWindows(entry, lineage) {
   const payload = String(entry?.payload_text || "");
-  const payloadLines = normalizedLines(payload);
+  // Citation-child delegated excerpts are canonical joins of the source-line
+  // array, not raw file bytes. A trailing LF can therefore be the declared
+  // final blank source line rather than an ignorable file terminator. Keep it
+  // here and let the authoritative materialized window count validate it.
+  const payloadLines = entry?.metadata?.source_payload_encoding === "delegated_excerpt"
+    ? payload.replace(/\r\n?/g, "\n").split("\n")
+    : normalizedLines(payload);
   const authoritative = lineage.source_windows;
   let parsed;
   try { parsed = JSON.parse(payload); } catch { parsed = null; }

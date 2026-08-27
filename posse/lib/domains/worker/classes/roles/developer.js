@@ -111,6 +111,7 @@ export class DeveloperRole extends BaseRole {
       role: this.getRole(),
       effectiveTier: ctx.tier,
       attemptCount: currentAttemptNumber,
+      attemptId: ctx.attemptId,
       maxAttempts: job.max_attempts || 3,
       lastError,
       cwd: devCwd,

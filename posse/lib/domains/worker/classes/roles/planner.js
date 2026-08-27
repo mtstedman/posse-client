@@ -201,7 +201,10 @@ export class PlannerRole extends BaseRole {
         ? [
             "ATLAS COMPACT HANDOFF ROUTING:",
             "Do not add dev_brief to a compact agent_handoff task. Posse derives the downstream dev brief from the task's scope and claims.",
-            "Claims are optional. When evidence materially supports the plan, use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
+            "Existing-code evidence is a strong default, not a plan validity requirement. When the research packet or your own exact-source ATLAS results expose evidence relevant to a task, attach concise claims with the proof/support selectors advertised by the issued schema. Posse materializes those claims into that task's downstream dev brief so the developer can start from the evidence instead of repeating repository discovery.",
+            "Claims may stay empty for genuinely new work or when no reliable source evidence is available. Never invent, pad, or guess citations merely to populate a task.",
+            "A file name, manifest entry, skeleton, or remembered line range is navigation rather than surfaced source evidence. Before citing a path selector, expose that exact range in this agent call with an issued exact-source ATLAS or read tool. If a useful selector is rejected as not surfaced, expose the task-relevant range and retry; do not discard available evidence merely to bypass selector validation.",
+            "Use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
             "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Only proof, support, and decoy selector objects are deterministically resolved, range-validated, and expanded.",
             "",
           ].join("\n")

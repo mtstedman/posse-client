@@ -32,6 +32,85 @@ function replaceMcpTextResult(result, parsed, value) {
   };
 }
 
+function hasUnseenSourceContinuation(data = {}) {
+  if (Array.isArray(data.additionalWindows) && data.additionalWindows.length > 0) return true;
+  if (Number(data.returnedFunctionAnchorsOmitted) > 0) return true;
+  if (String(data.traversal_ref?.ref || data.traversal_ref || data.continuationRef || "").trim()) return true;
+  if (Number(data.continuationWindows) > 0) return true;
+  if (Array.isArray(data._continuationWindows) && data._continuationWindows.length > 0) return true;
+  if (Array.isArray(data.continuationRanges) && data.continuationRanges.length > 0) return true;
+  return false;
+}
+
+function resolvedSelectionMetadata(data = {}) {
+  const metadata = {};
+  for (const key of [
+    "identifiersFound",
+    "identifiersReturned",
+    "identifiersMissing",
+    "identifiersOmitted",
+    "truncated",
+    "selectionBounded",
+    "outputTruncated",
+  ]) {
+    if (Object.hasOwn(data, key)) metadata[key] = data[key];
+  }
+  return metadata;
+}
+
+// A selector fingerprint can miss reuse when two different selectors resolve
+// to the same already-delivered source interval. Native execution is still
+// required to resolve that interval; this admission runs before model ingress
+// and replaces only a single, exact, continuation-free source slice.
+export function suppressCoveredSourceInterval(result, coverageOwner, toolArgs = {}, {
+  toolName = "code.window",
+} = {}) {
+  if (toolName !== "code.window" || !coverageOwner) {
+    return { result, admission: null, resolvedChars: 0 };
+  }
+  const parsed = parsedMcpTextResult(result);
+  if (!parsed) return { result, admission: null, resolvedChars: 0 };
+  const envelope = parsed.value;
+  const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : envelope;
+  if (
+    !data
+    || typeof data !== "object"
+    || data.status === "covered"
+    || typeof data.content !== "string"
+    || !data.content
+    || hasUnseenSourceContinuation(data)
+  ) {
+    return { result, admission: null, resolvedChars: 0 };
+  }
+
+  // Besides resolving line bounds, prepareData proves that the returned body
+  // is one byte-exact on-disk slice. Stitched and clipped/malformed payloads
+  // therefore fail open and retain the native response.
+  const prepared = coverageOwner.prepareData(data, toolArgs);
+  if (!prepared) return { result, admission: null, resolvedChars: 0 };
+  const admission = coverageOwner.admitResolvedInterval({
+    repoRelativePath: prepared.fresh.relative,
+    startLine: prepared.startLine,
+    endLine: prepared.endLine,
+  });
+  if (!admission?.covered) return { result, admission: null, resolvedChars: 0 };
+  const selectorAliased = coverageOwner.recordResolvedIntervalReuse(toolArgs, admission);
+
+  const compact = {
+    ...admission.result,
+    executed: true,
+    source_suppressed: true,
+    ...resolvedSelectionMetadata(data),
+  };
+  return {
+    result: replaceMcpTextResult(result, parsed, compact),
+    admission,
+    payload: compact,
+    resolvedChars: prepared.content.length,
+    selectorAliased,
+  };
+}
+
 function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } = {}) {
   const parsed = parsedMcpTextResult(result);
   if (!parsed) return result;

@@ -16,6 +16,7 @@ installCliWarningFilter();
 //   health              Show failure/stuck-job health signals
 //   dashboard           Visual job board
 //   review              Final report + approve/reject
+//   gate answer ...     Resolve a parked human gate by job ID
 //   update              Pull latest Posse client + refresh dependencies
 //   inject <desc>       Quick-add a work item (also works mid-run)
 //   image <prompt>      Generate an image directly (skips research/plan)
@@ -574,6 +575,7 @@ let _serveCommandModulePromise = null;
 let _diagnosticCommandsModulePromise = null;
 let _localModelsCommandModulePromise = null;
 let _nativeBinariesCommandModulePromise = null;
+let _gateCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -653,6 +655,11 @@ async function loadLocalModelsCommandModule() {
 async function loadNativeBinariesCommandModule() {
   _nativeBinariesCommandModulePromise ||= import("./native-binaries-command.js");
   return _nativeBinariesCommandModulePromise;
+}
+
+async function loadGateCommandModule() {
+  _gateCommandModulePromise ||= import("./gate-command.js");
+  return _gateCommandModulePromise;
 }
 
 async function loadAtlasModule() {
@@ -2500,6 +2507,28 @@ async function cmdServe() {
   return runServeCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
 }
 
+async function cmdGate() {
+  const { runGateCommand } = await loadGateCommandModule();
+  const result = await runGateCommand(process.argv.slice(3), { projectDir: PROJECT_DIR });
+  if (result.ok) {
+    const wiLabel = result.work_item_id ? ` for WI#${result.work_item_id}` : "";
+    const feedbackLabel = result.feedback ? " with feedback" : "";
+    console.log(`\n  ${C.green}Resolved gate job #${result.job_id}${wiLabel} with ${result.action}${feedbackLabel}.${C.reset}\n`);
+    return result;
+  }
+  if (result.reason === "usage") {
+    COMMAND_USAGE.gate();
+  } else if (result.reason === "invalid_action") {
+    const choices = result.choices?.length ? result.choices.join(", ") : "none";
+    console.error(`\n  ${C.red}Action is not valid for gate job #${result.job_id}.${C.reset}`);
+    console.error(`  ${C.dim}Allowed actions: ${choices}${C.reset}\n`);
+  } else {
+    console.error(`\n  ${C.red}Could not resolve gate${result.job_id ? ` job #${result.job_id}` : ""}: ${result.reason}.${C.reset}\n`);
+  }
+  process.exitCode = result.exitCode || 1;
+  return result;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // MAIN
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2530,6 +2559,11 @@ const COMMAND_USAGE = {
     console.log(`\n  Usage: posse go [flags]`);
     console.log(`  plan + run in one shot: plans queued work items, then starts the scheduler.`);
     console.log(`  ${C.dim}Accepts the same flags as 'run' — see: posse run --help${C.reset}\n`);
+  },
+  gate: () => {
+    console.log(`\n  Usage: posse gate answer <gate-job-id> <action> [--feedback "details"]`);
+    console.log(`  Resolve a parked human gate without starting the scheduler.`);
+    console.log(`  ${C.dim}Common actions: pass, fail, retry, replan, skip. The gate's catalogued choices remain authoritative.${C.reset}\n`);
   },
   "local-models": () => {
     console.log(`\n  Usage: posse local-models [list [--json] | download [shorthand]]`);
@@ -2627,6 +2661,8 @@ ${aliasDiagnostic}
     ${C.cyan}update${C.reset}     Update Posse + dependencies, binaries, and Jina
     ${C.dim}             update [--dry-run] [--json] [--branch main]${C.reset}
     ${C.cyan}review${C.reset}     Approve/reject completed work items
+    ${C.cyan}gate answer${C.reset} Resolve a parked human gate by job ID
+    ${C.dim}             gate answer <gate-job-id> pass|fail|retry|replan|skip [--feedback "…"]${C.reset}
     ${C.cyan}events${C.reset}     Show event log (audit trail)
     ${C.dim}             events [jobId] [--session]${C.reset}
     ${C.cyan}timeline${C.reset}   Full execution chain for a work item
@@ -2737,6 +2773,7 @@ async function dispatchResolvedCommand(command) {
     doctor: cmdDoctor,
     update: cmdUpdate,
     review: cmdReview,
+    gate: cmdGate,
     inject: cmdInject,
     ask: cmdAsk,
     image: cmdImage,

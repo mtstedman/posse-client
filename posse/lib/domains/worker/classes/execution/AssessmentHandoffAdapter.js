@@ -31,6 +31,8 @@ import {
 } from "../../functions/helpers/mutation-guards.js";
 import {
   countInternalAssessmentRetries,
+  harnessAssessorEffort,
+  harnessAssessorProvider,
 } from "../../functions/helpers/assessment-shared.js";
 import {
   refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
@@ -43,6 +45,9 @@ import {
 import {
   snapshotAndResetDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
+import {
+  gitExecAsync,
+} from "../../../git/functions/utils.js";
 import {
   recordObservation,
 } from "../../../observability/functions/observations.js";
@@ -118,7 +123,9 @@ export async function resolveAssessmentOnlyProvider(agentDispatcher) {
   if (!agentDispatcher || typeof agentDispatcher.providerFor !== "function") {
     throw new Error("Assessment routing requires the worker AgentDispatcher");
   }
-  const binding = await agentDispatcher.providerFor({ role });
+  // A pinned harness provider that is not configured for the role must fail
+  // loud (dispatchError) rather than silently comparing unequal assessors.
+  const binding = await agentDispatcher.providerFor({ role, providerName: harnessAssessorProvider() });
   const provider = binding?.provider;
   if (!provider) {
     throw new Error("AgentDispatcher did not bind a Provider for assessor");
@@ -208,7 +215,7 @@ export class AssessmentHandoffAdapter {
     const assessReasoningEffortOverride = typeof cleanPayload?._assess_reasoning_effort === "string"
       ? cleanPayload._assess_reasoning_effort
       : null;
-    const assessmentReasoningEffort = assessReasoningEffortOverride || "medium";
+    const assessmentReasoningEffort = harnessAssessorEffort() || assessReasoningEffortOverride || "medium";
     // Retrieve the previous attempt's stored output.
     const prevAttempts = getAttempts(job.id);
     const lastWithCommit = [...prevAttempts].reverse().find(a => a.commit_hash);
@@ -355,16 +362,46 @@ export class AssessmentHandoffAdapter {
           throw new Error(`Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`);
         }
       }
+      let filesCommitted = [];
+      let filesCommittedUnknown = false;
+      let filesCommittedError = null;
+      // Attempts persist the pre-commit HEAD, so multi-commit attempts diff
+      // base..head; older rows without a base fall back to the final commit.
+      const commitBaseHash = String(lastWithCommit.commit_base_hash || "").trim() || null;
+      const commitDiffRevs = commitBaseHash
+        ? [commitBaseHash, lastWithCommit.commit_hash]
+        : [`${lastWithCommit.commit_hash}^!`];
+      // File names must be worktree-root-relative to match the scope contract
+      // (the live path computes them in wtPath), not artifact output_root.
+      const commitListCwd = wtPath || worker.projectDir;
+      try {
+        filesCommitted = (await gitExecAsync([
+          "diff",
+          "--no-renames",
+          "--name-only",
+          "--relative",
+          ...commitDiffRevs,
+        ], commitListCwd))
+          .split("\n")
+          .map((line) => String(line || "").replace(/\\/g, "/").trim())
+          .filter(Boolean);
+      } catch (error) {
+        filesCommittedUnknown = true;
+        filesCommittedError = error?.message || String(error);
+      }
       const assessmentContext = await attachAssessmentDiffContextAsync({
         task_mode: jobPayloadForAssess.task_mode || "code",
         manifest: null,
         commit_hash: lastWithCommit.commit_hash || null,
+        commit_base_hash: commitBaseHash,
         output_root: jobPayloadForAssess.output_root || null,
         allowed_files: jobPayloadForAssess.files_to_modify || [],
         allowed_create_files: jobPayloadForAssess.files_to_create || [],
         allowed_delete_files: scopedDeleteTargetsFromModule(job, jobPayloadForAssess),
         allowed_create_roots: jobPayloadForAssess.create_roots || [],
-        files_committed: [],
+        files_committed: filesCommitted,
+        files_committed_unknown: filesCommittedUnknown,
+        files_committed_error: filesCommittedError,
         files_reverted: [],
         files_requested: flattenPendingAssessmentFileRequests(pendingFileRequests),
       }, assessmentCwd);

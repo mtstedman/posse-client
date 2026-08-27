@@ -30,6 +30,7 @@ import { promptLiteral } from "../../../../shared/format/functions/prompt-litera
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { isArtifactMode, buildManifest, validateManifestAgainstContract } from "../../../artifacts/functions/index.js";
+import { harnessAssessorEffort, harnessAssessorProvider } from "./assessment-shared.js";
 import { getProviderBackoff } from "../../../providers/functions/provider.js";
 import {
   attachAssessmentDiffContextAsync,
@@ -64,6 +65,7 @@ import {
   getWorkItemWorkflowConfig,
 } from "../../../intake/functions/hints.js";
 import { isInsideRoot, isUnderRoot, normPath, normalizeRoots } from "../../../../shared/scope/functions/path.js";
+import { isTestCollateralPath } from "../../../../shared/policies/functions/scope-auto-approval.js";
 import { processVerdict } from "./process-verdict.js";
 import { normalizeAssessorConfidence } from "./verdict-shared.js";
 import {
@@ -409,6 +411,37 @@ function _addedScopedDiffText(scopedDiff = "") {
     .join("\n");
 }
 
+function _addedScopedTestDiffText(scopedDiff = "") {
+  const added = [];
+  let currentPath = "";
+  for (const line of String(scopedDiff || "").split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      const match = /^diff --git (?:"?a\/.*?) (?:"?b\/)(.*?"?)$/.exec(line);
+      currentPath = match ? match[1].replace(/^"|"$/g, "") : "";
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const rawPath = line.slice(4).trim().split("\t", 1)[0];
+      currentPath = rawPath === "/dev/null"
+        ? ""
+        : rawPath.replace(/^"?b\//, "").replace(/"$/, "");
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++") && isTestCollateralPath(currentPath)) {
+      added.push(line.slice(1));
+    }
+  }
+  return added.join("\n");
+}
+
+function _isFalsyDisabledTestMarkerValue(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["false", "null", "undefined", "nan", "''", "\"\"", "``", "void 0"].includes(normalized)) {
+    return true;
+  }
+  return /^[+-]?(?:0+(?:\.0*)?|\.0+)(?:e[+-]?\d+)?n?$/.test(normalized);
+}
+
 function _disabledRequiredTestMarkers(scopedDiff = "") {
   const added = _addedScopedDiffText(scopedDiff);
   if (!added) return [];
@@ -419,8 +452,9 @@ function _disabledRequiredTestMarkers(scopedDiff = "") {
     /\bpytest\.skip\s*\(/gi,
     /#\s*\[\s*ignore\s*\]/gi,
   ];
-  const propertyMarkers = [...added.matchAll(/\b(?:todo|skip)\s*:\s*([^,}\n]+)/gi)]
-    .filter((match) => String(match[1] || "").trim().toLowerCase() !== "false")
+  const addedTests = _addedScopedTestDiffText(scopedDiff);
+  const propertyMarkers = [...addedTests.matchAll(/\b(?:todo|skip)\s*:\s*([^,}\n]+)/gi)]
+    .filter((match) => !_isFalsyDisabledTestMarkerValue(match[1]))
     .map((match) => match[0]);
   return [...new Set([
     ...patterns.flatMap((pattern) => added.match(pattern) || []),
@@ -1025,7 +1059,7 @@ export function __testBuildAssessmentProviderScope(options) {
 export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null } = {}) {
   const assessorProvider = String(
     routedProviderName
-    || await agentDispatcher?.selectProvider?.({ role: "assessor" })
+    || await agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
     || "",
   ).trim();
   if (!assessorProvider) {
@@ -2416,7 +2450,7 @@ export async function runPostExecutionAssessment(worker, {
 
       const jobAc = worker._abortControllers.get(job.id);
       assessorProvider = String(
-        await worker.agentDispatcher?.selectProvider?.({ role: "assessor" })
+        await worker.agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
         || "",
       ).trim().toLowerCase();
       if (!assessorProvider) {
@@ -2482,9 +2516,10 @@ export async function runPostExecutionAssessment(worker, {
         const index = assessmentTierOrder.indexOf(current);
         return assessmentTierOrder[Math.min(index + 1, assessmentTierOrder.length - 1)];
       };
-      const assessmentReasoningEffort = ["low", "medium", "high"].includes(String(jobPayloadForAssess._assess_reasoning_effort || "").trim().toLowerCase())
-        ? String(jobPayloadForAssess._assess_reasoning_effort).trim().toLowerCase()
-        : "medium";
+      const assessmentReasoningEffort = harnessAssessorEffort()
+        || (["low", "medium", "high"].includes(String(jobPayloadForAssess._assess_reasoning_effort || "").trim().toLowerCase())
+          ? String(jobPayloadForAssess._assess_reasoning_effort).trim().toLowerCase()
+          : "medium");
       // A/B harnesses compare execution routes, not assessor strength. Allow
       // the harness supervisor to hold the in-job assessor tier constant even
       // when a planner independently adjusts the developer job tier.

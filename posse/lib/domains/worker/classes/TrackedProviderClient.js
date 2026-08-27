@@ -360,6 +360,12 @@ function resolveCatalogSafeTierModel(providerName, tier, candidate) {
   return resolveEffectiveTierModel(providerKey, tierKey, selected).model || selected || null;
 }
 
+function resolveProviderExecutionModelName(provider, modelName, options = {}) {
+  if (!modelName || typeof provider?.resolveExecutionModelName !== "function") return modelName || null;
+  const resolved = String(provider.resolveExecutionModelName(modelName, options) || "").trim();
+  return resolved || modelName;
+}
+
 function resolveRuntimeModelFallback(providerName, tier, attemptedModel) {
   const providerKey = String(providerName || "").trim().toLowerCase();
   const tierKey = String(tier || "standard").trim().toLowerCase();
@@ -502,6 +508,7 @@ function completionAccountingFields({
   return {
     input_tokens: accountingStats.inputTokens,
     output_tokens: accountingStats.outputTokens,
+    reasoning_output_tokens: accountingStats.reasoningOutputTokens,
     cached_input_tokens: accountingStats.cachedInputTokens,
     cache_creation_input_tokens: accountingStats.cacheCreationInputTokens,
     turns_used: stats.numTurns ?? null,
@@ -1400,8 +1407,16 @@ export class TrackedProviderClient {
           || sequenceId == null
           || attemptId == null
           || requestContextInputTokens == null
-        ) return;
+        ) {
+          if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
+            console.error(`[ctx-debug] progress SKIP precision=${precision} seq=${sequenceId} attempt=${attemptId} reqCtx=${requestContextInputTokens}`);
+          }
+          return;
+        }
         try {
+          if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
+            console.error(`[ctx-debug] publish checkpoint call=${agentCallId} seq=${sequenceId} reqCtx=${requestContextInputTokens}`);
+          }
           this.deps.publishContextBudgetCheckpoint({
             agentCallId,
             attemptId,
@@ -1415,7 +1430,12 @@ export class TrackedProviderClient {
             ) ?? 0,
             precision,
           });
-        } catch { /* a live checkpoint must not interrupt provider execution */ }
+        } catch (checkpointErr) {
+          /* a live checkpoint must not interrupt provider execution */
+          if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
+            console.error(`[ctx-debug] publish FAILED: ${checkpointErr?.message || checkpointErr}`);
+          }
+        }
       },
       onAgentCommentary: (value) => {
         try { upstreamAgentCommentary?.(value); } catch { /* caller telemetry is best effort */ }
@@ -2409,11 +2429,18 @@ export class TrackedProviderClient {
     // Catalog enforcement keeps tier-config models honest, but an explicit
     // per-job pin is the user's call: the cached catalog snapshot can lag a
     // newly released model, and silently swapping a pinned model for the tier
-    // default would run (and bill) a model the job never selected.
+    // default would run (and bill) a model the job never selected. Provider
+    // auth compatibility is applied separately at the concrete execution
+    // boundary below because the provider applies that same constraint when
+    // it launches the request.
     const jobPinnedModel = !!effectiveJobModelName && selectedExecutionModelName === effectiveJobModelName;
-    const executionModelName = jobPinnedModel
+    const catalogModelName = jobPinnedModel
       ? selectedExecutionModelName
       : resolveCatalogSafeTierModel(providerName, tier, selectedExecutionModelName);
+    const executionModelName = resolveProviderExecutionModelName(provider, catalogModelName, {
+      role: opts.role,
+      modelTier: tier,
+    });
 
     if (executionModelName) opts = { ...opts, modelName: executionModelName };
 
@@ -2542,9 +2569,16 @@ export class TrackedProviderClient {
       return result;
     } catch (err) {
       let activeErr = err;
-      const runtimeFallbackModel = opts._modelFallbackAttempted
+      const runtimeFallbackCandidate = opts._modelFallbackAttempted
         ? null
         : (isRuntimeModelError(activeErr) ? resolveRuntimeModelFallback(providerName, tier, executionModelName) : null);
+      const resolvedRuntimeFallbackModel = resolveProviderExecutionModelName(provider, runtimeFallbackCandidate, {
+        role: opts.role,
+        modelTier: tier,
+      });
+      const runtimeFallbackModel = normalizeModelName(resolvedRuntimeFallbackModel) === normalizeModelName(executionModelName)
+        ? null
+        : resolvedRuntimeFallbackModel;
       if (runtimeFallbackModel) {
         try {
           recordObservation({
@@ -2687,11 +2721,15 @@ export class TrackedProviderClient {
             this.emitStatus(job_id, `${C.yellow}[fallback] ${providerName} failed (API error) -> trying ${fallbackName}${C.reset}`);
 
             const fbTierConfig = fbProvider.getModelTierConfig?.(tier) || fbProvider.MODEL_TIERS?.[tier] || fbProvider.MODEL_TIERS?.standard || {};
-            const fbModelName = resolveCatalogSafeTierModel(
+            const fbCatalogModelName = resolveCatalogSafeTierModel(
               fallbackName,
               tier,
               fbTierConfig.model || getDefaultTierModel(fallbackName, tier),
             );
+            const fbModelName = resolveProviderExecutionModelName(fbProvider, fbCatalogModelName, {
+              role: opts.role,
+              modelTier: tier,
+            });
             const fbAc = new AbortController();
             if (job_id) {
               const prevAc = this.worker._abortControllers.get(job_id);

@@ -81,12 +81,18 @@ function renderPlannerDevBrief(brief) {
 
 function issueHandoffTraversalRefsForCurrentCall(packet, hashRefPacket) {
   const observation = getObservationContext() || {};
-  if (!hashRefPacket || observation.agent_call_id == null) return hashRefPacket;
+  const attemptId = observation.attempt_id ?? packet?.attempt_id ?? null;
+  const agentCallId = observation.agent_call_id ?? packet?.agent_call_id ?? null;
+  // Prompt composition normally precedes agent-call creation. Issue the
+  // packet against the durable attempt in that phase; HashRefCapabilityStore
+  // deliberately lets later calls in the same attempt consume it. Tests and
+  // replay paths that already have a call keep the narrower call scope.
+  if (!hashRefPacket || (attemptId == null && agentCallId == null)) return hashRefPacket;
   const context = {
     work_item_id: packet?.work_item_id ?? observation.work_item_id ?? null,
     job_id: packet?.job_id ?? observation.job_id ?? null,
-    attempt_id: observation.attempt_id ?? null,
-    agent_call_id: observation.agent_call_id,
+    attempt_id: attemptId,
+    agent_call_id: agentCallId,
   };
   const issued = reissueHashRefHandoffPacket(hashRefPacket, {
     sourceContext: context,

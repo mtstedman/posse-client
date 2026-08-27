@@ -128,6 +128,7 @@ import {
   materializeSourceCoverage,
   prepareSourceCoverage,
   sourceCoverageOwnerForSession,
+  suppressCoveredSourceInterval,
 } from "../../../domains/research/functions/owner-source-admission.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
@@ -2185,8 +2186,12 @@ function atlasGateResultState(result = null) {
   };
 }
 
-const OWNER_EVIDENCE_IDENTITY_VERSION = 1;
+const OWNER_EVIDENCE_IDENTITY_VERSION = 2;
 const OWNER_EVIDENCE_IDENTITY_MAX = 64;
+// 10-line quantization of delivered source ranges. Fine enough that a window
+// extending a few lines past prior coverage still mints a new identity; coarse
+// enough that a full window stays within OWNER_EVIDENCE_IDENTITY_MAX blocks.
+const OWNER_SOURCE_RANGE_BLOCK_LINES = 10;
 const OWNER_EVIDENCE_KEY_NAMES = new Set([
   "content_hash",
   "contentHash",
@@ -2515,6 +2520,9 @@ function recordOwnerModelControlNotice(session, toolName, notice = {}) {
  *   executor?: Record<string, any> | null,
  *   observationDetail?: Record<string, any> | null,
  *   synthesisAdmission?: Record<string, any> | null,
+ *   coverageOwner?: any,
+ *   coverageCursor?: number,
+ *   responseComposition?: Record<string, number> | null,
  * }} [observation]
  */
 function recordOwnerToolObservation({
@@ -2529,6 +2537,9 @@ function recordOwnerToolObservation({
   executor = null,
   observationDetail = null,
   synthesisAdmission = null,
+  coverageOwner = null,
+  coverageCursor = 0,
+  responseComposition = null,
 } = {}) {
   const boot = session?.bootConfig || {};
   const outcome = error ? "failed" : classifyMcpToolResult(result);
@@ -2539,13 +2550,30 @@ function recordOwnerToolObservation({
   const structuredError = ownerToolStructuredError(result, error);
   const infrastructureFailure = (error || result?.isError === true)
     && isResearchInfrastructureFailure(structuredError);
-  const evidenceIdentities = ownerAtlasEvidenceIdentities({
+  const collectedEvidenceIdentities = ownerAtlasEvidenceIdentities({
     session,
     toolName,
     toolArgs,
     result: evidenceResult || result,
     outcome,
   });
+  let sourceRangeEvidence = coverageOwner && outcome === "succeeded"
+    ? ownerSourceRangeEvidence(coverageOwner, coverageCursor, toolArgs)
+    : null;
+  if (
+    !sourceRangeEvidence
+    && outcome === "succeeded"
+    && effectiveAtlasResearchAction(requestedToolPolicyName(toolName, toolArgs)) === "code.window"
+  ) {
+    sourceRangeEvidence = ownerWindowResponseRangeEvidence(evidenceResult || result);
+  }
+  // Delivered coverage rows are the authoritative novelty substrate for a
+  // source read: they say exactly which file lines entered the working set.
+  // The result-derived identities (paths + content hashes) remain the contract
+  // for every other action and for source reads that delivered nothing.
+  const evidenceIdentities = sourceRangeEvidence && Array.isArray(collectedEvidenceIdentities)
+    ? sourceRangeEvidence.identities
+    : collectedEvidenceIdentities;
   const sourcePaths = ownerAtlasSourcePaths({
     toolName,
     toolArgs,
@@ -2600,6 +2628,17 @@ function recordOwnerToolObservation({
             content_blocks: Array.isArray(result?.content) ? result.content.length : 0,
             is_error: result?.isError === true,
             over_client_clip: resultChars > CLIENT_RESULT_CLIP_CHARS,
+            // Payload composition: delivered source chars vs the envelope
+            // (headers, handles, index blocks, refs) wrapped around them.
+            ...(sourceRangeEvidence ? {
+              source_chars: sourceRangeEvidence.sourceChars,
+              envelope_chars: Math.max(0, resultChars - sourceRangeEvidence.sourceChars),
+            } : {}),
+            // Named char deltas of each owner-side payload stage, so the
+            // envelope decomposes without re-deriving it offline.
+            ...(responseComposition && typeof responseComposition === "object"
+              ? { composition: responseComposition }
+              : {}),
           },
           ...structuredError,
           ...(infrastructureFailure ? { infrastructure_failure: true } : {}),
@@ -2635,6 +2674,96 @@ function recordOwnerToolObservation({
 
 function sourceSelectionItems(toolArgs = {}) {
   return [toolArgs || {}];
+}
+
+// Range-normalized evidence identity for delivered source (staged-plan Stage-5
+// lever 2). Content hashes minted a fresh identity for every re-window of an
+// already-read file, so the stale-novelty closeout never fired on re-window
+// churn. Identities here are quantized line blocks of what this call actually
+// delivered: re-delivering seen lines repeats seen identities (stale), while
+// any unseen block is novel — including disjoint later ranges of a seen file.
+// A delivery longer than OWNER_EVIDENCE_IDENTITY_MAX blocks truncates; the
+// bounded failure mode is marking an over-long read stale, never crediting it.
+//
+// Identity strings deliberately exclude source_version: the same lines must
+// map to the same identity whether they were ledgered or derived from the
+// response payload, or one path would re-mint the other's blocks as novel.
+// A file edited mid-attempt re-reads as seen; research attempts are read-only.
+function ownerAddRangeBlocks(identities, relPath, startLine, endLine) {
+  const start = Number(startLine);
+  const end = Number(endLine);
+  if (!relPath || !Number.isFinite(start) || !Number.isFinite(end)) return;
+  const firstBlock = Math.max(0, Math.floor((Math.min(start, end) - 1) / OWNER_SOURCE_RANGE_BLOCK_LINES));
+  const lastBlock = Math.max(firstBlock, Math.floor((Math.max(start, end) - 1) / OWNER_SOURCE_RANGE_BLOCK_LINES));
+  for (let block = firstBlock; block <= lastBlock; block += 1) {
+    if (identities.size >= OWNER_EVIDENCE_IDENTITY_MAX) break;
+    identities.add(`lines:${relPath}:${block}`);
+  }
+}
+
+function ownerSourceRangeEvidence(coverageOwner, sinceId, toolArgs) {
+  if (!coverageOwner?.db || !coverageOwner?.attemptId) return null;
+  let rows;
+  try {
+    rows = coverageOwner.db.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ? AND observation_type = 'source.coverage' AND id > ?
+      ORDER BY id ASC
+    `).all(coverageOwner.attemptId, Math.max(0, Number(sinceId) || 0));
+  } catch {
+    return null;
+  }
+  const fingerprint = sourceSelectorFingerprint(toolArgs || {});
+  const identities = new Set();
+  let sourceChars = 0;
+  let deliveredRows = 0;
+  for (const row of rows) {
+    let detail;
+    try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+    if (String(detail?.selector_fingerprint || "") !== fingerprint) continue;
+    if (detail?.delivery_state !== "delivered") continue;
+    if (String(detail?.origin || "").includes("prefetch")
+      || String(detail?.origin || "").includes("reuse")) continue;
+    deliveredRows += 1;
+    sourceChars += Math.max(0, Number(detail?.returned_chars) || 0);
+    const relPath = String(detail?.repo_rel_path || "").replace(/\\/g, "/").trim().toLowerCase();
+    ownerAddRangeBlocks(identities, relPath, detail?.start_line, detail?.end_line);
+  }
+  if (deliveredRows === 0) return null;
+  return { identities: [...identities], sourceChars };
+}
+
+// Fallback range evidence parsed from the response payload itself. The
+// coverage ledger misses deliveries whose content is not one contiguous
+// on-disk slice — multi-identifier windows stitch several segments — so a
+// ledgered join alone leaves those calls on always-novel content hashes.
+// The payload's own window ranges carry the same task-blind information.
+function ownerWindowResponseRangeEvidence(result) {
+  const text = ownerResultTextWithoutControls(result);
+  if (!text) return null;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  if (!data || typeof data !== "object") return null;
+  if (String(data.status || "").toLowerCase() === "covered") return null;
+  const relPath = String(data.repo_rel_path || "").replace(/\\/g, "/").trim().toLowerCase();
+  if (!relPath) return null;
+  const windows = [
+    ...(typeof data.content === "string" && data.content
+      ? [{ content: data.content, startLine: data.startLine, endLine: data.endLine }]
+      : []),
+    ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
+  ];
+  const identities = new Set();
+  let sourceChars = 0;
+  for (const window of windows) {
+    if (typeof window?.content !== "string" || !window.content) continue;
+    sourceChars += window.content.length;
+    ownerAddRangeBlocks(identities, relPath, window.startLine, window.endLine);
+  }
+  if (identities.size === 0) return null;
+  return { identities: [...identities], sourceChars };
 }
 
 function sourceSelectionCoverageCursor(coverageOwner) {
@@ -2711,6 +2840,15 @@ function coveredSourceSelectionObservation(admission) {
   };
 }
 
+function suppressedSourceSelectionObservation(admission, resolvedChars) {
+  return {
+    ...coveredSourceSelectionObservation(admission),
+    executed: true,
+    sourceSuppressed: true,
+    resolvedChars: Math.max(0, Number(resolvedChars) || 0),
+  };
+}
+
 /**
  * @param {{
  *   session?: any,
@@ -2756,7 +2894,7 @@ function recordSourceSelectionObservations({
         selector_fingerprint: fingerprint,
         attempted: true,
         outcome,
-        executed: outcome === "executed",
+        executed: entry.executed === true || outcome === "executed",
         covered: outcome === "covered",
         blocked: outcome === "blocked",
         novel_source: outcome === "executed" && coverage.novel === true,
@@ -2770,6 +2908,10 @@ function recordSourceSelectionObservations({
         coverage_origin_job_id: entry.coverageOriginJobId || null,
         coverage_origin_attempt_id: entry.coverageOriginAttemptId || null,
         evidence_ref: entry.evidenceRef || null,
+        ...(entry.sourceSuppressed === true ? {
+          source_suppressed: true,
+          resolved_chars: Math.max(0, Number(entry.resolvedChars) || 0),
+        } : {}),
         agent_call_id: boot.agentCallId ?? null,
       },
     });
@@ -2804,6 +2946,14 @@ function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferByt
     return Buffer.alloc(0);
   }
   return next;
+}
+
+export function __testOwnerSourceRangeEvidence(coverageOwner, sinceId, toolArgs) {
+  return ownerSourceRangeEvidence(coverageOwner, sinceId, toolArgs);
+}
+
+export function __testOwnerWindowResponseRangeEvidence(result) {
+  return ownerWindowResponseRangeEvidence(result);
 }
 
 export function __testJsonlParseBuffer(buffer, onMessage, opts = {}) {
@@ -5287,8 +5437,52 @@ export class PersistentMcpOwner {
       let result = executed?.result && typeof executed.result === "object"
         ? executed.result
         : mcpToolErrorPayload("ATLAS executor returned no MCP result");
+      // Envelope composition: measure what each owner-side stage adds to (or
+      // removes from) the model-visible payload, so the per-call envelope
+      // (result_chars − source_chars) decomposes into named parts instead of
+      // one opaque residual. Character counting only; no behavior change.
+      const responseComposition = { executor_chars: mcpResultTextChars(result) };
+      const composed = (label, next) => {
+        const delta = mcpResultTextChars(next) - mcpResultTextChars(result);
+        if (delta !== 0) responseComposition[label] = (responseComposition[label] || 0) + delta;
+        return next;
+      };
+      let resolvedCoverageSuppression = null;
+      let resolvedCoverageReuseNotice = null;
+      const selectorHasUnseenContinuation = coverageAdmissions.some(
+        (admission) => admission?.reason === "continuation_unseen",
+      );
+      if (coverageOwner && !selectorHasUnseenContinuation) {
+        resolvedCoverageSuppression = suppressCoveredSourceInterval(
+          result,
+          coverageOwner,
+          toolArgs || {},
+          { toolName: requested.name },
+        );
+        result = composed("coverage_suppress", resolvedCoverageSuppression.result);
+        if (resolvedCoverageSuppression.admission) {
+          const reuseNotice = sourceEvidenceReuseNotice(
+            coverageOwner,
+            resolvedCoverageSuppression.admission,
+          );
+          if (reuseNotice) {
+            resolvedCoverageReuseNotice = reuseNotice;
+            const first = result.content[0];
+            const suffixAt = first.text.indexOf("\n\n[");
+            const suffix = suffixAt >= 0 ? first.text.slice(suffixAt) : "";
+            const noticeResult = {
+              ...result,
+              content: [{ ...first, text: `${JSON.stringify({
+                ...resolvedCoverageSuppression.payload,
+                message: reuseNotice,
+              })}${suffix}` }, ...result.content.slice(1)],
+            };
+            result = composed("coverage_suppress_notice", noticeResult);
+          }
+        }
+      }
       if (coverageOwner) {
-        result = prepareSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name });
+        result = composed("coverage_prepare", prepareSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name }));
       }
       const evidenceResult = result;
       const executorCompletedAt = Date.now();
@@ -5302,15 +5496,21 @@ export class PersistentMcpOwner {
         args: toolArgs,
         ...atlasGateResultState(result),
       });
-      result = appendResearcherSymbolHandles(result, session);
-      result = appendHashRefToMcpTextResult(result, toolName, toolArgs, session);
+      result = composed("symbol_handles", appendResearcherSymbolHandles(result, session));
+      result = composed("hash_ref_surface", appendHashRefToMcpTextResult(result, toolName, toolArgs, session));
       noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);
       if (coverageOwner) {
-        result = materializeSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name });
+        result = composed("coverage_materialize", materializeSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name }));
       }
-      result = compactResearcherTypedAtlasResult(result, session, toolName, toolArgs);
+      result = composed("compaction", compactResearcherTypedAtlasResult(result, session, toolName, toolArgs));
       for (const transform of providerTransforms) {
-        result = annotateOwnerResultTransform(result, transform);
+        result = composed("transform_annotations", annotateOwnerResultTransform(result, transform));
+      }
+      if (resolvedCoverageReuseNotice) {
+        result = tagOwnerModelControlNotice(result, resolvedCoverageReuseNotice, {
+          kind: SOURCE_EVIDENCE_REUSE_NOTICE_KIND,
+          trigger: resolvedCoverageSuppression.admission.reason || "contained_interval",
+        });
       }
       for (const admission of coverageAdmissions) {
         coverageOwner?.settleReservation(admission.reservation, result?.isError ? "failed" : "confirmed");
@@ -5331,14 +5531,14 @@ export class PersistentMcpOwner {
       // attaching here ensures an Atlas-only phase receives pending operator
       // feedback at its next result boundary.
       this._refundResearchInfrastructureFailure(session, synthesisAdmission, result);
-      result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
-      result = appendOwnerResearcherTypedReadyCallBatchingNotice(result, session);
-      result = appendOwnerResearchSynthesisNotice(
+      result = composed("operator_feedback", appendOwnerOperatorFeedbackDelivery(result, session, toolName));
+      result = composed("batching_notice", appendOwnerResearcherTypedReadyCallBatchingNotice(result, session));
+      result = composed("synthesis_notice", appendOwnerResearchSynthesisNotice(
         result,
         session,
         toolName,
         synthesisAdmission,
-      );
+      ));
       const ownerTransformMs = Math.max(0, Date.now() - transformStartedAt);
       const executorDiagnostics = {
         ...(executed?.executor || {}),
@@ -5359,6 +5559,15 @@ export class PersistentMcpOwner {
         queueWaitMs,
         executor: executorDiagnostics,
         synthesisAdmission,
+        coverageOwner,
+        coverageCursor: coverageObservationCursor,
+        responseComposition,
+        observationDetail: resolvedCoverageSuppression?.admission ? {
+          source_coverage_suppressed: true,
+          source_coverage_reason: resolvedCoverageSuppression.admission.reason,
+          resolved_source_chars: resolvedCoverageSuppression.resolvedChars,
+          selector_alias_recorded: resolvedCoverageSuppression.selectorAliased === true,
+        } : null,
       });
       if (coverageOwner) {
         recordSourceSelectionObservations({
@@ -5370,6 +5579,12 @@ export class PersistentMcpOwner {
           entries: windowSelections.map((_, index) => {
             const admission = coverageAdmissions[index];
             if (admission?.covered) return coveredSourceSelectionObservation(admission);
+            if (resolvedCoverageSuppression?.admission) {
+              return suppressedSourceSelectionObservation(
+                resolvedCoverageSuppression.admission,
+                resolvedCoverageSuppression.resolvedChars,
+              );
+            }
             return { outcome: "executed", reason: "native_execution", reasonClass: null };
           }),
         });

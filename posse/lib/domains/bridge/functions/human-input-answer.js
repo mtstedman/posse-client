@@ -9,6 +9,7 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
 import {
   exactHumanInputChoiceFromAnswer,
+  humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
 } from "../../../catalog/human-input.js";
 
@@ -98,7 +99,11 @@ function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS
   return { leaseToken, job: getJob(jobId) };
 }
 
-export async function answerHumanInput(jobId, args = {}, { projectDir = process.cwd(), allowReviewGateAnswer = false } = {}) {
+export async function answerHumanInput(jobId, args = {}, {
+  projectDir = process.cwd(),
+  allowReviewGateAnswer = false,
+  allowChoiceFeedback = false,
+} = {}) {
   const id = Number(jobId ?? args.job_id ?? args.jobId);
   if (!Number.isInteger(id) || id <= 0) return { ok: false, reason: "invalid_job_id" };
 
@@ -137,7 +142,10 @@ export async function answerHumanInput(jobId, args = {}, { projectDir = process.
   if (answers.length === 0 || answers.every((answer) => String(answer?.answer ?? answer ?? "").trim() === "")) {
     return { ok: false, reason: "empty_answer" };
   }
-  if (choices.length > 0 && !exactHumanInputChoiceFromAnswer(latestAnswerText(answers), choices)) {
+  const selectedChoice = allowChoiceFeedback
+    ? humanInputChoiceFromAnswer(latestAnswerText(answers), choices)
+    : exactHumanInputChoiceFromAnswer(latestAnswerText(answers), choices);
+  if (choices.length > 0 && !selectedChoice) {
     return {
       ok: false,
       reason: "invalid_choice",

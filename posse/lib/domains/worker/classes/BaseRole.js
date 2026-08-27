@@ -15,6 +15,20 @@ function dispatchPacketFromContext(ctx = {}) {
     || null;
 }
 
+function packetAtlasAvailability(packet = null) {
+  if (!packet || typeof packet !== "object") return null;
+  const issuedSurface = packet.remote_issuance?.tool_surface;
+  if (Array.isArray(issuedSurface)) {
+    return issuedSurface.some((entry) => String(entry?.name || entry || "").startsWith("atlas."));
+  }
+  if (packet.atlas === null || packet.context_hints?.disableAtlas === true) return false;
+  if (packet.atlas && typeof packet.atlas === "object") {
+    if (packet.atlas.prefetchFailed === true) return false;
+    if (typeof packet.atlas.active === "boolean") return packet.atlas.active;
+  }
+  return null;
+}
+
 function normalizedProviderName(value) {
   return String(value || "").trim().toLowerCase().replaceAll("_", "-");
 }
@@ -115,6 +129,7 @@ export class BaseRole {
       const dispatcher = this.context?.agentDispatcher;
       if (dispatcher && typeof dispatcher.createAgent === "function") {
         const packet = dispatchPacketFromContext(ctx);
+        const atlasAvailable = packetAtlasAvailability(packet);
         const attemptIdentity = ctx.attemptId ?? job?.attempt_id ?? job?.attempt_count ?? "pending";
         const agentKey = `job:${job?.id ?? "none"}:attempt:${attemptIdentity}:role:${role}`;
         preparedAgent = dispatcher.createAgent({
@@ -125,6 +140,7 @@ export class BaseRole {
           reusable: true,
           agentHandoff: packet?.agent_coordination?.agent_handoff_v1 === true,
           subAgent: packet?.agent_coordination?.sub_agent_v1 === true,
+          ...(atlasAvailable != null ? { atlasAvailable } : {}),
           handoffRequest: packet || {
             job_id: job?.id ?? null,
             work_item_id: job?.work_item_id ?? null,

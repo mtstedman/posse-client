@@ -42,13 +42,18 @@ export function admitSourceContextHeadroom({ boot = {}, args = {} } = {}) {
   const threshold = providerLongContextThreshold(boot.providerName, boot.modelName);
   const boundary = providerContextAdmissionBoundary(boot.providerName, boot.modelName);
   if (threshold == null || boundary == null) return { allowed: true, reason: "no_tier_boundary" };
+  // Checkpoints publish on turn completion, and nothing fresher can exist while
+  // the current turn is still streaming — which on high-reasoning profiles
+  // regularly exceeds the reader's 60s default. Wall-clock age here only guards
+  // abandoned rows (attempt/session/provider/model checks already scope the
+  // row), so give slow turns room instead of failing open as "stale".
   const checkpoint = readContextBudgetCheckpoint({
     agentCallId: boot.agentCallId,
     attemptId: boot.attemptId,
     providerSessionId: boot.providerSessionId,
     provider: boot.providerName,
     modelName: boot.modelName,
-  });
+  }, { maxAgeMs: 600_000 });
   if (!checkpoint.usable) {
     observation(boot, {
       decision: "fail_open",

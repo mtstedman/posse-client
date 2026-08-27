@@ -3,7 +3,13 @@
 // Native Codex CLI provider facade for the posse orchestrator.
 
 export { __testBuildCodexWebToolsOverrides } from "./prompt-blocks.js";
-export { capabilities, MODEL_TIERS, getModelTierConfig, __testNormalizeModelForAuthMode } from "./model-config.js";
+export {
+  capabilities,
+  MODEL_TIERS,
+  getModelTierConfig,
+  resolveExecutionModelName,
+  __testNormalizeModelForAuthMode,
+} from "./model-config.js";
 export { hasCredentials, __testResolveCodexAuthMode } from "./auth.js";
 export {
   discoverCodexCli,

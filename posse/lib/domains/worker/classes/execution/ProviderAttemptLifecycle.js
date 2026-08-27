@@ -132,8 +132,10 @@ export class ProviderAttemptLifecycle {
     let effectiveTier = preserveExecutionProfile
       ? job.model_tier
       : (researchRetrySynthesisTier || provider.escalateTier(job.model_tier, prelimCount, { resolveModel: resolveTierModel }));
-    let modelName = job.model_name
-      || tierModelName(effectiveTier, { role, providerName: executionProvider || undefined });
+    let modelName = provider.resolveExecutionModelName(
+      job.model_name || tierModelName(effectiveTier, { role, providerName: executionProvider || undefined }),
+      { role, modelTier: effectiveTier },
+    );
 
     const result = incrementAndCreateAttempt(job.id, leaseToken, role, modelName, job.reasoning_effort);
     if (!result) {
@@ -147,7 +149,10 @@ export class ProviderAttemptLifecycle {
     // Recalculate tier if attempt drifted (provider already resolved above with job.provider).
     if (attemptCount > prelimCount && !researchRetrySynthesisTier && !preserveExecutionProfile) {
       effectiveTier = provider.escalateTier(job.model_tier, attemptCount, { resolveModel: resolveTierModel });
-      const driftedModelName = job.model_name || resolveTierModel(effectiveTier);
+      const driftedModelName = provider.resolveExecutionModelName(
+        job.model_name || resolveTierModel(effectiveTier),
+        { role, modelTier: effectiveTier },
+      );
       if (driftedModelName !== modelName) {
         modelName = driftedModelName;
         setAttemptModelName(attempt.id, modelName);
@@ -158,10 +163,11 @@ export class ProviderAttemptLifecycle {
 
     if (researchRetrySynthesisTier && effectiveTier !== job.model_tier) {
       worker.emit(job.id, `${C.yellow}[research-retry] WI#${job.work_item_id} job #${job.id}: pinned retry synthesis to ${effectiveTier} tier (attempt ${attemptCount})${C.reset}`);
-      if (worker.display) worker.display.updateWorkerTier(job.id, effectiveTier, attemptCount, job.provider || null, modelName);
     } else if (effectiveTier !== job.model_tier) {
       worker.emit(job.id, `${C.yellow}[escalation] WI#${job.work_item_id} job #${job.id}: ${job.model_tier} -> ${effectiveTier} (attempt ${attemptCount})${C.reset}`);
-      if (worker.display) worker.display.updateWorkerTier(job.id, effectiveTier, attemptCount, job.provider || null, modelName);
+    }
+    if (worker.display) {
+      worker.display.updateWorkerTier(job.id, effectiveTier, attemptCount, executionProvider || null, modelName);
     }
 
     // Per-job scratch directory.
