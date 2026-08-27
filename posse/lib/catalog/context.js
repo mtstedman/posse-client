@@ -36,6 +36,16 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     tailChars: 800,
     digest: "list_files",
   }),
+  // get_brief is normally compact after markdown/JSON deduplication. Retain a
+  // transport-safe first response for pathological research bundles while the
+  // generic hash-ref layer preserves every omitted character behind one
+  // traversal ref.
+  get_brief: Object.freeze({
+    capChars: 32000,
+    headChars: 25000,
+    tailChars: 1500,
+    digest: "generic",
+  }),
   // symbol.search returns the largest per-call payloads in the research lane
   // (~29KB observed in run28/29). Bounding is a transport invariant
   // (atlas_search_result_paging defaults on; explicit "off" is an operator

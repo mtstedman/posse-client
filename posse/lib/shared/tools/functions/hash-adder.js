@@ -2208,7 +2208,7 @@ function enforceResearchFetchSerializedBudget(renderedText, deliveryBudget, refs
   return JSON.stringify({
     ok: false,
     code: "fetch_ref_delivery_budget_exceeded",
-    error: "fetch_ref could not serialize the requested refs inside the researcher delivery budget",
+    error: "fetch_ref could not serialize the requested refs inside the bounded delivery budget",
     requested: refs.length,
     max_serialized_chars: deliveryBudget.max_serialized_chars,
     retryable: true,
@@ -2242,6 +2242,8 @@ function recordFetchObservation(hashContext, ref, result, renderedText = null, p
     visible_ledger_enforced: policy.visible_ledger_enforced === true,
     requested_capability: policy.requested_capability || "legacy",
     legacy_alias: policy.requested_capability !== "traversal",
+    reaccess_authorized: policy.reaccess_authorized === true,
+    reaccess_consumed: policy.reaccess_consumed === true,
     agent_call_id: hashContext.agent_call_id ?? null,
     ...delivery,
   };
@@ -2331,7 +2333,7 @@ export function fetchHashRefTool(args = {}, {
     return JSON.stringify({
       ok: false,
       code: "fetch_ref_batch_too_large",
-      error: `fetch_ref accepts at most ${RESEARCH_FETCH_REF_MAX_REFS} unique refs for a researcher call`,
+      error: `fetch_ref accepts at most ${RESEARCH_FETCH_REF_MAX_REFS} unique refs for this role`,
       requested: refs.length,
       max_refs: RESEARCH_FETCH_REF_MAX_REFS,
       retryable: true,

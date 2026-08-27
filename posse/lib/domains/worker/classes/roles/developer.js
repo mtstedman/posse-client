@@ -14,6 +14,7 @@ import {
   handoff,
   packetToDynamicContextString,
   parseMissingContext,
+  renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
 import { BaseRole } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
@@ -43,6 +44,7 @@ const DEFAULT_DEPS = {
   loadCheckpoint: defaultLoadCheckpoint,
   loadNudges: () => "",
   parseAgentCompletionLog: defaultParseAgentCompletionLog,
+  renderAtlasHandoffSections,
   scopedDeleteTargets: defaultScopedDeleteTargets,
   shortJobTitle: defaultShortJobTitle,
   uniqueScopeFiles: defaultUniqueScopeFiles,
@@ -62,6 +64,7 @@ export class DeveloperRole extends BaseRole {
     const {
       loadCheckpoint,
       loadNudges,
+      renderAtlasHandoffSections: renderAtlasHandoffSectionsFn,
       scopedDeleteTargets,
       uniqueScopeFiles,
     } = this.roleDeps();
@@ -116,6 +119,7 @@ export class DeveloperRole extends BaseRole {
     });
 
     await handoff(packet, { providerName: ctx.providerName });
+    const atlasHandoffBlock = renderAtlasHandoffSectionsFn(packet);
     files = dbOnlyTask ? [] : uniqueScopeFiles(packet.files_to_modify || []);
     createFiles = dbOnlyTask ? [] : (packet.files_to_create || []);
     createRoots = dbOnlyTask ? [] : (packet.create_roots || []);
@@ -175,6 +179,7 @@ export class DeveloperRole extends BaseRole {
     Object.assign(ctx, {
       createFiles,
       createRoots,
+      atlasHandoffBlock,
       dbOnlyTask,
       deleteFiles,
       deleteOnlyTask,
@@ -214,6 +219,7 @@ export class DeveloperRole extends BaseRole {
       continuationContext ? continuationContext + "\n" : null,
       driftContext ? driftContext + "\n" : null,
       nudgeContext || null,
+      atlasHandoffBlock || null,
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
       "",

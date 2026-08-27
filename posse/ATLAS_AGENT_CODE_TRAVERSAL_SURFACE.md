@@ -51,7 +51,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
@@ -436,7 +436,7 @@ Extract text from an image (OCR) using the local tesseract CLI. Use this when yo
 
 ### `atlas.fetch_ref`
 
-Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
+Remote roles: `artificer`, `assessor`, `dev`, `researcher`.
 
 | Contract field | Value |
 |---|---|
@@ -497,7 +497,7 @@ Remote roles: `planner`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Load the research brief already prepared for this work item in one call: the researcher's full analysis, structured data (key files, patterns, constraints), the ranked file-priority list, the function/class index, plus a manifest of staged source files. One call at the start of planning returns the complete pre-staged handoff context.
+Load the research brief already prepared for this work item in one call: canonical structured research (key files, patterns, constraints), the ranked file-priority list, the function/class index, plus a manifest of staged source files. One call at the start of planning returns the complete pre-staged handoff context; raw brief markdown is omitted only when structured research includes the complete planning synthesis.
 
 This definition has no public parameters.
 
@@ -920,7 +920,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Search file contents deterministically with ripgrep (rg), using regex or literal modes. Supports context lines, result paging, and file/count output modes.
+Search file contents deterministically with ripgrep (rg), using regex or literal modes. Returns a self-bounded ranked result with at most one context line, matchesTotal, and file/count output modes; it does not return continuation pages.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -932,7 +932,6 @@ Search file contents deterministically with ripgrep (rg), using regex or literal
 | `include` | `string` | Optional |  | Glob pattern to filter files, e.g. '*.js', '*.{ts,tsx}' |
 | `literal` | `boolean` | Optional |  | Treat pattern as literal text. Default: false, which enables regex interpretation. |
 | `multiline` | `boolean` | Optional |  | Allow regex to match across newlines. Default: false. |
-| `offset` | `integer` | Optional |  | Skip this many result rows before returning output. |
 | `output_mode` | `string` | Optional | values "content", "files_with_matches", "count" | Result format. Default: content. |
 | `path` | `string` | Optional |  | File or directory to search in. Default: working directory |
 | `pattern` | `string` | Required |  | Search pattern. Interpreted as a regex unless literal is true. |
@@ -1146,6 +1145,7 @@ compatibility. The agent projection removes them.
 - `atlas.code.survey`: `sessionId`
 - `atlas.code.window`: `sessionId`, `sliceContext`
 - `atlas.fetch_ref`: `hashes`, `refs`
+- `tools.search_files`: `offset`
 - `atlas.symbol.card`: `ifNoneMatch`, `includeResolutionMetadata`, `minCallConfidence`, `sessionId`, `symbolIds`, `symbolRefs`
 - `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
 - `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`

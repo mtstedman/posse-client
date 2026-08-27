@@ -226,7 +226,7 @@ function acceptResolvedId(out, key, value, field) {
   out[key] = normalized;
 }
 
-function jobAncestorRows(db, jobId, workItemId) {
+export function jobAncestorRows(db, jobId, workItemId) {
   const rows = [];
   const seen = new Set();
   let currentId = positiveInt(jobId);

@@ -21,6 +21,7 @@ import {
   MCP_SESSION_RELEASED_NOTIFICATION,
 } from "../../../catalog/mcp.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
+import { roleUsesBoundedRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
   assessorFallbackReadKey,
   isAssessorFallbackReadKey,
@@ -1018,6 +1019,14 @@ function sourceEvidenceReuseNotice(coverageOwner, admission) {
   const db = coverageOwner?.db;
   const ref = String(admission?.result?.evidence_ref?.ref || admission?.result?.evidenceRef?.ref || "").trim();
   if (!attemptId || !db || !ref) return null;
+  const coverageScope = String(admission?.coverageScope || admission?.result?.coverage_scope || "current_attempt");
+  if (coverageScope !== "current_attempt") {
+    const priorScope = coverageScope === "prior_attempt" ? "an earlier attempt" : "an ancestor job";
+    return `EVIDENCE_REACCESS: This source selection was delivered in ${priorScope} as ${ref}, `
+      + "so its source text is not visible in the current session. If the exact source is material, call "
+      + "atlas.traverse_ref with that ref and reaccessAuthorization set to reaccess.authorization from this "
+      + "response. Do not treat ref metadata alone as source content or cite an uninspected claim from it.";
+  }
 
   let issuedAttempts = sourceEvidenceReuseNoticeAttempts.get(db);
   if (!issuedAttempts) {
@@ -2083,6 +2092,18 @@ function parsedSourceEvidenceItems(result, selectionCount) {
   return byIndex;
 }
 
+function coveredSourceSelectionObservation(admission) {
+  return {
+    outcome: "covered",
+    reason: admission?.reason || "covered_reuse",
+    reasonClass: "reaccess",
+    coverageScope: admission?.coverageScope || admission?.result?.coverage_scope || null,
+    coverageOriginJobId: admission?.coverageOrigin?.job_id || admission?.result?.coverage_origin?.job_id || null,
+    coverageOriginAttemptId: admission?.coverageOrigin?.attempt_id || admission?.result?.coverage_origin?.attempt_id || null,
+    evidenceRef: admission?.result?.reaccess?.ref || admission?.result?.evidence_ref?.ref || null,
+  };
+}
+
 /**
  * @param {{
  *   session?: any,
@@ -2138,6 +2159,10 @@ function recordSourceSelectionObservations({
           : Math.max(0, Number(entry.storedChars) || 0),
         reason: entry.reason || "unspecified",
         reason_class: entry.reasonClass || null,
+        coverage_scope: entry.coverageScope || null,
+        coverage_origin_job_id: entry.coverageOriginJobId || null,
+        coverage_origin_attempt_id: entry.coverageOriginAttemptId || null,
+        evidence_ref: entry.evidenceRef || null,
         agent_call_id: boot.agentCallId ?? null,
       },
     });
@@ -4226,7 +4251,7 @@ export class PersistentMcpOwner {
           : fetchHashRefTool(toolArgs || {}, {
               ...hashContext,
               researchPhase: synthesisAdmission.researchPhase || null,
-              enforcePolicy: String(session?.bootConfig?.role || "") === "researcher",
+              enforcePolicy: roleUsesBoundedRefTraversal(session?.bootConfig?.role),
               requireTraversal: isCanonicalAtlasTraversalTool(toolName, toolArgs),
             });
         const deliveredRefs = createRef
@@ -4329,14 +4354,9 @@ export class PersistentMcpOwner {
           toolArgs,
           coverageOwner,
           coverageCursor: coverageObservationCursor,
-          entries: windowSelections.map((_, index) => {
-            const admission = coverageAdmissions[index];
-            return {
-              outcome: "covered",
-              reason: admission?.reason || "covered_reuse",
-              reasonClass: "reaccess",
-            };
-          }),
+          entries: windowSelections.map((_, index) => (
+            coveredSourceSelectionObservation(coverageAdmissions[index])
+          )),
         });
         return mcpToolResultMessage(message, result);
       }
@@ -4392,11 +4412,7 @@ export class PersistentMcpOwner {
           coverageCursor: coverageObservationCursor,
           entries: windowSelections.map((_, index) => {
             const admission = coverageAdmissions[index];
-            if (admission?.covered) return {
-              outcome: "covered",
-              reason: admission.reason || "covered_reuse",
-              reasonClass: "reaccess",
-            };
+            if (admission?.covered) return coveredSourceSelectionObservation(admission);
             return {
               outcome: "blocked",
               reason: contextHeadroom.reason || "context_headroom",
@@ -4513,11 +4529,7 @@ export class PersistentMcpOwner {
           evidenceResult,
           entries: windowSelections.map((_, index) => {
             const admission = coverageAdmissions[index];
-            if (admission?.covered) return {
-              outcome: "covered",
-              reason: admission.reason || "covered_reuse",
-              reasonClass: "reaccess",
-            };
+            if (admission?.covered) return coveredSourceSelectionObservation(admission);
             return { outcome: "executed", reason: "native_execution", reasonClass: null };
           }),
         });
@@ -4591,11 +4603,7 @@ export class PersistentMcpOwner {
           coverageCursor: coverageObservationCursor,
           entries: sourceSelectionItems(toolArgs).map((_, index) => {
             const admission = activeCoverageAdmissions[index];
-            if (admission?.covered) return {
-              outcome: "covered",
-              reason: admission.reason || "covered_reuse",
-              reasonClass: "reaccess",
-            };
+            if (admission?.covered) return coveredSourceSelectionObservation(admission);
             return nativeSourceExecutionStarted
               ? { outcome: "executed", reason: "execution_error", reasonClass: "suppression" }
               : { outcome: "blocked", reason: "pre_execution_error", reasonClass: "suppression" };

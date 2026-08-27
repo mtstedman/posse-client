@@ -2327,10 +2327,10 @@ export const TOOL_GET_BRIEF = {
   type: "function",
   name: "get_brief",
   description:
-    "Load the research brief already prepared for this work item in one call: the researcher's full analysis, " +
-    "structured data (key files, patterns, constraints), the ranked file-priority list, the function/class index, " +
+    "Load the research brief already prepared for this work item in one call: canonical structured research " +
+    "(key files, patterns, constraints), the ranked file-priority list, the function/class index, " +
     "plus a manifest of staged source files. One call at the start of planning returns the complete " +
-    "pre-staged handoff context.",
+    "pre-staged handoff context; raw brief markdown is omitted only when structured research includes the complete planning synthesis.",
   parameters: {
     type: "object",
     properties: {},

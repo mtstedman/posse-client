@@ -42,6 +42,7 @@ import {
 import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
+import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
   assessorFallbackReadCallKey,
   isAssessorFallbackReadKey,
@@ -746,16 +747,16 @@ function getStaticAtlasToolSchemas() {
   return STATIC_ATLAS_TOOL_SCHEMAS.map((schema) => ({ ...schema, annotations: { ...(schema.annotations || {}) } }));
 }
 
-function projectResearchTraversalTools(tools, role, contractedTools = null) {
+function projectCanonicalTraversalTools(tools, role, contractedTools = null) {
   const rows = Array.isArray(tools) ? tools : [];
-  if (role !== "researcher") return rows;
+  if (!roleUsesCanonicalRefTraversal(role)) return rows;
   const contract = Array.isArray(contractedTools) ? contractedTools : [];
   const hasTraversal = contract.length > 0
     ? contract.some((name) => _normalizeAtlasActionForAllowlist(name) === "traverse_ref")
     : rows.some((tool) => _stripAtlasPrefix(tool?.name) === "traverse_ref");
   if (!hasTraversal) return rows;
   // fetch_ref remains an accepted execution alias for rolling compatibility,
-  // but a researcher that has the array-only traversal contract must never
+  // but a role on the array-only traversal contract must never
   // see the scalar alias in tools/list.
   return rows.filter((tool) => _stripAtlasPrefix(tool?.name) !== "fetch_ref");
 }
@@ -3371,7 +3372,7 @@ async function handleRequest(msg) {
     // advertisement when the flag is on. Role-scoped paths never carry the
     // gateway names in atlasAllowedActions, so this is a no-op for them.
     const dedupGateways = ownerHotGateway && resolveAtlasGatewayDedupAdvertise();
-    const atlasTools = projectResearchTraversalTools(allAtlasTools
+    const atlasTools = projectCanonicalTraversalTools(allAtlasTools
       .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
       .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
       .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name))),

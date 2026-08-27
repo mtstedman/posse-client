@@ -346,6 +346,16 @@ function listStagedFullSources(fullDir) {
   return paths;
 }
 
+function structuredResearchContainsCompleteSynthesis(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!String(value.synthesis || "").trim()) return false;
+  return Array.isArray(value.key_files)
+    && Array.isArray(value.claims)
+    && Array.isArray(value.proof)
+    && Array.isArray(value.support)
+    && Array.isArray(value.decoy);
+}
+
 // Returns the pre-staged research brief bundle for the active work item in one
 // call. Resolves the work item + role from the ambient observation context
 // (set per job around every provider call), so the agent needs no arguments and
@@ -384,6 +394,7 @@ export function createGetBriefExecutor() {
     }
 
     const sections = {};
+    let structuredResearchReplacesBrief = false;
     for (const spec of GET_BRIEF_FAST_FILES) {
       let raw;
       try {
@@ -395,6 +406,7 @@ export function createGetBriefExecutor() {
       if (spec.parse) {
         try {
           sections[spec.key] = JSON.parse(raw);
+          structuredResearchReplacesBrief = structuredResearchContainsCompleteSynthesis(sections[spec.key]);
         } catch {
           sections[spec.key] = raw;
         }
@@ -402,6 +414,7 @@ export function createGetBriefExecutor() {
         sections[spec.key] = raw;
       }
     }
+    if (structuredResearchReplacesBrief) delete sections.brief;
 
     const fullPaths = listStagedFullSources(path.join(baseDir, usedRole, "full"));
     return JSON.stringify({
@@ -416,7 +429,7 @@ export function createGetBriefExecutor() {
           ? "Source bodies are NOT included here. Call read_file on one of these paths only when you need a specific implementation; otherwise plan from the brief above."
           : "No full source files were staged for this work item.",
       },
-    }, null, 2);
+    });
   };
 }
 

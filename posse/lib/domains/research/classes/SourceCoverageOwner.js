@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { fetchHashRefForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
+import { fetchHashRefForContext, jobAncestorRows, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.js";
@@ -123,6 +123,7 @@ export class SourceCoverageOwner {
     this.agentCallId = Number(agentCallId) || null;
     this.repositoryIdentity = String(repositoryIdentity || this.cwd);
     this.db = db;
+    this.missingWorkItemObservationRecorded = false;
   }
 
   #freshSource(repoRelativePath) {
@@ -140,12 +141,50 @@ export class SourceCoverageOwner {
 
   #rows() {
     if (!this.jobId || !this.attemptId) return [];
-    return this.db.prepare(`
-      SELECT id, detail_json
+    if (!this.workItemId) {
+      if (!this.missingWorkItemObservationRecorded) {
+        this.missingWorkItemObservationRecorded = true;
+        const alreadyRecorded = this.db.prepare(`
+          SELECT 1
+          FROM job_observations
+          WHERE job_id = ? AND attempt_id = ?
+            AND observation_type = 'source.coverage.skipped'
+            AND json_extract(detail_json, '$.reason') = 'missing_work_item_id'
+          LIMIT 1
+        `).get(this.jobId, this.attemptId);
+        if (!alreadyRecorded) {
+          recordObservation({
+            work_item_id: null,
+            job_id: this.jobId,
+            attempt_id: this.attemptId,
+            observation_type: "source.coverage.skipped",
+            summary: "Source coverage reuse skipped because work-item identity is missing",
+            detail: {
+              reason: "missing_work_item_id",
+              agent_call_id: this.agentCallId,
+            },
+            db: this.db,
+          });
+        }
+      }
+      return [];
+    }
+    const ancestry = jobAncestorRows(this.db, this.jobId, this.workItemId);
+    if (ancestry.length === 0) return [];
+    const jobRank = new Map(ancestry.map((row, index) => [row.id, index]));
+    const placeholders = ancestry.map(() => "?").join(", ");
+    const rows = this.db.prepare(`
+      SELECT id, job_id, attempt_id, detail_json
       FROM job_observations
-      WHERE job_id = ? AND attempt_id = ? AND observation_type = ?
-      ORDER BY id DESC
-    `).all(this.jobId, this.attemptId, COVERAGE_OBSERVATION);
+      WHERE work_item_id = ? AND job_id IN (${placeholders}) AND observation_type = ?
+    `).all(this.workItemId, ...ancestry.map((row) => row.id), COVERAGE_OBSERVATION);
+    return rows.sort((left, right) => {
+      const leftCurrentAttempt = left.job_id === this.jobId && left.attempt_id === this.attemptId;
+      const rightCurrentAttempt = right.job_id === this.jobId && right.attempt_id === this.attemptId;
+      if (leftCurrentAttempt !== rightCurrentAttempt) return leftCurrentAttempt ? -1 : 1;
+      const rankDelta = (jobRank.get(left.job_id) ?? ancestry.length) - (jobRank.get(right.job_id) ?? ancestry.length);
+      return rankDelta || right.id - left.id;
+    });
   }
 
   #authorization(coverage) {
@@ -169,13 +208,25 @@ export class SourceCoverageOwner {
       { db: this.db },
     );
     if (!stored?.ok || !stored?.found) return null;
+    const coverageScope = Number(row.job_id) === this.jobId && Number(row.attempt_id) === this.attemptId
+      ? "current_attempt"
+      : (Number(row.job_id) === this.jobId ? "prior_attempt" : "ancestor_job");
+    const coverageOrigin = {
+      scope: coverageScope,
+      job_id: Number(row.job_id),
+      attempt_id: Number(row.attempt_id),
+    };
     const authorization = this.#authorization({ ...coverage, observationId: row.id });
     return {
       covered: true,
       reason,
+      coverageScope,
+      coverageOrigin,
       result: {
         status: "covered",
         executed: false,
+        coverage_scope: coverageScope,
+        coverage_origin: coverageOrigin,
         repo_rel_path: coverage.repo_rel_path,
         startLine: coverage.start_line,
         endLine: coverage.end_line,
