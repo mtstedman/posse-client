@@ -39,25 +39,25 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`, `atlas.tree.branch`, `atlas.tree.expand`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `subagent`
 
@@ -343,7 +343,7 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use only when exact source is needed for a known symbol or anchored file region. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
+Use only when exact source is needed for a known symbol or anchored file region. Reuse source evidence already visible in context before calling this tool. Each call must target source outside delivered ranges; a new same-file window must target a named unresolved symbol or branch beyond existing evidence. Context, confidence, and corroboration use the evidence already visible. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -452,7 +452,7 @@ Compatibility traversal for unseen stored #ref content. Batch every independentl
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs. |
+| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
 | `offset` | `integer` | Optional | min 0 | Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0. |
 | `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. It permits one stored ref to be delivered once more. |
 | `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or every independently needed alias as one array batch. |
@@ -1069,64 +1069,12 @@ Stored-result traversal for content not present in the current context. Call onl
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000, compatibility max: 60000. Researcher delivery is additionally bounded to 8000 per ref, 32000 text characters per call, and 24 unique refs. |
+| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
 | `offset` | `integer` | Optional | min 0 | Compatibility selector for an initial or legacy traversal. Opaque next_traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent. |
 | `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto. |
 | `traversal_ref` | `string | array` | Required | max length 512; max items 100 | One explicitly issued traversal ref such as #a3f9, or every independently needed traversal ref as one array batch. |
-
-### `atlas.tree.branch`
-
-Remote roles: `assessor`, `dev`, `planner`, `researcher`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `tree.branch` |
-| Tool reference token | `atlas.tree.branch` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `atlas` |
-| Batchable input | No |
-| Parallel calls | Yes |
-| System-prefetch capable | No |
-
-Containment-tree exploration for a path, node, symbol, cluster, or process. Returns paged descendants with paths, aggregate counts, and compressed-tree area labels.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `includeAggregates` | `boolean` | Optional |  | Include aggregate counts/raw metrics on each node. Default true. |
-| `limit` | `integer` | Optional | min 1; max 500 | Maximum nodes to return. Optional: when omitted, ATLAS chooses 100-250 from indexed repository size. Max 500. |
-| `maxDepth` | `integer` | Optional | min 0; max 8 | Descendant depth from focused node(s). Default 1, max 8. |
-| `nodeId` | `string` | Optional | min length 1; max length 2000 | Exact ATLAS tree node id, such as root, dir:src, file:src/run.ts, or a symbol node id. |
-| `offset` | `integer` | Optional | min 0; max 100000 | Page offset into the focused subtree. |
-| `path` | `string` | Optional | min length 1; max length 4000 | Canonical repo-relative file or directory path to focus. |
-| `refId` | `string` | Optional | min length 1; max length 512 | Cluster/process id for ref lookup. |
-| `refType` | `string` | Optional | values "cluster", "process" | Direct leaf ref lookup type. |
-| `symbolId` | `string` | Optional |  | Stable ATLAS symbol ID/ref. Duplicated blobs may return multiple tree locations; pass path to disambiguate. |
-
-### `atlas.tree.expand`
-
-Remote roles: `assessor`, `dev`, `planner`, `researcher`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `tree.expand` |
-| Tool reference token | `atlas.tree.expand` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `atlas` |
-| Batchable input | No |
-| Parallel calls | Yes |
-| System-prefetch capable | No |
-
-Breadth expansion around validated file, symbol, node, cluster, or process seeds. Returns surrounding branches, sibling files, tests, entrypoints, and deterministic scope and risk metrics.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `maxFiles` | `integer` | Optional | min 1; max 500 | Maximum candidate files returned. Default 40, max 500. |
-| `nodeIds` | `string | array` | Optional | min length 1; max length 2000; max items 100 | One exact indexed tree node ID or an array of node IDs. |
-| `paths` | `string | array` | Optional | min length 1; max length 4000; max items 100 | One repo-relative file or directory seed or an array of seeds. |
-| `refs` | `object | array` | Optional | max items 20 | One cluster or process ref or an array of refs to use as weak seeds; broad matches are reported separately. |
-| `symbolIds` | `string | array` | Optional | max items 100 | One opaque ATLAS symbol ID or an array of IDs to use as exact seeds. |
 
 ### `tools.validate_artifact_output`
 
@@ -1201,5 +1149,3 @@ compatibility. The agent projection removes them.
 - `atlas.symbol.card`: `ifNoneMatch`, `includeResolutionMetadata`, `minCallConfidence`, `sessionId`, `symbolIds`, `symbolRefs`
 - `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
 - `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`
-- `atlas.tree.branch`: `includeLatestRun`, `includeRefs`, `includeTerms`
-- `atlas.tree.expand`: `branchFileCap`, `editedFiles`, `maxBranches`, `path`, `refId`, `refMatchLimit`, `refType`, `symbolId`

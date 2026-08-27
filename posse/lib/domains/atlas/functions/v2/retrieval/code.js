@@ -43,7 +43,6 @@ const MAX_LENS_SCOPE_SIGNATURE_CHARS = 160;
 export const CODE_WINDOW_MAP_MAX_CHARS = 4000;
 const CODE_WINDOW_MAP_MAX_REQUESTS = 12;
 const CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST = 3;
-const CODE_WINDOW_MAP_MAX_INDEX_ENTRIES = 32;
 const CODE_WINDOW_MAP_TEXT_MAX_CHARS = 160;
 
 export function normalizeCodeLensContextLines(value) {
@@ -148,6 +147,26 @@ function boundedCodeMapText(value) {
   return String(value || "").trim().slice(0, CODE_WINDOW_MAP_TEXT_MAX_CHARS);
 }
 
+function normalizedQualifiedIdentifier(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/::/gu, ".")
+    .replace(/[\\/#]/gu, ".")
+    .replace(/\.+/gu, ".")
+    .replace(/^\.|\.$/gu, "");
+}
+
+function symbolMatchesRequestedIdentifier(symbol, identifier) {
+  const requested = normalizedQualifiedIdentifier(identifier);
+  if (!requested) return false;
+  const name = normalizedQualifiedIdentifier(symbol?.name);
+  const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+  return name === requested
+    || qualifiedName === requested
+    || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
+}
+
 function normalizedInlineRanges(value) {
   const ranges = (Array.isArray(value) ? value : [])
     .filter((entry) => entry && typeof entry === "object" && String(entry.content || "").length > 0)
@@ -197,13 +216,16 @@ function targetInlineCoverage(startLine, endLine, inlineRanges) {
 
 function codeWindowMapTarget(entry, inlineRanges) {
   const hit = symbolHit(entry.symbol);
-  hit.location.startLine = entry.startLine;
-  hit.location.endLine = entry.endLine;
-  hit.name = boundedCodeMapText(hit.name);
-  if (hit.qualifiedName) hit.qualifiedName = boundedCodeMapText(hit.qualifiedName);
+  const inlineCoverage = targetInlineCoverage(entry.startLine, entry.endLine, inlineRanges);
   return {
-    ...hit,
-    ...targetInlineCoverage(entry.startLine, entry.endLine, inlineRanges),
+    symbolId: hit.symbolId,
+    name: boundedCodeMapText(hit.qualifiedName || hit.name),
+    kind: boundedCodeMapText(hit.kind),
+    lines: [entry.startLine, entry.endLine],
+    coverage: inlineCoverage.coverage,
+    ...(inlineCoverage.inlineRanges.length > 0
+      ? { inlineRanges: inlineCoverage.inlineRanges }
+      : {}),
   };
 }
 
@@ -218,7 +240,9 @@ function codeWindowMapFits(map, maxChars) {
 }
 
 /**
- * Build the bounded orientation attached to oversized file-mode windows.
+ * Build the compact requested-symbol orientation attached to oversized
+ * file-mode windows. Every requested identifier inside the request safety
+ * limit gets a row before target details consume the remaining map budget.
  * The map describes only source that is actually inline; continuation ranges
  * are deliberately excluded so an indexed address is never mistaken for
  * delivered evidence.
@@ -256,28 +280,22 @@ export function buildCodeWindowMap({
   );
   const returned = new Set(stringArray(identifiersReturned).map((entry) => entry.toLowerCase()));
   const requested = [...new Set(stringArray(identifiers))];
+  const requestedShown = requested.slice(0, CODE_WINDOW_MAP_MAX_REQUESTS);
   const map = {
-    version: /** @type {1} */ (1),
+    version: /** @type {2} */ (2),
     fileLines: String(source || "").split(/\r?\n/u).length,
     inlineRanges: inlineRanges.map((entry) => `${entry.startLine}-${entry.endLine}`),
     requested: [],
-    requestedTotal: requested.length,
-    requestedShown: 0,
-    requestedOmitted: requested.length,
-    symbolIndex: [],
-    indexedSymbolsTotal: entries.length,
-    indexedSymbolsShown: 0,
-    indexedSymbolsOmitted: entries.length,
-    note: "Coverage refers only to inline source ranges. Symbol-mode follow-ups remain bounded by the configured line and token caps.",
+    ...(requested.length > requestedShown.length
+      ? { requestedOmitted: requested.length - requestedShown.length }
+      : {}),
   };
 
-  for (const identifier of requested.slice(0, CODE_WINDOW_MAP_MAX_REQUESTS)) {
+  const targetWork = [];
+  for (const identifier of requestedShown) {
     const normalized = identifier.toLowerCase();
-    const matches = entries.filter(({ symbol }) => (
-      String(symbol.name || "").toLowerCase() === normalized
-      || String(symbol.qualified_name || "").toLowerCase() === normalized
-    ));
-    const targets = matches
+    const matches = entries.filter(({ symbol }) => symbolMatchesRequestedIdentifier(symbol, identifier));
+    const candidates = matches
       .slice(0, CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST)
       .map((entry) => codeWindowMapTarget(entry, inlineRanges));
     const textualFound = found.has(normalized);
@@ -287,32 +305,34 @@ export function buildCodeWindowMap({
       state: matches.length > 0
         ? "indexed"
         : (textualFound ? "textually_found_unindexed" : "absent"),
-      coverage: requestedCoverage(targets, textualReturned),
-      ...(targets.length > 0 ? { targets } : {}),
-      ...(matches.length > targets.length ? { targetsOmitted: matches.length - targets.length } : {}),
+      coverage: requestedCoverage(candidates, textualReturned),
+      targets: [],
+      ...(matches.length > 0 ? { targetsOmitted: matches.length } : {}),
     };
     map.requested.push(item);
-    map.requestedShown = map.requested.length;
-    map.requestedOmitted = Math.max(0, requested.length - map.requestedShown);
-    if (!codeWindowMapFits(map, maxChars)) {
-      map.requested.pop();
-      map.requestedShown = map.requested.length;
-      map.requestedOmitted = Math.max(0, requested.length - map.requestedShown);
-      break;
+    targetWork.push({ item, candidates, matches: matches.length });
+  }
+
+  // Add one target per request before adding second or third matches. A noisy
+  // identifier cannot starve later requested identifiers of their addresses.
+  for (let targetIndex = 0; targetIndex < CODE_WINDOW_MAP_MAX_TARGETS_PER_REQUEST; targetIndex += 1) {
+    for (const work of targetWork) {
+      const candidate = work.candidates[targetIndex];
+      if (!candidate) continue;
+      work.item.targets.push(candidate);
+      const omitted = Math.max(0, work.matches - work.item.targets.length);
+      if (omitted > 0) work.item.targetsOmitted = omitted;
+      else delete work.item.targetsOmitted;
+      if (!codeWindowMapFits(map, maxChars)) {
+        work.item.targets.pop();
+        work.item.targetsOmitted = work.matches - work.item.targets.length;
+      }
     }
   }
 
-  for (const entry of entries.slice(0, CODE_WINDOW_MAP_MAX_INDEX_ENTRIES)) {
-    const target = codeWindowMapTarget(entry, inlineRanges);
-    map.symbolIndex.push(target);
-    map.indexedSymbolsShown = map.symbolIndex.length;
-    map.indexedSymbolsOmitted = Math.max(0, entries.length - map.indexedSymbolsShown);
-    if (!codeWindowMapFits(map, maxChars)) {
-      map.symbolIndex.pop();
-      map.indexedSymbolsShown = map.symbolIndex.length;
-      map.indexedSymbolsOmitted = Math.max(0, entries.length - map.indexedSymbolsShown);
-      break;
-    }
+  for (const work of targetWork) {
+    if (work.item.targets.length === 0) delete work.item.targets;
+    if (work.item.targetsOmitted === 0) delete work.item.targetsOmitted;
   }
   return map;
 }
@@ -659,12 +679,22 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     typeof params.maxTokens === "number" && params.maxTokens > 0 ? params.maxTokens : codeWindowPolicy.maxWindowTokens,
     codeWindowPolicy.maxWindowTokens,
   );
+  const fileMode = Boolean(params.file && !params.symbolId);
+  const oversizedFileMode = Boolean(
+    fileMode && source.split(/\r?\n/u).length > codeWindowPolicy.maxWindowLines,
+  );
+  const fileSymbols = fileMode
+    && (identifiers.length > 0 || oversizedFileMode)
+    && typeof view.query.symbolsInFile === "function"
+    ? await view.query.symbolsInFile(targetPath)
+    : [];
+  const nativeSelection = nativeIdentifierSelection(identifiers, fileSymbols);
   const result = await buildWindow({
     repo_rel_path: targetPath,
     source,
     target,
     symbolId,
-    identifiersToFind: identifiers,
+    identifiersToFind: nativeSelection.identifiers,
     expectedLines: positiveInteger(params.expectedLines),
     granularity: params.granularity || "symbol",
     maxWindowLines: codeWindowPolicy.maxWindowLines,
@@ -678,11 +708,26 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   let selectionBounded = result.selectionBounded == null
     ? truncated
     : result.selectionBounded === true;
-  let additionalWindows = normalizeCodeWindowSlices(result.additionalWindows);
-  let continuationWindows = normalizeCodeWindowSlices(result._continuationWindows);
-  const identifiersFound = stringArray(result.identifiersFound);
-  const identifiersReturned = stringArray(result.identifiersReturned);
-  const identifiersMissing = stringArray(result.identifiersMissing);
+  let additionalWindows = remapCodeWindowSliceIdentifiers(
+    normalizeCodeWindowSlices(result.additionalWindows),
+    nativeSelection.aliases,
+  );
+  let continuationWindows = remapCodeWindowSliceIdentifiers(
+    normalizeCodeWindowSlices(result._continuationWindows),
+    nativeSelection.aliases,
+  );
+  const identifiersFound = remapNativeIdentifiers(result.identifiersFound, nativeSelection.aliases);
+  const identifiersReturned = remapNativeIdentifiers(result.identifiersReturned, nativeSelection.aliases);
+  const indexedIdentifiers = new Set(nativeSelection.indexed.map((entry) => entry.toLowerCase()));
+  for (const identifier of nativeSelection.indexed) {
+    if (![...identifiersFound, ...identifiersReturned]
+      .some((entry) => entry.toLowerCase() === identifier.toLowerCase())) {
+      identifiersFound.push(identifier);
+    }
+  }
+  const identifiersMissing = remapNativeIdentifiers(result.identifiersMissing, nativeSelection.aliases)
+    .filter((entry) => !indexedIdentifiers.has(entry.toLowerCase()));
+  const identifiersOmitted = remapNativeIdentifiers(result.identifiersOmitted, nativeSelection.aliases);
   let identifierRedirects = [];
   /** @type {CodeWindowData["redirect"] | null} */
   let redirect = null;
@@ -692,10 +737,11 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     [...identifiersFound, ...identifiersReturned].map((entry) => entry.toLowerCase()),
   );
   const missingIdentifiers = new Set(identifiersMissing.map((entry) => entry.toLowerCase()));
+  const wholeFileDelivered = sameWholeFileSource(content, source);
   const allRequestedAnchorsMissed = Boolean(
-    params.file
-    && !params.symbolId
+    fileMode
     && identifiers.length > 0
+    && !wholeFileDelivered
     && identifiers.every((entry) => (
       !matchedIdentifiers.has(entry.toLowerCase())
       && missingIdentifiers.has(entry.toLowerCase())
@@ -733,10 +779,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
       searchedRepository: true,
       nextAction: "code.window",
     };
-  } else if (params.file && !params.symbolId && source.split(/\r?\n/u).length > codeWindowPolicy.maxWindowLines) {
-    const fileSymbols = typeof view.query.symbolsInFile === "function"
-      ? await view.query.symbolsInFile(targetPath)
-      : [];
+  } else if (oversizedFileMode) {
     codeMap = buildCodeWindowMap({
       source,
       symbols: fileSymbols,
@@ -777,7 +820,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     identifiersFound,
     identifiersReturned,
     identifiersMissing,
-    identifiersOmitted: stringArray(result.identifiersOmitted),
+    identifiersOmitted,
     ...(redirect ? { redirect, identifierRedirects } : {}),
     ...(codeMap ? { map: codeMap } : {}),
     ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
@@ -792,6 +835,81 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
       : {}),
   };
   return okEnvelope({ action: "code.window", versionId, data });
+}
+
+function nativeIdentifierSelection(requestedIdentifiers, symbols) {
+  const identifiers = [];
+  const indexed = [];
+  const aliases = new Map();
+  const seenNative = new Set();
+  const seenIndexed = new Set();
+
+  const addNative = (nativeIdentifier, requestedIdentifier) => {
+    const native = String(nativeIdentifier || "").trim();
+    if (!native) return;
+    const normalized = native.toLowerCase();
+    if (!seenNative.has(normalized)) {
+      seenNative.add(normalized);
+      identifiers.push(native);
+    }
+    const requested = String(requestedIdentifier || "").trim();
+    const mapped = aliases.get(normalized) || [];
+    if (requested && !mapped.some((entry) => entry.toLowerCase() === requested.toLowerCase())) {
+      mapped.push(requested);
+    }
+    aliases.set(normalized, mapped);
+  };
+
+  for (const requested of stringArray(requestedIdentifiers)) {
+    const matches = (Array.isArray(symbols) ? symbols : [])
+      .filter((symbol) => symbolMatchesRequestedIdentifier(symbol, requested));
+    if (matches.length === 0) {
+      addNative(requested, requested);
+      continue;
+    }
+    if (!seenIndexed.has(requested.toLowerCase())) {
+      seenIndexed.add(requested.toLowerCase());
+      indexed.push(requested);
+    }
+    const declaredNames = [...new Set(matches
+      .map((symbol) => String(symbol?.name || "").trim())
+      .filter(Boolean))];
+    for (const declaredName of declaredNames.length > 0 ? declaredNames : [requested]) {
+      addNative(declaredName, requested);
+    }
+  }
+
+  return { identifiers, indexed, aliases };
+}
+
+function remapNativeIdentifiers(value, aliases) {
+  const remapped = [];
+  const seen = new Set();
+  for (const identifier of stringArray(value)) {
+    const requested = aliases.get(identifier.toLowerCase()) || [identifier];
+    for (const entry of requested) {
+      const normalized = entry.toLowerCase();
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      remapped.push(entry);
+    }
+  }
+  return remapped;
+}
+
+function remapCodeWindowSliceIdentifiers(value, aliases) {
+  return value.map((entry) => ({
+    ...entry,
+    identifiers: remapNativeIdentifiers(entry.identifiers, aliases),
+  }));
+}
+
+function sameWholeFileSource(content, source) {
+  const comparable = (value) => {
+    const text = String(value || "").replace(/\r\n/gu, "\n");
+    return text.endsWith("\n") ? text.slice(0, -1) : text;
+  };
+  return String(content || "").length > 0 && comparable(content) === comparable(source);
 }
 
 function stringArray(value) {

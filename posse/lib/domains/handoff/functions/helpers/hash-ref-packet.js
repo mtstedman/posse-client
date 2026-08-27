@@ -13,6 +13,7 @@ import {
 } from "../../../queue/functions/hash-refs.js";
 import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch-ref-policy.js";
 import { renderTraversalRefStub } from "../../../../shared/tools/functions/ref-surface.js";
+import { normalizedEvidenceSourceWindows } from "../../../../shared/tools/functions/source-evidence.js";
 
 const DEFAULT_MAX_REFS_PER_LANE = 24;
 const DEFAULT_MAX_WHY_CHARS = 180;
@@ -278,15 +279,89 @@ function selectedPayloadText(payloadText, lines) {
   return sourceLines.slice(lines.start - 1, lines.end).join("\n");
 }
 
+function validMaterializedSourceWindows(entry) {
+  return normalizedEvidenceSourceWindows(entry?.metadata?.source_windows)
+    .filter((window) => {
+      const materializedStart = Number(window.materialized_start_line);
+      const materializedEnd = Number(window.materialized_end_line);
+      return Number.isInteger(materializedStart)
+        && Number.isInteger(materializedEnd)
+        && materializedStart > 0
+        && materializedEnd >= materializedStart
+        && materializedEnd - materializedStart === window.source_end_line - window.source_start_line;
+    });
+}
+
+function selectSourceCoordinatePayload(entry, lines) {
+  if (String(entry?.metadata?.line_semantics || "").toLowerCase() !== "source") return null;
+  const windows = validMaterializedSourceWindows(entry);
+  const sourceCandidates = windows.filter((window) => (
+    lines.start >= window.source_start_line && lines.end <= window.source_end_line
+  ));
+  let window = sourceCandidates.length === 1 ? sourceCandidates[0] : null;
+  let materializedStart;
+  let materializedEnd;
+  let sourceStart;
+  let sourceEnd;
+
+  if (window) {
+    sourceStart = lines.start;
+    sourceEnd = lines.end;
+    materializedStart = window.materialized_start_line + sourceStart - window.source_start_line;
+    materializedEnd = window.materialized_start_line + sourceEnd - window.source_start_line;
+  } else if (sourceCandidates.length === 0) {
+    const materializedCandidates = windows.filter((candidate) => (
+      lines.start >= candidate.materialized_start_line && lines.end <= candidate.materialized_end_line
+    ));
+    if (materializedCandidates.length !== 1) return null;
+    [window] = materializedCandidates;
+    materializedStart = lines.start;
+    materializedEnd = lines.end;
+    sourceStart = window.source_start_line + materializedStart - window.materialized_start_line;
+    sourceEnd = window.source_start_line + materializedEnd - window.materialized_start_line;
+  } else {
+    return null;
+  }
+
+  const payloadText = selectedPayloadText(entry.payload_text, {
+    start: materializedStart,
+    end: materializedEnd,
+  });
+  if (payloadText == null) return null;
+  return {
+    payloadText,
+    metadata: {
+      ...(entry.metadata || {}),
+      path: window.path,
+      line_semantics: "source",
+      source_windows: [{
+        ...window,
+        source_start_line: sourceStart,
+        source_end_line: sourceEnd,
+        materialized_start_line: 1,
+        materialized_end_line: sourceEnd - sourceStart + 1,
+      }],
+    },
+  };
+}
+
 function entryForResurface(fetchResult, laneEntry = null) {
   const entry = fetchResult?.entry;
   if (!entry) return null;
   if (entry.entry_kind === "materialized") {
-    const payloadText = selectedPayloadText(entry.payload_text, laneEntry?.lines);
+    const sourceSelection = laneEntry?.lines
+      ? selectSourceCoordinatePayload(entry, laneEntry.lines)
+      : null;
+    if (laneEntry?.lines && String(entry?.metadata?.line_semantics || "").toLowerCase() === "source" && !sourceSelection) {
+      return null;
+    }
+    const payloadText = sourceSelection?.payloadText
+      ?? selectedPayloadText(entry.payload_text, laneEntry?.lines);
     if (payloadText == null) return null;
     return {
       entryKind: "materialized",
       payloadText,
+      metadata: sourceSelection?.metadata || entry.metadata || {},
     };
   }
   if (laneEntry?.lines) return null;
@@ -312,9 +387,10 @@ function resurfaceEntry(fetchResult, laneEntry, {
   const sourceEntry = fetchResult?.entry;
   const surfacedEntry = entryForResurface(fetchResult, laneEntry);
   if (!sourceEntry || !surfacedEntry) return null;
+  const { metadata: selectedMetadata, ...surfaceFields } = surfacedEntry;
   const sourceSelector = formatHashRefSelector(laneEntry.ref, laneEntry.lines);
   const surfaced = surfaceHashRefForContext(targetContext, {
-    ...surfacedEntry,
+    ...surfaceFields,
     ...(laneEntry.lines ? {} : { contentHash: sourceEntry.content_hash }),
     objectType: sourceEntry.object_type,
     source: sourceEntry.source || `hash_ref:${sourceSelector}`,
@@ -322,7 +398,7 @@ function resurfaceEntry(fetchResult, laneEntry, {
     ...(laneEntry.lines ? {} : { sizeChars: sourceEntry.size_chars }),
     versionId: sourceEntry.version_id,
     metadata: {
-      ...(sourceEntry.metadata || {}),
+      ...(selectedMetadata || sourceEntry.metadata || {}),
       ...hashRefModelVisibility(targetContext, { visibility: "hidden", issuedAs: "traversal" }),
       reissued_by: "hash_ref_handoff",
       source_ref: laneEntry.ref,

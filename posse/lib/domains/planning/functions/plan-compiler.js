@@ -1980,7 +1980,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             }
 
             // Thread context_dir into the payload for the dev handler
-            const existingPayload = parseJobPayload(job);
+            const existingPayload = parseJobPayload(getJob(job.id) || job);
             existingPayload.context_dir = jobCtxDir.replace(/\\/g, "/");
             updateJobPayload(job.id, JSON.stringify(existingPayload));
           } catch { /* context dir is nice-to-have, not critical */ }

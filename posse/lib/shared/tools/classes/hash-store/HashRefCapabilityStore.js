@@ -96,6 +96,14 @@ export class HashRefCapabilityStore {
     return deserialize(this._row(TABLES.traversal, ref));
   }
 
+  traversals() {
+    return this.db.prepare(`
+      SELECT * FROM ${TABLES.traversal}
+      WHERE scope_key = ?
+      ORDER BY created_at, ref
+    `).all(this.scopeKey).map(deserialize);
+  }
+
   evidence(ref) {
     return deserialize(this._row(TABLES.evidence, ref));
   }

@@ -1571,7 +1571,7 @@ export const TOOL_SEARCH_FILES = {
   name: "search_files",
   description:
     "Search file contents deterministically with ripgrep (rg), using regex or literal modes. " +
-    "Supports context lines, result paging, and file/count output modes.",
+    "Returns a self-bounded ranked result with at most one context line, matchesTotal, and file/count output modes; it does not return continuation pages.",
   parameters: {
     type: "object",
     properties: {
@@ -1590,7 +1590,7 @@ export const TOOL_SEARCH_FILES = {
       after_context: { type: "integer", description: "Lines of context after each content match." },
       context: { type: "integer", description: "Lines of context before and after each match." },
       head_limit: { type: "integer", description: "Maximum returned rows after offset. Default: 100, max: 500." },
-      offset: { type: "integer", description: "Skip this many result rows before returning output." },
+      offset: { type: "integer", description: "Legacy internal row offset.", internalOnly: true },
     },
     required: ["pattern"],
     additionalProperties: false,

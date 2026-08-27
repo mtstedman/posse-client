@@ -409,8 +409,19 @@
 // ============================================================================
 
 /**
+ * @typedef {Object} ScopeBeamCandidate
+ * @property {string} path
+ * @property {SymbolId} [symbolId]
+ * @property {string} kind
+ * @property {[number,number]} [lines] Inclusive declaration location when a symbol was resolved.
+ * @property {string} [signature]
+ * @property {string} why Deterministic task/query ranking explanation.
+ */
+
+/**
  * @typedef {Object} SymbolSearchData
  * @property {SymbolHit[]} items
+ * @property {ScopeBeamCandidate[]} [beam] Scope-ranked candidates filling only unused search slots.
  * @property {EntitySearchHit[]} [entities]   Optional opt-in entity hits.
  * @property {number} total
  * @property {boolean} truncated
@@ -844,13 +855,11 @@
 /**
  * @typedef {Object} CodeWindowMapTarget
  * @property {SymbolId} symbolId
- * @property {string} name
+ * @property {string} name Qualified name when available, otherwise the declaration name.
  * @property {string} kind
- * @property {string} lang
- * @property {SymbolLocation} location
- * @property {string} [qualifiedName]
+ * @property {[number,number]} lines Inclusive declaration start and end lines in repo_rel_path.
  * @property {"full"|"partial"|"none"} coverage Coverage of this indexed declaration by inlineRanges, never by an unseen continuation.
- * @property {string[]} inlineRanges Exact inline intersections formatted as inclusive start-end lines.
+ * @property {string[]} [inlineRanges] Exact inline intersections formatted as inclusive start-end lines.
  */
 
 /**
@@ -864,18 +873,11 @@
 
 /**
  * @typedef {Object} CodeWindowMap
- * @property {1} version
+ * @property {2} version
  * @property {number} fileLines
  * @property {string[]} inlineRanges Exact source ranges present inline in the delivered result.
  * @property {CodeWindowMapRequest[]} requested
- * @property {number} requestedTotal
- * @property {number} requestedShown
- * @property {number} requestedOmitted
- * @property {CodeWindowMapTarget[]} symbolIndex
- * @property {number} indexedSymbolsTotal
- * @property {number} indexedSymbolsShown
- * @property {number} indexedSymbolsOmitted
- * @property {string} note
+ * @property {number} [requestedOmitted] Requested identifiers beyond the per-call safety limit.
  */
 
 /**

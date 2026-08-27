@@ -84,7 +84,7 @@ const CREATE_REF_MAX_NOTE_CHARS = 300;
 const CREATE_REF_MAX_BATCH = 24;
 const CREATE_REF_OWNER_SCOPES = new Set(["work_item", "job"]);
 const RESEARCH_FETCH_REF_MAX_REFS = 24;
-const RESEARCH_FETCH_REF_PER_REF_CHARS = 8000;
+const RESEARCH_FETCH_REF_BATCH_PER_REF_CHARS = 8000;
 const RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS = 32000;
 const RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS = 40000;
 const RESEARCH_FETCH_REF_ENVELOPE_BASE_RESERVE = 4096;
@@ -121,6 +121,10 @@ function refInputs(args = {}) {
   const surface = hashRefSurfaceInput(args);
   addMany(surface.value);
   return { refs: out, requestedCapability: surface.requested_capability };
+}
+
+export function hashRefTraversalInputs(args = {}) {
+  return refInputs(args);
 }
 
 function lineFingerprintMap(text, chunkLines = 80) {
@@ -329,7 +333,7 @@ function renderBoundedResult(text, {
   const omitted = slices.omitted.length;
   const objectLabel = normalizeObjectType(objectType) || normalizeObjectType(toolName) || "tool_result";
   const digest = overflowDigest(text, policy, toolName, args);
-  const digestText = JSON.stringify(digest, null, 2);
+  const digestText = JSON.stringify(digest);
   const lines = [
     `[bounded_result ${objectLabel}: full payload ${sizeChars} chars; showing ${head.length}${tail ? `+${tail.length}` : ""} chars; omitted ${omitted} chars]`,
     "[overflow_digest]",
@@ -473,7 +477,7 @@ export function compactTreeScopeResult(toolName, result, {
     count: nextPage.count,
   });
   envelope.data.candidateFilesTotal = candidates.length;
-  return { result: JSON.stringify(envelope, null, 2), compacted: true };
+  return { result: JSON.stringify(envelope), compacted: true };
 }
 
 function ambientStampingEnabled() {
@@ -659,7 +663,7 @@ export function compactCodeSurveyResult(toolName, result, {
   // fails, never expose the potentially large private carrier to the model.
   delete data._snapshotFiles;
   if (!snapshot?.ref) {
-    return { result: JSON.stringify(envelope, null, 2), compacted: false };
+    return { result: JSON.stringify(envelope), compacted: false };
   }
 
   data.files = files.slice(0, SURVEY_PAGE_FILES);
@@ -679,7 +683,7 @@ export function compactCodeSurveyResult(toolName, result, {
     ranks: snapshot.ranks,
     count: snapshot.count,
   });
-  return { result: JSON.stringify(envelope, null, 2), compacted: true };
+  return { result: JSON.stringify(envelope), compacted: true };
 }
 
 // ---- code.window / code.lens result ref-paging (flag-gated, default ON) -----
@@ -924,6 +928,30 @@ export function compactCodeWindowLensResult(toolName, result, {
     compacted = true;
   }
 
+  if (tool === "code.window" && typeof data.content === "string" && data.content.length < 1000) {
+    for (const field of ["truncated", "selectionBounded", "outputTruncated"]) {
+      if (data[field] === false) {
+        delete data[field];
+        compacted = true;
+      }
+    }
+    for (const field of [
+      "identifiersFound",
+      "identifiersReturned",
+      "identifiersMissing",
+      "identifiersOmitted",
+    ]) {
+      if (Array.isArray(data[field]) && data[field].length === 0) {
+        delete data[field];
+        compacted = true;
+      }
+    }
+    if (data.estimatedTokens != null) {
+      delete data.estimatedTokens;
+      compacted = true;
+    }
+  }
+
   // A continuation is a lossless partition of the already-selected result.
   // Combine the native hard-budget remainder with any Node display tail before
   // materialization so one ordered ref owns every omitted line exactly once.
@@ -968,7 +996,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     let inlineContentBudget = min;
     if (tool === "code.window" && originalContent) {
       data.content = "";
-      const structuralChars = JSON.stringify(envelope, null, 2).length;
+      const structuralChars = JSON.stringify(envelope).length;
       data.content = originalContent;
       inlineContentBudget = Math.max(1000, min - structuralChars - 1200);
     }
@@ -1132,7 +1160,7 @@ export function compactCodeWindowLensResult(toolName, result, {
           compacted = true;
           delete data.sourceVersion;
           delete data.repositoryIdentity;
-          return { result: JSON.stringify(envelope, null, 2), compacted: true };
+          return { result: JSON.stringify(envelope), compacted: true };
         }
         data.additionalWindows = [
           ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
@@ -1168,7 +1196,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         compacted = true;
         delete data.sourceVersion;
         delete data.repositoryIdentity;
-        return { result: JSON.stringify(envelope, null, 2), compacted: true };
+        return { result: JSON.stringify(envelope), compacted: true };
       }
       data.additionalWindows = [
         ...(Array.isArray(data.additionalWindows) ? data.additionalWindows : []),
@@ -1198,14 +1226,14 @@ export function compactCodeWindowLensResult(toolName, result, {
 
   if (!pagingEnabled || result.length <= min || !hasHashRefScope(hashContext)) {
     return compacted
-      ? { result: JSON.stringify(envelope, null, 2), compacted: true }
+      ? { result: JSON.stringify(envelope), compacted: true }
       : { result, compacted: false };
   }
 
   // code.lens: page the lower-ranked matches[] tail.
   if (tool === "code.lens" && Array.isArray(data.matches) && data.matches.length > LENS_INLINE_MATCHES) {
     const tail = data.matches.slice(LENS_INLINE_MATCHES);
-    const tailPayload = JSON.stringify({ tool: "code.lens", tailMatches: tail }, null, 1);
+    const tailPayload = JSON.stringify({ tool: "code.lens", tailMatches: tail });
     let surfaced;
     try {
       surfaced = surfaceHashRefForContext(hashContext, {
@@ -1239,11 +1267,11 @@ export function compactCodeWindowLensResult(toolName, result, {
     data.tailMatchesTotal = data.inlineMatchCount + data.deferredMatchCount;
     data.totalMatchCount = data.tailMatchesTotal
       + Math.max(0, Number(data.omittedMatchCount) || 0);
-    return { result: JSON.stringify(envelope, null, 2), compacted: true };
+    return { result: JSON.stringify(envelope), compacted: true };
   }
 
   return compacted
-    ? { result: JSON.stringify(envelope, null, 2), compacted: true }
+    ? { result: JSON.stringify(envelope), compacted: true }
     : { result, compacted: false };
 }
 
@@ -1859,7 +1887,7 @@ function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
       ok: false,
       ref: normalizeRef(result?.ref),
       error: result?.error || "not_found_or_not_visible",
-    }, null, 2);
+    });
   }
   const entry = result.entry;
   if (entry.entry_kind === "materialized") {
@@ -1882,7 +1910,7 @@ function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
         ...paged.page,
         full_size_chars: fullText.length,
       },
-    }, null, 2);
+    });
   }
   return JSON.stringify({
     ok: true,
@@ -1898,7 +1926,7 @@ function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
     notice: entry.metadata?.retention_exceeded
       ? "Payload unavailable: bounded retention cap exceeded."
       : "Payload unavailable: descriptor-backed ref cannot be recomputed in this runtime.",
-  }, null, 2);
+  });
 }
 
 function attachFetchedCapabilityRefs(renderedText, {
@@ -1972,7 +2000,7 @@ function attachFetchedCapabilityRefs(renderedText, {
   // the backing source alias in the primary ref field, especially for opaque
   // continuation cursors where it may identify a different visible page.
   rendered.ref = evidenceRef;
-  const nextSelector = nextHashRefViewSelector(rendered);
+  const nextSelector = nextHashRefViewSelector(rendered, { inheritLimit: false });
   if (nextSelector) {
     const issued = issueHashRefTraversalForContext(hashContext, {
       sourceRef: sourceEntry?.ref,
@@ -1983,7 +2011,56 @@ function attachFetchedCapabilityRefs(renderedText, {
       kind: rendered.page.mode === "search" ? "search_page" : "offset_page",
     });
   }
-  return JSON.stringify(rendered, null, 2);
+  return JSON.stringify(rendered);
+}
+
+function shrinkFetchPayloadToSerializedChars(renderedText, maxChars) {
+  const cap = Number(maxChars);
+  if (!Number.isFinite(cap) || String(renderedText || "").length <= cap) return renderedText;
+  let payload;
+  try { payload = JSON.parse(String(renderedText || "{}")); } catch { return renderedText; }
+  if (payload?.ok !== true || typeof payload.text !== "string" || payload.text.length === 0) {
+    return renderedText;
+  }
+  const originalText = payload.text;
+  const originalReturnedChars = Number(payload?.page?.returned_chars) || originalText.length;
+  const pageOffset = Math.max(0, Number(payload?.page?.offset) || 0);
+  const fullSizeChars = Math.max(
+    pageOffset + originalText.length,
+    Number(payload?.page?.full_size_chars) || 0,
+  );
+  const render = (length) => {
+    const text = originalText.slice(0, Math.max(1, length));
+    const page = { ...(payload.page || {}) };
+    page.returned_chars = text.length;
+    page.limit = text.length;
+    page.original_returned_chars = originalReturnedChars;
+    page.serialized_shrunk = true;
+    if (page.mode === "offset") {
+      page.next_offset = pageOffset + text.length < fullSizeChars ? pageOffset + text.length : null;
+      page.has_more = page.next_offset != null;
+    } else if (page.mode === "search") {
+      const rows = text.split("\n").length;
+      const matchCount = Math.max(rows, Number(page.match_count) || 0);
+      page.next_offset = pageOffset + rows < matchCount ? pageOffset + rows : null;
+      page.has_more = page.next_offset != null;
+    }
+    return JSON.stringify({ ...payload, text, page });
+  };
+  let low = 1;
+  let high = originalText.length;
+  let best = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = render(middle);
+    if (candidate.length <= cap) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best || renderedText;
 }
 
 function fetchDeliveryDetail(renderedText) {
@@ -2102,15 +2179,20 @@ function researchFetchDeliveryBudget(refCount) {
       - (count * RESEARCH_FETCH_REF_ENVELOPE_PER_REF_RESERVE),
   );
   const totalTextChars = Math.min(RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS, envelopeAwareTextCap);
+  const perRefCap = count === 1
+    ? totalTextChars
+    : RESEARCH_FETCH_REF_BATCH_PER_REF_CHARS;
   return {
     max_refs: RESEARCH_FETCH_REF_MAX_REFS,
-    max_per_ref_chars: RESEARCH_FETCH_REF_PER_REF_CHARS,
+    max_per_ref_chars: perRefCap,
+    max_single_ref_chars: RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS,
+    max_batch_per_ref_chars: RESEARCH_FETCH_REF_BATCH_PER_REF_CHARS,
     max_total_text_chars: RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS,
     max_serialized_chars: RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS,
     allocated_total_text_chars: totalTextChars,
     allocated_per_ref_chars: Math.max(
       1,
-      Math.min(RESEARCH_FETCH_REF_PER_REF_CHARS, Math.floor(totalTextChars / count)),
+      Math.min(perRefCap, Math.floor(totalTextChars / count)),
     ),
   };
 }
@@ -2259,7 +2341,7 @@ export function fetchHashRefTool(args = {}, {
     ? researchFetchDeliveryBudget(refs.length)
     : null;
   recordFetchBatchObservation(hashContext, refs, args, { researchPhase, enforcePolicy, deliveryBudget });
-  if (refs.length === 0) return JSON.stringify({ ok: false, error: "traverse_ref requires traversal_ref" }, null, 2);
+  if (refs.length === 0) return JSON.stringify({ ok: false, error: "traverse_ref requires traversal_ref" });
   const requestedReaccessAuthorization = String(args.reaccessAuthorization || "").trim();
   if (requestedReaccessAuthorization && refs.length !== 1) {
     return JSON.stringify({
@@ -2273,7 +2355,7 @@ export function fetchHashRefTool(args = {}, {
 
   const requestedLimit = parsePositiveInt(
     args.limit,
-    CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS,
+    deliveryBudget?.allocated_per_ref_chars || CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS,
     CONTEXT_FETCH_REF_MAX_LIMIT_CHARS,
   );
   const deliveryArgs = deliveryBudget
@@ -2365,11 +2447,17 @@ export function fetchHashRefTool(args = {}, {
         classification: policy.classification,
         retryable: false,
         message: policy.message,
-      }, null, 2);
+      });
     } else {
       rendered = fetchResultText(result, policy.args || selectorArgs, {
         researchDelivery: deliveryBudget != null,
       });
+      if (deliveryBudget) {
+        const perRefSerializedCap = refs.length === 1
+          ? deliveryBudget.max_serialized_chars - 2048
+          : Math.floor((deliveryBudget.max_serialized_chars - 4096) / refs.length);
+        rendered = shrinkFetchPayloadToSerializedChars(rendered, perRefSerializedCap);
+      }
       rendered = attachFetchedCapabilityRefs(rendered, {
         hashContext,
         requestedRef: ref,
@@ -2641,7 +2729,7 @@ export function createHashRefResult(args = {}, {
 }
 
 export function createHashRefTool(args = {}, options = {}) {
-  return JSON.stringify(createHashRefResult(args, options), null, 2);
+  return JSON.stringify(createHashRefResult(args, options));
 }
 
 export const __testHashAdderInternals = Object.freeze({

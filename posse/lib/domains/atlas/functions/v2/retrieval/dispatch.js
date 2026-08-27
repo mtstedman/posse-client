@@ -248,6 +248,7 @@ function dispatchImpl(call, ctx) {
         repoRoot: ctx.repoRoot,
         planner: ctx.planner,
         onDemandEmbeddingFill: ctx.config?.onDemandEmbeddingFill !== false,
+        config: ctx.config,
       }));
     case "symbol.card":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
@@ -323,6 +324,7 @@ function dispatchImpl(call, ctx) {
               params: /** @type {any} */ ({ query: identifier, limit: 5, semantic: false }),
               repoRoot: ctx.repoRoot,
               onDemandEmbeddingFill: false,
+              scopeBeamEnabled: false,
             });
             const matches = search?.ok && Array.isArray(search.data?.items)
               ? search.data.items.filter((hit) => hit?.location?.repo_rel_path !== requestedFile)

@@ -81,7 +81,47 @@ function agentHandoffToolSchemaTelemetry(role, compactCompletion = false, compac
   return toolSchemaTelemetry(schema);
 }
 
-function sessionContractFingerprint(options = {}, providerName = "") {
+function sortedUniqueStrings(value) {
+  return [...new Set(
+    (Array.isArray(value) ? value : [])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean),
+  )].sort();
+}
+
+function agentGateSurfaceFingerprint(options = {}) {
+  const issued = options?._remoteIssuedPolicy;
+  if (issued?.valid !== true) return "unissued";
+  return crypto.createHash("sha256").update(JSON.stringify({
+    tools: sortedUniqueStrings(issued.toolAllowlist?.tools),
+    atlas: sortedUniqueStrings(issued.toolAllowlist?.atlas),
+    projectDbCapability: String(issued.projectDbCapability || "none"),
+    toolPolicy: {
+      allowRead: issued.toolPolicy?.allow_read === true,
+      allowWrite: issued.toolPolicy?.allow_write === true,
+      allowShell: issued.toolPolicy?.allow_shell === true,
+      allowTests: issued.toolPolicy?.allow_tests === true,
+      fallbackReads: Number(issued.toolPolicy?.fallback_reads) || 0,
+    },
+    coordination: {
+      agentHandoffV1: issued.coordination?.agentHandoffV1 === true,
+      agentHandoffCompactV1: issued.coordination?.agentHandoffCompactV1 === true,
+      agentHandoffCompactV2: issued.coordination?.agentHandoffCompactV2 === true,
+      agentHandoffCompactV3: issued.coordination?.agentHandoffCompactV3 === true,
+      subAgentV1: issued.coordination?.subAgentV1 === true,
+      subAgentNextInputV1: issued.coordination?.subAgentNextInputV1 === true,
+    },
+  })).digest("hex");
+}
+
+function issuedAtlasAvailable(options = {}) {
+  if (options?._subAgentChild === true) return false;
+  const issued = options?._remoteIssuedPolicy;
+  if (issued?.valid === true) return (issued.toolAllowlist?.atlas || []).length > 0;
+  return options.disableAtlas !== true && options.atlasConfig?.enabled !== false;
+}
+
+export function sessionContractFingerprint(options = {}, providerName = "") {
   const effective = narrowProviderOptionsToRemoteIssuance(options);
   const coordination = effective?._remoteIssuedPolicy?.coordination || {};
   const schema = agentHandoffToolSchemaTelemetry(
@@ -108,6 +148,7 @@ function sessionContractFingerprint(options = {}, providerName = "") {
     compactV1: coordination.agentHandoffCompactV1 === true,
     compactV2: coordination.agentHandoffCompactV2 === true,
     compactV3: coordination.agentHandoffCompactV3 === true,
+    agentGateSurfaceSha256: agentGateSurfaceFingerprint(effective),
   })).digest("hex");
 }
 
@@ -543,19 +584,26 @@ function providerAgentIdentity(opts = {}, {
     .includes("tools.sub_agent");
   const coordinationChild = opts._subAgentChild === true;
   const coordinationKey = coordinationChild ? "child" : (subAgent ? "subagents" : (agentHandoff ? "handoff" : "off"));
+  const surfaceFingerprint = agentGateSurfaceFingerprint(opts);
+  const surfaceKey = surfaceFingerprint === "unissued" ? surfaceFingerprint : surfaceFingerprint.slice(0, 16);
+  const atlasAvailable = issuedAtlasAvailable(opts);
+  const remoteToolSurface = coordinationChild
+    ? opts._coordinationChildRemoteToolSurface
+    : opts._remoteToolSurface;
   if (laneId != null) {
     return {
-      key: `session-lane:${laneId}:${lane}:coord-${coordinationKey}`,
+      key: `session-lane:${laneId}:${lane}:coord-${coordinationKey}:surface-${surfaceKey}`,
       logicalKey: `wi:${workItemId ?? "none"}:${lane}:${skillKey}`,
       reusable: true,
       agentHandoff,
       subAgent,
       coordinationChild,
+      atlasAvailable,
       ...(coordinationChild && opts._coordinationChildPermitId
         ? { coordinationChildPermitId: opts._coordinationChildPermitId }
         : {}),
-      ...(coordinationChild && opts._coordinationChildRemoteToolSurface
-        ? { remoteToolSurface: opts._coordinationChildRemoteToolSurface }
+      ...(remoteToolSurface
+        ? { remoteToolSurface }
         : {}),
     };
   }
@@ -566,11 +614,12 @@ function providerAgentIdentity(opts = {}, {
     agentHandoff,
     subAgent,
     coordinationChild,
+    atlasAvailable,
     ...(coordinationChild && opts._coordinationChildPermitId
       ? { coordinationChildPermitId: opts._coordinationChildPermitId }
       : {}),
-    ...(coordinationChild && opts._coordinationChildRemoteToolSurface
-      ? { remoteToolSurface: opts._coordinationChildRemoteToolSurface }
+    ...(remoteToolSurface
+      ? { remoteToolSurface }
       : {}),
   };
 }
@@ -611,7 +660,9 @@ function agentJobAttachment(opts = {}, context = {}) {
     subAgent,
     ...(issuedToolAllowlist ? { toolAllowlist: issuedToolAllowlist } : {}),
     coordinationChild: opts._subAgentChild === true,
-    atlasAvailable: opts.disableAtlas !== true && atlasConfig.enabled !== false,
+    atlasAvailable: issuedToolAllowlist
+      ? issuedToolAllowlist.atlas.length > 0
+      : opts.disableAtlas !== true && atlasConfig.enabled !== false,
     atlasGateEnabled: opts.atlasGateEnabled !== false,
     atlasPrefetchStatus: opts.atlasPrefetchStatus || "",
     atlas: {

@@ -746,6 +746,20 @@ function getStaticAtlasToolSchemas() {
   return STATIC_ATLAS_TOOL_SCHEMAS.map((schema) => ({ ...schema, annotations: { ...(schema.annotations || {}) } }));
 }
 
+function projectResearchTraversalTools(tools, role, contractedTools = null) {
+  const rows = Array.isArray(tools) ? tools : [];
+  if (role !== "researcher") return rows;
+  const contract = Array.isArray(contractedTools) ? contractedTools : [];
+  const hasTraversal = contract.length > 0
+    ? contract.some((name) => _normalizeAtlasActionForAllowlist(name) === "traverse_ref")
+    : rows.some((tool) => _stripAtlasPrefix(tool?.name) === "traverse_ref");
+  if (!hasTraversal) return rows;
+  // fetch_ref remains an accepted execution alias for rolling compatibility,
+  // but a researcher that has the array-only traversal contract must never
+  // see the scalar alias in tools/list.
+  return rows.filter((tool) => _stripAtlasPrefix(tool?.name) !== "fetch_ref");
+}
+
 function isStaticAtlasToolName(toolName) {
   return STATIC_ATLAS_TOOL_NAMES.has(String(toolName || ""));
 }
@@ -3357,10 +3371,13 @@ async function handleRequest(msg) {
     // advertisement when the flag is on. Role-scoped paths never carry the
     // gateway names in atlasAllowedActions, so this is a no-op for them.
     const dedupGateways = ownerHotGateway && resolveAtlasGatewayDedupAdvertise();
-    const atlasTools = allAtlasTools
+    const atlasTools = projectResearchTraversalTools(allAtlasTools
       .filter((tool) => atlasAllowedActions?.has(_stripAtlasPrefix(tool?.name)))
       .filter((tool) => isExternallyRoutedAtlasTool(tool?.name))
-      .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name)))
+      .filter((tool) => !dedupGateways || !ATLAS_GATEWAY_TOOL_NAMES.has(_stripAtlasPrefix(tool?.name))),
+      roleName,
+      bootConfig?.toolAllowlist?.atlas,
+    )
       .map((tool) => buildFoldedAtlasToolDescriptor(tool, {
         role: roleName,
         codeWindowPolicy: bootConfig?.atlas?.codeWindowPolicy || null,

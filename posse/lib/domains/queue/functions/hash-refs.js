@@ -471,6 +471,14 @@ export function fetchHashRefTraversalForContext(context = {}, ref, opts = {}) {
   return { ok: true, found: true, capability, source: source.entry };
 }
 
+export function listHashRefTraversalsForContext(context = {}, opts = {}) {
+  const db = opts.db || getDb();
+  const resolved = resolveHashRefContext(context, db);
+  const store = capabilityStoreForResolvedContext(resolved, db);
+  if (!store) return [];
+  return store.traversals();
+}
+
 export function fetchHashRefEvidenceForContext(context = {}, ref, opts = {}) {
   const db = opts.db || getDb();
   const resolved = resolveHashRefContext(context, db);

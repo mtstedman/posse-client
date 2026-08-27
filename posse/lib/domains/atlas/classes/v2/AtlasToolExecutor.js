@@ -29,6 +29,15 @@ import {
   pathQualityPriorsEnabled,
 } from "../../functions/v2/retrieval/path-priors.js";
 import { boundSymbolSearchEnvelope } from "../../functions/v2/retrieval/search.js";
+import {
+  attachScopeBeam,
+  markScopeBeamDegraded,
+  scopeBeamConfig,
+  scopeBeamMaxFiles,
+  SCOPE_BEAM_STRUCTURE_FILE_LIMIT,
+  symbolSearchHasUnusedSlots,
+  symbolSearchLimit,
+} from "../../functions/v2/retrieval/search-beam.js";
 import { resolveVendoredSourcePromotions } from "../../functions/v2/retrieval/vendored-dependencies.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import path from "node:path";
@@ -1033,6 +1042,7 @@ export class AtlasToolExecutor {
           taskType: typeof request.args?.taskType === "string" ? request.args.taskType : null,
           telemetryEnabled: usageTelemetryEnabled(readPayload.config),
         };
+        const nativeDeadline = this.#now() + timeoutMs;
         let envelope;
         const nativeStartedAt = this.#now();
         try {
@@ -1047,7 +1057,7 @@ export class AtlasToolExecutor {
             versionId: readPayload.versionId,
             config: readPayload.config || {},
             ...(vectorBridge ? { vectorBridge } : {}),
-            deadline: this.#now() + timeoutMs,
+            deadline: nativeDeadline,
           }, {
             timeoutMs,
             idempotent: true,
@@ -1066,13 +1076,26 @@ export class AtlasToolExecutor {
         }
         const nativeCallMs = Math.max(0, this.#now() - nativeStartedAt);
         const transformStartedAt = this.#now();
-        const transformedEnvelope = request.action === "symbol.search"
-          ? boundSymbolSearchEnvelope(applyNativeSymbolSearchPriors(
-              envelope,
-              request.args || {},
-              nativeRepoRoot,
-            ))
-          : envelope;
+        let scopeBeamMs = 0;
+        let transformedEnvelope = envelope;
+        if (request.action === "symbol.search") {
+          transformedEnvelope = applyNativeSymbolSearchPriors(
+            envelope,
+            request.args || {},
+            nativeRepoRoot,
+          );
+          const scopeBeamStartedAt = this.#now();
+          transformedEnvelope = await this.#attachNativeScopeBeam({
+            envelope: transformedEnvelope,
+            request,
+            readPayload,
+            repoRoot: nativeRepoRoot,
+            deadline: nativeDeadline,
+            searchVectorBridge: vectorBridge,
+          });
+          scopeBeamMs = Math.max(0, this.#now() - scopeBeamStartedAt);
+          transformedEnvelope = boundSymbolSearchEnvelope(transformedEnvelope);
+        }
         const converted = conductorEnvelopeToToolResult(transformedEnvelope);
         const resultTransformMs = Math.max(0, this.#now() - transformStartedAt);
         return withExecutorDiagnostics(converted, {
@@ -1088,6 +1111,7 @@ export class AtlasToolExecutor {
             read_context: readContextMs,
             vector_bridge: vectorBridgeMs,
             native_call: nativeCallMs,
+            ...(request.action === "symbol.search" ? { scope_beam: scopeBeamMs } : {}),
             result_transform: resultTransformMs,
             executor_total: Math.max(0, this.#now() - runnerStartedAt),
           },
@@ -1141,6 +1165,95 @@ export class AtlasToolExecutor {
     return mode
       ? this.#gate.write(request.repoKey, runner, { label, waitMs: request.waitMs || this.#waitMs })
       : this.#gate.read(request.repoKey, runner, { label, waitMs: request.waitMs || this.#waitMs });
+  }
+
+  async #attachNativeScopeBeam({ envelope, request, readPayload, repoRoot, deadline, searchVectorBridge }) {
+    const limit = symbolSearchLimit(request.args?.limit, 12);
+    if (!symbolSearchHasUnusedSlots(envelope, limit)) return envelope;
+    if (this.#now() >= deadline) return markScopeBeamDegraded(envelope);
+    const beamConfig = scopeBeamConfig(readPayload.config);
+
+    let scopeVectorBridge = searchVectorBridge;
+    if (!scopeVectorBridge) {
+      const [bridgeResult] = await Promise.allSettled([
+        this.#nativeVectorBridge({
+          query: String(request.args?.query || ""),
+          limit: scopeBeamMaxFiles(limit),
+          repoRoot,
+          config: beamConfig,
+        }),
+      ]);
+      if (bridgeResult.status === "fulfilled") scopeVectorBridge = bridgeResult.value;
+    }
+    if (this.#now() >= deadline) return markScopeBeamDegraded(envelope);
+
+    const scopeArgs = treeScopeDiscoveryArgs({
+      taskText: String(request.args?.query || ""),
+      ...(typeof request.args?.taskType === "string" ? { taskType: request.args.taskType } : {}),
+      maxFiles: scopeBeamMaxFiles(limit),
+    }, readPayload.readRoot);
+    if (this.#now() >= deadline) return markScopeBeamDegraded(envelope);
+    const remainingForScope = Math.max(1, deadline - this.#now());
+    const [scopeResult] = await Promise.allSettled([
+      this.#nativeToolCall({
+        contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+        action: "tree.scope",
+        args: cloneJson(scopeArgs) || {},
+        viewPath: readPayload.viewPath,
+        ledgerPath: readPayload.ledgerPath,
+        repoRoot,
+        repoId: readPayload.repoId,
+        versionId: readPayload.versionId,
+        config: beamConfig,
+        ...(scopeVectorBridge ? { vectorBridge: scopeVectorBridge } : {}),
+        deadline,
+      }, {
+        timeoutMs: remainingForScope,
+        idempotent: true,
+      }),
+    ]);
+    if (scopeResult.status !== "fulfilled") return markScopeBeamDegraded(envelope);
+
+    const scopeEnvelope = /** @type {any} */ (scopeResult.value);
+    const paths = (Array.isArray(scopeEnvelope?.data?.candidateFiles)
+      ? scopeEnvelope.data.candidateFiles
+      : [])
+      .map((entry) => String(entry?.path || "").trim())
+      .filter(Boolean)
+      .slice(0, SCOPE_BEAM_STRUCTURE_FILE_LIMIT);
+    let structureEnvelope = null;
+    if (paths.length > 0 && this.#now() < deadline) {
+      const remainingForStructure = Math.max(1, deadline - this.#now());
+      const [structureResult] = await Promise.allSettled([
+        this.#nativeToolCall({
+          contractVersion: ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
+          action: "code.structure",
+          args: {
+            paths,
+            maxFiles: paths.length,
+            includeSymbols: true,
+            includeEdges: false,
+          },
+          viewPath: readPayload.viewPath,
+          ledgerPath: readPayload.ledgerPath,
+          repoRoot,
+          repoId: readPayload.repoId,
+          versionId: readPayload.versionId,
+          config: beamConfig,
+          deadline,
+        }, {
+          timeoutMs: remainingForStructure,
+          idempotent: true,
+        }),
+      ]);
+      if (structureResult.status === "fulfilled") structureEnvelope = structureResult.value;
+    }
+    return attachScopeBeam(envelope, {
+      query: String(request.args?.query || ""),
+      limit,
+      scopeEnvelope,
+      structureEnvelope,
+    });
   }
 
   #repoKeyFor(request) {

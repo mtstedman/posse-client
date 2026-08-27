@@ -239,9 +239,9 @@ function prerequisitesFor(action) {
   if (action === "index.refresh") return ["The repo should be registered or have a writable ATLAS ledger path."];
   if (action === "symbol.card" || action === "symbol.overview") return ["Use symbol.search first when you do not already have a symbolId."];
   if (action === "tree.overview" || action === "tree.branch") return ["Run index.refresh first if tree-derived state is missing or stale."];
-  if (action === "tree.scope") return ["Prefetch-only: the handoff runs this with the full task text. Agents should use tree.expand with validated seeds instead."];
-  if (action === "tree.expand") return ["Seed with files/areas already validated (from the brief, tree.branch, or symbol.overview locations)."];
-  if (action === "code.survey") return ["Use tree.branch or tree.expand first to pick the directory or file set worth surveying."];
+  if (action === "tree.scope") return ["Internal task-conditioned prefetch; preserve the full task text and current planner configuration."];
+  if (action === "tree.expand") return ["Internal seed expansion; provide validated paths, symbolIds, nodeIds, or refs."];
+  if (action === "code.survey") return [];
   if (action === "code.structure") return ["Use when the answer needs exact file/symbol/import/fan-in inventory instead of code-body context."];
   if (action === "code.db") return ["Internal WI/setup DB inventory only. Agents receive the resulting WI brief and hash refs instead of calling this action."];
   if (action.startsWith("slice.") || action === "context") return ["Start from symbol.search, symbol.card, or taskText."];
@@ -254,12 +254,12 @@ function prerequisitesFor(action) {
 function nextActionsFor(action) {
   const next = {
     "symbol.search": ["symbol.card", "symbol.overview", "code.skeleton"],
-    "symbol.card": ["symbol.overview", "tree.branch", "code.window"],
-    "symbol.overview": ["symbol.card", "tree.branch", "code.window"],
-    "tree.overview": ["tree.branch", "symbol.card", "code.skeleton"],
-    "tree.branch": ["code.structure", "code.survey", "tree.expand", "symbol.card", "code.skeleton"],
-    "tree.scope": ["code.skeleton", "review.analyze"],
-    "tree.expand": ["code.structure", "tree.branch", "code.skeleton", "symbol.search"],
+    "symbol.card": ["symbol.overview", "code.window"],
+    "symbol.overview": ["symbol.card", "code.window"],
+    "tree.overview": [],
+    "tree.branch": [],
+    "tree.scope": [],
+    "tree.expand": [],
     "slice.build": ["slice.refresh", "context"],
     "edit.plan": ["code.skeleton", "code.lens"],
     "code.survey": ["code.structure", "symbol.overview", "code.lens", "code.window"],

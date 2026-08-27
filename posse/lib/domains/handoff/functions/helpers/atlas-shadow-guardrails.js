@@ -35,7 +35,7 @@ export function buildAtlasShadowGuardrails(packet = {}, opts = {}) {
     lanes.push({
       id: "deploy_provenance",
       reason: "Task asks for live/deploy/config provenance where source-only indexing has missed shell/config hook copies.",
-      recommended_first_tools: ["tree.branch", "code.structure", "code.survey"],
+      recommended_first_tools: ["code.structure", "code.survey"],
       native_exception: "Allow direct native reads for non-indexed deploy/config/shell artifacts after naming the provenance gap.",
     });
   }

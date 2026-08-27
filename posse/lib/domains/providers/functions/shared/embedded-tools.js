@@ -41,6 +41,7 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
     if (isAtlasTool(tool)) {
       const defs = getAtlasEmbeddedToolDefinitions([name], {
         codeWindowPolicy: contract?.atlasCodeWindowPolicy || null,
+        role: contract?.role || null,
       });
       if (defs.length > 0) map[name] = defs[0];
       continue;

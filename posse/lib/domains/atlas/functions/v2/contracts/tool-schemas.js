@@ -768,6 +768,9 @@ export function validateAtlasToolCall(call) {
   if (!schema) return { ok: true };
   const params = { .../** @type {Record<string, unknown>} */ (call) };
   delete params.action;
+  if (action === "traverse_ref" && params.traversal_ref == null) {
+    params.traversal_ref = params.traversal_refs ?? params.ref ?? params.refs ?? params.hashes;
+  }
   /** @type {ValidationError[]} */
   const errors = [];
   validateValue(params, schema, "$", errors);

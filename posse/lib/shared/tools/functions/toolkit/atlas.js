@@ -261,12 +261,13 @@ export function resolveAtlasDeterministicCliAction(action) {
 
 export function getAtlasDeterministicToolDefinitions(toolNames = [], {
   codeWindowPolicy = null,
+  role = null,
 } = {}) {
   return (toolNames || [])
     .map((toolName) => {
       const schema = ATLAS_TOOL_DEFS[toolName];
       return schema
-        ? projectAtlasToolDefinitionForRuntime(schema, { action: toolName, codeWindowPolicy })
+        ? projectAtlasToolDefinitionForRuntime(schema, { action: toolName, codeWindowPolicy, role })
         : null;
     })
     .filter(Boolean);

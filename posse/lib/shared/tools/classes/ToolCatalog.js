@@ -67,7 +67,7 @@ export class ToolCatalog {
   static getSchema(name, { role = null, compactCompletion = false, compactV3 = false } = {}) {
     const entry = this.get(name);
     if (entry) {
-      if (String(name || "").trim() === "agent_handoff" && role) {
+      if (role) {
         return getToolSchemaForRole(name, role, { compactCompletion, compactV3 });
       }
       return entry.schema || null;

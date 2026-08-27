@@ -332,9 +332,7 @@ function boundedSearchRows(rows, { offset, headLimit, maxChars = CONTEXT_SEARCH_
   const returned = output.length;
   const nextOffset = offset + returned;
   const truncated = nextOffset < total;
-  if (truncated) {
-    output.push(`[search_files matchesTotal=${total} returned=${returned} offset=${offset} nextOffset=${nextOffset} truncated=true]`);
-  }
+  output.push(`[search_files matchesTotal=${total} returned=${returned} truncated=${truncated}]`);
   return output.join("\n").slice(0, maxChars);
 }
 

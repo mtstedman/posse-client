@@ -39,6 +39,21 @@ export function reconcileCodexFreshSessionUsage(streamUsage = {}, rolloutUsage =
   };
 }
 
+export function resolveCodexCloseTurns({
+  latestTurnCount = null,
+  completedTurnEvents = 0,
+  rolloutUsageApplied = false,
+  rolloutUsage = null,
+} = {}) {
+  const streamed = token(latestTurnCount);
+  if (streamed != null) return streamed;
+  const completed = token(completedTurnEvents);
+  if (completed != null && completed > 0) return completed;
+  if (rolloutUsageApplied !== true) return null;
+  const recovered = token(rolloutUsage?.numTurns);
+  return recovered != null && recovered > 0 ? recovered : null;
+}
+
 function dayDirectories(startedAtMs) {
   const timestamp = Number(startedAtMs);
   if (!Number.isFinite(timestamp)) return [];
@@ -138,13 +153,14 @@ export function parseCodexRolloutUsage(text, { expectedSessionHandle = null } = 
     && segmentTotals.inputTokens === usage.inputTokens
     && segmentTotals.outputTokens === usage.outputTokens
     && segmentTotals.cachedInputTokens === (usage.cachedInputTokens ?? 0);
-  // token_count rows are cumulative snapshots within one `codex exec` turn,
-  // not CLI-turn boundaries. Request cardinality is reported separately.
+  // Each changed durable token_count snapshot closes one provider request.
+  // The live stream can omit turn.completed under pressure, so this durable
+  // request count is also the close-time turn fallback.
   return {
     sessionHandle,
     usage,
     segments,
-    numTurns: usage ? 1 : null,
+    numTurns: segments.length > 0 ? segments.length : null,
     providerRequestCount: segments.length,
     malformedLines,
     complete,
@@ -190,7 +206,7 @@ export function sliceCodexResumedSessionUsage(baseline, current) {
     ...current,
     usage,
     segments,
-    numTurns: 1,
+    numTurns: segments.length,
     providerRequestCount: segments.length,
     complete: true,
     resumedFromProviderRequestCount: baseline.segments.length,

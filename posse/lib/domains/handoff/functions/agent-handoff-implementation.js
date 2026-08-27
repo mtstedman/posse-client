@@ -3515,6 +3515,7 @@ export function stageAgentHandoff(args, {
     digest,
     packet.evidence_chars,
   );
+  recordAtlasTrunkHitRate(packet, resolvedContext);
   return {
     ok: true,
     status: "staged",
@@ -3523,6 +3524,100 @@ export function stageAgentHandoff(args, {
     callCount: 1,
     ...(hasDiagnostics ? { diagnostics } : {}),
   };
+}
+
+function recordAtlasTrunkHitRate(packet, context) {
+  const database = context?.db || getDb();
+  const jobId = positiveInt(context?.jobId ?? context?.job_id);
+  const attemptId = positiveInt(context?.attemptId ?? context?.attempt_id);
+  if (!jobId) return false;
+  try {
+    const row = database.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE job_id = ?
+        AND observation_type = 'atlas.prefetch.trunk'
+        AND (? IS NULL OR attempt_id = ?)
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(jobId, attemptId, attemptId);
+    if (!row?.detail_json) return false;
+    const trunk = JSON.parse(row.detail_json);
+    const rankedFiles = canonicalPathList(trunk?.ranked_files);
+    const surveyFiles = canonicalPathList(trunk?.survey_files);
+    const pointedFiles = canonicalPathList(
+      Array.isArray(trunk?.pointed_files)
+        ? trunk.pointed_files
+        : [...rankedFiles, ...surveyFiles],
+    );
+    const citedFiles = citedSourcePaths(packet);
+    const pointed = new Set(pointedFiles);
+    const hitFiles = citedFiles.filter((file) => pointed.has(file));
+    const hitRate = citedFiles.length > 0 ? hitFiles.length / citedFiles.length : null;
+    const pointedPrecision = pointedFiles.length > 0 ? hitFiles.length / pointedFiles.length : null;
+    return recordObservation({
+      db: database,
+      work_item_id: positiveInt(context?.workItemId ?? context?.work_item_id),
+      job_id: jobId,
+      attempt_id: attemptId,
+      observation_type: "atlas.prefetch.trunk_hit_rate",
+      summary: `ATLAS trunk covered ${hitFiles.length}/${citedFiles.length} terminally cited file(s)`,
+      detail: {
+        kind: "atlas_prefetch_trunk_hit_rate",
+        ranked_files: rankedFiles,
+        survey_files: surveyFiles,
+        pointed_files: pointedFiles,
+        cited_files: citedFiles,
+        hit_files: hitFiles,
+        pointed_file_count: pointedFiles.length,
+        cited_file_count: citedFiles.length,
+        hit_file_count: hitFiles.length,
+        hit_rate: hitRate,
+        pointed_precision: pointedPrecision,
+      },
+    });
+  } catch {
+    return false;
+  }
+}
+
+function citedSourcePaths(packet) {
+  const out = [];
+  const seen = new Set();
+  const push = (value) => {
+    const sourcePath = canonicalSourcePath(value);
+    if (!sourcePath || seen.has(sourcePath)) return;
+    seen.add(sourcePath);
+    out.push(sourcePath);
+  };
+  for (const handoff of Array.isArray(packet?.handoffs) ? packet.handoffs : []) {
+    for (const claim of Array.isArray(handoff?.report?.claims) ? handoff.report.claims : []) {
+      const detail = claim?.[1];
+      for (const lane of ["evidence", "proof", "support"]) {
+        for (const evidence of Array.isArray(detail?.[lane]) ? detail[lane] : []) {
+          push(evidence?.path);
+          for (const window of Array.isArray(evidence?.provenance?.source_windows)
+            ? evidence.provenance.source_windows
+            : []) {
+            push(window?.path);
+          }
+        }
+      }
+    }
+  }
+  return out.sort();
+}
+
+function canonicalPathList(value) {
+  const out = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(value) ? value : []) {
+    const sourcePath = canonicalSourcePath(entry);
+    if (!sourcePath || seen.has(sourcePath)) continue;
+    seen.add(sourcePath);
+    out.push(sourcePath);
+  }
+  return out;
 }
 
 export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = getDb() } = {}) {
@@ -3634,7 +3729,12 @@ function renderEvidenceAppendix(report) {
   for (const [index, claim] of (report.claims || []).entries()) {
     const detail = claim[1] || {};
     const marker = `[E${index + 1}]`;
-    const claimLabel = String(claim[0] || "").replace(/\s+/g, " ").trim();
+    const rawClaimLabel = String(claim[0] || "").replace(/\s+/g, " ").trim();
+    const claimLabel = rawClaimLabel === marker
+      ? ""
+      : rawClaimLabel.startsWith(`${marker} `)
+        ? rawClaimLabel.slice(marker.length + 1)
+        : rawClaimLabel;
     const claimPrefix = claimLabel ? `${claimLabel} — ` : "";
     const selectors = [...new Set(
       ["evidence", "proof", "support"].flatMap((lane) => (

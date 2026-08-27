@@ -25,6 +25,18 @@ import { ensureEmbeddingsForView } from "../embeddings/on-demand.js";
 import { logAtlasError } from "../verbose-errors.js";
 import { CONTEXT_SYMBOL_SEARCH_SELF_BOUND_CHARS } from "../../../../../catalog/context.js";
 import { resolveVendoredSourcePromotions } from "./vendored-dependencies.js";
+import { treeScope } from "./tree.js";
+import { codeStructure } from "./exact.js";
+import {
+  attachScopeBeam,
+  compactScopeBeamCandidate,
+  markScopeBeamDegraded,
+  scopeBeamConfig,
+  scopeBeamMaxFiles,
+  SCOPE_BEAM_STRUCTURE_FILE_LIMIT,
+  symbolSearchHasUnusedSlots,
+  syncScopeBeamMetadata,
+} from "./search-beam.js";
 
 // Module-level dedup so a misconfigured pair (e.g. encoder dim 384,
 // index dim 128) doesn't flood the worker log on every search. Keyed
@@ -70,6 +82,8 @@ function warnOnceDimMismatch(encoder, index) {
  *   repoRoot?: string,
  *   planner?: (input: string) => QueryPlan | Promise<QueryPlan>,
  *   onDemandEmbeddingFill?: boolean,
+ *   config?: Record<string, unknown>,
+ *   scopeBeamEnabled?: boolean,
  * }} args
  * @returns {Promise<ReturnType<typeof okEnvelope<SymbolSearchData>>>}
  */
@@ -88,6 +102,8 @@ export async function symbolSearch({
   repoRoot,
   planner,
   onDemandEmbeddingFill = true,
+  config = {},
+  scopeBeamEnabled = true,
 }) {
   const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : 20;
   const vendoredPromotions = /** @type {any} */ (params).filterToolingPaths === true
@@ -172,6 +188,11 @@ export async function symbolSearch({
       ledger,
       repoId,
       embeddingEnsureStatus,
+      repoRoot,
+      planner,
+      taskType,
+      config,
+      scopeBeamEnabled,
     });
   }
 
@@ -215,13 +236,18 @@ export async function symbolSearch({
     ledger,
     repoId,
     embeddingEnsureStatus: null,
+    repoRoot,
+    planner,
+    taskType,
+    config,
+    scopeBeamEnabled,
   });
 }
 
 /**
- * @param {{ view: View, result: HybridSearchResult, versionId: string, limit: number, query: string, semanticRequested?: boolean, encoder?: EmbeddingEncoder, overlayHits?: Array<Awaited<ReturnType<typeof overlayHit>>>, ledger?: Ledger, repoId?: string | null, embeddingEnsureStatus?: any }} args
+ * @param {{ view: View, result: HybridSearchResult, versionId: string, limit: number, query: string, semanticRequested?: boolean, encoder?: EmbeddingEncoder, overlayHits?: Array<Awaited<ReturnType<typeof overlayHit>>>, ledger?: Ledger, repoId?: string | null, embeddingEnsureStatus?: any, repoRoot?: string, planner?: (input: string) => QueryPlan | Promise<QueryPlan>, taskType?: TaskType, config?: Record<string, unknown>, scopeBeamEnabled?: boolean }} args
  */
-async function buildEnvelope({ view, result, versionId, limit, query, semanticRequested = false, encoder, overlayHits = [], ledger, repoId, embeddingEnsureStatus = null }) {
+async function buildEnvelope({ view, result, versionId, limit, query, semanticRequested = false, encoder, overlayHits = [], ledger, repoId, embeddingEnsureStatus = null, repoRoot, planner, taskType, config = {}, scopeBeamEnabled = true }) {
   const durableItems = result.items
     .filter((entry) => isDefaultVisibleSymbol(entry.payload) || isExplicitLiteralSymbolQuery(query, entry.payload))
     .map((entry) => {
@@ -314,12 +340,76 @@ async function buildEnvelope({ view, result, versionId, limit, query, semanticRe
     }
   }
 
-  return boundSymbolSearchEnvelope(okEnvelope({
+  const envelope = okEnvelope({
     action: "symbol.search",
     versionId,
     data,
     meta,
-  }));
+  });
+  if (scopeBeamEnabled && symbolSearchHasUnusedSlots(envelope, limit)) {
+    await attachNodeScopeBeam({
+      envelope,
+      view,
+      versionId,
+      query,
+      limit,
+      repoRoot,
+      planner,
+      taskType,
+      config,
+    });
+  }
+  return boundSymbolSearchEnvelope(envelope);
+}
+
+async function attachNodeScopeBeam({ envelope, view, versionId, query, limit, repoRoot, planner, taskType, config }) {
+  // Compatibility/internal fallback only. Product symbol.search runs through
+  // AtlasToolExecutor's native-complete path, which shares the request deadline
+  // across search, scope, and structure. These Node helpers are not cancellable;
+  // their conductor caller owns the outer timeout, so an inner Promise.race
+  // would only orphan work after returning.
+  const [scopeResult] = await Promise.allSettled([
+    treeScope({
+      view,
+      versionId,
+      params: {
+        taskText: query,
+        ...(taskType ? { taskType } : {}),
+        maxFiles: scopeBeamMaxFiles(limit),
+      },
+      config: scopeBeamConfig(config),
+      planner,
+    }),
+  ]);
+  if (scopeResult.status !== "fulfilled") {
+    markScopeBeamDegraded(envelope);
+    return;
+  }
+  const scopeEnvelope = /** @type {any} */ (scopeResult.value);
+  const paths = (Array.isArray(scopeEnvelope?.data?.candidateFiles)
+    ? scopeEnvelope.data.candidateFiles
+    : [])
+    .map((entry) => String(entry?.path || "").trim())
+    .filter(Boolean)
+    .slice(0, SCOPE_BEAM_STRUCTURE_FILE_LIMIT);
+  let structureEnvelope = null;
+  if (paths.length > 0) {
+    const [structureResult] = await Promise.allSettled([
+      codeStructure({
+        view,
+        versionId,
+        params: {
+          paths,
+          maxFiles: paths.length,
+          includeSymbols: true,
+          includeEdges: false,
+        },
+        repoRoot,
+      }),
+    ]);
+    if (structureResult.status === "fulfilled") structureEnvelope = structureResult.value;
+  }
+  attachScopeBeam(envelope, { query, limit, scopeEnvelope, structureEnvelope });
 }
 
 /**
@@ -335,6 +425,7 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
   const data = envelope.data;
   const meta = envelope.meta || {};
   if (Array.isArray(data.items)) data.items = data.items.map(compactSymbolAddress);
+  if (Array.isArray(data.beam)) data.beam = data.beam.map(compactScopeBeamCandidate);
   delete meta.scoreScheme;
   if (JSON.stringify(envelope).length <= maxChars) return envelope;
   if (Array.isArray(data.entities) && JSON.stringify(envelope).length > maxChars) delete data.entities;
@@ -342,6 +433,10 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
     if (JSON.stringify(envelope).length <= maxChars) break;
     delete meta[key];
   }
+  while (Array.isArray(data.beam) && data.beam.length > 0 && JSON.stringify(envelope).length > maxChars) {
+    data.beam.pop();
+  }
+  syncScopeBeamMetadata(envelope);
   while (Array.isArray(data.items) && data.items.length > 1 && JSON.stringify(envelope).length > maxChars) {
     data.items.pop();
     data.truncated = true;

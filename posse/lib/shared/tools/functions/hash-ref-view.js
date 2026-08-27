@@ -176,13 +176,15 @@ export function hashRefViewSelector(view, args = {}) {
   };
 }
 
-export function nextHashRefViewSelector(view) {
+export function nextHashRefViewSelector(view, { inheritLimit = true } = {}) {
   const page = view?.page || {};
   if (page.has_more !== true || page.next_offset == null) return null;
   return {
     mode: page.mode === "search" ? "search" : "offset",
     offset: Math.max(0, Number(page.next_offset) || 0),
-    limit: Math.max(1, Number(page.limit) || CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS),
+    ...(inheritLimit ? {
+      limit: Math.max(1, Number(page.limit) || CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS),
+    } : {}),
     ...(page.mode === "search" ? {
       search: String(page.search || ""),
       search_mode: String(page.requested_search_mode || "auto"),

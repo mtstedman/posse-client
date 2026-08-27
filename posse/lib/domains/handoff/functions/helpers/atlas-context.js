@@ -2147,6 +2147,40 @@ async function _attachAtlasTreePrefetchContext(packet, {
     surveyContext,
     treeScope,
   };
+  _recordAtlasTrunkPrefetchDiagnostic(packet, { treeScope, surveyContext });
+}
+
+function _recordAtlasTrunkPrefetchDiagnostic(packet, { treeScope, surveyContext }) {
+  try {
+    const context = getObservationContext() || {};
+    const rankedFiles = _uniqueAtlasPaths(
+      Array.isArray(treeScope?.candidateFiles) ? treeScope.candidateFiles : [],
+      ATLAS_TREE_SCOPE_MAX_FILES,
+    );
+    const surveyFiles = _uniqueAtlasPaths(
+      Array.isArray(surveyContext?.topFiles) ? surveyContext.topFiles : [],
+      MAX_SURVEY_FILES,
+    );
+    const pointedFiles = _uniqueAtlasPaths([...rankedFiles, ...surveyFiles], ATLAS_TREE_SCOPE_MAX_FILES + MAX_SURVEY_FILES);
+    recordObservation({
+      work_item_id: context.work_item_id ?? packet?.work_item_id ?? null,
+      job_id: context.job_id ?? packet?.job_id ?? null,
+      attempt_id: context.attempt_id ?? null,
+      observation_type: "atlas.prefetch.trunk",
+      summary: `ATLAS trunk pointed to ${pointedFiles.length} file(s)`,
+      detail: {
+        kind: "atlas_prefetch_trunk",
+        origin: "prefetch",
+        action: treeScope?.action || "tree.scope",
+        prefetch_mode: packet?.atlas_slice_context?.prefetchMode || null,
+        ranked_files: rankedFiles,
+        survey_files: surveyFiles,
+        pointed_files: pointedFiles,
+      },
+    });
+  } catch {
+    // Standing measurement must never affect handoff assembly.
+  }
 }
 
 function _atlasSkeletonFloorFiles(prefetchTargets = {}) {
@@ -3412,11 +3446,6 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
       lines.push(_renderCardLine(card));
       for (const detail of _renderCardDetailLines(card)) lines.push(detail);
     }
-  }
-
-  const recipientRole = String(packet?.recipient || "").trim().toLowerCase();
-  if (treeScope?.ok && (recipientRole === "planner" || recipientRole === "dev")) {
-    lines.push("The seeds above are pre-expanded from the brief; call tree.expand only for files you newly validate.");
   }
 
   if (slice.surveyContext?.ok) {

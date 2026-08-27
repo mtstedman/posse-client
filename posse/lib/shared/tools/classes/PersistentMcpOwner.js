@@ -92,7 +92,8 @@ import {
 } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
-import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool } from "../functions/hash-adder.js";
+import { appendHashRefIfMajor, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool, hashRefTraversalInputs } from "../functions/hash-adder.js";
+import { listHashRefTraversalsForContext } from "../../../domains/queue/functions/hash-refs.js";
 import {
   bindAgentAttachmentToSignedContract,
   isInternalAtlasAction,
@@ -860,6 +861,30 @@ function mcpToolTextPayload(text) {
     content: [{ type: "text", text: value }],
     isError: /^Error:/i.test(value),
   };
+}
+
+const deliveredTraversalRefsBySession = new WeakMap();
+
+function deliveredTraversalRefs(text, requestedRefs = []) {
+  try {
+    const parsed = JSON.parse(String(text || ""));
+    if (Array.isArray(parsed?.refs)) {
+      return requestedRefs.filter((_ref, index) => parsed.refs[index]?.ok === true);
+    }
+    return parsed?.ok === true && requestedRefs[0] ? [requestedRefs[0]] : [];
+  } catch {
+    return [];
+  }
+}
+
+function deliveredTraversalRefSet(session) {
+  if (!session || typeof session !== "object") return new Set();
+  let delivered = deliveredTraversalRefsBySession.get(session);
+  if (!delivered) {
+    delivered = new Set();
+    deliveredTraversalRefsBySession.set(session, delivered);
+  }
+  return delivered;
 }
 
 function createRefMcpPayload(data = {}) {
@@ -4190,14 +4215,27 @@ export class PersistentMcpOwner {
       if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
         const createRef = isAtlasCreateHashTool(toolName, toolArgs);
         const hashContext = { context: hashRefToolContext(session) };
-        let result = createRef
-          ? createRefMcpPayload(createHashRefResult(toolArgs || {}, hashContext))
-          : mcpToolTextPayload(fetchHashRefTool(toolArgs || {}, {
+        const traversalInputs = createRef ? null : hashRefTraversalInputs(toolArgs || {});
+        const priorDeliveredTraversalRefs = createRef ? null : deliveredTraversalRefSet(session);
+        const availableTraversalRefs = createRef
+          ? null
+          : listHashRefTraversalsForContext(hashContext.context)
+              .filter((entry) => !priorDeliveredTraversalRefs.has(entry.ref)).length;
+        const traversalText = createRef
+          ? null
+          : fetchHashRefTool(toolArgs || {}, {
               ...hashContext,
               researchPhase: synthesisAdmission.researchPhase || null,
               enforcePolicy: String(session?.bootConfig?.role || "") === "researcher",
               requireTraversal: isCanonicalAtlasTraversalTool(toolName, toolArgs),
-            }));
+            });
+        const deliveredRefs = createRef
+          ? []
+          : deliveredTraversalRefs(traversalText, traversalInputs.refs);
+        for (const ref of deliveredRefs) priorDeliveredTraversalRefs.add(ref);
+        let result = createRef
+          ? createRefMcpPayload(createHashRefResult(toolArgs || {}, hashContext))
+          : mcpToolTextPayload(traversalText);
         result = appendOwnerOperatorFeedbackDelivery(result, session, toolName);
         result = appendOwnerResearchEarlyFetchNotice(
           result,
@@ -4220,6 +4258,12 @@ export class PersistentMcpOwner {
           durationMs: Date.now() - startedAt,
           queueWaitMs,
           executor: { via: "hash_ref_store" },
+          observationDetail: createRef ? null : {
+            traversal_telemetry_version: 1,
+            available_refs: availableTraversalRefs,
+            requested_refs: traversalInputs.refs.length,
+            delivered_refs: deliveredRefs.length,
+          },
           synthesisAdmission,
         });
         appendRunTelemetry("diagnostics", {

@@ -36,7 +36,7 @@ import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRout
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
-import { reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
+import { reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
@@ -772,7 +772,12 @@ export async function callProvider(promptText, {
         // Current Codex JSONL emits turn.completed without a numeric count.
         // Count those lifecycle events; tool calls are not turns and can be
         // absent when the deterministic MCP gateway owns their telemetry.
-        numTurns: latestTurnCount ?? (completedTurnEvents > 0 ? completedTurnEvents : null),
+        numTurns: resolveCodexCloseTurns({
+          latestTurnCount,
+          completedTurnEvents,
+          rolloutUsageApplied,
+          rolloutUsage,
+        }),
         maxTurns: turnLimit,
         maxOutputTokens: outputTokenLimit,
         outputTruncated: false,

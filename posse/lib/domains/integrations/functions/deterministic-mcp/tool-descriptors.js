@@ -136,7 +136,9 @@ export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
   "repo.quality",
   "repo.status",
   "tree.overview",
+  "tree.branch",
   "tree.scope",
+  "tree.expand",
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",
@@ -304,7 +306,7 @@ export const TOOL_CATALOG = {
   search_files: {
     schema: TOOL_SEARCH_FILES,
     access: "read",
-    summary: "Search file contents deterministically through bounded ripgrep output (one context line, total/continuation offset footer when truncated).",
+    summary: "Search file contents deterministically through self-bounded ripgrep output (one context line and matchesTotal, without continuation paging).",
     observation: { type: "tool.search", label: "Search", format: "search", targetKeys: ["path", "directory", "file_path"] },
   },
   git_history: {
@@ -631,8 +633,6 @@ export const WEB_TOOL_ROLES = new Set(["researcher", "assessor"]);
 export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"]);
 
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
-  "tree.branch",
-  "tree.expand",
   "symbol.search",
   "symbol.card",
   "symbol.overview",
@@ -930,8 +930,8 @@ export function getAtlasRouteDefinitionForRole(role) {
     // are excluded here on purpose.
     tools: [...externalTools].filter(isExternallyRoutedAtlasTool),
     // Routed for the role at all — what the handoff prefetch may execute on
-    // the agent's behalf. Prefetch-only actions (tree.scope) stay in THIS
-    // list; only mutating and fallback-only actions are stripped.
+    // the agent's behalf. Prefetch-only tree actions stay in THIS list; only
+    // mutating and fallback-only actions are stripped.
     internalTools: [...internalTools].filter((tool) => !isBlockedFoldedAtlasTool(tool) && !isFallbackOnlyAtlasTool(tool)),
     rationale: route.rationale,
   };
@@ -1001,14 +1001,16 @@ const ATLAS_FALLBACK_ONLY_ACTIONS = new Set([
 ]);
 
 // Actions the handoff prefetch runs on the agent's behalf with better input
-// (full task text) than the agent could reconstruct — kept in role routes so
-// the prefetch can use them, but never advertised to the agent. Agents get
-// tree.expand (seed expansion) instead.
+// than the agent could reconstruct. Keep their schemas and internal role
+// routes intact while the whole tree suite is reversibly disabled on the
+// agent-facing surface.
 const ATLAS_PREFETCH_ONLY_ACTIONS = new Set([
   "repo.overview",
   "repo.status",
   "tree.overview",
+  "tree.branch",
   "tree.scope",
+  "tree.expand",
   "slice.build",
   "slice.refresh",
   "slice.spillover.get",
@@ -1053,8 +1055,8 @@ export function projectAtlasToolDefinitionForRuntime(schema = {}, {
 } = {}) {
   const normalizedAction = normalizeAtlasActionName(action || schema?.name);
   if (normalizedAction !== "code.window" || !codeWindowPolicy) return schema;
-  const policy = normalizeAtlasCodeWindowPolicy(codeWindowPolicy);
   const projected = cloneJson(schema);
+  const policy = normalizeAtlasCodeWindowPolicy(codeWindowPolicy);
   for (const schemaKey of ["parameters", "inputSchema"]) {
     const maxTokens = projected?.[schemaKey]?.properties?.maxTokens;
     if (!maxTokens || typeof maxTokens !== "object") continue;

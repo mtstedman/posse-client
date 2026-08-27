@@ -214,6 +214,7 @@ export class AgentDispatcher {
         agentHandoff: preparation.agentHandoff === true,
         subAgent: preparation.subAgent === true,
         coordinationChild: preparation.coordinationChild === true,
+        atlasAvailable: preparation.atlasAvailable !== false,
       }),
     });
   }
@@ -227,6 +228,7 @@ export class AgentDispatcher {
     agentHandoff = false,
     subAgent = false,
     coordinationChild = false,
+    atlasAvailable = true,
     coordinationChildPermitId = null,
     remoteToolSurface = null,
     handoffRequest = null,
@@ -275,6 +277,7 @@ export class AgentDispatcher {
       agentHandoff: agentHandoff === true,
       subAgent: subAgent === true,
       coordinationChild: coordinationChild === true,
+      atlasAvailable: atlasAvailable !== false,
       coordinationChildPermitId,
       remoteToolSurface,
       handoffRequest,
@@ -364,6 +367,7 @@ export class AgentDispatcher {
     agentHandoff = false,
     subAgent = false,
     coordinationChild = false,
+    atlasAvailable = true,
     coordinationChildPermitId = null,
     remoteToolSurface = null,
     handoffRequest = null,
@@ -415,6 +419,7 @@ export class AgentDispatcher {
       agentHandoff,
       subAgent,
       coordinationChild,
+      atlasAvailable,
       coordinationChildPermitId,
       remoteToolSurface,
       handoffRequest,
@@ -532,16 +537,18 @@ export class AgentDispatcher {
         agentHandoff: preparation.agentHandoff === true,
         subAgent: preparation.subAgent === true,
         coordinationChild: preparation.coordinationChild === true,
+        atlasAvailable: preparation.atlasAvailable !== false,
       });
       const gate = await this.gateFactory({
         key: preparation.key,
         logicalKey: preparation.logicalKey,
         ...roleContract,
         ...(preparation.remoteToolSurface && typeof preparation.remoteToolSurface === "object"
-          && preparation.coordinationChild === true
           ? {
               remoteToolSurface: preparation.remoteToolSurface,
-              coordinationChildPermitId: preparation.coordinationChildPermitId,
+              ...(preparation.coordinationChild === true
+                ? { coordinationChildPermitId: preparation.coordinationChildPermitId }
+                : {}),
             }
           : {}),
       });
