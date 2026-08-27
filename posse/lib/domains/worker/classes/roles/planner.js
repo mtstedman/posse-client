@@ -204,6 +204,7 @@ export class PlannerRole extends BaseRole {
             "Existing-code evidence is a strong default, not a plan validity requirement. When the research packet or your own exact-source ATLAS results expose evidence relevant to a task, attach concise claims with the proof/support selectors advertised by the issued schema. Posse materializes those claims into that task's downstream dev brief so the developer can start from the evidence instead of repeating repository discovery.",
             "Claims may stay empty for genuinely new work or when no reliable source evidence is available. Never invent, pad, or guess citations merely to populate a task.",
             "A file name, manifest entry, skeleton, or remembered line range is navigation rather than surfaced source evidence. Before citing a path selector, expose that exact range in this agent call with an issued exact-source ATLAS or read tool. If a useful selector is rejected as not surfaced, expose the task-relevant range and retry; do not discard available evidence merely to bypass selector validation.",
+            "When ATLAS returns an evidence_ref, cite that ref directly. If you use create_ref to narrow existing evidence, pass source_ref plus lines instead of copying source text into text; the server-side slice preserves file/line custody for the developer. Inline text chunks are prose and cannot prove source coordinates.",
             "Use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
             "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Proof and support selectors are deterministically resolved, range-validated, and auto-expanded into the developer call when available; decoy selectors remain labeled routing context.",
             "",
@@ -214,6 +215,7 @@ export class PlannerRole extends BaseRole {
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief or repeat task requirements in summary.",
           "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane. Refs may also appear in task_spec or success_criteria as compact opaque references; those narrative occurrences are not expanded. Posse auto-expands available proof/support evidence into the developer call so directly relevant planner findings do not require rediscovery. Decoy refs are not auto-expanded and must include a short why.",
+          "When narrowing existing evidence with create_ref, use source_ref plus lines rather than copying code into text so the derived ref retains exact source coordinates.",
           "",
           ].join("\n")
       : "";

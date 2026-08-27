@@ -52,7 +52,10 @@ import {
   materializeHashRefView,
   nextHashRefViewSelector,
 } from "./hash-ref-view.js";
-import { canonicalEvidenceSourcePath } from "./source-evidence.js";
+import {
+  canonicalEvidenceSourcePath,
+  normalizedEvidenceSourceWindows,
+} from "./source-evidence.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -492,6 +495,14 @@ function ambientStampingEnabled() {
 }
 
 function surfaceMinCharsFor(toolName, { ambient = null } = {}) {
+  // code.lens exposes exact source lines. Leaving a small lens result below
+  // the ordinary hash-ref floor makes those lines visible to the model but
+  // absent from exact-call evidence custody, so a planner cannot hand them
+  // off without copying the code into untracked prose. Always stamp lens
+  // output so every surfaced source window retains its agent-call identity.
+  if (String(toolName || "").replace(/^atlas[.:]/, "") === "code.lens") {
+    return EVIDENCE_REF_SURFACE_MIN_CHARS;
+  }
   if (!(ambient ?? ambientStampingEnabled())) return DEFAULT_SURFACE_MIN_CHARS;
   return EVIDENCE_REF_TOOLS.has(String(toolName || ""))
     ? EVIDENCE_REF_SURFACE_MIN_CHARS
@@ -2622,15 +2633,60 @@ function sliceSourcePayload(payloadText, item) {
     if (start < 1 || end < start) return { error: "invalid_lines_range (use \"start-end\", 1-based)" };
     const rows = text.replace(/\r\n/g, "\n").split("\n");
     if (start > rows.length) return { error: `lines_out_of_range (source has ${rows.length} lines)` };
-    return { text: rows.slice(start - 1, Math.min(end, rows.length)).join("\n"), slice: `lines:${start}-${Math.min(end, rows.length)}` };
+    const selectedEnd = Math.min(end, rows.length);
+    return {
+      text: rows.slice(start - 1, selectedEnd).join("\n"),
+      slice: `lines:${start}-${selectedEnd}`,
+      lineSlice: { start, end: selectedEnd },
+    };
   }
   const offset = Math.max(0, Number(item.offset) || 0);
   const limit = item.limit != null ? Math.max(1, Number(item.limit) || 0) : null;
-  if (offset === 0 && limit == null) return { text, slice: null };
+  if (offset === 0 && limit == null) return { text, slice: null, wholePayload: true };
   if (offset >= text.length) return { error: `offset_out_of_range (source has ${text.length} chars)` };
   return {
     text: text.slice(offset, limit != null ? offset + limit : undefined),
     slice: `chars:${offset}-${limit != null ? Math.min(offset + limit, text.length) : text.length}`,
+  };
+}
+
+function inheritedCreateRefSourceMetadata(sourceEntry, sliced = {}) {
+  const sourceMetadata = sourceEntry?.metadata || {};
+  const sourceWindows = normalizedEvidenceSourceWindows(sourceMetadata.source_windows);
+  if (String(sourceMetadata.line_semantics || "").toLowerCase() !== "source" || sourceWindows.length === 0) {
+    return null;
+  }
+
+  let inherited = [];
+  if (sliced.wholePayload === true) {
+    inherited = sourceWindows;
+  } else if (sliced.lineSlice) {
+    const sliceStart = Number(sliced.lineSlice.start);
+    const sliceEnd = Number(sliced.lineSlice.end);
+    for (const window of sourceWindows) {
+      const materializedStart = Number(window.materialized_start_line);
+      const materializedEnd = Number(window.materialized_end_line);
+      if (!Number.isInteger(materializedStart) || !Number.isInteger(materializedEnd)) continue;
+      const overlapStart = Math.max(sliceStart, materializedStart);
+      const overlapEnd = Math.min(sliceEnd, materializedEnd);
+      if (overlapEnd < overlapStart) continue;
+      inherited.push({
+        ...window,
+        source_start_line: window.source_start_line + overlapStart - materializedStart,
+        source_end_line: window.source_start_line + overlapEnd - materializedStart,
+        materialized_start_line: overlapStart - sliceStart + 1,
+        materialized_end_line: overlapEnd - sliceStart + 1,
+      });
+    }
+  }
+  if (inherited.length === 0) return null;
+  const paths = [...new Set(inherited.map((window) => window.path))];
+  return {
+    line_semantics: "source",
+    source_windows: inherited,
+    ...(paths.length === 1 ? { path: paths[0] } : {}),
+    ...(sourceMetadata.repository_identity != null ? { repository_identity: sourceMetadata.repository_identity } : {}),
+    ...(sourceMetadata.source_version != null ? { source_version: sourceMetadata.source_version } : {}),
   };
 }
 
@@ -2648,6 +2704,7 @@ function createOneHashRef(hashContext, item = {}) {
   let sliceNote = null;
   let sourceAlias = null;
   let sourceCitationMetadata = null;
+  let sourceCoordinateMetadata = null;
   if (sourceRef) {
     sourceAlias = normalizeRef(sourceRef);
     if (!isHashRefAlias(sourceAlias)) return createRefError("invalid_source_ref", { source_ref: String(sourceRef) });
@@ -2685,6 +2742,7 @@ function createOneHashRef(hashContext, item = {}) {
     if (sliced.error) return createRefError(sliced.error, { source_ref: sourceAlias });
     payload = sliced.text;
     sliceNote = sliced.slice;
+    sourceCoordinateMetadata = inheritedCreateRefSourceMetadata(fetched.entry, sliced);
   }
 
   if (typeof payload !== "string" || payload.trim() === "") {
@@ -2729,6 +2787,7 @@ function createOneHashRef(hashContext, item = {}) {
           issuedAs: "evidence",
         }),
         ...(sourceAlias ? { source_ref: sourceAlias, slice: sliceNote } : {}),
+        ...(sourceCoordinateMetadata || {}),
         ...(sourceCitationMetadata || {}),
       },
     }, { ownerScope });
