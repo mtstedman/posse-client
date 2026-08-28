@@ -37,6 +37,7 @@ import {
   removeDependency,
   getWorkItem,
   expireStaleSessionLeases,
+  findPeerClaimConflict,
   reconcileHumanGates,
   resurfaceParkedHumanGates,
   supersedeHumanGate,
@@ -49,10 +50,12 @@ import {
   onQueueStateChanged,
   reconcileFileLaneWaits,
   recordFileLaneWait,
+  recordPeerClaimDeferral,
   parseJobPayload,
   runImmediateTransaction,
   RUNTIME_STATUS_KEYS,
   clearRuntimeStatus,
+  clearPeerClaimDeferralsForJob,
   isBridgePresenceFresh,
   readRuntimeStatus,
   writeRuntimeStatus,
@@ -128,6 +131,7 @@ import {
   recoverHeadlessHumanTimeouts,
   recoverOrphanedReviewJobs,
 } from "../functions/headless-recovery.js";
+import { createSharedTrunkPoller } from "../functions/shared-trunk-poller.js";
 import {
   readWaitingLanePreparationConcurrency,
   reconcileWaitingLaneJobCompletion,
@@ -794,8 +798,11 @@ export class Scheduler {
   _idleSleepMs() {
     const repairMs = Math.max(1, Number(this.repairPollMs || this.pollMs || DEFAULT_REPAIR_POLL_MS));
     const readyDelayMs = this._nextQueuedReadyDelayMs();
-    if (readyDelayMs == null) return repairMs;
-    return Math.max(0, Math.min(repairMs, readyDelayMs));
+    const sharedTrunkDelayMs = this._sharedTrunkPoller?.delayUntilDueMs?.();
+    const delays = [repairMs, readyDelayMs, sharedTrunkDelayMs]
+      .filter((value) => value != null && Number.isFinite(Number(value)))
+      .map((value) => Math.max(0, Number(value)));
+    return delays.length > 0 ? Math.min(...delays) : repairMs;
   }
 
   async _sleepUntilQueueWakeOrRepair(generation) {
@@ -1555,6 +1562,12 @@ export class Scheduler {
       activeWorkersProvider: () => activeWorkers,
     });
     this._startRunLoopKeepAlive();
+    // Only the scheduler-lock holder owns this collaborator, which preserves
+    // a single local fetch/ff-update writer even when `posse serve` is running
+    // beside the run process.
+    this._sharedTrunkPoller = createSharedTrunkPoller({
+      projectDir: this.projectDir,
+    });
     recordRunDiagnostic("scheduler.run_loop_started", {
       owner_id: this.ownerId,
       concurrency: this.concurrency,
@@ -1608,6 +1621,14 @@ export class Scheduler {
         try {
         const lapStartQueueGeneration = getQueueWakeGeneration();
         this._refreshRuntimeSettings();
+
+        // Fetch before candidate selection. When due, every mutating job in
+        // this lap therefore sees a trunk no older than the configured
+        // cadence. Transport failures are explicitly fail-open inside the
+        // poller; merge publication performs its own fail-closed preflight.
+        await this._sharedTrunkPoller.poll({
+          idle: activeWorkers.size === 0 && idleCount > 0,
+        });
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
         // for another scheduler cannot stop this one; consumed either way so
@@ -1970,6 +1991,14 @@ export class Scheduler {
           });
           if (candidates.length === 0) break;
 
+          // A scheduler that was idle may have been using the slower cadence.
+          // Re-evaluate against the active cadence before the first newly
+          // runnable job can lease; the poller remains a cheap cadence no-op
+          // when the last fetch is already fresh enough.
+          if (candidateCount === 0) {
+            await this._sharedTrunkPoller.poll({ idle: false });
+          }
+
           for (const job of candidates) {
             candidateCount++;
             scanExcludeJobIds.add(job.id);
@@ -2134,6 +2163,34 @@ export class Scheduler {
                   });
                   skipJobIds.add(job.id);
                   continue;
+                }
+              }
+
+              const sharedTrunkConfig = this._sharedTrunkPoller?.currentConfig?.();
+              if (sharedTrunkConfig?.enabled && sharedTrunkConfig?.claimsEnabled) {
+                const peerConflict = findPeerClaimConflict(jobScope);
+                if (peerConflict) {
+                  const advisory = recordPeerClaimDeferral(job, peerConflict, {
+                    maxDeferMin: sharedTrunkConfig.claimDeferMaxMin,
+                  });
+                  if (advisory.defer) {
+                    const peer = peerConflict.claim;
+                    const conflictPath = peerConflict.candidate?.path || peer.path || "unknown";
+                    rememberBlockedLock({
+                      job_id: job.id,
+                      work_item_id: job.work_item_id,
+                      holder_type: "peer_instance",
+                      holder_id: peer.instance_id,
+                      holder_work_item_id: peer.work_item_id,
+                      path: conflictPath,
+                      lock_kind: peerConflict.candidate?.lock_kind || peer.scope_kind || "file",
+                      message: `#${job.id} waits on ${conflictPath}; claimed by peer ${peer.instance_id}`,
+                    });
+                    skipJobIds.add(job.id);
+                    continue;
+                  }
+                } else {
+                  clearPeerClaimDeferralsForJob(job.id);
                 }
               }
             }
@@ -2509,6 +2566,7 @@ export class Scheduler {
       const shutdownReason = this._lockLost ? "lock_lost" : (this._stopRequested ? "stop_requested" : "run_loop_exit");
       this.stop({ activeWorkers, reason: shutdownReason });
       this._activeRunWorkers = null;
+      this._sharedTrunkPoller = null;
       this._lockLossKillCallback = null;
       this._lockLostKilledJobIds.clear();
     }

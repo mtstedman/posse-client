@@ -5,6 +5,7 @@ import {
   getJob,
   getWorkItem,
   holdWorkItemForPendingMerge,
+  hasUnresolvedSharedTrunkMergeOperation,
   listJobsByWorkItem,
   logEvent,
   markWorkItemMergeFailed,
@@ -398,7 +399,7 @@ export async function finalizeApprovedReview(workItemId, {
       const result = await workflow.gitMergeToTargetAsync(
         lockedWi.branch_name,
         projectDir,
-        { wiId: wi.id, retryDeterministicConflict: true },
+        { wiId: wi.id, retryDeterministicConflict: true, mergeLockAlreadyHeld: true },
       );
       if (!result?.ok) {
         if (!result?.deferred) markWorkItemMergeFailed(wi.id);
@@ -576,6 +577,9 @@ export async function rejectReview(workItemId, { actor = "bridge", reason = null
   const outcome = await withMergeLock(() => {
     const wi = getWorkItem(workItemId);
     if (!wi) return { ok: false, reason: "no_such_wi" };
+    if (hasUnresolvedSharedTrunkMergeOperation(wi.id)) {
+      return { ok: false, reason: "shared_trunk_publication_pending" };
+    }
     const readiness = reviewRejectionReadiness(wi.id);
     if (!readiness.ok) return { ok: false, reason: readiness.reason };
     const reviewable = requireReviewableWorkItem(wi);

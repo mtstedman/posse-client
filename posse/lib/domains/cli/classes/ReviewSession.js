@@ -13,6 +13,7 @@ import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-d
 import { finalAssessmentFor } from "../functions/review-report.js";
 import { applyMemoryReviewAction } from "../functions/memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { hasUnresolvedSharedTrunkMergeOperation } from "../../queue/functions/index.js";
 import {
   askSingleKeyChoice,
   createRunWrapUpTracker,
@@ -134,7 +135,7 @@ export class ReviewSession {
   const targetDirtyAtReviewStart = await this._announceDirtyTargetBeforeAutoMerge(null);
   const reviewAutoMerge = targetDirtyAtReviewStart
     ? { acquired: true, result: 0 }
-    : await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "review" }));
+    : await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "review", mergeLockAlreadyHeld: true }));
   if (targetDirtyAtReviewStart) {
     console.log(`  ${C.yellow || ""}Auto-merge skipped: target branch is dirty.${C.reset || ""}`);
   } else if (!reviewAutoMerge.acquired) {
@@ -266,6 +267,7 @@ export class ReviewSession {
         const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
           wiId: wi.id,
           retryDeterministicConflict: true,
+          mergeLockAlreadyHeld: true,
           onPhase(event = {}) {
             if (event.phase === "commit") console.log(`     ${C.cyan}Committing....${C.reset}`);
             else if (event.phase === "retry") console.log(`     ${C.yellow}Retrying merge...${C.reset}`);
@@ -336,6 +338,9 @@ export class ReviewSession {
     } else if (choice.toLowerCase() === "r") {
       const reason = await ask(`     Reason (or enter to skip): `);
       const rejectionOutcome = await withMergeLock(async () => {
+        if (hasUnresolvedSharedTrunkMergeOperation(wi.id)) {
+          return { ok: false, reason: "shared_trunk_publication_pending" };
+        }
         const readiness = this._reviewRejectionReadiness(wi.id);
         if (!readiness.ok) return readiness;
         const freshWi = readiness.workItem || getWorkItem(wi.id) || wi;
@@ -377,6 +382,9 @@ export class ReviewSession {
       console.log(`     ${C.yellow}Rejected → re-queued${C.reset}\n`);
     } else if (choice.toLowerCase() === "d") {
       const deleteOutcome = await withMergeLock(async () => {
+        if (hasUnresolvedSharedTrunkMergeOperation(wi.id)) {
+          return { ok: false, reason: "shared_trunk_publication_pending" };
+        }
         const readiness = this._reviewRejectionReadiness(wi.id);
         if (!readiness.ok) return readiness;
         const freshWi = readiness.workItem || getWorkItem(wi.id) || wi;
@@ -514,7 +522,7 @@ export class ReviewSession {
   // review so the user knows how to recover during the upcoming approval flow.
   await this._announceDirtyTargetBeforeAutoMerge();
 
-  const wrapUpAutoMerge = await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "run wrap-up", runGc: false }));
+  const wrapUpAutoMerge = await withMergeLock(() => autoMergeCompletedWorkItems({ reason: "run wrap-up", runGc: false, mergeLockAlreadyHeld: true }));
   if (!wrapUpAutoMerge.acquired) {
     console.log(`  ${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
   }
@@ -992,6 +1000,7 @@ export class ReviewSession {
           const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
             wiId,
             retryDeterministicConflict: true,
+            mergeLockAlreadyHeld: true,
             onPhase(event = {}) {
               if (event.phase === "commit") phase("Committing....", event);
               else if (event.phase === "merge") phase("Merging....", event);
@@ -1083,6 +1092,9 @@ export class ReviewSession {
       }
       enqueueGitWork(item, async () => {
         const rejectionOutcome = await withMergeLock(async () => {
+          if (hasUnresolvedSharedTrunkMergeOperation(wiId)) {
+            return { ok: false, reason: "shared_trunk_publication_pending" };
+          }
           const readiness = this._reviewRejectionReadiness(wiId);
           if (!readiness.ok) return readiness;
           const lockedWi = readiness.workItem || getWorkItem(wiId) || freshWi;
@@ -1125,6 +1137,9 @@ export class ReviewSession {
       if (!freshWi) return false;
       enqueueGitWork(item, async () => {
         const deleteOutcome = await withMergeLock(async () => {
+          if (hasUnresolvedSharedTrunkMergeOperation(wiId)) {
+            return { ok: false, reason: "shared_trunk_publication_pending" };
+          }
           const readiness = this._reviewRejectionReadiness(wiId);
           if (!readiness.ok) return readiness;
           const lockedWi = readiness.workItem || getWorkItem(wiId) || freshWi;
@@ -1612,7 +1627,7 @@ export class ReviewSession {
       // and GC's held-WI path would snapshot+hard-reset worktrees whose
       // agents are still executing (they hold no worktree lock while the
       // provider runs).
-      const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "live review", runGc: false }));
+      const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "live review", runGc: false, mergeLockAlreadyHeld: true }));
       if (!outcome.acquired) {
         display.addEvent(`${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
         return 0;
@@ -2144,7 +2159,7 @@ export class ReviewSession {
       display.addEvent(`${C.yellow || ""}Auto-merge skipped: target branch is dirty.${C.reset || ""}`);
       return 0;
     }
-    const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "TUI wrap-up", runGc: false }));
+    const outcome = await withMergeLock(() => autoMergeCompletedWorkItems({ display, reason: "TUI wrap-up", runGc: false, mergeLockAlreadyHeld: true }));
     if (!outcome.acquired) {
       display.addEvent(`${C.yellow}Auto-merge skipped: another merge is already in progress.${C.reset}`);
       return 0;

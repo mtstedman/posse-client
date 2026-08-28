@@ -8,6 +8,21 @@ const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..");
 export const PYTHON_RUNTIME_STAMP_NAME = ".posse-requirements.sha256";
 
+// A repo counts as a Python project for managed-runtime provisioning when any
+// of these exist at its root. Keep this aligned with the SCIP python fileset
+// (indexers.js) so "SCIP says python" and "doctor provisions python" agree.
+export const PYTHON_PROJECT_MANIFESTS = Object.freeze([
+  "requirements.txt",
+  "pyproject.toml",
+  "setup.py",
+  "setup.cfg",
+  "Pipfile",
+  "poetry.lock",
+  "uv.lock",
+  "tox.ini",
+  "pytest.ini",
+]);
+
 // Executability is stable for the life of one Posse process. Cache successful
 // and failed probes by file metadata so building child environments does not
 // spawn Python for every provider/tool invocation.
@@ -43,6 +58,33 @@ function runtimeSlug(projectDir) {
 
 export function getPythonRuntimeRoot(posseRoot = DEFAULT_POSSE_ROOT) {
   return path.join(path.resolve(posseRoot || DEFAULT_POSSE_ROOT), ".posse", "runtime", "python");
+}
+
+export function getPythonToolchainRoot(posseRoot = DEFAULT_POSSE_ROOT) {
+  return path.join(path.resolve(posseRoot || DEFAULT_POSSE_ROOT), ".posse", "runtime", "python-toolchain");
+}
+
+export function getPythonToolchainExecutable(posseRoot = DEFAULT_POSSE_ROOT) {
+  const root = getPythonToolchainRoot(posseRoot);
+  return process.platform === "win32"
+    ? path.join(root, "python", "python.exe")
+    : path.join(root, "python", "bin", "python3");
+}
+
+export function getPythonToolchainSearchDirs(posseRoot = DEFAULT_POSSE_ROOT) {
+  const root = getPythonToolchainRoot(posseRoot);
+  return [
+    path.join(root, "python"),
+    path.join(root, "python", "Scripts"),
+    path.join(root, "python", "bin"),
+  ];
+}
+
+export function listPythonProjectManifests(projectDir = process.cwd()) {
+  const root = path.resolve(projectDir || process.cwd());
+  return PYTHON_PROJECT_MANIFESTS
+    .map((name) => ({ name, path: path.join(root, name) }))
+    .filter((entry) => fileExists(entry.path));
 }
 
 export function getPythonVenvBinDir(runtimeDir) {
@@ -98,20 +140,44 @@ export function resolveManagedPythonRuntime({
 export function resolveManagedPythonRuntimeForProject({
   projectDir = process.cwd(),
   posseRoot = DEFAULT_POSSE_ROOT,
+  assumePython = false,
 } = {}) {
   const root = path.resolve(projectDir || process.cwd());
-  const requirements = path.join(root, "requirements.txt");
-  if (!fileExists(requirements)) return null;
-  const requirementsHash = hashFile(requirements);
-  if (!requirementsHash) return null;
-  const runtime = resolveManagedPythonRuntime({ projectDir: root, posseRoot, requirementsHash });
+  const manifests = listPythonProjectManifests(root);
+  if (manifests.length === 0 && !assumePython) {
+    // Marker-less repos can still own a managed runtime: doctor provisions one
+    // when the enabled SCIP environments detect python sources. Consumers that
+    // cannot re-run that detection (buildRuntimeEnv, test resolvers) find it
+    // through its stamp instead of returning null.
+    const provisioned = resolveManagedPythonRuntime({ projectDir: root, posseRoot, requirementsHash: hashText("no-manifest") });
+    if (!fileExists(provisioned.stampPath)) return null;
+    return {
+      ...provisioned,
+      projectDir: root,
+      manifests: [],
+      requirements: null,
+      requirementsHash: hashText("no-manifest"),
+      ready: pythonExecutableWorks(provisioned.python),
+    };
+  }
+  const requirements = manifests.find((entry) => entry.name === "requirements.txt")?.path || null;
+  // Requirements-only projects keep the legacy requirements-file hash so their
+  // existing managed venvs and stamps survive the manifest-detection widening.
+  const manifestHash = manifests.length === 0
+    ? hashText("no-manifest")
+    : (manifests.length === 1 && requirements
+      ? hashFile(requirements)
+      : hashText(manifests.map((entry) => `${entry.name}:${hashFile(entry.path)}`).join("\n")));
+  if (!manifestHash) return null;
+  const runtime = resolveManagedPythonRuntime({ projectDir: root, posseRoot, requirementsHash: manifestHash });
   let installedHash = "";
   try { installedHash = fs.readFileSync(runtime.stampPath, "utf8").trim(); } catch { installedHash = ""; }
   return {
     ...runtime,
     projectDir: root,
+    manifests,
     requirements,
-    requirementsHash,
-    ready: installedHash === requirementsHash && pythonExecutableWorks(runtime.python),
+    requirementsHash: manifestHash,
+    ready: installedHash === manifestHash && pythonExecutableWorks(runtime.python),
   };
 }

@@ -54,7 +54,12 @@ export function createAutoMergeWorkflowHelpers(context, {
 
   let autoMergeCompletedWorkItemsPromise = null;
 
-  async function autoMergeCompletedWorkItemsImpl({ display = null, reason = "run wrap-up", runGc = true } = {}) {
+  async function autoMergeCompletedWorkItemsImpl({
+    display = null,
+    reason = "run wrap-up",
+    runGc = true,
+    mergeLockAlreadyHeld = false,
+  } = {}) {
     refreshWorkItemStatuses(AUTO_MERGE_STATUS_RECONCILE_STATUSES);
     const mergeable = listEndOfRunMergeableWorkItems();
 
@@ -89,6 +94,7 @@ export function createAutoMergeWorkflowHelpers(context, {
         updateStep("merge", "running", `WI#${wi.id} -> ${targetBranch}`);
         const result = await gitMergeToTargetAsync(branchName, projectDir, {
           wiId: wi.id,
+          mergeLockAlreadyHeld,
           onPhase(event = {}) {
             if (event.phase === "commit") {
               if (typeof display?.setRunPhase === "function") display.setRunPhase(`Committing WI#${wi.id} squash merge`);
@@ -112,13 +118,15 @@ export function createAutoMergeWorkflowHelpers(context, {
             message: "Auto-approved for end-of-run merge",
             event_json: JSON.stringify({ approval_type: autoApproveReason, reason }),
           });
-          logEvent({
-            work_item_id: wi.id,
-            event_type: EVENT_TYPES.WORK_ITEM_MERGED,
-            actor_type: EVENT_ACTORS.SYSTEM,
-            message: `Auto-merged ${branchName} into ${targetBranch} at ${mergeHash}`,
-            event_json: JSON.stringify({ branch: branchName, merge_hash: mergeHash, target_branch: targetBranch, reason }),
-          });
+          if (!result.sharedTrunk) {
+            logEvent({
+              work_item_id: wi.id,
+              event_type: EVENT_TYPES.WORK_ITEM_MERGED,
+              actor_type: EVENT_ACTORS.SYSTEM,
+              message: `Auto-merged ${branchName} into ${targetBranch} at ${mergeHash}`,
+              event_json: JSON.stringify({ branch: branchName, merge_hash: mergeHash, target_branch: targetBranch, reason }),
+            });
+          }
           setMergeState(wi.id, "merged");
           updateStep("merge", "done", `${targetBranch} ${mergeHash.slice(0, 8)}`);
           // ATLAS reindex is never a blocking step on the review/approval or
@@ -126,7 +134,10 @@ export function createAutoMergeWorkflowHelpers(context, {
           // scheduler and move on. The queued job survives WI cleanup (only
           // purpose "wi" warms are retired) and session exit.
           let atlasFollowupOk = true;
-          try {
+          if (result.sharedTrunk) {
+            updateStep("atlas", "done", "queued after publication");
+            updateStep("onnx", "skipped", "runs with background replay");
+          } else try {
             const queued = queueAtlasMainRefreshAfterMerge({
               wiId: wi.id,
               branchName,

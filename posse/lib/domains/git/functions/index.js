@@ -5,6 +5,8 @@ export * from "./hooks.js";
 export * from "./native/invoke.js";
 export * from "./policy.js";
 export * from "./push-guard.js";
+export * from "./shared-trunk-config.js";
+export * from "./shared-trunk.js";
 export * from "./target-branch.js";
 export * from "./utils.js";
 export * from "./workflows.js";

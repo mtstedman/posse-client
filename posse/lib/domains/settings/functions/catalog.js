@@ -31,6 +31,8 @@ import {
 // and re-exported so admin UI / validation imports keep their existing paths.
 import {
   SETTING_KEYS,
+  SHARED_TRUNK_DEFAULTS,
+  SHARED_TRUNK_LIMITS,
   AGENT_COORDINATION_MODE_VALUES,
   ASSESSMENT_SCOPE_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
@@ -236,6 +238,17 @@ export const SETTINGS_CATALOG = [
   { key: "default_max_attempts",  default: "3", numeric: { integer: true, min: 1 }, description: "Default maximum attempts per job" },
   { key: "scheduler_shadow_conflict_metrics", default: "true", valueType: "boolean", description: "Emit shadow metrics for relaxed scheduler root-root conflicts that strict mode would block" },
   { key: "target_branch",         default: "", scope: "repo", description: "Repo merge target branch (empty = auto-detect remote default/main/master before the current terminal branch)" },
+  // Shared-trunk settings are deliberately repo-scoped. Two clones sharing an
+  // account database must still have independent enrollment and identities.
+  { key: SETTING_KEYS.SHARED_TRUNK_ENABLED, default: String(SHARED_TRUNK_DEFAULTS.enabled), scope: "repo", valueType: "boolean", description: "Allow this clone to synchronize and automatically push its configured Posse side trunk" },
+  { key: SETTING_KEYS.SHARED_TRUNK_BRANCH, default: SHARED_TRUNK_DEFAULTS.branch, scope: "repo", description: "Shared Posse side-trunk branch; must match target_branch and must not be the remote default branch" },
+  { key: SETTING_KEYS.SHARED_TRUNK_REMOTE, default: SHARED_TRUNK_DEFAULTS.remote, scope: "repo", description: "Git remote used to synchronize the shared Posse side trunk" },
+  { key: SETTING_KEYS.SHARED_TRUNK_FETCH_INTERVAL_SEC, default: String(SHARED_TRUNK_DEFAULTS.fetchIntervalSec), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.fetchIntervalSec }, description: "Seconds between shared-trunk fetches while a scheduler run has active or queued work" },
+  { key: SETTING_KEYS.SHARED_TRUNK_FETCH_INTERVAL_IDLE_SEC, default: String(SHARED_TRUNK_DEFAULTS.fetchIntervalIdleSec), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.fetchIntervalIdleSec }, description: "Seconds between shared-trunk fetches while a live scheduler run is idle-parked" },
+  { key: SETTING_KEYS.SHARED_TRUNK_PUSH_RETRY_MAX, default: String(SHARED_TRUNK_DEFAULTS.pushRetryMax), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.pushRetryMax }, description: "Maximum bounded fetch/re-merge retries after a shared-trunk push race" },
+  { key: SETTING_KEYS.SHARED_TRUNK_CLAIMS_ENABLED, default: String(SHARED_TRUNK_DEFAULTS.claimsEnabled), scope: "repo", valueType: "boolean", description: "Publish and consume advisory cross-instance file claims for this shared trunk" },
+  { key: SETTING_KEYS.SHARED_TRUNK_CLAIMS_TTL_MIN, default: String(SHARED_TRUNK_DEFAULTS.claimsTtlMin), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.claimsTtlMin }, description: "Maximum lifetime in minutes of an advisory cross-instance file claim" },
+  { key: SETTING_KEYS.SHARED_TRUNK_CLAIM_DEFER_MAX_MIN, default: String(SHARED_TRUNK_DEFAULTS.claimDeferMaxMin), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.claimDeferMaxMin }, description: "Maximum minutes a peer claim may defer dispatch before the advisory hardens open" },
   { key: "git_commit_style",      default: "off", scope: "repo", options: GIT_COMMIT_STYLE_VALUES, description: "Commit subject policy: off, Conventional Commits, or Conventional Commits decorated with Gitmoji; enabled modes use one standard-tier assessor pass over the scoped diff" },
   { key: "session_recycle_mode",  default: "off", options: SESSION_RECYCLE_MODE_VALUES, description: "Session recycling mode: off, dev-fix, or full" },
   { key: "session_recycle_strict_provider", default: "true", valueType: "boolean", description: "Reset recycled lanes instead of resuming when a later job chooses a different provider" },

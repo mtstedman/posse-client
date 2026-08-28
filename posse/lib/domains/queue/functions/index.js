@@ -13,10 +13,13 @@ export {
   isBridgePresenceFresh,
   readRuntimeStatus,
   writeRuntimeStatus,
+  updateSharedTrunkRuntimeStatus,
   clearRuntimeStatus,
   markCleanShutdown,
 } from "./runtime-status.js";
 export * from "./waiting-lane-preparations.js";
+export * from "./cross-instance-claims.js";
+export * from "./shared-trunk-merge-state.js";
 
 // Existing consumers also use queue's smaller entity/service exports.  They
 // intentionally continue to resolve from the original store during the

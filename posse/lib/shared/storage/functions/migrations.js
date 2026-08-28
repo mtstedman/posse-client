@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 11;
+export const HOST_SCHEMA_VERSION = 12;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -427,6 +427,102 @@ export function repairWaitingLanePreparationSchema(db) {
 
 export function __testRepairWaitingLanePreparationSchema(db) {
   return repairWaitingLanePreparationSchema(db);
+}
+
+export function needsSharedTrunkMergeOperationSchema(db) {
+  return [
+    "shared_trunk_merge_operations",
+    "shared_trunk_peer_claims",
+    "shared_trunk_local_claims",
+    "shared_trunk_claim_deferrals",
+  ].some((tableName) => !tableExists(db, tableName));
+}
+
+export function installSharedTrunkMergeOperationSchema(db) {
+  if (!needsSharedTrunkMergeOperationSchema(db)) return false;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS shared_trunk_merge_operations (
+      operation_id TEXT PRIMARY KEY,
+      work_item_id INTEGER NOT NULL,
+      purpose TEXT NOT NULL CHECK (purpose IN ('final','iterative')),
+      purpose_key TEXT NOT NULL,
+      source_branch TEXT NOT NULL,
+      source_sha TEXT NOT NULL,
+      target_branch TEXT NOT NULL,
+      remote TEXT NOT NULL,
+      base_sha TEXT NOT NULL,
+      expected_remote_sha TEXT NOT NULL,
+      candidate_sha TEXT,
+      phase TEXT NOT NULL CHECK (phase IN ('intent','candidate','publish_unknown','deferred','published')),
+      attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+      version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+      last_error_code TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+      UNIQUE (work_item_id, purpose, purpose_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_merge_operations_phase
+      ON shared_trunk_merge_operations(phase, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_merge_operations_work_item
+      ON shared_trunk_merge_operations(work_item_id, purpose, updated_at);
+
+    CREATE TABLE IF NOT EXISTS shared_trunk_peer_claims (
+      claim_key TEXT PRIMARY KEY,
+      ref_name TEXT NOT NULL,
+      object_oid TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      work_item_id INTEGER,
+      job_id INTEGER,
+      path TEXT NOT NULL,
+      scope_kind TEXT NOT NULL CHECK (scope_kind IN ('file','root')),
+      lifecycle_kind TEXT NOT NULL CHECK (lifecycle_kind = 'hard'),
+      expires_at TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_peer_claims_expires
+      ON shared_trunk_peer_claims(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_peer_claims_path
+      ON shared_trunk_peer_claims(path, scope_kind);
+
+    CREATE TABLE IF NOT EXISTS shared_trunk_local_claims (
+      claim_key TEXT PRIMARY KEY,
+      object_oid TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      work_item_id INTEGER,
+      job_id INTEGER,
+      path TEXT NOT NULL,
+      scope_kind TEXT NOT NULL CHECK (scope_kind IN ('file','root')),
+      lifecycle_kind TEXT NOT NULL CHECK (lifecycle_kind = 'hard'),
+      expires_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_local_claims_expires
+      ON shared_trunk_local_claims(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_local_claims_path
+      ON shared_trunk_local_claims(path, scope_kind);
+
+    CREATE TABLE IF NOT EXISTS shared_trunk_claim_deferrals (
+      job_id INTEGER NOT NULL,
+      work_item_id INTEGER,
+      claim_key TEXT NOT NULL,
+      claim_identity TEXT NOT NULL,
+      first_deferred_at TEXT NOT NULL,
+      last_deferred_at TEXT NOT NULL,
+      hardened_at TEXT,
+      PRIMARY KEY (job_id, claim_key),
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_shared_trunk_claim_deferrals_work_item
+      ON shared_trunk_claim_deferrals(work_item_id);
+  `);
+  return true;
+}
+
+export function __testInstallSharedTrunkMergeOperationSchema(db) {
+  return installSharedTrunkMergeOperationSchema(db);
 }
 
 const HUMAN_GATE_JOB_COLUMNS = Object.freeze([

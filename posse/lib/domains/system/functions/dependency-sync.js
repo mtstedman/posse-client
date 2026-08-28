@@ -27,8 +27,11 @@ import {
 } from "../../atlas/functions/v2/embeddings/jina-model.js";
 import {
   DEFAULT_POSSE_ROOT,
+  getPythonToolchainExecutable,
+  listPythonProjectManifests,
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
+import { ensureManagedPythonToolchain } from "../../environments/functions/python-toolchain-install.js";
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 import {
   filterProcessEnv,
@@ -895,6 +898,9 @@ function resolvePythonCommand(projectRoot = process.cwd()) {
       { command: "python3", args: [] },
       { command: "python", args: [] },
     ]));
+  // Posse-managed CPython toolchain (installed by doctor when nothing above
+  // resolves) sits last so a user-installed Python always wins.
+  candidates.push({ command: getPythonToolchainExecutable(roots[0]), args: [] });
   for (const candidate of candidates) {
     if (candidate.command.includes(path.sep) && !fileExists(candidate.command)) continue;
     const result = spawnSync(candidate.command, [...candidate.args, "--version"], {
@@ -911,15 +917,17 @@ function inspectPythonProject(root, opts = {}) {
   const runtime = resolveManagedPythonRuntimeForProject({
     projectDir: root,
     posseRoot: opts.posseRoot || DEFAULT_POSSE_ROOT,
+    assumePython: opts.assumePython === true,
   });
   if (!runtime) {
-    return { present: false, root, ok: true, status: "skipped", reason: "no requirements.txt" };
+    return { present: false, root, ok: true, status: "skipped", reason: "no Python project manifests" };
   }
   return {
     present: true,
     root,
     ok: runtime.ready,
     status: runtime.ready ? "ok" : "needs-install",
+    manifests: (runtime.manifests || []).map((manifest) => manifest.name),
     requirements: runtime.requirements,
     requirements_hash: runtime.requirementsHash,
     python: runtime.python,
@@ -929,16 +937,79 @@ function inspectPythonProject(root, opts = {}) {
   };
 }
 
+// `pip install -e .` only makes sense when the manifest actually declares a
+// buildable package; a config-only pyproject.toml (just [tool.*] tables) would
+// otherwise make pip synthesize a junk setuptools package.
+function pythonEditableInstallable(root, manifests = []) {
+  const names = new Set(manifests);
+  if (names.has("setup.py")) return true;
+  if (!names.has("pyproject.toml")) return false;
+  let source = "";
+  try { source = fs.readFileSync(path.join(root, "pyproject.toml"), "utf8"); } catch { return false; }
+  return /^\s*\[(?:project|build-system|tool\.poetry)[\].]/mu.test(source);
+}
+
+function samePath(a, b) {
+  const left = path.resolve(String(a || ""));
+  const right = path.resolve(String(b || ""));
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
 async function ensurePythonProject(entry, opts) {
-  const before = inspectPythonProject(entry.root, opts);
+  const inspectOpts = { ...opts, assumePython: entry.assumePython === true };
+  const before = inspectPythonProject(entry.root, inspectOpts);
   if (!before.present) return before;
-  if (before.status === "ok") return { ...before, label: entry.label, action: "none", message: "python requirements ready" };
-  const basePython = resolvePythonCommand(opts.posseRoot);
-  if (!basePython) {
-    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: "Python is not available on PATH" };
+  // The project repo's runtime must carry the approved test runner even when
+  // it was provisioned before doctor learned to install pytest (the manifest
+  // stamp stays valid, so the full install path below never re-runs for it).
+  const needsPytest = samePath(entry.root, opts.projectDir || entry.root);
+  if (before.status === "ok") {
+    if (needsPytest && !probeCommandOk(before.python, ["-m", "pytest", "--version"])) {
+      if (opts.dryRun) {
+        return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: "would install pytest into the existing managed Python runtime" };
+      }
+      opts.onProgress?.(`${entry.label}: installing pytest test runner`);
+      const pytestInstall = await runCommand(before.python, ["-m", "pip", "install", "pytest"], {
+        cwd: entry.root,
+        timeoutMs: opts.timeoutMs,
+        onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
+      });
+      if (!pytestInstall.ok) {
+        return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `pip install pytest failed: ${firstLine(pytestInstall.message)}` };
+      }
+      return { ...before, label: entry.label, ok: true, status: "installed", action: "install", message: "pytest installed into existing python environment" };
+    }
+    return { ...before, label: entry.label, action: "none", message: "python environment ready" };
   }
+  const dependencyInstall = before.requirements
+    ? { args: ["-m", "pip", "install", "-r", before.requirements], detail: `pip install -r ${path.basename(before.requirements)}` }
+    : (pythonEditableInstallable(entry.root, before.manifests)
+      ? { args: ["-m", "pip", "install", "-e", "."], detail: "pip install -e ." }
+      : null);
+  let basePython = resolvePythonCommand(opts.posseRoot);
   if (opts.dryRun) {
-    return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: `would create Posse-managed Python runtime and pip install -r ${path.basename(before.requirements)}` };
+    const steps = [
+      basePython ? "" : "download managed CPython",
+      "create Posse-managed Python runtime",
+      dependencyInstall?.detail || "",
+      "ensure pytest",
+    ].filter(Boolean).join(", ");
+    return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: `would ${steps}` };
+  }
+  if (!basePython) {
+    opts.onProgress?.(`${entry.label}: Python not found; installing managed CPython toolchain`);
+    const toolchain = await ensureManagedPythonToolchain({
+      posseRoot: opts.posseRoot,
+      timeoutMs: opts.timeoutMs,
+      onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
+    });
+    if (!toolchain.ok) {
+      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `Python is not available on PATH and the managed CPython install failed: ${firstLine(toolchain.message)}` };
+    }
+    basePython = resolvePythonCommand(opts.posseRoot);
+    if (!basePython) {
+      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: "managed CPython installed but python is still not resolvable" };
+    }
   }
 
   opts.onProgress?.(`${entry.label}: python runtime ${path.basename(before.runtime_dir)}`);
@@ -951,18 +1022,37 @@ async function ensurePythonProject(entry, opts) {
   if (!create.ok) {
     return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `python -m venv failed: ${firstLine(create.message)}` };
   }
-  const pip = await runCommand(before.python, ["-m", "pip", "install", "-r", before.requirements], {
+  if (dependencyInstall) {
+    const pip = await runCommand(before.python, dependencyInstall.args, {
+      cwd: entry.root,
+      timeoutMs: opts.timeoutMs,
+      onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
+    });
+    if (!pip.ok) {
+      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `${dependencyInstall.detail} failed: ${firstLine(pip.message)}` };
+    }
+  }
+  // The approved Python test runner is pytest (`python -m pytest`); make sure
+  // the managed runtime can run it even when the repo's manifests omit it.
+  const pytestProbe = await runCommand(before.python, ["-m", "pytest", "--version"], {
     cwd: entry.root,
     timeoutMs: opts.timeoutMs,
-    onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
   });
-  if (!pip.ok) {
-    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `pip install failed: ${firstLine(pip.message)}` };
+  if (!pytestProbe.ok) {
+    opts.onProgress?.(`${entry.label}: installing pytest test runner`);
+    const pytestInstall = await runCommand(before.python, ["-m", "pip", "install", "pytest"], {
+      cwd: entry.root,
+      timeoutMs: opts.timeoutMs,
+      onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
+    });
+    if (!pytestInstall.ok) {
+      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: `pip install pytest failed: ${firstLine(pytestInstall.message)}` };
+    }
   }
   fs.mkdirSync(path.dirname(before.stamp_path), { recursive: true });
   fs.writeFileSync(before.stamp_path, `${before.requirements_hash}\n`, "utf8");
-  const after = inspectPythonProject(entry.root, opts);
-  return { ...after, label: entry.label, ok: after.status === "ok", status: after.status === "ok" ? "installed" : "failed", action: "install", message: "python requirements installed" };
+  const after = inspectPythonProject(entry.root, inspectOpts);
+  return { ...after, label: entry.label, ok: after.status === "ok", status: after.status === "ok" ? "installed" : "failed", action: "install", message: `python environment installed (${dependencyInstall ? `${dependencyInstall.detail} + ` : ""}pytest)` };
 }
 
 function composerCommand(posseRoot) {
@@ -1160,23 +1250,139 @@ async function ensureDependencyEntry(entry, ensure, opts) {
   }
 }
 
-function testToolRuntime(projectRoot, posseRoot, { requirePython = false } = {}) {
-  const managedPython = requirePython ? inspectPythonProject(projectRoot, { posseRoot }) : null;
-  const python = !requirePython
+// Registered/approved test runners for the toolchain languages doctor cannot
+// install itself. Detection of these languages without a working runner is a
+// hard doctor failure — otherwise agents spin out trying to run tests.
+const LANGUAGE_TEST_TOOLCHAINS = Object.freeze({
+  go: Object.freeze({
+    probe: ["go", "version"],
+    runner: "go test",
+    hint: "install Go (https://go.dev/dl) so `go test` can run",
+  }),
+  rust: Object.freeze({
+    probe: ["cargo", "--version"],
+    runner: "cargo test",
+    hint: "install Rust via rustup (https://rustup.rs) so `cargo test` can run",
+  }),
+  php: Object.freeze({
+    probe: ["php", "--version"],
+    runner: "php tests",
+    hint: "install PHP so repository tests (phpunit/composer test) can run",
+  }),
+});
+
+function probeCommandOk(command, args) {
+  try {
+    const spec = commandSpawnSpec(command, args, { env: process.env });
+    const result = spawnSync(spec.command, spec.args, {
+      encoding: "utf8",
+      windowsHide: true,
+      windowsVerbatimArguments: spec.windowsVerbatimArguments === true,
+      timeout: 15000,
+    });
+    return (result.status ?? 1) === 0;
+  } catch {
+    return false;
+  }
+}
+
+function languageTestToolchainEntries(detectedLanguages) {
+  const out = [];
+  for (const language of detectedLanguages || []) {
+    const spec = LANGUAGE_TEST_TOOLCHAINS[language];
+    if (!spec) continue;
+    const ok = probeCommandOk(spec.probe[0], spec.probe.slice(1));
+    out.push({
+      language,
+      runner: spec.runner,
+      ok,
+      status: ok ? "ok" : "failed",
+      message: ok ? `${spec.runner} available` : `${spec.runner} unavailable: ${spec.hint}`,
+    });
+  }
+  return out;
+}
+
+function testToolRuntime(projectRoot, posseRoot, {
+  requirePython = false,
+  assumeRepoPython = false,
+  detectedLanguages = null,
+  dryRun = false,
+} = {}) {
+  const requirePythonRuntime = requirePython || assumeRepoPython;
+  const managedPython = requirePythonRuntime
+    ? inspectPythonProject(projectRoot, { posseRoot, assumePython: assumeRepoPython })
+    : null;
+  const python = !requirePythonRuntime
     ? null
     : (managedPython.present && managedPython.ok
       ? { command: managedPython.python, args: [] }
       : resolvePythonCommand(posseRoot || projectRoot));
+  // Plan mode: the pending python-environment install repairs both a missing
+  // interpreter (managed CPython download) and missing pytest, so neither
+  // should fail the plan.
+  const pendingPythonRepair = dryRun && managedPython?.present && !managedPython.ok;
+  // pytest is only a requirement when the project repo itself is a python
+  // project. requirePython alone can be true just because the posse root
+  // ships helper requirements — a JS-only repo must not fail on system
+  // python lacking pytest (nothing ever installs it there).
+  const repoNeedsPytest = managedPython?.present === true;
+  let pytest = null;
+  if (repoNeedsPytest) {
+    if (python && probeCommandOk(python.command, [...python.args, "-m", "pytest", "--version"])) {
+      pytest = { ok: true, message: "python -m pytest available" };
+    } else if (pendingPythonRepair) {
+      pytest = { ok: true, message: "pytest will be installed into the managed Python runtime" };
+    } else {
+      pytest = { ok: false, message: "python -m pytest is not runnable; posse doctor installs it into the managed Python runtime" };
+    }
+  }
+  const languages = languageTestToolchainEntries(detectedLanguages);
+  const pythonOk = !requirePythonRuntime
+    || pendingPythonRepair
+    || Boolean(python && (!repoNeedsPytest || pytest?.ok));
   return {
-    ok: Boolean(process.execPath) && (!requirePython || Boolean(python)),
+    ok: Boolean(process.execPath) && pythonOk && languages.every((entry) => entry.ok),
     javascript: { ok: Boolean(process.execPath), command: process.execPath },
     python: {
-      ok: !requirePython || Boolean(python),
-      required: requirePython,
+      ok: pythonOk,
+      required: requirePythonRuntime,
       command: python?.command || null,
       args: python?.args || [],
+      pytest,
     },
+    languages,
   };
+}
+
+function testToolEntries(test_tools) {
+  if (!test_tools || test_tools.skipped) return [];
+  return [
+    ...(test_tools.javascript ? [{
+      present: true,
+      label: "test javascript",
+      ok: test_tools.javascript.ok,
+      status: test_tools.javascript.ok ? "ok" : "failed",
+      message: test_tools.javascript.command || "node unavailable",
+    }] : []),
+    ...(test_tools.python?.required ? [{
+      present: true,
+      label: "test python",
+      ok: test_tools.python.ok,
+      status: test_tools.python.ok ? "ok" : "failed",
+      message: [
+        test_tools.python.command || "python unavailable",
+        test_tools.python.pytest?.message || "",
+      ].filter(Boolean).join("; "),
+    }] : []),
+    ...(Array.isArray(test_tools.languages) ? test_tools.languages.map((entry) => ({
+      present: true,
+      label: `test ${entry.language}`,
+      ok: entry.ok,
+      status: entry.status,
+      message: entry.message,
+    })) : []),
+  ];
 }
 
 function scipModeEnabled(value) {
@@ -1227,20 +1433,7 @@ function bootDependencyEntries(result) {
       present: true,
       label: `scip ${entry.language}`,
     })) : []),
-    ...(result.test_tools?.javascript ? [{
-      present: true,
-      label: "test javascript",
-      ok: result.test_tools.javascript.ok,
-      status: result.test_tools.javascript.ok ? "ok" : "failed",
-      message: result.test_tools.javascript.command || "node unavailable",
-    }] : []),
-    ...(result.test_tools?.python?.required ? [{
-      present: true,
-      label: "test python",
-      ok: result.test_tools.python.ok,
-      status: result.test_tools.python.ok ? "ok" : "failed",
-      message: result.test_tools.python.command || "python unavailable",
-    }] : []),
+    ...testToolEntries(result.test_tools),
   ].filter((entry) => entry?.present !== false && entry?.status !== "skipped");
 }
 
@@ -1335,6 +1528,14 @@ export async function ensureBootDependencies(input = {}) {
   const includeScip = input.includeScip !== false;
   const includeTestTools = input.includeTestTools !== false;
 
+  // Detect the repo's enabled SCIP/source languages once: the SCIP installer,
+  // the python-environment step, and the test-toolchain checks all key off it.
+  const scipEnabled = scipModeEnabled(input.scipMode);
+  const neededLanguages = scipEnabled && (includeScip || includeTestTools || includePython)
+    ? neededScipLanguages({ projectDir, posseRoot, languages: input.scipLanguages })
+    : null;
+  const pythonLanguageEnabled = Boolean(neededLanguages?.includes("python"));
+
   if (includeNode) {
     const nodeRoots = uniqueByPath([
       { root: posseRoot, label: "posse npm" },
@@ -1345,10 +1546,13 @@ export async function ensureBootDependencies(input = {}) {
   }
 
   if (includePython) {
+    // A repo qualifies when it carries any Python project manifest, or when
+    // the enabled SCIP environments detected python sources at all (so a
+    // marker-less python repo still gets an interpreter + pytest).
     const pythonRoots = uniqueByPath([
       { root: posseRoot, label: "posse python" },
-      { root: projectDir, label: "repo python" },
-    ]).filter((entry) => fileExists(path.join(entry.root, "requirements.txt")));
+      { root: projectDir, label: "repo python", assumePython: pythonLanguageEnabled },
+    ]).filter((entry) => entry.assumePython || listPythonProjectManifests(entry.root).length > 0);
     for (const entry of pythonRoots) python.push(await ensureDependencyEntry(entry, ensurePythonProject, opts));
   }
 
@@ -1398,12 +1602,8 @@ export async function ensureBootDependencies(input = {}) {
   }
 
   if (includeScip) {
-    if (scipModeEnabled(input.scipMode)) {
-      const scipLanguages = neededScipLanguages({
-        projectDir,
-        posseRoot,
-        languages: input.scipLanguages,
-      });
+    if (scipEnabled) {
+      const scipLanguages = neededLanguages;
       if (scipLanguages && scipLanguages.length === 0) {
         scip = { ok: true, skipped: "no SCIP source languages detected", results: [] };
       } else {
@@ -1430,7 +1630,12 @@ export async function ensureBootDependencies(input = {}) {
   }
 
   const test_tools = includeTestTools
-    ? testToolRuntime(projectDir, posseRoot, { requirePython: python.some((entry) => entry?.present !== false) })
+    ? testToolRuntime(projectDir, posseRoot, {
+      requirePython: python.some((entry) => entry?.present !== false),
+      assumeRepoPython: pythonLanguageEnabled,
+      detectedLanguages: neededLanguages,
+      dryRun,
+    })
     : { ok: true, skipped: "disabled" };
   const allResults = [
     ...node,
@@ -1443,10 +1648,7 @@ export async function ensureBootDependencies(input = {}) {
       present: true,
       label: `scip ${entry.language}`,
     })) : []),
-    ...(includeTestTools ? [
-      { present: true, label: "test javascript", ok: test_tools.javascript.ok, status: test_tools.javascript.ok ? "ok" : "failed", message: test_tools.javascript.command || "node unavailable" },
-      ...(test_tools.python.required ? [{ present: true, label: "test python", ok: test_tools.python.ok, status: test_tools.python.ok ? "ok" : "failed", message: test_tools.python.command || "python unavailable" }] : []),
-    ] : []),
+    ...(includeTestTools ? testToolEntries(test_tools) : []),
   ];
   const counts = summarizeResults(allResults);
   const ok = counts.failed === 0;

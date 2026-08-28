@@ -5,7 +5,7 @@
 // telemetry must never break a run.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { now } from "./common.js";
+import { now, runImmediateTransaction } from "./common.js";
 
 export const RUNTIME_STATUS_KEYS = Object.freeze({
   BOOT: "boot",
@@ -15,6 +15,9 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   STOP_REQUEST: "stop_request",
   // Heartbeat from `posse serve`: a remote operator can reach this repo.
   BRIDGE: "bridge",
+  // Persisted shared-trunk synchronization health, projected read-only by the
+  // bridge. This intentionally survives scheduler shutdown for diagnostics.
+  SHARED_TRUNK: "shared_trunk",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".
@@ -58,6 +61,43 @@ export function writeRuntimeStatus(key, value) {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Durable shared-trunk health mutation. Unlike ordinary best-effort heartbeat
+ * rows, contention counters and divergence are recovery-relevant operator
+ * state, so this path uses the queue's immediate transaction discipline.
+ */
+export function updateSharedTrunkRuntimeStatus(patch = {}, { increments = {} } = {}) {
+  try {
+    const db = getDb();
+    return runImmediateTransaction(db, () => {
+      let current = {};
+      try {
+        const row = db.prepare("SELECT value_json FROM runtime_status WHERE key = ?")
+          .get(RUNTIME_STATUS_KEYS.SHARED_TRUNK);
+        const parsed = row ? JSON.parse(row.value_json || "{}") : {};
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed;
+      } catch { /* replace malformed status with a valid bounded snapshot */ }
+      const next = { ...current, ...(patch && typeof patch === "object" ? patch : {}) };
+      for (const [key, delta] of Object.entries(increments || {})) {
+        const amount = Number(delta);
+        if (!Number.isFinite(amount)) continue;
+        next[key] = Math.max(0, Number(next[key]) || 0) + amount;
+      }
+      const ts = now();
+      db.prepare(`
+        INSERT INTO runtime_status (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `).run(RUNTIME_STATUS_KEYS.SHARED_TRUNK, JSON.stringify(next), ts);
+      return next;
+    });
+  } catch {
+    return null;
   }
 }
 

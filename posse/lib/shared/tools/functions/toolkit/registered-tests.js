@@ -6,7 +6,10 @@ import { spawnSync } from "child_process";
 
 import { scrubSecrets } from "../../../telemetry/classes/logging/secret-scrub.js";
 import { getDb } from "../../../storage/functions/index.js";
-import { resolveManagedPythonRuntimeForProject } from "../../../../domains/runtime/functions/python-runtime.js";
+import {
+  getPythonToolchainExecutable,
+  resolveManagedPythonRuntimeForProject,
+} from "../../../../domains/runtime/functions/python-runtime.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
 
 const SUPPORTED_LANGUAGES = new Set(["javascript", "node", "js", "python", "py"]);
@@ -757,6 +760,7 @@ function resolvePythonCommand(cwd = process.cwd()) {
     { command: "python", args: [] },
     { command: "python3", args: [] },
     { command: "py", args: ["-3"] },
+    { command: getPythonToolchainExecutable(), args: [] },
   ];
   for (const candidate of candidates) {
     if (path.isAbsolute(candidate.command) && !fs.existsSync(candidate.command)) continue;

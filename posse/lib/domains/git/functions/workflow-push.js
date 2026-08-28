@@ -3,6 +3,7 @@
 
 import { listWorkItems, logEvent, withMergeLock } from "../../queue/functions/index.js";
 import {
+  cancelOpenPushOfferGateForTarget,
   cancelOpenPushOfferGates,
   markOpenPushOfferGatePushed,
   upsertPushOfferGate,
@@ -12,6 +13,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { runHook } from "./hooks.js";
 import { gitExec, resolvePushBranch } from "./utils.js";
 import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
+import { resolveSharedTrunkConfigRuntime } from "./shared-trunk-config.js";
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity } = context;
@@ -130,8 +132,51 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     return runGitWorkflowTaskOffMainThread("collectPushOfferState", { mergedCount }, workerOptions);
   }
 
+  let sharedTrunkRoutingProblemLogged = false;
+  async function isEnrolledSharedTrunkPair(remote, branch) {
+    // Automatic-publication routing must degrade to the legacy manual
+    // push-offer path — never crash wrap-up, and never cancel the operator's
+    // manual escape hatch — when the enrollment is invalid or the native
+    // contract is unavailable. The merge coordinator independently fails
+    // closed before any trunk write in both situations.
+    let config;
+    try {
+      config = await resolveSharedTrunkConfigRuntime(projectDir, {
+        nativeCapabilityPreflight: async ({ projectDir: root }) => {
+          const { getSharedTrunkNativeCapabilities } = await import("./shared-trunk-native.js");
+          return getSharedTrunkNativeCapabilities(root);
+        },
+      });
+    } catch (err) {
+      if (!sharedTrunkRoutingProblemLogged) {
+        sharedTrunkRoutingProblemLogged = true;
+        try {
+          logEvent({
+            event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: `Shared-trunk push routing degraded to manual offers: ${err?.message || err}`,
+            event_json: JSON.stringify({ error: err?.message || String(err), error_code: err?.code || null, push_routing: true }),
+          });
+        } catch { /* routing must not depend on telemetry */ }
+      }
+      return false;
+    }
+    return config.enabled
+      && String(remote || "") === config.remote
+      && String(branch || "") === config.branch;
+  }
+
   async function refreshPushOfferGate(mergedCount = 0, { createdBy = "post_merge_closeout" } = {}) {
     const state = await collectPushOfferStateAsync(mergedCount);
+    if (state?.effectiveRemote && state?.pushBranch
+      && await isEnrolledSharedTrunkPair(state.effectiveRemote, state.pushBranch)) {
+      cancelOpenPushOfferGateForTarget(
+        state.effectiveRemote,
+        state.pushBranch,
+        "shared_trunk_publishes_automatically",
+      );
+      return { ok: false, reason: "shared_trunk_automatic_publication", state };
+    }
     const aheadCount = Number.isFinite(state?.aheadCount) ? state.aheadCount : 0;
     if (!state?.hasRemote || !state?.pushBranch || state.pushBranchWorkItem
       || (Number(mergedCount) <= 0 && aheadCount <= 0)) {
@@ -141,17 +186,10 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     return { ...upsertPushOfferGate(state, { createdBy }), state };
   }
 
-  function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
-    const pushBranchWorkItem = workItemForBranch(pushBranch);
-    if (pushBranchWorkItem) {
-      return {
-        ok: false,
-        reason: "work_item_push_target",
-        wiId: pushBranchWorkItem.id,
-        pushBranch,
-      };
-    }
-
+  // This is also the shared-trunk publication gate. Keep marker validation and
+  // the repository hook in one implementation so automatic CAS publication
+  // cannot be weaker than an operator-initiated push.
+  function validatePushCandidate({ pushBranch }) {
     try {
       const markerCheck = gitExec([
         "grep",
@@ -175,9 +213,8 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
         };
       }
     } catch (err) {
-      // git grep exits 1 when no matches are found — the only failure that
-      // means "clean". Anything else (gate busy, native git unavailable,
-      // grep itself erroring) must not silently pass the marker gate.
+      // git grep exits 1 when no matches are found. Every other error fails
+      // closed, including native route/capability failures.
       if (err?.status !== 1) {
         return {
           ok: false,
@@ -188,9 +225,23 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     const gate = runHook("pre_push_gate", { cwd: projectDir, targetBranch: pushBranch, nativeParity });
-    if (!gate.ok) {
-      return { ok: false, reason: "gate_failed", output: gate.output || "" };
+    if (!gate.ok) return { ok: false, reason: "gate_failed", output: gate.output || "" };
+    return { ok: true };
+  }
+
+  function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
+    const pushBranchWorkItem = workItemForBranch(pushBranch);
+    if (pushBranchWorkItem) {
+      return {
+        ok: false,
+        reason: "work_item_push_target",
+        wiId: pushBranchWorkItem.id,
+        pushBranch,
+      };
     }
+
+    const validation = validatePushCandidate({ pushBranch });
+    if (!validation.ok) return validation;
 
     try {
       gitExec(["push", effectiveRemote, pushBranch], projectDir, { timeoutMs: GIT_MERGE_TIMEOUT_MS, nativeParity });
@@ -206,7 +257,16 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
   }
 
-  function executePushAsync(args = {}, workerOptions = {}) {
+  async function executePushAsync(args = {}, workerOptions = {}) {
+    if (args?.effectiveRemote && args?.pushBranch
+      && await isEnrolledSharedTrunkPair(args.effectiveRemote, args.pushBranch)) {
+      cancelOpenPushOfferGateForTarget(
+        args.effectiveRemote,
+        args.pushBranch,
+        "shared_trunk_publishes_automatically",
+      );
+      return { ok: false, reason: "shared_trunk_automatic_publication" };
+    }
     return runGitWorkflowTaskOffMainThread("executePush", args, workerOptions);
   }
 
@@ -221,6 +281,17 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     if (!state?.hasRemote) {
+      console.log("");
+      return;
+    }
+
+    if (state.effectiveRemote && state.pushBranch
+      && await isEnrolledSharedTrunkPair(state.effectiveRemote, state.pushBranch)) {
+      cancelOpenPushOfferGateForTarget(
+        state.effectiveRemote,
+        state.pushBranch,
+        "shared_trunk_publishes_automatically",
+      );
       console.log("");
       return;
     }
@@ -375,6 +446,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     refreshPushOfferGate,
     executePush,
     executePushAsync,
+    validatePushCandidate,
     offerPush,
   };
 }

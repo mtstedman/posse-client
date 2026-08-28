@@ -38,12 +38,14 @@ import {
   resolveHandoffSquashConflicts,
 } from "./handoff-conflict-resolution.js";
 import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
+import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
 
 export function createMergeWorkflowHelpers(context, {
   ensureCleanTargetBranch,
   isRuntimePorcelainLine,
   sourceWorktreeDirtyState,
   sweepOrphanedInferTsconfig,
+  validatePushCandidate = () => ({ ok: true }),
 }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
   const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
@@ -94,6 +96,14 @@ export function createMergeWorkflowHelpers(context, {
   function expectedSquashSubject(branch, mergeTargetBranch = currentTargetBranch()) {
     const targetBranch = mergeTargetBranch;
     return `Squash merge ${branch} into ${targetBranch}`;
+  }
+
+  function squashCommitArgs(subject, sharedTrunkOperationId = null) {
+    const args = ["commit", "-m", subject];
+    if (sharedTrunkOperationId) {
+      args.push("-m", `Posse-Shared-Trunk-Operation: ${sharedTrunkOperationId}`);
+    }
+    return args;
   }
 
   function workItemMetadata(wiId) {
@@ -409,6 +419,7 @@ export function createMergeWorkflowHelpers(context, {
     step = "unknown",
     targetBranch = currentTargetBranch(),
     preMergeHead = null,
+    sharedTrunkOperationId = null,
   } = {}) {
     const canRecover = step === "commit" || step === "postcommit";
     if (!canRecover) return null;
@@ -469,7 +480,7 @@ export function createMergeWorkflowHelpers(context, {
       });
       try {
         emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch, retry: true });
-        gitMergeExec(["commit", "-m", subject], cwd);
+        gitMergeExec(squashCommitArgs(subject, sharedTrunkOperationId), cwd);
         const mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
         cleanupSquashMessage(cwd);
         log(`Merge timeout retry succeeded: ${branch} into ${targetBranch} at ${mergeHash}`, {
@@ -585,6 +596,9 @@ export function createMergeWorkflowHelpers(context, {
   }
 
   function gitMergeToTarget(branch, cwd, options = {}) {
+    if (options.worktreeLockAlreadyHeld === true) {
+      return gitMergeToTargetUnlocked(branch, cwd, options);
+    }
     return withWorktreeLock(cwd, projectDir, () => gitMergeToTargetUnlocked(branch, cwd, options));
   }
 
@@ -592,6 +606,8 @@ export function createMergeWorkflowHelpers(context, {
     wiId = null,
     onPhase = null,
     retryDeterministicConflict = false,
+    suppressPostMergeEffects = false,
+    sharedTrunkOperationId = null,
   } = {}) {
     const targetBranch = currentTargetBranch();
     const log = (msg, extra = {}) => {
@@ -1090,7 +1106,7 @@ export function createMergeWorkflowHelpers(context, {
           });
           emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
           mergeStep = "commit";
-          gitMergeExec(["commit", "-m", expectedSquashSubject(branch, targetBranch)], cwd);
+          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId), cwd);
           mergeCreated = true;
           mergeStep = "postcommit";
         } else {
@@ -1192,7 +1208,7 @@ export function createMergeWorkflowHelpers(context, {
               if (stagedFiles.length > 0) runProjectedCandidateGate(stagedFiles);
               emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
               mergeStep = "commit";
-              gitMergeExec(["commit", "-m", expectedSquashSubject(branch, targetBranch)], cwd);
+              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId), cwd);
               mergeCreated = true;
               mergeStep = "postcommit";
               mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
@@ -1232,16 +1248,19 @@ export function createMergeWorkflowHelpers(context, {
             step: mergeStep,
             targetBranch,
             preMergeHead,
+            sharedTrunkOperationId,
           });
           if (recovered?.ok) {
-            emitAtlasMainAdvancedAfterMerge({
-              wiId,
-              branchName: branch,
-              targetBranch,
-              mergeHash: recovered.mergeHash,
-              cwd,
-              source: "merge",
-            });
+            if (!suppressPostMergeEffects) {
+              emitAtlasMainAdvancedAfterMerge({
+                wiId,
+                branchName: branch,
+                targetBranch,
+                mergeHash: recovered.mergeHash,
+                cwd,
+                source: "merge",
+              });
+            }
             return recovered;
           }
         }
@@ -1304,7 +1323,7 @@ export function createMergeWorkflowHelpers(context, {
 
       log(`Merged ${branch} into ${targetBranch} at ${mergeHash}`, { json: { branch, target: targetBranch, merge_hash: mergeHash } });
       clearDeterministicMergeFailure(wiId);
-      if (mergeCreated || (preMergeHead && mergeHash && mergeHash !== preMergeHead)) {
+      if (!suppressPostMergeEffects && (mergeCreated || (preMergeHead && mergeHash && mergeHash !== preMergeHead))) {
         emitAtlasMainAdvancedAfterMerge({
           wiId,
           branchName: branch,
@@ -1337,18 +1356,39 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
-  function gitMergeToTargetAsync(branch, cwd, {
+  async function gitMergeToTargetAsync(branch, cwd, {
     wiId = null,
     onPhase = null,
     retryDeterministicConflict = false,
     signal = null,
     timeoutMs = GIT_WORKFLOW_TASK_TIMEOUT_MS,
+    purpose = "final",
+    purposeKey = null,
+    mergeLockAlreadyHeld = false,
   } = {}) {
-    return runGitWorkflowTaskOffMainThread(
+    const runLocal = ({ suppressPostMergeEffects = false, worktreeLockAlreadyHeld = false, operationId = null } = {}) => runGitWorkflowTaskOffMainThread(
       "gitMergeToTarget",
-      { branch, cwd, wiId, retryDeterministicConflict },
+      {
+        branch,
+        cwd,
+        wiId,
+        retryDeterministicConflict,
+        suppressPostMergeEffects,
+        worktreeLockAlreadyHeld,
+        sharedTrunkOperationId: operationId,
+      },
       { onPhase, signal, timeoutMs },
     );
+    return mergeToSharedTrunkAsync({
+      projectDir,
+      branch,
+      workItemId: wiId,
+      purpose,
+      purposeKey,
+      mergeLocalCandidate: runLocal,
+      validateCandidate: validatePushCandidate,
+      mergeLockAlreadyHeld,
+    });
   }
 
   async function mergeIterativePassToTarget(wi, {
@@ -1381,6 +1421,8 @@ export function createMergeWorkflowHelpers(context, {
 
     const result = await gitMergeToTargetAsync(branchName, projectDir, {
       wiId: wi.id,
+      purpose: "iterative",
+      purposeKey: sourceBranchTip || `${wi.id}:${passNumber ?? "unknown"}`,
       onPhase: onPhase || ((event = {}) => {
         if (event.phase === "atlas-indexing") {
           if (typeof display?.setRunPhase === "function") display.setRunPhase(`ATLAS indexing iterative pass for WI#${wi.id}`);
@@ -1397,28 +1439,33 @@ export function createMergeWorkflowHelpers(context, {
     if (!result.ok) return { ...result, targetBranch, sourceBranch: branchName, sourceBranchTip };
 
     const mergeHash = result.mergeHash || null;
-    logEvent({
-      work_item_id: wi.id,
-      event_type: EVENT_TYPES.WORK_ITEM_ITERATION_PASS_MERGED,
-      actor_type: EVENT_ACTORS.SYSTEM,
-      message: `Merged iterative pass ${passLabel} from ${branchName} into ${targetBranch}${mergeHash ? ` at ${mergeHash}` : ""}`,
-      event_json: JSON.stringify({
-        branch: branchName,
-        target_branch: targetBranch,
-        merge_hash: mergeHash,
-        source_branch_tip: sourceBranchTip,
-        pass: passNumber,
-        reason,
-      }),
-    });
-    await refreshAtlasMainAfterMerge({
-      wiId: wi.id,
-      branchName,
-      targetBranch,
-      mergeHash,
-      onPhase,
-      source: "iterative_merge",
-    });
+    // The shared-trunk coordinator owns the sole post-publication event and
+    // ATLAS main-advance fanout, including crash recovery. Preserve the legacy
+    // local-only effects when the feature is disabled.
+    if (!result.sharedTrunk) {
+      logEvent({
+        work_item_id: wi.id,
+        event_type: EVENT_TYPES.WORK_ITEM_ITERATION_PASS_MERGED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `Merged iterative pass ${passLabel} from ${branchName} into ${targetBranch}${mergeHash ? ` at ${mergeHash}` : ""}`,
+        event_json: JSON.stringify({
+          branch: branchName,
+          target_branch: targetBranch,
+          merge_hash: mergeHash,
+          source_branch_tip: sourceBranchTip,
+          pass: passNumber,
+          reason,
+        }),
+      });
+      await refreshAtlasMainAfterMerge({
+        wiId: wi.id,
+        branchName,
+        targetBranch,
+        mergeHash,
+        onPhase,
+        source: "iterative_merge",
+      });
+    }
 
     say(`  ${C.green}[iterate]${C.reset} WI#${wi.id}: pass ${passLabel} merged into ${targetBranch}${mergeHash ? ` (${mergeHash.slice(0, 8)})` : ""}`);
     if (typeof display?.setRunPhase === "function") {

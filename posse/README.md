@@ -173,7 +173,8 @@ Use `posse help` for the full CLI reference.
 - `ask`: queue a research-only question.
 - `image`: generate an image directly.
 - `events`, `timeline`, `cost`, `fanout`, `audit`, `calls`, `prompts`,
-  `usage`, `atlas-smoke`, `mcp-status`, `codex-models`: inspection commands.
+  `usage`, `atlas-smoke`, `shared-trunk-smoke`, `mcp-status`, `codex-models`:
+  inspection and disposable smoke commands.
 - `local-models [list|download]`: inspect the signed local-model catalog or
   select a pinned bundle for a confirmed, resumable download.
 - `admin`: open stats and settings tooling.
@@ -392,6 +393,76 @@ output blocks the commit before staging.
 
 Recovery snapshots are stored as local refs under `refs/posse/snapshots/*` with
 metadata in `refs/notes/posse-snapshots`.
+
+### Shared side trunk for separate Posse instances
+
+Shared-trunk mode lets two independent Posse installations collaborate through
+one remote side branch. Each person must use a separate clone and a separate
+`.posse/` database. Never point two instances at one clone, one worktree, or a
+SQLite database on a network filesystem.
+
+Create the side branch once, push it, then configure each clone while its clean
+root checkout is on that branch. Enable the feature last:
+
+```bash
+git switch -c posse/shared
+git push -u origin posse/shared
+
+posse admin set target_branch posse/shared --json
+posse admin set shared_trunk_branch posse/shared --json
+posse admin set shared_trunk_remote origin --json
+posse admin set shared_trunk_enabled true --json
+posse pairing-preflight
+```
+
+`main`, `master`, and the remote's detected default branch are refused. The
+configured shared branch must equal `target_branch`, and the native Git helper
+must advertise the complete shared-trunk contract. Authentication must already
+work non-interactively for the configured remote.
+
+Run `posse pairing-preflight` in every participating clone. It fetches the
+exact shared branch and performs a no-change, leased dry-run push to verify that
+member's read access and noninteractive write transport. When advisory claims
+are enabled, it also creates and CAS-deletes a unique probe claim ref. The
+probe does not distribute credentials and cannot certify hosting-provider
+branch-protection rules without a real branch update; normal publication keeps
+the authoritative exact-OID lease and fast-forward checks.
+
+Successful WI and iterative merges are published automatically to the exact
+side branch. Posse still runs committed-conflict checks and `pre_push_gate`, but
+does not create a human push-offer gate for that automatic publication.
+Promotion from the side trunk to the repository default branch remains a
+separate, human-reviewed Git workflow.
+
+The scheduler fetches before dispatch and polls while a run is alive. An
+inactive clone catches up when its next run starts; v1 does not keep an exited
+scheduler resident solely to poll. A divergence or unresolved publication is
+persisted in bridge instance status and halts further trunk writes. Inspect the
+two histories before recovery:
+
+```bash
+git fetch origin posse/shared
+git status
+git log --left-right --graph --oneline posse/shared...origin/posse/shared
+```
+
+Do not hard-reset the side branch casually. Posse's retry reset is
+compare-and-swap guarded and only runs when `HEAD`, the fetched remote-tracking
+OID, checkout state, and operation journal all match.
+
+Advisory cross-instance file claims are separately opt-in:
+
+```bash
+posse admin set shared_trunk_claims_enabled true --json
+```
+
+Claims publish bounded JSON blobs under `refs/posse/claims/*`. They reduce
+predictable duplicate work but never grant exclusivity and always fail open;
+Git merge/push remains the correctness backstop. Claim paths and old blobs may
+remain discoverable in the remote's object database after a claim ref is
+deleted, and permissive ref fetches can expose claim-ref churn. Leave claims
+disabled unless that metadata/noise is acceptable for the collaboration
+remote.
 
 Normal pushes (`git push`, `git push origin main`) do not publish these refs.
 Avoid broad ref pushes such as:

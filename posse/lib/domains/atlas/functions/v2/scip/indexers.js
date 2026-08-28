@@ -13,6 +13,7 @@ import { ATLAS_SOURCE_LANGUAGE_ORDER } from "../../../../../catalog/atlas.js";
 import { gitExecBuffer } from "../../../../git/functions/utils.js";
 import { languageForPath } from "../parse/language-buckets.js";
 import { normalizeScipLanguages } from "./languages.js";
+import { getPythonToolchainSearchDirs } from "../../../../runtime/functions/python-runtime.js";
 import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
 
 export const DEFAULT_SCIP_INDEX_TIMEOUT_MS = 120_000;
@@ -318,6 +319,7 @@ function commandSearchRoots({ repoRoot, posseRoot }) {
     { dir: path.join(repoRoot, "venv", "Scripts"), source: "repo venv/Scripts" },
     { dir: path.join(repoRoot, ".venv", "bin"), source: "repo .venv/bin" },
     { dir: path.join(repoRoot, "venv", "bin"), source: "repo venv/bin" },
+    ...getPythonToolchainSearchDirs(posseRoot).map((dir) => ({ dir, source: "posse python toolchain" })),
   ];
   const pathEnv = String(process.env.PATH || "");
   for (const dir of pathEnv.split(path.delimiter).filter(Boolean)) {

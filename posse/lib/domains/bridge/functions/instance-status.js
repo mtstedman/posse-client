@@ -12,6 +12,8 @@ const OFFLINE_HEARTBEAT_MS = 10 * 60 * 1000;
 const MAX_BOOT_STEPS = 30;
 const MAX_LABEL_CHARS = 120;
 const MAX_DETAIL_CHARS = 200;
+const MAX_GIT_NAME_CHARS = 240;
+const MAX_GIT_REMOTE_CHARS = 128;
 
 let _cachedVersion;
 
@@ -44,6 +46,59 @@ function readJsonRow(db, key) {
 function parseMs(value) {
   const parsed = Date.parse(String(value || ""));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function boundedText(value, maxChars) {
+  const text = String(value || "").trim();
+  return text ? text.slice(0, maxChars) : null;
+}
+
+function normalizedTimestamp(value) {
+  const parsed = parseMs(value);
+  return parsed == null ? null : new Date(parsed).toISOString();
+}
+
+function nonNegativeInteger(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(parsed));
+}
+
+function normalizedGitOid(value) {
+  const oid = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{7,64}$/.test(oid) ? oid : null;
+}
+
+function normalizeSharedTrunkStatus(row, nowMs) {
+  if (!row?.value || typeof row.value !== "object" || Array.isArray(row.value)) return null;
+  const value = row.value;
+  const lastAttemptAt = normalizedTimestamp(value.last_attempt_at);
+  const lastSuccessAt = normalizedTimestamp(value.last_success_at);
+  const lastSuccessMs = parseMs(lastSuccessAt);
+  return {
+    enabled: value.enabled === true,
+    claims_enabled: value.claims_enabled === true,
+    remote: boundedText(value.remote, MAX_GIT_REMOTE_CHARS),
+    branch: boundedText(value.branch, MAX_GIT_NAME_CHARS),
+    local_sha: normalizedGitOid(value.local_sha),
+    remote_sha: normalizedGitOid(value.remote_sha),
+    ahead_count: nonNegativeInteger(value.ahead_count ?? value.ahead),
+    behind_count: nonNegativeInteger(value.behind_count ?? value.behind),
+    last_attempt_at: lastAttemptAt,
+    last_success_at: lastSuccessAt,
+    last_sync_age_sec: lastSuccessMs == null
+      ? null
+      : Math.max(0, Math.floor((nowMs - lastSuccessMs) / 1000)),
+    diverged: value.diverged === true,
+    push_rejection_count: nonNegativeInteger(value.push_rejection_count),
+    push_retry_count: nonNegativeInteger(value.push_retry_count),
+    max_push_retry_depth: nonNegativeInteger(value.max_push_retry_depth),
+    sync_unavailable_count: nonNegativeInteger(value.sync_unavailable_count),
+    publication_unresolved: value.publication_unresolved === true,
+    unresolved_operation_count: nonNegativeInteger(value.unresolved_operation_count),
+    last_error_code: boundedText(value.last_error_code, 160),
+    updated_at: normalizedTimestamp(row.updatedAt),
+  };
 }
 
 function normalizeBootSteps(rawSteps) {
@@ -108,6 +163,8 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
   const boot = readJsonRow(db, "boot");
   const scheduler = readJsonRow(db, "scheduler");
   const shutdown = readJsonRow(db, "shutdown");
+  const sharedTrunk = readJsonRow(db, "shared_trunk");
+  const sharedTrunkStatus = normalizeSharedTrunkStatus(sharedTrunk, nowMs);
 
   const heartbeatMs = schedulerHeartbeatMs(db, scheduler);
   const shutdownMs = shutdown ? (parseMs(shutdown.value?.at) ?? parseMs(shutdown.updatedAt)) : null;
@@ -156,6 +213,7 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
           queued_work_items: queuedWorkItems,
         }
       : null,
+    ...(sharedTrunkStatus ? { shared_trunk: sharedTrunkStatus } : {}),
     version: posseVersion(),
     updated_at: new Date(nowMs).toISOString(),
   };

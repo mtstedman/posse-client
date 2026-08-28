@@ -45,6 +45,7 @@ import {
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { isTransientSharedTrunkMergeResult } from "../../git/functions/shared-trunk.js";
 import { ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
@@ -297,6 +298,26 @@ export async function processIterativeWrapUp({
         reason,
         display,
       });
+      if (!mergeResult.ok && isTransientSharedTrunkMergeResult(mergeResult)) {
+        // A shared-trunk deferral (merge lock busy, native/transport blip,
+        // push contention, pending journal recovery) is retryable by design
+        // and must not finalize the iterative WI as merge-failed — the next
+        // wrap-up pass re-attempts the same pass merge.
+        logEvent({
+          work_item_id: wi.id,
+          event_type: EVENT_TYPES.WORK_ITEM_ITERATION_PASS_MERGE_DEFERRED,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Iterative pass merge deferred (${mergeResult.reason || "shared-trunk deferral"}); retrying at next wrap-up`,
+          event_json: JSON.stringify({
+            pass: refreshed.passCount,
+            branch: wi.branch_name,
+            reason: mergeResult.reason || null,
+            shared_trunk: true,
+          }),
+        });
+        say(`  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: pass merge deferred (${mergeResult.reason || "shared trunk busy"}); will retry`);
+        continue;
+      }
       if (!mergeResult.ok) {
         markWorkItemMergeFailed(wi.id);
         wi = markIterativeFinished(

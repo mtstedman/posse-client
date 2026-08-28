@@ -141,6 +141,18 @@ export const EVENT_TYPES = Object.freeze({
   GIT_TARGET_BRANCH_CLEARED: "git.target_branch_cleared",
   GIT_TARGET_BRANCH_SNAPSHOTTED: "git.target_branch_snapshotted",
 
+  // ── shared remote trunk ────────────────────────────────────────────────
+  SHARED_TRUNK_ADVANCED: "shared_trunk.advanced",
+  SHARED_TRUNK_CLAIM_DEFERRED: "shared_trunk.claim_deferred",
+  SHARED_TRUNK_CLAIM_HARDENED: "shared_trunk.claim_hardened",
+  SHARED_TRUNK_CLAIM_SYNC_FAILED: "shared_trunk.claim_sync_failed",
+  SHARED_TRUNK_CLAIM_WARNING: "shared_trunk.claim_warning",
+  SHARED_TRUNK_DIVERGED: "shared_trunk.diverged",
+  SHARED_TRUNK_PUSH_RECOVERED: "shared_trunk.push_recovered",
+  SHARED_TRUNK_PUSH_REJECTED: "shared_trunk.push_rejected",
+  SHARED_TRUNK_PUSH_RETRIED: "shared_trunk.push_retried",
+  SHARED_TRUNK_SYNC_UNAVAILABLE: "shared_trunk.sync_unavailable",
+
   // ── job lifecycle & assessment ──────────────────────────────────────────
   JOB_ARTIFACT_EXISTING_OUTPUT_REUSED: "job.artifact_existing_output_reused",
   JOB_ARTIFACT_FAST_PASS: "job.artifact_fast_pass",
@@ -395,6 +407,7 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_ESCALATION: "work_item.escalation",
   WORK_ITEM_ITERATION_FINISHED: "work_item.iteration_finished",
   WORK_ITEM_ITERATION_PASS_MERGED: "work_item.iteration_pass_merged",
+  WORK_ITEM_ITERATION_PASS_MERGE_DEFERRED: "work_item.iteration_pass_merge_deferred",
   WORK_ITEM_ITERATION_STARTUP_SANITIZED: "work_item.iteration_startup_sanitized",
   WORK_ITEM_ITERATION_SPAWNED: "work_item.iteration_spawned",
   WORK_ITEM_MERGE_DEFERRED: "work_item.merge_deferred",

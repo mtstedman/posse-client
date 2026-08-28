@@ -22,6 +22,26 @@ export const ADMIN_MAX_JSON_BYTES = 2 * 1024 * 1024;
 // tool-call budget policy enforced at every assessor tool transport.
 export const ASSESSOR_MAX_TOOL_CALLS_DEFAULT = 12;
 
+export const SHARED_TRUNK_DEFAULTS = Object.freeze({
+  enabled: false,
+  branch: "",
+  remote: "origin",
+  fetchIntervalSec: 30,
+  fetchIntervalIdleSec: 300,
+  pushRetryMax: 3,
+  claimsEnabled: false,
+  claimsTtlMin: 30,
+  claimDeferMaxMin: 30,
+});
+
+export const SHARED_TRUNK_LIMITS = Object.freeze({
+  fetchIntervalSec: Object.freeze({ min: 5, max: 86_400 }),
+  fetchIntervalIdleSec: Object.freeze({ min: 5, max: 86_400 }),
+  pushRetryMax: Object.freeze({ min: 0, max: 20 }),
+  claimsTtlMin: Object.freeze({ min: 1, max: 1_440 }),
+  claimDeferMaxMin: Object.freeze({ min: 0, max: 1_440 }),
+});
+
 export const SETTING_KEYS = Object.freeze({
   ASSESSMENT_SCOPE_MODE: "assessment_scope_mode",
   ASSESSMENT_SCOPE_MAX_GROUP_JOBS: "assessment_scope_max_group_jobs",
@@ -122,6 +142,15 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_TREE_COMPRESSION_MODEL_MAX_SEEDS: "atlas_tree_compression_model_max_seeds",
   SKILLS_DISABLED_IDS: "skills_disabled_ids",
   SKILLS_ENABLED: "skills_enabled",
+  SHARED_TRUNK_ENABLED: "shared_trunk_enabled",
+  SHARED_TRUNK_BRANCH: "shared_trunk_branch",
+  SHARED_TRUNK_REMOTE: "shared_trunk_remote",
+  SHARED_TRUNK_FETCH_INTERVAL_SEC: "shared_trunk_fetch_interval_sec",
+  SHARED_TRUNK_FETCH_INTERVAL_IDLE_SEC: "shared_trunk_fetch_interval_idle_sec",
+  SHARED_TRUNK_PUSH_RETRY_MAX: "shared_trunk_push_retry_max",
+  SHARED_TRUNK_CLAIMS_ENABLED: "shared_trunk_claims_enabled",
+  SHARED_TRUNK_CLAIMS_TTL_MIN: "shared_trunk_claims_ttl_min",
+  SHARED_TRUNK_CLAIM_DEFER_MAX_MIN: "shared_trunk_claim_defer_max_min",
   STALL_TIMEOUT: "stall_timeout",
   TARGET_BRANCH: "target_branch",
   WEB_TOOLS_ENABLED: "web_tools_enabled",

@@ -576,6 +576,7 @@ let _diagnosticCommandsModulePromise = null;
 let _localModelsCommandModulePromise = null;
 let _nativeBinariesCommandModulePromise = null;
 let _gateCommandModulePromise = null;
+let _pairingPreflightCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -660,6 +661,11 @@ async function loadNativeBinariesCommandModule() {
 async function loadGateCommandModule() {
   _gateCommandModulePromise ||= import("./gate-command.js");
   return _gateCommandModulePromise;
+}
+
+async function loadPairingPreflightCommandModule() {
+  _pairingPreflightCommandModulePromise ||= import("./pairing-preflight-command.js");
+  return _pairingPreflightCommandModulePromise;
 }
 
 async function loadAtlasModule() {
@@ -1789,7 +1795,7 @@ async function cmdGo() {
     }
     if (refuseIfSchedulerLive("go")) return;
     const helpers = await getGitWorkflowHelpers();
-    const mergeOutcome = await withMergeLock(() => helpers.autoMergeCompletedWorkItems({ reason: "go start" }));
+    const mergeOutcome = await withMergeLock(() => helpers.autoMergeCompletedWorkItems({ reason: "go start", mergeLockAlreadyHeld: true }));
     if (!mergeOutcome.acquired) {
       console.log(`\n  ${C.red}go refused:${C.reset} another merge is already in progress; retry when it finishes.\n`);
       process.exitCode = 1;
@@ -2111,9 +2117,10 @@ async function cmdMerge() {
     }
     // The operator confirmed the merge prompt above — honor it past a
     // recorded deterministic conflict, matching ReviewSession's approve paths.
-    const result = await helpers.gitMergeToTarget(lockedWi.branch_name, PROJECT_DIR, {
+    const result = await helpers.gitMergeToTargetAsync(lockedWi.branch_name, PROJECT_DIR, {
       wiId: wi.id,
       retryDeterministicConflict: true,
+      mergeLockAlreadyHeld: true,
     });
     if (result.ok) setMergeState(wi.id, "merged");
     else if (!result.deferred) markWorkItemMergeFailed(wi.id);
@@ -2227,6 +2234,16 @@ async function cmdUsage() {
 async function cmdAtlasSmoke() {
   const { cmdAtlasSmoke: cmdAtlasSmokeImpl } = await loadDiagnosticCommandsModule();
   return cmdAtlasSmokeImpl({ projectDir: PROJECT_DIR });
+}
+
+async function cmdSharedTrunkSmoke() {
+  const { cmdSharedTrunkSmoke: cmdSharedTrunkSmokeImpl } = await loadDiagnosticCommandsModule();
+  return cmdSharedTrunkSmokeImpl();
+}
+
+async function cmdPairingPreflight() {
+  const { cmdPairingPreflight: cmdPairingPreflightImpl } = await loadPairingPreflightCommandModule();
+  return cmdPairingPreflightImpl({ projectDir: PROJECT_DIR });
 }
 
 async function cmdAtlas() {
@@ -2687,6 +2704,10 @@ ${aliasDiagnostic}
     ${C.dim}             usage [--json] [--refresh|--force-refresh]${C.reset}
     ${C.cyan}atlas-smoke${C.reset}  Run Posse's local ATLAS smoke test against a repo
     ${C.dim}             atlas-smoke <repoPath> [query] [provider]${C.reset}
+    ${C.cyan}shared-trunk-smoke${C.reset}  Run a disposable two-clone shared-trunk race/claim smoke
+    ${C.dim}             shared-trunk-smoke [--json]${C.reset}
+    ${C.cyan}pairing-preflight${C.reset}  Verify this member's shared-remote access
+    ${C.dim}             pairing-preflight [--json]${C.reset}
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}
     ${C.cyan}atlas-v2${C.reset}     Inspect/manage the ATLAS v2 ledger, views, and warmer queue
@@ -2788,6 +2809,9 @@ async function dispatchResolvedCommand(command) {
     replay: cmdReplay,
     usage: cmdUsage,
     "atlas-smoke": cmdAtlasSmoke,
+    "shared-trunk-smoke": cmdSharedTrunkSmoke,
+    "pairing-preflight": cmdPairingPreflight,
+    "shared-trunk-preflight": cmdPairingPreflight,
     atlas: cmdAtlas,
     "atlas-v2": cmdAtlasV2,
     "mcp-status": cmdMcpStatus,

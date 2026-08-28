@@ -1,7 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
-import { resolveManagedPythonRuntimeForProject } from "../../../../domains/runtime/functions/python-runtime.js";
+import {
+  getPythonToolchainExecutable,
+  resolveManagedPythonRuntimeForProject,
+} from "../../../../domains/runtime/functions/python-runtime.js";
 import {
   groupVerificationFiles,
   packageManagerRun,
@@ -229,6 +232,11 @@ function pythonCommandCandidates(cwd) {
       { command: "python3", args: [], display: "python3" },
       { command: "python", args: [], display: "python" },
     );
+  }
+
+  const toolchainPython = getPythonToolchainExecutable();
+  if (fileExists(toolchainPython)) {
+    candidates.push({ command: toolchainPython, args: [], display: toolchainPython });
   }
 
   const seen = new Set();

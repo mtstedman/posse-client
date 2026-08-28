@@ -27,6 +27,7 @@ import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { firstGitLine } from "./workflow-git-utils.js";
 import { inspectPreparedWorktreeLockedAsync } from "./prepared-worktree-recovery.js";
 import { gitTopLevelAsync } from "./worktree-path.js";
+import { reconcileSharedTrunkOperations } from "./shared-trunk.js";
 
 const LIVE_PREPARATION_JOB_STATUS_SET = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
 
@@ -199,6 +200,26 @@ export async function reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
 
 export function createStartupDirtyGuardHelpers(context) {
   const { projectDir, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
+
+  // Boot reconciliation surfaces journal/config problems as persisted health,
+  // never as a thrown error: the journal rows are durable, so a throw here
+  // would recur on every restart as a boot crash loop with no operator
+  // recovery path.
+  async function reconcileSharedTrunkAtStartup(dir) {
+    try {
+      return await reconcileSharedTrunkOperations(dir);
+    } catch (err) {
+      try {
+        logEvent({
+          event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Shared-trunk startup reconciliation failed: ${err?.message || err}`,
+          event_json: JSON.stringify({ error: err?.message || String(err), error_code: err?.code || null, startup: true }),
+        });
+      } catch { /* health reporting must not block boot */ }
+      return { ok: false, error: err?.message || String(err), errorCode: err?.code || null, operations: [], unresolved: [] };
+    }
+  }
   let projectGitPrefixCache;
 
   // "" means "git ran and reported a clean tree" (or no repo). An infra
@@ -700,6 +721,8 @@ export function createStartupDirtyGuardHelpers(context) {
         try { onPhase({ detail }); } catch { /* display callback only */ }
       }
     };
+    emitPhase("reconciling shared-trunk publication journal");
+    const sharedTrunkRecovery = await reconcileSharedTrunkAtStartup(projectDir);
     emitPhase("reconciling waiting-lane filesystem");
     const waitingLaneFilesystemRecovery = await reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
       signal,
@@ -716,7 +739,7 @@ export function createStartupDirtyGuardHelpers(context) {
     throwIfAborted(signal);
     if (!dirtyLines.length) {
       emitPhase("target tree clean");
-      return { ok: true, dirty: false, policy: mode, action: "clean", waitingLaneFilesystemRecovery };
+      return { ok: true, dirty: false, policy: mode, action: "clean", waitingLaneFilesystemRecovery, sharedTrunkRecovery };
     }
     if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
       throw new Error(dirtyTreeGuardMessage({ reason, dirtyLines, policy: mode }));
@@ -735,6 +758,7 @@ export function createStartupDirtyGuardHelpers(context) {
           action: "no_staged_changes",
           dirtyCount: dirtyLines.length,
           waitingLaneFilesystemRecovery,
+          sharedTrunkRecovery,
         };
       }
       throwIfAborted(signal);
@@ -768,6 +792,7 @@ export function createStartupDirtyGuardHelpers(context) {
       dirtyCount: dirtyLines.length,
       commit,
       waitingLaneFilesystemRecovery,
+      sharedTrunkRecovery,
     };
   }
 
@@ -780,6 +805,7 @@ export function createStartupDirtyGuardHelpers(context) {
     timeoutMs = GIT_WORKFLOW_TASK_TIMEOUT_MS,
   } = {}) {
     throwIfAborted(signal);
+    const sharedTrunkRecovery = await reconcileSharedTrunkAtStartup(projectDir);
     if (typeof onPhase === "function") {
       try { onPhase({ detail: "reconciling waiting-lane filesystem" }); } catch { /* display callback only */ }
     }
@@ -801,7 +827,7 @@ export function createStartupDirtyGuardHelpers(context) {
       signal,
       timeoutMs,
     });
-    return { ...result, waitingLaneFilesystemRecovery };
+    return { ...result, waitingLaneFilesystemRecovery, sharedTrunkRecovery };
   }
 
   function ensureCleanTargetBranch(reason, { fatalOnFailure = false, logWhenClean = false } = {}) {

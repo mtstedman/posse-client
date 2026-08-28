@@ -30,6 +30,7 @@ export function createGitWorkflowHelpers(options = {}) {
     isRuntimePorcelainLine: startup.isRuntimePorcelainLine,
     sourceWorktreeDirtyState: review.sourceWorktreeDirtyState,
     sweepOrphanedInferTsconfig: startup.sweepOrphanedInferTsconfig,
+    validatePushCandidate: push.validatePushCandidate,
   });
   const autoMerge = createAutoMergeWorkflowHelpers(context, {
     gitMergeToTargetAsync: merge.gitMergeToTargetAsync,
@@ -76,6 +77,7 @@ export function createGitWorkflowHelpers(options = {}) {
     _collectPushOfferStateAsync: push.collectPushOfferStateAsync,
     _executePush: push.executePush,
     _executePushAsync: push.executePushAsync,
+    _validatePushCandidate: push.validatePushCandidate,
     _snapshotAndRemoveWorktreeOnly: cleanup.snapshotAndRemoveWorktreeOnly,
   };
 }

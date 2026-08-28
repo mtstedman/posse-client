@@ -619,6 +619,22 @@ export async function cmdAtlasSmoke({ projectDir }) {
   return report;
 }
 
+export async function cmdSharedTrunkSmoke() {
+  const json = process.argv.slice(3).includes("--json");
+  const { runSharedTrunkSmoke } = await import("../../../../scripts/shared-trunk-smoke.mjs");
+  if (!json) console.log(`\n  ${C.bold}Shared Trunk Two-Clone Smoke${C.reset}`);
+  const report = await runSharedTrunkSmoke({
+    onProgress: json ? null : (message) => console.log(`  ${C.dim}${message}${C.reset}`),
+  });
+  if (json) {
+    console.log(JSON.stringify(report));
+  } else {
+    console.log(`  ${C.green}passed${C.reset} ${report.branch} -> ${report.remoteHead.slice(0, 12)}`);
+    console.log(`  ${C.dim}${report.pushRejections} forced push race recovered; ${report.claimsRoundTripped} claim round-tripped${C.reset}\n`);
+  }
+  return report;
+}
+
 export async function cmdAtlasV2({ projectDir }) {
   const { runAtlasV2Command } = await import("./commands/atlas-v2.js");
   const argv = process.argv.slice(3);

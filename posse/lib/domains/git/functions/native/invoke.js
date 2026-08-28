@@ -191,6 +191,7 @@ function logNativeHeartbeatFailure({ method, asyncMode = false, bridge = false, 
 // needing to kill the in-flight process. This is a transport/idempotency
 // decision only; authorization is classified independently below.
 const WORKER_ELIGIBLE_METHODS = new Set([
+  "git.capabilities",
   "git.currentBranch",
   "git.currentHash",
   "git.hasChanges",
@@ -247,6 +248,7 @@ export { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../../catalog/binary.js"
 // every unrecognized method falls through to git:mutate.
 const GIT_READ_ONLY_METHODS = new Set([
   "git.branchExists",
+  "git.capabilities",
   "git.commitScope.conflictsWith",
   "git.commitScope.containsFile",
   "git.commitScope.findConflict",

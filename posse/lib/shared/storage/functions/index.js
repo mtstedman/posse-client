@@ -26,6 +26,7 @@ import {
   needsBridgeCommandResultsSchema,
   needsQueueForeignKeyOrphanRepair,
   needsWaitingLanePreparationSchema,
+  needsSharedTrunkMergeOperationSchema,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
   repairRunInsightsPromotionSchema,
@@ -33,6 +34,7 @@ import {
   repairHumanGateAssessmentSchema,
   repairQueueForeignKeyOrphans,
   repairWaitingLanePreparationSchema,
+  installSharedTrunkMergeOperationSchema,
   installBridgeCommandResultsSchema,
   repairWorkItemsGovernanceTierSchema,
   runHostMigration,
@@ -48,6 +50,7 @@ export {
   __testRepairHumanGateAssessmentSchema,
   __testRepairQueueForeignKeyOrphans,
   __testRepairWaitingLanePreparationSchema,
+  __testInstallSharedTrunkMergeOperationSchema,
   __testRepairWorkItemsGovernanceTierSchema,
   getHostSchemaVersion as __testGetHostSchemaVersion,
   runHostMigration as __testRunHostMigration,
@@ -2734,6 +2737,12 @@ export function getDb() {
     name: "waiting_lane_preparation_contracts",
     needs: needsWaitingLanePreparationSchema,
     migrate: repairWaitingLanePreparationSchema,
+  });
+  runHostMigration(_db, {
+    version: 12,
+    name: "shared_trunk_merge_operations",
+    needs: needsSharedTrunkMergeOperationSchema,
+    migrate: installSharedTrunkMergeOperationSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

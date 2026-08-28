@@ -21,6 +21,10 @@ import { logEvent, flushEventsNow } from "./events.js";
 import { leaseNowMs } from "./lease-clock.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import {
+  sharedTrunkClaimsEnabled,
+  warnForPeerClaimAtToolWrite,
+} from "./cross-instance-claims.js";
 
 const JOB_LOCK_RELEASE_STATUSES = new Set(["queued", ...TERMINAL_JOB_STATUSES]);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
@@ -789,6 +793,11 @@ export function verifyOrAcquireJobWriteLockForPath(jobId, filePath, { source = "
   const job = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(Number(jobId));
   if (!job) return { ok: true, skipped: "no_job" };
   if (!jobNeedsWriteLocks(job)) return { ok: true, skipped: "job_not_locking" };
+  // Peer claims are an advisory warning only. Run this before the local-lock
+  // fast path so a job that correctly owns its local lock still learns that a
+  // different clone may be editing the same file. The authoritative local
+  // lock result below is unchanged.
+  if (sharedTrunkClaimsEnabled()) warnForPeerClaimAtToolWrite(job, target);
   if (jobHoldsWriteLockForPath(job.id, target)) return { ok: true, held: true };
 
   const scope = { files: [target], roots: [] };

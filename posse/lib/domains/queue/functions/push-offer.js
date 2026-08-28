@@ -55,11 +55,11 @@ export function findOpenPushOfferJob() {
   return row ? getJob(row.id) : null;
 }
 
-function cancelOpenPushOfferGatesInTransaction(reason) {
+function cancelOpenPushOfferGatesInTransaction(reason, { remote = null, branch = null } = {}) {
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT id FROM jobs
+      `SELECT id, payload_json FROM jobs
        WHERE job_type = 'human_input'
          AND status IN ${OPEN_GATE_STATUSES_SQL}
          AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
@@ -67,6 +67,12 @@ function cancelOpenPushOfferGatesInTransaction(reason) {
     .all();
   let canceled = 0;
   for (const row of rows) {
+    if (remote != null || branch != null) {
+      let payload = {};
+      try { payload = JSON.parse(row.payload_json || "{}"); } catch { /* non-matching malformed gate */ }
+      if (remote != null && String(payload.remote || "") !== String(remote)) continue;
+      if (branch != null && String(payload.push_branch || "") !== String(branch)) continue;
+    }
     if (closePushOfferGate(row.id, "canceled", { declined: false, superseded: true, reason })) {
       canceled += 1;
     }
@@ -88,6 +94,22 @@ export function cancelOpenPushOfferGates(reason = "superseded") {
   // An in-flight push owns the same lock through remote mutation and durable
   // gate settlement. Leave the gate untouched so cancellation cannot report a
   // superseded offer after that push has already changed the remote.
+  return outcome.acquired ? outcome.result : 0;
+}
+
+/** Cancel only an offer for one exact remote/branch publication target. */
+export function cancelOpenPushOfferGateForTarget(remote, branch, reason = "superseded") {
+  const normalizedRemote = String(remote || "").trim();
+  const normalizedBranch = String(branch || "").trim();
+  if (!normalizedRemote || !normalizedBranch) return 0;
+  const db = getDb();
+  const outcome = withMergeLockSync(
+    () => runImmediateTransaction(db, () => cancelOpenPushOfferGatesInTransaction(reason, {
+      remote: normalizedRemote,
+      branch: normalizedBranch,
+    })),
+    { ownerId: `merge-${process.pid}-push-offer-target-cancel` },
+  );
   return outcome.acquired ? outcome.result : 0;
 }
 
