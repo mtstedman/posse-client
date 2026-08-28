@@ -7,6 +7,7 @@ import {
   parseHashRefSelector,
 } from "../../../../catalog/hash-store.js";
 import {
+  fetchHashRefAcrossJobAttempts,
   fetchHashRefForContext,
   materializeHashRefEvidenceForContext,
   promoteHashRefTraversalForContext,
@@ -28,7 +29,30 @@ const stagedDevBriefEvidence = new WeakMap();
 function fetchEvidenceOrSource(context, ref) {
   const evidence = materializeHashRefEvidenceForContext(context, ref);
   if (evidence?.found) return evidence;
-  return fetchHashRefForContext(context, ref);
+  const fetched = fetchHashRefForContext(context, ref);
+  if (fetched?.found) return fetched;
+  // A stale/invalid attempt_id or agent_call_id in the handed-down context
+  // hard-errors resolution (`invalid_agent_call_id` / `invalid_attempt_id`),
+  // so the fetch never even reaches the job scope that owns the ref. Retry at
+  // plain job scope — which owns and can always reach its own and ancestor
+  // evidence — before giving up.
+  const workItemId = context?.work_item_id ?? context?.workItemId;
+  const jobId = context?.job_id ?? context?.jobId;
+  const hadNarrowScope = context?.attempt_id != null || context?.attemptId != null
+    || context?.agent_call_id != null || context?.agentCallId != null;
+  if (jobId != null && hadNarrowScope) {
+    const jobScoped = fetchHashRefForContext({ work_item_id: workItemId, job_id: jobId }, ref);
+    if (jobScoped?.found) return jobScoped;
+  }
+  // Evidence surfaced under a different attempt of this job or an ancestor
+  // (agent_run scope keys on attempt_id) is still a legitimate cross-role reuse
+  // target; recover it within the job's own ancestry.
+  const recovered = fetchHashRefAcrossJobAttempts(
+    jobId != null ? { work_item_id: workItemId, job_id: jobId } : context,
+    ref,
+  );
+  if (recovered?.found) return recovered;
+  return fetched;
 }
 
 function compactText(value, max = 180) {

@@ -154,10 +154,16 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
   }
   const remoteCheck = nativeResult(remoteEnvelope) || {};
   const remoteOid = String(remoteCheck.remoteOid || remoteCheck.remote_oid || "").trim();
+  const checkedRemote = String(remoteCheck.remote || "").trim();
+  const checkedBranch = String(remoteCheck.branch || "").trim();
+  const writeCheck = String(remoteCheck.writeCheck || remoteCheck.write_check || "").trim();
   if (remoteCheck.readAccess !== true
     || remoteCheck.writeTransportAccess !== true
-    || !OID_RE.test(remoteOid)) {
-    return preflightFailure("remote_access_unproven", "Native preflight did not prove remote read/write transport access", {
+    || !OID_RE.test(remoteOid)
+    || checkedRemote !== config.remote
+    || checkedBranch !== config.branch
+    || writeCheck !== "dry_run_exact_branch_lease") {
+    return preflightFailure("remote_access_unproven", "Native preflight did not prove exact-branch remote read/write transport access", {
       remote: config.remote,
       branch: config.branch,
     });
@@ -193,7 +199,7 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
       writeTransportAccess: true,
       claimRefAccess: config.claimsEnabled === true ? true : null,
     },
-    writeCheck: remoteCheck.writeCheck || remoteCheck.write_check || "dry_run_exact_branch_lease",
+    writeCheck,
     branchPolicyVerified: remoteCheck.branchPolicyVerified === true,
     claimProbe,
   };

@@ -42,6 +42,7 @@ export function adminGitExec(args, cwd, {
   timeoutMs = DEFAULT_TIMEOUT_MS,
   timeout = undefined,
   encoding = "utf8",
+  env = undefined,
 } = {}) {
   const argv = normalizeArgs(args);
   try {
@@ -52,6 +53,7 @@ export function adminGitExec(args, cwd, {
       maxBuffer,
       timeout: timeout ?? timeoutMs,
       windowsHide: true,
+      env,
       // execFileSync passes child stderr through to the parent's terminal
       // unless stdio is explicit. Callers include git hooks running during a
       // user's commit; failure detail stays available via commandFailure's
@@ -74,6 +76,7 @@ export function adminGitExecAsync(args, cwd, {
   timeout = undefined,
   encoding = "utf8",
   signal = undefined,
+  env = undefined,
 } = {}) {
   const argv = normalizeArgs(args);
   return new Promise((resolve, reject) => {
@@ -84,6 +87,7 @@ export function adminGitExecAsync(args, cwd, {
       timeout: timeout ?? timeoutMs,
       windowsHide: true,
       signal,
+      env,
     }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout;

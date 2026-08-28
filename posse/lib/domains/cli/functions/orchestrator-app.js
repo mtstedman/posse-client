@@ -577,6 +577,7 @@ let _localModelsCommandModulePromise = null;
 let _nativeBinariesCommandModulePromise = null;
 let _gateCommandModulePromise = null;
 let _pairingPreflightCommandModulePromise = null;
+let _pairCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
@@ -666,6 +667,11 @@ async function loadGateCommandModule() {
 async function loadPairingPreflightCommandModule() {
   _pairingPreflightCommandModulePromise ||= import("./pairing-preflight-command.js");
   return _pairingPreflightCommandModulePromise;
+}
+
+async function loadPairCommandModule() {
+  _pairCommandModulePromise ||= import("../../pairing/functions/pair-command.js");
+  return _pairCommandModulePromise;
 }
 
 async function loadAtlasModule() {
@@ -2246,6 +2252,16 @@ async function cmdPairingPreflight() {
   return cmdPairingPreflightImpl({ projectDir: PROJECT_DIR });
 }
 
+async function cmdPair() {
+  const { runPairingCommand } = await loadPairCommandModule();
+  return runPairingCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
+}
+
+async function cmdUnpair() {
+  const { runUnpairCommand } = await loadPairCommandModule();
+  return runUnpairCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
+}
+
 async function cmdAtlas() {
   const { cmdAtlas: cmdAtlasImpl } = await loadDiagnosticCommandsModule();
   return cmdAtlasImpl({ projectDir: PROJECT_DIR });
@@ -2582,6 +2598,20 @@ const COMMAND_USAGE = {
     console.log(`  Resolve a parked human gate without starting the scheduler.`);
     console.log(`  ${C.dim}Common actions: pass, fail, retry, replan, skip. The gate's catalogued choices remain authoritative.${C.reset}\n`);
   },
+  pair: () => {
+    console.log(`\n  Usage:`);
+    console.log(`    posse pair [host] [--remote origin] [--branch posse/pair-name]`);
+    console.log(`    posse pair <CODE>`);
+    console.log(`    posse pair join <CODE>`);
+    console.log(`    posse pair status`);
+    console.log(`    posse pair leave`);
+    console.log(`\n  Opens or joins a persistent Posse-to-Posse shared-trunk session.`);
+    console.log(`  ${C.dim}This is separate from phone pairing via \`posse serve --pair\`.${C.reset}\n`);
+  },
+  unpair: () => {
+    console.log(`\n  Usage: posse unpair [--json]`);
+    console.log(`  Leave the current pairing and restore the original branch/settings.\n`);
+  },
   "local-models": () => {
     console.log(`\n  Usage: posse local-models [list [--json] | download [shorthand]]`);
     console.log(`  Lists signed local models with download size and recommended memory.`);
@@ -2614,7 +2644,24 @@ async function printCommandHelp(command) {
 export async function main() {
   const command = normalizeCommandName((!COMMAND && ITERATE_FLAG) ? "add" : COMMAND);
   if (rejectUnknownFlags()) return;
-  const commandPolicy = getCommandBootstrapPolicy(command);
+  const baseCommandPolicy = getCommandBootstrapPolicy(command);
+  let pairSubcommand = "";
+  if (command === "pair") {
+    const pairArgs = process.argv.slice(3);
+    for (let index = 0; index < pairArgs.length; index += 1) {
+      const arg = String(pairArgs[index] || "");
+      if (arg === "--remote" || arg === "--branch") {
+        index += 1;
+        continue;
+      }
+      if (arg.startsWith("-")) continue;
+      pairSubcommand = arg.toLowerCase();
+      break;
+    }
+  }
+  const commandPolicy = command === "pair" && ["leave", "status"].includes(pairSubcommand)
+    ? { ...baseCommandPolicy, requiresNativeGit: false }
+    : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
   // Report and polling commands may write the dated operational log, but they
   // do not own a scheduler lifecycle and must not create logs/runs sessions.
@@ -2708,6 +2755,9 @@ ${aliasDiagnostic}
     ${C.dim}             shared-trunk-smoke [--json]${C.reset}
     ${C.cyan}pairing-preflight${C.reset}  Verify this member's shared-remote access
     ${C.dim}             pairing-preflight [--json]${C.reset}
+    ${C.cyan}pair${C.reset}       Open or join a Posse-to-Posse shared session
+    ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
+    ${C.cyan}unpair${C.reset}     Leave pairing and restore the original branch/settings
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}
     ${C.cyan}atlas-v2${C.reset}     Inspect/manage the ATLAS v2 ledger, views, and warmer queue
@@ -2812,6 +2862,8 @@ async function dispatchResolvedCommand(command) {
     "shared-trunk-smoke": cmdSharedTrunkSmoke,
     "pairing-preflight": cmdPairingPreflight,
     "shared-trunk-preflight": cmdPairingPreflight,
+    pair: cmdPair,
+    unpair: cmdUnpair,
     atlas: cmdAtlas,
     "atlas-v2": cmdAtlasV2,
     "mcp-status": cmdMcpStatus,

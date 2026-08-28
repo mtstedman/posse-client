@@ -220,6 +220,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "-j", takesValue: true, category: "filter-value" },
   { name: "--role", takesValue: true, category: "filter-value" },
   { name: "--branch", takesValue: true, category: "filter-value" },
+  { name: "--remote", takesValue: true, category: "filter-value" },
   { name: "--lang", takesValue: true, category: "filter-value" },
   { name: "-r", takesValue: true, category: "filter-value" },
   { name: "-n", takesValue: true, category: "filter-value" },

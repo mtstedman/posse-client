@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 12;
+export const HOST_SCHEMA_VERSION = 13;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -523,6 +523,48 @@ export function installSharedTrunkMergeOperationSchema(db) {
 
 export function __testInstallSharedTrunkMergeOperationSchema(db) {
   return installSharedTrunkMergeOperationSchema(db);
+}
+
+export function needsPairingSessionSchema(db) {
+  if (!tableExists(db, "pairing_sessions")) return true;
+  return !db.prepare(
+    "SELECT 1 AS one FROM sqlite_master WHERE type='index' AND name='idx_pairing_sessions_one_live'",
+  ).get();
+}
+
+export function installPairingSessionSchema(db) {
+  if (!needsPairingSessionSchema(db)) return false;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pairing_sessions (
+      id TEXT PRIMARY KEY,
+      role TEXT NOT NULL CHECK (role IN ('host','member')),
+      remote_session_id TEXT,
+      relay_token TEXT,
+      remote_name TEXT NOT NULL,
+      remote_url TEXT NOT NULL,
+      shared_branch TEXT NOT NULL,
+      original_branch TEXT NOT NULL,
+      original_head TEXT NOT NULL,
+      original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
+      added_remote_name TEXT,
+      added_remote_url TEXT,
+      phase TEXT NOT NULL CHECK (phase IN ('enrolling','active','leaving','restore_blocked','left')),
+      process_pid INTEGER,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_sessions_one_live
+      ON pairing_sessions((1))
+      WHERE phase IN ('enrolling','active','leaving','restore_blocked');
+    CREATE INDEX IF NOT EXISTS idx_pairing_sessions_updated
+      ON pairing_sessions(updated_at DESC);
+  `);
+  return true;
+}
+
+export function __testInstallPairingSessionSchema(db) {
+  return installPairingSessionSchema(db);
 }
 
 const HUMAN_GATE_JOB_COLUMNS = Object.freeze([

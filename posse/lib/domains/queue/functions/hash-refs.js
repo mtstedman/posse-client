@@ -633,6 +633,50 @@ export function fetchHashRefForContext(context = {}, ref, opts = {}) {
 }
 
 /**
+ * Recover an evidence ref that was surfaced under the agent_run (attempt) scope
+ * of this job or any ancestor job, regardless of which attempt is current. The
+ * agent_run store keys strictly on `attempt_id`, so a ref one role surfaced in
+ * its own attempt is otherwise invisible to a later attempt of the same job and
+ * to descendant jobs (job ancestry only reaches `job_hash_refs`). This resolves
+ * the owning attempt within the job's own ancestry — never a sibling — and
+ * fetches through that attempt's scope so cross-role/cross-attempt handoffs can
+ * reissue it instead of forcing the receiver to re-fetch the source.
+ */
+export function fetchHashRefAcrossJobAttempts(context = {}, ref, opts = {}) {
+  const db = opts.db || getDb();
+  const normalized = normalizeHashRefAlias(ref);
+  const resolved = resolveHashRefContext(context, db);
+  if (resolved.error || !normalized || !resolved.jobId || !resolved.workItemId) {
+    return { ok: false, found: false, ref: String(ref || ""), error: resolved.error || "missing_job_scope" };
+  }
+  const ancestorIds = jobAncestorRows(db, resolved.jobId, resolved.workItemId).map((row) => row.id);
+  if (ancestorIds.length === 0) {
+    return { ok: false, found: false, ref: String(ref || ""), error: "no_job_ancestry" };
+  }
+  const placeholders = ancestorIds.map(() => "?").join(", ");
+  let owner = null;
+  try {
+    owner = db.prepare(`
+      SELECT attempt_id, job_id
+      FROM agent_run_hash_refs
+      WHERE ref = ? AND work_item_id = ? AND job_id IN (${placeholders})
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1
+    `).get(normalized, resolved.workItemId, ...ancestorIds);
+  } catch {
+    owner = null;
+  }
+  if (!owner?.attempt_id) {
+    return { ok: false, found: false, ref: normalized, error: "not_found_or_not_visible" };
+  }
+  return fetchHashRefForContext({
+    work_item_id: resolved.workItemId,
+    job_id: owner.job_id,
+    attempt_id: owner.attempt_id,
+  }, normalized, opts);
+}
+
+/**
  * Find exact traversal views derived from one stored ref and visible through
  * the current hash-ref scope. Terminal handoff validation uses this to
  * canonicalize a model's source-ref citation after that same model fetched an

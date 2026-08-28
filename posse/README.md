@@ -396,13 +396,47 @@ metadata in `refs/notes/posse-snapshots`.
 
 ### Shared side trunk for separate Posse instances
 
-Shared-trunk mode lets two independent Posse installations collaborate through
-one remote side branch. Each person must use a separate clone and a separate
+Shared-trunk mode lets any number of independent Posse installations collaborate
+through one remote side branch. Each person must use a separate clone and a separate
 `.posse/` database. Never point two instances at one clone, one worktree, or a
 SQLite database on a network filesystem.
 
-Create the side branch once, push it, then configure each clone while its clean
-root checkout is on that branch. Enable the feature last:
+The host opens a persistent Posse-to-Posse pairing session from a clean named
+branch:
+
+```bash
+posse pair
+```
+
+Posse creates and pushes a unique side branch, verifies the host's exact remote
+read/write path, switches the shared-trunk settings, and prints a reusable
+10-character code. Any number of members can join from their own clean clone:
+
+```bash
+posse pair ABCDE-FG234
+# equivalent: posse pair join ABCDE-FG234
+```
+
+Each joining Posse resolves the code to repository metadata, matches or adds the
+remote, independently proves noninteractive fetch and leased dry-run push access,
+and only then switches to the shared branch. Repository credentials are never
+shared through the pairing service. A member who cannot read and write the Git
+remote is not enrolled.
+
+The host and member commands remain connected, like `posse serve`. Press Ctrl-C
+or run `posse pair leave` (alias: `posse unpair`) to unpair. The host closes the
+session for everyone; every connected member then restores its own original
+branch and exact prior shared-trunk settings. A hard-killed process leaves a
+durable local recovery journal; `posse pair status` or `posse pair leave`
+finishes restoration. Restoration safely pauses if the shared checkout is dirty,
+so commit or stash the work and run `posse pair leave` again.
+
+`posse pair` is deliberately separate from `posse serve --pair`: the former
+pairs multiple Posse clones into one shared Git side trunk, while the latter
+pairs a phone/client to the Remote bridge.
+
+Manual configuration remains available for long-lived administrator-managed
+trunks. Create the branch once, push it, then enable the feature last:
 
 ```bash
 git switch -c posse/shared
@@ -420,7 +454,8 @@ configured shared branch must equal `target_branch`, and the native Git helper
 must advertise the complete shared-trunk contract. Authentication must already
 work non-interactively for the configured remote.
 
-Run `posse pairing-preflight` in every participating clone. It fetches the
+Pairing runs `posse pairing-preflight` automatically in every participating
+clone. For a manually configured trunk, run it yourself. It fetches the
 exact shared branch and performs a no-change, leased dry-run push to verify that
 member's read access and noninteractive write transport. When advisory claims
 are enabled, it also creates and CAS-deletes a unique probe claim ref. The

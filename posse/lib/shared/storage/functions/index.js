@@ -27,6 +27,7 @@ import {
   needsQueueForeignKeyOrphanRepair,
   needsWaitingLanePreparationSchema,
   needsSharedTrunkMergeOperationSchema,
+  needsPairingSessionSchema,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
   repairRunInsightsPromotionSchema,
@@ -35,6 +36,7 @@ import {
   repairQueueForeignKeyOrphans,
   repairWaitingLanePreparationSchema,
   installSharedTrunkMergeOperationSchema,
+  installPairingSessionSchema,
   installBridgeCommandResultsSchema,
   repairWorkItemsGovernanceTierSchema,
   runHostMigration,
@@ -51,6 +53,7 @@ export {
   __testRepairQueueForeignKeyOrphans,
   __testRepairWaitingLanePreparationSchema,
   __testInstallSharedTrunkMergeOperationSchema,
+  __testInstallPairingSessionSchema,
   __testRepairWorkItemsGovernanceTierSchema,
   getHostSchemaVersion as __testGetHostSchemaVersion,
   runHostMigration as __testRunHostMigration,
@@ -2743,6 +2746,12 @@ export function getDb() {
     name: "shared_trunk_merge_operations",
     needs: needsSharedTrunkMergeOperationSchema,
     migrate: installSharedTrunkMergeOperationSchema,
+  });
+  runHostMigration(_db, {
+    version: 13,
+    name: "pairing_sessions",
+    needs: needsPairingSessionSchema,
+    migrate: installPairingSessionSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

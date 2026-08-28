@@ -11,7 +11,7 @@ PRAGMA foreign_keys = ON;
 --  10 = + durable bridge command idempotency results.
 --  11 = + disabled waiting-lane preparation contracts and durable state.
 --  12 = + durable shared-trunk merge journal and advisory claim mirrors.
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -1221,6 +1221,33 @@ CREATE INDEX IF NOT EXISTS idx_shared_trunk_merge_operations_phase
 
 CREATE INDEX IF NOT EXISTS idx_shared_trunk_merge_operations_work_item
   ON shared_trunk_merge_operations(work_item_id, purpose, updated_at);
+
+-- Posse-to-Posse pairing journal. The short-lived relay credential is kept
+-- only while the session is live so interrupted unpair operations can recover.
+CREATE TABLE IF NOT EXISTS pairing_sessions (
+  id TEXT PRIMARY KEY,
+  role TEXT NOT NULL CHECK (role IN ('host','member')),
+  remote_session_id TEXT,
+  relay_token TEXT,
+  remote_name TEXT NOT NULL,
+  remote_url TEXT NOT NULL,
+  shared_branch TEXT NOT NULL,
+  original_branch TEXT NOT NULL,
+  original_head TEXT NOT NULL,
+  original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
+  added_remote_name TEXT,
+  added_remote_url TEXT,
+  phase TEXT NOT NULL CHECK (phase IN ('enrolling','active','leaving','restore_blocked','left')),
+  process_pid INTEGER,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_sessions_one_live
+  ON pairing_sessions((1))
+  WHERE phase IN ('enrolling','active','leaving','restore_blocked');
+CREATE INDEX IF NOT EXISTS idx_pairing_sessions_updated
+  ON pairing_sessions(updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS shared_trunk_peer_claims (
   claim_key TEXT PRIMARY KEY,
