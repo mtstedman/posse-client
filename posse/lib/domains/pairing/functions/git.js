@@ -66,6 +66,15 @@ export function canonicalRepositoryLocator(remoteUrl) {
       code: "pairing_repository_invalid",
     });
   }
+  // SCP-style remotes are parsed before URL remotes, so Windows drive syntax
+  // would otherwise turn `C:\\repo` into the network locator `c/\\repo`.
+  // Pairing is network-only: reject absolute/drive-relative and UNC forms at
+  // the ambiguity boundary instead of letting them acquire a shared identity.
+  if (/^[A-Za-z]:/u.test(value) || /^(?:\\\\|\/\/)/u.test(value)) {
+    throw Object.assign(new Error("Pairing requires a network Git remote (HTTPS, SSH, or git protocol)"), {
+      code: "pairing_repository_not_networked",
+    });
+  }
 
   const scp = value.match(/^(?:[^@/:]+@)?([^/:]+):(.+)$/u);
   if (!value.includes("://") && scp) {

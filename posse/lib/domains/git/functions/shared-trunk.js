@@ -87,6 +87,27 @@ function fetchedClaimsTruncated(result) {
   return result?.claimsTruncated === true || result?.claims_truncated === true;
 }
 
+function fetchedClaimsPagination(result) {
+  const camel = Object.prototype.hasOwnProperty.call(result || {}, "claimsNextCursor");
+  const snake = Object.prototype.hasOwnProperty.call(result || {}, "claims_next_cursor");
+  if (!camel && !snake) return { claimsPaginationSupported: false, claimsNextCursor: null };
+  const raw = camel ? result.claimsNextCursor : result.claims_next_cursor;
+  if (raw == null) return { claimsPaginationSupported: true, claimsNextCursor: null };
+  const cursor = String(raw).trim();
+  if (!/^[0-9a-f]{64}$/u.test(cursor)) {
+    return { claimsPaginationSupported: false, claimsNextCursor: null };
+  }
+  return { claimsPaginationSupported: true, claimsNextCursor: cursor };
+}
+
+function claimFetchMetadata(result) {
+  return {
+    claimsTruncated: result?.claimsTruncated === true,
+    claimsPaginationSupported: result?.claimsPaginationSupported === true,
+    claimsNextCursor: result?.claimsNextCursor || null,
+  };
+}
+
 async function underMergeLock(fn, ownerSuffix, alreadyHeld = false) {
   if (alreadyHeld) return fn();
   const locked = await withMergeLock(fn, {
@@ -358,7 +379,7 @@ export function handleSharedTrunkAdvance(projectDir, {
   return { advanced: true, atlas, paths };
 }
 
-async function fetchRemote(projectDir, config, { includeClaims = false } = {}) {
+async function fetchRemote(projectDir, config, { includeClaims = false, claimAfter = null } = {}) {
   let envelope;
   try {
     envelope = await fetchSharedTrunkNative({
@@ -366,6 +387,7 @@ async function fetchRemote(projectDir, config, { includeClaims = false } = {}) {
       remote: config.remote,
       branch: config.branch,
       includeClaims: includeClaims === true,
+      ...(includeClaims === true && claimAfter ? { claimAfter } : {}),
     });
   } catch (err) {
     return { ok: false, unavailable: true, operational: true, reason: err?.code || "fetch_failed", error: err };
@@ -382,11 +404,12 @@ async function fetchRemote(projectDir, config, { includeClaims = false } = {}) {
     remoteSha,
     fetchedClaims: fetchedClaims(result),
     claimsTruncated: fetchedClaimsTruncated(result),
+    ...fetchedClaimsPagination(result),
   };
 }
 
-async function reconcileAlreadyLocked(projectDir, config, { fetched = null, includeClaims = false } = {}) {
-  const observed = fetched || await fetchRemote(projectDir, config, { includeClaims });
+async function reconcileAlreadyLocked(projectDir, config, { fetched = null, includeClaims = false, claimAfter = null } = {}) {
+  const observed = fetched || await fetchRemote(projectDir, config, { includeClaims, claimAfter });
   if (!observed.ok) return { ...observed, config, operations: [], unresolved: [] };
   const operations = [];
   const unresolved = [];
@@ -490,14 +513,14 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
     // claim snapshot it carried is authoritative for the peer-claim mirror.
     fetchCompleted: true,
     fetchedClaims: observed.fetchedClaims,
-    claimsTruncated: observed.claimsTruncated === true,
+    ...claimFetchMetadata(observed),
     operations,
     unresolved,
   };
 }
 
 /** Startup/poll callable. It never guesses publication from local state alone. */
-export async function reconcileSharedTrunkOperations(projectDir, { includeClaims = false } = {}) {
+export async function reconcileSharedTrunkOperations(projectDir, { includeClaims = false, claimAfter = null } = {}) {
   const runtime = await runtimeSharedTrunkConfig(projectDir);
   if (!runtime.config.enabled) {
     return { ok: true, skipped: "disabled", unavailable: false, config: runtime.config, operations: [], unresolved: [] };
@@ -512,7 +535,7 @@ export async function reconcileSharedTrunkOperations(projectDir, { includeClaims
     return { ok: false, unavailable: true, reason: runtime.reason, config: runtime.config, operations: [], unresolved: [] };
   }
   return underMergeLock(
-    () => withWorktreeLockAsync(projectDir, projectDir, () => reconcileAlreadyLocked(projectDir, runtime.config, { includeClaims })),
+    () => withWorktreeLockAsync(projectDir, projectDir, () => reconcileAlreadyLocked(projectDir, runtime.config, { includeClaims, claimAfter })),
     "shared-trunk-reconcile",
   );
 }
@@ -521,10 +544,11 @@ export async function reconcileSharedTrunkOperations(projectDir, { includeClaims
 export async function syncSharedTrunkAlreadyLocked(projectDir, {
   config,
   includeClaims = false,
+  claimAfter = null,
   allowOperationId = null,
 } = {}) {
   recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch) });
-  const fetched = await fetchRemote(projectDir, config, { includeClaims });
+  const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter });
   if (!fetched.ok) {
     if (fetched.unavailable) {
       recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch), unavailable: true });
@@ -544,7 +568,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       config,
       fetchCompleted: true,
       fetchedClaims: fetched.fetchedClaims,
-      claimsTruncated: fetched.claimsTruncated === true,
+      ...claimFetchMetadata(fetched),
       reason: "unresolved_shared_trunk_operation",
       unresolved: blocking,
     };
@@ -560,7 +584,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       config,
       fetchCompleted: true,
       fetchedClaims: fetched.fetchedClaims,
-      claimsTruncated: fetched.claimsTruncated === true,
+      ...claimFetchMetadata(fetched),
       advanced: false,
       oldSha: localSha,
       newSha: localSha,
@@ -606,7 +630,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       local_sha: oldSha || null,
       remote_sha: fetched.remoteSha,
     });
-    return { ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, claimsTruncated: fetched.claimsTruncated === true, diverged: true, advanced: false, oldSha, newSha, reason: "local_trunk_diverged" };
+    return { ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), diverged: true, advanced: false, oldSha, newSha, reason: "local_trunk_diverged" };
   }
   if (status === "blocked") {
     recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha });
@@ -615,7 +639,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       config,
       fetchCompleted: true,
       fetchedClaims: fetched.fetchedClaims,
-      claimsTruncated: fetched.claimsTruncated === true,
+      ...claimFetchMetadata(fetched),
       advanced: false,
       diverged: false,
       unavailable: false,
@@ -631,7 +655,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       config,
       fetchCompleted: true,
       fetchedClaims: fetched.fetchedClaims,
-      claimsTruncated: fetched.claimsTruncated === true,
+      ...claimFetchMetadata(fetched),
       advanced: false,
       diverged: false,
       unavailable: false,
@@ -653,7 +677,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     config,
     fetchCompleted: true,
     fetchedClaims: fetched.fetchedClaims,
-    claimsTruncated: fetched.claimsTruncated === true,
+    ...claimFetchMetadata(fetched),
     advanced,
     oldSha,
     newSha,
@@ -663,7 +687,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
 }
 
 /** Public locked fetch/reconcile/fast-forward operation used by polling. */
-export async function syncSharedTrunkFromOrigin(projectDir, { includeClaims = false } = {}) {
+export async function syncSharedTrunkFromOrigin(projectDir, { includeClaims = false, claimAfter = null } = {}) {
   const runtime = await runtimeSharedTrunkConfig(projectDir);
   if (!runtime.config.enabled) {
     return {
@@ -689,6 +713,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, { includeClaims = fa
     () => withWorktreeLockAsync(projectDir, projectDir, () => syncSharedTrunkAlreadyLocked(projectDir, {
       config: runtime.config,
       includeClaims,
+      claimAfter,
     })),
     "shared-trunk-sync",
   );

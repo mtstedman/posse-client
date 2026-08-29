@@ -151,7 +151,10 @@ export function normalizeFetchedSharedTrunkClaims(fetchedClaims, options = {}) {
   return rows;
 }
 
-function replacePeerClaims(rows, instanceId, { completeSnapshot = true } = {}) {
+function replacePeerClaims(rows, instanceId, {
+  completeSnapshot = true,
+  snapshotStartedAt = null,
+} = {}) {
   const db = getDb();
   const observedAt = now();
   const peerRows = rows.filter((row) => row.instance_id !== instanceId);
@@ -195,7 +198,13 @@ function replacePeerClaims(rows, instanceId, { completeSnapshot = true } = {}) {
     // A truncated native fetch is not authority that omitted refs vanished.
     // Preserve the prior mirror until a complete snapshot or TTL expiry.
     if (completeSnapshot) {
-      if (seen.size === 0) {
+      const cycleStartedMs = Date.parse(snapshotStartedAt || "");
+      if (Number.isFinite(cycleStartedMs)) {
+        // A paginated cycle has already upserted earlier pages. Remove only
+        // rows that were not observed anywhere in this completed traversal.
+        db.prepare("DELETE FROM shared_trunk_peer_claims WHERE observed_at < ?")
+          .run(new Date(cycleStartedMs).toISOString());
+      } else if (seen.size === 0) {
         db.prepare("DELETE FROM shared_trunk_peer_claims").run();
       } else {
         const placeholders = [...seen].map(() => "?").join(",");
@@ -310,6 +319,8 @@ export async function syncCrossInstanceClaims({
   instanceId,
   fetchedClaims = [],
   claimsTruncated = false,
+  claimSnapshotComplete = null,
+  claimSnapshotStartedAt = null,
   activeLocks = { work_items: [], jobs: [] },
   casPush = casPushSharedTrunkClaimNative,
 } = {}) {
@@ -325,8 +336,12 @@ export async function syncCrossInstanceClaims({
     observedAtMs,
     ttlMin: config.claimsTtlMin,
   });
+  const completeSnapshot = claimSnapshotComplete == null
+    ? claimsTruncated !== true
+    : claimSnapshotComplete === true;
   const peerRows = replacePeerClaims(normalized, owner, {
-    completeSnapshot: claimsTruncated !== true,
+    completeSnapshot,
+    snapshotStartedAt: claimSnapshotStartedAt,
   });
   const remoteByKey = new Map(normalized.map((row) => [row.claim_key, row]));
   let expiredReleased = 0;

@@ -179,12 +179,13 @@ export class NativeBinary {
    *   nativeAuthManager?: import("../../native/classes/HeartbeatAuthManager.js").HeartbeatAuthManager,
    *   pulseManager?: PulseEnvelopeProvider,
    *   exactVersion?: string | null,
+   *   developmentOverrideAfterMs?: number | null,
    *   heartbeatVersion?: string | null,
    *   spawnImpl?: typeof spawn,
    *   spawnSyncImpl?: typeof spawnSync,
    * }} args
    */
-  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, exactVersion = undefined, heartbeatVersion = null, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
+  constructor({ name, binRoot, platform, arch, env, nativeAuthManager, pulseManager, exactVersion = undefined, developmentOverrideAfterMs = null, heartbeatVersion = null, spawnImpl = spawn, spawnSyncImpl = spawnSync } = /** @type {any} */ ({})) {
     if (!name) throw new TypeError("NativeBinary: name is required");
     this.name = name;
     this._binRoot = binRoot || null;
@@ -225,6 +226,9 @@ export class NativeBinary {
     this.keyGated = nativeBinaryIsKeyGated(name);
     this.workerCapable = nativeBinaryIsWorkerCapable(name);
     this.exactVersion = exactVersion === undefined ? nativeBinaryExactVersion(name) : exactVersion;
+    this._developmentOverrideAfterMs = Number.isFinite(developmentOverrideAfterMs)
+      ? Number(developmentOverrideAfterMs)
+      : null;
     this.heartbeatVersion = heartbeatVersion;
     this._versionProbe = null;
     this._nativePulseIdentity = null;
@@ -779,9 +783,20 @@ export class NativeBinary {
         arch: this.arch,
       })?.binaryPath)
       .filter(Boolean);
-    return this.exactVersion
-      ? [...downloaded, ...direct]
-      : [...direct, ...downloaded];
+    if (!this.exactVersion) return [...direct, ...downloaded];
+    if (this._developmentOverrideAfterMs == null) return [...downloaded, ...direct];
+    const newerDevelopmentBuild = direct.some((candidate) => {
+      try {
+        const stat = fs.statSync(candidate);
+        return stat.isFile() && stat.mtimeMs > this._developmentOverrideAfterMs;
+      } catch {
+        return false;
+      }
+    });
+    // A pull/boot refresh supersedes older flat staging. A developer can still
+    // explicitly rebuild or restage afterward, and that newer file wins until
+    // the next issued-artifact refresh boundary.
+    return newerDevelopmentBuild ? [...direct, ...downloaded] : downloaded;
   }
 
   /**

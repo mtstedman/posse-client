@@ -52,6 +52,8 @@ export class SharedTrunkPoller {
     this._lastPollAt = null;
     this._inFlight = null;
     this._lastConfig = null;
+    this._claimCursor = null;
+    this._claimCycleStartedAt = null;
   }
 
   delayUntilDueMs() {
@@ -109,6 +111,8 @@ export class SharedTrunkPoller {
     this._lastConfig = config;
     if (!config?.enabled) {
       this._nextDueAt = 0;
+      this._claimCursor = null;
+      this._claimCycleStartedAt = null;
       // One-shot correction of persisted health after the feature is turned
       // off, so status projections and tool-time claim warnings stop reading
       // a stale enabled=true snapshot.
@@ -121,6 +125,12 @@ export class SharedTrunkPoller {
       return { attempted: false, skipped: "disabled", config };
     }
     const now = this._nowMs();
+    if (config.claimsEnabled === true && !this._claimCycleStartedAt) {
+      this._claimCycleStartedAt = new Date().toISOString();
+    } else if (config.claimsEnabled !== true) {
+      this._claimCursor = null;
+      this._claimCycleStartedAt = null;
+    }
     const intervalSec = positiveSeconds(
       idle ? config.fetchIntervalIdleSec : config.fetchIntervalSec,
       idle ? 300 : 30,
@@ -137,6 +147,7 @@ export class SharedTrunkPoller {
     try {
       const recovery = await this._reconcile(this.projectDir, {
         includeClaims: config.claimsEnabled === true,
+        ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
       });
       if (recovery?.blocked || recovery?.diverged || (recovery?.unresolved?.length || 0) > 0) {
         // Blocked recovery halts trunk writes, but its completed claim-
@@ -148,6 +159,7 @@ export class SharedTrunkPoller {
       }
       const result = await this._sync(this.projectDir, {
         includeClaims: config.claimsEnabled === true,
+        ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
       });
       const effectiveConfig = result?.config || config;
       await this._reconcileClaims(result, effectiveConfig);
@@ -175,14 +187,29 @@ export class SharedTrunkPoller {
     if (config?.claimsEnabled !== true) return;
     if (result?.fetchCompleted !== true) return;
     try {
+      const paginationSupported = result?.claimsPaginationSupported === true;
+      const nextCursor = paginationSupported && /^[0-9a-f]{64}$/u.test(result?.claimsNextCursor || "")
+        ? result.claimsNextCursor
+        : null;
+      const snapshotComplete = paginationSupported
+        ? nextCursor == null
+        : result?.claimsTruncated !== true;
       await this._syncClaims({
         projectDir: this.projectDir,
         config,
         instanceId: this._instanceId(this.projectDir),
         fetchedClaims: result?.fetchedClaims || [],
         claimsTruncated: result?.claimsTruncated === true,
+        claimSnapshotComplete: snapshotComplete,
+        claimSnapshotStartedAt: paginationSupported ? this._claimCycleStartedAt : null,
         activeLocks: this._activeLocks(),
       });
+      if (paginationSupported && nextCursor) {
+        this._claimCursor = nextCursor;
+      } else {
+        this._claimCursor = null;
+        this._claimCycleStartedAt = null;
+      }
     } catch (err) {
       // Claims are explicitly fail-open. Keep trunk sync success and make
       // the degraded optimization visible without blocking dispatch.

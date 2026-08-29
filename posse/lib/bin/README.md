@@ -66,8 +66,10 @@ issued by the server (including Bossy when issued), verifies each SHA-256, and
 reuses a valid cached artifact.
 Normal `posse run` boot performs the same check for every enabled binary, so the
 explicit pull is primarily useful for prefetching or diagnosing artifact access.
-Boot is the automatic update boundary: once a run accepts a valid artifact, the
-process keeps that version for the rest of the run. Ordinary runtime availability
+Boot is the automatic update boundary: once a run accepts a valid artifact, it
+records that issued version in the installation so later processes select the
+same verified artifact before any older flat staging. The process keeps that
+version for the rest of the run. Ordinary runtime availability
 checks may recover a missing or invalid binary, but they do not refresh issued
 versions or replace a valid live handle mid-run.
 
@@ -101,7 +103,10 @@ always `lib/bin/posse-atlas-vector/<version>/...`, never `lib/bin/vector/...`.
 Each package keeps its independently issued versions in its own directory.
 
 An explicitly staged build is accepted only when its reported version matches
-the server-issued version. The cache stores a SHA-256 sidecar and is re-verified on every process boot.
+the server-issued version. A flat build staged after the most recent pull/boot
+refresh remains a development override; an older flat build cannot shadow the
+recorded issued artifact in a later process. The cache stores a SHA-256 sidecar
+and is re-verified on every process boot.
 Downloads use a same-directory `.part` file, fsync, and atomic rename; a
 checksum mismatch never becomes runnable. The raw `POSSE_KEY` is used only by
 the existing heartbeat broker and is never sent to the artifact endpoint or

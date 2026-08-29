@@ -34,6 +34,11 @@ import {
   findVerifiedNativeBinaryArtifact,
   invalidateNativeArtifactCache,
 } from "../../native/functions/artifact-download.js";
+import { defaultNativeBinRoot } from "../../native/functions/artifact-layout.js";
+import {
+  readNativeArtifactSelectionSync,
+  recordNativeArtifactSelection,
+} from "../../native/functions/artifact-selection.js";
 import { NativeBinary } from "./NativeBinary.js";
 
 const NATIVE_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
@@ -212,6 +217,24 @@ export class BinaryManager {
   }
 
   _createHandle(name, binRoot, exactVersion = undefined) {
+    let resolvedVersion = exactVersion;
+    let developmentOverrideAfterMs = null;
+    if (resolvedVersion === undefined) {
+      resolvedVersion = pinnedNativeVersion(name, this._opts.env);
+      // Explicit roots are development/test fixtures and intentionally remain
+      // self-contained. Only the installation-owned default manager consumes
+      // the durable selection written by a successful issued-artifact refresh.
+      if (resolvedVersion === undefined && !binRoot && !this._opts.binRoot) {
+        const selection = readNativeArtifactSelectionSync({
+          binRoot: process.env.POSSE_NATIVE_BIN_ROOT || defaultNativeBinRoot(),
+          name,
+        });
+        if (selection) {
+          resolvedVersion = selection.version;
+          developmentOverrideAfterMs = selection.selectedAtMs;
+        }
+      }
+    }
     return new NativeBinary({
       name,
       binRoot,
@@ -224,7 +247,8 @@ export class BinaryManager {
       env: this._opts.env,
       nativeAuthManager: this.nativeAuthManager,
       pulseManager: this._handlePulseManager,
-      exactVersion: exactVersion === undefined ? pinnedNativeVersion(name, this._opts.env) : exactVersion,
+      exactVersion: resolvedVersion,
+      developmentOverrideAfterMs,
     });
   }
 
@@ -275,9 +299,27 @@ export class BinaryManager {
     const ensureKey = `${name}:${refresh ? "refresh" : "cached"}:${dryRun ? "plan" : "install"}`;
     const inFlight = this._artifactEnsures.get(ensureKey);
     if (inFlight) return inFlight;
-    const promise = this._ensureRemoteArtifact(name, { refresh, dryRun, onProgress }).finally(() => {
+    const promise = this._ensureRemoteArtifact(name, { refresh, dryRun, onProgress })
+      .then(async (result) => {
+        if (
+          refresh
+          && result?.available === true
+          && result?.current === true
+          && result?.version
+          && !this._opts.binRoot
+          && this._artifactInstaller === ensureNativeBinaryArtifact
+        ) {
+          await recordNativeArtifactSelection({
+            binRoot: this.binary(name).binRoot,
+            name,
+            version: result.version,
+          });
+        }
+        return result;
+      })
+      .finally(() => {
       if (this._artifactEnsures.get(ensureKey) === promise) this._artifactEnsures.delete(ensureKey);
-    });
+      });
     this._artifactEnsures.set(ensureKey, promise);
     return promise;
   }
