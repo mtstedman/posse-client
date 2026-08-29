@@ -34,7 +34,8 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
    interactive default selection when input is available.
 2. **Preflight checks** — validates the optional smoke-test repo and reports
    provider credential / Git identity gaps.
-3. **System packages** — installs missing Git and helper CLIs via winget: ripgrep,
+3. **System packages** — installs missing Git and helper CLIs via winget in user
+   scope: ripgrep,
    Tesseract OCR, ImageMagick, FFmpeg, and Python 3. PHP is installed only when
    `php` is explicitly selected for SCIP. Each tool tries its winget id
    candidates independently, so one failure can't sink the rest.
@@ -43,15 +44,17 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 4. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise tries the
    winget Node distributions and verifies the installed major before continuing.
    Node 24 is a minimum, not an exact-version pin; newer majors are accepted.
-5. **Posse checkout** — uses the checkout containing this installer when
-   available; standalone fallback shallow-clones the public client and accepts
-   both a flat Posse root and the public client's `posse\` subdirectory.
+5. **Posse checkout** — uses the checkout containing this installer when it is
+   writable by the current user. A read-only bundled checkout triggers a
+   user-owned shallow clone instead. The public client's `posse\` subdirectory
+   is auto-detected.
 6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
    selected; then uses a global `composer` when present or otherwise
    configures PHP's bundled OpenSSL, cURL, and ZIP extensions (backing up an
    existing `php.ini` once), verifies them in a new PHP process, then downloads a
-   signature-verified `composer.phar` into Posse's `scip\bin` (skipped when
-   PHP is absent).
+   signature-verified `composer.phar` into
+   `%LOCALAPPDATA%\Posse\scip\bin` (skipped when PHP is absent). PHP's install
+   directory is write-probed before any `php.ini` edit.
 7. **npm dependencies** — `npm install --include=optional` (skipped when
    `node_modules` is fresh; one automatic retry).
 8. **Shell wiring** — writes `%USERPROFILE%\.config\posse\atlas.env.ps1`,
@@ -66,8 +69,10 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
 11. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
     prompts for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` /
     `CODEX_API_KEY`, written to
-    `%USERPROFILE%\.config\posse\providers.env.ps1` with an NTFS ACL locked
-    to the current user, plus optional `claude` / `codex login` launches.
+    `%USERPROFILE%\.config\posse\providers.env.ps1` with inheritance disabled
+    and access limited to the current user, SYSTEM, and local Administrators,
+    plus optional `claude` / `codex login` launches. Existing files are parsed
+    as data rather than executed as PowerShell.
 12. **Native binaries** — downloads the current authenticated `posse-atlas`,
     `posse-git`, `posse-ml`, `posse-remote`, and `posse-atlas-vector` artifacts for the host
     platform. Existing verified versions are reused. Without `POSSE_KEY`, the
@@ -79,7 +84,11 @@ server process. ATLAS runtime configuration lives in `~\.posse\account.db`
     and downloads/deploys the versioned Jina embeddings package when missing or
     stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; Windows does
     not need a system `tar`, `zstd`, or Node unpacker package. This replaces the
-    old standalone `pip install --user` and inline SCIP steps.
+    old standalone `pip install --user` and inline SCIP steps. On Windows,
+    generated Python, SCIP, Composer, dependency-lock, and native artifact state
+    lives beneath `%LOCALAPPDATA%\Posse`, not in the code checkout. Doctor/update
+    repair Posse npm dependencies before loading SQLite, so a loaded
+    `better_sqlite3.node` cannot pin the file being replaced.
 14. **Validation** — boots Posse (`posse status`) with a
     five-minute timeout.
 15. **ATLAS smoke test** — only with `-RepoPath`.
@@ -128,7 +137,7 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 | `-SkipSettings` | Don't seed `~\.posse\account.db` |
 | `-SkipHostTools` | Don't install helper CLIs (missing tools are still reported) |
 | `-NoInstallNode` | Don't auto-install Node via winget when Node 24+ is missing |
-| `-ConfigureKeys` | Prompt for provider API keys (SecureString input, user-only ACL file) |
+| `-ConfigureKeys` | Prompt for provider API keys (SecureString input, restricted ACL file) |
 | `-Force` | Re-run `npm install` even when `node_modules` looks fresh |
 | `-CommandTimeoutSeconds <sec>` | Maximum runtime for ordinary external commands (default: 1800; range: 60–86400) |
 | `-DoctorTimeoutSeconds <sec>` | Maximum runtime for first-run doctor, including Jina deployment (default: 7500; range: 60–86400) |
@@ -152,9 +161,10 @@ powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
 - External commands are killed after their configured timeout so an unattended
   package manager, Git, npm, native download, or doctor process cannot hold the
   installer forever.
-- `atlas.env.ps1` is rewritten each run. `providers.env.ps1` is **only**
-  touched when `-ConfigureKeys` is passed, and only the keys you enter are
-  updated — other lines are preserved. Account settings are merged, never
+- `atlas.env.ps1` is rewritten each run. An existing `providers.env.ps1` ACL is
+  validated/repaired on every run. With `-ConfigureKeys`, only the four known
+  provider assignments are parsed and rewritten; comments or arbitrary
+  PowerShell are intentionally ignored. Account settings are merged, never
   overwritten.
 
 ## Provider API keys
@@ -173,9 +183,9 @@ With `-ConfigureKeys`, the installer prompts (hidden via
   input skips the prompt.
 - Values are stored **plaintext** in
   `%USERPROFILE%\.config\posse\providers.env.ps1`. The installer applies an
-  NTFS ACL granting only the current Windows user access (inheritance
-  disabled) — the strongest protection available without DPAPI/Credential
-  Manager integration.
+  NTFS ACL granting the current Windows user, SYSTEM, and local Administrators
+  access (inheritance disabled). The replacement file is created with that ACL
+  before secret bytes are written.
 - Claude and Codex CLI logins can't be fully scripted — after the key
   prompts, the installer offers to launch `claude` and/or `codex login`.
 

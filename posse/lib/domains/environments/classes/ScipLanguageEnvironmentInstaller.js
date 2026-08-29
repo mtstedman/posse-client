@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from "path";
+import { managedToolRoot } from "../../../shared/platform/functions/managed-install-state.js";
 import {
   DEFAULT_POSSE_ROOT,
   DEFAULT_SCIP_COMMAND_TIMEOUT_MS,
@@ -33,6 +34,7 @@ export class ScipLanguageEnvironmentInstaller {
     arch = process.arch,
   } = {}) {
     this.posseRoot = path.resolve(String(posseRoot || DEFAULT_POSSE_ROOT));
+    this.installRoot = managedToolRoot(this.posseRoot, { platform });
     this.force = force === true;
     this.dryRun = dryRun === true;
     this.timeoutMs = normalizeCommandTimeoutMs(timeoutMs, DEFAULT_SCIP_COMMAND_TIMEOUT_MS);
@@ -97,15 +99,15 @@ export class ScipLanguageEnvironmentInstaller {
   }
 
   commandPath(segments, command) {
-    return commandPath(this.posseRoot, segments, command, this.platform);
+    return commandPath(this.installRoot, segments, command, this.platform);
   }
 
   expectedCommandPath(segments, command) {
-    return expectedCommandPath(this.posseRoot, segments, command, this.platform);
+    return expectedCommandPath(this.installRoot, segments, command, this.platform);
   }
 
   findCommandPath(segments, command) {
-    return findCommandPath(this.posseRoot, segments, command, this.platform);
+    return findCommandPath(this.installRoot, segments, command, this.platform);
   }
 
   statusForInstalledCommand(segments, command) {

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultPerUserPosseStateRoot } from "../../platform/functions/managed-install-state.js";
 
 import {
   nativeBinaryEntry,
@@ -14,7 +15,14 @@ const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VERSION_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 
 /** The installation-owned root shared by staging, downloads, and resolution. */
-export function defaultNativeBinRoot() {
+export function defaultNativeBinRoot({
+  platform = process.platform,
+  env = process.env,
+  homeDir = undefined,
+} = {}) {
+  if (platform === "win32") {
+    return path.join(defaultPerUserPosseStateRoot({ platform, env, homeDir }), "native");
+  }
   return path.resolve(THIS_DIR, "..", "..", "..", "bin");
 }
 

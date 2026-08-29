@@ -14,7 +14,19 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   }
 
   get nodeDir() {
+    return path.join(this.installRoot, "scip", "node");
+  }
+
+  get sourceNodeDir() {
     return path.join(this.posseRoot, "scip", "node");
+  }
+
+  async preparePackageRoot() {
+    if (this.nodeDir === this.sourceNodeDir || this.dryRun) return;
+    await fs.promises.mkdir(this.nodeDir, { recursive: true });
+    for (const name of ["package.json", "package-lock.json", "patch-scip-python.mjs"]) {
+      await fs.promises.copyFile(path.join(this.sourceNodeDir, name), path.join(this.nodeDir, name));
+    }
   }
 
   get commandSegments() {
@@ -37,7 +49,10 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   async install() {
     const packageJson = path.join(this.nodeDir, "package.json");
     const manifest = await this.runStep(1, "check managed Node package root", async () => {
-      if (!fs.existsSync(packageJson)) return this.failed(`missing ${packageJson}`);
+      const sourcePackageJson = path.join(this.sourceNodeDir, "package.json");
+      if (!fs.existsSync(sourcePackageJson)) return this.failed(`missing ${sourcePackageJson}`);
+      await this.preparePackageRoot();
+      if (!this.dryRun && !fs.existsSync(packageJson)) return this.failed(`missing ${packageJson}`);
       return this.ok("ok", "managed Node package root present");
     });
     if (manifest?.ok === false) return manifest;

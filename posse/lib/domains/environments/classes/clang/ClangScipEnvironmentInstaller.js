@@ -21,7 +21,7 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
   }
 
   get binDir() {
-    return path.join(this.posseRoot, "scip", "bin");
+    return path.join(this.installRoot, "scip", "bin");
   }
 
   installPlan() {

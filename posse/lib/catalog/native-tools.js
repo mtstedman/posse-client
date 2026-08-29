@@ -1422,7 +1422,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish assessment with one verdict, explicit confidence, and a brief prose proof drawn from the evidence already available. The receipt ends provider generation.",
+    "Finish assessment with one verdict, explicit confidence, and a brief prose proof drawn from the evidence already available. A fail verdict also requires an exact repair instruction so the fix handoff preserves the defect location, current behavior, expected behavior, and narrow change. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1441,6 +1441,12 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
         maxLength: 500,
         description: "One concise sentence stating the decisive verified fact or remaining defect.",
       },
+      repair: {
+        type: "string",
+        minLength: 1,
+        maxLength: 1000,
+        description: "Required only for fail: exact path/location, current behavior, expected behavior, and narrow required change passed to the fix job.",
+      },
       questions: {
         type: "array",
         maxItems: 3,
@@ -1448,6 +1454,11 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
       },
     },
     required: ["verdict", "confidence", "proof"],
+    allOf: [{
+      if: { properties: { verdict: { const: "fail" } }, required: ["verdict"] },
+      then: { required: ["repair"] },
+      else: { not: { required: ["repair"] } },
+    }],
     additionalProperties: false,
   },
 };

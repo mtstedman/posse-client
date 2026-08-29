@@ -2,10 +2,12 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
-import { fileURLToPath } from "url";
+import {
+  DEFAULT_INSTALLED_POSSE_ROOT,
+  managedInstallStateRoot,
+} from "../../../shared/platform/functions/managed-install-state.js";
 
-const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..");
+export const DEFAULT_POSSE_ROOT = DEFAULT_INSTALLED_POSSE_ROOT;
 export const PYTHON_RUNTIME_STAMP_NAME = ".posse-requirements.sha256";
 
 // A repo counts as a Python project for managed-runtime provisioning when any
@@ -57,11 +59,11 @@ function runtimeSlug(projectDir) {
 }
 
 export function getPythonRuntimeRoot(posseRoot = DEFAULT_POSSE_ROOT) {
-  return path.join(path.resolve(posseRoot || DEFAULT_POSSE_ROOT), ".posse", "runtime", "python");
+  return path.join(managedInstallStateRoot(posseRoot || DEFAULT_POSSE_ROOT), "runtime", "python");
 }
 
 export function getPythonToolchainRoot(posseRoot = DEFAULT_POSSE_ROOT) {
-  return path.join(path.resolve(posseRoot || DEFAULT_POSSE_ROOT), ".posse", "runtime", "python-toolchain");
+  return path.join(managedInstallStateRoot(posseRoot || DEFAULT_POSSE_ROOT), "runtime", "python-toolchain");
 }
 
 export function getPythonToolchainExecutable(posseRoot = DEFAULT_POSSE_ROOT) {

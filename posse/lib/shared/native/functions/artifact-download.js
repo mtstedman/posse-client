@@ -12,6 +12,11 @@ import {
 } from "../../../catalog/binary.js";
 import { PulseTokenManager } from "../classes/PulseTokenManager.js";
 import {
+  isRetryableWindowsFileError,
+  renameWithWindowsRetry,
+  unlinkWithWindowsRetry,
+} from "../../platform/functions/windows-file-retry.js";
+import {
   defaultNativeBinRoot,
   installedNativeArtifactVersions,
   nativeArtifactLayout,
@@ -22,6 +27,10 @@ export const NATIVE_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
 const ARTIFACT_ROUTE_GRANT = REMOTE_ARTIFACTS_READ_ROUTE;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const ERROR_RESPONSE_MAX_BYTES = 4 * 1024;
+const ARTIFACT_COMMIT_LOCK_WAIT_MS = 30_000;
+const ARTIFACT_COMMIT_LOCK_STALE_MS = 10 * 60 * 1000;
+const ARTIFACT_COMMIT_MALFORMED_LOCK_STALE_MS = 30_000;
+const ACTIVE_ARTIFACT_COMMIT_TOKENS = new Set();
 
 export function defaultNativeArtifactCacheRoot() {
   return defaultNativeBinRoot();
@@ -203,6 +212,7 @@ export async function ensureNativeBinaryArtifact({
 
     await fsp.mkdir(path.dirname(selected.binaryPath), { recursive: true });
     const partPath = `${selected.binaryPath}.part-${process.pid}-${randomUUID()}`;
+    const filePlatform = osToken === "windows" ? "win32" : process.platform;
     try {
       const actual = await writeResponseToPart(response, partPath, limit, ac.signal, (loadedBytes) => {
         reportArtifactProgress(onProgress, {
@@ -226,16 +236,21 @@ export async function ensureNativeBinaryArtifact({
         throw artifactError("POSSE_ARTIFACT_CHECKSUM_MISMATCH", "native artifact checksum verification failed");
       }
 
-      const concurrentSha = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
-      if (concurrentSha) {
-        await safeUnlink(partPath);
-        return { ...selected, sha256: concurrentSha, source: "cache", downloaded: false };
-      }
-      await deleteInvalidCache(selected.binaryPath, selected.checksumPath);
-      await fsp.rename(partPath, selected.binaryPath);
-      if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
-      await writeChecksumSidecar(selected.checksumPath, actual.sha256);
-      await syncDirectory(path.dirname(selected.binaryPath));
+      const committed = await withArtifactCommitLock(selected.binaryPath, async () => {
+        const concurrentSha = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
+        if (concurrentSha) {
+          return { sha256: concurrentSha, source: "cache", downloaded: false };
+        }
+        await deleteInvalidCache(selected.binaryPath, selected.checksumPath, filePlatform);
+        await renameWithWindowsRetry(partPath, selected.binaryPath, {
+          rename: fsp.rename,
+          platform: filePlatform,
+        });
+        if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
+        await writeChecksumSidecar(selected.checksumPath, actual.sha256, filePlatform);
+        await syncDirectory(path.dirname(selected.binaryPath));
+        return { sha256: actual.sha256, size: actual.size, source: "remote", downloaded: true };
+      }, { platform: filePlatform });
       reportArtifactProgress(onProgress, {
         type: "native-artifact-download",
         phase: "complete",
@@ -244,9 +259,9 @@ export async function ensureNativeBinaryArtifact({
         loadedBytes: actual.size,
         totalBytes: actual.size,
       });
-      return { ...selected, sha256: actual.sha256, size: actual.size, source: "remote", downloaded: true };
+      return { ...selected, ...committed };
     } finally {
-      await safeUnlink(partPath);
+      await safeUnlink(partPath, filePlatform);
     }
   } catch (err) {
     if (!responseComplete && (ac.signal.aborted || err?.name === "AbortError")) {
@@ -261,7 +276,7 @@ export async function ensureNativeBinaryArtifact({
 /** @param {{ binaryPath?: string, checksumPath?: string }} [args] */
 export async function invalidateNativeArtifactCache({ binaryPath, checksumPath } = {}) {
   if (!binaryPath || !checksumPath) return;
-  await deleteInvalidCache(binaryPath, checksumPath);
+  await deleteInvalidCache(binaryPath, checksumPath, process.platform);
 }
 
 async function verifiedCachedArtifact(binaryPath, checksumPath) {
@@ -316,7 +331,7 @@ async function writeResponseToPart(response, partPath, maxBytes, signal, onChunk
   return { sha256: hash.digest("hex"), size };
 }
 
-async function writeChecksumSidecar(checksumPath, sha256) {
+async function writeChecksumSidecar(checksumPath, sha256, platform = process.platform) {
   const part = `${checksumPath}.part-${process.pid}-${randomUUID()}`;
   const handle = await fsp.open(part, "wx", 0o600);
   try {
@@ -326,16 +341,87 @@ async function writeChecksumSidecar(checksumPath, sha256) {
     await handle.close();
   }
   try {
-    await safeUnlink(checksumPath);
-    await fsp.rename(part, checksumPath);
+    await safeUnlink(checksumPath, platform);
+    await renameWithWindowsRetry(part, checksumPath, { rename: fsp.rename, platform });
   } finally {
-    await safeUnlink(part);
+    await safeUnlink(part, platform);
   }
 }
 
-async function deleteInvalidCache(binaryPath, checksumPath) {
-  await safeUnlink(checksumPath);
-  await safeUnlink(binaryPath);
+async function deleteInvalidCache(binaryPath, checksumPath, platform = process.platform) {
+  await safeUnlink(checksumPath, platform);
+  await safeUnlink(binaryPath, platform);
+}
+
+async function withArtifactCommitLock(binaryPath, action, {
+  platform = process.platform,
+  waitMs = ARTIFACT_COMMIT_LOCK_WAIT_MS,
+} = {}) {
+  const lockPath = `${binaryPath}.install.lock`;
+  const token = `${process.pid}-${randomUUID()}`;
+  const startedAt = Date.now();
+  let handle = null;
+  while (!handle) {
+    let created = false;
+    try {
+      handle = await fsp.open(lockPath, "wx", 0o600);
+      created = true;
+      ACTIVE_ARTIFACT_COMMIT_TOKENS.add(token);
+      await handle.writeFile(`${JSON.stringify({ pid: process.pid, token, created_at: new Date().toISOString() })}\n`, "utf8");
+      await handle.sync();
+    } catch (error) {
+      try { await handle?.close(); } catch { /* best effort */ }
+      handle = null;
+      if (created) {
+        try { await safeUnlink(lockPath, platform); } catch { /* original error is more useful */ }
+        ACTIVE_ARTIFACT_COMMIT_TOKENS.delete(token);
+      }
+      const contended = error?.code === "EEXIST" || isRetryableWindowsFileError(error, platform);
+      if (!contended) throw error;
+      try {
+        if (await artifactCommitLockIsStale(lockPath)) {
+          await safeUnlink(lockPath, platform);
+          continue;
+        }
+      } catch (statError) {
+        if (statError?.code === "ENOENT") continue;
+      }
+      if (Date.now() - startedAt >= waitMs) {
+        const timeout = artifactError("POSSE_ARTIFACT_LOCK_TIMEOUT", `native artifact install lock timed out: ${lockPath}`);
+        throw timeout;
+      }
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+    }
+  }
+
+  try {
+    return await action();
+  } finally {
+    try { await handle.close(); } catch { /* best effort */ }
+    try { await safeUnlink(lockPath, platform); } catch { /* reclaimed on the next install */ }
+    ACTIVE_ARTIFACT_COMMIT_TOKENS.delete(token);
+  }
+}
+
+async function artifactCommitLockIsStale(lockPath) {
+  try {
+    const [raw, stat] = await Promise.all([
+      fsp.readFile(lockPath, "utf8"),
+      fsp.stat(lockPath),
+    ]);
+    const lock = JSON.parse(raw);
+    const abandonedByThisProcess = Number(lock?.pid) === process.pid
+      && !ACTIVE_ARTIFACT_COMMIT_TOKENS.has(lock?.token);
+    return abandonedByThisProcess || Date.now() - stat.mtimeMs > ARTIFACT_COMMIT_LOCK_STALE_MS;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    try {
+      const stat = await fsp.stat(lockPath);
+      return Date.now() - stat.mtimeMs > ARTIFACT_COMMIT_MALFORMED_LOCK_STALE_MS;
+    } catch {
+      return true;
+    }
+  }
 }
 
 async function sha256File(filePath) {
@@ -433,9 +519,9 @@ function shaFromDigestHeader(value) {
   }
 }
 
-async function safeUnlink(filePath) {
+async function safeUnlink(filePath, platform = process.platform) {
   try {
-    await fsp.unlink(filePath);
+    await unlinkWithWindowsRetry(filePath, { unlink: fsp.unlink, platform });
   } catch (err) {
     if (err?.code !== "ENOENT") throw err;
   }

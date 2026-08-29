@@ -73,5 +73,15 @@ if (process.argv.includes("--bossy")) {
   process.exit(await launchBossy());
 }
 
+// Doctor and update may have to replace Posse's own native Node dependencies.
+// Handle them before the main application imports/opens better-sqlite3; Windows
+// will not unlink a loaded .node module from the live process.
+const { runMaintenanceCliIfRequested } = await import("./lib/domains/cli/functions/maintenance-bootstrap.js");
+if (await runMaintenanceCliIfRequested()) {
+  // Maintenance awaited every child and flushed its output. Exit explicitly so
+  // a native heartbeat or package-manager handle cannot pin the bootstrap.
+  process.exit(process.exitCode ?? 0);
+}
+
 const { runOrchestratorCli } = await import("./lib/domains/cli/functions/orchestrator-app.js");
 await runOrchestratorCli();

@@ -1,10 +1,14 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { managedInstallStateRoot } from "../../platform/functions/managed-install-state.js";
 
 const LOCK_POLL_MS = 200;
-const MALFORMED_LOCK_STALE_MS = 60 * 60 * 1000;
+const WINDOWS_TRANSIENT_RETRY_MS = 2000;
+const RELEASE_RETRY_ATTEMPTS = 5;
+const MALFORMED_LOCK_STALE_MS = 30 * 1000;
 const MAX_LOCK_AGE_MS = 24 * 60 * 60 * 1000;
+const ACTIVE_LOCK_TOKENS = new Set();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,16 +46,28 @@ function lockIsStale(lockPath) {
   }
   const acquiredMs = Date.parse(lock.value?.acquired_at || "");
   const tooOld = Number.isFinite(acquiredMs) && Date.now() - acquiredMs > MAX_LOCK_AGE_MS;
-  return tooOld || !processIsAlive(Number(lock.value?.pid));
+  const abandonedByThisProcess = Number(lock.value?.pid) === process.pid
+    && !ACTIVE_LOCK_TOKENS.has(lock.value?.token);
+  return tooOld || abandonedByThisProcess || !processIsAlive(Number(lock.value?.pid));
 }
 
-function releaseOwnedLock(lockPath, token) {
-  const lock = readLock(lockPath);
-  if (lock?.value?.token !== token) return;
-  try { fs.unlinkSync(lockPath); } catch {}
+async function releaseOwnedLock(lockPath, token) {
+  for (let attempt = 1; attempt <= RELEASE_RETRY_ATTEMPTS; attempt += 1) {
+    const lock = readLock(lockPath);
+    if (lock?.value?.token !== token) return true;
+    try {
+      fs.unlinkSync(lockPath);
+      return true;
+    } catch (error) {
+      const retryable = isRetryableDependencyLockOpenError(error);
+      if (!retryable || attempt >= RELEASE_RETRY_ATTEMPTS) return false;
+      await delay(40 * attempt);
+    }
+  }
+  return false;
 }
 
-function reapStaleLock(lockPath) {
+async function reapStaleLock(lockPath) {
   const reaperPath = `${lockPath}.reaper`;
   const token = `${process.pid}-${crypto.randomUUID()}`;
   let handle = null;
@@ -59,6 +75,7 @@ function reapStaleLock(lockPath) {
   try {
     handle = fs.openSync(reaperPath, "wx");
     created = true;
+    ACTIVE_LOCK_TOKENS.add(token);
     fs.writeFileSync(handle, `${JSON.stringify({ pid: process.pid, token, acquired_at: new Date().toISOString() })}\n`, "utf8");
     fs.closeSync(handle);
     handle = null;
@@ -68,8 +85,9 @@ function reapStaleLock(lockPath) {
     }
     if (created) {
       try { fs.unlinkSync(reaperPath); } catch {}
+      ACTIVE_LOCK_TOKENS.delete(token);
     }
-    if (err?.code !== "EEXIST") throw err;
+    if (!isRetryableDependencyLockOpenError(err)) throw err;
     if (lockIsStale(reaperPath)) {
       try { fs.unlinkSync(reaperPath); } catch {}
     }
@@ -85,12 +103,18 @@ function reapStaleLock(lockPath) {
       return false;
     }
   } finally {
-    releaseOwnedLock(reaperPath, token);
+    await releaseOwnedLock(reaperPath, token);
+    ACTIVE_LOCK_TOKENS.delete(token);
   }
 }
 
+export function isRetryableDependencyLockOpenError(error, platform = process.platform) {
+  if (error?.code === "EEXIST") return true;
+  return platform === "win32" && ["EPERM", "EBUSY", "EACCES"].includes(error?.code);
+}
+
 export function dependencyInstallLockPath(posseRoot) {
-  return path.join(path.resolve(posseRoot), ".posse", "deps", "dependency-install.lock");
+  return path.join(managedInstallStateRoot(posseRoot), "deps", "dependency-install.lock");
 }
 
 export async function withDependencyInstallLock(posseRoot, fn, {
@@ -103,6 +127,7 @@ export async function withDependencyInstallLock(posseRoot, fn, {
   const token = `${process.pid}-${crypto.randomUUID()}`;
   const startedAt = Date.now();
   let waitingReported = false;
+  let lastOpenError = null;
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
   while (true) {
@@ -111,6 +136,7 @@ export async function withDependencyInstallLock(posseRoot, fn, {
     try {
       handle = fs.openSync(lockPath, "wx");
       created = true;
+      ACTIVE_LOCK_TOKENS.add(token);
       fs.writeFileSync(handle, `${JSON.stringify({ pid: process.pid, token, acquired_at: new Date().toISOString() })}\n`, "utf8");
       fs.closeSync(handle);
       handle = null;
@@ -121,12 +147,18 @@ export async function withDependencyInstallLock(posseRoot, fn, {
       }
       if (created) {
         try { fs.unlinkSync(lockPath); } catch {}
+        ACTIVE_LOCK_TOKENS.delete(token);
       }
-      if (err?.code !== "EEXIST") throw err;
-      if (lockIsStale(lockPath) && reapStaleLock(lockPath)) continue;
+      if (!isRetryableDependencyLockOpenError(err)) throw err;
+      lastOpenError = err;
+      if (err?.code !== "EEXIST" && Date.now() - startedAt >= WINDOWS_TRANSIENT_RETRY_MS) throw err;
+      if (lockIsStale(lockPath) && await reapStaleLock(lockPath)) continue;
       const maxWaitMs = waitMs == null ? null : Math.max(0, Number(waitMs) || 0);
       if (maxWaitMs != null && Date.now() - startedAt >= maxWaitMs) {
-        const timeout = new Error(`dependency install lock timed out after ${maxWaitMs}ms: ${lockPath}`);
+        const lastError = lastOpenError?.code
+          ? ` (last open error ${lastOpenError.code}: ${lastOpenError.message || "unknown"})`
+          : "";
+        const timeout = new Error(`dependency install lock timed out after ${maxWaitMs}ms: ${lockPath}${lastError}`);
         timeout.code = "DEPENDENCY_INSTALL_LOCK_TIMEOUT";
         throw timeout;
       }
@@ -141,6 +173,8 @@ export async function withDependencyInstallLock(posseRoot, fn, {
   try {
     return await fn();
   } finally {
-    releaseOwnedLock(lockPath, token);
+    const released = await releaseOwnedLock(lockPath, token);
+    ACTIVE_LOCK_TOKENS.delete(token);
+    if (!released) onProgress?.("dependency install lock release was deferred; the next repair will reclaim it");
   }
 }

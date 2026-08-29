@@ -2324,6 +2324,20 @@ function normalizeAssessorTerminalArgs(source) {
     report.questions,
     report.human_questions,
   );
+  const repair = firstAssessorText(
+    source.repair,
+    first.repair,
+    report.repair,
+    source.spawn_jobs?.[0]?.payload?.instructions,
+    first.spawn_jobs?.[0]?.payload?.instructions,
+    report.spawn_jobs?.[0]?.payload?.instructions,
+  ).replace(/\s+/g, " ").trim().slice(0, 1000);
+  if (outcome === "fail" && !repair) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.repair is required for fail");
+  }
+  if (outcome !== "fail" && repair) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.repair is only valid for fail");
+  }
   const confidence = source.confidence ?? first.confidence ?? report.confidence;
   if (!["low", "medium", "high"].includes(confidence)) {
     fail(
@@ -2348,7 +2362,7 @@ function normalizeAssessorTerminalArgs(source) {
         constraints: [],
         success_criteria: [],
         questions,
-        payload: {},
+        payload: repair ? { repair } : {},
       },
     }],
   };
@@ -2828,7 +2842,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
       source,
       uniqueKeys(
         compatibilityAliasKeys("assessorCompactOutcome"),
-        ["confidence", "proof", "questions"],
+        ["confidence", "proof", "repair", "questions"],
       ),
       "agent_handoff",
     );
@@ -2841,6 +2855,15 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.confidence must be low, medium, or high");
     }
     const proof = boundedString(compact.proof, "agent_handoff.proof", 500);
+    const repair = compact.repair == null
+      ? null
+      : boundedString(compact.repair, "agent_handoff.repair", 1000);
+    if (outcome === "fail" && !repair) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.repair is required for fail");
+    }
+    if (outcome !== "fail" && repair) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.repair is only valid for fail");
+    }
     const questions = compact.questions == null
       ? []
       : stringArray(compact.questions, "agent_handoff.questions", 3, 240);
@@ -2861,7 +2884,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
           constraints: [],
           success_criteria: [],
           questions,
-          payload: {},
+          payload: repair ? { repair } : {},
         },
       }],
     };
@@ -3002,6 +3025,19 @@ function materializeTerminalCompletion(args, role) {
     narrative_chars: 0,
     authoritative: true,
   };
+}
+
+function normalizeReportPayload(value, label, profile) {
+  if (value == null) return {};
+  if (profile !== "assessor.verdict.v1") {
+    exactKeys(value, [], label);
+    return {};
+  }
+  const payload = exactKeys(value, ["repair"], label);
+  const repair = payload.repair == null
+    ? null
+    : boundedString(payload.repair, `${label}.repair`, 1000);
+  return repair ? { repair } : {};
 }
 
 function collectAgentHandoffValidationIssues(args, { context = {}, role = "", maxHandoffs = null } = {}) {
@@ -3146,7 +3182,11 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000,
       ));
     }
-    if (report.payload != null) capture(() => exactKeys(report.payload, [], `${label}.report.payload`));
+    if (report.payload != null) capture(() => normalizeReportPayload(
+      report.payload,
+      `${label}.report.payload`,
+      profile,
+    ));
 
     if (!Array.isArray(report.claims)) {
       issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: `${label}.report.claims must be an array` });
@@ -3416,7 +3456,10 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     validateResearchAbsenceClaims(research, claims, `${reportLabel}.research`);
     const plannerMetadata = normalizePlannerReportMetadata(report, reportLabel, profile);
     entryCounters.narrative += [...constraints, ...successCriteria, ...questions].reduce((sum, text) => sum + text.length, 0);
-    const structuredMetadataLength = structuredStringLength(research) + structuredStringLength(plannerMetadata);
+    const payload = normalizeReportPayload(report.payload, `${reportLabel}.payload`, profile);
+    const structuredMetadataLength = structuredStringLength(research)
+      + structuredStringLength(plannerMetadata)
+      + structuredStringLength(payload);
     if (!researcherReport
       && structuredMetadataLength > AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars) {
       fail(
@@ -3435,7 +3478,6 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     }
     counters.narrative += entryCounters.narrative;
     counters.evidence += entryCounters.evidence;
-    if (report.payload != null) exactKeys(report.payload, [], `handoffs[${index}].report.payload`);
     const handoff = {
       id,
       depends_on: dependsOn,
@@ -3450,7 +3492,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         questions,
         ...(research == null ? {} : { research }),
         ...plannerMetadata,
-        payload: {},
+        payload,
       },
     };
     validateNarrativeEvidenceBoundary(handoff, index);
@@ -4316,11 +4358,19 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
         .map((reason) => String(reason || "").trim())
         .filter(Boolean),
     )];
+    const repair = String(first.report.payload?.repair || "").trim();
+    const spawnJobs = packet.outcome === "fail" && repair
+      ? [{
+          job_type: "fix",
+          title: "Fix assessed defect",
+          payload: { instructions: repair },
+        }]
+      : [];
     return `\`\`\`json\n${JSON.stringify({
       verdict: packet.outcome,
       confidence: packet.confidence,
       reasons,
-      spawn_jobs: [],
+      spawn_jobs: spawnJobs,
       human_questions: first.report.questions,
       suggestions: [],
     }, null, 2)}\n\`\`\``;

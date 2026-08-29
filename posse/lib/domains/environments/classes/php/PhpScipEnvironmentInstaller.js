@@ -20,7 +20,19 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
   }
 
   get phpDir() {
+    return path.join(this.installRoot, "scip", "php");
+  }
+
+  get sourcePhpDir() {
     return path.join(this.posseRoot, "scip", "php");
+  }
+
+  async preparePackageRoot() {
+    if (this.phpDir === this.sourcePhpDir || this.dryRun) return;
+    await fs.promises.mkdir(this.phpDir, { recursive: true });
+    for (const name of ["composer.json", "composer.lock", "patch-scip-php.mjs"]) {
+      await fs.promises.copyFile(path.join(this.sourcePhpDir, name), path.join(this.phpDir, name));
+    }
   }
 
   installPlan() {
@@ -36,7 +48,10 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
   async install() {
     const composerJson = path.join(this.phpDir, "composer.json");
     const manifest = await this.runStep(1, "check managed Composer package root", async () => {
-      if (!fs.existsSync(composerJson)) return this.failed(`missing ${composerJson}`);
+      const sourceComposerJson = path.join(this.sourcePhpDir, "composer.json");
+      if (!fs.existsSync(sourceComposerJson)) return this.failed(`missing ${sourceComposerJson}`);
+      await this.preparePackageRoot();
+      if (!this.dryRun && !fs.existsSync(composerJson)) return this.failed(`missing ${composerJson}`);
       return this.ok("ok", "managed Composer package root present");
     });
     if (manifest?.ok === false) return manifest;
@@ -89,7 +104,7 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
   async composerCommand() {
     if (await commandOnPath("composer")) return { command: composerBin(this.platform), args: [] };
     if (!(await commandOnPath("php"))) return null;
-    const phar = path.join(this.posseRoot, "scip", "bin", "composer.phar");
+    const phar = path.join(this.installRoot, "scip", "bin", "composer.phar");
     if (!fileExists(phar)) return null;
     return { command: "php", args: [phar] };
   }

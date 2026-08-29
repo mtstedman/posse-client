@@ -15,6 +15,7 @@ import { languageForPath } from "../parse/language-buckets.js";
 import { normalizeScipLanguages } from "./languages.js";
 import { getPythonToolchainSearchDirs } from "../../../../runtime/functions/python-runtime.js";
 import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
+import { managedToolRoot } from "../../../../../shared/platform/functions/managed-install-state.js";
 
 export const DEFAULT_SCIP_INDEX_TIMEOUT_MS = 120_000;
 
@@ -300,12 +301,22 @@ export function normalizeArgs(value) {
  * @returns {Array<{ dir: string, source: string }>}
  */
 function commandSearchRoots({ repoRoot, posseRoot }) {
-  const scipRoot = path.join(posseRoot, "scip");
+  const toolRoot = managedToolRoot(posseRoot);
+  const managedScipRoot = path.join(toolRoot, "scip");
+  const legacyScipRoot = path.join(posseRoot, "scip");
   /** @type {Array<{ dir: string, source: string }>} */
-  const roots = [
-    { dir: path.join(scipRoot, "bin"), source: "posse scip/bin" },
-    { dir: path.join(scipRoot, "node", "node_modules", ".bin"), source: "posse scip/node" },
-    { dir: path.join(scipRoot, "php", "vendor", "bin"), source: "posse scip/php" },
+  const roots = [];
+  if (path.resolve(toolRoot) !== path.resolve(posseRoot)) {
+    roots.push(
+      { dir: path.join(managedScipRoot, "bin"), source: "managed posse scip/bin" },
+      { dir: path.join(managedScipRoot, "node", "node_modules", ".bin"), source: "managed posse scip/node" },
+      { dir: path.join(managedScipRoot, "php", "vendor", "bin"), source: "managed posse scip/php" },
+    );
+  }
+  roots.push(
+    { dir: path.join(legacyScipRoot, "bin"), source: "posse scip/bin" },
+    { dir: path.join(legacyScipRoot, "node", "node_modules", ".bin"), source: "posse scip/node" },
+    { dir: path.join(legacyScipRoot, "php", "vendor", "bin"), source: "posse scip/php" },
     { dir: path.join(posseRoot, "node_modules", ".bin"), source: "posse node_modules/.bin" },
     { dir: path.join(posseRoot, "vendor", "bin"), source: "posse vendor/bin" },
     { dir: path.join(posseRoot, ".venv", "Scripts"), source: "posse .venv/Scripts" },
@@ -320,7 +331,7 @@ function commandSearchRoots({ repoRoot, posseRoot }) {
     { dir: path.join(repoRoot, ".venv", "bin"), source: "repo .venv/bin" },
     { dir: path.join(repoRoot, "venv", "bin"), source: "repo venv/bin" },
     ...getPythonToolchainSearchDirs(posseRoot).map((dir) => ({ dir, source: "posse python toolchain" })),
-  ];
+  );
   const pathEnv = String(process.env.PATH || "");
   for (const dir of pathEnv.split(path.delimiter).filter(Boolean)) {
     roots.push({ dir, source: "PATH" });

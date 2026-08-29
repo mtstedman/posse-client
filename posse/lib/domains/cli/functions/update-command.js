@@ -3,16 +3,8 @@ import os from "os";
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
-import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas/config.js";
-import { getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
-import { gitExecAsync } from "../../git/functions/utils.js";
-import {
-  DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS,
-  doctorRepoDependencies,
-  formatBootDependencySync,
-} from "../../system/functions/dependency-sync.js";
-import { DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS } from "../../atlas/functions/v2/embeddings/jina-model.js";
+import { adminGitExecAsync } from "../../git/functions/admin-git-exec.js";
 
 const DEFAULT_REMOTE = "origin";
 const DEFAULT_BRANCH = "main";
@@ -21,7 +13,8 @@ const GIT_TIMEOUT_MS = 120_000;
 // they get far more room than ordinary plumbing calls.
 const FETCH_TIMEOUT_MS = 600_000;
 const MERGE_TIMEOUT_MS = 300_000;
-const UPDATE_DOCTOR_TIMEOUT_MS = DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS;
+const UPDATE_DOCTOR_TIMEOUT_MS = 30 * 60 * 1000;
+const UPDATE_JINA_MODEL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const UPDATE_CHECK_TIMEOUT_MS = 2_000;
 const UPDATE_CHECK_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const CHANGELOG_LIMIT = 8;
@@ -92,7 +85,9 @@ export async function runGitCommand(args, {
   timeoutMs = GIT_TIMEOUT_MS,
 } = {}) {
   try {
-    const stdout = await gitExecAsync(args, cwd, {
+    const stdout = await adminGitExecAsync(args, cwd, {
+      trim: false,
+      env: process.env,
       timeoutMs,
       maxBuffer: 16 * 1024 * 1024,
     });
@@ -359,9 +354,9 @@ export async function updatePosseClient({
   branch = DEFAULT_BRANCH,
   dryRun = false,
   git = runGitCommand,
-  runDoctor = doctorRepoDependencies,
-  getAtlasConfig = getAtlasIntegrationConfig,
-  getSchedulerBlockMessage = getLiveSchedulerBlockMessage,
+  runDoctor = null,
+  getAtlasConfig = null,
+  getSchedulerBlockMessage = null,
   ui = null,
 } = {}) {
   const resolvedPosseRoot = path.resolve(posseRoot || DEFAULT_POSSE_ROOT);
@@ -375,6 +370,9 @@ export async function updatePosseClient({
   let mergeStarted = false;
   try {
     if (!dryRun) {
+      if (typeof getSchedulerBlockMessage !== "function") {
+        ({ getLiveSchedulerBlockMessage: getSchedulerBlockMessage } = await import("../../queue/functions/index.js"));
+      }
       const schedulerBlock = getSchedulerBlockMessage?.("main");
       if (schedulerBlock) {
         const update = blockedUpdate(`Posse is running; stop it before updating. ${schedulerBlock}`, {
@@ -601,6 +599,12 @@ export async function updatePosseClient({
     u.start("deps", dryRun
       ? "checking the dependency plan (posse doctor --dry-run)"
       : "refreshing dependencies (posse doctor)");
+    if (typeof getAtlasConfig !== "function") {
+      ({ getAtlasIntegrationConfig: getAtlasConfig } = await import("../../integrations/functions/atlas/config.js"));
+    }
+    if (typeof runDoctor !== "function") {
+      ({ doctorRepoDependencies: runDoctor } = await import("../../system/functions/dependency-sync.js"));
+    }
     const atlasConfig = getAtlasConfig?.() || {};
     const dependencies = await runDoctor({
       projectDir: resolvedProjectDir,
@@ -609,7 +613,7 @@ export async function updatePosseClient({
       includeNativeBinaries: true,
       includeJinaModel: true,
       timeoutMs: UPDATE_DOCTOR_TIMEOUT_MS,
-      modelTimeoutMs: DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
+      modelTimeoutMs: UPDATE_JINA_MODEL_TIMEOUT_MS,
       scipMode: atlasConfig.enabled === false
         ? "off"
         : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),
@@ -617,7 +621,7 @@ export async function updatePosseClient({
       onProgress: (message) => u.note("deps", firstLine(message)),
     });
     const depsOk = dependencies?.ok !== false;
-    const depsSummary = firstLine(dependencies?.doctor?.summary || (dependencies ? formatBootDependencySync(dependencies) : ""))
+    const depsSummary = firstLine(dependencies?.doctor?.summary || dependencies?.summary || dependencies?.message || "")
       || (depsOk ? "ready" : "needs attention");
     u.done("deps", depsOk ? "ok" : "warn", depsSummary);
 
@@ -828,9 +832,9 @@ export async function cmdUpdate({
   log = console.log,
   stream = process.stdout,
   git = runGitCommand,
-  runDoctor = doctorRepoDependencies,
-  getAtlasConfig = getAtlasIntegrationConfig,
-  getSchedulerBlockMessage = getLiveSchedulerBlockMessage,
+  runDoctor = null,
+  getAtlasConfig = null,
+  getSchedulerBlockMessage = null,
 } = {}) {
   if (hasArg(argv, "--help") || hasArg(argv, "-h")) {
     renderUpdateHelp({ log, colors });

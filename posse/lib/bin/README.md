@@ -55,7 +55,9 @@ from `process.platform` / `process.arch` by
 ## Pull, build, and deploy
 
 Pull every server-issued binary for the current OS and architecture into the
-verified, versioned native bin directory inside this Posse installation:
+verified, versioned native bin directory. Windows uses
+`%LOCALAPPDATA%\Posse\native`; other platforms use this installation's
+`lib/bin` tree:
 
 ```bash
 npm run pull:native
@@ -97,9 +99,10 @@ npm run rebuild:rust-binaries -- --platform current --rust-root <path-to-posse-b
 boot otherwise mints an `artifacts:read` pulse, reads each current package
 version signed into that pulse, downloads the exact current OS/architecture
 artifact from Posse Remote, verifies its SHA-256, and caches it under
-`lib/bin/<package>/<version>/<os>/<arch>/<file>` in the Posse installation.
+`<native-root>/<package>/<version>/<os>/<arch>/<file>`.
 Package names come only from `lib/catalog/binary.js`; for example, vector is
-always `lib/bin/posse-atlas-vector/<version>/...`, never `lib/bin/vector/...`.
+always `<native-root>/posse-atlas-vector/<version>/...`, never
+`<native-root>/vector/...`.
 Each package keeps its independently issued versions in its own directory.
 
 An explicitly staged build is accepted only when its reported version matches
@@ -107,7 +110,8 @@ the server-issued version. A flat build staged after the most recent pull/boot
 refresh remains a development override; an older flat build cannot shadow the
 recorded issued artifact in a later process. The cache stores a SHA-256 sidecar
 and is re-verified on every process boot.
-Downloads use a same-directory `.part` file, fsync, and atomic rename; a
+Downloads use a same-directory `.part` file, an inter-process commit lock,
+fsync, Windows sharing-violation retries, and atomic rename; a
 checksum mismatch never becomes runnable. The raw `POSSE_KEY` is used only by
 the existing heartbeat broker and is never sent to the artifact endpoint or
 written to disk.

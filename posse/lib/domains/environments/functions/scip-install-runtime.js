@@ -46,6 +46,26 @@ export function scipDependencyInstallEnv(sourceEnv = process.env) {
   });
 }
 
+export function terminateScipCommand(child, {
+  platform = process.platform,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  if (!child || child.exitCode != null) return false;
+  if (platform === "win32" && child.pid) {
+    try {
+      const killed = spawnSyncImpl("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 5000,
+      });
+      if (killed?.status === 0) return true;
+    } catch {
+      // Fall through to direct-child termination.
+    }
+  }
+  try { return child.kill("SIGKILL"); } catch { return false; }
+}
+
 /**
  * @param {string} command
  * @param {string[]} args
@@ -66,11 +86,15 @@ export async function runCommand(command, args, {
     let stdout = "";
     let stderr = "";
     let timer = null;
+    let forceTimer = null;
+    let settleTimer = null;
 
     const finish = (result) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      if (settleTimer) clearTimeout(settleTimer);
       resolve(result);
     };
 
@@ -89,7 +113,21 @@ export async function runCommand(command, args, {
     if (effectiveTimeoutMs != null) {
       timer = setTimeout(() => {
         timedOut = true;
-        try { child.kill(); } catch { /* child may already be gone */ }
+        terminateScipCommand(child);
+        forceTimer = setTimeout(() => terminateScipCommand(child), 1000);
+        forceTimer.unref?.();
+        settleTimer = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref?.();
+          finish({
+            ok: false,
+            message: `timed out after ${effectiveTimeoutMs}ms; process tree did not report exit`,
+            status: child.exitCode,
+            signal: child.signalCode,
+          });
+        }, 6000);
+        settleTimer.unref?.();
       }, effectiveTimeoutMs);
       timer.unref?.();
     }

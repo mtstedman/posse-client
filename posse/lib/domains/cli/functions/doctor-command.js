@@ -201,6 +201,7 @@ export async function cmdDoctor({
 
   if (json) {
     log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
     return result;
   }
 

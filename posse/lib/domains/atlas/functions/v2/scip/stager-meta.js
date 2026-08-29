@@ -7,6 +7,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { renameWithWindowsRetry as retryRename } from "../../../../../shared/platform/functions/windows-file-retry.js";
 import { SCIP_SANITIZER_POLICY_VERSION } from "./sanitizer-policy.js";
 
 export const SCIP_STAGER_META_SCHEMA_VERSION = 1;
@@ -44,8 +45,6 @@ export async function readStagerMeta(outputPath) {
   }
 }
 
-const RENAME_RETRYABLE_WIN_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
-
 /**
  * Atomic-rename a temp file onto its destination, retrying the Windows-only
  * transient failure where a just-written dest is briefly held open by a scanner/
@@ -63,16 +62,7 @@ export async function renameWithWindowsRetry(from, to, {
   rename = fs.promises.rename,
   platform = process.platform,
 } = {}) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await rename(from, to);
-      return;
-    } catch (err) {
-      const retryable = platform === "win32" && RENAME_RETRYABLE_WIN_CODES.has(err?.code);
-      if (!retryable || attempt >= attempts) throw err;
-      await new Promise((resolve) => { setTimeout(resolve, baseDelayMs * attempt); });
-    }
-  }
+  return await retryRename(from, to, { attempts, baseDelayMs, rename, platform });
 }
 
 /**

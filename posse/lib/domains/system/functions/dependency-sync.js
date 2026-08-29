@@ -37,6 +37,10 @@ import {
   filterProcessEnv,
   isUnboundedCommandTimeout,
 } from "../../../shared/platform/functions/process-env.js";
+import {
+  managedInstallStateRoot,
+  managedToolRoot,
+} from "../../../shared/platform/functions/managed-install-state.js";
 
 const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import.meta.url);
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
@@ -308,7 +312,7 @@ function nodeInstallCacheDir(root, opts = {}) {
   const rootUnderProject = !relToProject || (!relToProject.startsWith("..") && !path.isAbsolute(relToProject));
   const baseRoot = rootUnderProject ? projectRoot : resolvedRoot;
   const key = hashText(resolvedRoot.toLowerCase()).slice(0, 12);
-  return path.join(baseRoot, ".posse", "deps", "npm-cache", key);
+  return path.join(managedInstallStateRoot(baseRoot), "deps", "npm-cache", key);
 }
 
 function installArgsForPackageManager(manager, root, opts = {}) {
@@ -561,7 +565,7 @@ function appendGitignorePattern(ignorePath, pattern) {
   fs.writeFileSync(ignorePath, `${existing}${prefix}${pattern}\n`, "utf8");
 }
 
-function ensureGeneratedDirectoryIgnored(root, dirName, opts = {}) {
+export function ensureGeneratedDirectoryIgnored(root, dirName, opts = {}) {
   if (opts.dryRun) return null;
   const absDir = path.resolve(root, dirName);
   if (!dirExists(absDir)) return null;
@@ -581,9 +585,26 @@ function ensureGeneratedDirectoryIgnored(root, dirName, opts = {}) {
     return null;
   }
 
-  appendGitignorePattern(ignorePath, pattern);
-  opts.onProgress?.(`ignored generated dependency directory ${pattern}`);
-  return { path: ignorePath, pattern };
+  try {
+    appendGitignorePattern(ignorePath, pattern);
+    opts.onProgress?.(`ignored generated dependency directory ${pattern}`);
+    return { path: ignorePath, pattern };
+  } catch (error) {
+    const warning = `could not update ${ignorePath}: ${error?.code || error?.message || error}`;
+    opts.onProgress?.(`warning: ${warning}`);
+    return { path: ignorePath, pattern, warning };
+  }
+}
+
+export function summarizeNodeFailure(value) {
+  const lines = outputLines(value);
+  const useful = lines.filter((line) => (
+    /^(?:npm (?:error|ERR!))?\s*(?:code|syscall|path|errno)\b/iu.test(line)
+    || /\b(?:EPERM|EACCES|EBUSY|ENOENT|ERESOLVE)\b/iu.test(line)
+    || /operation not permitted|permission denied|access is denied|could not resolve dependency/iu.test(line)
+  ));
+  const selected = useful.length > 0 ? useful.slice(0, 6) : lines.slice(-3);
+  return compact(selected.join(" | "), 1200) || "npm failed";
 }
 
 function summarizeComposerFailure(value) {
@@ -794,14 +815,12 @@ async function ensureNodeProject(entry, opts) {
     timeoutMs: opts.timeoutMs,
     onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
   });
-  const generatedIgnore = before.missing_node_modules
-    ? ensureGeneratedDirectoryIgnored(entry.root, "node_modules", opts)
-    : null;
+  let generatedIgnore = null;
   let usedPeerConflictRetry = false;
   if (!run.ok) {
     const peerRetryArgs = installArgsForPeerConflictRetry(before.manager, args, run);
     if (!peerRetryArgs) {
-      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${installLabel} failed: ${firstLine(run.message)}` };
+      return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${installLabel} failed: ${summarizeNodeFailure(run.message)}` };
     }
     opts.onProgress?.(`${entry.label}: ${before.manager} install with legacy peer deps`);
     const peerRetry = await runCommand(command, peerRetryArgs, {
@@ -817,11 +836,14 @@ async function ensureNodeProject(entry, opts) {
         status: "failed",
         action: "install",
         generated_ignore: generatedIgnore,
-        message: `${installLabel} failed after peer dependency retry: ${firstLine(peerRetry.message) || firstLine(run.message)}`,
+        message: `${installLabel} failed after peer dependency retry: ${summarizeNodeFailure(peerRetry.message || run.message)}`,
       };
     }
     usedPeerConflictRetry = true;
   }
+  generatedIgnore = before.missing_node_modules
+    ? ensureGeneratedDirectoryIgnored(entry.root, "node_modules", opts)
+    : null;
   let after = inspectNodeProject(entry.root);
   let missingAfter = missingNodePackageLabels(after);
   let usedFocusedRetry = false;
@@ -848,7 +870,7 @@ async function ensureNodeProject(entry, opts) {
           message: `${installLabel} completed${usedPeerConflictRetry ? " after peer dependency retry" : ""}; optional packages unavailable: ${missingOptional.join(", ")}`,
         };
       }
-      return { ...after, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} focused install failed: ${firstLine(retry.message)}` };
+      return { ...after, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `${before.manager} focused install failed: ${summarizeNodeFailure(retry.message)}` };
     }
     after = inspectNodeProject(entry.root);
     missingAfter = missingNodePackageLabels(after);
@@ -1058,7 +1080,7 @@ async function ensurePythonProject(entry, opts) {
 function composerCommand(posseRoot) {
   const composer = "composer";
   if (commandOnPath(composer)) return { command: composer, args: [] };
-  const phar = path.join(posseRoot, "scip", "bin", "composer.phar");
+  const phar = path.join(managedToolRoot(posseRoot), "scip", "bin", "composer.phar");
   if (commandOnPath("php") && fileExists(phar)) return { command: "php", args: [phar] };
   return null;
 }
@@ -1113,13 +1135,14 @@ async function ensureComposerProject(entry, opts) {
     timeoutMs: opts.timeoutMs,
     onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
   });
-  const generatedIgnore = before.missing_vendor
-    ? ensureGeneratedDirectoryIgnored(entry.root, "vendor", opts)
-    : null;
+  let generatedIgnore = null;
   if (!run.ok) {
     const detail = summarizeComposerFailure(`${run.stderr || ""}\n${run.stdout || ""}\n${run.message || ""}`);
     return { ...before, label: entry.label, ok: false, status: "failed", action: "install", generated_ignore: generatedIgnore, message: `composer install failed: ${detail}` };
   }
+  generatedIgnore = before.missing_vendor
+    ? ensureGeneratedDirectoryIgnored(entry.root, "vendor", opts)
+    : null;
   let after = inspectComposerProject(entry.root);
   const dependenciesPresent = !after.missing_vendor && !after.missing_installed;
   if (dependenciesPresent && !opts.dryRun) {
@@ -1248,6 +1271,38 @@ async function ensureDependencyEntry(entry, ensure, opts) {
       message: firstLine(err?.message || err) || "dependency repair failed",
     };
   }
+}
+
+/**
+ * Repair only Posse's own Node dependency tree for callers that already loaded
+ * the full dependency-sync graph. The top-level Windows maintenance bootstrap
+ * uses the deliberately lightweight posse-node-repair.js worker instead.
+ *
+ * @param {{
+ *   posseRoot?: string,
+ *   dryRun?: boolean,
+ *   forceNodeInstall?: boolean,
+ *   adoptNodeInstall?: boolean,
+ *   timeoutMs?: number | string | boolean | null,
+ *   onProgress?: ((message: string) => void) | null,
+ * }} [input]
+ */
+export async function ensurePosseNodeDependencies(input = {}) {
+  const posseRoot = path.resolve(String(input.posseRoot || DEFAULT_POSSE_ROOT));
+  const opts = {
+    dryRun: input.dryRun === true,
+    posseRoot,
+    projectDir: posseRoot,
+    forceNodeInstall: input.forceNodeInstall === true,
+    adoptNodeInstall: input.adoptNodeInstall === true,
+    timeoutMs: normalizeCommandTimeoutMs(input.timeoutMs, DEFAULT_DOCTOR_COMMAND_TIMEOUT_MS),
+    onProgress: typeof input.onProgress === "function" ? input.onProgress : null,
+  };
+  return await ensureDependencyEntry(
+    { root: posseRoot, label: "posse npm" },
+    ensureNodeProject,
+    opts,
+  );
 }
 
 // Registered/approved test runners for the toolchain languages doctor cannot

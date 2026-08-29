@@ -19,7 +19,7 @@ export class GoScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller
   }
 
   get binDir() {
-    return path.join(this.posseRoot, "scip", "bin");
+    return path.join(this.installRoot, "scip", "bin");
   }
 
   installPlan() {

@@ -65,7 +65,7 @@
 
 .PARAMETER ConfigureKeys
   Interactively prompt for provider API keys (stored in providers.env.ps1 with
-  a user-only ACL).
+  an ACL limited to the current user, SYSTEM, and local Administrators).
 
 .PARAMETER Force
   Re-run npm install even when node_modules looks fresh.
@@ -124,6 +124,8 @@ $PosseScipMode      = "on"
 $ScipLanguagesSupplied = $PSBoundParameters.ContainsKey("ScipLanguages")
 $PosseScipLanguages = if ($ScipLanguagesSupplied) { $ScipLanguages } else { "typescript,python" }
 $NodeMinMajor       = 24
+$localAppDataRoot   = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
+$script:ManagedStateRoot = Join-Path $localAppDataRoot "Posse"
 
 # =============================================================================
 # UI layer: colors, splash, spinner, step engine
@@ -714,6 +716,30 @@ function Set-UserPathRaw {
   finally { $key.Dispose() }
 }
 
+function Test-DirectoryWriteAccess {
+  param([string]$DirectoryPath, [switch]$Create)
+  if ([string]::IsNullOrWhiteSpace($DirectoryPath)) { return $false }
+  $probeDir = Resolve-FullPath $DirectoryPath
+  try {
+    if (-not (Test-Path -LiteralPath $probeDir)) {
+      if (-not $Create) { return $false }
+      New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+    }
+    $probePath = Join-Path $probeDir (".posse-write-probe-" + [Guid]::NewGuid().ToString("N"))
+    try {
+      [System.IO.File]::WriteAllText($probePath, "ok", (New-Object System.Text.UTF8Encoding($false)))
+    }
+    finally {
+      Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+  }
+  catch {
+    Write-LogOnly ("[write-probe] {0}: {1}" -f $probeDir, $_.Exception.Message)
+    return $false
+  }
+}
+
 function Get-NodeMajor {
   $node = Get-Command node -ErrorAction SilentlyContinue
   if (-not $node) { return 0 }
@@ -791,7 +817,13 @@ function Test-DepsFresh {
 }
 
 function Test-ImageMagick {
-  return (Test-Cmd "magick") -or (Test-Cmd "convert")
+  $command = Get-Command magick -ErrorAction SilentlyContinue
+  if (-not $command) { return $false }
+  try {
+    $version = [string](& $command.Source -version 2>$null)
+    return $LASTEXITCODE -eq 0 -and $version -match "ImageMagick"
+  }
+  catch { return $false }
 }
 
 function Get-MissingPhpComposerExtensions {
@@ -823,6 +855,12 @@ function Enable-PhpComposerExtensions {
   }
   try { $phpBinary = (Resolve-Path -LiteralPath $phpBinary -ErrorAction Stop).Path } catch {}
   $phpDir = Split-Path $phpBinary -Parent
+  if (-not (Test-DirectoryWriteAccess $phpDir)) {
+    return [PSCustomObject]@{
+      Ok = $false; Changed = $false; IniPath = ""
+      Message = ("PHP directory is not writable by the current user: {0}" -f $phpDir)
+    }
+  }
   $extDir = Join-Path $phpDir "ext"
   $missingDlls = @($missingBefore | Where-Object { -not (Test-Path -LiteralPath (Join-Path $extDir ("php_{0}.dll" -f $_))) })
   if ($missingDlls.Count -gt 0) {
@@ -945,7 +983,7 @@ function Step-Packages {
     foreach ($id in $tool.WingetIds) {
       $rc = Invoke-Logged -Description ("install {0} ({1})" -f $tool.Label, $id) -Command @(
         "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
-        "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
+        "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
       )
       if ($rc -eq 0) { $installed = $true; break }
     }
@@ -963,7 +1001,8 @@ function Step-Packages {
           $userPath = Get-UserPathRaw
           if (-not (($userPath -split ";") -contains $dir)) {
             $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $dir } else { $dir }
-            Set-UserPathRaw $newUserPath
+            try { Set-UserPathRaw $newUserPath }
+            catch { Write-Warn2 ("could not persist Tesseract PATH entry; current session still works: {0}" -f $_.Exception.Message) }
           }
         }
         Write-Info "added Tesseract to PATH: $dir"
@@ -1014,7 +1053,7 @@ function Step-Node {
   foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
     $rc = Invoke-Logged -Description ("install Node.js ({0})" -f $id) -Command @(
       "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
-      "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
+      "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
     )
     if ($rc -eq 0) { $installed = $true; break }
   }
@@ -1041,8 +1080,14 @@ function Step-Checkout {
   if (-not $script:PosseDirResolved) {
     $detected = Get-InstallerPosseDir
     if ($detected) {
-      $script:PosseDirResolved = $detected
-      Write-Info "using the Posse checkout containing this installer"
+      if ($DryRun -or (Test-DirectoryWriteAccess $detected)) {
+        $script:PosseDirResolved = $detected
+        Write-Info "using the writable Posse checkout containing this installer"
+      }
+      else {
+        $script:PosseDirResolved = Join-Path $InstallRoot "posse-client"
+        Write-Warn2 ("installer checkout is read-only for the current user; cloning a user-owned copy into {0}" -f $script:PosseDirResolved)
+      }
     }
     else {
       $script:PosseDirResolved = Join-Path $InstallRoot "posse-client"
@@ -1054,7 +1099,12 @@ function Step-Checkout {
     $resolvedRoot = Resolve-PosseRootFromCheckout $script:PosseDirResolved
     if ($resolvedRoot) {
       $script:PosseDirResolved = $resolvedRoot
-      Step-End "ok" ("existing checkout: {0}" -f $resolvedRoot)
+      if (-not $DryRun -and -not (Test-DirectoryWriteAccess $resolvedRoot)) {
+        Step-FailCritical ("Posse checkout is not writable by the current user: {0}. Move/reclone it into a user-owned directory or omit -PosseDir." -f $resolvedRoot)
+      }
+      else {
+        Step-End "ok" ("existing writable checkout: {0}" -f $resolvedRoot)
+      }
     }
     else {
       Step-FailCritical ("{0} exists but has no orchestrator.js at its root or under posse\ (move or remove the partial directory, then re-run)" -f $script:PosseDirResolved)
@@ -1099,7 +1149,7 @@ function Step-Composer {
     Step-End "skipped" "PHP SCIP not selected"
     return
   }
-  $pharPath = Join-Path $script:PosseDirResolved "scip\bin\composer.phar"
+  $pharPath = Join-Path $script:ManagedStateRoot "scip\bin\composer.phar"
   $php = Get-Command php -ErrorAction SilentlyContinue
   if ($php -and -not $DryRun) {
     $phpExtensions = Enable-PhpComposerExtensions $php.Source
@@ -1111,14 +1161,14 @@ function Step-Composer {
     if ($phpExtensions.Changed) { Write-Info $phpExtensions.Message }
   }
   if (Test-Cmd "composer") { Step-End "ok" "composer on PATH"; return }
-  if (Test-Path $pharPath) { Step-End "ok" "composer.phar already present in scip\bin"; return }
+  if (Test-Path $pharPath) { Step-End "ok" ("composer.phar already present in {0}" -f $pharPath); return }
   if (-not $php) {
     Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
     Step-End "skipped" "php not available"
     return
   }
   if ($DryRun) {
-    Step-End "dry-run" "would configure PHP Composer extensions and download signature-verified composer.phar into scip\bin"
+    Step-End "dry-run" ("would configure PHP Composer extensions and download signature-verified composer.phar into {0}" -f $pharPath)
     return
   }
 
@@ -1140,7 +1190,7 @@ function Step-Composer {
     }
     $rc = Invoke-Logged -Description "run Composer installer" -Command @($php.Source, $setupPath, "--install-dir=$binDir", "--filename=composer.phar", "--quiet")
     if ($rc -eq 0 -and (Test-Path $pharPath)) {
-      Step-End "ok" "composer.phar installed into scip\bin"
+      Step-End "ok" ("composer.phar installed into {0}" -f $pharPath)
     }
     else {
       Write-Warn2 "Composer could not be installed; SCIP PHP dependency installs will be skipped"
@@ -1216,23 +1266,35 @@ function Step-ShellWiring {
   # Keep the managed shim first so an older npm/global Posse install cannot
   # win command resolution. The shim itself is rewritten above to point at the
   # checkout resolved by this installer run.
-  $userPath = Get-UserPathRaw
-  $parts = @($userPath -split ";" | Where-Object { $_ -and $_ -ine $binDir })
-  $newUserPath = (@($binDir) + $parts) -join ";"
-  if (-not $NoPersistEnv -and $newUserPath -ine $userPath) { Set-UserPathRaw $newUserPath }
+  if (-not $NoPersistEnv) {
+    try {
+      $userPath = Get-UserPathRaw
+      $parts = @($userPath -split ";" | Where-Object { $_ -and $_ -ine $binDir })
+      $newUserPath = (@($binDir) + $parts) -join ";"
+      if ($newUserPath -ine $userPath) { Set-UserPathRaw $newUserPath }
+    }
+    catch {
+      Write-Warn2 ("could not persist the Posse PATH entry; the shim still works in this session: {0}" -f $_.Exception.Message)
+    }
+  }
   $sessionParts = @($env:Path -split ";" | Where-Object { $_ -and $_ -ine $binDir })
   $env:Path = (@($binDir) + $sessionParts) -join ";"
 
   $executionPolicy = Get-PersistentExecutionPolicy
   $profileAllowed = $executionPolicy -notin @("Restricted", "AllSigned")
   if (-not $NoPersistEnv -and $PROFILE -and $profileAllowed) {
-    $profileDir = Split-Path $PROFILE -Parent
-    if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
-    if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-    $existing = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-    if ($null -eq $existing -or -not $existing.Contains($script:EnvFile)) {
-      Add-Content -Path $PROFILE -Value ("`n# Posse ATLAS integration`n. '" + ($script:EnvFile -replace "'", "''") + "'")
-      Write-Info "updated $PROFILE"
+    try {
+      $profileDir = Split-Path $PROFILE -Parent
+      if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+      if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+      $existing = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+      if ($null -eq $existing -or -not $existing.Contains($script:EnvFile)) {
+        Add-Content -Path $PROFILE -Value ("`n# Posse ATLAS integration`n. '" + ($script:EnvFile -replace "'", "''") + "'")
+        Write-Info "updated $PROFILE"
+      }
+    }
+    catch {
+      Write-Warn2 ("could not update the PowerShell profile; posse.cmd remains available through PATH: {0}" -f $_.Exception.Message)
     }
   }
   elseif (-not $NoPersistEnv -and -not $profileAllowed) {
@@ -1380,6 +1442,100 @@ function Step-Validate {
 
 # --- provider keys (interactive; no spinner) --------------------------------------
 $script:ConfiguredKeys = @()
+$script:ProviderKeyNames = @("POSSE_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "CODEX_API_KEY")
+
+function Read-ProviderKeysFile {
+  param([string]$PathValue)
+  $values = @{}
+  if (-not (Test-Path -LiteralPath $PathValue)) { return ,$values }
+  # This file is data, not trusted code. Accept only the exact single-quoted
+  # assignments emitted by this installer; ignore comments or arbitrary PS.
+  $assignment = '^\s*\$env:(POSSE_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)\s*=\s*''((?:[^'']|'''')*)''\s*$'
+  foreach ($line in Get-Content -LiteralPath $PathValue -ErrorAction Stop) {
+    $match = [regex]::Match([string]$line, $assignment)
+    if (-not $match.Success) { continue }
+    $values[$match.Groups[1].Value] = $match.Groups[2].Value.Replace("''", "'")
+  }
+  return ,$values
+}
+
+function Import-ProviderKeysFile {
+  param([string]$PathValue)
+  $values = Read-ProviderKeysFile $PathValue
+  foreach ($name in $values.Keys) {
+    if (-not [Environment]::GetEnvironmentVariable($name, "Process")) {
+      [Environment]::SetEnvironmentVariable($name, [string]$values[$name], "Process")
+    }
+  }
+  return ,$values
+}
+
+function New-ProviderFileSecurity {
+  $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  $security = New-Object System.Security.AccessControl.FileSecurity
+  $security.SetOwner($currentUser)
+  $security.SetAccessRuleProtection($true, $false)
+  foreach ($sidValue in @($currentUser.Value, "S-1-5-18", "S-1-5-32-544")) {
+    $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$security.AddAccessRule($rule)
+  }
+  return $security
+}
+
+function Set-ProviderFileAcl {
+  param([string]$PathValue)
+  $security = New-ProviderFileSecurity
+  Set-Acl -LiteralPath $PathValue -AclObject $security -ErrorAction Stop
+}
+
+function Write-RestrictedProviderFile {
+  param([string]$PathValue, [string]$Contents)
+  $dir = Split-Path $PathValue -Parent
+  if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  if (Test-Path -LiteralPath $PathValue) { Set-ProviderFileAcl $PathValue }
+
+  $temporary = Join-Path $dir (".providers-" + [Guid]::NewGuid().ToString("N") + ".tmp")
+  $stream = $null
+  $writer = $null
+  try {
+    $security = New-ProviderFileSecurity
+    # Create an empty file first, apply the restricted ACL, and only then write
+    # secret bytes. This works on both .NET Framework (PS 5.1) and modern .NET.
+    $stream = [System.IO.File]::Open(
+      $temporary,
+      [System.IO.FileMode]::CreateNew,
+      [System.IO.FileAccess]::ReadWrite,
+      [System.IO.FileShare]::None
+    )
+    $stream.Dispose()
+    $stream = $null
+    Set-Acl -LiteralPath $temporary -AclObject $security -ErrorAction Stop
+    $stream = [System.IO.File]::Open(
+      $temporary,
+      [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::Write,
+      [System.IO.FileShare]::None
+    )
+    $writer = [System.IO.StreamWriter]::new($stream, [System.Text.UTF8Encoding]::new($false))
+    $stream = $null # StreamWriter owns it from here.
+    $writer.Write($Contents)
+    $writer.Flush()
+    $writer.Dispose()
+    $writer = $null
+    Move-Item -LiteralPath $temporary -Destination $PathValue -Force
+    Set-ProviderFileAcl $PathValue
+  }
+  finally {
+    if ($writer) { $writer.Dispose() }
+    if ($stream) { $stream.Dispose() }
+    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+  }
+}
 
 function Prompt-ForKey {
   param([string]$Label, [string]$VarName)
@@ -1403,8 +1559,33 @@ function Step-Keys {
   Step-Begin "keys"
   $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
+  $storedKeys = @{}
+  $aclReady = $true
+  if (Test-Path -LiteralPath $providersFile) {
+    try {
+      $storedKeys = Import-ProviderKeysFile $providersFile
+      if (-not $DryRun) {
+        $safeLines = @("# Posse provider API keys -- generated by install-posse-atlas.ps1")
+        foreach ($name in $script:ProviderKeyNames) {
+          if ($storedKeys.ContainsKey($name) -and $storedKeys[$name]) {
+            $safeLines += ('$env:{0} = ''{1}''' -f $name, ([string]$storedKeys[$name] -replace "'", "''"))
+          }
+        }
+        Write-RestrictedProviderFile $providersFile (($safeLines -join "`r`n") + "`r`n")
+      }
+    }
+    catch {
+      $aclReady = $false
+      Write-Warn2 ("could not validate or restrict provider key file {0}: {1}" -f $providersFile, $_.Exception.Message)
+    }
+  }
   if (-not $ConfigureKeys) {
-    Step-End "skipped" "pass -ConfigureKeys to set provider API keys interactively"
+    if (Test-Path -LiteralPath $providersFile) {
+      if ($DryRun) { Step-End "dry-run" "would sanitize known provider assignments and repair the existing ACL" }
+      elseif ($aclReady) { Step-End "ok" "existing provider key file sanitized and ACL repaired" }
+      else { Step-End "partial" "existing provider key file ACL could not be secured" }
+    }
+    else { Step-End "skipped" "pass -ConfigureKeys to set provider API keys interactively" }
     return
   }
   if ($DryRun) {
@@ -1416,8 +1597,6 @@ function Step-Keys {
     Step-End "skipped" "no interactive terminal"
     return
   }
-
-  if (Test-Path $providersFile) { . $providersFile }
 
   Write-Info "input is hidden; press Enter to skip any key"
   [void](Prompt-ForKey "Posse remote key" "POSSE_KEY")
@@ -1439,53 +1618,51 @@ function Step-Keys {
   }
 
   if ($script:ConfiguredKeys.Count -eq 0) {
-    Step-End "ok" "no new keys captured"
+    if ($aclReady) { Step-End "ok" "no new keys captured; existing ACL verified" }
+    else { Step-End "partial" "no new keys captured; existing ACL could not be secured" }
     return
   }
 
-  # Merge with existing file: keep $env: lines for vars we didn't touch.
-  $capturedNames = @($script:ConfiguredKeys | ForEach-Object { $_.Name })
-  $preserved = @()
-  if (Test-Path $providersFile) {
-    $preserved = Get-Content $providersFile | Where-Object {
-      $line = $_
-      $keep = $true
-      foreach ($n in $capturedNames) {
-        if ($line -match "^\s*\`$env:$([regex]::Escape($n))\s*=") { $keep = $false; break }
-      }
-      $keep -and $line -notmatch '^\s*#\s*Posse provider API keys'
+  # Merge only known assignments. Unknown lines are intentionally discarded so
+  # a provider data file can never become a persistence/code-execution vector.
+  foreach ($key in $script:ConfiguredKeys) { $storedKeys[$key.Name] = $key.Value }
+  $lines = @("# Posse provider API keys -- generated by install-posse-atlas.ps1")
+  foreach ($name in $script:ProviderKeyNames) {
+    if ($storedKeys.ContainsKey($name) -and $storedKeys[$name]) {
+      $lines += ('$env:{0} = ''{1}''' -f $name, ([string]$storedKeys[$name] -replace "'", "''"))
     }
   }
-  $lines = @("# Posse provider API keys -- generated by install-posse-atlas.ps1")
-  $lines += $preserved | Where-Object { $_ }
-  foreach ($k in $script:ConfiguredKeys) {
-    $lines += ('$env:{0} = ''{1}''' -f $k.Name, ($k.Value -replace "'", "''"))
-  }
-  $dir = Split-Path $providersFile -Parent
-  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-  Set-Content -Path $providersFile -Value ($lines -join "`r`n") -Encoding UTF8
-
-  # Tighten ACL so only the current user (and admins/system) can read it.
   try {
-    $acl = Get-Acl $providersFile
-    $acl.SetAccessRuleProtection($true, $false)
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-      [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, "FullControl", "Allow")
-    $acl.SetAccessRule($rule)
-    Set-Acl -Path $providersFile -AclObject $acl
+    Write-RestrictedProviderFile $providersFile (($lines -join "`r`n") + "`r`n")
+    $aclReady = $true
   }
   catch {
-    Write-Warn2 "could not tighten ACL on $providersFile - file keeps default NTFS permissions. $_"
+    Write-Warn2 ("could not write provider keys with a restrictive ACL; the previous file was preserved: {0}" -f $_.Exception.Message)
+    Step-End "partial" "new keys are available only in this process; secure persistence failed"
+    return
   }
 
-  if (-not $NoPersistEnv -and $PROFILE) {
-    $profileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-    if ($null -eq $profileContent -or -not $profileContent.Contains($providersFile)) {
-      Add-Content -Path $PROFILE -Value ("`n# Posse provider keys`n. '" + ($providersFile -replace "'", "''") + "'")
-      Write-Info "updated $PROFILE"
+  $executionPolicy = Get-PersistentExecutionPolicy
+  $profileAllowed = $executionPolicy -notin @("Restricted", "AllSigned")
+  if (-not $NoPersistEnv -and $PROFILE -and $profileAllowed) {
+    try {
+      $profileDir = Split-Path $PROFILE -Parent
+      if (-not (Test-Path -LiteralPath $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+      if (-not (Test-Path -LiteralPath $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+      $profileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+      if ($null -eq $profileContent -or -not $profileContent.Contains($providersFile)) {
+        Add-Content -Path $PROFILE -Value ("`n# Posse provider keys`n. '" + ($providersFile -replace "'", "''") + "'")
+        Write-Info "updated $PROFILE"
+      }
+    }
+    catch {
+      Write-Warn2 ("could not update the PowerShell profile with provider keys; load the file manually when needed: {0}" -f $_.Exception.Message)
     }
   }
-  Step-End "ok" ("wrote {0} key(s) to {1} (user-only ACL)" -f $script:ConfiguredKeys.Count, $providersFile)
+  elseif (-not $NoPersistEnv -and -not $profileAllowed) {
+    Write-Warn2 ("PowerShell execution policy is {0}; skipped provider-key profile wiring." -f $executionPolicy)
+  }
+  Step-End "ok" ("wrote {0} key(s) to {1} (current user + SYSTEM/Administrators ACL)" -f $script:ConfiguredKeys.Count, $providersFile)
 }
 
 function Step-NativeBinaries {
@@ -1497,7 +1674,10 @@ function Step-NativeBinaries {
   }
 
   $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
-  if (-not $env:POSSE_KEY -and (Test-Path $providersFile)) { . $providersFile }
+  if (-not $env:POSSE_KEY -and (Test-Path $providersFile)) {
+    try { [void](Import-ProviderKeysFile $providersFile) }
+    catch { Write-Warn2 ("provider key file could not be parsed safely: {0}" -f $_.Exception.Message) }
+  }
   if (-not $env:POSSE_KEY) {
     $persistedKey = [Environment]::GetEnvironmentVariable("POSSE_KEY", "User")
     if (-not $persistedKey) { $persistedKey = [Environment]::GetEnvironmentVariable("POSSE_KEY", "Machine") }
@@ -1580,6 +1760,21 @@ function Step-Preflight {
   }
   else {
     Write-Info "no -RepoPath provided; smoke test will be skipped"
+  }
+  if (-not $DryRun) {
+    $requiredUserDirs = @(
+      $script:ManagedStateRoot,
+      (Join-Path $env:USERPROFILE ".config\posse"),
+      (Join-Path $env:USERPROFILE ".local\bin")
+    )
+    foreach ($requiredDir in $requiredUserDirs) {
+      if (-not (Test-DirectoryWriteAccess $requiredDir -Create)) {
+        $script:CriticalFailed = $true
+        Step-End "failed" ("current user cannot write required install directory: {0}" -f $requiredDir)
+        return $false
+      }
+    }
+    Write-Info ("managed Windows runtimes: {0}" -f $script:ManagedStateRoot)
   }
   Test-GitConfig
   Test-ProviderCredentials

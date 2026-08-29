@@ -19,6 +19,15 @@ const DEFAULT_DEPS = {
   shortJobTitle: defaultShortJobTitle,
 };
 
+const SUMMARY_OUTPUT_MAX_CHARS = 4000;
+const SUMMARY_TRUNCATION_NOTICE = "\n\n[Summary truncated at 4000 characters.]";
+
+function boundedSummaryOutput(output) {
+  const text = String(output || "").trim();
+  if (text.length <= SUMMARY_OUTPUT_MAX_CHARS) return text;
+  return `${text.slice(0, SUMMARY_OUTPUT_MAX_CHARS - SUMMARY_TRUNCATION_NOTICE.length).trimEnd()}${SUMMARY_TRUNCATION_NOTICE}`;
+}
+
 export class SummaryRole extends BaseRole {
   // Summary jobs reuse planner provider settings because they are read-only
   // synthesis calls rather than a separately configured runtime role.
@@ -67,14 +76,15 @@ export class SummaryRole extends BaseRole {
   }
 
   async processOutput(output, _stats, job, ctx) {
+    const summary = boundedSummaryOutput(output);
     storeArtifact({
       work_item_id: job.work_item_id,
       job_id: job.id,
       attempt_id: ctx.attemptId,
       artifact_type: "summary",
-      content_long: output,
+      content_long: summary,
     });
 
-    return output;
+    return summary;
   }
 }

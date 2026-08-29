@@ -31,6 +31,7 @@
     "contract:remote-agent-tools:check": "node scripts/generate-remote-agent-tool-definitions.mjs --check",
     "contract:remote-agent-tools:write": "node scripts/generate-remote-agent-tool-definitions.mjs --write",
     "contract:posse-remote:check": "node scripts/verify-posse-remote-tool-policy.mjs",
+    "smoke:provider-tools": "node scripts/provider-tool-smoke.mjs --check",
     "check:log-secrets": "node scripts/check-log-secrets.mjs",
     "pull:native": "node scripts/pull-native-artifacts.mjs",
     "compile:native:encoder": "node scripts/rebuild-rust-binaries.mjs --platform windows --binary atlas,git,remote",
