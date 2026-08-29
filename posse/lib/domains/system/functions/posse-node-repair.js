@@ -238,12 +238,17 @@ export async function repairPosseNodeTree({
       && before.missingLocked.length === 0
       && !before.stale;
     if (canAdopt && !dryRun) {
-      fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${before.manifestHash}\n`, "utf8");
+      try {
+        fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${before.manifestHash}\n`, "utf8");
+      } catch (error) {
+        return { ...before, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `existing npm install looks healthy, but the dependency stamp could not be written: ${error?.code || error?.message || error}` };
+      }
       return { ...before, label: "posse npm", ok: true, status: "installed", action: "stamp", message: "verified existing npm install" };
     }
     if (dryRun) return { ...before, label: "posse npm", ok: true, status: "dry-run", action: "install", message: "would run npm install" };
 
-    const cacheDir = path.join(managedInstallStateRoot(root), "deps", "npm-cache", hashText(root.toLowerCase()).slice(0, 12));
+    const cacheKeySource = process.platform === "win32" ? root.toLowerCase() : root;
+    const cacheDir = path.join(managedInstallStateRoot(root), "deps", "npm-cache", hashText(cacheKeySource).slice(0, 12));
     const args = ["install", "--include=optional", "--no-save", "--cache", cacheDir, "--no-fund", "--no-audit"];
     onProgress?.("posse npm: npm install");
     let run = await runNpm(args, { cwd: root, timeoutMs, onProgress });

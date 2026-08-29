@@ -48,7 +48,10 @@ function readMaintenanceSettings(projectDir) {
     POSSE_PROJECT_DIR: path.resolve(projectDir || process.cwd()),
   };
   const probe = spawnSync(process.execPath, [SETTINGS_PROBE], {
-    cwd: POSSE_ROOT,
+    // The orchestrator DB (scheduler_locks) anchors at process cwd, not
+    // POSSE_PROJECT_DIR — probe from the project or the live-scheduler guard
+    // reads the checkout's empty DB and never blocks `posse update`.
+    cwd: path.resolve(projectDir || process.cwd()),
     env,
     encoding: "utf8",
     windowsHide: true,
@@ -75,12 +78,19 @@ function readMaintenanceSettings(projectDir) {
   }
 }
 
-function runDoctorInFreshProcess({ projectDir, dryRun }) {
+function runDoctorInFreshProcess({ projectDir, dryRun, adoptNodeInstall = false }) {
   const args = [path.join(POSSE_ROOT, "orchestrator.js"), "doctor", "--json"];
   if (dryRun) args.push("--dry-run");
+  if (adoptNodeInstall) args.push("--adopt-node-install");
   const child = spawnSync(process.execPath, args, {
     cwd: path.resolve(projectDir || process.cwd()),
-    env: { ...process.env, POSSE_PROJECT_DIR: path.resolve(projectDir || process.cwd()) },
+    env: {
+      ...process.env,
+      POSSE_PROJECT_DIR: path.resolve(projectDir || process.cwd()),
+      // The parent just repaired the Posse npm tree; the child's bootstrap
+      // does not need a third pass.
+      POSSE_MAINTENANCE_NODE_REPAIRED: "1",
+    },
     encoding: "utf8",
     windowsHide: true,
     timeout: 3 * 60 * 60 * 1000,
@@ -128,7 +138,10 @@ async function repairOwnNodeTree({ argv, dryRun, json }) {
     child.on("close", (status) => {
       try {
         const parsed = JSON.parse(stdout.trim());
-        if (status !== 0 && parsed?.ok !== false) parsed.ok = false;
+        if (status !== 0 && parsed?.ok !== false) {
+          parsed.ok = false;
+          parsed.status = "failed";
+        }
         resolve(parsed);
       } catch (error) {
         resolve({
@@ -151,7 +164,9 @@ async function runDoctorBootstrap(argv) {
 
   const json = hasArg(argv, "--json");
   const dryRun = hasArg(argv, "--dry-run");
-  const ownNode = await repairOwnNodeTree({ argv, dryRun, json });
+  const ownNode = process.env.POSSE_MAINTENANCE_NODE_REPAIRED === "1"
+    ? { ok: true, status: "ok", label: "posse npm", message: "repaired by the maintenance parent" }
+    : await repairOwnNodeTree({ argv, dryRun, json });
   if (ownNode?.ok === false) {
     await cmdDoctor({
       argv,
@@ -201,11 +216,12 @@ async function runUpdateBootstrap(argv) {
     // Repair Posse's Node tree in this addon-free parent, then run every other
     // doctor phase from the newly checked-out code in a fresh process.
     runDoctor: async (input = {}) => {
-      const refreshedNode = await repairOwnNodeTree({ argv: [], dryRun: input.dryRun === true, json: true });
+      const refreshedNode = await repairOwnNodeTree({ argv, dryRun: input.dryRun === true, json: true });
       if (refreshedNode?.ok === false) return maintenanceFailure(refreshedNode);
       return runDoctorInFreshProcess({
         projectDir: input.projectDir || process.cwd(),
         dryRun: input.dryRun === true,
+        adoptNodeInstall: hasArg(argv, "--adopt-node-install"),
       });
     },
   });

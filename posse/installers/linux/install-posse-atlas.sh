@@ -1277,7 +1277,6 @@ const settingsPath = process.env.POSSE_ACCOUNT_DB_PATH
   ? path.resolve(process.env.POSSE_ACCOUNT_DB_PATH)
   : path.join(os.homedir(), ".posse", "account.db");
 const seed = {
-  atlas_mode: process.env.POSSE_SEED_MODE,
   atlas_phases: process.env.POSSE_SEED_PHASES,
   atlas_live_funnel: process.env.POSSE_SEED_FUNNEL,
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
@@ -1360,7 +1359,7 @@ step_doctor() {
   fi
   info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
   if run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (first run builds Python/SCIP envs and deploys Jina)" \
-    "$NODE_BIN" orchestrator.js doctor; then
+    "$NODE_BIN" orchestrator.js doctor --adopt-node-install; then
     step_end ok "runtime dependencies, binaries, and Jina ready"
   else
     warn "posse doctor reported unresolved dependencies — run 'posse doctor' after fixing the tools it names (log has details)"

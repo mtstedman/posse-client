@@ -787,6 +787,7 @@ const PLANNER_SCOPE = {
   type: "object",
   description:
     "Exact execution scope. db requires target dev and empty file arrays; other agent tasks require at least one exact writable path. " +
+    "Dev/code tasks require exact file paths and cannot use create_roots; artificer tasks may use bounded create_roots for artifact output. " +
     "Agent and promote tasks require concrete writable scope; non-db scope includes more than task_mode. " +
     "system/human_input uses scope:{}; system/promote requires exact destination files in files_to_create or files_to_modify.",
   properties: {
@@ -798,7 +799,12 @@ const PLANNER_SCOPE = {
     files_to_modify: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
     files_to_create: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
     files_to_delete: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
-    create_roots: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
+    create_roots: {
+      type: "array",
+      maxItems: 100,
+      items: { type: "string", minLength: 1, maxLength: 500 },
+      description: "Artifact-output roots for artificer tasks. Invalid for dev/code; declare each new repository file in files_to_create.",
+    },
     output_root: { type: "string", maxLength: 500 },
   },
   anyOf: [
@@ -945,6 +951,22 @@ const PLANNER_COMPACT_TASK_V3 = {
     ...AGENT_HANDOFF_PLANNER_REPORT_FIELDS,
   },
   required: ["role", "summary", "scope", "success_criteria"],
+  allOf: [{
+    if: {
+      properties: { role: { const: "dev" } },
+      required: ["role"],
+    },
+    then: {
+      properties: {
+        scope: {
+          not: {
+            required: ["create_roots"],
+            properties: { create_roots: { minItems: 1 } },
+          },
+        },
+      },
+    },
+  }],
   additionalProperties: false,
 };
 
@@ -1151,7 +1173,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
-    "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
+    "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source; expose an exact range before citing it, and if an available task-relevant selector is rejected as unsurfaced, expose that range and retry so the evidence stays attached. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Use an evidence_ref directly because its text is already visible to this planner call. A re-issued traversal_ref is available routing custody, not evidence: call it first to surface the content, then cite the returned evidence_ref or an exact surfaced path range. Source-backed line selectors use the source-file line numbers shown in gutters or source metadata and must stay inside one surfaced window. Cite only visibility surfaced to this planner call. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
@@ -1380,7 +1402,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
-    "Every non-db dev/artificer task must name at least one exact writable path in scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots; promote requires an exact destination path and human_input uses scope:{}. " +
+    "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source; expose an exact range before citing it, and if an available task-relevant selector is rejected as unsurfaced, expose that range and retry so the evidence stays attached. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Use an evidence_ref directly because its text is already visible to this planner call. A re-issued traversal_ref is available routing custody, not evidence: call it first to surface the content, then cite the returned evidence_ref or an exact surfaced path range. Source-backed line selectors use the source-file line numbers shown in gutters or source metadata and must stay inside one surfaced window. Cite only visibility surfaced to this planner call. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +

@@ -39,16 +39,18 @@
     "rebuild:rust-binaries": "node scripts/rebuild-rust-binaries.mjs",
     "rebuild:rust-binaries:all": "node scripts/rebuild-rust-binaries.mjs --platform all"
   },
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
-    "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1-beta.2",
     "agentkeepalive": "^4.2.1",
     "ajv": "^8.20.0",
     "better-sqlite3": "12.8.0",
-    "node-pty": "^1.1.0",
     "openai": "^4.104.0",
     "qrcode-terminal": "^0.12.0"
   },
   "optionalDependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1-beta.2",
     "mysql2": "^3.22.5",
     "pg": "^8.13.0"
   },

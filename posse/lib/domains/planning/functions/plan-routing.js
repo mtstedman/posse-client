@@ -726,9 +726,8 @@ export function validatePlannedTask(task, index, taskCount) {
     if (task.create_roots != null && !isStringArray(task.create_roots)) {
       errors.push("create_roots must be an array of strings");
     } else if (Array.isArray(task.create_roots)) {
-      for (let i = 0; i < task.create_roots.length; i++) {
-        const err = validateCreateRootPath(task.create_roots[i], `create_roots[${i}]`);
-        if (err) errors.push(err);
+      if (task.create_roots.length > 0) {
+        errors.push("create_roots[0] is invalid for dev tasks; declare every new repository file in files_to_create");
       }
     }
   }

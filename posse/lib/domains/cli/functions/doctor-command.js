@@ -226,8 +226,16 @@ export async function cmdDoctor({
     color: colors.green,
   });
 
+  if (result.credentials?.posse_key === "missing") {
+    log(`\n  ${colors.yellow}POSSE_KEY is not set${colors.reset} - ${result.credentials.remedy}`);
+  }
+
   if (!report.repaired?.length && !report.pending?.length && !report.failed?.length) {
-    log(`\n  ${colors.green}All dependency/runtime requirements are ready.${colors.reset}`);
+    if (result.credentials?.posse_key === "missing") {
+      log(`\n  ${colors.green}Dependency/runtime requirements are ready${colors.reset} (except the missing POSSE_KEY above).`);
+    } else {
+      log(`\n  ${colors.green}All dependency/runtime requirements are ready.${colors.reset}`);
+    }
   }
   log("");
 

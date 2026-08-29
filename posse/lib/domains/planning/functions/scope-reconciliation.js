@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
+import { gitExecBuffer } from "../../git/functions/utils.js";
 
 function pathEntryExists(target) {
   try {
@@ -42,6 +44,40 @@ function resolveRepoScopePath(projectDir, value) {
 
 function isRepository(projectDir) {
   return !!projectDir && pathEntryExists(path.join(path.resolve(projectDir), ".git"));
+}
+
+function ignoredUntrackedPathKeys(projectDir, values) {
+  const paths = uniqueScopePaths(values);
+  if (paths.length === 0) return new Set();
+  // ls-files is read-only and exact pathspecs keep the scan bounded to the
+  // planner's proposed scope. The native transport still needs a warm pulse
+  // token, which a fresh process (tests, cold boots) does not have -- fall
+  // back to direct system git so the ignored-path guard cannot silently
+  // disable itself; only when both transports fail does the probe degrade to
+  // "nothing ignored".
+  const args = [
+    "ls-files",
+    "-z",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--",
+    ...paths,
+  ];
+  let output = null;
+  try {
+    output = gitExecBuffer(args, projectDir, { maxBuffer: 1024 * 1024 });
+  } catch {
+    try {
+      output = adminGitExec(args, projectDir, { encoding: "buffer", maxBuffer: 1024 * 1024 });
+    } catch {
+      return new Set();
+    }
+  }
+  return new Set(output.toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .map(scopePathKey));
 }
 
 function legacyTaskNode(task, index) {
@@ -91,6 +127,15 @@ function validateNodes(nodes, projectDir) {
   if (!isRepository(projectDir)) return [];
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const issues = [];
+  const ignoredPathKeys = ignoredUntrackedPathKeys(
+    projectDir,
+    nodes
+      .filter(repoCodeTask)
+      .flatMap((node) => [
+        ...uniqueScopePaths(node.scope.files_to_modify),
+        ...uniqueScopePaths(node.scope.files_to_create),
+      ]),
+  );
 
   for (const node of nodes) {
     if (!repoCodeTask(node)) continue;
@@ -118,7 +163,15 @@ function validateNodes(nodes, projectDir) {
         continue;
       }
       const resolved = resolveRepoScopePath(projectDir, filePath);
-      if (resolved && !pathEntryExists(resolved) && !ancestorCreates.has(key)) {
+      if (resolved && ignoredPathKeys.has(key)) {
+        issues.push({
+          taskIndex: node.index,
+          taskId: node.id,
+          path: filePath,
+          declaredKind: "files_to_modify",
+          reason: "the path is ignored and will not exist in an isolated worktree",
+        });
+      } else if (resolved && !pathEntryExists(resolved) && !ancestorCreates.has(key)) {
         issues.push({
           taskIndex: node.index,
           taskId: node.id,
@@ -133,7 +186,15 @@ function validateNodes(nodes, projectDir) {
       const key = scopePathKey(filePath);
       if (modifyKeys.has(key)) continue;
       const resolved = resolveRepoScopePath(projectDir, filePath);
-      if (resolved && pathEntryExists(resolved) && !ancestorDeletes.has(key)) {
+      if (resolved && ignoredPathKeys.has(key)) {
+        issues.push({
+          taskIndex: node.index,
+          taskId: node.id,
+          path: filePath,
+          declaredKind: "files_to_create",
+          reason: "the path is ignored by repository policy",
+        });
+      } else if (resolved && pathEntryExists(resolved) && !ancestorDeletes.has(key)) {
         issues.push({
           taskIndex: node.index,
           taskId: node.id,

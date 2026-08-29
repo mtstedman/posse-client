@@ -15,6 +15,7 @@ import {
 } from "../../../catalog/process.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import { resolvePosseKey } from "../../../shared/native/functions/key.js";
 import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { gitExec } from "../../git/functions/utils.js";
@@ -930,9 +931,25 @@ function resolvePythonCommand(projectRoot = process.cwd()) {
       windowsHide: true,
       timeout: 5000,
     });
-    if ((result.status ?? 1) === 0) return candidate;
+    if ((result.status ?? 1) !== 0) continue;
+    // Exit status alone is not proof of a working interpreter: the Windows
+    // Store python alias and other stubs can exit 0 without being Python,
+    // which then blocks the managed-CPython fallback. Require a real
+    // `Python 3.x` banner and the documented 3.9 floor.
+    const version = parseProbedPythonVersion(result);
+    if (!version || version.major !== 3 || version.minor < MIN_PYTHON_MINOR) continue;
+    return candidate;
   }
   return null;
+}
+
+const MIN_PYTHON_MINOR = 9;
+
+function parseProbedPythonVersion(result) {
+  const banner = `${result?.stdout || ""}\n${result?.stderr || ""}`;
+  const match = banner.match(/^Python (\d+)\.(\d+)/mu);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: Number(match[2]) };
 }
 
 function inspectPythonProject(root, opts = {}) {
@@ -1748,7 +1765,22 @@ export async function doctorRepoDependencies(input = {}) {
   const mode = result.dry_run ? "plan" : "repair";
   return {
     ...result,
+    credentials: probeDoctorCredentials(),
     doctor: buildDependencyDoctorReport(result, mode),
+  };
+}
+
+function probeDoctorCredentials() {
+  // Presence only, never validity or the value itself. Missing POSSE_KEY does
+  // not fail the doctor (it must keep working as the keyless escape hatch),
+  // but an install that cannot boot must stop reporting "all ready".
+  let posseKey = "";
+  try { posseKey = resolvePosseKey(); } catch { posseKey = ""; }
+  return {
+    posse_key: posseKey ? "present" : "missing",
+    remedy: posseKey
+      ? null
+      : "set POSSE_KEY in your environment (installer: -ConfigureKeys on Windows, --configure-keys on Linux); native binaries and the remote gateway need it",
   };
 }
 

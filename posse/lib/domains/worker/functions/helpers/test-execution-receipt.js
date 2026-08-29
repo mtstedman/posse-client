@@ -259,6 +259,31 @@ function commandExecutable(command) {
   return raw.replace(/\\/g, "/").split("/").pop().toLowerCase();
 }
 
+function classifyNestedRunnerInfrastructureFailure(command, result) {
+  if (result?.status !== "failed") return result;
+  const executable = commandExecutable(command);
+  if (!["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
+    return result;
+  }
+  const output = [result.stdout, result.stderr]
+    .map((value) => String(value || ""))
+    .filter(Boolean)
+    .join("\n");
+  const nestedExecutableMissing = (
+    /\bspawn\s+ENOENT\b/i.test(output)
+    || /\bnode_modules missing\b/i.test(output)
+    || /(?:^|\n)(?:\/bin\/)?(?:ba)?sh:\s*\d*:\s*[^\n]+:\s*(?:not found|command not found)\b/i.test(output)
+    || /is not recognized as an internal or external command/i.test(output)
+  );
+  if (!nestedExecutableMissing) return result;
+  return {
+    ...result,
+    status: "infrastructure_error",
+    ok: null,
+    reason: "test_task_dependency_unavailable",
+  };
+}
+
 function packageManagerTaskArgs(args = []) {
   const remaining = [...args];
   // args arrive lowercased (the whole command is normalized before splitting),
@@ -532,11 +557,12 @@ async function executeReceipt({
     });
   }
 
-  const result = await runCommand(plan.command, {
+  const rawResult = await runCommand(plan.command, {
     cwd,
     timeoutMs,
     trustedShell: plan.source === "task_ab_acceptance",
   });
+  const result = classifyNestedRunnerInfrastructureFailure(plan.command, rawResult);
   const after = await porcelain(cwd);
   const afterCommit = await currentCommit(cwd);
   const afterHeadRef = await currentHeadRef(cwd);

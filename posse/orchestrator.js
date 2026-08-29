@@ -8,6 +8,18 @@ import { scrubSecrets } from "./lib/shared/telemetry/classes/logging/secret-scru
 
 installCliWarningFilter();
 
+// Node floor. Fail with the remedy before any native-addon import can turn a
+// wrong Node into a raw ABI stack trace (package.json `engines` only warns).
+const MIN_NODE_MAJOR = 24;
+const nodeMajor = Number(String(process.versions.node).split(".")[0]);
+if (Number.isFinite(nodeMajor) && nodeMajor < MIN_NODE_MAJOR) {
+  process.stderr.write(
+    `Posse requires Node ${MIN_NODE_MAJOR}+ (this is Node ${process.versions.node}).\n`
+    + "Install a current Node (the Posse installer does this) and re-run, or re-run the installer.\n",
+  );
+  process.exit(1);
+}
+
 // Fatal crash recorder. The main orchestrator process has no global
 // rejection/exception handler (only the worker processes do), so a teardown
 // unhandled rejection — e.g. a child-index/daemon close race during the
@@ -46,7 +58,11 @@ const recordFatalCrash = (kind, err) => {
   if (isBrokenPipe(err)) { noteBrokenPipeOnce(kind); return; } // consumer gone — keep running, don't abort
   const stack = err && err.stack ? err.stack : String(err);
   const code = err && err.code ? ` code=${err.code}` : "";
-  const line = scrubSecrets(`\n[${new Date().toISOString()}] FATAL ${kind}${code}\n${stack}\n`);
+  const text = `${err?.code || ""} ${err?.message || ""} ${stack}`;
+  const remedy = (err?.code === "ERR_DLOPEN_FAILED" || /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED/u.test(text))
+    ? "\nRemedy: Node changed under this install (native addon ABI mismatch). Run `posse doctor` to rebuild dependencies, or re-run the installer.\n"
+    : "";
+  const line = scrubSecrets(`\n[${new Date().toISOString()}] FATAL ${kind}${code}\n${stack}\n${remedy}`);
   try { process.stderr.write(`\x1b[?25h\x1b[0m${line}`); } catch { /* best effort */ }
   try {
     const dir = path.join(process.cwd(), ".posse", "logs");

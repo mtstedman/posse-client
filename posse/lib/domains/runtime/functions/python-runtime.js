@@ -109,11 +109,14 @@ function pythonExecutableWorks(python) {
     const cached = PYTHON_EXECUTABLE_PROBE_CACHE.get(python);
     if (cached?.signature === signature) return cached.ok;
     const result = spawnSync(python, ["--version"], {
-      stdio: "ignore",
+      encoding: "utf8",
       windowsHide: true,
       timeout: 15000,
     });
-    const ok = result.status === 0;
+    // A zero exit is not enough: interpreter-shaped stubs (e.g. the Windows
+    // Store alias) can exit 0 without being Python. Require the banner.
+    const ok = result.status === 0
+      && /^Python 3\./mu.test(`${result.stdout || ""}\n${result.stderr || ""}`);
     PYTHON_EXECUTABLE_PROBE_CACHE.set(python, { signature, ok });
     return ok;
   } catch {

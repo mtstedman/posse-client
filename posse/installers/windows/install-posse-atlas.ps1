@@ -716,6 +716,30 @@ function Set-UserPathRaw {
   finally { $key.Dispose() }
 }
 
+function Send-EnvironmentChangeBroadcast {
+  # HKCU Environment writes are invisible to Explorer-launched terminals until
+  # a WM_SETTINGCHANGE "Environment" broadcast. SetEnvironmentVariable(User)
+  # broadcasts on its own; raw registry PATH writes must do it here.
+  try {
+    if (-not ("PosseNative.EnvBroadcast" -as [type])) {
+      Add-Type -Namespace PosseNative -Name EnvBroadcast -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    [UIntPtr]$result = [UIntPtr]::Zero
+    # 0xFFFF = HWND_BROADCAST, 0x1A = WM_SETTINGCHANGE, 2 = SMTO_ABORTIFHUNG
+    [void][PosseNative.EnvBroadcast]::SendMessageTimeout([IntPtr]0xFFFF, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)
+  }
+  catch { Write-LogOnly ("[env-broadcast] {0}" -f $_.Exception.Message) }
+}
+
+function Expand-PathEntry {
+  param([string]$Entry)
+  if ([string]::IsNullOrWhiteSpace($Entry)) { return "" }
+  try { return [Environment]::ExpandEnvironmentVariables($Entry) } catch { return $Entry }
+}
+
 function Test-DirectoryWriteAccess {
   param([string]$DirectoryPath, [switch]$Create)
   if ([string]::IsNullOrWhiteSpace($DirectoryPath)) { return $false }
@@ -999,9 +1023,10 @@ function Step-Packages {
         $env:Path = "$dir;$env:Path"
         if (-not $NoPersistEnv) {
           $userPath = Get-UserPathRaw
-          if (-not (($userPath -split ";") -contains $dir)) {
+          $alreadyPresent = @($userPath -split ";" | Where-Object { (Expand-PathEntry $_) -ieq $dir }).Count -gt 0
+          if (-not $alreadyPresent) {
             $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $dir } else { $dir }
-            try { Set-UserPathRaw $newUserPath }
+            try { Set-UserPathRaw $newUserPath; Send-EnvironmentChangeBroadcast }
             catch { Write-Warn2 ("could not persist Tesseract PATH entry; current session still works: {0}" -f $_.Exception.Message) }
           }
         }
@@ -1256,7 +1281,11 @@ function Step-ShellWiring {
   $cmdShim = Join-Path $binDir "posse.cmd"
   $psShim = Join-Path $binDir "posse.ps1"
   $orchestrator = Join-Path $script:PosseDirResolved "orchestrator.js"
-  $cmdContents = ("@echo off`r`n""{0}"" ""{1}"" %*`r`n" -f $script:NodeBin, $orchestrator)
+  # cmd.exe expands %NAME% even inside quotes; double every literal percent so
+  # a checkout path containing % cannot corrupt the shim.
+  $cmdNodeBin = $script:NodeBin -replace "%", "%%"
+  $cmdOrchestrator = $orchestrator -replace "%", "%%"
+  $cmdContents = ("@echo off`r`n""{0}"" ""{1}"" %*`r`n" -f $cmdNodeBin, $cmdOrchestrator)
   [System.IO.File]::WriteAllText($cmdShim, $cmdContents, (New-Object System.Text.UTF8Encoding($false)))
   # A same-name .ps1 takes precedence over posse.cmd in PowerShell and is
   # unusable under the default Restricted execution policy. Remove the old
@@ -1266,12 +1295,19 @@ function Step-ShellWiring {
   # Keep the managed shim first so an older npm/global Posse install cannot
   # win command resolution. The shim itself is rewritten above to point at the
   # checkout resolved by this installer run.
+  $script:UserPathChangedThisRun = $false
   if (-not $NoPersistEnv) {
     try {
       $userPath = Get-UserPathRaw
-      $parts = @($userPath -split ";" | Where-Object { $_ -and $_ -ine $binDir })
+      # Compare expanded forms so a pre-existing %USERPROFILE%-style entry
+      # dedupes against the expanded $binDir instead of duplicating it.
+      $parts = @($userPath -split ";" | Where-Object { $_ -and ((Expand-PathEntry $_) -ine $binDir) })
       $newUserPath = (@($binDir) + $parts) -join ";"
-      if ($newUserPath -ine $userPath) { Set-UserPathRaw $newUserPath }
+      if ($newUserPath -ine $userPath) {
+        Set-UserPathRaw $newUserPath
+        Send-EnvironmentChangeBroadcast
+        $script:UserPathChangedThisRun = $true
+      }
     }
     catch {
       Write-Warn2 ("could not persist the Posse PATH entry; the shim still works in this session: {0}" -f $_.Exception.Message)
@@ -1302,7 +1338,9 @@ function Step-ShellWiring {
   }
 
   $note = "env file + UTF-8 posse.cmd shim installed for $script:PosseDirResolved"
-  if (-not (Test-Cmd "posse")) { $note += " (open a new terminal to pick up PATH)" }
+  # Test-Cmd runs against this process's freshly seeded PATH, so it cannot
+  # detect the case that matters; base the reminder on the persisted change.
+  if ($script:UserPathChangedThisRun) { $note += " (open a new terminal to pick up PATH)" }
   Step-End "ok" $note
 }
 
@@ -1315,7 +1353,6 @@ const settingsPath = process.env.POSSE_ACCOUNT_DB_PATH
   ? path.resolve(process.env.POSSE_ACCOUNT_DB_PATH)
   : path.join(os.homedir(), ".posse", "account.db");
 const seed = {
-  atlas_mode: process.env.POSSE_SEED_MODE,
   atlas_phases: process.env.POSSE_SEED_PHASES,
   atlas_live_funnel: process.env.POSSE_SEED_FUNNEL,
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
@@ -1537,15 +1574,35 @@ function Write-RestrictedProviderFile {
   }
 }
 
-function Prompt-ForKey {
-  param([string]$Label, [string]$VarName)
-  $existing = [Environment]::GetEnvironmentVariable($VarName, "Process")
-  if ($existing) {
-    Write-Info "$VarName already set (length $($existing.Length)) - skipping"
+function Persist-UserEnvironmentKey {
+  param([string]$VarName, [string]$Value)
+  # The runtime resolves keys from process env, then the HKCU/HKLM Environment
+  # registry (shared/native/functions/key.js) -- never from providers.env.ps1.
+  # User-scope persistence is what makes posse.cmd from cmd.exe / VS Code /
+  # schedulers work; SetEnvironmentVariable(User) also broadcasts the change.
+  try {
+    [Environment]::SetEnvironmentVariable($VarName, $Value, "User")
+    return $true
+  }
+  catch {
+    Write-Warn2 ("could not persist {0} to the user environment: {1}" -f $VarName, $_.Exception.Message)
     return $false
   }
-  $secure = Read-Host -Prompt "      Enter $Label (press Enter to skip)" -AsSecureString
-  if ($secure.Length -eq 0) { Write-Info "skipped $Label"; return $false }
+}
+
+function Prompt-ForKey {
+  param([string]$Label, [string]$VarName, [switch]$FromParentEnv, [string]$StoredValue = "")
+  if ($FromParentEnv) {
+    $existing = [Environment]::GetEnvironmentVariable($VarName, "Process")
+    Write-Info "$VarName already set in this shell (length $($existing.Length)) - keeping it"
+    return $false
+  }
+  $promptSuffix = if ($StoredValue) { "press Enter to keep the stored key" } else { "press Enter to skip" }
+  $secure = Read-Host -Prompt "      Enter $Label ($promptSuffix)" -AsSecureString
+  if ($secure.Length -eq 0) {
+    if ($StoredValue) { Write-Info "kept stored $VarName" } else { Write-Info "skipped $Label" }
+    return $false
+  }
   $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
   try { $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
   finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
@@ -1559,12 +1616,33 @@ function Step-Keys {
   Step-Begin "keys"
   $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
+  # Snapshot which keys the parent shell already carried, before the stored
+  # file is imported into process env, so re-running -ConfigureKeys can still
+  # replace a stored (rotated/wrong) key.
+  $parentEnvKeys = @{}
+  foreach ($name in $script:ProviderKeyNames) {
+    if ([Environment]::GetEnvironmentVariable($name, "Process")) { $parentEnvKeys[$name] = $true }
+  }
   $storedKeys = @{}
   $aclReady = $true
   if (Test-Path -LiteralPath $providersFile) {
     try {
       $storedKeys = Import-ProviderKeysFile $providersFile
       if (-not $DryRun) {
+        # The file is dot-sourced by $PROFILE, so it must only ever contain the
+        # known assignments -- but never destroy user content silently: keep a
+        # one-time .bak beside it when unrecognized lines are dropped.
+        $assignmentPattern = '^\s*\$env:(POSSE_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)\s*=\s*''(?:[^'']|'''')*''\s*$'
+        $rawLines = @(Get-Content -LiteralPath $providersFile -ErrorAction Stop)
+        $droppedLines = @($rawLines | Where-Object { $_ -and $_.Trim() -and $_ -notmatch $assignmentPattern -and $_.Trim() -notmatch '^#' })
+        if ($droppedLines.Count -gt 0) {
+          $backupPath = "$providersFile.bak"
+          if (-not (Test-Path -LiteralPath $backupPath)) {
+            Copy-Item -LiteralPath $providersFile -Destination $backupPath -Force
+            try { Set-ProviderFileAcl $backupPath } catch { Write-LogOnly ("[keys] backup ACL: {0}" -f $_.Exception.Message) }
+          }
+          Write-Warn2 ("{0} unrecognized line(s) in {1} were dropped (only key assignments are kept); original saved to {2}" -f $droppedLines.Count, $providersFile, $backupPath)
+        }
         $safeLines = @("# Posse provider API keys -- generated by install-posse-atlas.ps1")
         foreach ($name in $script:ProviderKeyNames) {
           if ($storedKeys.ContainsKey($name) -and $storedKeys[$name]) {
@@ -1572,6 +1650,14 @@ function Step-Keys {
           }
         }
         Write-RestrictedProviderFile $providersFile (($safeLines -join "`r`n") + "`r`n")
+        # Promote stored keys into the HKCU Environment the runtime actually
+        # reads, so installs done before this fix start working from cmd.exe,
+        # VS Code, and schedulers without a PowerShell profile.
+        foreach ($name in $script:ProviderKeyNames) {
+          if ($storedKeys.ContainsKey($name) -and $storedKeys[$name] -and -not [Environment]::GetEnvironmentVariable($name, "User")) {
+            [void](Persist-UserEnvironmentKey $name ([string]$storedKeys[$name]))
+          }
+        }
       }
     }
     catch {
@@ -1599,10 +1685,15 @@ function Step-Keys {
   }
 
   Write-Info "input is hidden; press Enter to skip any key"
-  [void](Prompt-ForKey "Posse remote key" "POSSE_KEY")
-  [void](Prompt-ForKey "OpenAI API key" "OPENAI_API_KEY")
-  [void](Prompt-ForKey "xAI (Grok) key" "XAI_API_KEY")
-  [void](Prompt-ForKey "Codex API key (optional - skip if you prefer 'codex login')" "CODEX_API_KEY")
+  foreach ($prompt in @(
+    @{ Label = "Posse remote key"; Name = "POSSE_KEY" },
+    @{ Label = "OpenAI API key"; Name = "OPENAI_API_KEY" },
+    @{ Label = "xAI (Grok) key"; Name = "XAI_API_KEY" },
+    @{ Label = "Codex API key (optional - skip if you prefer 'codex login')"; Name = "CODEX_API_KEY" }
+  )) {
+    $stored = if ($storedKeys.ContainsKey($prompt.Name)) { [string]$storedKeys[$prompt.Name] } else { "" }
+    [void](Prompt-ForKey $prompt.Label $prompt.Name -FromParentEnv:($parentEnvKeys.ContainsKey($prompt.Name)) -StoredValue $stored)
+  }
 
   if (Test-Cmd "claude") {
     $ans = Read-Host "      Run 'claude' now to log in to Claude? [y/N]"
@@ -1635,6 +1726,11 @@ function Step-Keys {
   try {
     Write-RestrictedProviderFile $providersFile (($lines -join "`r`n") + "`r`n")
     $aclReady = $true
+    foreach ($name in $script:ProviderKeyNames) {
+      if ($storedKeys.ContainsKey($name) -and $storedKeys[$name]) {
+        [void](Persist-UserEnvironmentKey $name ([string]$storedKeys[$name]))
+      }
+    }
   }
   catch {
     Write-Warn2 ("could not write provider keys with a restrictive ACL; the previous file was preserved: {0}" -f $_.Exception.Message)
@@ -1662,7 +1758,7 @@ function Step-Keys {
   elseif (-not $NoPersistEnv -and -not $profileAllowed) {
     Write-Warn2 ("PowerShell execution policy is {0}; skipped provider-key profile wiring." -f $executionPolicy)
   }
-  Step-End "ok" ("wrote {0} key(s) to {1} (current user + SYSTEM/Administrators ACL)" -f $script:ConfiguredKeys.Count, $providersFile)
+  Step-End "ok" ("wrote {0} key(s) to {1} (restricted ACL) and the user environment" -f $script:ConfiguredKeys.Count, $providersFile)
 }
 
 function Step-NativeBinaries {
@@ -1746,8 +1842,21 @@ function Test-GitConfig {
   if (-not $email) { Write-Warn2 'git user.email is not set globally (git config --global user.email "you@example.com")' }
 }
 
+function Test-IsElevated {
+  try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  }
+  catch { return $false }
+}
+
 function Step-Preflight {
   Step-Begin "preflight"
+  if (Test-IsElevated) {
+    $script:CriticalFailed = $true
+    Step-End "failed" "do not run this installer elevated: it would install Posse into the Administrator profile (PATH, keys, and managed state land in the wrong account). Re-run from a normal PowerShell window."
+    return $false
+  }
   if ($script:RepoPath) {
     $script:RepoPath = Resolve-FullPath $script:RepoPath
     if (-not (Test-Path $script:RepoPath)) {
