@@ -35,14 +35,22 @@ export function readNativeArtifactSelectionSync({
 }) {
   const selectionPath = nativeArtifactSelectionPath({ binRoot, name });
   if (!selectionPath) return null;
+  let descriptor = null;
   try {
-    const stat = fs.statSync(selectionPath);
+    // Read and stat one open inode so an atomic replacement by a concurrent
+    // refresher cannot pair the new version with the old marker boundary.
+    descriptor = fs.openSync(selectionPath, "r");
+    const stat = fs.fstatSync(descriptor);
     if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_SELECTION_BYTES) return null;
-    const version = validNativeArtifactVersion(fs.readFileSync(selectionPath, "utf8"));
+    const version = validNativeArtifactVersion(fs.readFileSync(descriptor, "utf8"));
     if (!version) return null;
     return Object.freeze({ version, selectedAtMs: stat.mtimeMs, path: selectionPath });
   } catch {
     return null;
+  } finally {
+    if (descriptor != null) {
+      try { fs.closeSync(descriptor); } catch { /* best effort */ }
+    }
   }
 }
 

@@ -785,10 +785,15 @@ export class NativeBinary {
       .filter(Boolean);
     if (!this.exactVersion) return [...direct, ...downloaded];
     if (this._developmentOverrideAfterMs == null) return [...downloaded, ...direct];
-    const newerDevelopmentBuild = direct.some((candidate) => {
+    const newerDevelopmentBuilds = direct.filter((candidate) => {
       try {
         const stat = fs.statSync(candidate);
-        return stat.isFile() && stat.mtimeMs > this._developmentOverrideAfterMs;
+        // Both timestamps must cross the selection boundary. Requiring the
+        // filesystem change time prevents a stale build with a preserved or
+        // clock-skewed future mtime from permanently defeating issued refreshes.
+        return stat.isFile()
+          && stat.mtimeMs > this._developmentOverrideAfterMs
+          && stat.ctimeMs > this._developmentOverrideAfterMs;
       } catch {
         return false;
       }
@@ -796,7 +801,9 @@ export class NativeBinary {
     // A pull/boot refresh supersedes older flat staging. A developer can still
     // explicitly rebuild or restage afterward, and that newer file wins until
     // the next issued-artifact refresh boundary.
-    return newerDevelopmentBuild ? [...direct, ...downloaded] : downloaded;
+    return newerDevelopmentBuilds.length > 0
+      ? [...newerDevelopmentBuilds, ...downloaded]
+      : downloaded;
   }
 
   /**

@@ -332,10 +332,18 @@ export async function syncCrossInstanceClaims({
   const boundedFetched = Array.isArray(fetchedClaims)
     ? fetchedClaims.slice(0, MAX_CLAIMS_PER_FETCH)
     : [];
-  const normalized = normalizeFetchedSharedTrunkClaims(boundedFetched, {
+  let normalized = normalizeFetchedSharedTrunkClaims(boundedFetched, {
     observedAtMs,
     ttlMin: config.claimsTtlMin,
   });
+  const snapshotStartedMs = Date.parse(claimSnapshotStartedAt || "");
+  if (Number.isFinite(snapshotStartedMs) && observedAtMs < snapshotStartedMs) {
+    // Snapshot membership is ordered by observed_at. Clamp only that mirror
+    // timestamp when the wall clock moves backwards; expiry validation above
+    // must continue to use the actual current time.
+    const snapshotBoundary = new Date(snapshotStartedMs).toISOString();
+    normalized = normalized.map((row) => ({ ...row, observed_at: snapshotBoundary }));
+  }
   const completeSnapshot = claimSnapshotComplete == null
     ? claimsTruncated !== true
     : claimSnapshotComplete === true;

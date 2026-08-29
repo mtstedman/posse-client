@@ -303,6 +303,7 @@ export class BinaryManager {
       .then(async (result) => {
         if (
           refresh
+          && !dryRun
           && result?.available === true
           && result?.current === true
           && result?.version
@@ -318,7 +319,7 @@ export class BinaryManager {
         return result;
       })
       .finally(() => {
-      if (this._artifactEnsures.get(ensureKey) === promise) this._artifactEnsures.delete(ensureKey);
+        if (this._artifactEnsures.get(ensureKey) === promise) this._artifactEnsures.delete(ensureKey);
       });
     this._artifactEnsures.set(ensureKey, promise);
     return promise;

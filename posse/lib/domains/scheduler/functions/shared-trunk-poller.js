@@ -23,6 +23,13 @@ function positiveSeconds(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function claimNamespace(config) {
+  if (!config?.enabled || config.claimsEnabled !== true) return null;
+  const remote = String(config.remote || "").trim();
+  const branch = String(config.branch || "").trim();
+  return remote && branch ? `${remote}\0${branch}` : null;
+}
+
 export class SharedTrunkPoller {
   constructor({
     projectDir = process.cwd(),
@@ -54,6 +61,7 @@ export class SharedTrunkPoller {
     this._lastConfig = null;
     this._claimCursor = null;
     this._claimCycleStartedAt = null;
+    this._claimNamespace = null;
   }
 
   delayUntilDueMs() {
@@ -113,6 +121,7 @@ export class SharedTrunkPoller {
       this._nextDueAt = 0;
       this._claimCursor = null;
       this._claimCycleStartedAt = null;
+      this._claimNamespace = null;
       // One-shot correction of persisted health after the feature is turned
       // off, so status projections and tool-time claim warnings stop reading
       // a stale enabled=true snapshot.
@@ -125,9 +134,15 @@ export class SharedTrunkPoller {
       return { attempted: false, skipped: "disabled", config };
     }
     const now = this._nowMs();
-    if (config.claimsEnabled === true && !this._claimCycleStartedAt) {
-      this._claimCycleStartedAt = new Date().toISOString();
-    } else if (config.claimsEnabled !== true) {
+    const namespace = claimNamespace(config);
+    if (namespace !== this._claimNamespace) {
+      this._claimCursor = null;
+      this._claimCycleStartedAt = null;
+      this._claimNamespace = namespace;
+    }
+    if (namespace && !this._claimCycleStartedAt) {
+      this._claimCycleStartedAt = new Date(now).toISOString();
+    } else if (!namespace) {
       this._claimCursor = null;
       this._claimCycleStartedAt = null;
     }
@@ -186,11 +201,23 @@ export class SharedTrunkPoller {
   async _reconcileClaims(result, config) {
     if (config?.claimsEnabled !== true) return;
     if (result?.fetchCompleted !== true) return;
+    if (!this._claimCycleStartedAt || claimNamespace(config) !== this._claimNamespace) {
+      // The fetch omitted claims or resolved a different remote/branch after
+      // this cycle began. Never combine namespaces or treat an empty,
+      // non-claim fetch as an authoritative snapshot.
+      this._claimCursor = null;
+      this._claimCycleStartedAt = null;
+      this._claimNamespace = null;
+      return;
+    }
     try {
       const paginationSupported = result?.claimsPaginationSupported === true;
       const nextCursor = paginationSupported && /^[0-9a-f]{64}$/u.test(result?.claimsNextCursor || "")
         ? result.claimsNextCursor
         : null;
+      if (nextCursor && this._claimCursor && nextCursor <= this._claimCursor) {
+        throw new Error("Shared-trunk claim cursor did not advance");
+      }
       const snapshotComplete = paginationSupported
         ? nextCursor == null
         : result?.claimsTruncated !== true;

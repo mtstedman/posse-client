@@ -50,8 +50,20 @@ export function currentCheckout(projectDir) {
 
 function trimRepoPath(value) {
   return String(value || "")
+    .trim()
     .replace(/^\/+|\/+$/gu, "")
-    .replace(/\.git$/iu, "");
+    .replace(/\.git$/iu, "")
+    .replace(/^\/+|\/+$/gu, "");
+}
+
+function requireRepositoryPath(value) {
+  const repoPath = trimRepoPath(value);
+  if (!repoPath) {
+    throw Object.assign(new Error("Pairing remote URL does not identify a repository path"), {
+      code: "pairing_repository_invalid",
+    });
+  }
+  return repoPath;
 }
 
 export function canonicalRepositoryLocator(remoteUrl) {
@@ -70,7 +82,7 @@ export function canonicalRepositoryLocator(remoteUrl) {
   // would otherwise turn `C:\\repo` into the network locator `c/\\repo`.
   // Pairing is network-only: reject absolute/drive-relative and UNC forms at
   // the ambiguity boundary instead of letting them acquire a shared identity.
-  if (/^[A-Za-z]:/u.test(value) || /^(?:\\\\|\/\/)/u.test(value)) {
+  if (/^[A-Za-z]:/u.test(value) || /^(?:\\\\|\/\/)/u.test(value) || /^file:/iu.test(value)) {
     throw Object.assign(new Error("Pairing requires a network Git remote (HTTPS, SSH, or git protocol)"), {
       code: "pairing_repository_not_networked",
     });
@@ -78,7 +90,7 @@ export function canonicalRepositoryLocator(remoteUrl) {
 
   const scp = value.match(/^(?:[^@/:]+@)?([^/:]+):(.+)$/u);
   if (!value.includes("://") && scp) {
-    return `${scp[1].toLowerCase()}/${trimRepoPath(scp[2])}`;
+    return `${scp[1].toLowerCase()}/${requireRepositoryPath(scp[2])}`;
   }
 
   let parsed;
@@ -104,7 +116,7 @@ export function canonicalRepositoryLocator(remoteUrl) {
   }
   // Preserve non-default ports: two repositories with the same host/path but
   // different SSH or HTTPS endpoints are not interchangeable access targets.
-  return `${parsed.host.toLowerCase()}/${trimRepoPath(parsed.pathname)}`;
+  return `${parsed.host.toLowerCase()}/${requireRepositoryPath(parsed.pathname)}`;
 }
 
 export function repositoryFingerprint(remoteUrl) {
