@@ -1337,10 +1337,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               }
             }
             if (
-              (researchCandidateCount > 3 || shouldDropForBroadNarrowScope)
-              && !hasModifyScope
-              && !hasCreateScope
-              && !hasDeleteScope
+              shouldDropForBroadNarrowScope
+              || (
+                researchCandidateCount > 3
+                && !hasModifyScope
+                && !hasCreateScope
+                && !hasDeleteScope
+              )
             ) {
               underScopedDroppedTitles.push(t.title);
               const reason = shouldDropForBroadNarrowScope
@@ -1385,10 +1388,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: stripped artifact output_root from repo code task "${t.title}"`);
               t.output_root = null;
               if (Array.isArray(t.create_roots) && t.create_roots.every((root) => isArtifactPath(root))) {
-                const createRoots = [...new Set((t.files_to_create || [])
-                  .map((file) => path.posix.dirname(String(file || "").replace(/\\/g, "/")))
-                  .filter((dir) => dir && dir !== "."))];
-                t.create_roots = createRoots;
+                t.create_roots = [];
               }
             }
           }

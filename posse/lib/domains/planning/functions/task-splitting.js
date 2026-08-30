@@ -3,7 +3,6 @@ import {
   artifactBasenameForRepoImage,
   collectRequestedImageOutputs,
   hasRequestedImageGenerationOutput,
-  normalizeCreateRootsForFiles,
   resolveRepoImageDestination,
   uniqueNormalizedPlannerPaths,
 } from "./image-outputs.js";
@@ -330,7 +329,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
           task_mode: "code",
           needs_image_generation: false,
           output_root: null,
-          create_roots: normalizeCreateRootsForFiles(summary.createFiles),
+          create_roots: [],
           _file_kind_split_done: true,
         },
         reason: `source-file output(s) require dev/code: ${summary.codeFiles.join(", ")}`,
@@ -392,7 +391,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
       needs_image_generation: false,
       output_root: null,
       files_to_create: devCreateFiles,
-      create_roots: normalizeCreateRootsForFiles(devCreateFiles),
+      create_roots: [],
       depends_on_index: [...new Set([...originalDependencies, finalDependencyIndex])],
       task_spec: [
         task.task_spec || task.instructions || "",
