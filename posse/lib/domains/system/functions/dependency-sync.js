@@ -42,6 +42,7 @@ import {
   managedInstallStateRoot,
   managedToolRoot,
 } from "../../../shared/platform/functions/managed-install-state.js";
+import { npmInstalledPackageDirs } from "./node-lock-validation.js";
 
 const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import.meta.url);
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
@@ -389,21 +390,6 @@ function commandOnPath(command) {
   return result.status === 0;
 }
 
-function npmLockedPackageDirs(root, manager) {
-  if (manager !== "npm") return [];
-  const lock = readJson(path.join(root, "npm-shrinkwrap.json"))
-    || readJson(path.join(root, "package-lock.json"));
-  if (!lock?.packages || typeof lock.packages !== "object") return [];
-  const dirs = [];
-  for (const [relative, metadata] of Object.entries(lock.packages)) {
-    const normalized = String(relative || "").replace(/\\/g, "/").replace(/^\.\//u, "");
-    if (!normalized || !normalized.split("/").includes("node_modules")) continue;
-    if (metadata?.optional === true) continue;
-    dirs.push(normalized);
-  }
-  return dirs;
-}
-
 function terminateDependencyCommand(child, { force = false } = {}) {
   if (!child || child.exitCode != null || (!force && child.killed)) return false;
   if (process.platform === "win32" && child.pid) {
@@ -457,7 +443,7 @@ function inspectNodeProject(root) {
   const { required, optional } = packageNames(pkg);
   const missingRequired = required.filter((name) => !dirExists(packageDir(root, name)));
   const missingOptional = optional.filter((name) => !dirExists(packageDir(root, name)));
-  const missingLocked = npmLockedPackageDirs(root, manager)
+  const missingLocked = (manager === "npm" ? npmInstalledPackageDirs(root) : [])
     .filter((relative) => !dirExists(path.join(root, ...relative.split("/"))));
   const missingNodeModules = !dirExists(nodeModules);
   const manifestHash = nodeManifestHash(root);
@@ -1599,6 +1585,10 @@ export async function ensureBootDependencies(input = {}) {
   const includeJinaModel = input.includeJinaModel === true;
   const includeScip = input.includeScip !== false;
   const includeTestTools = input.includeTestTools !== false;
+  // Targeted repairs (e.g. provisioning an isolated worktree before a frozen
+  // test baseline) must not let an unrelated posse-root failure poison the
+  // verdict: the caller only cares whether the TARGET project became runnable.
+  const includePosseRoot = input.includePosseRoot !== false;
 
   // Detect the repo's enabled SCIP/source languages once: the SCIP installer,
   // the python-environment step, and the test-toolchain checks all key off it.
@@ -1610,7 +1600,7 @@ export async function ensureBootDependencies(input = {}) {
 
   if (includeNode) {
     const nodeRoots = uniqueByPath([
-      { root: posseRoot, label: "posse npm" },
+      ...(includePosseRoot ? [{ root: posseRoot, label: "posse npm" }] : []),
       { root: projectDir, label: "repo npm" },
       ...discoverLockBackedNodeRoots(projectDir),
     ]).filter((entry) => fileExists(path.join(entry.root, "package.json")));
@@ -1622,7 +1612,7 @@ export async function ensureBootDependencies(input = {}) {
     // the enabled SCIP environments detected python sources at all (so a
     // marker-less python repo still gets an interpreter + pytest).
     const pythonRoots = uniqueByPath([
-      { root: posseRoot, label: "posse python" },
+      ...(includePosseRoot ? [{ root: posseRoot, label: "posse python" }] : []),
       { root: projectDir, label: "repo python", assumePython: pythonLanguageEnabled },
     ]).filter((entry) => entry.assumePython || listPythonProjectManifests(entry.root).length > 0);
     for (const entry of pythonRoots) python.push(await ensureDependencyEntry(entry, ensurePythonProject, opts));

@@ -862,6 +862,7 @@ export function testReceiptObservationDetail(receipt = {}) {
     failure_fingerprint: receipt.failure_fingerprint || null,
     artifact_id: receipt.artifact_id || null,
     reused: receipt.reused === true,
+    dependency_repair: receipt.dependency_repair || null,
   };
 }
 

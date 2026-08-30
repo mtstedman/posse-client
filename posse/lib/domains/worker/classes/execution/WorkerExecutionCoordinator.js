@@ -249,6 +249,12 @@ export class WorkerExecutionCoordinator {
                 includeJinaModel: false,
                 includeScip: false,
                 includeTestTools: false,
+                // Only the worktree's own packages decide this repair: a
+                // pre-existing posse-root dependency failure must not discard
+                // a successful worktree install (observed live 2026-08-30:
+                // "posse npm" failed on node-pty while "repo npm" succeeded,
+                // and the honest baseline was thrown away with the attempt).
+                includePosseRoot: false,
                 adoptNodeInstall: true,
               }, {
                 signal: executeAbortController?.signal || null,

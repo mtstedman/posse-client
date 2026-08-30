@@ -16,6 +16,7 @@ import { withDependencyInstallLock } from "../../../shared/concurrency/functions
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 import { managedInstallStateRoot } from "../../../shared/platform/functions/managed-install-state.js";
 import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
+import { npmInstalledPackageDirs } from "./node-lock-validation.js";
 
 const NODE_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -88,15 +89,8 @@ function inspectPosseNodeTree(root) {
   const optional = Object.keys(pkg.optionalDependencies || {});
   const missingRequired = required.filter((name) => !dirExists(packageDir(root, name)));
   const missingOptional = optional.filter((name) => !dirExists(packageDir(root, name)));
-  const lock = readJson(path.join(root, "npm-shrinkwrap.json")) || readJson(path.join(root, "package-lock.json"));
-  const missingLocked = Object.entries(lock?.packages || {})
-    .filter(([relative, metadata]) => {
-      const normalized = String(relative || "").replace(/\\/g, "/").replace(/^\.\//u, "");
-      return normalized.split("/").includes("node_modules")
-        && metadata?.optional !== true
-        && !dirExists(path.join(root, ...normalized.split("/")));
-    })
-    .map(([relative]) => relative);
+  const missingLocked = npmInstalledPackageDirs(root)
+    .filter((relative) => !dirExists(path.join(root, ...relative.split("/"))));
   const manifestHash = nodeManifestHash(root);
   let installedHash = "";
   try { installedHash = fs.readFileSync(path.join(nodeModules, NODE_MANIFEST_STAMP_NAME), "utf8").trim(); } catch {}
