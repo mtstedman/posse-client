@@ -455,6 +455,12 @@ export async function callProvider(promptText, {
     delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
     delete childEnv.XAI_API_KEY;
     delete childEnv.GITHUB_TOKEN;
+    Object.assign(
+      childEnv,
+      deterministicReadMcp.providerChildEnv
+        || deterministicReadMcp.serverConfig?.providerChildEnv
+        || {},
+    );
     if (configRoute.codexHome) childEnv.CODEX_HOME = configRoute.codexHome;
     else if (providerHomeEnv?.isolated && providerHomeEnv.envVar) childEnv[providerHomeEnv.envVar] = providerHomeEnv.home;
     // Codex defaults to ~/.codex when CODEX_HOME is absent. Use the same

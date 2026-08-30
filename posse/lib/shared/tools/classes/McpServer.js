@@ -20,7 +20,10 @@ export class McpServer {
     }
     this._proc = this._spawn(spec.command, spec.args || [], {
       cwd: spec.cwd || process.cwd(),
-      env: spec.env || process.env,
+      env: {
+        ...(spec.env || process.env),
+        ...(spec.providerChildEnv || {}),
+      },
       stdio,
       windowsHide: true,
     });

@@ -750,6 +750,12 @@ export async function callProvider(promptText, {
 
     const startTime = Date.now();
     const childEnv = scrubClaudeChildEnv(buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env));
+    Object.assign(
+      childEnv,
+      deterministicReadMcp.providerChildEnv
+        || deterministicReadMcp.serverConfig?.providerChildEnv
+        || {},
+    );
     // Clean, Posse-owned provider home from the MCP helper (generic + provider-
     // keyed). No-op until a `claude` home profile is registered.
     const providerHomeEnv = deterministicReadMcp.providerHomeEnv

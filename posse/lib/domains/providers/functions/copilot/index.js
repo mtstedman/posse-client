@@ -85,6 +85,24 @@ export function parseErrorBackoff(err) {
   return parseCopilotErrorBackoff(err);
 }
 
+function buildCopilotAdditionalMcpConfig(mcpConfig = {}) {
+  const env = { ...(mcpConfig.env || {}) };
+  for (const key of Object.keys(mcpConfig.providerChildEnv || {}).sort()) {
+    if (/^[A-Z_][A-Z0-9_]*$/u.test(key)) env[key] = `\${${key}}`;
+  }
+  return JSON.stringify({
+    mcpServers: {
+      [mcpConfig.name]: {
+        command: mcpConfig.command,
+        args: mcpConfig.args || [],
+        cwd: mcpConfig.cwd || undefined,
+        env,
+        tools: ["*"],
+      },
+    },
+  });
+}
+
 function requestCopilotChildTermination(proc, { platform = process.platform, scheduleForceKill = null } = {}) {
   terminateSpawnedProcess(proc, { force: false, platform });
   if (typeof scheduleForceKill === "function") scheduleForceKill();
@@ -152,17 +170,7 @@ export async function callProvider(promptText, opts = {}) {
     error.code = "POSSE_AGENT_MCP_GATE_NOT_READY";
     throw error;
   }
-  const additionalMcpConfig = JSON.stringify({
-    mcpServers: {
-      [mcpConfig.name]: {
-        command: mcpConfig.command,
-        args: mcpConfig.args || [],
-        cwd: mcpConfig.cwd || undefined,
-        env: mcpConfig.env || undefined,
-        tools: ["*"],
-      },
-    },
-  });
+  const additionalMcpConfig = buildCopilotAdditionalMcpConfig(mcpConfig);
 
   return new Promise((resolve, reject) => {
     const workingDir = String(cwd || projectDir || process.cwd());
@@ -192,6 +200,7 @@ export async function callProvider(promptText, opts = {}) {
       buildRuntimeEnv(projectDir || workingDir, workingDir, process.env),
       resolveCopilotAuth(),
     );
+    Object.assign(env, mcpConfig.providerChildEnv || {});
     // COPILOT_ALLOW_ALL is also accepted in lieu of --allow-all-tools;
     // belt-and-braces in case future versions tighten the flag set.
     delete env.COPILOT_ALLOW_ALL;
@@ -398,6 +407,7 @@ export const __testClassifyCopilotFailure = classifyCopilotFailure;
 export const __testBuildCopilotArgs = buildCopilotArgs;
 export const __testBuildCopilotCloseStats = buildCopilotCloseStats;
 export const __testBuildCopilotChildEnv = buildCopilotChildEnv;
+export const __testBuildCopilotAdditionalMcpConfig = buildCopilotAdditionalMcpConfig;
 export const __testBuildCopilotSpawn = buildCopilotSpawn;
 export const __testResolveCopilotStallTimeoutMs = resolveCopilotStallTimeoutMs;
 export const __testRequestCopilotChildTermination = requestCopilotChildTermination;

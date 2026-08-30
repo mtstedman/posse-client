@@ -451,10 +451,14 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     if (fs.existsSync(canonical)) addManagedCandidate(canonical);
     if (legacy && !sameFsPath(legacy, canonical) && fs.existsSync(legacy)) addManagedCandidate(legacy);
     for (const wtPath of gitWorktreePathsForBranch(branchName, projectDir)) addManagedCandidate(wtPath);
-    disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id });
+    const atlasCleanupResults = [
+      disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id }),
+    ];
     let managedWorktreeCleanupFailed = false;
     for (const wtPath of candidates) {
-      disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id, worktreePath: wtPath });
+      atlasCleanupResults.push(
+        disposeWorkItemAtlasGraph({ projectDir: projectDir, workItemId: wi.id, worktreePath: wtPath }),
+      );
       // Snapshot-gated: reject/kill/requeue paths reach here with worktrees
       // that can hold uncommitted work (reviewer fixes, a just-killed agent's
       // writes) — bare force-removal destroyed it unsnapshotted. A refusal
@@ -518,12 +522,15 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
       .run(new Date().toISOString(), wi.id);
     if (clearMergeState) setMergeState(wi.id, null);
     if (isAtlasV2EmissionEnabled()) {
+      const atlasCleanupNeedsRetry = atlasCleanupResults.some((result) => result?.ok !== true);
       emitAtlasV2WiCleanup({
         payload: {
           wi_id: Number(wi.id),
           branch: String(branchName || ""),
           disposition: clearMergeState ? "abandoned" : "merged",
+          cleanup_completed_inline: !atlasCleanupNeedsRetry,
         },
+        enqueueWarmJob: atlasCleanupNeedsRetry,
         onError: () => { /* outbox failure must not block cleanup */ },
       });
     }

@@ -640,6 +640,7 @@ export async function ensurePreDevelopmentTestBaseline({
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   cleanupWorktree = null,
+  repairDependencies = null,
 } = {}) {
   const existing = findFrozenTestBaseline(job?.id);
   if (existing) return { ...existing, reused: true };
@@ -656,7 +657,7 @@ export async function ensurePreDevelopmentTestBaseline({
       return null;
     }
   }
-  return await executeReceipt({
+  const receipt = await executeReceipt({
     job,
     plan,
     phase: "baseline",
@@ -664,6 +665,46 @@ export async function ensurePreDevelopmentTestBaseline({
     timeoutMs,
     cleanupWorktree,
   });
+  if (receipt?.reason !== "test_task_dependency_unavailable"
+    || typeof repairDependencies !== "function") {
+    return receipt;
+  }
+
+  let repair = null;
+  try {
+    repair = await repairDependencies(receipt);
+  } catch (error) {
+    repair = { ok: false, error: error?.message || String(error) };
+  }
+  if (repair?.ok !== true) {
+    return {
+      ...receipt,
+      dependency_repair: {
+        ok: false,
+        status: repair?.status || null,
+        error: repair?.error || repair?.message || null,
+      },
+    };
+  }
+
+  // The first receipt remains an honest record of the unavailable toolchain.
+  // Re-run at the same commit after repair so the frozen, reusable baseline is
+  // the actual repository result rather than an infrastructure failure.
+  const repairedReceipt = await executeReceipt({
+    job,
+    plan,
+    phase: "baseline",
+    cwd,
+    timeoutMs,
+    cleanupWorktree,
+  });
+  return {
+    ...repairedReceipt,
+    dependency_repair: {
+      ok: true,
+      status: repair.status || "ok",
+    },
+  };
 }
 
 export async function ensurePostChangeTestReceipt({

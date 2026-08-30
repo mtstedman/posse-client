@@ -12,6 +12,14 @@ import {
   roleUsesDeterministicReadMcp,
 } from "../../../integrations/functions/deterministic-mcp.js";
 
+function mcpServerEnvWithProviderReferences(server = {}) {
+  const env = { ...(server.env || {}) };
+  for (const key of Object.keys(server.providerChildEnv || {}).sort()) {
+    if (/^[A-Z_][A-Z0-9_]*$/u.test(key)) env[key] = `\${${key}}`;
+  }
+  return env;
+}
+
 export async function buildClaudeAtlasMcpConfigPayloadAsync(role, cwd, { assignmentUnit = null, workItemId = null, disableAtlas = false, atlasConfig = null } = {}) {
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
   const attachment = disableAtlas
@@ -134,7 +142,7 @@ export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
           command: server.command,
           args: server.args || [],
           cwd: server.cwd || undefined,
-          env: server.env || undefined,
+          env: mcpServerEnvWithProviderReferences(server),
         },
       },
     },
@@ -226,7 +234,7 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
           command: server.command,
           args: server.args || [],
           cwd: server.cwd || undefined,
-          env: server.env || undefined,
+          env: mcpServerEnvWithProviderReferences(server),
         },
       },
     },

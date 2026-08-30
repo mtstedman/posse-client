@@ -753,14 +753,15 @@ export function emitScipStaged({ payload, jobId = null, onError = undefined }) {
 }
 
 /**
- * @param {{ payload: WiCleanupPayload, jobId?: number | null, onError?: (err: Error) => void }} args
+ * @param {{ payload: WiCleanupPayload, jobId?: number | null, enqueueWarmJob?: boolean, onError?: (err: Error) => void }} args
  */
-export function emitWiCleanup({ payload, jobId = null, onError = undefined }) {
+export function emitWiCleanup({ payload, jobId = null, enqueueWarmJob = true, onError = undefined }) {
   return emitAtlasPipelineEvent({
     eventType: ATLAS_EVENTS.WI_CLEANUP,
     payload,
     workItemId: payload?.wi_id ?? null,
     jobId,
+    enqueueWarmJob,
     onError,
   });
 }

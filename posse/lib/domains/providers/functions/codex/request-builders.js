@@ -43,6 +43,18 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
   if (serverConfig.cwd) {
     configOverrides.push(`mcp_servers.${serverKey}.cwd=${_toTomlLiteral(serverConfig.cwd)}`);
   }
+  const inheritedEnvKeys = Object.keys(serverConfig.providerChildEnv || {})
+    .filter((key) => /^[A-Z_][A-Z0-9_]*$/u.test(key))
+    .sort();
+  if (inheritedEnvKeys.length > 0) {
+    // Codex intentionally filters the parent environment inherited by stdio
+    // MCP servers. Whitelist the variable names so the shim receives the
+    // launch-only credentials without serializing their values into the CLI
+    // config overrides (and therefore the provider process argv).
+    configOverrides.push(
+      `mcp_servers.${serverKey}.env_vars=${_toTomlLiteral(inheritedEnvKeys)}`,
+    );
+  }
   appendCodexMcpEnvOverrides(configOverrides, serverKey, serverConfig.env, {
     extraAllowedKeys: toolNames.includes("generate_image")
       ? ["OPENAI_API_KEY", "XAI_API_KEY"]

@@ -488,6 +488,17 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: cycling between ${uniqueErrors.size} error(s) across ${failedAttempts.length + 1} attempts — dead-lettering${C.reset}`);
         }
       }
+    } else if (failedAttempts.length === 0) {
+      // Pre-attempt catastrophic failures (worktree or frozen-baseline setup)
+      // never create job_attempts rows, so the row-based repeat guards above
+      // are blind to them: a deterministic setup failure would burn every
+      // attempt on a byte-identical error. Compare against the repeat key
+      // stashed by the previous pre-attempt retry pass instead.
+      const stashedRepeatKey = parseJobPayload(freshJob)?._pre_attempt_repeat_key;
+      if (stashedRepeatKey && stashedRepeatKey === errRepeatKey) {
+        sameErrorRepeat = true;
+        worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: same pre-attempt error on consecutive attempts — dead-lettering (retry cannot change the outcome)${C.reset}`);
+      }
     }
   }
 
@@ -596,10 +607,43 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     const { dependents, isRecoveryJob } = recovery;
     const deadLetterPayload = parseJobPayload(job);
     const isOneshotLeaf = job.job_type === "dev" && (deadLetterPayload.oneshot === true || deadLetterPayload.oneshot_origin === true);
-    if (!suppressHumanRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf)) {
+    // A planned dev/fix job with no dependents previously matched no recovery
+    // branch at all: the dead letter silently flipped the work item to failed.
+    // Stall-exhausted dead letters keep their own capped recovery branch below.
+    const isMutatingLeaf = !isOneshotLeaf && !stallExhausted && (job.job_type === "dev" || job.job_type === "fix");
+    if (!suppressHumanRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
       if (recoveryIsUnattended(worker)) {
-        emitUnattendedRecoverySkipped(worker, job, isOneshotLeaf ? "One-shot" : "Research", {
-          recovery_kind: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
+        emitUnattendedRecoverySkipped(worker, job, isMutatingLeaf ? (job.job_type === "fix" ? "Fix" : "Dev") : (isOneshotLeaf ? "One-shot" : "Research"), {
+          recovery_kind: isMutatingLeaf ? "dead_letter_recovery" : (isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery"),
+        });
+      } else if (isMutatingLeaf) {
+        const attemptHistory = buildAttemptSummary(job.id);
+        const jobLabel = job.job_type === "fix" ? "Fix job" : "Dev job";
+        const recoveryJob = createJob({
+          work_item_id: job.work_item_id,
+          job_type: "human_input",
+          title: `${jobLabel} failed: ${job.title.slice(0, 80)}`,
+          parent_job_id: job.id,
+          priority: "urgent",
+          model_tier: "cheap",
+          payload_json: JSON.stringify({
+            original_job_id: job.id,
+            review_type: "dead_letter_recovery",
+            question_kind: "dead_letter_recovery",
+            choices: deadLetterRecoveryChoices(),
+            questions: [
+              `${jobLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nWithout recovery the work item fails. Should we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
+            ],
+            context: `This ${jobLabel.toLowerCase()} has no downstream dependents, so the work item fails without operator guidance. The attempt history shows what went wrong on each try.`,
+          }),
+        });
+        worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} ${jobLabel.toLowerCase()} dead-lettered — spawned human_input #${recoveryJob.id}${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: `${jobLabel} dead-letter recovery: spawned human_input #${recoveryJob.id}`,
         });
       } else {
         const attemptHistory = buildAttemptSummary(job.id);
@@ -707,6 +751,15 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     if (turnBudgetExhausted) backoffSec = Math.min(backoffSec, 2);
     let circuitReroute = null;
     const failedAttempts = getAttempts(job.id).filter((attempt) => attempt.status === "failed");
+    if (failedAttempts.length === 0 && !turnBudgetExhausted) {
+      // Pre-attempt catastrophic failure: no job_attempts row exists, so stash
+      // the repeat key in the payload for the row-blind repeat guard above.
+      const stashPayload = parseJobPayload(freshJob);
+      if (stashPayload._pre_attempt_repeat_key !== errRepeatKey) {
+        stashPayload._pre_attempt_repeat_key = errRepeatKey;
+        updateJobPayload(freshJob.id, JSON.stringify(stashPayload));
+      }
+    }
     const executionProvider = job._executionProvider || freshJob.provider || job.provider || null;
     const providerPool = Array.isArray(job._allowedProviders)
       ? [...new Set(job._allowedProviders.filter(Boolean))]

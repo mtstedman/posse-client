@@ -46,6 +46,9 @@ import {
   snapshotAndResetDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
 import {
+  ensureBootDependenciesInWorker,
+} from "../../../system/functions/dependency-sync.js";
+import {
   handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
   handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
   handlePendingScopeApprovalPause as handlePendingScopeApprovalPauseFromModule,
@@ -229,6 +232,33 @@ export class WorkerExecutionCoordinator {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[test-intake] ${message}${C.reset}`),
             })
           : null,
+        repairDependencies: wtPath
+          ? async () => {
+              worker.emit(
+                job.id,
+                `${C.dim}[test-intake] WI#${job.work_item_id} job #${job.id}: repository test dependencies unavailable; repairing the isolated worktree once${C.reset}`,
+              );
+              return await ensureBootDependenciesInWorker({
+                projectDir: wtPath,
+                includeNode: true,
+                includePython: false,
+                includeComposer: false,
+                includeGo: false,
+                includeCargo: false,
+                includeNativeBinaries: false,
+                includeJinaModel: false,
+                includeScip: false,
+                includeTestTools: false,
+                adoptNodeInstall: true,
+              }, {
+                signal: executeAbortController?.signal || null,
+                onProgress: (message) => worker.emit(
+                  job.id,
+                  `${C.dim}[test-intake] ${message}${C.reset}`,
+                ),
+              });
+            }
+          : null,
       });
       if (baselineReceipt) {
         const baselineLabel = baselineReceipt.reused
@@ -247,7 +277,7 @@ export class WorkerExecutionCoordinator {
           detail: testReceiptObservationDetail(baselineReceipt),
         });
         if (baselineReceipt.status === "infrastructure_error") {
-          throw new Error(`Pre-development test cleanup failed: ${baselineReceipt.reason || "worktree remained dirty"}`);
+          throw new Error(`Pre-development test infrastructure unavailable: ${baselineReceipt.reason || "unknown infrastructure failure"}`);
         }
       }
 

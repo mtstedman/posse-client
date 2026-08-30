@@ -851,15 +851,20 @@ function buildDeterministicMcpConfigFromBootPayload(role, {
       shimScriptPath,
       "--owner-pipe",
       ownerEndpoint.pipePath,
-      "--owner-token",
-      ownerEndpoint.token,
-      "--mcp-oauth-token",
-      bootPayload.mcpOAuthToken,
     ],
     cwd,
     env: {
       ...deterministicMcpBaseEnv(process.env),
       ...deterministicMcpShimMetadataEnv(bootPayload, resolvedAtlasConfig),
+    },
+    // These values authenticate the provider-owned stdio shim to the
+    // persistent owner. Keep them out of both the MCP server declaration and
+    // the provider CLI arguments: Codex serializes MCP config overrides on its
+    // command line, and other providers may do the same. The provider child
+    // inherits this private launch environment and passes it to the shim.
+    providerChildEnv: {
+      POSSE_MCP_SHIM_OWNER_TOKEN: ownerEndpoint.token,
+      POSSE_MCP_SHIM_OAUTH_TOKEN: bootPayload.mcpOAuthToken,
     },
     tools: narrowedBootPayload.toolAllowlist?.tools || [],
     atlasTools: narrowedBootPayload.toolAllowlist?.atlas || [],
@@ -961,6 +966,7 @@ export class McpServerConfig {
     atlasTools = [],
     requiredTools = [],
     remoteToolSurface = null,
+    providerChildEnv = {},
   } = {}) {
     this.ready = !!ready;
     this.reason = reason || null;
@@ -970,6 +976,7 @@ export class McpServerConfig {
     this.args = Array.isArray(args) ? [...args] : [];
     this.cwd = cwd || process.cwd();
     this.env = normalizedEnv(env);
+    this.providerChildEnv = normalizedEnv(providerChildEnv);
     this.tools = Array.isArray(tools) ? [...tools] : [];
     this.atlasTools = Array.isArray(atlasTools) ? [...atlasTools] : [];
     this.requiredTools = Array.isArray(requiredTools) ? [...requiredTools] : [];
@@ -1001,6 +1008,7 @@ export class McpServerConfig {
       args: [...this.args],
       cwd: this.cwd,
       env: this.toEnv(),
+      providerChildEnv: { ...this.providerChildEnv },
       tools: [...this.tools],
       atlasTools: [...this.atlasTools],
       requiredTools: [...this.requiredTools],

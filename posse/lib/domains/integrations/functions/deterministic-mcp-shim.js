@@ -66,11 +66,14 @@ function argValue(name) {
 const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 const ownerPipe = argValue("--owner-pipe");
-const ownerToken = argValue("--owner-token");
-const mcpOAuthToken = argValue("--mcp-oauth-token");
+// Keep compatibility with already-generated configs during rolling upgrades,
+// but new configs deliver credentials only through the provider child's
+// inherited environment so ordinary process listings cannot expose them.
+const ownerToken = process.env.POSSE_MCP_SHIM_OWNER_TOKEN || argValue("--owner-token");
+const mcpOAuthToken = process.env.POSSE_MCP_SHIM_OAUTH_TOKEN || argValue("--mcp-oauth-token");
 
 if (IS_MAIN && (!ownerPipe || !ownerToken || !mcpOAuthToken)) {
-  process.stderr.write("[posse-mcp-shim] missing --owner-pipe, --owner-token, or --mcp-oauth-token\n");
+  process.stderr.write("[posse-mcp-shim] missing owner pipe or inherited credentials\n");
   process.exit(2);
 }
 

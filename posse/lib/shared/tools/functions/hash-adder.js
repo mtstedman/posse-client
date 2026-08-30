@@ -1364,6 +1364,74 @@ function recordHashSurfaceFailure(context, toolName, sizeChars, reason) {
   }
 }
 
+function collectBriefEvidenceRefs(value, out, depth = 0) {
+  if (depth > 8 || out.size >= 64 || value == null) return;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectBriefEvidenceRefs(entry, out, depth + 1);
+    return;
+  }
+  if (typeof value === "object") {
+    if (value.ref != null) collectBriefEvidenceRefs(value.ref, out, depth + 1);
+    for (const key of ["evidence", "proof", "support"]) {
+      if (value[key] != null) collectBriefEvidenceRefs(value[key], out, depth + 1);
+    }
+    return;
+  }
+  if (typeof value !== "string") return;
+  for (const match of value.matchAll(/#[0-9a-z]{4,}(?=\b|:)/giu)) {
+    const ref = normalizeRef(match[0]);
+    if (ref) out.add(ref);
+  }
+}
+
+function registerGetBriefEvidenceForCurrentCall(toolName, result, hashContext) {
+  if (String(toolName || "").trim().toLowerCase() !== "get_brief") return 0;
+  let parsed;
+  try { parsed = JSON.parse(String(result || "")); } catch { return 0; }
+  if (parsed?.ok !== true || !parsed.sections || typeof parsed.sections !== "object") return 0;
+  const refs = new Set();
+  const structured = parsed.sections.research;
+  if (structured && typeof structured === "object") {
+    for (const lane of ["proof", "support"]) {
+      collectBriefEvidenceRefs(structured[lane], refs);
+    }
+  }
+  let promoted = 0;
+  for (const ref of refs) {
+    try {
+      if (fetchHashRefEvidenceForContext(hashContext, ref)?.found) continue;
+      const source = fetchHashRefForContext(hashContext, ref);
+      if (!source?.found || source.entry?.entry_kind !== "materialized" || source.entry.payload_text == null) continue;
+      const created = createHashRefEvidenceForContext(hashContext, {
+        ref: source.entry.ref,
+        sourceRef: source.entry.ref,
+        selector: { mode: "full" },
+        viewText: source.entry.payload_text,
+        sourceContentHash: source.entry.content_hash,
+      });
+      if (created?.ok) promoted += 1;
+    } catch {
+      // The brief remains usable even if an old/stale evidence identity can no
+      // longer be rebound. Exact source tools are still available as fallback.
+    }
+  }
+  if (promoted > 0) {
+    recordObservation({
+      work_item_id: hashContext.work_item_id ?? null,
+      job_id: hashContext.job_id ?? null,
+      attempt_id: hashContext.attempt_id ?? null,
+      observation_type: "hash_ref.brief_evidence_promoted",
+      summary: `Promoted ${promoted} get_brief evidence ref(s) for the current agent call`,
+      detail: {
+        promoted,
+        declared_refs: refs.size,
+        agent_call_id: hashContext.agent_call_id ?? null,
+      },
+    });
+  }
+  return promoted;
+}
+
 function recordContextMeterSample(context, toolName, {
   fullSizeChars,
   emittedSizeChars,
@@ -1613,6 +1681,11 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
   return {
     line_semantics: "source",
     source_windows: sourceWindows,
+    // A lens is already a deliberately bounded aggregate of exact source
+    // windows. The handoff materializer validates overlap, de-duplicates
+    // source lines, and enforces its line/character caps, so a bare lens ref is
+    // safe to cite without forcing the model through a reject-and-retry cycle.
+    ...(isLens && sourceWindows.length > 1 ? { bare_multi_window_citable: true } : {}),
     ...(paths.length === 1 ? { path: paths[0] } : {}),
     ...(envelope?.repositoryIdentity || parsed?.repositoryIdentity
       ? { repository_identity: envelope?.repositoryIdentity || parsed?.repositoryIdentity }
@@ -1855,6 +1928,7 @@ export function appendHashRefIfMajor(toolName, result, {
     return result;
   }
   recordHashObservation(hashContext, surfaced, toolName, sizeChars, { refRole: "citation" });
+  if (!boundedIngress) registerGetBriefEvidenceForCurrentCall(toolName, result, hashContext);
   const stamped = `${result}${refStub({
     entry: { ...surfaced.entry, ref: surfaced.model_ref || surfaced.entry.ref },
     toolName,
