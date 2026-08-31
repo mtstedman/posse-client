@@ -208,6 +208,12 @@ export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off",
 export const KAIZEN_TO_ATLAS_MODE_VALUES = Object.freeze(["off", "shadow", "write"]);
 export const LOG_LEVEL_VALUES = Object.freeze(["debug", "info", "warn", "error"]);
 export const MODEL_CATALOG_ENFORCEMENT_VALUES = Object.freeze(["warn_and_fallback", "warn_only", "off"]);
+export const PLAN_APPROVAL_MODES = Object.freeze({
+  AUTO_APPROVE: "auto_approve",
+  CRITICAL_RISK: "critical_risk",
+  ALL_PLANS: "all_plans",
+});
+export const PLAN_APPROVAL_MODE_VALUES = Object.freeze(Object.values(PLAN_APPROVAL_MODES));
 export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "warn", "enforce"]);
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);

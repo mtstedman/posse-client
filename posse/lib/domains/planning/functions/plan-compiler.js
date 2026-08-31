@@ -83,8 +83,7 @@ import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from
 import { planArtifactReuse as planArtifactReuseFromModule } from "./artifact-reuse.js";
 import {
   createPlanApprovalGate,
-  isPlanApprovalEnabled,
-  isPlanApprovalSuppressedForRun,
+  planApprovalRequirement,
 } from "./plan-approval.js";
 import {
   getResearchBudget,
@@ -2201,16 +2200,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           const createdPayload = parseJobPayload(createdJob);
           return Number(createdPayload?._execution_policy?.risk_score || 0) >= 5;
         });
-        const criticalRiskApproval = criticalRiskJobIds.length > 0
-          && !isPlanApprovalSuppressedForRun();
-        if (isPlanApprovalEnabled() || criticalRiskApproval) {
+        const approval = planApprovalRequirement({
+          hasCriticalRisk: criticalRiskJobIds.length > 0,
+        });
+        if (approval.required) {
           if (createdIds.length > 0) {
             const wi = getWorkItem(planJob.work_item_id);
             const gateId = createPlanApprovalGate(planJob, createdIds, {
               wi_title: wi?.title || planJob.title,
               task_count: createdCount,
               job_count: createdIds.length,
-              approval_reason: criticalRiskApproval ? "critical_risk" : "configured",
+              approval_reason: approval.reason,
               critical_risk_job_ids: criticalRiskJobIds,
             });
             if (gateId != null) {

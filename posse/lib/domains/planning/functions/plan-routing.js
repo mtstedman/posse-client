@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { REPO_CODE_EXTENSIONS } from "../../../catalog/files.js";
 import { isArtifactMode } from "../../artifacts/functions/index.js";
+import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { validateCreateRootPath, validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
@@ -67,6 +68,7 @@ export function planCoverageGaps(workItem = {}, tasks = []) {
       && !MEDIA_CODE_CONTEXT_RE.test(segment)
     ));
   if (!requiresGeneratedMedia) return [];
+  const plannedTasks = Array.isArray(tasks) ? tasks : [];
   const hasMediaTask = (Array.isArray(tasks) ? tasks : []).some((task) => {
     const taskText = [task?.title, task?.task_spec, ...(Array.isArray(task?.success_criteria) ? task.success_criteria : [task?.success_criteria])]
       .filter(Boolean)
@@ -75,9 +77,33 @@ export function planCoverageGaps(workItem = {}, tasks = []) {
       || task?.needs_image_generation === true
       || (String(task?.job_type || "").toLowerCase() === "artificer" && /\b(?:image|photo|illustration|artwork)\b/i.test(taskText));
   });
-  return hasMediaTask
+  const gaps = hasMediaTask
     ? []
     : ["The request explicitly requires generated visual media, but the plan has no image/artificer deliverable task"];
+
+  const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
+  const desiredOutputs = Array.isArray(intakeHints?.desired_outputs)
+    ? intakeHints.desired_outputs.map((value) => String(value || "").trim().toLowerCase())
+    : [];
+  const requiresRepoIntegration = intakeHints?.output_mode === "repo"
+    || desiredOutputs.includes("repo")
+    || ["code", "patch", "mixed"].includes(String(intakeHints?.deliverable_type || "").trim().toLowerCase());
+  if (requiresRepoIntegration) {
+    const hasWritableCodeTask = plannedTasks.some((task) => {
+      const jobType = String(task?.job_type || "dev").trim().toLowerCase();
+      if (!["dev", "fix"].includes(jobType)) return false;
+      const modified = Array.isArray(task?.files_to_modify) ? task.files_to_modify.filter(Boolean) : [];
+      const deleted = Array.isArray(task?.files_to_delete) ? task.files_to_delete.filter(Boolean) : [];
+      const createdCode = (Array.isArray(task?.files_to_create) ? task.files_to_create : [])
+        .some((file) => classifyCreateFileKind(file) === "code");
+      return modified.length > 0 || deleted.length > 0 || createdCode;
+    });
+    if (!hasWritableCodeTask) {
+      gaps.push("The request requires generated visual media plus repository integration, but the plan has no writable dev/fix task");
+    }
+  }
+
+  return gaps;
 }
 
 const CODE_BASENAMES = new Set([

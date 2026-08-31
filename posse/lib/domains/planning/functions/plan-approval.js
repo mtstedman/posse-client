@@ -1,8 +1,8 @@
 // lib/plan-approval.js
 //
-// Plan-approval gate for the Planner -> Delegator/Dev boundary. Enabled by
-// the 'plan_approval_mode' setting and automatically for critical-risk plans
-// unless the current run explicitly suppresses plan approval. When enabled,
+// Plan-approval gate for the Planner -> Delegator/Dev boundary. Controlled by
+// the 'plan_approval_mode' setting: plans can run automatically, pause only for
+// critical risk, or always pause. When required,
 // the plan compiler creates a human_input gate job, hangs every newly-created
 // job off it, and parks the gate at waiting_on_human. An operator then runs
 // `posse plan review/approve/reject <wi-id>` to unblock or cancel the cascade.
@@ -11,7 +11,11 @@
 // and CLI agree on the semantics. Downstream deps use the standard hard-dep
 // mechanism — the scheduler needs no special knowledge.
 
-import { SETTING_KEYS } from "../../../catalog/settings.js";
+import {
+  PLAN_APPROVAL_MODES,
+  PLAN_APPROVAL_MODE_VALUES,
+  SETTING_KEYS,
+} from "../../../catalog/settings.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { TERMINAL_JOB_STATUSES } from "../../queue/functions/common.js";
 import {
@@ -56,28 +60,54 @@ export const PLAN_APPROVAL_STATES = Object.freeze([
 
 let _planApprovalOverride = null;
 
-function parseBool(value) {
-  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
+export function normalizePlanApprovalMode(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (PLAN_APPROVAL_MODE_VALUES.includes(normalized)) return normalized;
+  if (/^(1|true|yes|on)$/.test(normalized)) return PLAN_APPROVAL_MODES.ALL_PLANS;
+  return PLAN_APPROVAL_MODES.AUTO_APPROVE;
 }
 
-/**
- * Is plan-approval gating currently enabled?
- */
-export function isPlanApprovalEnabled() {
-  if (_planApprovalOverride != null) return _planApprovalOverride === true;
+export function getPlanApprovalMode() {
+  if (_planApprovalOverride != null) return _planApprovalOverride;
   try {
-    return parseBool(getSetting(SETTING_KEYS.PLAN_APPROVAL_MODE));
+    return normalizePlanApprovalMode(getSetting(SETTING_KEYS.PLAN_APPROVAL_MODE));
   } catch {
-    return false;
+    return PLAN_APPROVAL_MODES.AUTO_APPROVE;
   }
 }
 
+/**
+ * Is any plan-approval policy currently enabled? One-shot routing uses this to
+ * ensure critical-risk mode cannot bypass the planner's risk classification.
+ */
+export function isPlanApprovalEnabled() {
+  return getPlanApprovalMode() !== PLAN_APPROVAL_MODES.AUTO_APPROVE;
+}
+
 export function setPlanApprovalOverrideForRun(value = null) {
-  _planApprovalOverride = typeof value === "boolean" ? value : null;
+  if (typeof value === "boolean") {
+    _planApprovalOverride = value
+      ? PLAN_APPROVAL_MODES.ALL_PLANS
+      : PLAN_APPROVAL_MODES.AUTO_APPROVE;
+    return;
+  }
+  const normalized = String(value ?? "").trim().toLowerCase();
+  _planApprovalOverride = PLAN_APPROVAL_MODE_VALUES.includes(normalized) ? normalized : null;
 }
 
 export function isPlanApprovalSuppressedForRun() {
-  return _planApprovalOverride === false;
+  return _planApprovalOverride === PLAN_APPROVAL_MODES.AUTO_APPROVE;
+}
+
+export function planApprovalRequirement({ hasCriticalRisk = false } = {}) {
+  const mode = getPlanApprovalMode();
+  if (mode === PLAN_APPROVAL_MODES.ALL_PLANS) {
+    return { required: true, reason: "configured" };
+  }
+  if (mode === PLAN_APPROVAL_MODES.CRITICAL_RISK && hasCriticalRisk) {
+    return { required: true, reason: "critical_risk" };
+  }
+  return { required: false, reason: null };
 }
 
 function setWorkItemApproval(wiId, state, feedback = null) {

@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 import { SETTINGS_CATALOG, getCatalogEntry, validateCatalogSettingValue } from "../functions/catalog.js";
+import { PLAN_APPROVAL_MODES, SETTING_KEYS } from "../../../catalog/settings.js";
 
 const ACCOUNT_DB_BUSY_TIMEOUT_MS = 2000;
 
@@ -437,6 +438,7 @@ export class AccountSettings {
   }
 
   _seedDefaults() {
+    this._migratePlanApprovalMode();
     this._migrateAtlasAutoFeedbackDefault();
     this._migrateAtlasToolGateDefault();
     this._migrateAtlasResultRefPagingDefault();
@@ -455,6 +457,23 @@ export class AccountSettings {
     // repo and can poison every run when stored globally. Repo target now resolves
     // from cwd or explicit in-memory config objects only.
     this._db.prepare(`DELETE FROM account_settings WHERE setting_key IN ('atlas_repo_id', 'atlas_repo_path', 'target_branch')`).run();
+  }
+
+  _migratePlanApprovalMode() {
+    this._db.prepare(
+      `UPDATE account_settings
+         SET setting_value = CASE
+               WHEN lower(trim(setting_value)) IN ('1', 'true', 'yes', 'on') THEN ?
+               ELSE ?
+             END,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+       WHERE setting_key = ?
+         AND lower(trim(setting_value)) IN ('0', '1', 'false', 'true', 'no', 'yes', 'off', 'on')`,
+    ).run(
+      PLAN_APPROVAL_MODES.ALL_PLANS,
+      PLAN_APPROVAL_MODES.AUTO_APPROVE,
+      SETTING_KEYS.PLAN_APPROVAL_MODE,
+    );
   }
 
   _migrateAtlasAutoFeedbackDefault() {

@@ -24,6 +24,9 @@ const REPO_MUTATION_VERBS = Object.freeze([
   "rename",
   "wire",
   "connect",
+  "integrate",
+  "embed",
+  "incorporate",
   "enable",
   "disable",
 ]);
