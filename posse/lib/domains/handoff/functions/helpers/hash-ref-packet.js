@@ -106,6 +106,8 @@ function entryParts(entry, maxWhyChars) {
       preview: entry.preview ?? null,
       unresolved: entry.unresolved === true,
       error: entry.error || null,
+      linesDropped: entry.lines_dropped === true || entry.linesDropped === true,
+      linesDropReason: entry.lines_drop_reason ?? entry.linesDropReason ?? null,
     };
   }
   return { ref: "", why: "" };
@@ -273,6 +275,8 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
       if (preview) normalized.preview = preview;
       if (parts.unresolved) normalized.unresolved = true;
       if (parts.error) normalized.error = compactText(parts.error, 120);
+      if (parts.linesDropped) normalized.lines_dropped = true;
+      if (parts.linesDropReason) normalized.lines_drop_reason = compactText(parts.linesDropReason, 120);
       lanes[lane].push(normalized);
     }
   }
@@ -431,12 +435,17 @@ function entryForResurface(fetchResult, laneEntry = null) {
     const sourceSelection = laneEntry?.lines
       ? selectSourceCoordinatePayload(entry, laneEntry.lines)
       : null;
-    if (laneEntry?.lines && String(entry?.metadata?.line_semantics || "").toLowerCase() === "source" && !sourceSelection) {
-      return null;
-    }
     const payloadText = sourceSelection?.payloadText
       ?? selectedPayloadText(entry.payload_text, laneEntry?.lines);
-    if (payloadText == null) return null;
+    if (laneEntry?.lines && payloadText == null) {
+      return {
+        entryKind: "materialized",
+        payloadText: entry.payload_text,
+        metadata: entry.metadata || {},
+        linesDropped: true,
+        linesDropReason: "source_slice_unavailable",
+      };
+    }
     return {
       entryKind: "materialized",
       payloadText,
@@ -466,22 +475,32 @@ function resurfaceEntry(fetchResult, laneEntry, {
   const sourceEntry = fetchResult?.entry;
   const surfacedEntry = entryForResurface(fetchResult, laneEntry);
   if (!sourceEntry || !surfacedEntry) return null;
-  const { metadata: selectedMetadata, ...surfaceFields } = surfacedEntry;
+  const {
+    metadata: selectedMetadata,
+    linesDropped = false,
+    linesDropReason = null,
+    ...surfaceFields
+  } = surfacedEntry;
   const sourceSelector = formatHashRefSelector(laneEntry.ref, laneEntry.lines);
+  const retainedLineSelection = !!laneEntry.lines && !linesDropped;
   const surfaced = surfaceHashRefForContext(targetContext, {
     ...surfaceFields,
-    ...(laneEntry.lines ? {} : { contentHash: sourceEntry.content_hash }),
+    ...(retainedLineSelection ? {} : { contentHash: sourceEntry.content_hash }),
     objectType: sourceEntry.object_type,
     source: sourceEntry.source || `hash_ref:${sourceSelector}`,
     note: noteWithWhy(sourceEntry.note, laneEntry.why),
-    ...(laneEntry.lines ? {} : { sizeChars: sourceEntry.size_chars }),
+    ...(retainedLineSelection ? {} : { sizeChars: sourceEntry.size_chars }),
     versionId: sourceEntry.version_id,
     metadata: {
       ...(selectedMetadata || sourceEntry.metadata || {}),
       ...hashRefModelVisibility(targetContext, { visibility: "hidden", issuedAs: "traversal" }),
       reissued_by: "hash_ref_handoff",
       source_ref: laneEntry.ref,
-      ...(laneEntry.lines ? { source_lines: laneEntry.lines, source_selector: sourceSelector } : {}),
+      ...(retainedLineSelection ? { source_lines: laneEntry.lines, source_selector: sourceSelector } : {}),
+      ...(linesDropped ? {
+        lines_dropped: true,
+        lines_drop_reason: linesDropReason || "source_slice_unavailable",
+      } : {}),
       handoff_destination: packet?.destination || "handoff",
     },
   }, { ownerScope: targetOwnerScope });
@@ -489,7 +508,11 @@ function resurfaceEntry(fetchResult, laneEntry, {
   return {
     ref: surfaced.model_ref || surfaced.entry.ref,
     source_ref: laneEntry.ref,
-    ...(laneEntry.lines ? { source_selector: sourceSelector } : {}),
+    ...(retainedLineSelection ? { source_selector: sourceSelector } : {}),
+    ...(linesDropped ? {
+      lines_dropped: true,
+      lines_drop_reason: linesDropReason || "source_slice_unavailable",
+    } : {}),
     ...(laneEntry.why ? { why: laneEntry.why } : {}),
     object_type: surfaced.entry.object_type,
     entry_kind: surfaced.entry.entry_kind,

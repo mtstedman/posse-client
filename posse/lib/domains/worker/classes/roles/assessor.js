@@ -103,6 +103,7 @@ export class AssessorRole extends BaseRole {
       taskMode,
       disableAtlas,
       workerCwd: job._worktreePath || worker.projectDir,
+      hasWorktree: !!job._worktreePath,
     });
 
     return [
@@ -139,6 +140,8 @@ export class AssessorRole extends BaseRole {
     return {
       role: this.getRole(),
       allowWrite: false,
+      allowShell: !!ctx.hasWorktree,
+      allowTests: !!ctx.hasWorktree,
       modelTier: ctx.tier,
       reasoningEffort: job.reasoning_effort || "medium",
       activity: `assessing: ${shortJobTitle(job).slice(0, 40)}`,
@@ -170,7 +173,11 @@ export class AssessorRole extends BaseRole {
 
   async assessResult(job, output, opts = {}) {
     const trackedCall = opts.trackedCall || this.providerClient.call.bind(this.providerClient);
-    return await assessResult(job, output, { ...opts, trackedCall });
+    return await assessResult(job, output, {
+      ...opts,
+      trackedCall,
+      allowMutatingRunners: !!job._worktreePath && opts.allowMutatingRunners !== false,
+    });
   }
 
   processVerdict(job, verdict, opts = {}) {

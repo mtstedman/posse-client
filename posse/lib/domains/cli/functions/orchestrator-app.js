@@ -202,7 +202,10 @@ import {
   stagePosseRuntimeGitignoreForInitialCommit,
 } from "../../runtime/functions/ignore.js";
 import { runHook } from "../../git/functions/hooks.js";
-import { refreshProjectContextAsync } from "../../project/functions/context.js";
+import {
+  formatPendingRecoveryStartupNotice,
+  refreshProjectContextAsync,
+} from "../../project/functions/context.js";
 import { ensureProjectMapAsync, ensureProjectMapRebuildHookAsync, getCachedProjectMap } from "../../project/functions/map.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "../../research/functions/routing.js";
 import {
@@ -919,6 +922,7 @@ function createStartupReadiness({ enabled = false } = {}) {
 async function init({ requireWritableArtifacts = true, refreshStartupContext = false, showReadiness = false, ensureNativeGit = false, refreshNativeGit = false } = {}) {
   configureRuntimeEnv(PROJECT_DIR);
   const readiness = createStartupReadiness({ enabled: showReadiness });
+  let startupContext = null;
   try {
     if (ensureNativeGit) {
       await readiness.step("Native Git", async () => {
@@ -964,9 +968,18 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
       // commands (run/go/review/merge). Skipping it for cheap intake commands
       // (add/inject/ask/plan/...) saves several seconds of git shellouts per call.
       if (refreshStartupContext) {
-        tasks.push(readiness.step("Project context", () => refreshProjectContextAsync(PROJECT_DIR, { writeDigest: true })));
+        tasks.push(readiness.step("Project context", async () => {
+          startupContext = await refreshProjectContextAsync(PROJECT_DIR, { writeDigest: true });
+          return startupContext;
+        }));
       }
       await Promise.all(tasks);
+      if (startupContext?.pendingRecoveries?.length
+        && !NON_INTERACTIVE
+        && !process.argv.includes("--json")
+        && process.stdout?.isTTY) {
+        process.stdout.write(formatPendingRecoveryStartupNotice(startupContext.pendingRecoveries));
+      }
     }
   } finally {
     readiness.finish();

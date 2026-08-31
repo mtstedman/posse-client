@@ -304,6 +304,21 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
         additionalProperties: false,
       },
     },
+    verification_targets: {
+      type: "array",
+      maxItems: 20,
+      description: "Existing repository-declared commands that directly verify a researched risk or behavior and are ready for the planner to preserve.",
+      items: {
+        type: "object",
+        properties: {
+          command: { type: "string", minLength: 1, maxLength: 1000 },
+          reason: { type: "string", minLength: 1, maxLength: 1000 },
+          files: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 500 } },
+        },
+        required: ["command", "reason"],
+        additionalProperties: false,
+      },
+    },
   },
   required: ["key_symbols", "memories", "planner_file_priorities", "patterns"],
   additionalProperties: false,
@@ -537,9 +552,9 @@ export const TOOL_AGENT_HANDOFF = {
                   type: "array",
                   maxItems: 12,
                   description:
-                    "In researcher.report.v1, claims are the primary answer: put one self-contained finding in each claim and claim N supplies [EN]. Prefer the narrowest implementation-code evidence over documentation or inference when code is available. " +
+                    "In researcher.report.v1, evidence-backed claims are the primary answer: put one self-contained finding in each claim and claim N supplies [EN]. Prefer the narrowest implementation-code evidence over documentation or inference when code is available. " +
                     'Exact tuple form: [["self-contained finding", {"evidence":["#ref:1-3", "src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
-                    "Every researcher claim carries at least one evidence selector. The runtime resolves and range-validates evidence and decoy selectors and derives their provenance. " +
+                    "The runtime resolves and range-validates evidence and decoy selectors and derives their provenance. Unsupported report candidates are moved into a marked summary note with no retry. " +
                     "Evidence accepts visible stored refs and already-surfaced file ranges in string or object form.",
                   items: {
                     type: "array",
@@ -551,7 +566,7 @@ export const TOOL_AGENT_HANDOFF = {
                         {
                           type: "object",
                           properties: {
-                            evidence: { type: "array", minItems: 1, maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
+                            evidence: { type: "array", maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
                             decoy: { type: "array", maxItems: 8, items: { type: "array", minItems: 2, maxItems: 2 } },
                             prose: { type: "string", maxLength: 4000, description: "Target 2000 characters or fewer; 4000 is the hard safety ceiling." },
                           },
@@ -757,21 +772,31 @@ const HANDOFF_CLAIMS = {
 const RESEARCHER_HANDOFF_CLAIM = {
   ...HANDOFF_CLAIM,
   description:
-    "Primary report finding. State one self-contained claim, then cite the narrowest implementation-code evidence available; claim N maps to [EN]. Runtime-owned provenance classifies every selector.",
+    "Candidate report finding. State one self-contained claim and cite the narrowest implementation-code evidence available; claim N maps to [EN]. The staged report retains evidence-backed claims and moves unsupported candidates into a clearly marked summary note without a retry.",
   properties: {
     ...HANDOFF_CLAIM.properties,
     claim: { type: "string", minLength: 1 },
-    evidence: { type: "array", minItems: 1, maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
+    evidence: { type: "array", maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
     summary: { type: "string", description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
   },
-  required: ["claim", "evidence"],
+  required: ["claim"],
 };
 
 const RESEARCHER_HANDOFF_CLAIMS = {
   type: "array",
   description:
-    "Primary report content. In report mode at least one ordered, self-contained finding is required and supplies [E1], [E2], ...; prefer code-backed claims and keep the summary to a compact connective wireframe.",
+    "Candidate report content. In report mode each evidence-backed finding supplies [E1], [E2], ...; unsupported candidates are moved into a marked summary note without a retry.",
   items: RESEARCHER_HANDOFF_CLAIM,
+};
+
+const RESEARCHER_PIPELINE_HANDOFF_CLAIMS = {
+  ...RESEARCHER_HANDOFF_CLAIMS,
+  description:
+    "Advisory planner input. Evidence is useful when already surfaced, but may be omitted because the planner can inspect the named claim and source itself.",
+  items: {
+    ...RESEARCHER_HANDOFF_CLAIM,
+    required: ["claim"],
+  },
 };
 
 const RESEARCHER_PIPELINE_LIMITS =
@@ -1042,25 +1067,6 @@ const V2_HANDOFF_CLAIMS = {
   items: V2_HANDOFF_CLAIM,
 };
 
-const V2_RESEARCHER_HANDOFF_CLAIM = {
-  ...V2_HANDOFF_CLAIM,
-  description:
-    "Primary report finding. State one self-contained claim, then cite the narrowest implementation-code evidence available; claim N maps to [EN]. Runtime-owned provenance classifies every selector.",
-  properties: {
-    ...V2_HANDOFF_CLAIM.properties,
-    evidence: { type: "array", minItems: 1, maxItems: 16, items: HANDOFF_EVIDENCE_SELECTOR },
-    summary: { ...V2_HANDOFF_CLAIM.properties.summary, description: "Pipeline-only optional synthesis. Omit for researcher.report.v1." },
-  },
-  required: ["claim", "evidence"],
-};
-
-const V2_RESEARCHER_HANDOFF_CLAIMS = {
-  ...V2_HANDOFF_CLAIMS,
-  description:
-    "Primary report content. In report mode at least one ordered, self-contained finding is required and supplies [E1], [E2], ...; prefer code-backed claims and keep the summary to a compact connective wireframe.",
-  items: V2_RESEARCHER_HANDOFF_CLAIM,
-};
-
 const V2_RESEARCHER_SCOPE = {
   type: "object",
   description: "Verified downstream seed files. These are research seeds, not write authority.",
@@ -1077,7 +1083,7 @@ const V2_RESEARCHER_REPORT = exactReport({
   questions: HANDOFF_STRING_LIST,
   research: AGENT_HANDOFF_RESEARCH_DATA,
 }, ["summary"], {
-  claims: V2_RESEARCHER_HANDOFF_CLAIMS,
+  claims: V2_HANDOFF_CLAIMS,
   summaryMaxLength: null,
   summaryDescription:
     "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
@@ -1114,7 +1120,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Finish research with the active profile and target. In report mode claims are the primary answer: state one self-contained finding per claim and back it with the narrowest relevant implementation-code evidence. Prefer code evidence over documentation or inference when code is available. Keep summary to a compact wireframe that orders or connects the claims; use as little prose as possible while covering the request. Claim detail and source excerpts stay in claims and evidence. Claim order supplies [E1], [E2], ... labels. Every claim needs evidence. The receipt ends generation.",
+    "Finish research with the active profile and target. Staged report claims remain assessment-grade and evidence-backed, while an unsupported submitted claim moves into a clearly marked summary note with no retry. Pipeline claims are advisory and may omit evidence; invalid pipeline selectors are dropped so the planner can inspect the claim itself. Preserve exact existing verification commands in research.verification_targets. Use outcome input_required when an unresolved choice would materially change security, authentication, data handling, or user-facing semantics and leave that choice to the human. The receipt ends generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -1174,7 +1180,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
     "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
-    "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source; expose an exact range before citing it, and if an available task-relevant selector is rejected as unsurfaced, expose that range and retry so the evidence stays attached. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
+    "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source. If an attempted selector is unavailable, Posse moves that unsupported claim into a marked task-summary note; finish the plan because evidence repair is optional. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Use an evidence_ref directly because its text is already visible to this planner call. A re-issued traversal_ref is available routing custody, not evidence: call it first to surface the content, then cite the returned evidence_ref or an exact surfaced path range. Source-backed line selectors use the source-file line numbers shown in gutters or source metadata and must stay inside one surfaced window. Cite only visibility surfaced to this planner call. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
@@ -1197,6 +1203,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
 export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
   description:
     "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only visible stored hash-ref strings. Terminal assessor proof may use tool-owned evidence or agent-authored prose refs. " +
+    "A fail verdict must include at least one claim with proof so automatic repair starts only from a supported assertion. " +
     "Submit the canonical claim objects and their hash-ref proof selectors, plus the verdict fields present in the schema. The receipt ends provider generation.",
   profile: "assessor.verdict.v1",
   outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
@@ -1220,7 +1227,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. In report mode claims are the primary answer: state one self-contained finding per claim and back it with the narrowest relevant implementation-code evidence. Prefer code evidence over documentation or inference when code is available. Keep summary to a compact wireframe that orders or connects the claims; use as little prose as possible while covering the request. Claim detail and source excerpts stay in claims and evidence. Claim order supplies [E1], [E2], ... labels. Every claim needs evidence. The receipt ends generation.",
+    "Finish research using the active profile. Staged report claims require exact evidence, but unsupported submitted claims are moved into a marked summary note without a retry. Pipeline claims are advisory and may omit evidence; the planner can inspect them directly. Preserve exact existing test commands in verification_targets. Use input_required for unresolved choices that materially change security, authentication, data handling, or user-facing semantics. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1238,7 +1245,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         description:
           "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
       },
-      claims: { ...RESEARCHER_HANDOFF_CLAIMS, default: [] },
+      claims: { ...RESEARCHER_PIPELINE_HANDOFF_CLAIMS, default: [] },
       key_files: {
         type: "array",
         maxItems: 12,
@@ -1303,6 +1310,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         },
       },
       absence_checks: AGENT_HANDOFF_RESEARCH_DATA.properties.absence_checks,
+      verification_targets: AGENT_HANDOFF_RESEARCH_DATA.properties.verification_targets,
       questions: {
         type: "array",
         maxItems: 5,
@@ -1356,7 +1364,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with a compact report. Put each self-contained finding in claims and cite visible stored refs or surfaced file ranges. Prefer implementation-code evidence. The receipt ends generation.",
+    "Finish research with a compact report. Put each self-contained finding in claims and cite visible stored refs or surfaced file ranges. Prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note with no retry. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1370,14 +1378,13 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
       claims: {
         type: "array",
         minItems: 1,
-        description: "Ordered primary findings; claim N supplies evidence label [EN].",
+        description: "Ordered candidate findings; evidence-backed claims supply [EN], while unsupported candidates are moved into a marked summary note.",
         items: {
           type: "object",
           properties: {
             claim: { type: "string", minLength: 1 },
             evidence: {
               type: "array",
-              minItems: 1,
               maxItems: 8,
               items: {
                 type: "string",
@@ -1386,7 +1393,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
               },
             },
           },
-          required: ["claim", "evidence"],
+          required: ["claim"],
           additionalProperties: false,
         },
       },
@@ -1403,7 +1410,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
     "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
-    "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source; expose an exact range before citing it, and if an available task-relevant selector is rejected as unsurfaced, expose that range and retry so the evidence stays attached. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
+    "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source. If an attempted selector is unavailable, Posse moves that unsupported claim into a marked task-summary note; finish the plan because evidence repair is optional. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Use an evidence_ref directly because its text is already visible to this planner call. A re-issued traversal_ref is available routing custody, not evidence: call it first to surface the content, then cite the returned evidence_ref or an exact surfaced path range. Source-backed line selectors use the source-file line numbers shown in gutters or source metadata and must stay inside one surfaced window. Cite only visibility surfaced to this planner call. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
     '{"tasks":[{"id":"implement","role":"dev","intent":"Implement the requested change","summary":"Update the implementation and regression coverage.","scope":{"task_mode":"code","files_to_modify":["src/example.js"]},"constraints":[],"success_criteria":["The regression is fixed without changing unrelated behavior"]}]}. ' +
@@ -1444,7 +1451,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish assessment with one verdict, explicit confidence, and a brief prose proof drawn from the evidence already available. A fail verdict also requires an exact repair instruction so the fix handoff preserves the defect location, current behavior, expected behavior, and narrow change. The receipt ends provider generation.",
+    "Finish assessment with one verdict, explicit confidence, and a brief prose proof drawn from the evidence already available. A fail verdict also requires at least one visible evidence selector and an exact repair instruction so the fix handoff preserves the grounded defect location, current behavior, expected behavior, and narrow change. The receipt ends provider generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1469,6 +1476,17 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
         maxLength: 1000,
         description: "Required only for fail: exact path/location, current behavior, expected behavior, and narrow required change passed to the fix job.",
       },
+      evidence: {
+        type: "array",
+        minItems: 1,
+        maxItems: 8,
+        items: {
+          type: "string",
+          pattern: HANDOFF_SELECTOR_STRING_PATTERN,
+          description: "A visible #ref or surfaced path with an optional line range.",
+        },
+        description: "Visible stored refs or surfaced file ranges supporting a fail verdict.",
+      },
       questions: {
         type: "array",
         maxItems: 3,
@@ -1478,8 +1496,8 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
     required: ["verdict", "confidence", "proof"],
     allOf: [{
       if: { properties: { verdict: { const: "fail" } }, required: ["verdict"] },
-      then: { required: ["repair"] },
-      else: { not: { required: ["repair"] } },
+      then: { required: ["repair", "evidence"] },
+      else: { not: { anyOf: [{ required: ["repair"] }, { required: ["evidence"] }] } },
     }],
     additionalProperties: false,
   },

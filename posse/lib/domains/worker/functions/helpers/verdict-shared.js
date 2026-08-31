@@ -84,6 +84,35 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   };
 }
 
+export function capVerdictForHighRiskVerificationGap(verdict, payload = {}, testRun = null) {
+  if (verdict?.verdict !== "pass") return verdict;
+  const policy = payload?._execution_policy && typeof payload._execution_policy === "object"
+    ? payload._execution_policy
+    : {};
+  const riskScore = Number(policy.risk_score ?? payload?.risk ?? 0);
+  const isCodeTask = policy?.structural_facts?.is_code_task === true
+    || String(payload?.task_mode || "code") === "code";
+  if (!isCodeTask || !Number.isFinite(riskScore) || riskScore < 4) return verdict;
+
+  const command = typeof payload?.test_command === "string"
+    ? payload.test_command.trim()
+    : "";
+  const postChange = testRun?.postChange || testRun?.post_change || null;
+  if (command && postChange?.status === "passed") return verdict;
+
+  const status = postChange?.status || (command ? "not_run" : "not_declared");
+  const detail = postChange?.validation_error || postChange?.reason || null;
+  return {
+    ...verdict,
+    verdict: "needs_review",
+    _disable_internal_retry: true,
+    reasons: [
+      `High-risk code requires a successful frozen post-change verification receipt before terminal pass; verification was ${status}${detail ? ` (${detail})` : ""}.`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
+}
+
 function _nextAssessmentRetryTier(currentTier) {
   const current = String(currentTier || "standard");
   const idx = ASSESSMENT_RETRY_TIER_ORDER.indexOf(current);
@@ -387,6 +416,7 @@ export function prepareVerdictForDispatch(job, verdict) {
     .find((attempt) => attempt.commit_hash)?.commit_hash || null;
   const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
+  prepared = capVerdictForHighRiskVerificationGap(prepared, payload, assessedReceipt);
 
   const normalizedPassConfidence = normalizeAssessorConfidence(prepared.confidence, {
     fallback: "medium",

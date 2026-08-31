@@ -1,7 +1,8 @@
 // lib/plan-approval.js
 //
-// Plan-approval gate for the Planner -> Delegator/Dev boundary. Opt-in via
-// the 'plan_approval_mode' setting. When enabled,
+// Plan-approval gate for the Planner -> Delegator/Dev boundary. Enabled by
+// the 'plan_approval_mode' setting and automatically for critical-risk plans
+// unless the current run explicitly suppresses plan approval. When enabled,
 // the plan compiler creates a human_input gate job, hangs every newly-created
 // job off it, and parks the gate at waiting_on_human. An operator then runs
 // `posse plan review/approve/reject <wi-id>` to unblock or cancel the cascade.
@@ -68,6 +69,10 @@ export function isPlanApprovalEnabled() {
 
 export function setPlanApprovalOverrideForRun(value = null) {
   _planApprovalOverride = typeof value === "boolean" ? value : null;
+}
+
+export function isPlanApprovalSuppressedForRun() {
+  return _planApprovalOverride === false;
 }
 
 function setWorkItemApproval(wiId, state, feedback = null) {

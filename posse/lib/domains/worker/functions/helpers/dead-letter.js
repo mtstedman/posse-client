@@ -44,6 +44,13 @@ import { isBridgePresenceFresh } from "../../../queue/functions/runtime-status.j
 
 const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
 
+// Network faults whose error text repeats byte-identically while the fault is
+// still transient. Scoped to the pre-attempt repeat guard: the shared
+// TRANSIENT_COMMIT_INFRA_RE already covers git/db/heartbeat faults there, but
+// a refused/unreachable endpoint (e.g. during worktree ATLAS join) must not
+// read as "retry cannot change the outcome".
+const PRE_ATTEMPT_TRANSIENT_ERROR_RE = /\bECONNREFUSED\b|\bECONNRESET\b|\bEAI_AGAIN\b|\bENETUNREACH\b|\bEHOSTUNREACH\b|\bEPIPE\b/;
+
 function deadLetterRecoveryChoices() {
   const providerChoices = ["claude", "openai", "codex", "grok"]
     .filter((provider) => isProviderSelectable(provider))
@@ -118,6 +125,11 @@ function unattendedRecoveryReason(worker) {
 
 function emitUnattendedRecoverySkipped(worker, job, label, details = {}) {
   const reason = unattendedRecoveryReason(worker);
+  const attemptHistory = details.attempt_history || buildAttemptSummary(job.id);
+  const choices = Array.isArray(details.choices) && details.choices.length > 0
+    ? details.choices
+    : deadLetterRecoveryChoices();
+  const providerHint = details.provider_hint ?? buildFastFailureProviderHint(job, getAttempts(job.id));
   worker?.emit?.(
     job.id,
     `${C.yellow}[recovery] WI#${job.work_item_id} ${label} dead-lettered; recovery human_input skipped (${reason})${C.reset}`,
@@ -133,6 +145,20 @@ function emitUnattendedRecoverySkipped(worker, job, label, details = {}) {
       reason,
       ...details,
     }),
+  });
+  recordObservation({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    observation_type: "recovery.pending",
+    summary: `${label} recovery pending after unattended dead-letter handling`,
+    detail: {
+      ...details,
+      reason,
+      recovery_kind: details.recovery_kind || "dead_letter_recovery",
+      attempt_history: attemptHistory,
+      choices,
+      provider_hint: providerHint || "",
+    },
   });
 }
 
@@ -235,6 +261,7 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
     emitUnattendedRecoverySkipped(worker, job, "Dependent job", {
       dependent_count: dependents.length,
       recovery_kind: "dead_letter_recovery",
+      provider_hint: providerHint,
     });
     return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true };
   }
@@ -493,9 +520,15 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
       // never create job_attempts rows, so the row-based repeat guards above
       // are blind to them: a deterministic setup failure would burn every
       // attempt on a byte-identical error. Compare against the repeat key
-      // stashed by the previous pre-attempt retry pass instead.
+      // stashed by the previous pre-attempt retry pass instead. Stable
+      // network-transient errors repeat byte-identically without being
+      // structural, so they keep their bounded max-attempts retries (the
+      // shared git/db transient guard below covers the rest).
       const stashedRepeatKey = parseJobPayload(freshJob)?._pre_attempt_repeat_key;
-      if (stashedRepeatKey && stashedRepeatKey === errRepeatKey) {
+      const preAttemptTransient = PRE_ATTEMPT_TRANSIENT_ERROR_RE.test(
+        errorDetails.fullText || errSummary || "",
+      );
+      if (stashedRepeatKey && stashedRepeatKey === errRepeatKey && !preAttemptTransient) {
         sameErrorRepeat = true;
         worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: same pre-attempt error on consecutive attempts — dead-lettering (retry cannot change the outcome)${C.reset}`);
       }
@@ -615,6 +648,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
       if (recoveryIsUnattended(worker)) {
         emitUnattendedRecoverySkipped(worker, job, isMutatingLeaf ? (job.job_type === "fix" ? "Fix" : "Dev") : (isOneshotLeaf ? "One-shot" : "Research"), {
           recovery_kind: isMutatingLeaf ? "dead_letter_recovery" : (isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery"),
+          provider_hint: providerHint,
         });
       } else if (isMutatingLeaf) {
         const attemptHistory = buildAttemptSummary(job.id);
@@ -695,6 +729,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           emitUnattendedRecoverySkipped(worker, job, "Stall", {
             recovery_kind: "stall_exhausted_recovery",
             stall_recovery_count: stallRecoveryCount,
+            provider_hint: providerHint,
           });
         } else {
           const attemptHistory = buildAttemptSummary(job.id);

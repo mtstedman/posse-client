@@ -473,17 +473,18 @@ export function createDeterministicToolkit({
       const start = Number(source.start);
       const end = Number(source.end);
       if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
-        return "Error: replaceLines requires a 1-based inclusive integer range with 1 <= start <= end.";
+        return "Error: replaceLines requires a 1-based inclusive integer range with 1 <= start <= end. Use insertAt or append when adding content outside an existing range.";
       }
       const { eol, hadFinalEol, lines } = splitEditableLinesFromModule(content);
-      if (end > lines.length) {
-        return `Error: replaceLines range ${start}:${end} is outside ${displayPath} (${lines.length} lines).`;
+      const insertIntoEmptyFile = lines.length === 0 && start === 1 && end === 1;
+      if (end > lines.length && !insertIntoEmptyFile) {
+        return `Error: replaceLines range ${start}:${end} is outside ${displayPath} (${lines.length} lines). Use insertAt to insert at a valid line or append to add content at the end.`;
       }
-      lines.splice(start - 1, end - start + 1, ...splitReplacementLines(source.content));
+      lines.splice(start - 1, insertIntoEmptyFile ? 0 : end - start + 1, ...splitReplacementLines(source.content));
       content = joinEditableLines(lines, eol, hadFinalEol);
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath} (replaceLines ${start}:${end})`;
+      return `File edited: ${displayPath} (replaceLines ${start}:${end}${insertIntoEmptyFile ? ", inserted into empty file" : ""})`;
     }
 
     if (modes[0] === "replacePattern") {

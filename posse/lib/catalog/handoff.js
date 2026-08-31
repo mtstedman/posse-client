@@ -97,13 +97,28 @@ export const AGENT_HANDOFF_PROFILE_POLICY = Object.freeze({
   }),
 });
 
-// Prompt-facing disclosure for the runtime's researcher evidence rule. Every
-// structured claim must be independently checkable through the canonical
-// evidence lane; uncited narrative belongs in the report summary.
+// Prompt-facing disclosure for the runtime's researcher evidence rule.
+// Human-facing report claims remain assessment-grade, but an unsupported
+// candidate is demoted to a marked summary note rather than spending another
+// provider turn on handoff repair. Pipeline research is an advisory discovery
+// brief: the planner can re-surface a cited location or inspect an uncited
+// claim, so evidence mistakes are recorded and dropped.
 export const AGENT_HANDOFF_RESEARCH_EVIDENCE_POLICY = Object.freeze({
-  profiles: Object.freeze(["researcher.pipeline.v1", "researcher.report.v1"]),
+  profiles: Object.freeze(["researcher.report.v1"]),
+  advisoryProfiles: Object.freeze(["researcher.pipeline.v1"]),
   requiredLanes: Object.freeze(["evidence"]),
-  rule: "every_claim",
+  rule: "every_report_claim",
+  unsupportedClaimFallback: "demote_to_summary_note",
+});
+
+// Automatic repair is a material mutation, so an assessor failure needs one
+// grounded defect claim before it can cross that boundary. Other assessor
+// outcomes keep claims optional to avoid adding verification work to passes.
+export const AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY = Object.freeze({
+  profiles: Object.freeze(["assessor.verdict.v1"]),
+  outcomes: Object.freeze(["fail"]),
+  requiredLanes: Object.freeze(["evidence"]),
+  rule: "at_least_one_claim",
 });
 
 // Agent-facing schemas advertise canonical handoff fields only. Runtime keeps

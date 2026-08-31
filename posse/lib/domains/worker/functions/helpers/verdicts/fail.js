@@ -16,7 +16,10 @@ import {
 import { parseJobPayload } from "../../../../queue/functions/payload.js";
 import { isArtifactMode } from "../../../../artifacts/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
-import { hasWritableScope } from "../../../../handoff/functions/index.js";
+import {
+  hasWritableScope,
+  normalizeHashRefHandoffPacket,
+} from "../../../../handoff/functions/index.js";
 import { jobLog } from "../../../../../shared/telemetry/functions/logging/logger.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../../settings/functions/tunables.js";
 import {
@@ -402,6 +405,14 @@ function _extractOriginalPayloadContext(job) {
     ? origPayload.test_command.trim()
     : "";
   const origTaskAbTestCommand = origPayload._task_ab_test_command === true && !!originalTestCommand;
+  const originalDevBrief = origPayload.dev_brief && typeof origPayload.dev_brief === "object"
+    ? origPayload.dev_brief
+    : null;
+  const originalHashRefPacket = origPayload.hash_ref_packet && typeof origPayload.hash_ref_packet === "object"
+    ? origPayload.hash_ref_packet
+    : originalDevBrief?.hash_ref_packet && typeof originalDevBrief.hash_ref_packet === "object"
+      ? originalDevBrief.hash_ref_packet
+      : null;
   if (isArtifactMode(origTaskMode) && origOutputRoot) {
     originalCreateRoots = _mergeUniquePaths(originalCreateRoots, [origOutputRoot]);
   }
@@ -410,7 +421,44 @@ function _extractOriginalPayloadContext(job) {
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
+    originalDevBrief, originalHashRefPacket,
   };
+}
+
+function _assessorEvidenceSelectors(claims = []) {
+  const selectors = [];
+  const seen = new Set();
+  for (const claim of Array.isArray(claims) ? claims : []) {
+    const detail = Array.isArray(claim) ? claim[1] : claim;
+    for (const evidence of Array.isArray(detail?.evidence) ? detail.evidence : []) {
+      const selector = typeof evidence === "string"
+        ? evidence.trim()
+        : String(evidence?.selector || "").trim();
+      if (!selector || seen.has(selector)) continue;
+      seen.add(selector);
+      selectors.push(selector);
+    }
+  }
+  return selectors;
+}
+
+function _fixHashRefPacket(originalPacket, assessorClaims = []) {
+  const selectors = _assessorEvidenceSelectors(assessorClaims);
+  if (selectors.length === 0) return originalPacket || null;
+  const source = originalPacket && typeof originalPacket === "object" ? originalPacket : {};
+  const normalized = normalizeHashRefHandoffPacket({
+    ...source,
+    source: source.source || "assessor",
+    lanes: {
+      proof: Array.isArray(source?.lanes?.proof) ? source.lanes.proof : [],
+      support: [
+        ...(Array.isArray(source?.lanes?.support) ? source.lanes.support : []),
+        ...selectors,
+      ],
+      decoy: Array.isArray(source?.lanes?.decoy) ? source.lanes.decoy : [],
+    },
+  }).packet;
+  return normalized ? { ...source, ...normalized, lanes: normalized.lanes } : originalPacket || null;
 }
 
 function _normalizeScopePath(value) {
@@ -490,6 +538,7 @@ function _spawnRecoveryJobsForVerdict({
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
+    originalDevBrief, originalHashRefPacket,
   } = origCtx;
   // One-shot lineage marker survives every recovery spawn so later fixes and
   // file-request follow-ups keep the tightened one-shot policies.
@@ -710,11 +759,21 @@ function _spawnRecoveryJobsForVerdict({
       roots: mergedFixRoots,
       planGeneration: currentPayload.plan_generation || currentPayload._plan_generation || 1,
     });
+    const fixHashRefPacket = _fixHashRefPacket(originalHashRefPacket, verdict._assessor_claims);
+    const fixDevBrief = originalDevBrief
+      ? {
+          ...originalDevBrief,
+          ...(fixHashRefPacket ? { hash_ref_packet: fixHashRefPacket } : {}),
+        }
+      : null;
     const fixPayload = {
       original_job_id: job.id,
       original_title: job.title,
       fix_instructions: fixInstructions,
       assessor_feedback: verdict.reasons,
+      original_task_spec: originalTaskSpec,
+      ...(fixDevBrief ? { dev_brief: fixDevBrief } : {}),
+      ...(fixHashRefPacket ? { hash_ref_packet: fixHashRefPacket } : {}),
       files_to_modify: mergedFixModify,
       files_to_create: mergedFixCreate,
       files_to_delete: mergedFixDelete,

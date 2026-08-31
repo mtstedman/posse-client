@@ -549,6 +549,7 @@ export class PlannerRole extends BaseRole {
       availableSkillsBlock,
       "One-time test intake for code tasks:",
       "- Identify one narrow existing repository-declared test command per dev/fix task and set test_command on that task.",
+      "- When the research brief supplies verification_targets, preserve one applicable exact command on the corresponding task; do not replace a targeted security or regression check with unrelated generic verification.",
       "- Prefer a package/manifest script or a single recognized test runner. Do not compose shell pipelines, setup steps, or cleanup commands.",
       "- The worker freezes that command before DEV and runs it once before and once after implementation; DEV must not run it.",
       "- If no existing suite applies, omit test_command instead of inventing one. Test execution is verification metadata, not a success criterion.",

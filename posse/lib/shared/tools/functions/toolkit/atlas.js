@@ -178,15 +178,18 @@ function prepareWriteMode(payload = {}) {
     const rawStart = Number(source.start);
     const rawEnd = Number(source.end);
     if (!Number.isInteger(rawStart) || !Number.isInteger(rawEnd) || rawStart < 1 || rawEnd < 1) {
-      throw new Error("ATLAS file.write replaceLines requires 1-based positive integer start/end values.");
+      throw new Error("ATLAS file.write replaceLines requires 1-based positive integer start/end values. Use insertAt or append when adding content outside an existing range.");
     }
-    const start = clampInt(rawStart, 1, ATLAS_MAX_FILE_LINES, 1);
-    const end = clampInt(rawEnd, 1, ATLAS_MAX_FILE_LINES, start);
-    if (end < start) throw new Error("ATLAS file.write replaceLines end must be >= start.");
+    if (rawStart > ATLAS_MAX_FILE_LINES || rawEnd > ATLAS_MAX_FILE_LINES) {
+      throw new Error(`ATLAS file.write replaceLines range exceeds the ${ATLAS_MAX_FILE_LINES}-line safety limit. Use insertAt or append when adding content outside an existing range.`);
+    }
+    if (rawEnd < rawStart) {
+      throw new Error("ATLAS file.write replaceLines end must be >= start. Use insertAt or append when adding content outside an existing range.");
+    }
     return {
       replaceLines: {
-        start,
-        end,
+        start: rawStart,
+        end: rawEnd,
         content: truncateWriteContent(source.content),
       },
     };

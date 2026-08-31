@@ -1533,6 +1533,7 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeJinaModel?: boolean,
  *   includeScip?: boolean,
  *   includeTestTools?: boolean,
+ *   includePosseRoot?: boolean,
  *   timeoutMs?: number | string | boolean | null,
  *   modelTimeoutMs?: number | string | boolean | null,
  *   forceNodeInstall?: boolean,

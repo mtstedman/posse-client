@@ -250,7 +250,7 @@ export const SETTINGS_CATALOG = [
   { key: SETTING_KEYS.SHARED_TRUNK_CLAIMS_TTL_MIN, default: String(SHARED_TRUNK_DEFAULTS.claimsTtlMin), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.claimsTtlMin }, description: "Maximum lifetime in minutes of an advisory cross-instance file claim" },
   { key: SETTING_KEYS.SHARED_TRUNK_CLAIM_DEFER_MAX_MIN, default: String(SHARED_TRUNK_DEFAULTS.claimDeferMaxMin), scope: "repo", numeric: { integer: true, ...SHARED_TRUNK_LIMITS.claimDeferMaxMin }, description: "Maximum minutes a peer claim may defer dispatch before the advisory hardens open" },
   { key: "git_commit_style",      default: "off", scope: "repo", options: GIT_COMMIT_STYLE_VALUES, description: "Commit subject policy: off, Conventional Commits, or Conventional Commits decorated with Gitmoji; enabled modes use one standard-tier assessor pass over the scoped diff" },
-  { key: "session_recycle_mode",  default: "off", options: SESSION_RECYCLE_MODE_VALUES, description: "Session recycling mode: off, dev-fix, or full" },
+  { key: "session_recycle_mode",  default: "dev-fix", options: SESSION_RECYCLE_MODE_VALUES, description: "Session recycling mode: off, dev-fix, or full" },
   { key: "session_recycle_strict_provider", default: "true", valueType: "boolean", description: "Reset recycled lanes instead of resuming when a later job chooses a different provider" },
   { key: "posse_session_lease_ttl", default: "300", numeric: { integer: true, min: 1 }, description: "Seconds before a recycled session lease is released" },
 

@@ -88,6 +88,8 @@
  * @property {number} ledger_entries_appended
  * @property {string | null} view_written     Absolute path of the produced view file, or null if no view was materialized.
  * @property {string | null} view_etag        ViewMeta.built_at or a derived ETag.
+ * @property {boolean} [view_reused]          True when an idempotent main merge proved the existing destination view current and reused it.
+ * @property {string[]} [redundant_phases_skipped] Expensive phases omitted after a current-view proof.
  * @property {string} [embeddings_provider]   Encoder/index provider used for best-effort vector ingest.
  * @property {number} [embeddings_candidates] Symbols considered for vector ingest.
  * @property {number} [embeddings_indexed]    Symbols submitted to the embedding index.

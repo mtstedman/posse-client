@@ -160,6 +160,40 @@ function _recentFailures(jobs, limit = 5) {
     }));
 }
 
+function _pendingRecoveries(limit = 8) {
+  const rows = getDb().prepare(`
+    SELECT o.id, o.work_item_id, o.job_id, o.summary, o.detail_json, o.created_at,
+           j.title, j.status
+    FROM job_observations o
+    LEFT JOIN jobs j ON j.id = o.job_id
+    WHERE o.observation_type = 'recovery.pending'
+    ORDER BY o.id DESC
+    LIMIT ?
+  `).all(Math.max(limit * 4, limit));
+  const seen = new Set();
+  const pending = [];
+  for (const row of rows) {
+    if (seen.has(row.job_id)) continue;
+    seen.add(row.job_id);
+    const detail = _safeJson(row.detail_json) || {};
+    pending.push({
+      observationId: row.id,
+      wiId: row.work_item_id,
+      jobId: row.job_id,
+      title: row.title || "Unknown job",
+      status: row.status || "unknown",
+      recoveryKind: detail.recovery_kind || "dead_letter_recovery",
+      reason: detail.reason || "unattended recovery skipped",
+      attemptHistory: String(detail.attempt_history || ""),
+      choices: Array.isArray(detail.choices) ? detail.choices : [],
+      providerHint: String(detail.provider_hint || ""),
+      createdAt: row.created_at || null,
+    });
+    if (pending.length >= limit) break;
+  }
+  return pending;
+}
+
 function _buildSummaryLines(items, formatter) {
   if (items.length === 0) return "None.";
   return items.map(formatter).join("\n");
@@ -180,6 +214,7 @@ export function buildStartupDigest(projectDir) {
   const snapshots = _latestRecoverySnapshots(projectDir, 6);
   const humanAnswers = _recentHumanAnswers(jobs, 6);
   const failures = _recentFailures(jobs, 8);
+  const pendingRecoveries = _pendingRecoveries(8);
   const clientProvenance = resolveClientProvenance();
 
   const digest = [
@@ -196,9 +231,18 @@ export function buildStartupDigest(projectDir) {
     `- Blocked jobs: ${blockedJobs.length}`,
     `- Pending merges: ${pendingMerges.length}`,
     `- Dirty worktree snapshots: ${snapshots.length}`,
+    `- Pending recoveries: ${pendingRecoveries.length}`,
     "",
     "## Blocked Jobs",
     _buildSummaryLines(blockedJobs, (job) => `- WI#${job.work_item_id} JOB#${job.id} [${job.status}] ${job.title}`),
+    "",
+    "## Pending Recoveries",
+    _buildSummaryLines(pendingRecoveries, (entry) => (
+      `- WI#${entry.wiId} JOB#${entry.jobId} [${entry.status}] ${entry.title}`
+        + ` (${entry.recoveryKind}; ${entry.reason})`
+        + `${entry.choices.length ? ` — choices: ${entry.choices.join(", ")}` : ""}`
+        + `${entry.providerHint ? `\n  Provider hint: ${entry.providerHint.replace(/\n/g, " ")}` : ""}`
+    )),
     "",
     "## Pending Merges",
     _buildSummaryLines(pendingMerges, (wi) => `- WI#${wi.id} [${wi.merge_state}] ${wi.title}`),
@@ -225,6 +269,7 @@ export function buildStartupDigest(projectDir) {
       blockedJobs: blockedJobs.length,
       pendingMerges: pendingMerges.length,
       dirtySnapshots: snapshots.length,
+      pendingRecoveries: pendingRecoveries.length,
       clientProvenance,
     },
     blockedJobs,
@@ -232,7 +277,23 @@ export function buildStartupDigest(projectDir) {
     snapshots,
     humanAnswers,
     failures,
+    pendingRecoveries,
   };
+}
+
+export function formatPendingRecoveryStartupNotice(pendingRecoveries = []) {
+  const entries = Array.isArray(pendingRecoveries) ? pendingRecoveries : [];
+  if (entries.length === 0) return "";
+  return [
+    "",
+    `Pending Recoveries (${entries.length})`,
+    ...entries.map((entry) => (
+      `  WI#${entry.wiId} JOB#${entry.jobId} [${entry.status}] ${entry.title}`
+        + `${entry.choices?.length ? ` — ${entry.choices.join(" | ")}` : ""}`
+    )),
+    "  Inspect details with: posse timeline <wi-id>",
+    "",
+  ].join("\n");
 }
 
 export function refreshProjectContext(projectDir, { writeDigest = true } = {}) {

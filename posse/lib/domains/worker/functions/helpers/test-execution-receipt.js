@@ -288,10 +288,13 @@ function packageManagerTaskArgs(args = []) {
   const remaining = [...args];
   // args arrive lowercased (the whole command is normalized before splitting),
   // so "-f" here matches pnpm's -F/--filter and "-c" matches -C/--dir. Both
-  // take a value that must be skipped along with the flag.
+  // take a value that must be skipped along with the flag. npm's --prefix and
+  // yarn's --cwd are the same shape (observed live 2026-08-30: the planner's
+  // "npm --prefix htdocs run typecheck" baseline was rejected as an
+  // unrecognized runner, silently dropping the frozen baseline).
   const optionsWithValues = new Set([
     "--filter", "-f", "--dir", "-c", "--config-dir", "--store-dir",
-    "--virtual-store-dir", "--workspace-dir",
+    "--virtual-store-dir", "--workspace-dir", "--prefix", "--cwd",
   ]);
   while (remaining.length > 0 && remaining[0].startsWith("-")) {
     const option = remaining.shift();
@@ -319,11 +322,8 @@ export function validatePlannerTestCommand(command) {
   const safeTaskPattern = /^(?:test|tests|check|typecheck|lint|verify|spec)(?::|$)/;
 
   let ok = false;
-  if (["npm", "npm.cmd"].includes(executable)) {
-    ok = safeTaskPattern.test(args[0] || "")
-      || (args[0] === "run" && safeTaskPattern.test(args[1] || ""));
-  } else if (["pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
-    const taskArgs = executable.startsWith("pnpm") ? packageManagerTaskArgs(args) : args;
+  if (["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
+    const taskArgs = packageManagerTaskArgs(args);
     ok = safeTaskPattern.test(taskArgs[0] || "")
       || (taskArgs[0] === "run" && safeTaskPattern.test(taskArgs[1] || ""));
   } else if (["node", "node.exe"].includes(executable)) {
@@ -852,6 +852,8 @@ export function testReceiptObservationDetail(receipt = {}) {
     source: receipt.source || null,
     phase: receipt.phase || null,
     status: receipt.status || null,
+    reason: receipt.reason || null,
+    validation_error: receipt.validation_error || null,
     exit_code: receipt.exit_code ?? null,
     duration_ms: receipt.duration_ms ?? null,
     commit_hash: receipt.commit_hash || null,

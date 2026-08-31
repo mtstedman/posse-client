@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   AGENT_HANDOFF_ALIAS_POLICY,
+  AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY,
   AGENT_HANDOFF_LIMITS,
   AGENT_HANDOFF_PLANNER_CONTRACT_KEYS,
   AGENT_HANDOFF_PLANNER_CONTRACT_VERSION,
@@ -43,6 +44,7 @@ import {
   detectSensitiveAgentHandoffText,
   findCopiedAgentHandoffEvidence,
 } from "./agent-handoff-boundaries.js";
+import { redactString } from "../../bridge/functions/redaction.js";
 import {
   normalizePlannerReportMetadata,
   normalizeResearchData,
@@ -134,7 +136,29 @@ function isCleanableEvidenceRangeError(error) {
   return String(error?.code || "") === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID";
 }
 
-function alternateEvidenceCleanupAction(error) {
+// Pipeline handoffs feed the next role, not a human-facing report. A
+// reject-and-retry loop on them buys nothing the consumer cannot do itself:
+// the planner (or dev) can surface an imperfect citation on its own, so prose
+// is redacted rather than rejected and unverifiable selectors demote to
+// recorded annotations. Standalone research reports (researcher.report.v1)
+// keep report-grade output by moving unsupported claims into a marked summary
+// note instead of retrying. Dev results keep strict rejection. Assessor prose
+// is redacted, while its defect-evidence selectors retain strict validation.
+const LENIENT_PIPELINE_HANDOFF_PROFILES = new Set([
+  "researcher.pipeline.v1",
+  "planner.plan.v1",
+]);
+
+const LENIENT_HANDOFF_PROSE_PROFILES = new Set([
+  ...LENIENT_PIPELINE_HANDOFF_PROFILES,
+  "assessor.verdict.v1",
+]);
+
+function isLenientHandoffProseProfile(profile) {
+  return LENIENT_HANDOFF_PROSE_PROFILES.has(String(profile || ""));
+}
+
+function alternateEvidenceCleanupAction(error, { lenient = false } = {}) {
   const code = String(error?.code || "");
   if (code === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") return "drop_invalid_range";
   if (code === "AGENT_HANDOFF_EVIDENCE_EMPTY") {
@@ -146,6 +170,56 @@ function alternateEvidenceCleanupAction(error) {
   if (code === "AGENT_HANDOFF_EVIDENCE_NOT_FOUND") {
     return "drop_invisible_ref_with_alternate_evidence";
   }
+  if (lenient && code === "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE") {
+    return "defer_unseen_ref_to_downstream_surface";
+  }
+  return null;
+}
+
+const ADVISORY_RESEARCH_EVIDENCE_ERRORS = new Set([
+  "AGENT_HANDOFF_EVIDENCE_CHANGED",
+  "AGENT_HANDOFF_EVIDENCE_EMPTY",
+  "AGENT_HANDOFF_EVIDENCE_NOT_CITABLE",
+  "AGENT_HANDOFF_EVIDENCE_NOT_FOUND",
+  "AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED",
+  "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE",
+  "AGENT_HANDOFF_EVIDENCE_PATH_AMBIGUOUS",
+  "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED",
+  "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+]);
+
+const STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES = new Set([
+  "planner.plan.v1",
+  "researcher.report.v1",
+]);
+
+const CLAIM_EVIDENCE_DEMOTION = Symbol("claimEvidenceDemotion");
+
+function advisoryResearchEvidenceCleanupAction(error) {
+  return ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(String(error?.code || ""))
+    ? "drop_advisory_research_selector"
+    : null;
+}
+
+function strictClaimEvidenceCleanupAction(error) {
+  const code = String(error?.code || "");
+  if (ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(code)
+    || code === "AGENT_HANDOFF_CONTEXT_INVALID"
+    || code === "AGENT_HANDOFF_EVIDENCE_TOO_LARGE") {
+    return "drop_unverifiable_strict_claim_selector";
+  }
+  return null;
+}
+
+function evidenceRecoveryAction(error, mode) {
+  if (mode === "annotate") return advisoryResearchEvidenceCleanupAction(error);
+  if (mode === "demote") return strictClaimEvidenceCleanupAction(error);
+  return null;
+}
+
+function evidenceFailureModeForProfile(profile) {
+  if (profile === "researcher.pipeline.v1") return "annotate";
+  if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) return "demote";
   return null;
 }
 
@@ -209,22 +283,39 @@ function exactKeys(value, allowed, label) {
   return object;
 }
 
-function boundedString(value, label, max, { required = true } = {}) {
+function boundedString(value, label, max, { required = true, lenient = false, context = null } = {}) {
   if (typeof value !== "string") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be a string`);
   const text = value.trim();
   if (required && !text) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} is required`);
   if (text.length > max) fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${max} characters`);
   const sensitiveLabel = detectSensitiveAgentHandoffText(text);
   if (sensitiveLabel) {
+    if (lenient) {
+      // Pipeline prose about credentials (an auth plan naming Bearer/JWT
+      // examples) is redacted and committed instead of bounced back to the
+      // producer — but only when the deterministic redaction provably
+      // neutralizes the match; anything still detected after redaction is
+      // rejected exactly as before.
+      const redacted = redactString(text);
+      if (!detectSensitiveAgentHandoffText(redacted)) {
+        recordEvidenceCleanup(context, {
+          action: "redact_sensitive_prose",
+          selector: label,
+          code: "AGENT_HANDOFF_SENSITIVE_CONTENT",
+          message: `${label} contained ${sensitiveLabel}; committed with the match redacted`,
+        });
+        return redacted;
+      }
+    }
     fail("AGENT_HANDOFF_SENSITIVE_CONTENT", `${label} contains sensitive content (${sensitiveLabel})`);
   }
   return text;
 }
 
-function stringArray(value, label, maxItems = 50, maxChars = 1000) {
+function stringArray(value, label, maxItems = 50, maxChars = 1000, options = {}) {
   if (!Array.isArray(value)) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be an array`);
   if (value.length > maxItems) fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${maxItems} items`);
-  return value.map((entry, index) => boundedString(entry, `${label}[${index}]`, maxChars));
+  return value.map((entry, index) => boundedString(entry, `${label}[${index}]`, maxChars, options));
 }
 
 function evidenceSourcePathSyntaxError(value) {
@@ -764,18 +855,21 @@ function refRelativeCoordinates(entry, lineage, start, end, { sourcePath = null 
     : (singleStartCovered ? eligible : []);
   if (translatable.length !== 1) {
     // A compact code.window envelope can be one serialized JSON line while
-    // carrying one exact multi-line source window in its `content` field. The
+    // carrying exact multi-line source windows in its content fields. The
     // model cites that visible embedded body as 1..N, but the envelope's
     // recorded materialized range is then 1..1. When there is exactly one
     // path/window and its full source content is available, translate against
-    // that body deterministically. Never apply this across multiple windows,
-    // missing content, or a span/content mismatch.
+    // uniquely covering body deterministically. Never apply this when two
+    // embedded windows could satisfy the same ref-relative selector.
     const contentWindows = coalescedSourceContentWindows(lineage.content_entry || entry, lineage)
       .filter((window) => !requestedPath || window.path === requestedPath)
       .filter((window) => Array.isArray(window.content_lines)
         && window.content_lines.length === window.source_end_line - window.source_start_line + 1);
-    const contentWindow = contentWindows.length === 1 ? contentWindows[0] : null;
-    if (contentWindow && start >= 1 && start <= contentWindow.content_lines.length) {
+    const coveringContentWindows = contentWindows.filter((window) => (
+      start >= 1 && start <= window.content_lines.length
+    ));
+    const contentWindow = coveringContentWindows.length === 1 ? coveringContentWindows[0] : null;
+    if (contentWindow) {
       const clampedRelativeEnd = Math.min(end, contentWindow.content_lines.length);
       return {
         matched: true,
@@ -1537,7 +1631,9 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
           .map((range) => `${range.path}:${range.start}-${range.end}`)
           .join(", ");
         const materializedRanges = (translatedCoordinates?.materializedRanges || [])
-          .filter((range) => Number.isInteger(range.start) && Number.isInteger(range.end))
+          .filter((range) => Number.isInteger(range.start)
+            && Number.isInteger(range.end)
+            && !(range.start === 1 && range.end === 1))
           .map((range) => `${range.path}:${range.start}-${range.end}`)
           .join(", ");
         fail(
@@ -1723,6 +1819,8 @@ function materializeClaim(
   {
     maxClaimChars = AGENT_HANDOFF_LIMITS.maxClaimChars,
     maxProseChars = AGENT_HANDOFF_LIMITS.maxSummaryChars,
+    lenientProse = false,
+    evidenceFailureMode = null,
   } = {},
 ) {
   const normalized = normalizeClaimInput(value, claimIndex);
@@ -1733,6 +1831,7 @@ function materializeClaim(
     normalized[0],
     `claims[${claimIndex}][0]`,
     maxClaimChars,
+    { lenient: lenientProse, context },
   );
   counters.narrative += claim.length;
   if (normalized.length === 1) return [claim];
@@ -1747,7 +1846,10 @@ function materializeClaim(
       try {
         evidence = materializeAgentHandoffEvidenceSelector(selector, context);
       } catch (error) {
-        const action = alternateEvidenceCleanupAction(error);
+        const action = evidenceRecoveryAction(error, evidenceFailureMode)
+          || alternateEvidenceCleanupAction(error, {
+            lenient: evidenceFailureMode === "annotate",
+          });
         if (!action) throw error;
         cleanableFailures.push({ selector, error, action });
         continue;
@@ -1758,31 +1860,57 @@ function materializeClaim(
         counters.evidence += evidence.excerpt.length;
       }
     }
-    if (materialized.size === 0 && cleanableFailures.length > 0) {
+    if (materialized.size === 0 && cleanableFailures.length > 0 && !evidenceFailureMode) {
       throw cleanableFailures[0].error;
     }
     for (const { selector, error, action } of cleanableFailures) {
+      const recordedAction = evidenceFailureMode === "demote" && materialized.size > 0
+        ? (alternateEvidenceCleanupAction(error) || action)
+        : action;
       recordEvidenceCleanup(context, {
-        action,
+        action: recordedAction,
         selector,
         code: error.code,
         message: error.message,
       });
     }
+    if (evidenceFailureMode === "annotate" && cleanableFailures.length > 0) {
+      // The consumer can surface the cited location itself, so the claim keeps
+      // its pointer: retain each demoted selector as an unverified annotation
+      // instead of forcing the producer through a reject-and-retry loop.
+      out.unverified_evidence = cleanableFailures.slice(0, 8).map(({ selector, error }) => ({
+        selector: evidenceSelectorText(selector).slice(0, 300),
+        code: error.code,
+      }));
+    }
     if (materialized.size > 0) out.evidence = [...materialized.values()];
   }
   if (detail.decoy != null) {
     if (!Array.isArray(detail.decoy)) fail("AGENT_HANDOFF_SCHEMA_INVALID", "decoy must be an array");
-    out.decoy = detail.decoy.map((entry, index) => {
+    out.decoy = detail.decoy.flatMap((entry, index) => {
       const normalizedEntry = normalizeDecoyInput(entry, `decoy[${index}]`);
       if (normalizedEntry.length !== 2) fail("AGENT_HANDOFF_SCHEMA_INVALID", `decoy[${index}] must be [selector, reason]`);
-      const evidence = materializeAgentHandoffEvidenceSelector(normalizedEntry[0], context);
+      let evidence;
+      try {
+        evidence = materializeAgentHandoffEvidenceSelector(normalizedEntry[0], context);
+      } catch (error) {
+        const action = evidenceRecoveryAction(error, evidenceFailureMode);
+        if (!action) throw error;
+        recordEvidenceCleanup(context, {
+          action: "drop_unverifiable_decoy_selector",
+          selector: normalizedEntry[0],
+          code: error.code,
+          message: error.message,
+        });
+        return [];
+      }
       selectors.add(evidence.selector);
       const reason = boundedString(normalizedEntry[1], `decoy[${index}][1]`, 500);
       counters.evidence += evidence.excerpt.length;
       counters.narrative += reason.length;
-      return [evidence, reason];
+      return [[evidence, reason]];
     });
+    if (out.decoy.length === 0) delete out.decoy;
   }
   if (selectors.size > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
     fail("AGENT_HANDOFF_TOO_LARGE", `claims[${claimIndex}] exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`);
@@ -1792,11 +1920,54 @@ function materializeClaim(
       detail.prose,
       `claims[${claimIndex}].prose`,
       maxProseChars,
-      { required: false },
+      { required: false, lenient: lenientProse, context },
     );
     counters.narrative += out.prose.length;
   }
-  return [claim, out];
+  const materializedClaim = [claim, out];
+  if (evidenceFailureMode === "demote"
+    && detail.evidence != null
+    && !Array.isArray(out.evidence)) {
+    Object.defineProperty(materializedClaim, CLAIM_EVIDENCE_DEMOTION, { value: true });
+  }
+  return materializedClaim;
+}
+
+function claimNarrativeChars(claim) {
+  const detail = plainObject(claim?.[1]) || {};
+  return String(claim?.[0] || "").length
+    + String(detail.prose || "").length
+    + (detail.decoy || []).reduce((sum, entry) => sum + String(entry?.[1] || "").length, 0);
+}
+
+function appendUnverifiedClaimSummaryNote(summary, claims, maxChars) {
+  if (!Array.isArray(claims) || claims.length === 0) return summary;
+  const claimText = claims
+    .map((claim) => [claim?.[0], claim?.[1]?.prose]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .join(" — "))
+    .filter(Boolean)
+    .join(" | ");
+  const note = `[Unverified handoff note: evidence was unavailable, so this is not treated as an evidence-backed claim] ${claimText}`;
+  const separator = summary ? "\n\n" : "";
+  if (`${summary}${separator}${note}`.length <= maxChars) return `${summary}${separator}${note}`;
+  const boundedNote = note.length <= maxChars
+    ? note
+    : `${note.slice(0, Math.max(0, maxChars - 1))}…`;
+  const summaryBudget = Math.max(0, maxChars - boundedNote.length - (summary ? 2 : 0));
+  const boundedSummary = summary.slice(0, summaryBudget).trimEnd();
+  return boundedSummary ? `${boundedSummary}\n\n${boundedNote}` : boundedNote;
+}
+
+function rewriteSummaryEvidenceLabels(summary, originalClaims, retainedClaims) {
+  const retainedIndexes = new Map(retainedClaims.map((claim, index) => [claim, index + 1]));
+  return String(summary || "").replace(/\[E(\d+)\]/g, (label, rawIndex) => {
+    const original = originalClaims[Number(rawIndex) - 1];
+    if (!original) return label;
+    const retainedIndex = retainedIndexes.get(original);
+    return retainedIndex == null ? "[unverified]" : `[E${retainedIndex}]`;
+  });
 }
 
 function validateResearchAbsenceClaims(research, claims, label) {
@@ -1842,6 +2013,11 @@ function validateResearchClaimEvidence(claims, label) {
     const detail = plainObject(claim?.[1]) || {};
     const evidence = Array.isArray(detail.evidence) ? detail.evidence : [];
     if (evidence.length > 0) continue;
+    // A lenient pipeline materialization may have demoted every selector on a
+    // claim to an unverified annotation; the researcher still named a
+    // location, so the claim stands for the consumer to verify.
+    const unverified = Array.isArray(detail.unverified_evidence) ? detail.unverified_evidence : [];
+    if (unverified.length > 0) continue;
     fail(
       "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
       `${label}.claims[${index}] has no evidence selector. Put narrative in summary and attach at least one existing ref or surfaced source range to evidence.`,
@@ -2248,6 +2424,11 @@ function compactAssessorQuestions(...values) {
     .map((value) => value.trim().slice(0, 240));
 }
 
+function compactAssessorEvidence(...values) {
+  const evidence = values.find((value) => Array.isArray(value)) || [];
+  return evidence.slice(0, 8);
+}
+
 function hasCanonicalAssessorEnvelope(source) {
   if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) {
     return false;
@@ -2332,6 +2513,14 @@ function normalizeAssessorTerminalArgs(source) {
     first.spawn_jobs?.[0]?.payload?.instructions,
     report.spawn_jobs?.[0]?.payload?.instructions,
   ).replace(/\s+/g, " ").trim().slice(0, 1000);
+  const evidence = compactAssessorEvidence(
+    source.evidence,
+    source.proof_refs,
+    first.evidence,
+    first.proof_refs,
+    report.evidence,
+    report.proof_refs,
+  );
   if (outcome === "fail" && !repair) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.repair is required for fail");
   }
@@ -2357,7 +2546,7 @@ function normalizeAssessorTerminalArgs(source) {
       intent: "Submit terminal assessor verdict",
       report: {
         summary: proof,
-        claims: [],
+        claims: evidence.length > 0 ? [{ claim: proof, proof: evidence }] : [],
         scope: {},
         constraints: [],
         success_criteria: [],
@@ -2703,6 +2892,13 @@ function normalizeResearcherTerminalArgs(source, context) {
     research.absenceChecks,
     source.absence_checks,
   ].find((value) => Array.isArray(value)) || [];
+  const verificationTargets = [
+    first.verification_targets,
+    first.verificationTargets,
+    research.verification_targets,
+    research.verificationTargets,
+    source.verification_targets,
+  ].find((value) => Array.isArray(value)) || [];
   const claims = researcherClaims(
     first.claims ?? report.claims ?? research.claims ?? source.claims,
     {
@@ -2753,6 +2949,7 @@ function normalizeResearcherTerminalArgs(source, context) {
           planner_file_priorities: researcherFilePriorities(priorities, keyFiles),
           patterns,
           absence_checks: absenceChecks,
+          verification_targets: verificationTargets,
         },
         payload: {},
       },
@@ -2784,6 +2981,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
     "file_priorities",
     "patterns",
     "absence_checks",
+    "verification_targets",
     "questions",
   ];
   if (normalizedRole === "researcher"
@@ -2831,6 +3029,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
             planner_file_priorities: priorities,
             patterns: compact.patterns ?? [],
             absence_checks: compact.absence_checks ?? [],
+            verification_targets: compact.verification_targets ?? [],
           },
           payload: {},
         },
@@ -3027,7 +3226,7 @@ function materializeTerminalCompletion(args, role) {
   };
 }
 
-function normalizeReportPayload(value, label, profile) {
+function normalizeReportPayload(value, label, profile, { lenientProse = false, context = null } = {}) {
   if (value == null) return {};
   if (profile !== "assessor.verdict.v1") {
     exactKeys(value, [], label);
@@ -3036,7 +3235,10 @@ function normalizeReportPayload(value, label, profile) {
   const payload = exactKeys(value, ["repair"], label);
   const repair = payload.repair == null
     ? null
-    : boundedString(payload.repair, `${label}.repair`, 1000);
+    : boundedString(payload.repair, `${label}.repair`, 1000, {
+        lenient: lenientProse,
+        context,
+      });
   return repair ? { repair } : {};
 }
 
@@ -3131,6 +3333,9 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
     issues.push({ code: "AGENT_HANDOFF_TOO_LARGE", message: `handoffs exceeds ${effectiveLimit} entries` });
   }
 
+  const lenientProse = isLenientHandoffProseProfile(profile);
+  const evidenceFailureMode = evidenceFailureModeForProfile(profile);
+  const lenientOptions = { lenient: lenientProse, context };
   for (const [handoffIndex, raw] of source.handoffs.slice(0, effectiveLimit).entries()) {
     const label = `handoffs[${handoffIndex}]`;
     const entry = capture(() => exactKeys(raw, ["id", "depends_on", "target", "intent", "report"], label));
@@ -3142,7 +3347,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       effectiveLimit,
       AGENT_HANDOFF_LIMITS.maxIdChars,
     ));
-    capture(() => boundedString(entry.intent, `${label}.intent`, 1000));
+    capture(() => boundedString(entry.intent, `${label}.intent`, 1000, lenientOptions));
     if (policy && profile) capture(() => validateTarget(entry.target, policy, profile, `${label}.target`));
 
     const report = capture(() => exactKeys(
@@ -3169,7 +3374,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       report.summary,
       `${label}.report.summary`,
       summaryLimit,
-      { required: false },
+      { required: false, ...lenientOptions },
     ));
     capture(() => normalizeScope(report.scope || {}, `${label}.report.scope`, profile));
     if (report.research != null) capture(() => normalizeResearchData(report.research, `${label}.report.research`, profile));
@@ -3180,12 +3385,14 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         `${label}.report.${key}`,
         researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50,
         researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000,
+        lenientOptions,
       ));
     }
     if (report.payload != null) capture(() => normalizeReportPayload(
       report.payload,
       `${label}.report.payload`,
       profile,
+      { lenientProse, context },
     ));
 
     if (!Array.isArray(report.claims)) {
@@ -3223,6 +3430,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         claim[0],
         `${claimLabel}.claim`,
         claimLengthLimit,
+        lenientOptions,
       ));
       if (claim.length === 1) continue;
       const detail = capture(() => normalizeClaimDetail(claim[1], `${claimLabel}.evidence`));
@@ -3231,7 +3439,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         detail.prose,
         `${claimLabel}.prose`,
         claimSummaryLimit,
-        { required: false },
+        { required: false, ...lenientOptions },
       ));
       const selectors = new Set();
       if (detail.evidence != null) {
@@ -3246,8 +3454,14 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           if (evidence?.selector) selectors.add(evidence.selector);
         }
         for (const { selector, error } of selectorFailures) {
-          const action = alternateEvidenceCleanupAction(error);
-          if (selectors.size > 0 && action) {
+          const action = (evidenceFailureMode === "demote" && selectors.size > 0
+            ? alternateEvidenceCleanupAction(error)
+            : null)
+            || evidenceRecoveryAction(error, evidenceFailureMode)
+            || alternateEvidenceCleanupAction(error, {
+              lenient: evidenceFailureMode === "annotate",
+            });
+          if ((selectors.size > 0 || evidenceFailureMode != null) && action) {
             recordEvidenceCleanup(context, {
               action,
               selector,
@@ -3267,10 +3481,22 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
               `${claimLabel}.decoy[${decoyIndex}]`,
             ));
             if (!decoy || decoy.length !== 2) continue;
-            const evidence = capture(
-              () => materializeAgentHandoffEvidenceSelector(decoy[0], context),
-              { selector: decoy[0] },
-            );
+            let evidence = null;
+            try {
+              evidence = materializeAgentHandoffEvidenceSelector(decoy[0], context);
+            } catch (error) {
+              const action = evidenceRecoveryAction(error, evidenceFailureMode);
+              if (action) {
+                recordEvidenceCleanup(context, {
+                  action: "drop_unverifiable_decoy_selector",
+                  selector: decoy[0],
+                  code: error.code,
+                  message: error.message,
+                });
+              } else {
+                collectError(error, { selector: decoy[0] });
+              }
+            }
             if (evidence?.selector) selectors.add(evidence.selector);
             capture(() => boundedString(decoy[1], `${claimLabel}.decoy[${decoyIndex}].reason`, 500));
           }
@@ -3367,6 +3593,8 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const localLimit = Number.isInteger(maxHandoffs) && maxHandoffs > 0 ? maxHandoffs : policy.maxHandoffs;
   const effectiveLimit = Math.min(policy.maxHandoffs, localLimit);
   if (source.handoffs.length > effectiveLimit) fail("AGENT_HANDOFF_TOO_LARGE", `handoffs exceeds ${effectiveLimit} entries`);
+  const lenientProse = isLenientHandoffProseProfile(profile);
+  const evidenceFailureMode = evidenceFailureModeForProfile(profile);
   const counters = { evidence: 0, narrative: 0 };
   const researcherLimits = AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY[profile];
   const researcherReport = profile === "researcher.report.v1";
@@ -3396,15 +3624,18 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       effectiveLimit,
       AGENT_HANDOFF_LIMITS.maxIdChars,
     );
-    const intent = boundedString(entry.intent, `handoffs[${index}].intent`, 1000);
+    const intent = boundedString(entry.intent, `handoffs[${index}].intent`, 1000, {
+      lenient: lenientProse,
+      context: materializationContext,
+    });
     entryCounters.narrative += intent.length;
     const reportLabel = `handoffs[${index}].report`;
     const report = exactKeys(entry.report, PLANNER_REPORT_KEYS, reportLabel);
-    const summary = boundedString(
+    let summary = boundedString(
       report.summary,
       `handoffs[${index}].report.summary`,
       summaryLimit,
-      { required: false },
+      { required: false, lenient: lenientProse, context: materializationContext },
     );
     entryCounters.narrative += summary.length;
     if (!Array.isArray(report.claims)) {
@@ -3419,7 +3650,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${claimCountLimit} claims`);
     }
-    const claims = report.claims.map((claim, claimIndex) => materializeClaim(
+    let claims = report.claims.map((claim, claimIndex) => materializeClaim(
       claim,
       claimIndex,
       materializationContext,
@@ -3427,36 +3658,88 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       {
         maxClaimChars: claimLengthLimit,
         maxProseChars: claimSummaryLimit,
+        lenientProse,
+        evidenceFailureMode,
       },
     ));
-    if (["researcher.report.v1", "researcher.pipeline.v1"].includes(profile)) {
+    if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) {
+      const unverifiedClaims = claims.filter((claim) => (
+        profile === "researcher.report.v1"
+          ? !Array.isArray(claim?.[1]?.evidence) || claim[1].evidence.length === 0
+          : claim[CLAIM_EVIDENCE_DEMOTION] === true
+      ));
+      if (unverifiedClaims.length > 0) {
+        const previousSummary = summary;
+        const unverifiedSet = new Set(unverifiedClaims);
+        const retainedClaims = claims.filter((claim) => !unverifiedSet.has(claim));
+        summary = appendUnverifiedClaimSummaryNote(
+          rewriteSummaryEvidenceLabels(summary, claims, retainedClaims),
+          unverifiedClaims,
+          summaryLimit,
+        );
+        entryCounters.narrative -= unverifiedClaims.reduce(
+          (total, claim) => total + claimNarrativeChars(claim),
+          0,
+        );
+        entryCounters.narrative += summary.length - previousSummary.length;
+        for (const [claimIndex, claim] of unverifiedClaims.entries()) {
+          recordEvidenceCleanup(materializationContext, {
+            action: "demote_unverified_claim_to_summary",
+            selector: `<claim:${claimIndex + 1}>`,
+            code: "AGENT_HANDOFF_CLAIM_EVIDENCE_UNAVAILABLE",
+            message: String(claim?.[0] || ""),
+          });
+        }
+        claims = retainedClaims;
+      }
+    }
+    if (profile === "researcher.report.v1") {
       validateResearchClaimEvidence(claims, reportLabel);
+    }
+    if (AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.profiles.includes(profile)
+      && AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.outcomes.includes(outcome)) {
+      const hasGroundedDefect = claims.some((claim) => (
+        Array.isArray(claim?.[1]?.evidence) && claim[1].evidence.length > 0
+      ));
+      if (!hasGroundedDefect) {
+        fail(
+          "AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_REQUIRED",
+          `${reportLabel}.claims requires at least one evidence-backed defect claim for a fail verdict`,
+        );
+      }
     }
     const reportListMaxItems = researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 50;
     const reportListMaxChars = researcherReport ? AGENT_HANDOFF_LIMITS.maxCallBytes : 1000;
+    const reportListOptions = { lenient: lenientProse, context: materializationContext };
     const constraints = report.constraints == null ? [] : stringArray(
       report.constraints,
       `handoffs[${index}].report.constraints`,
       reportListMaxItems,
       reportListMaxChars,
+      reportListOptions,
     );
     const successCriteria = report.success_criteria == null ? [] : stringArray(
       report.success_criteria,
       `handoffs[${index}].report.success_criteria`,
       reportListMaxItems,
       reportListMaxChars,
+      reportListOptions,
     );
     const questions = report.questions == null ? [] : stringArray(
       report.questions,
       `handoffs[${index}].report.questions`,
       reportListMaxItems,
       reportListMaxChars,
+      reportListOptions,
     );
     const research = normalizeResearchData(report.research, `${reportLabel}.research`, profile);
     validateResearchAbsenceClaims(research, claims, `${reportLabel}.research`);
     const plannerMetadata = normalizePlannerReportMetadata(report, reportLabel, profile);
     entryCounters.narrative += [...constraints, ...successCriteria, ...questions].reduce((sum, text) => sum + text.length, 0);
-    const payload = normalizeReportPayload(report.payload, `${reportLabel}.payload`, profile);
+    const payload = normalizeReportPayload(report.payload, `${reportLabel}.payload`, profile, {
+      lenientProse,
+      context: materializationContext,
+    });
     const structuredMetadataLength = structuredStringLength(research)
       + structuredStringLength(plannerMetadata)
       + structuredStringLength(payload);
@@ -4410,6 +4693,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
       constraints: first.report.constraints,
       ...(research.scope_estimate ? { scope_estimate: research.scope_estimate } : {}),
       ...(Array.isArray(research.absence_checks) ? { absence_checks: research.absence_checks } : {}),
+      ...(Array.isArray(research.verification_targets) ? { verification_targets: research.verification_targets } : {}),
       questions_for_human: packet.outcome === "input_required",
       questions,
     }, null, 2)}\n\`\`\``;

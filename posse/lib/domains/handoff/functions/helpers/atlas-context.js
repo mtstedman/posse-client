@@ -215,6 +215,17 @@ function _pathExistsInCwd(cwd, filePath) {
   }
 }
 
+function _viableAtlasSurveySeedFiles(cwd, seedFiles = []) {
+  return _uniqueAtlasPaths(seedFiles)
+    .filter((filePath) => _isIndexedSourcePath(filePath))
+    .filter((filePath) => _pathExistsInCwd(cwd, filePath));
+}
+
+export function __testViableAtlasSurveySeedFiles(cwd, seedFiles = []) {
+  assertTestContext("__testViableAtlasSurveySeedFiles");
+  return _viableAtlasSurveySeedFiles(cwd, seedFiles);
+}
+
 function _extractMentionedRepoPathsFromText(text) {
   const body = String(text || "");
   if (!body) return [];
@@ -2207,8 +2218,9 @@ async function _prefetchAtlasSurvey(packet, {
   const startedAt = Date.now();
   let scope = null;
   try {
+    const viableSeedFiles = _viableAtlasSurveySeedFiles(packet.cwd, seedFiles);
     scope = chooseSurveyScope(
-      { taskText, rankedFiles, candidateDirs, seedFiles, keySymbols },
+      { taskText, rankedFiles, candidateDirs, seedFiles: viableSeedFiles, keySymbols },
       defaultSurveyScopeDeps(packet.cwd),
     );
     if (!scope.inject) {
@@ -2224,14 +2236,21 @@ async function _prefetchAtlasSurvey(packet, {
     if (String(raw || "").startsWith("Error:")) {
       return _finishAtlasSurveyPrefetch(packet, { ok: false, attempted: true, scope, error: String(raw).slice(0, 200), retries }, startedAt);
     }
-    let data = extractAtlasJsonPayload(raw);
-    data = data?.result ?? data?.data ?? data;
+    const parsed = extractAtlasJsonPayload(raw);
+    const data = parsed?.result ?? parsed?.data ?? parsed;
+    const warnings = [...new Set([
+      ...(Array.isArray(parsed?.warnings) ? parsed.warnings : []),
+      ...(Array.isArray(parsed?.meta?.warnings) ? parsed.meta.warnings : []),
+      ...(Array.isArray(data?.warnings) ? data.warnings : []),
+      ...(Array.isArray(data?.diagnostics?.warnings) ? data.diagnostics.warnings : []),
+    ].map((warning) => String(warning || "").trim()).filter(Boolean))].slice(0, 16);
     if (!data || !Array.isArray(data.files) || data.files.length === 0) {
       return _finishAtlasSurveyPrefetch(packet, {
         ok: false,
         attempted: true,
         scope,
         error: "survey returned no files",
+        warnings,
         metrics: data?.metrics || null,
         retries,
       }, startedAt);
@@ -2260,6 +2279,7 @@ async function _prefetchAtlasSurvey(packet, {
       lifecycleExpansion,
       dependencyBoundaries,
       retries,
+      warnings,
     }, startedAt);
   } catch (err) {
     return _finishAtlasSurveyPrefetch(packet, {
@@ -2432,6 +2452,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     granularity: result.granularity || null,
     truncated: !!result.truncated,
     retries: Number(result.retries || 0),
+    warnings: (Array.isArray(result.warnings) ? result.warnings : []).slice(0, 16),
     durationMs: result.durationMs,
     fileCount,
     fileSummaries,
@@ -2567,6 +2588,9 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
         attempted: !!result?.attempted,
         duration_ms: Number(result?.durationMs || 0),
         retries: Number(result?.retries || 0),
+        warnings: (Array.isArray(result?.warnings) ? result.warnings : [])
+          .slice(0, 16)
+          .map((warning) => String(warning).slice(0, 500)),
         scope: _summarizeSurveyScope(result?.scope),
         vendored_promoted: (Array.isArray(result?.scope?.vendoredPromoted) ? result.scope.vendoredPromoted : [])
           .slice(0, 16),
@@ -3364,8 +3388,12 @@ function _renderAtlasSurveyMissSection(sc, packet) {
   const target = _formatSurveyScopeTarget(sc?.scope) || "selected area";
   const reason = sc?.error ? String(sc.error).split(/\r?\n/)[0].slice(0, 220) : "unknown reason";
   const source = sc?.scope?.source ? ` (scope source: ${sc.scope.source})` : "";
+  const warnings = (Array.isArray(sc?.warnings) ? sc.warnings : [])
+    .map((warning) => String(warning || "").split(/\r?\n/)[0].slice(0, 220))
+    .filter(Boolean);
   return [
     `Area survey (${label} over ${target}) was attempted but unavailable${source}: ${reason}.`,
+    ...warnings.slice(0, 3).map((warning) => `ATLAS survey warning: ${warning}`),
     `If call edges or exhaustive area structure matter, retry ${label} over that scope when available; otherwise continue with the available indexed evidence and report the resulting limitation instead of treating tree scope as a call map.`,
   ];
 }

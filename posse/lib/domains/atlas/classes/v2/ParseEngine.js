@@ -55,7 +55,12 @@ import {
   DOCUMENTATION_TEXT_SHAPE_VERSION,
   embeddingKeysForSymbol,
 } from "../../functions/v2/embeddings/documentation-channel.js";
-import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../../functions/v2/view-health.js";
+import {
+  inspectViewMaterialization,
+  openViewWithMeta,
+  removeSqliteFile,
+  viewFreshness,
+} from "../../functions/v2/view-health.js";
 import { viewCanServeBranch } from "../../functions/v2/view-can-serve.js";
 import { sourceStatRecord, sourceStatMatches } from "../../functions/v2/source-stats.js";
 import { languageTagForExtension } from "../../functions/v2/language-tag.js";
@@ -1571,6 +1576,7 @@ export class ParseEngine {
       return base;
     }
 
+    let replayedEntries = 0;
     try {
       await this.#emitStage("merge", `replaying ${sourceBranch} onto ${ontoBranch}`);
       const entries = await this.#ledger.replayPartition(
@@ -1595,6 +1601,7 @@ export class ParseEngine {
       base.ledger_entries_appended += out.entries.length;
       base.paths_considered = out.entries.length;
       base.paths_indexed = out.entries.length;
+      replayedEntries = out.entries.length;
     } catch (err) {
       if (!isMergeAlreadyReflected({
         ledger: this.#ledger,
@@ -1619,6 +1626,10 @@ export class ParseEngine {
       }
     }
 
+    if (replayedEntries === 0 && await this.#reuseCurrentBranchView({ payload, branch: ontoBranch, base })) {
+      return base;
+    }
+
     await this.#runScipPhaseIfEnabled(base, "main-merge", { force: true, forceIfMissing: true });
 
     return await this.#rebuildBranchView({
@@ -1626,6 +1637,49 @@ export class ParseEngine {
       branch: ontoBranch,
       base,
     });
+  }
+
+  /**
+   * Reuse an already-current destination view after an idempotent merge
+   * replay. Branch finalization above still runs; only redundant SCIP,
+   * materialization, and embedding reconciliation are skipped. Every durable
+   * generation join field must match or the caller takes the full rebuild.
+   *
+   * @param {{ payload: AtlasWarmJobPayload, branch: string, base: AtlasWarmJobResult }} args
+   * @returns {Promise<boolean>}
+   */
+  async #reuseCurrentBranchView({ payload, branch, base }) {
+    const outPath = payload.out_view_path || (
+      branch === this.#defaultBranch ? mainViewPath(this.#repoRoot) : null
+    );
+    if (!outPath || !fs.existsSync(outPath)) return false;
+    let view = null;
+    try {
+      await this.#emitStage("view", `checking current ${branch} view after empty merge replay`);
+      view = View.mount({ dbPath: outPath, mode: "readonly" });
+      const meta = view.metaLocal();
+      const current = meta.branch === branch
+        && meta.ledger_seq === this.#ledger.headSeq(branch)
+        && meta.layer_revision === this.#ledger.layerRevision()
+        && this.#viewMetaMatchesBuildMode(meta)
+        && inspectViewMaterialization(view._unsafeDb(), {
+          treeCompressionMode: this.#treeCompressionMode,
+        }).ok;
+      if (!current) return false;
+      base.view_written = outPath;
+      base.view_etag = meta.built_at;
+      /** @type {any} */ (base).view_reused = true;
+      /** @type {any} */ (base).redundant_phases_skipped = [
+        "scip",
+        "view_rebuild",
+        "embedding_reconciliation",
+      ];
+      return true;
+    } catch {
+      return false;
+    } finally {
+      try { view?.close?.(); } catch { /* stale/corrupt views take the full path */ }
+    }
   }
 
   /**

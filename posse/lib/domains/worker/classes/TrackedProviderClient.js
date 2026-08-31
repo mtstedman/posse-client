@@ -2770,7 +2770,7 @@ export class TrackedProviderClient {
                     role: opts.role,
                   })
                 : prompt;
-            const { output: fbOutput, stats: fbStats } = await this._executeOneAttempt(fallbackPrompt, fbOpts, {
+            const fallbackResult = await this._executeOneAttempt(fallbackPrompt, fbOpts, {
               providerName: fallbackName,
               provider: fbProvider,
               tier,
@@ -2786,12 +2786,13 @@ export class TrackedProviderClient {
               },
               abortSignal: fbAc.signal,
             });
+            const { stats: fbStats } = fallbackResult;
 
             if (job_id) {
               updateJobProvider(job_id, fallbackName, fbStats.modelName || fbModelName || null);
             }
             this.emitStatus(job_id, `${C.green}[fallback] ${fallbackName} succeeded${C.reset}`);
-            return { output: fbOutput, stats: fbStats };
+            return fallbackResult;
           } catch (fbErr) {
             // Propagate abort signals so killJob() during a fallback is honored;
             // otherwise the outer throw replaces the abort with the primary

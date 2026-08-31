@@ -97,6 +97,20 @@ export function getAtlasWarmJobCompletion(warmJobId) {
   };
 }
 
+export async function waitForAtlasWarmJobCompletion(warmJobId, {
+  timeoutMs = 30_000,
+  pollMs = 100,
+} = {}) {
+  const deadline = Date.now() + Math.max(0, Math.min(30_000, Number(timeoutMs) || 0));
+  let completion = getAtlasWarmJobCompletion(warmJobId);
+  while (!completion.completed && Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(pollMs, remaining))));
+    completion = getAtlasWarmJobCompletion(warmJobId);
+  }
+  return completion;
+}
+
 function parseJsonObject(value, fallback = {}) {
   if (!value) return fallback;
   try {
@@ -169,6 +183,7 @@ function warmJobPriority(eventType) {
   if (
     eventType === ATLAS_EVENTS.RESEARCH_COMPLETE
     || eventType === ATLAS_EVENTS.DEV_LEASED
+    || eventType === ATLAS_EVENTS.DEV_COMMITTED
     || eventType === ATLAS_EVENTS.MAIN_ADVANCED
     || eventType === ATLAS_EVENTS.SCIP_STAGED
   ) {

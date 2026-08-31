@@ -81,7 +81,11 @@ import {
 } from "../../providers/functions/delegation-routing.js";
 import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
 import { planArtifactReuse as planArtifactReuseFromModule } from "./artifact-reuse.js";
-import { createPlanApprovalGate, isPlanApprovalEnabled } from "./plan-approval.js";
+import {
+  createPlanApprovalGate,
+  isPlanApprovalEnabled,
+  isPlanApprovalSuppressedForRun,
+} from "./plan-approval.js";
 import {
   getResearchBudget,
   isResearchBudgetDeep,
@@ -2139,19 +2143,29 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
       }
 
-      // ── Plan-approval gate (opt-in via account settings) ──
+      // ── Plan-approval gate ──
       // Every created job gets a hard-dep on the gate so none run until the
       // human approves/rejects. The gate is a human_input job parked at
       // waiting_on_human; `posse plan approve/reject` drives the transition.
       try {
-        if (isPlanApprovalEnabled()) {
-          const createdIds = [...allCreatedJobIds];
+        const createdIds = [...allCreatedJobIds];
+        const criticalRiskJobIds = createdIds.filter((jobId) => {
+          const createdJob = getJob(jobId);
+          if (!createdJob || createdJob.job_type !== "dev") return false;
+          const createdPayload = parseJobPayload(createdJob);
+          return Number(createdPayload?._execution_policy?.risk_score || 0) >= 5;
+        });
+        const criticalRiskApproval = criticalRiskJobIds.length > 0
+          && !isPlanApprovalSuppressedForRun();
+        if (isPlanApprovalEnabled() || criticalRiskApproval) {
           if (createdIds.length > 0) {
             const wi = getWorkItem(planJob.work_item_id);
             const gateId = createPlanApprovalGate(planJob, createdIds, {
               wi_title: wi?.title || planJob.title,
               task_count: createdCount,
               job_count: createdIds.length,
+              approval_reason: criticalRiskApproval ? "critical_risk" : "configured",
+              critical_risk_job_ids: criticalRiskJobIds,
             });
             if (gateId != null) {
               worker.emit(planJob.id, `${C.yellow}[plan-approval]${C.reset} WI#${planJob.work_item_id}: ${createdIds.length} job(s) blocked pending approval (gate job #${gateId})`);

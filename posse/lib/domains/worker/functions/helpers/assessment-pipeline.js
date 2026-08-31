@@ -40,7 +40,10 @@ import {
   handoff,
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
-import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
+import {
+  getAgentHandoffRecord,
+  isRetryableTerminalHandoffError,
+} from "../../../handoff/functions/agent-handoff.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
@@ -74,6 +77,7 @@ import {
 } from "../../../queue/functions/sibling-locks.js";
 import {
   getAtlasWarmJobCompletion,
+  waitForAtlasWarmJobCompletion,
 } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
@@ -1056,7 +1060,7 @@ export function __testBuildAssessmentProviderScope(options) {
  * @param {boolean} opts.autoApprove - Pass through to callProvider
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
-export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null } = {}) {
+export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
   const assessorProvider = String(
     routedProviderName
     || await agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
@@ -1292,7 +1296,9 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
     try {
       const assessmentDb = getDb();
-      _rerunFailedRegisteredTestsForAssessment({ job, cwd, scopeFiles: registeredTestScopeFiles, db: assessmentDb });
+      if (allowMutatingRunners) {
+        _rerunFailedRegisteredTestsForAssessment({ job, cwd, scopeFiles: registeredTestScopeFiles, db: assessmentDb });
+      }
       registeredTestRunEvidence = __testBuildRegisteredTestRunEvidence({
         jobId: job.id,
         scopeFiles: registeredTestScopeFiles,
@@ -1410,6 +1416,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   let response;
+  let trustedAssessorEvidenceChars = null;
+  let trustedAssessorClaims = [];
   const assessorMaxToolCalls = getAssessorMaxToolCalls();
   const assessorDeepthink = !!parseJobPayload(job).deepthink;
   const assessmentInputKey = crypto.createHash("sha256").update(JSON.stringify({
@@ -1438,6 +1446,20 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   });
   if (reusableReview) {
     response = reusableReview.content_long;
+    try {
+      const metadata = typeof reusableReview.content_json === "string"
+        ? JSON.parse(reusableReview.content_json)
+        : reusableReview.content_json;
+      if (Number.isInteger(metadata?.assessor_handoff_evidence_chars)) {
+        trustedAssessorEvidenceChars = Math.max(0, metadata.assessor_handoff_evidence_chars);
+      }
+      trustedAssessorClaims = Array.isArray(metadata?.assessor_handoff_claims)
+        ? metadata.assessor_handoff_claims
+        : [];
+    } catch {
+      trustedAssessorEvidenceChars = null;
+      trustedAssessorClaims = [];
+    }
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -1474,6 +1496,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       activity: `assessing: ${job.title}`,
       silent,
       autoApprove,
+      allowShell: allowMutatingRunners,
+      allowTests: allowMutatingRunners,
       cwd,
       scopedFiles: providerScope.scopedFiles,
       createFiles: providerScope.createFiles,
@@ -1499,6 +1523,17 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       jobModelName: null,
     });
     response = result.output;
+    if (Number.isInteger(result.agentCallId)) {
+      const handoffRecord = getAgentHandoffRecord(result.agentCallId);
+      const packet = handoffRecord?.packet;
+      trustedAssessorEvidenceChars = packet?.profile === "assessor.verdict.v1"
+        ? Math.max(0, Number(packet.evidence_chars) || 0)
+        : 0;
+      trustedAssessorClaims = packet?.profile === "assessor.verdict.v1"
+        && Array.isArray(packet?.handoffs?.[0]?.report?.claims)
+        ? packet.handoffs[0].report.claims
+        : [];
+    }
   } catch (err) {
     throw err;
   }
@@ -1524,6 +1559,12 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       content_json: {
         assessment_input_key: assessmentInputKey,
         verdict_parse_succeeded: _isReusableAssessorVerdict(verdictJson, verdict),
+        ...(trustedAssessorEvidenceChars == null
+          ? {}
+          : { assessor_handoff_evidence_chars: trustedAssessorEvidenceChars }),
+        ...(trustedAssessorClaims.length === 0
+          ? {}
+          : { assessor_handoff_claims: trustedAssessorClaims }),
       },
     });
   }
@@ -1647,6 +1688,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     human_questions: _normalizeAssessmentTextList(verdict.human_questions),
     suggestions: _normalizeAssessmentTextList(verdict.suggestions),
     raw: response,
+    ...(trustedAssessorClaims.length === 0 ? {} : { _assessor_claims: trustedAssessorClaims }),
     ...(verdict._disable_internal_retry ? { _disable_internal_retry: true } : {}),
   };
   const taskBoundary = buildAssessmentTaskBoundary(job);
@@ -1674,6 +1716,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       remoteComposer,
       taskBoundaryRetryDepth: 1,
       attemptId,
+      allowMutatingRunners,
     });
   }
   if (boundaryViolation) {
@@ -1688,6 +1731,30 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       human_questions: [],
       suggestions: [],
       raw: normalizedVerdict.raw,
+      _disable_internal_retry: true,
+    };
+  }
+  if (normalizedVerdict.verdict === "fail" && trustedAssessorEvidenceChars === 0) {
+    recordObservation({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attemptId ?? null,
+      observation_type: "assessment.unsupported_fix_blocked",
+      summary: "Blocked automatic fix from an evidence-free assessor failure",
+      detail: {
+        verdict: "fail",
+        assessor_handoff_evidence_chars: 0,
+      },
+    });
+    return {
+      ...normalizedVerdict,
+      verdict: "needs_review",
+      confidence: "none",
+      reasons: [
+        "Assessor reported a failure without an evidence-backed defect claim; automatic repair was suppressed pending review.",
+        ...normalizedVerdict.reasons,
+      ],
+      spawn_jobs: [],
       _disable_internal_retry: true,
     };
   }
@@ -1818,6 +1885,81 @@ function getWorkerProviderCall(worker) {
   return call.bind(worker.providerClient);
 }
 
+async function callWithProjectDirAssessmentGuard(call, callArgs, {
+  projectDir,
+  job,
+  attemptId = null,
+  emit = null,
+} = {}) {
+  let before = null;
+  try {
+    before = await gitPorcelainZAsync(projectDir);
+  } catch {
+    before = null;
+  }
+
+  let callResult;
+  let callError = null;
+  try {
+    callResult = await call(...callArgs);
+  } catch (err) {
+    callError = err;
+  }
+
+  let guardError = null;
+  if (before != null) {
+    let after = before;
+    try {
+      after = await gitPorcelainZAsync(projectDir);
+    } catch {
+      after = before;
+    }
+    if (after !== before) {
+      const changedEntries = diffPorcelainEntries(before, after);
+      let snapshotDir = null;
+      let cleanupError = null;
+      if (before === "") {
+        try {
+          snapshotDir = await snapshotAndResetDirtyWorktreeAsync(projectDir, projectDir, {
+            reason: `assessment-project-dir-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+            branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+            wiId: job.work_item_id,
+            onMsg: (message) => emit?.(`${C.dim}[assessor-guard] ${message}${C.reset}`),
+          });
+        } catch (err) {
+          cleanupError = err?.message || String(err);
+        }
+      } else {
+        cleanupError = "projectDir was already dirty; refused to reset operator-owned changes";
+      }
+      recordObservation({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attemptId,
+        observation_type: "assessment.project_dir_side_effect",
+        summary: cleanupError
+          ? "Assessor changed projectDir and automatic cleanup was unsafe"
+          : "Assessor projectDir side effects were snapshotted and reset",
+        detail: {
+          changed_entries: changedEntries.slice(0, 100),
+          snapshot_dir: snapshotDir,
+          cleanup_error: cleanupError,
+        },
+      });
+      emit?.(`${C.yellow}[assessor-guard] provider-side projectDir changes detected${snapshotDir ? `; reset after snapshot ${snapshotDir}` : ""}${C.reset}`);
+      if (cleanupError) {
+        guardError = new Error(`Assessment projectDir mutation cleanup failed: ${cleanupError}`, {
+          ...(callError ? { cause: callError } : {}),
+        });
+      }
+    }
+  }
+
+  if (guardError) throw guardError;
+  if (callError) throw callError;
+  return callResult;
+}
+
 function killShellCommandProcessTree(child, options = {}) {
   return killShellCommandProcessTreeImpl(child, options);
 }
@@ -1901,6 +2043,7 @@ export async function runPostExecutionAssessment(worker, {
   shouldOverrideArtifactMissingFail,
   shortJobTitle,
   syncAssessorWorkerDisplay,
+  waitForAtlasWarmCompletion = waitForAtlasWarmJobCompletion,
 } = {}) {
   const hasPendingFileRequests = () => {
     if (!pendingFileRequests) return false;
@@ -1928,7 +2071,13 @@ export async function runPostExecutionAssessment(worker, {
   const evidenceWarmRequired = currentPayload?._atlas_evidence_warm_required === true;
   if (evidenceWarmRequired || (Number.isInteger(evidenceWarmJobId) && evidenceWarmJobId > 0)) {
     const hasEvidenceWarmJob = Number.isInteger(evidenceWarmJobId) && evidenceWarmJobId > 0;
-    const evidenceWarm = getAtlasWarmJobCompletion(hasEvidenceWarmJob ? evidenceWarmJobId : null);
+    let evidenceWarm = getAtlasWarmJobCompletion(hasEvidenceWarmJob ? evidenceWarmJobId : null);
+    if (hasEvidenceWarmJob && !evidenceWarm.completed) {
+      evidenceWarm = await waitForAtlasWarmCompletion(evidenceWarmJobId, {
+        timeoutMs: 30_000,
+        pollMs: 100,
+      });
+    }
     if (!evidenceWarm.ok) {
       currentPayload._assess_only = true;
       persistPendingAssessmentFileRequests(currentPayload, pendingFileRequests);
@@ -2504,8 +2653,21 @@ export async function runPostExecutionAssessment(worker, {
           : (wtPath || worker.projectDir),
         assessmentContext,
         attemptId: attempt.id,
+        allowMutatingRunners: !!wtPath,
       };
-      const trackedCall = getWorkerProviderCall(worker);
+      const rawTrackedCall = getWorkerProviderCall(worker);
+      const assessmentCwd = assessOpts.cwd;
+      const usesProjectDirCwd = !wtPath
+        && taskMode === "code"
+        && path.resolve(assessmentCwd) === path.resolve(worker.projectDir);
+      const trackedCall = usesProjectDirCwd
+        ? (...callArgs) => callWithProjectDirAssessmentGuard(rawTrackedCall, callArgs, {
+            projectDir: worker.projectDir,
+            job,
+            attemptId: attempt.id,
+            emit: (message) => worker.emit(job.id, message),
+          })
+        : rawTrackedCall;
       const assessmentTierOrder = ["cheap", "standard", "strong"];
       const normalizeAssessmentTier = (value, fallback = "cheap") => {
         const raw = String(value || "").trim().toLowerCase();

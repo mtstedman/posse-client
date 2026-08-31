@@ -31,7 +31,7 @@ export function normalizeRecycleMode(value) {
 
 export function requiredCoverageRolesForMode(modeValue = "off") {
   const mode = normalizeRecycleMode(modeValue);
-  if (mode === "dev-fix") return ["dev", "assessor"];
+  if (mode === "dev-fix") return ["dev"];
   if (mode === "full") return ["dev", "planner", "assessor"];
   return [];
 }

@@ -92,7 +92,7 @@ export function normalizeResearchData(value, label, profile) {
   }
   const source = exactKeys(
     value,
-    ["key_symbols", "memories", "planner_file_priorities", "patterns", "scope_estimate", "absence_checks", "question_details"],
+    ["key_symbols", "memories", "planner_file_priorities", "patterns", "scope_estimate", "absence_checks", "question_details", "verification_targets"],
     label,
   );
   const keySymbols = normalizeResearchSymbolSeeds(source.key_symbols, 12);
@@ -159,6 +159,7 @@ export function normalizeResearchData(value, label, profile) {
 
   let questionDetails = [];
   let absenceChecks = [];
+  let verificationTargets = [];
   if (source.absence_checks != null) {
     if (!Array.isArray(source.absence_checks) || source.absence_checks.length > 20) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.absence_checks must be an array with at most 20 entries`);
@@ -196,6 +197,21 @@ export function normalizeResearchData(value, label, profile) {
       };
     });
   }
+  if (source.verification_targets != null) {
+    if (!Array.isArray(source.verification_targets) || source.verification_targets.length > 20) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.verification_targets must be an array with at most 20 entries`);
+    }
+    verificationTargets = source.verification_targets.map((raw, index) => {
+      const entry = exactKeys(raw, ["command", "reason", "files"], `${label}.verification_targets[${index}]`);
+      return {
+        command: boundedString(entry.command, `${label}.verification_targets[${index}].command`, 1000),
+        reason: boundedString(entry.reason, `${label}.verification_targets[${index}].reason`, 1000),
+        files: entry.files == null
+          ? []
+          : stringArray(entry.files, `${label}.verification_targets[${index}].files`, 20, 500),
+      };
+    });
+  }
 
   return {
     key_symbols: keySymbols,
@@ -205,6 +221,7 @@ export function normalizeResearchData(value, label, profile) {
     ...(scopeEstimate == null ? {} : { scope_estimate: scopeEstimate }),
     ...(absenceChecks.length === 0 ? {} : { absence_checks: absenceChecks }),
     ...(questionDetails.length === 0 ? {} : { question_details: questionDetails }),
+    ...(verificationTargets.length === 0 ? {} : { verification_targets: verificationTargets }),
   };
 }
 
