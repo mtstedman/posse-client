@@ -601,6 +601,23 @@ function reviewGateNeedsRetirement(job) {
   return !["succeeded", "canceled"].includes(job?.status);
 }
 
+function hasRecordedReviewResolution(job) {
+  const row = getDb().prepare(`
+    SELECT event_json FROM events
+    WHERE job_id = ? AND event_type IN (?, ?)
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(job.id, EVENT_TYPES.JOB_REVIEW_RESOLVED, EVENT_TYPES.JOB_REVIEW_SKIPPED);
+  if (!row?.event_json) return false;
+  try {
+    const detail = JSON.parse(row.event_json);
+    return Number(detail.assessor_state_version) >= Number(job.state_version || 0)
+      && detail.assessor_verdict_preserved === job.assessor_verdict;
+  } catch {
+    return false;
+  }
+}
+
 const REVIEW_SETTLEMENT_ORIGINAL_STATUSES = new Set([
   "waiting_on_human",
   "waiting_on_review",
@@ -675,18 +692,14 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
       }) || changed;
     }
     if (job.assessor_verdict === "needs_review") {
-      if (hasImplementationAttempts(job.id)) {
-        changed = setAssessorVerdict(job.id, "pass", "high", { force: true }) || changed;
-      } else {
-        // Work-item approval unblocks the graph, but unexecuted work is never
-        // recorded as assessor-passed — same invariant as the job-level review
-        // waiver in human-input-job.js.
-        waived = true;
-        changed = setAssessorVerdict(job.id, "not_assessed", null, { force: true }) || changed;
-        setAssessmentLifecycle(job.id, "assessment_waived", { completed: true });
-      }
+      // Approval is a human/system resolution, not a new assessor verdict.
+      // Preserve the model's actual needs_review result and record the override
+      // in the review event/lifecycle instead of rewriting history to pass/high.
+      waived = true;
+      changed = setAssessmentLifecycle(job.id, "assessment_waived", { completed: true }) || changed;
     }
     if (!changed) continue;
+    const resolvedJob = getJob(job.id) || job;
     logEvent({
       work_item_id: id,
       job_id: job.id,
@@ -695,7 +708,15 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
       message: resolution === "work_item_merged"
         ? "Pending job review resolved by approved work-item merge"
         : "Pending job review resolved by explicit work-item approval",
-      event_json: JSON.stringify(waived ? { resolution, assessment_waived: true } : { resolution }),
+      event_json: JSON.stringify(waived ? {
+        resolution,
+        human_resolution: "accept",
+        assessment_waived: true,
+        assessor_verdict_preserved: job.assessor_verdict,
+        assessor_confidence_preserved: job.assessor_confidence || null,
+        assessor_state_version: resolvedJob.state_version || 0,
+        implementation_attempted: hasImplementationAttempts(job.id),
+      } : { resolution }),
     });
     resolved += 1;
   }
@@ -707,7 +728,10 @@ function settleMergedWorkItemReviewJobs(id) {
   const plan = {
     originals: jobs.filter((job) => (
       job.job_type !== "human_input"
-      && (job.status === "waiting_on_review" || job.assessor_verdict === "needs_review")
+      && (
+        job.status === "waiting_on_review"
+        || (job.assessor_verdict === "needs_review" && !hasRecordedReviewResolution(job))
+      )
     )),
     // Once the work item is actually merged, every remaining review gate is
     // stale even if its original row was already made terminal elsewhere.
@@ -1602,7 +1626,8 @@ export function setAssessorVerdict(
   }
   const result = db.prepare(`
     UPDATE jobs
-    SET assessor_verdict = ?, assessor_confidence = ?, updated_at = ?
+    SET assessor_verdict = ?, assessor_confidence = ?,
+        state_version = state_version + 1, updated_at = ?
     WHERE ${where.join(" AND ")}
   `).run(verdict, confidence, now(), ...whereParams);
   return result.changes > 0;

@@ -43,6 +43,27 @@ export const IMAGE_EXTS = new Set([
   ".bmp", ".tif", ".tiff", ".ico",
 ]);
 
+const EXPLICIT_MEDIA_DELIVERABLE_RE = /\b(?:rich|custom|original|generated|hero|banner|background|marketing|product)\s+(?:images?|photos?|illustrations?|artwork|visuals?)\b|\b(?:create|generate|produce|add|include|supply|design)\s+(?:[\w-]+\s+){0,3}(?:images?|photos?|illustrations?|artwork)\b/i;
+const MEDIA_DELIVERABLE_NEGATION_RE = /\b(?:do not|don't|without|no need to|must not)\s+(?:create|generate|produce|add|include|supply|design)\b[^.\n]{0,80}\b(?:images?|photos?|illustrations?|artwork)\b/i;
+
+export function planCoverageGaps(workItem = {}, tasks = []) {
+  const requestText = [workItem?.title, workItem?.description].filter(Boolean).join("\n");
+  const requiresGeneratedMedia = EXPLICIT_MEDIA_DELIVERABLE_RE.test(requestText)
+    && !MEDIA_DELIVERABLE_NEGATION_RE.test(requestText);
+  if (!requiresGeneratedMedia) return [];
+  const hasMediaTask = (Array.isArray(tasks) ? tasks : []).some((task) => {
+    const taskText = [task?.title, task?.task_spec, ...(Array.isArray(task?.success_criteria) ? task.success_criteria : [task?.success_criteria])]
+      .filter(Boolean)
+      .join(" ");
+    return String(task?.task_mode || "").toLowerCase() === "image"
+      || task?.needs_image_generation === true
+      || (String(task?.job_type || "").toLowerCase() === "artificer" && /\b(?:image|photo|illustration|artwork)\b/i.test(taskText));
+  });
+  return hasMediaTask
+    ? []
+    : ["The request explicitly requires generated visual media, but the plan has no image/artificer deliverable task"];
+}
+
 const CODE_BASENAMES = new Set([
   "dockerfile",
   "makefile",

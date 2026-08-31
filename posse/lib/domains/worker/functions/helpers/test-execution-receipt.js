@@ -427,6 +427,36 @@ export function resolveFrozenTestPlan(job = {}, payload = {}) {
   };
 }
 
+function frozenTestPlanFromReceipt(receipt = {}) {
+  if (!receipt || receipt.schema_version !== RECEIPT_SCHEMA_VERSION) return null;
+  const command = typeof receipt.command === "string" ? receipt.command.trim() : "";
+  const source = typeof receipt.source === "string" ? receipt.source.trim() : "";
+  const planId = typeof receipt.plan_id === "string" ? receipt.plan_id.trim() : "";
+  if (!command || !source || !planId) return null;
+
+  // The baseline receipt is the durable frozen plan. Preserve its normalized
+  // executable and working directory for the post-change run; reconstructing
+  // only the display command turns a safe wrapper such as
+  // `cd htdocs && npm run typecheck` back into a direct spawn of `cd`.
+  const executionCommand = typeof receipt.execution_command === "string"
+    ? receipt.execution_command.trim()
+    : "";
+  const cwdRelative = receipt.cwd_relative == null
+    ? null
+    : safeRelativeTestDirectory(receipt.cwd_relative);
+  if (!executionCommand || (receipt.cwd_relative != null && !cwdRelative)) return null;
+
+  return {
+    schema_version: receipt.schema_version,
+    command,
+    execution_command: executionCommand,
+    cwd_relative: cwdRelative,
+    source,
+    plan_id: planId,
+    validation_error: receipt.validation_error || null,
+  };
+}
+
 export function findFrozenTestBaseline(jobId) {
   return storedReceipts(jobId)
     .find((receipt) => receipt.phase === "baseline"
@@ -772,13 +802,7 @@ export async function ensurePostChangeTestReceipt({
   if (!cwd) return null;
   const baseline = findFrozenTestBaseline(job?.id);
   const plan = baseline
-    ? {
-        schema_version: baseline.schema_version,
-        command: baseline.command,
-        source: baseline.source,
-        plan_id: baseline.plan_id,
-        validation_error: baseline.validation_error || null,
-      }
+    ? frozenTestPlanFromReceipt(baseline)
     : resolveFrozenTestPlan(job, payload);
   if (!plan) return null;
   const assessedCommit = commitHash || await currentCommit(cwd);

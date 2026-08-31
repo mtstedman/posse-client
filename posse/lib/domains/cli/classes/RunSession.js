@@ -270,6 +270,7 @@ export class RunSession {
   let startAtlasWarmupPhase = null;
   let scheduler = null;
   let worker = null;
+  let displayActions = null;
   const displaySnapshots = new RunDisplaySnapshotController({
     getDisplay: () => display,
     projectDir: PROJECT_DIR,
@@ -1144,6 +1145,7 @@ export class RunSession {
     if (display && typeof display.acceptQueueSnapshot === "function") {
       const accepted = display.acceptQueueSnapshot(snapshot);
       if (accepted !== false) refreshDisplaySnapshotsForQueue();
+      try { displayActions?.surfaceActionableHumanGates(snapshot.jobs || []); } catch { /* surfaced again on the next snapshot */ }
     }
   };
   scheduler = new Scheduler({
@@ -2277,30 +2279,20 @@ export class RunSession {
         !(atlasBoot?.attempted && atlasBoot.ok === false) &&
         !(atlasRuntime?.attempted && atlasRuntime.ok === false)
       ),
-      // Keep a soft-timeout so the rest of boot can settle, then expose an
-      // explicit Enter-to-background escape hatch while the pre-loop gate keeps
-      // waiting for ATLAS unless the user releases it.
+      // Keep a soft-timeout so the rest of boot can settle. Once it expires,
+      // release the pre-loop gate automatically and let the real warm continue
+      // behind the run loop. A soft timeout must not become a hidden human gate.
       softTimeoutMs: Number.isFinite(Number(atlasWarmupBootConfig?.bootSoftTimeoutMs))
         ? Math.max(0, Number(atlasWarmupBootConfig.bootSoftTimeoutMs))
         : 33 * 60 * 1000,
-      softTimeoutDetail: "indexing — press Enter to background",
-      // The pre-TUI gate below keeps waiting on the warm after this step's
-      // soft-timeout, so the chip must stay "running": marking it ok here made
-      // the whole panel read 100%/ready while boot was still blocked on the
-      // warm (and only an Enter — or the warm finishing — would advance it).
+      softTimeoutDetail: "indexing continues in background",
+      // Keep the chip running until the pre-TUI gate consumes the background
+      // request and marks it deferred. The late completion watcher can still
+      // promote it to the real terminal outcome.
       softTimeoutStatus: "running",
       onSoftTimeout: () => {
         if (atlasBootBackgroundRequested) return;
-        // Headless boots have no TTY to press Enter on — the footer action is
-        // unreachable, so a warm wedged before the encode handoff left them
-        // waiting on internal warm timeouts alone. Auto-background instead,
-        // matching the non-interactive behavior at the views-ready handoffs.
-        if (!bootCanPromptForBackground()) {
-          requestAtlasBootBackground("atlas-soft-timeout-non-interactive");
-          return;
-        }
-        setBootEnterAction(() => requestAtlasBootBackground("atlas-soft-timeout-enter"));
-        updateBootFooter("hit Enter to continue with ATLAS in the background");
+        requestAtlasBootBackground("atlas-soft-timeout");
       },
     });
     };
@@ -2508,18 +2500,13 @@ export class RunSession {
   // The entire upper boot section has settled (warmups + providers + scheduler
   // lock/orphan/pre-loop). Kick the ATLAS/SCIP warm now so the top of the panel
   // finishes independently before the ATLAS×SCIP matrix + zip take over. This
-  // returns at the warm's soft-timeout; the real work continues and is awaited
-  // by the gate just below, so the panel keeps animating live progress.
+  // returns at the warm's soft-timeout; the real work continues while the
+  // background request releases the gate just below.
   //
-  // Race the phase against the Enter/headless background request: the footer
-  // advertises "hit Enter to load in the background" long before the phase's
-  // soft-timeout, and headless boots auto-request at views-ready — both must
-  // release this wait immediately. The gate below re-races the already-settled
-  // request and takes its deferred-chip + late-completion-watcher branch. When
-  // no request is made, the race waits on the phase exactly as before, so the
-  // default remains: boot holds until the ATLAS index has fully synced. The
-  // phase promise never rejects (bootWarmup converts failures to results), so
-  // leaving it un-awaited after a background win is safe.
+  // Race the phase against any earlier views-ready/Enter background request.
+  // If neither arrived first, the phase's own soft-timeout now creates the
+  // request and releases this wait without requiring human input. The gate
+  // below consumes the request and attaches the late-completion watcher.
   if (startAtlasWarmupPhase) {
     await Promise.race([startAtlasWarmupPhase(), atlasBootBackgroundRequest, bootAborted]);
     if (await bailIfBootInterrupted()) return;
@@ -2678,7 +2665,7 @@ export class RunSession {
     }
   }
 
-  const displayActions = new RunDisplayActions({
+  displayActions = new RunDisplayActions({
     display,
     worker,
     projectDir: PROJECT_DIR,
@@ -2709,6 +2696,9 @@ export class RunSession {
     researchPayload,
     refreshDisplaySnapshotsForQueue,
   }).wire();
+  if (display) {
+    try { displayActions.surfaceActionableHumanGates(listJobs()); } catch { /* scheduler snapshots retry */ }
+  }
   if (display) {
     const humanAnswerRelay = new RunHumanAnswerRelay({
       display,
@@ -2769,7 +2759,7 @@ export class RunSession {
     hasAutoMergeableCompletedWorkItems,
     autoMergePendingReviewBlockers,
     describePendingReviewLockBlockers,
-    surfacePlanApprovalGates: (activeJobs) => displayActions.surfacePlanApprovalGates(activeJobs),
+    surfaceActionableHumanGates: (activeJobs) => displayActions.surfaceActionableHumanGates(activeJobs),
   });
   await scheduler.runLoop(
     (job) => worker.execute(job),

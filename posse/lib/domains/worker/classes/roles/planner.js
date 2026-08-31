@@ -45,7 +45,7 @@ import {
 import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { worktreePathAsync } from "../../../git/functions/worktree-path.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
-import { getExplicitIntakeBindings } from "../../../planning/functions/plan-routing.js";
+import { getExplicitIntakeBindings, planCoverageGaps } from "../../../planning/functions/plan-routing.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
@@ -232,6 +232,12 @@ export class PlannerRole extends BaseRole {
       plannerCtx.desiredOutputsBlock,
       job ? loadNudges(job.id, { attemptId: plannerCtx.attemptId }) : "",
       plannerCtx.plannerRoutingContext,
+      [
+        "FINAL COVERAGE CHECK (before submitting):",
+        "- Build a private coverage matrix mapping every explicit user deliverable, named surface, constraint, and verification expectation to at least one task and success criterion.",
+        "- Do not emit the matrix as an extra schema field; use it to repair omissions in the task batch.",
+        "- If the request explicitly asks for rich/custom/generated images, photos, illustrations, artwork, or other visual assets, include an image artificer deliverable (and repo promotion/integration when requested). CSS styling alone does not satisfy a requested media deliverable.",
+      ].join("\n"),
       (plannerCtx.plannerReadRoot || plannerCtx.projectDir)
         ? `PROJECT ROOT: ${(plannerCtx.plannerReadRoot || plannerCtx.projectDir).replace(/\\/g, "/")}`
         : null,
@@ -924,6 +930,20 @@ export class PlannerRole extends BaseRole {
         snippet: output,
       });
       tasks = tasks.slice(0, maxTasks);
+    }
+    const coverageGaps = planCoverageGaps(ctx.workItem, tasks);
+    if (coverageGaps.length > 0) {
+      const detail = `Planner coverage check failed: ${coverageGaps.join("; ")}`;
+      emit(worker, job.id, `${C.red}[planner]${C.reset} WI#${job.work_item_id}: ${detail}`);
+      logBadInputFailure(job, {
+        attemptId: ctx.attemptId,
+        layer: "planner",
+        upstream: "planner_output",
+        classification: "deliverable_coverage_gap",
+        detail,
+        snippet: output,
+      });
+      throw new Error(detail);
     }
     worker.createJobsFromPlan(job, tasks, {
       atlasDevBriefsEnabled: !!ctx.plannerPacket?.atlas?.active,

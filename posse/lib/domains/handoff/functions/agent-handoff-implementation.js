@@ -1919,9 +1919,13 @@ function normalizeDecoyInput(value, label) {
   return [selector, reason ?? "Excluded from supporting evidence."];
 }
 
-function isCompatibilityProofProvenance(evidence) {
+function isGroundedClaimEvidence(evidence) {
   const kind = evidence?.provenance?.kind;
   return ["Tool Result", "Full Tool Call"].includes(kind);
+}
+
+function isCompatibilityProofProvenance(evidence) {
+  return isGroundedClaimEvidence(evidence);
 }
 
 function materializeClaim(
@@ -2125,7 +2129,7 @@ function validateResearchClaimEvidence(claims, label) {
   for (const [index, claim] of claims.entries()) {
     const detail = plainObject(claim?.[1]) || {};
     const evidence = Array.isArray(detail.evidence) ? detail.evidence : [];
-    if (evidence.length > 0) continue;
+    if (evidence.some(isGroundedClaimEvidence)) continue;
     // A lenient pipeline materialization may have demoted every selector on a
     // claim to an unverified annotation; the researcher still named a
     // location, so the claim stands for the consumer to verify.
@@ -3778,7 +3782,8 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) {
       const unverifiedClaims = claims.filter((claim) => (
         profile === "researcher.report.v1"
-          ? !Array.isArray(claim?.[1]?.evidence) || claim[1].evidence.length === 0
+          ? !Array.isArray(claim?.[1]?.evidence)
+            || !claim[1].evidence.some(isGroundedClaimEvidence)
           : claim[CLAIM_EVIDENCE_DEMOTION] === true
       ));
       if (unverifiedClaims.length > 0) {
@@ -3812,7 +3817,8 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     if (AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.profiles.includes(profile)
       && AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.outcomes.includes(outcome)) {
       const hasGroundedDefect = claims.some((claim) => (
-        Array.isArray(claim?.[1]?.evidence) && claim[1].evidence.length > 0
+        Array.isArray(claim?.[1]?.evidence)
+        && claim[1].evidence.some(isGroundedClaimEvidence)
       ));
       if (!hasGroundedDefect) {
         fail(

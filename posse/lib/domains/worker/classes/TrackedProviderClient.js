@@ -26,7 +26,7 @@ import {
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { resolveEffectiveTierModel } from "../../providers/functions/model-catalog-validate.js";
 import { C } from "../../../shared/format/functions/colors.js";
-import { filterProviderToolUseReplay, getObservationContext, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
+import { filterProviderToolUseReplay, getObservationContext, reconcileProviderToolUseReplay, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordOutput } from "../../../shared/telemetry/functions/logging/output-log.js";
 import { resolveAtlasExecutionAttachment, withAtlasExecutionPolicySnapshot } from "../../integrations/functions/atlas.js";
@@ -421,6 +421,7 @@ const DEFAULT_DEPS = {
   getProviderRateLimitState,
   selectProviderName,
   filterProviderToolUseReplay,
+  reconcileProviderToolUseReplay,
   getObservationContext,
   recordObservation,
   recordProviderToolBatchObservations,
@@ -1279,6 +1280,7 @@ export class TrackedProviderClient {
       completeAgentCall,
       createAgentCall,
       filterProviderToolUseReplay,
+      reconcileProviderToolUseReplay,
       recordOutput,
       recordPrompt,
       recordRecoveryCheckpoint,
@@ -1883,15 +1885,13 @@ export class TrackedProviderClient {
         }
         const terminalResult = { output: "", stats: error?.stats || {} };
         // Terminal handoff shutdown bypasses BaseProvider's normal successful
-        // result boundary. Apply the same provider-neutral turn guard before
-        // accepting the synthesized result so an abort receipt cannot turn an
-        // over-budget call into success.
-        new ProviderTurnBudget({
+        // result boundary. Preserve close-time turn overages as telemetry;
+        // the already committed terminal handoff remains authoritative.
+        providerResult = new ProviderTurnBudget({
           providerName,
           requestedMaxTurns: resolvedMaxTurns,
         }).finalize(terminalResult);
         terminalProviderError = error;
-        providerResult = terminalResult;
       }
       providerReturnedAt ??= Date.now();
       if (abortSignal?.aborted) {
@@ -2153,9 +2153,18 @@ export class TrackedProviderClient {
         attempt_id: null,
         provider: providerName,
         tool_uses: stats.toolUses || [],
+        agent_call_id: agentCallId,
       });
-      const toolUsesForReplay = filterProviderToolUseReplay(stats.toolUses || [], {
+      const filteredToolUsesForReplay = filterProviderToolUseReplay(stats.toolUses || [], {
         skipToolkitDeterministic: !!stats.toolUsesLoggedByToolkit,
+      });
+      const toolUsesForReplay = reconcileProviderToolUseReplay({
+        tool_uses: stats.toolUses || [],
+        replay_tool_uses: filteredToolUsesForReplay,
+        toolkit_logged: !!stats.toolUsesLoggedByToolkit,
+        agent_call_id: agentCallId,
+        job_id,
+        cwd: cwd || this.worker.projectDir,
       });
       retainReplayToolUses?.(agentCallId, toolUsesForReplay);
       recordToolUseObservations({
@@ -2164,6 +2173,7 @@ export class TrackedProviderClient {
         attempt_id: null,
         tool_uses: toolUsesForReplay,
         cwd: cwd || this.worker.projectDir,
+        agent_call_id: agentCallId,
       });
       recordRecoveryCheckpoint?.({
         work_item_id,
@@ -2363,9 +2373,18 @@ export class TrackedProviderClient {
         attempt_id: null,
         provider: providerName,
         tool_uses: err.toolUses || [],
+        agent_call_id: agentCallId,
       });
-      const failureToolUsesForReplay = filterProviderToolUseReplay(err.toolUses || [], {
+      const filteredFailureToolUsesForReplay = filterProviderToolUseReplay(err.toolUses || [], {
         skipToolkitDeterministic: !!stats.toolUsesLoggedByToolkit,
+      });
+      const failureToolUsesForReplay = reconcileProviderToolUseReplay({
+        tool_uses: err.toolUses || [],
+        replay_tool_uses: filteredFailureToolUsesForReplay,
+        toolkit_logged: !!stats.toolUsesLoggedByToolkit,
+        agent_call_id: agentCallId,
+        job_id,
+        cwd: cwd || this.worker.projectDir,
       });
       retainReplayToolUses?.(agentCallId, failureToolUsesForReplay);
       recordToolUseObservations({
@@ -2374,6 +2393,7 @@ export class TrackedProviderClient {
         attempt_id: null,
         tool_uses: failureToolUsesForReplay,
         cwd: cwd || this.worker.projectDir,
+        agent_call_id: agentCallId,
       });
       recordRecoveryCheckpoint?.({
         work_item_id,

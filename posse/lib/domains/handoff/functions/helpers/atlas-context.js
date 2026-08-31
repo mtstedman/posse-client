@@ -3605,10 +3605,7 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
 
   if (packet.atlas?.gateEnabled) {
     const label = atlasBackendLabel(packet.atlas);
-    lines.push(`Use prefetch as the first codebase map, then make targeted ${label} retrieval calls only for remaining code-evidence gaps; never call ${label} merely to make native tools available (prefetch does not count as active retrieval).`);
-  } else {
-    const label = atlasBackendLabel(packet.atlas);
-    lines.push(`Use prefetch as the first codebase map. Make additional task-relevant ${label} calls only for specific code-evidence gaps; use native file/search tools when ${label} cannot provide sufficient information.`);
+    lines.push(`${label} gate note: prefetch does not count as active retrieval; make a targeted retrieval call only for a remaining code-evidence gap, never merely to unlock native tools.`);
   }
   return lines.join("\n");
 }

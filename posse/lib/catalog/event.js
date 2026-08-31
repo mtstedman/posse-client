@@ -165,6 +165,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_ASSESSMENT_ENVIRONMENT_ERROR: "job.assessment_environment_error",
   JOB_ASSESSMENT_DEFERRED_FOR_SIBLING_WRITES: "job.assessment_deferred_for_sibling_writes",
   JOB_ASSESSMENT_INTERNAL_RETRY: "job.assessment_internal_retry",
+  JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED: "job.assessment_infrastructure_exhausted",
   JOB_ASSESSMENT_ORPHANED: "job.assessment_orphaned",
   JOB_ASSESSMENT_PARSE_ERROR: "job.assessment_parse_error",
   JOB_ASSESSMENT_PARSE_RETRY_BUDGET_EXCEEDED: "job.assessment_parse_retry_budget_exceeded",

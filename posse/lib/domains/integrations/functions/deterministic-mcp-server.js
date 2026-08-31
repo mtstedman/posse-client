@@ -89,6 +89,7 @@ import {
 } from "../../providers/functions/shared/tool-runtime.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { registeredTestToolResultObservation } from "../../observability/functions/registered-test-tool-result.js";
+import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
 import {
   acknowledgeOperatorFeedback,
   awaitJobScopeExpansionDecision,
@@ -3367,6 +3368,10 @@ async function completeNativeToolCall({
     input: recordInput,
     resultText: text,
   });
+  const scopedCheckResult = scopedCheckToolResultObservation({
+    tool: toolName,
+    resultText: text,
+  });
   const resultDiagnostic = registeredTestResult?.error || capString(text, 300);
   finishToolInvocation(toolInvocation, {
     tool: toolName,
@@ -3374,14 +3379,17 @@ async function completeNativeToolCall({
     cwd: workspaceCwd,
     ok,
     outcome,
-    ...(registeredTestResult?.summary ? { resultSummary: registeredTestResult.summary } : {}),
+    ...((registeredTestResult?.summary || scopedCheckResult?.summary)
+      ? { resultSummary: registeredTestResult?.summary || scopedCheckResult.summary }
+      : {}),
     ...(outcome === "failed" ? { error: resultDiagnostic } : {}),
     ...(outcome === "rejected" ? { rejection: resultDiagnostic } : {}),
-    ...(atlasLiveBuffer || readStats || registeredTestResult?.detail ? {
+    ...(atlasLiveBuffer || readStats || registeredTestResult?.detail || scopedCheckResult?.detail ? {
       extraDetail: {
         ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
         ...(readStats || {}),
         ...(registeredTestResult?.detail ? { registered_test_result: registeredTestResult.detail } : {}),
+        ...(scopedCheckResult?.detail ? { scoped_check_result: scopedCheckResult.detail } : {}),
       },
     } : {}),
   });

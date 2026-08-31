@@ -25,7 +25,6 @@ import {
   reopenHumanGateResolution,
   requestParkedJobResumeAfterGate,
   supersedeHumanGate,
-  setAssessorVerdict,
   setAssessmentLifecycle,
   setAttemptCommitHash,
   storeArtifact,
@@ -980,7 +979,6 @@ export async function runHumanInputJob(worker, job, {
             force: true,
           });
           if (settled !== false) {
-            setAssessorVerdict(origJob.id, "not_assessed", null, { force: true });
             setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
             cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
             worker.emit(job.id, `${C.yellow}[human] Unexecuted job #${origJob.id} was explicitly waived; it was not marked passed${C.reset}`);
@@ -989,8 +987,15 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
-              actor_type: EVENT_ACTORS.WORKER,
+              actor_type: EVENT_ACTORS.HUMAN,
               message: `Legacy pass action on unexecuted job was recorded as an explicit waiver via job #${job.id}`,
+              event_json: JSON.stringify({
+                human_resolution: "explicit_waiver",
+                resolution_job_id: job.id,
+                assessor_verdict_preserved: origJob.assessor_verdict,
+                assessor_confidence_preserved: origJob.assessor_confidence || null,
+                assessor_state_version: getJob(origJob.id)?.state_version || origJob.state_version || 0,
+              }),
             });
           }
         } else if (reviewDecision === "pass") {
@@ -1000,19 +1005,25 @@ export async function runHumanInputJob(worker, job, {
             force: true,
           });
           if (settled !== false) {
-            setAssessorVerdict(origJob.id, "pass", "high", { force: true });
             if (assessmentReview) {
-              setAssessmentLifecycle(origJob.id, "assessment_passed", { completed: true });
+              setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
             }
             cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
-            worker.emit(job.id, `${C.green}[human] Review passed job #${origJob.id}${C.reset}`);
+            worker.emit(job.id, `${C.green}[human] Review accepted job #${origJob.id}; assessor verdict preserved as ${origJob.assessor_verdict}${C.reset}`);
             logEvent({
               work_item_id: job.work_item_id,
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-              actor_type: EVENT_ACTORS.WORKER,
-              message: `Human review passed original job via job #${job.id}`,
+              actor_type: EVENT_ACTORS.HUMAN,
+              message: `Human review accepted original job via job #${job.id}; assessor verdict preserved`,
+              event_json: JSON.stringify({
+                human_resolution: "pass",
+                resolution_job_id: job.id,
+                assessor_verdict_preserved: origJob.assessor_verdict,
+                assessor_confidence_preserved: origJob.assessor_confidence || null,
+                assessor_state_version: getJob(origJob.id)?.state_version || origJob.state_version || 0,
+              }),
             });
           }
         } else if (reviewDecision === "fail") {
@@ -1022,7 +1033,6 @@ export async function runHumanInputJob(worker, job, {
             force: true,
           });
           if (settled !== false) {
-            setAssessorVerdict(origJob.id, "fail", "high", { force: true });
             if (assessmentReview) {
               setAssessmentLifecycle(origJob.id, "assessment_failed", { completed: true });
             }
@@ -1033,8 +1043,15 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-              actor_type: EVENT_ACTORS.WORKER,
-              message: `Human review failed original job via job #${job.id}`,
+              actor_type: EVENT_ACTORS.HUMAN,
+              message: `Human review rejected original job via job #${job.id}; assessor verdict preserved`,
+              event_json: JSON.stringify({
+                human_resolution: "fail",
+                resolution_job_id: job.id,
+                assessor_verdict_preserved: origJob.assessor_verdict,
+                assessor_confidence_preserved: origJob.assessor_confidence || null,
+                assessor_state_version: getJob(origJob.id)?.state_version || origJob.state_version || 0,
+              }),
             });
           }
         } else if (assessmentReview && reviewDecision === "retry") {
@@ -1093,7 +1110,6 @@ export async function runHumanInputJob(worker, job, {
             force: true,
           });
           if (settled !== false) {
-            setAssessorVerdict(origJob.id, "not_assessed", null, { force: true });
             if (assessmentReview) {
               setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
             }
@@ -1104,8 +1120,15 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
-              actor_type: EVENT_ACTORS.WORKER,
+              actor_type: EVENT_ACTORS.HUMAN,
               message: `Human explicitly waived review via job #${job.id}`,
+              event_json: JSON.stringify({
+                human_resolution: "explicit_waiver",
+                resolution_job_id: job.id,
+                assessor_verdict_preserved: origJob.assessor_verdict,
+                assessor_confidence_preserved: origJob.assessor_confidence || null,
+                assessor_state_version: getJob(origJob.id)?.state_version || origJob.state_version || 0,
+              }),
             });
           }
         }

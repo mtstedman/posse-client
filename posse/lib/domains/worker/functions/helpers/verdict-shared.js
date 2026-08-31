@@ -34,6 +34,7 @@ import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logg
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
+import { getDb } from "../../../../shared/storage/functions/index.js";
 
 const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard", "strong"];
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
@@ -84,7 +85,44 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   };
 }
 
-export function capVerdictForHighRiskVerificationGap(verdict, payload = {}, testRun = null) {
+function latestSuccessfulScopedCheckVerification(jobId, assessedCommitHash) {
+  const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/i.test(requiredCommit)) return null;
+  try {
+    const rows = getDb().prepare(`
+      SELECT detail_json, created_at
+      FROM job_observations
+      WHERE job_id = ? AND observation_type = 'tool.run_scoped_checks'
+      ORDER BY id DESC
+      LIMIT 20
+    `).all(jobId);
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      const result = detail?.scoped_check_result;
+      if (detail?.outcome !== "succeeded" || detail?.ok !== true) continue;
+      if (result?.status !== "passed" || result?.ok !== true) continue;
+      const executedCommit = String(result.executed_commit_hash || "").trim().toLowerCase();
+      if (!/^[0-9a-f]{40,64}$/i.test(executedCommit) || executedCommit !== requiredCommit) continue;
+      return {
+        ...result,
+        executed_commit_hash: executedCommit,
+        created_at: row.created_at,
+        agent_call_id: detail.agent_call_id ?? null,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function capVerdictForHighRiskVerificationGap(
+  verdict,
+  payload = {},
+  testRun = null,
+  scopedVerification = null,
+) {
   if (verdict?.verdict !== "pass") return verdict;
   const policy = payload?._execution_policy && typeof payload._execution_policy === "object"
     ? payload._execution_policy
@@ -99,6 +137,37 @@ export function capVerdictForHighRiskVerificationGap(verdict, payload = {}, test
     : "";
   const postChange = testRun?.postChange || testRun?.post_change || null;
   if (command && postChange?.status === "passed") return verdict;
+  if (scopedVerification?.status === "passed" && scopedVerification?.executed_commit_hash) {
+    return {
+      ...verdict,
+      verification_status: "scoped_checks_passed",
+      verification_commit_hash: scopedVerification.executed_commit_hash,
+    };
+  }
+
+  // The execution policy deliberately caps high-risk/no-runner work at a
+  // medium-confidence machine verdict. Do not reintroduce an unconditional
+  // high floor here and turn that explicit policy decision into a human gate.
+  const configuredFloor = normalizeAssessorConfidence(
+    payload?._assess_pass_confidence_floor
+      ?? policy?.assessor?.pass_confidence_floor,
+    { fallback: null, allowNone: true },
+  );
+  if (configuredFloor !== "high") {
+    const confidence = normalizeAssessorConfidence(verdict.confidence, {
+      fallback: "medium",
+      allowNone: true,
+    });
+    return {
+      ...verdict,
+      confidence: confidence === "high" ? "medium" : confidence,
+      verification_status: command ? "declared_verification_unavailable" : "verification_unavailable",
+      reasons: [
+        `Executable verification was unavailable; policy permits at most a medium-confidence source assessment for this task.`,
+        ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+      ],
+    };
+  }
 
   const status = postChange?.status || (command ? "not_run" : "not_declared");
   const detail = postChange?.validation_error || postChange?.reason || null;
@@ -415,8 +484,14 @@ export function prepareVerdictForDispatch(job, verdict) {
   const assessedCommitHash = [...getAttempts(job.id)].reverse()
     .find((attempt) => attempt.commit_hash)?.commit_hash || null;
   const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
+  const scopedVerification = latestSuccessfulScopedCheckVerification(job.id, assessedCommitHash);
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
-  prepared = capVerdictForHighRiskVerificationGap(prepared, payload, assessedReceipt);
+  prepared = capVerdictForHighRiskVerificationGap(
+    prepared,
+    payload,
+    assessedReceipt,
+    scopedVerification,
+  );
 
   const normalizedPassConfidence = normalizeAssessorConfidence(prepared.confidence, {
     fallback: "medium",

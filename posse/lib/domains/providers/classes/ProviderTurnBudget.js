@@ -25,9 +25,10 @@ export class ProviderTurnBudgetExceededError extends Error {
     this.provider = providerName;
     this.maxTurns = maxTurns;
     this.numTurns = numTurns;
-    // A terminal handoff receipt makes provider shutdown errors expected, but
-    // it must not convert a completed over-budget call back into success.
-    this.terminalHandoffStopCompatible = false;
+    // A validated terminal handoff is authoritative. This error may describe
+    // a live interruption, but it must never suppress a handoff that was
+    // already durably committed before provider shutdown.
+    this.terminalHandoffStopCompatible = true;
     const output = typeof result?.output === "string" ? result.output : "";
     this.stats = {
       ...(result?.stats || {}),
@@ -43,9 +44,10 @@ export class ProviderTurnBudgetExceededError extends Error {
 }
 
 /**
- * One provider-neutral turn-budget policy. Provider adapters normalize their
- * native telemetry into the shared result stats contract; this manager alone
- * decides whether a reported success is admissible.
+ * Provider adapters normalize native telemetry into this shared close-time
+ * accounting boundary. Live-enforced providers stop before returning success;
+ * providers whose turn count is known only at close can report an overage, but
+ * close-time accounting must not retroactively reject completed work.
  */
 export class ProviderTurnBudget {
   /** @param {{ providerName?: string, requestedMaxTurns?: unknown }} [opts] */
@@ -55,8 +57,8 @@ export class ProviderTurnBudget {
   }
 
   /**
-   * Reject a successful result only when normalized evidence proves it crossed
-   * the configured maximum. Equality is valid: maxTurns is inclusive.
+   * Annotate a completed result when normalized evidence proves it crossed the
+   * configured maximum. Equality is valid: maxTurns is inclusive.
    * @param {any} result
    */
   finalize(result) {
@@ -64,11 +66,15 @@ export class ProviderTurnBudget {
     const maxTurns = this.requestedMaxTurns
       ?? positiveInteger(result?.stats?.maxTurns);
     if (numTurns == null || maxTurns == null || numTurns <= maxTurns) return result;
-    throw new ProviderTurnBudgetExceededError({
-      providerName: this.providerName,
-      maxTurns,
-      numTurns,
-      result,
-    });
+    return {
+      ...result,
+      stats: {
+        ...(result?.stats || {}),
+        maxTurns,
+        numTurns,
+        turnBudgetExceeded: true,
+        turnBudgetStatus: "completed_overage",
+      },
+    };
   }
 }

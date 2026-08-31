@@ -5,6 +5,7 @@ import {
   getPythonToolchainExecutable,
   resolveManagedPythonRuntimeForProject,
 } from "../../../../domains/runtime/functions/python-runtime.js";
+import { gitCurrentHash } from "../../../../domains/git/functions/utils.js";
 import {
   groupVerificationFiles,
   packageManagerRun,
@@ -36,6 +37,15 @@ const SOURCE_EXTENSIONS = new Set([
 const MAX_SCOPE_ROOT_FILES = 250;
 const MAX_FAILURES = 60;
 const MAX_OUTPUT_CHARS = 6000;
+
+function currentGitCommit(cwd, gitCurrentHashImpl = gitCurrentHash) {
+  try {
+    const commit = String(gitCurrentHashImpl(cwd) || "").trim();
+    return /^[0-9a-f]{40,64}$/i.test(commit) ? commit.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
 
 function normalizePathList(cwd, values = []) {
   const out = [];
@@ -891,7 +901,16 @@ function combineRootChecks(name, projectCwd, entries) {
   };
 }
 
-export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
+export function runScopedChecks({
+  args = {},
+  cwd,
+  declaredScope = {},
+  gitCurrentHashImpl = gitCurrentHash,
+} = {}) {
+  // Bind the receipt to the commit that was present before any verifier ran.
+  // A verifier that unexpectedly mutates HEAD must not make its own result look
+  // as though it validated that later commit.
+  const executedCommitHash = currentGitCommit(cwd, gitCurrentHashImpl);
   const requested = Array.isArray(args.checks) && args.checks.length > 0
     ? args.checks.map((check) => String(check).trim().toLowerCase()).filter(Boolean)
     : ["lint"];
@@ -927,6 +946,7 @@ export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
       ok: false,
       status: "unavailable",
       summary: "no supported checks requested",
+      executed_commit_hash: executedCommitHash,
       scoped_files: files,
       readiness: verificationReadinessManifest(cwd, files, requested),
       checks: [],
@@ -945,6 +965,7 @@ export function runScopedChecks({ args = {}, cwd, declaredScope = {} } = {}) {
   const result = {
     ok,
     status,
+    executed_commit_hash: executedCommitHash,
     summary: status === "passed"
       ? "all requested checks passed"
       : (status === "unavailable"

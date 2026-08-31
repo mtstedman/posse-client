@@ -1277,6 +1277,12 @@ export class Display {
     return targets.length;
   }
 
+  hasQuestionsForJob(jobId) {
+    const targetJobId = Number(jobId);
+    return Number.isFinite(targetJobId)
+      && this._questionQueue.some((q) => Number(q.jobId) === targetJobId);
+  }
+
   cancelAllQuestions() {
     this._aborted = true;
     this._inputMode = false;

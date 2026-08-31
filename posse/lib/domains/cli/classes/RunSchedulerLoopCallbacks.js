@@ -27,6 +27,7 @@ export class RunSchedulerLoopCallbacks {
     hasAutoMergeableCompletedWorkItems = null,
     autoMergePendingReviewBlockers = false,
     describePendingReviewLockBlockers = () => null,
+    surfaceActionableHumanGates = null,
     surfacePlanApprovalGates = () => [],
   } = {}) {
     this.getDisplay = getDisplay;
@@ -37,7 +38,7 @@ export class RunSchedulerLoopCallbacks {
     this.hasAutoMergeableCompletedWorkItems = hasAutoMergeableCompletedWorkItems;
     this.autoMergePendingReviewBlockers = autoMergePendingReviewBlockers;
     this.describePendingReviewLockBlockers = describePendingReviewLockBlockers;
-    this.surfacePlanApprovalGates = surfacePlanApprovalGates;
+    this.surfaceActionableHumanGates = surfaceActionableHumanGates || surfacePlanApprovalGates;
     this.lastPendingReviewBlockerMsg = null;
     this.pendingReviewAutoMergeAttempts = new Set();
     this.backgroundWrapUp = null;
@@ -140,9 +141,9 @@ export class RunSchedulerLoopCallbacks {
   onIdle(activeJobs) {
     const display = this.getDisplay();
     try {
-      this.surfacePlanApprovalGates(activeJobs);
+      this.surfaceActionableHumanGates(activeJobs);
     } catch (err) {
-      const msg = `Could not surface pending plan approval: ${err?.message || err}`;
+      const msg = `Could not surface pending human gate: ${err?.message || err}`;
       if (display) display.addEvent(`${this.C.red}${msg}${this.C.reset}`);
       else console.log(`\n  ${this.C.red}${msg}${this.C.reset}`);
     }
@@ -208,7 +209,7 @@ export class RunSchedulerLoopCallbacks {
   onDone() {
     const display = this.getDisplay();
     try {
-      this.surfacePlanApprovalGates([]);
+      this.surfaceActionableHumanGates([]);
     } catch { /* display prompt cleanup is best effort during closeout */ }
     const msg = "All jobs complete.";
     if (display) display.addEvent(`${this.C.green}${this.C.bold}${msg}${this.C.reset}`);

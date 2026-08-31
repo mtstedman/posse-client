@@ -51,8 +51,6 @@ const ATLAS137_ATTEMPT_SCOPED_OBSERVATION_TYPES = new Set([
   "context.headroom_actual",
 ]);
 const RESEARCH_INFRASTRUCTURE_FAILURE_CODES = new Set([
-  "file_not_found",
-  "indexed_file_missing",
   "repo_root_unavailable",
   "repository_unavailable",
   "file_unreadable",
@@ -80,7 +78,7 @@ export function isResearchInfrastructureFailure(detail = {}) {
       || detail?.message
       || "",
   );
-  return /2097152-byte limit|response exceeds 2097152 serialized bytes|\bSQLITE_(?:BUSY|IOERR|CORRUPT|CANTOPEN)\b|repository root .*(?:missing|unavailable)|not (?:present|found) in (?:the )?checkout|\bENOENT\b/iu.test(text);
+  return /2097152-byte limit|response exceeds 2097152 serialized bytes|\bSQLITE_(?:BUSY|IOERR|CORRUPT|CANTOPEN)\b|repository root .*(?:missing|unavailable)|\bENOENT\b/iu.test(text);
 }
 
 function _trimToolReplayBucket(bucket, now) {
@@ -1855,19 +1853,99 @@ export function filterProviderToolUseReplay(toolUses = [], { skipToolkitDetermin
   });
 }
 
+export function reconcileProviderToolUseReplay({
+  tool_uses = [],
+  replay_tool_uses = [],
+  toolkit_logged = false,
+  agent_call_id = null,
+  job_id = null,
+  cwd = null,
+} = {}) {
+  if (!toolkit_logged || !Array.isArray(tool_uses) || tool_uses.length === 0) {
+    return Array.isArray(replay_tool_uses) ? replay_tool_uses : [];
+  }
+  const replay = Array.isArray(replay_tool_uses) ? [...replay_tool_uses] : [];
+  const replayObjects = new Set(replay);
+  const callId = Number(agent_call_id);
+  const normalizedJobId = Number(job_id);
+  if (!Number.isInteger(callId) || callId <= 0 || !Number.isInteger(normalizedJobId) || normalizedJobId <= 0) {
+    // Without the durable call identity there is no safe way to prove toolkit
+    // coverage. Replay all provider-reported calls rather than lose telemetry.
+    return tool_uses.map((toolUse) => replayObjects.has(toolUse) ? toolUse : ({
+      ...toolUse,
+      observation_detail: {
+        ...(toolUse?.observation_detail || {}),
+        recovered_from_provider_rollout: true,
+        recovery_reason: "toolkit_observation_identity_unavailable",
+      },
+    }));
+  }
+
+  const persisted = getObservationsByJob(normalizedJobId, 5000).flatMap((row) => {
+    if (!String(row?.observation_type || "").startsWith("tool.")) return [];
+    try {
+      const detail = JSON.parse(String(row.detail_json || "{}"));
+      if (Number(detail?.agent_call_id) !== callId) return [];
+      return [{
+        observation_type: String(row.observation_type),
+        summary: String(row.summary || ""),
+        consumed: false,
+      }];
+    } catch {
+      return [];
+    }
+  });
+
+  const output = [];
+  for (const toolUse of tool_uses) {
+    if (replayObjects.has(toolUse)) {
+      output.push(toolUse);
+      continue;
+    }
+    // Only deterministic/toolkit-owned calls were suppressed from the normal
+    // replay lane. A provider integration can still return cloned objects, so
+    // re-check ownership instead of depending solely on object identity.
+    if (filterProviderToolUseReplay([toolUse], { skipToolkitDeterministic: true }).length > 0) {
+      output.push(toolUse);
+      continue;
+    }
+    const summary = _summarizeToolUse(toolUse, cwd);
+    const matching = summary == null ? null : persisted.find((row) => (
+      !row.consumed
+      && row.observation_type === summary.observation_type
+      && (row.summary === summary.summary || row.summary.startsWith(`${summary.summary} —`))
+    ));
+    if (matching) {
+      matching.consumed = true;
+      continue;
+    }
+    output.push({
+      ...toolUse,
+      observation_detail: {
+        ...(toolUse?.observation_detail || {}),
+        recovered_from_provider_rollout: true,
+        recovery_reason: "toolkit_observation_missing",
+        provider_tool_use_id: toolUse?.id || null,
+      },
+    });
+  }
+  return output;
+}
+
 export function recordProviderToolBatchObservations({
   work_item_id = null,
   job_id = null,
   attempt_id = null,
   provider = null,
   tool_uses = [],
+  agent_call_id = null,
 } = {}) {
   if (!Array.isArray(tool_uses) || tool_uses.length === 0) return;
   const context = getObservationContext() || {};
   const resolvedWorkItemId = work_item_id ?? context.work_item_id ?? null;
   const resolvedJobId = job_id ?? context.job_id ?? null;
   const resolvedAttemptId = attempt_id ?? context.attempt_id ?? null;
-  const resolvedAgentCallId = context.agent_call_id ?? null;
+  const resolvedAgentCallId = agent_call_id ?? context.agent_call_id ?? null;
   const providerName = String(provider || "provider").trim().toLowerCase() || "provider";
   const batches = new Map();
 
@@ -1979,13 +2057,14 @@ export function recordToolUseObservations({
   tool_uses = [],
   cwd = null,
   dedupe_replays = true,
+  agent_call_id = null,
 } = {}) {
   if (!Array.isArray(tool_uses) || tool_uses.length === 0) return;
   const context = getObservationContext() || {};
   const resolvedWorkItemId = work_item_id ?? context.work_item_id ?? null;
   const resolvedJobId = job_id ?? context.job_id ?? null;
   const resolvedAttemptId = attempt_id ?? context.attempt_id ?? null;
-  const resolvedAgentCallId = context.agent_call_id ?? null;
+  const resolvedAgentCallId = agent_call_id ?? context.agent_call_id ?? null;
   const seen = new Set();
   const now = Date.now();
   const replayBucketKey = resolvedJobId == null ? "__global__" : String(resolvedJobId);

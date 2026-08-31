@@ -51,7 +51,6 @@ import {
   stashDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
 import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
-import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { effectiveArtifactTaskMode } from "../../../providers/functions/execution-routing.js";
 import {
   artifactOutputClaimsReusableComplete,
@@ -166,7 +165,7 @@ function updateAssessmentLifecycleFromVerdict(jobId, freshJob, verdict = null) {
   }
 }
 
-function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
+export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
   pendingFileRequests = null,
   readyAt = null,
 } = {}) {
@@ -176,36 +175,30 @@ function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
   const count = Number(fresh.assessment_attempt_count || 0);
   const max = Math.max(1, Number(fresh.assessment_max_attempts || 3));
   if (count >= max) {
-    if (isRetryableTerminalHandoffError(error)) {
-      setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
-      worker.emit(job.id, `${C.red}[assessor] Terminal handoff repair budget exhausted; failing without an operator gate${C.reset}`);
-      worker._releaseLease(job, leaseToken, "failed");
-      return { gated: false, terminalProtocolFailure: true };
-    }
-    setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
-    const reviewJob = createJob({
+    const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
+    setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
+    setJobError(job.id, `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`);
+    logEvent({
       work_item_id: job.work_item_id,
-      job_type: "human_input",
-      title: `Assessment unavailable: ${String(job.title || "").slice(0, 70)}`,
-      parent_job_id: job.id,
-      priority: "high",
-      model_tier: "cheap",
-      payload_json: JSON.stringify({
-        original_job_id: job.id,
-        gate_kind: "assessment_retry_exhausted",
-        review_type: "assessment_retry_limit",
-        question_kind: "assessment_retry_limit",
-        choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit,
-        questions: [
-          `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
-          "Choose pass, fail, skip, or replan.",
-        ],
-        context: "The implementation attempt and commit are preserved. This gate controls assessment only.",
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; failed without creating a human verdict gate`,
+      event_json: JSON.stringify({
+        attempts: count,
+        max_attempts: max,
+        terminal_protocol_failure: terminalProtocolFailure,
+        error: message.slice(0, 2000),
+        operator_actionable: false,
       }),
     });
-    worker.emit(job.id, `${C.yellow}[assessor] Assessment retry budget exhausted; opened review gate #${reviewJob.id}${C.reset}`);
-    worker._releaseLease(job, leaseToken, "waiting_on_review");
-    return { gated: true, reviewJob };
+    worker.emit(job.id, `${C.red}[assessor] Assessment infrastructure exhausted; failing without an operator verdict gate${C.reset}`);
+    worker._releaseLease(job, leaseToken, "failed");
+    return {
+      gated: false,
+      infrastructureFailure: true,
+      terminalProtocolFailure,
+    };
   }
   setAssessmentLifecycle(job.id, "assessment_unavailable", { error: message });
   worker._releaseLease(job, leaseToken, "queued", {

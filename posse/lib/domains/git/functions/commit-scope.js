@@ -1112,6 +1112,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       snapshotRestoreError,
       snapshotRestoreRef,
       mergeCompleted: false,
+      mergeTreeChanged: false,
       outOfScopeMergeFiles,
       quarantinedOutOfScopeMergeFiles,
       mergeAuditFailed,
@@ -1145,7 +1146,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // the next job's commit.
   if (!staged && !mergeInProgress) {
     const scopeCleanedNoOp = hasScope && reverted.length > 0;
-    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedIgnoredModifyFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef };
+    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedIgnoredModifyFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef, mergeCompleted: false, mergeTreeChanged: false };
   }
 
   // When completing a merge, verify the dev actually resolved the conflicts
@@ -1277,6 +1278,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     snapshotRestoreError,
     snapshotRestoreRef,
     mergeCompleted: mergeInProgress,
+    // A merge commit can be structurally necessary while leaving the first
+    // parent's tree untouched (for example, resolving every conflict to
+    // "ours"). Keep that coordination fact separate from task output so the
+    // worker cannot count an empty merge commit as a successful repair.
+    mergeTreeChanged: mergeInProgress ? Boolean(staged) : null,
     outOfScopeMergeFiles,
     quarantinedOutOfScopeMergeFiles,
     mergeAuditFailed,

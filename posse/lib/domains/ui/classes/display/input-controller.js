@@ -152,7 +152,11 @@ export class DisplayInputController {
   _startAnsweringForJob(jobId) {
     const targetJobId = Number(jobId);
     if (!Number.isFinite(targetJobId)) return false;
-    const qSet = this._questionQueue.find((entry) => Number(entry.jobId) === targetJobId);
+    let qSet = this._questionQueue.find((entry) => Number(entry.jobId) === targetJobId);
+    if (!qSet && typeof this.onAnswerJob === "function") {
+      try { this.onAnswerJob(targetJobId); } catch { /* leave the action unavailable */ }
+      qSet = this._questionQueue.find((entry) => Number(entry.jobId) === targetJobId);
+    }
     if (!qSet) return false;
     this._inputMode = "question";
     this._activeQ = qSet;

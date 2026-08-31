@@ -614,6 +614,7 @@ export async function handlePostExecutionForWorker({
               gitAddWarnings,
               scopeCleanedNoOp,
               mergeCompleted,
+              mergeTreeChanged,
               outOfScopeMergeFiles,
               mergeAuditFailed,
               mergeAuditError,
@@ -626,14 +627,21 @@ export async function handlePostExecutionForWorker({
             skippedStaleModifyFiles = skippedStaleModifyFilesFromCommit || [];
 
             if (mergeCompleted) {
-              this.emit(job.id, `${C.dim}[git] WI#${job.work_item_id} job #${job.id}: merge completed by dev${C.reset}`);
+              const mergeMessage = mergeTreeChanged === false
+                ? "Coordination-only merge completed; the task produced no tree delta"
+                : "Dev resolved pending merge and committed";
+              this.emit(job.id, `${C.dim}[git] WI#${job.work_item_id} job #${job.id}: ${mergeMessage}${C.reset}`);
               logEvent({
                 work_item_id: job.work_item_id,
                 job_id: job.id,
                 attempt_id: attempt.id,
                 event_type: EVENT_TYPES.JOB_MERGE_COMPLETED,
                 actor_type: EVENT_ACTORS.WORKER,
-                message: `Dev resolved pending merge and committed`,
+                message: mergeMessage,
+                event_json: JSON.stringify({
+                  coordination_only: mergeTreeChanged === false,
+                  merge_tree_changed: mergeTreeChanged ?? null,
+                }),
               });
             }
 
@@ -810,7 +818,11 @@ export async function handlePostExecutionForWorker({
             }
 
             if (commitHash !== headBefore) {
-              hasFileChanges = true;
+              // A two-parent commit is not by itself task output. When the
+              // merge left the first parent's tree unchanged, keep the commit
+              // for coordination/audit history but send the attempt through
+              // the ordinary no-write guard instead of assessment/success.
+              hasFileChanges = !(mergeCompleted && mergeTreeChanged === false);
               committedHash = commitHash;
               setAttemptCommitHash(attempt.id, commitHash, headBefore);
               // Capture what was actually committed (ground truth for assessor)
@@ -847,6 +859,7 @@ export async function handlePostExecutionForWorker({
                   out_of_scope_dirty_skipped: outOfScopeDirtySkipped || [],
                   out_of_scope_staging_skipped: outOfScopeStagingSkipped || [],
                   scope_cleaned_noop: scopeCleanedNoOp,
+                  coordination_only_merge: mergeCompleted && mergeTreeChanged === false,
                   sibling_dirty_skipped: siblingSkipped,
                 },
               });
