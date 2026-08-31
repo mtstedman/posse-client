@@ -93,6 +93,17 @@ function nonNegativeInteger(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
 }
 
+function optionalNonNegativeInteger(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+function optionalPositiveInteger(value) {
+  const parsed = optionalNonNegativeInteger(value);
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
 export function normalizeIssuedRole(value) {
   const role = String(value || "").trim().toLowerCase();
   const normalized = role === "developer" || role === "development" || role === "fix"
@@ -682,6 +693,19 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
   if (attachment.webResearchHandoff !== true) {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "web_research_handoff");
   }
+  const signedToolPolicy = plainObject(signed.issuedToolPolicy);
+  const signedFallbackReads = optionalNonNegativeInteger(signed.fallbackReads);
+  const issuedFallbackReads = signedToolPolicy
+    ? nonNegativeInteger(signedToolPolicy.fallback_reads ?? signedToolPolicy.fallbackReads)
+    : null;
+  const fallbackReadCeiling = signedFallbackReads == null
+    ? (issuedFallbackReads ?? 0)
+    : (issuedFallbackReads == null
+        ? signedFallbackReads
+        : Math.min(signedFallbackReads, issuedFallbackReads));
+  const requestedFallbackReads = optionalNonNegativeInteger(attachment.fallbackReads);
+  const signedAssessorMaxToolCalls = optionalPositiveInteger(signed.assessorMaxToolCalls);
+  const requestedAssessorMaxToolCalls = optionalPositiveInteger(attachment.assessorMaxToolCalls);
   return {
     ...signed,
     role: runtimeRole,
@@ -693,6 +717,17 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     attemptId: attachment.attemptId ?? null,
     agentCallId: attachment.agentCallId ?? null,
     promptChars: Math.max(0, Number(attachment.promptChars) || 0),
+    // Attempt budgets are Job-scoped, so the long-lived Agent token normally
+    // leaves them unset. Bind the trusted attachment while retaining the
+    // signed remote issuance (and any explicit signed value) as the ceiling.
+    fallbackReads: requestedFallbackReads == null
+      ? 0
+      : Math.min(requestedFallbackReads, fallbackReadCeiling),
+    assessorMaxToolCalls: signedAssessorMaxToolCalls == null
+      ? requestedAssessorMaxToolCalls
+      : (requestedAssessorMaxToolCalls == null
+          ? signedAssessorMaxToolCalls
+          : Math.min(signedAssessorMaxToolCalls, requestedAssessorMaxToolCalls)),
     modelName: String(attachment.modelName || ""),
     // Context-budget checkpoints key their session as `agent-call:<id>`
     // (TrackedProviderClient publish sites); an attachment that doesn't carry

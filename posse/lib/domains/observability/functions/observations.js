@@ -1870,6 +1870,17 @@ function summarizeToolUseForReconciliation(toolUse, cwd = null) {
   return _summarizeToolUse(toolUse, cwd);
 }
 
+function reconciliationSummaryMatches(persistedSummary, expectedSummary) {
+  if (persistedSummary === expectedSummary) return true;
+  if (persistedSummary.startsWith(`${expectedSummary} —`)) return true;
+  // Owner-routed ATLAS completions use the provider-facing status wording
+  // emitted by _summarizeToolUse(), not finishToolInvocation's em dash.
+  return ["failed", "rejected"].some((status) => (
+    persistedSummary === `${expectedSummary} ${status}`
+    || persistedSummary.startsWith(`${expectedSummary} ${status}:`)
+  ));
+}
+
 export function reconcileProviderToolUseReplay({
   tool_uses = [],
   replay_tool_uses = [],
@@ -1948,7 +1959,7 @@ export function reconcileProviderToolUseReplay({
       persisted.find((row) => (
         !row.consumed
         && row.observation_type === summary.observation_type
-        && (row.summary === summary.summary || row.summary.startsWith(`${summary.summary} —`))
+        && reconciliationSummaryMatches(row.summary, summary.summary)
       ))
       // finishToolInvocation intentionally permits a result-specific summary.
       // Agent-call identity, canonical type, and an unconsumed finish record

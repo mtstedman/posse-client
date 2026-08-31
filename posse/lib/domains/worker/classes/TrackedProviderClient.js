@@ -752,6 +752,8 @@ function agentJobAttachment(opts = {}, context = {}) {
     attemptId: context.attemptId ?? opts.attemptId ?? null,
     agentCallId: context.agentCallId ?? opts.agentCallId ?? null,
     promptChars: opts.promptChars || 0,
+    fallbackReads: opts.fallbackReads ?? null,
+    assessorMaxToolCalls: opts.assessorMaxToolCalls ?? null,
     modelName: context.modelName || opts.modelName || null,
     providerSessionId: `agent-call:${context.agentCallId ?? opts.agentCallId ?? "unknown"}`,
     allowWrite: opts.allowWrite === true,
