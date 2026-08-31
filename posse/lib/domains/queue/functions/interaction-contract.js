@@ -1,6 +1,11 @@
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
 import { WORK_ITEM_ACTION_PROTOCOL } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import {
+  canonicalHumanGateAction,
+  humanInputChoiceFromAnswer,
+  humanInputChoicesForPayload,
+} from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
@@ -8,6 +13,8 @@ import { now, runImmediateTransaction } from "./common.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
 import { createOperatorNudge } from "./agent-interactions.js";
 import { logEvent } from "./events.js";
+import { getHumanGate } from "./human-gates.js";
+import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 
 const ACTION_PROTOCOL = WORK_ITEM_ACTION_PROTOCOL;
@@ -30,6 +37,7 @@ const CURRENT_GATE_STATUSES = Object.freeze([
   "queued", "waiting_on_human", "waiting_on_review", "running", "assessing",
 ]);
 const CURRENT_GATE_STATUSES_SQL = `(${CURRENT_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
+const LIVE_OWNER_DELIVERY_HANDLERS = new Set(["scope", "review", "human_input", "one_shot"]);
 const FEEDBACK_PHASES = new Set([
   "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
 ]);
@@ -230,11 +238,18 @@ function insertActionReservation(db, {
     observedAt,
     observedAt,
   );
-  return Number(info.lastInsertRowid);
+  const reservationId = Number(info.lastInsertRowid);
+  notifyQueueStateChanged({
+    reason: "human_answer_reserved",
+    jobId,
+    workItemId,
+  });
+  return reservationId;
 }
 
 function completeReservedAction(db, reservationId, result) {
-  const row = db.prepare(`SELECT metadata_json FROM agent_interactions WHERE id = ?`).get(reservationId);
+  const row = db.prepare(`SELECT work_item_id, job_id, metadata_json FROM agent_interactions WHERE id = ?`).get(reservationId);
+  if (!row) return false;
   const metadata = parseJsonObject(row?.metadata_json);
   const action = metadata[ACTION_METADATA_KEY] || {};
   metadata[ACTION_METADATA_KEY] = {
@@ -248,6 +263,12 @@ function completeReservedAction(db, reservationId, result) {
     SET status = 'applied', metadata_json = ?, updated_at = ?
     WHERE id = ?
   `).run(JSON.stringify(metadata), result.observed_at, reservationId);
+  notifyQueueStateChanged({
+    reason: "human_answer_completed",
+    jobId: row.job_id,
+    workItemId: row.work_item_id,
+  });
+  return true;
 }
 
 function actionReplayOrConflict(existing, target, { actionId, actionKind } = {}) {
@@ -375,6 +396,11 @@ function gateChoiceRecords(kind, payload) {
   }
 
   const explicit = Array.isArray(payload?.choices) ? payload.choices : null;
+  if (!explicit || explicit.length === 0) {
+    return liveOwnerDeliveryHandler(HANDLER_BY_KIND.get(kind))
+      ? (WORK_ITEM_QUESTION_CHOICE_IDS[kind] || []).map((choiceId) => choiceRecord(choiceId))
+      : [];
+  }
   if (!validChoiceEntries(kind, explicit)) return [];
   return explicit.map((entry) => choiceRecord(choiceIdFromEntry(entry), entry));
 }
@@ -388,9 +414,18 @@ function gateQuestionState(job) {
   return "closed";
 }
 
-function observedGateQuestionState(job, observedAt) {
+function liveOwnerDeliveryHandler(handler) {
+  return LIVE_OWNER_DELIVERY_HANDLERS.has(handler);
+}
+
+function observedGateQuestionState(job, observedAt, { allowLiveOwnerDelivery = false } = {}) {
   const state = gateQuestionState(job);
-  return state === "open" && jobHasLiveLeaseAt(job, observedAt) ? "pending" : state;
+  if (state !== "open" || !jobHasLiveLeaseAt(job, observedAt)) return state;
+  return allowLiveOwnerDelivery ? "open" : "pending";
+}
+
+function gateQuestionGeneration(jobId) {
+  return String(getHumanGate(jobId)?.generation || 1);
 }
 
 function hasPendingQuestionAction(db, questionId) {
@@ -399,22 +434,29 @@ function hasPendingQuestionAction(db, questionId) {
     FROM agent_interactions
     WHERE kind = 'approval' AND status = 'active'
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
-      AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'
+      AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.state') IN ('reserved', 'delivered')
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.target.question_id') = ?
     LIMIT 1
   `).get(questionId));
 }
 
-function currentGateQuestionCount(db, workItemId, observedAt) {
+function pendingQuestionAction(db, questionId) {
   const row = db.prepare(`
-    SELECT COALESCE(SUM(
-      CASE
-        WHEN json_type(payload_json, '$.questions') = 'array'
-          AND json_array_length(payload_json, '$.questions') > 0
-        THEN json_array_length(payload_json, '$.questions')
-        ELSE 1
-      END
-    ), 0) AS count
+    SELECT *
+    FROM agent_interactions
+    WHERE kind = 'approval' AND status = 'active'
+      AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
+      AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.state') IN ('reserved', 'delivered')
+      AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.target.question_id') = ?
+    ORDER BY id ASC
+    LIMIT 1
+  `).get(questionId);
+  return row ? { row, action: parseStoredAction(row) } : null;
+}
+
+function currentGateQuestionCount(db, workItemId, observedAt) {
+  const rows = db.prepare(`
+    SELECT payload_json
     FROM jobs
     WHERE work_item_id = ? AND job_type = 'human_input'
       AND status IN ${CURRENT_GATE_STATUSES_SQL}
@@ -423,8 +465,15 @@ function currentGateQuestionCount(db, workItemId, observedAt) {
         OR julianday(json_extract(payload_json, '$.expires_at')) IS NULL
         OR julianday(json_extract(payload_json, '$.expires_at')) > julianday(?)
       )
-  `).get(workItemId, observedAt);
-  return Number(row?.count || 0);
+  `).all(workItemId, observedAt);
+  return rows.reduce((count, row) => {
+    const payload = parseJsonObject(row.payload_json);
+    const choices = gateChoiceRecords(typedKindForGate(payload), payload);
+    const questions = Array.isArray(payload.questions) && payload.questions.length > 0
+      ? payload.questions
+      : [payload.prompt || "Human input requested"];
+    return count + (choices.length > 0 ? 1 : questions.length);
+  }, 0);
 }
 
 function currentDurableQuestionCount(db, workItemId, observedAt) {
@@ -480,14 +529,20 @@ function projectGateQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS)
     const payload = parseJsonObject(job.payload_json);
     const kind = typedKindForGate(payload);
     const choices = gateChoiceRecords(kind, payload);
-    const questions = Array.isArray(payload.questions) && payload.questions.length > 0
+    const handler = HANDLER_BY_KIND.get(kind) || null;
+    const rawQuestions = Array.isArray(payload.questions) && payload.questions.length > 0
       ? payload.questions
       : [payload.prompt || job.title || "Human input requested"];
+    const questions = choices.length > 0 && rawQuestions.length > 1
+      ? [rawQuestions.join("\n\n")]
+      : rawQuestions;
     for (let index = 0; index < questions.length && out.length < limit; index += 1) {
       const questionId = `gate:${job.id}:${index}`;
-      const ownerState = observedGateQuestionState(job, observedAt);
+      const ownerState = observedGateQuestionState(job, observedAt, {
+        allowLiveOwnerDelivery: liveOwnerDeliveryHandler(handler),
+      });
       const state = hasPendingQuestionAction(db, questionId) ? "pending" : ownerState;
-      const actionable = state === "open" && choices.length > 0 && HANDLER_BY_KIND.has(kind);
+      const actionable = state === "open" && choices.length > 0 && handler != null;
       out.push({
         question_id: questionId,
         work_item_id: String(job.work_item_id),
@@ -501,7 +556,7 @@ function projectGateQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS)
         state,
         opened_at: job.created_at,
         expires_at: payload.expires_at || null,
-        generation: String(job.bridge_change_seq ?? 0),
+        generation: gateQuestionGeneration(job.id),
         choices: actionable || state !== "open" ? choices : [],
         capability: actionable ? QUESTION_CAPABILITY : null,
         answer: answerForGate(db, job.id, index),
@@ -711,14 +766,21 @@ function locateQuestion(db, { workItemId, jobId, questionId } = {}) {
     const job = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(jobId);
     if (!job || job.work_item_id !== workItemId || job.job_type !== "human_input") return null;
     const payload = parseJsonObject(job.payload_json);
-    const questions = Array.isArray(payload.questions) && payload.questions.length > 0
+    const rawQuestions = Array.isArray(payload.questions) && payload.questions.length > 0
       ? payload.questions : [payload.prompt || job.title || "Human input requested"];
-    const questionIndex = Number(gateMatch[2]);
-    if (!Number.isSafeInteger(questionIndex) || questionIndex < 0 || questionIndex >= questions.length) return null;
     const kind = typedKindForGate(payload);
     const choices = gateChoiceRecords(kind, payload);
+    const questions = choices.length > 0 && rawQuestions.length > 1
+      ? [rawQuestions.join("\n\n")]
+      : rawQuestions;
+    const questionIndex = Number(gateMatch[2]);
+    if (!Number.isSafeInteger(questionIndex) || questionIndex < 0 || questionIndex >= questions.length) return null;
     const observedAt = now();
-    const ownerState = observedGateQuestionState(job, observedAt);
+    const handler = HANDLER_BY_KIND.get(kind) || null;
+    const liveOwner = jobHasLiveLeaseAt(job, observedAt);
+    const ownerState = observedGateQuestionState(job, observedAt, {
+      allowLiveOwnerDelivery: liveOwnerDeliveryHandler(handler),
+    });
     const state = isExpired(payload.expires_at, observedAt) && ["open", "pending"].includes(ownerState)
       ? "expired" : ownerState;
     return {
@@ -727,8 +789,11 @@ function locateQuestion(db, { workItemId, jobId, questionId } = {}) {
       kind,
       choices,
       state,
-      generation: String(job.bridge_change_seq ?? 0),
-      handler: HANDLER_BY_KIND.get(kind) || null,
+      generation: gateQuestionGeneration(job.id),
+      handler,
+      live_owner: liveOwner,
+      owner_delivery: liveOwner && liveOwnerDeliveryHandler(handler),
+      payload,
     };
   }
 
@@ -798,10 +863,46 @@ function storedGitPushCompletion(db, action) {
   return { state: observedGateQuestionState(job, now()), accepted: false, safeReasonCode: "question_closed" };
 }
 
+function storedHumanGateCompletion(db, action) {
+  if (!liveOwnerDeliveryHandler(action?.handler)) return null;
+  const jobId = positiveId(action.target?.job_id);
+  if (!jobId) return { state: "closed", accepted: false, safeReasonCode: "question_not_found" };
+  const row = db.prepare(`
+    SELECT j.status, j.lease_token, j.lease_expires_at,
+      hg.gate_state, hg.generation, hg.resolution_action, hg.resolution_error
+    FROM jobs j
+    LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE j.id = ?
+  `).get(jobId);
+  if (!row) return { state: "closed", accepted: false, safeReasonCode: "question_not_found" };
+  if (row.gate_state === "resolved") {
+    const selected = canonicalHumanGateAction(
+      action.descriptor?.owner_action || action.target?.choice_id,
+    );
+    const resolved = canonicalHumanGateAction(row.resolution_action);
+    return selected && selected === resolved
+      ? { state: "answered", accepted: true, safeReasonCode: null }
+      : { state: "closed", accepted: false, safeReasonCode: "question_answer_lost_race" };
+  }
+  if (row.gate_state === "superseded" || TERMINAL_JOB_STATUS_SET.has(row.status)) {
+    return {
+      state: gateQuestionState(row),
+      accepted: false,
+      safeReasonCode: safeReason(row.resolution_error, "question_closed"),
+    };
+  }
+  return {
+    state: jobHasLiveLeaseAt(row, now()) ? "pending" : gateQuestionState(row),
+    accepted: null,
+    safeReasonCode: jobHasLiveLeaseAt(row, now()) ? "owner_delivery_pending" : "owner_unavailable",
+  };
+}
+
 function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}) {
   const replay = actionReplayOrConflict(existing, target, { actionId, actionKind: "question.answer" });
   if (!existing?.action || replay?.outcome !== "pending") return { replay };
-  const completion = storedGitPushCompletion(db, existing.action);
+  const completion = storedHumanGateCompletion(db, existing.action)
+    || storedGitPushCompletion(db, existing.action);
   if (!completion) return { replay };
   if (completion.accepted != null) {
     const observedAt = now();
@@ -819,6 +920,32 @@ function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}
     };
     completeReservedAction(db, existing.row.id, result);
     return { replay: result };
+  }
+  if (liveOwnerDeliveryHandler(existing.action.handler)) {
+    if (existing.action.state === "delivered" && completion.safeReasonCode === "owner_unavailable") {
+      const observedAt = now();
+      const result = {
+        ...baseActionResult({
+          actionId,
+          actionKind: "question.answer",
+          target,
+          outcome: "rejected",
+          observedAt,
+          safeReasonCode: "owner_lost_after_delivery",
+        }),
+        question_state: completion.state,
+        result_event_id: null,
+      };
+      completeReservedAction(db, existing.row.id, result);
+      return { replay: result };
+    }
+    return {
+      replay: {
+        ...replay,
+        safe_reason: completion.safeReasonCode,
+        retryable: completion.safeReasonCode === "owner_unavailable",
+      },
+    };
   }
   const descriptor = existing.action.descriptor;
   if (!descriptor || descriptor.handler !== "git_push") return { replay };
@@ -898,6 +1025,20 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
         result_event_id: null,
       } };
     }
+    const competing = pendingQuestionAction(db, questionId);
+    if (competing) {
+      return { result: {
+        ...baseActionResult({
+          actionId,
+          actionKind: "question.answer",
+          target,
+          outcome: "pending",
+          safeReasonCode: "question_resolution_in_progress",
+        }),
+        question_state: "pending",
+        result_event_id: null,
+      } };
+    }
     const observedAt = now();
     const descriptor = {
       handler: question.handler,
@@ -907,6 +1048,11 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
       question_generation: generation,
       choice_id: choiceId,
       ...(question.handler === "git_push" ? { decline: choiceId === "decline" } : {}),
+      ...(question.owner_delivery ? {
+        owner_action: canonicalHumanGateAction(
+          humanInputChoiceFromAnswer(choiceId, humanInputChoicesForPayload(question.payload)) || choiceId,
+        ),
+      } : {}),
     };
     const reservationId = insertActionReservation(db, {
       actionId,
@@ -920,11 +1066,29 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
       author: args.author,
       observedAt,
     });
-    return { reservationId, descriptor };
+    return {
+      reservationId,
+      descriptor,
+      ownerDeliveryPending: question.owner_delivery === true,
+    };
   });
 
   if (reserved.replay) return reserved.replay;
   if (reserved.result) return reserved.result;
+  if (reserved.ownerDeliveryPending) {
+    return {
+      ...baseActionResult({
+        actionId,
+        actionKind: "question.answer",
+        target,
+        outcome: "pending",
+        safeReasonCode: "owner_delivery_pending",
+      }),
+      question_state: "pending",
+      result_event_id: null,
+      retryable: true,
+    };
+  }
 
   let transitionResult;
   let transitionError = null;
@@ -960,6 +1124,254 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
     });
   } catch { /* the reserved durable result remains authoritative */ }
   return result;
+}
+
+function ownerDeliveryDescriptor(row) {
+  const action = parseStoredAction(row);
+  const descriptor = action?.descriptor;
+  if (
+    row?.status !== "active"
+    || action?.action_kind !== "question.answer"
+    || action?.state !== "reserved"
+    || !descriptor
+    || !liveOwnerDeliveryHandler(descriptor.handler)
+  ) return null;
+  const jobId = positiveId(descriptor.job_id);
+  const workItemId = positiveId(descriptor.work_item_id);
+  const questionId = String(descriptor.question_id || "");
+  const questionMatch = questionId.match(/^gate:([1-9]\d*):(0|[1-9]\d*)$/);
+  const questionGeneration = String(descriptor.question_generation || "");
+  const choiceId = String(descriptor.choice_id || "");
+  if (
+    !jobId
+    || !workItemId
+    || !questionMatch
+    || positiveId(questionMatch[1]) !== jobId
+    || !questionGeneration
+    || !choiceId
+    || Number(row.job_id) !== jobId
+    || Number(row.work_item_id) !== workItemId
+    || !sameTarget(action.target, actionTarget({
+      workItemId,
+      jobId,
+      questionId,
+      choiceId,
+    }))
+  ) return null;
+  return {
+    reservation_id: Number(row.id),
+    action_id: String(action.action_id || ""),
+    handler: descriptor.handler,
+    work_item_id: String(workItemId),
+    job_id: String(jobId),
+    question_id: questionId,
+    question_index: Number(questionMatch[2]),
+    question_generation: questionGeneration,
+    choice_id: choiceId,
+  };
+}
+
+/**
+ * Narrow owner-side read for the attended-run relay. This intentionally omits
+ * lease tokens and free-form answer text; the Display contributes its private
+ * in-memory lease token only after an exact prompt match.
+ */
+export function listReservedHumanAnswerDeliveries({ limit = 32 } = {}) {
+  const db = getDb();
+  reconcileAbandonedHumanAnswerDeliveries();
+  const boundedLimit = Math.max(1, Math.min(128, Number(limit) || 32));
+  const observedAt = now();
+  const rows = db.prepare(`
+    SELECT ai.*, j.status AS job_status, j.lease_token AS job_lease_token,
+      j.lease_expires_at AS job_lease_expires_at,
+      hg.gate_state, hg.generation AS gate_generation
+    FROM agent_interactions ai
+    JOIN jobs j ON j.id = ai.job_id
+    JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE ai.kind = 'approval' AND ai.status = 'active'
+      AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
+      AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'
+      AND j.job_type = 'human_input' AND j.status = 'waiting_on_human'
+      AND j.lease_token IS NOT NULL
+      AND j.lease_expires_at IS NOT NULL
+      AND julianday(j.lease_expires_at) > julianday(?)
+      AND hg.gate_state = 'open'
+    ORDER BY ai.created_at ASC, ai.id ASC
+    LIMIT ?
+  `).all(observedAt, boundedLimit);
+  const deliveries = [];
+  for (const row of rows) {
+    if (!jobHasLiveLeaseAt({
+      status: row.job_status,
+      lease_token: row.job_lease_token,
+      lease_expires_at: row.job_lease_expires_at,
+    }, observedAt)) continue;
+    const descriptor = ownerDeliveryDescriptor(row);
+    if (!descriptor || descriptor.question_generation !== String(row.gate_generation || 1)) continue;
+    deliveries.push({
+      ...descriptor,
+      gate_generation: String(row.gate_generation || 1),
+    });
+  }
+  return deliveries;
+}
+
+export function reconcileAbandonedHumanAnswerDeliveries() {
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const rows = db.prepare(`
+      SELECT ai.*
+      FROM agent_interactions ai
+      JOIN jobs j ON j.id = ai.job_id
+      WHERE ai.kind = 'approval' AND ai.status = 'active'
+        AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
+        AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'delivered'
+        AND (
+          j.lease_token IS NULL
+          OR j.lease_expires_at IS NULL
+          OR julianday(j.lease_expires_at) <= julianday(?)
+        )
+      ORDER BY ai.id ASC
+    `).all(now());
+    let reconciled = 0;
+    for (const row of rows) {
+      const action = parseStoredAction(row);
+      if (!action?.action_id || !action.target) continue;
+      const outcome = reconcileReservedQuestionAction(db, {
+        row,
+        action,
+      }, action.target, { actionId: action.action_id });
+      if (outcome.replay?.outcome !== "pending") reconciled += 1;
+    }
+    return reconciled;
+  });
+}
+
+export function markHumanAnswerDelivery({
+  reservation_id,
+  job_id,
+  question_generation,
+  lease_token,
+} = {}) {
+  const reservationId = positiveId(reservation_id);
+  const jobId = positiveId(job_id);
+  const leaseToken = String(lease_token || "");
+  if (!reservationId || !jobId || !leaseToken) return { ok: false, reason: "invalid_delivery_identity" };
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const row = db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(reservationId);
+    const descriptor = ownerDeliveryDescriptor(row);
+    if (!descriptor || positiveId(descriptor.job_id) !== jobId) {
+      return { ok: false, reason: "reservation_not_pending" };
+    }
+    if (descriptor.question_generation !== String(question_generation || "")) {
+      return { ok: false, reason: "stale_generation" };
+    }
+    const job = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(jobId);
+    const gate = db.prepare(`SELECT gate_state, generation FROM human_gates WHERE gate_job_id = ?`).get(jobId);
+    if (
+      !job
+      || job.status !== "waiting_on_human"
+      || job.lease_token !== leaseToken
+      || !jobHasLiveLeaseAt(job, now())
+    ) return { ok: false, reason: "stale_owner_lease" };
+    if (gate?.gate_state !== "open" || String(gate.generation || 1) !== descriptor.question_generation) {
+      return { ok: false, reason: "stale_generation" };
+    }
+    const metadata = parseJsonObject(row.metadata_json);
+    const action = metadata[ACTION_METADATA_KEY];
+    const deliveredAt = now();
+    metadata[ACTION_METADATA_KEY] = {
+      ...action,
+      state: "delivered",
+      delivered_at: deliveredAt,
+      delivery_count: Math.max(0, Number(action.delivery_count || 0)) + 1,
+    };
+    const updated = db.prepare(`
+      UPDATE agent_interactions
+      SET metadata_json = ?, first_applied_at = COALESCE(first_applied_at, ?),
+          last_applied_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+        AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'
+    `).run(JSON.stringify(metadata), deliveredAt, deliveredAt, deliveredAt, reservationId);
+    if (updated.changes !== 1) return { ok: false, reason: "delivery_raced" };
+    notifyQueueStateChanged({
+      reason: "human_answer_delivered",
+      jobId,
+      workItemId: row.work_item_id,
+    });
+    return { ok: true, delivered_at: deliveredAt };
+  });
+}
+
+export function completeDeliveredHumanAnswerReservation({
+  reservation_id,
+  job_id,
+  accepted = false,
+  reason = null,
+  author = "operator",
+} = {}) {
+  const reservationId = positiveId(reservation_id);
+  const jobId = positiveId(job_id);
+  if (!reservationId || !jobId) return { ok: false, reason: "invalid_delivery_identity" };
+  const db = getDb();
+  const settled = runImmediateTransaction(db, () => {
+    const row = db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(reservationId);
+    const action = parseStoredAction(row);
+    if (!row || Number(row.job_id) !== jobId || action?.action_kind !== "question.answer") {
+      return { ok: false, reason: "reservation_not_found" };
+    }
+    if (action.state === "complete" && action.result) return { ok: true, idempotent: true, result: action.result };
+    if (row.status !== "active" || action.state !== "delivered") {
+      return { ok: false, reason: "reservation_not_delivered" };
+    }
+    const observedAt = now();
+    const result = {
+      ...baseActionResult({
+        actionId: action.action_id,
+        actionKind: "question.answer",
+        target: action.target,
+        outcome: accepted ? "accepted" : "rejected",
+        observedAt,
+        safeReasonCode: accepted ? null : safeReason(reason, "transition_rejected"),
+      }),
+      question_state: accepted ? "answered" : questionStateAfterTransition(
+        db,
+        action.target?.question_id,
+        "open",
+      ),
+      result_event_id: null,
+    };
+    completeReservedAction(db, reservationId, result);
+    return {
+      ok: true,
+      idempotent: false,
+      result,
+      work_item_id: row.work_item_id,
+      choice_id: action.target?.choice_id || null,
+    };
+  });
+  if (settled.ok && !settled.idempotent) {
+    try {
+      logEvent({
+        work_item_id: settled.work_item_id,
+        job_id: jobId,
+        event_type: EVENT_TYPES.AGENT_QUESTION_ANSWERED,
+        actor_type: EVENT_ACTORS.HUMAN,
+        actor_id: boundedText(author, 120),
+        message: accepted
+          ? `Reserved human answer applied by the owning run for job #${jobId}`
+          : `Reserved human answer rejected by the owning run for job #${jobId}`,
+        event_json: {
+          reservation_id: reservationId,
+          choice_id: settled.choice_id,
+          outcome: settled.result?.outcome,
+          safe_reason: settled.result?.safe_reason,
+        },
+      });
+    } catch { /* the durable reservation result remains authoritative */ }
+  }
+  return settled;
 }
 
 export function replaceOperatorNudge(args = {}) {

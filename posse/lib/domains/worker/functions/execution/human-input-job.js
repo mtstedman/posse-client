@@ -33,6 +33,7 @@ import {
   updateWorkItemStatus,
 } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
+import { completeDeliveredHumanAnswerReservation } from "../../../queue/functions/interaction-contract.js";
 import { withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
 import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
 import { dropStashByHashAsync, findStallStashEntryAsync } from "../../../git/functions/utils.js";
@@ -278,6 +279,9 @@ export async function runHumanInputJob(worker, job, {
   }
 
   const startTime = Date.now();
+  let deliveredAnswerReservation = null;
+  let deliveredAnswerApplied = false;
+  let deliveredAnswerFailure = null;
   try {
     if (isBogusResearchPlaceholderPayload(payload) && payload.original_job_id) {
       const origJob = getJob(payload.original_job_id);
@@ -338,6 +342,22 @@ export async function runHumanInputJob(worker, job, {
     }
 
     const output = await worker._humanInputHandler(activeJob, abortSignal, { leaseToken });
+    const outputEnvelope = payloadObject(output);
+    const deliveredMetadata = Array.isArray(outputEnvelope.answers)
+      ? [...outputEnvelope.answers].reverse().find((answer) => (
+          answer && typeof answer === "object"
+          && answer.metadata && typeof answer.metadata === "object"
+          && Number.isSafeInteger(Number(answer.metadata.reservation_id))
+          && Number(answer.metadata.reservation_id) > 0
+        ))?.metadata
+      : null;
+    if (deliveredMetadata) {
+      deliveredAnswerReservation = {
+        reservation_id: Number(deliveredMetadata.reservation_id),
+        job_id: job.id,
+        author: "operator",
+      };
+    }
     worker._throwIfKilled(job.id);
 
     if (output === null) {
@@ -351,7 +371,6 @@ export async function runHumanInputJob(worker, job, {
       worker._cleanupWorktreeIfDone(job.work_item_id);
       return;
     }
-    const outputEnvelope = payloadObject(output);
     const actionChoices = humanInputChoicesForPayload(payload);
     const uncataloguedReview = isHumanInputReviewPayload(payload) && actionChoices.length === 0;
     if (actionChoices.length > 0 || uncataloguedReview) {
@@ -1200,6 +1219,7 @@ export async function runHumanInputJob(worker, job, {
     if (!resolutionCompleted.ok) {
       throw new Error(`Human gate completion failed: ${resolutionCompleted.reason}`);
     }
+    deliveredAnswerApplied = true;
     const humanLeaseReleased = releaseHumanLease(finalHumanStatus);
     if (humanLeaseReleased === false) {
       worker.emit(job.id, `${C.yellow}[human] Ignored stale answer for review job #${job.id}; its lease was already closed${C.reset}`);
@@ -1217,6 +1237,7 @@ export async function runHumanInputJob(worker, job, {
     refreshAndExtractInsights(job.work_item_id);
     } catch (postErr) {
       const message = postErr instanceof Error ? postErr.message : String(postErr);
+      deliveredAnswerFailure = message;
       worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed after human input was recorded; retired the gate instead of asking again: ${message}${C.reset}`);
       completeAttempt(attempt.attempt.id, {
         status: "failed",
@@ -1245,6 +1266,7 @@ export async function runHumanInputJob(worker, job, {
       try { refreshAndExtractInsights(job.work_item_id); } catch { /* best effort */ }
     }
   } catch (err) {
+    deliveredAnswerFailure = err?.message || String(err);
     if (worker._handleDeterministicInterruption(job, attempt.attempt.id, startTime, leaseToken, err)) {
       return;
     }
@@ -1260,5 +1282,18 @@ export async function runHumanInputJob(worker, job, {
       error: err.message,
     });
     worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+  } finally {
+    if (deliveredAnswerReservation) {
+      try {
+        completeDeliveredHumanAnswerReservation({
+          ...deliveredAnswerReservation,
+          accepted: deliveredAnswerApplied,
+          reason: deliveredAnswerFailure || (deliveredAnswerApplied ? null : "owner_transition_not_applied"),
+        });
+      } catch {
+        // The reservation stays durable for projection/reconciliation; worker
+        // completion must not be replaced by relay bookkeeping failure.
+      }
+    }
   }
 }

@@ -1130,6 +1130,7 @@ export class Display {
     escapeAnswer = null,
     escapeLabel = null,
     promptIdentity = null,
+    ownerLeaseToken = null,
   } = {}) {
     return new Promise((resolve, reject) => {
       if (this._aborted) {
@@ -1147,6 +1148,9 @@ export class Display {
         promptIdentity: promptIdentity && typeof promptIdentity === "object"
           ? promptIdentity
           : null,
+        _ownerLeaseToken: typeof ownerLeaseToken === "string" && ownerLeaseToken
+          ? ownerLeaseToken
+          : null,
         escapeAnswer: typeof escapeAnswer === "string" && escapeAnswer.trim() ? escapeAnswer.trim() : null,
         escapeLabel: typeof escapeLabel === "string" && escapeLabel.trim() ? escapeLabel.trim() : null,
         answers: [],
@@ -1163,6 +1167,85 @@ export class Display {
         this._startAnswering();
       }
     });
+  }
+
+  /**
+   * Resolve one exact in-memory human prompt from an owner-delivery
+   * reservation. The private lease token never leaves this Display entry; the
+   * relay receives it only inside onMatched so it can atomically mark delivery
+   * before the worker's prompt promise is resolved.
+   */
+  deliverQuestionAnswer(delivery = {}, { onMatched = null } = {}) {
+    const jobId = Number(delivery.job_id);
+    const questionIndex = Number(delivery.question_index);
+    const generation = String(delivery.question_generation || "");
+    const gateGeneration = String(delivery.gate_generation || generation);
+    const choiceId = String(delivery.choice_id || "");
+    if (
+      !Number.isSafeInteger(jobId)
+      || jobId <= 0
+      || !Number.isSafeInteger(questionIndex)
+      || questionIndex < 0
+      || !generation
+      || !choiceId
+    ) return { delivered: false, reason: "invalid_delivery_identity" };
+
+    const q = this._questionQueue.find((entry) => {
+      const identity = entry?.promptIdentity || {};
+      return Number(entry?.jobId) === jobId
+        && Number(identity.gate_job_id ?? entry?.jobId) === jobId
+        && Number(entry?.currentIdx) === questionIndex
+        && String(identity.question_generation || "") === generation
+        && String(identity.gate_generation || identity.question_generation || "") === gateGeneration;
+    });
+    if (!q) return { delivered: false, reason: "prompt_not_ready" };
+    if (!q._ownerLeaseToken) return { delivered: false, reason: "prompt_has_no_owner_lease" };
+    const choices = Array.isArray(q.choices) ? q.choices : [];
+    if (!choices.includes(choiceId)) return { delivered: false, reason: "choice_not_allowed" };
+
+    let matched = { ok: true };
+    try {
+      if (typeof onMatched === "function") {
+        matched = onMatched({
+          ownerLeaseToken: q._ownerLeaseToken,
+          promptIdentity: q.promptIdentity,
+        });
+      }
+    } catch (err) {
+      return { delivered: false, reason: err?.message || "delivery_mark_failed" };
+    }
+    if (matched === false || matched?.ok === false) {
+      return { delivered: false, reason: matched?.reason || "delivery_mark_failed" };
+    }
+
+    q.answers.push({
+      question: q.questions[q.currentIdx],
+      answer: choiceId,
+      metadata: {
+        idempotency_key: String(delivery.action_id || ""),
+        reservation_id: Number(delivery.reservation_id),
+        source: "reserved_owner_delivery",
+      },
+    });
+    q.currentIdx += 1;
+    if (q.currentIdx < q.questions.length) {
+      if (q === this._activeQ) this._inputBuf = "";
+      this.requestRender({ force: true });
+      return { delivered: true, complete: false };
+    }
+
+    const answers = q.answers;
+    q.resolve(answers);
+    this._removeQuestionSet(q);
+    if (q === this._activeQ) {
+      this._activeQ = null;
+      this._inputBuf = "";
+      this._startAnswering();
+    }
+    const wiTag = q.workItemId ? `WI#${q.workItemId} ` : "";
+    this.addEvent(`${C.green}\u2713 ${wiTag}Accepted reserved answer for job #${q.jobId}${C.reset}`);
+    this.requestRender({ force: true });
+    return { delivered: true, complete: true };
   }
 
   /**

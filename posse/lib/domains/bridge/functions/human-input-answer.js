@@ -6,6 +6,10 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { getHumanGate, getJob } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
 import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
+import {
+  answerWorkItemQuestionChoice,
+  projectWorkItemInteractions,
+} from "../../queue/functions/interaction-contract.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
 import {
@@ -15,6 +19,12 @@ import {
 } from "../../../catalog/human-input.js";
 
 const DEFAULT_BRIDGE_LEASE_SECONDS = 300;
+const STRUCTURED_CHOICE_ALIASES = Object.freeze({
+  retry_assessment: Object.freeze(["retry"]),
+  retry_with_changes: Object.freeze(["retry"]),
+  explicit_waiver: Object.freeze(["skip"]),
+  deny: Object.freeze(["reject"]),
+});
 
 function normalizeAnswers(questions, args = {}) {
   if (Array.isArray(args.answers)) return args.answers;
@@ -160,11 +170,54 @@ export async function answerHumanInput(jobId, args = {}, {
     const fresh = getJob(id);
     const freshContract = getHumanGate(id);
     if (fresh?.status === "waiting_on_human" && jobHasLiveLeaseAt(fresh, now())) {
+      const generation = String(freshContract?.generation || 1);
+      const projected = projectWorkItemInteractions({ work_item_id: fresh.work_item_id || current.work_item_id });
+      const question = projected.questions.find((entry) => entry.question_id === `gate:${id}:0`);
+      const structuredChoices = new Set((question?.choices || []).map((choice) => choice.choice_id));
+      const requestedChoice = selectedChoice || latestAnswerText(answers);
+      const choiceId = structuredChoices.has(requestedChoice)
+        ? requestedChoice
+        : (STRUCTURED_CHOICE_ALIASES[requestedChoice] || []).find((choice) => structuredChoices.has(choice))
+          || requestedChoice;
+      const actionId = String(args.action_id || `gate-answer:${crypto.createHash("sha256")
+        .update(`${id}:${generation}:${choiceId}`)
+        .digest("hex")}`);
+      const reserved = await answerWorkItemQuestionChoice({
+        action_id: actionId,
+        work_item_id: String(fresh.work_item_id || current.work_item_id),
+        job_id: String(id),
+        question_id: `gate:${id}:0`,
+        question_generation: generation,
+        choice_id: choiceId,
+        source: args.source || "terminal",
+        author: args.author || "operator",
+      }, {
+        // The live-owner branch returns before executing this callback. If the
+        // lease disappears during validation, fail closed instead of claiming
+        // or resolving from the secondary process.
+        executeTransition: async () => ({ ok: false, reason: "owner_lease_changed" }),
+      });
+      if (reserved.outcome === "pending" || reserved.outcome === "accepted") {
+        return {
+          ok: true,
+          pending: reserved.outcome === "pending",
+          reason: reserved.safe_reason || null,
+          message: reserved.outcome === "pending"
+            ? "Answer reserved for the active run; the owning worker will apply it."
+            : "The owning run already applied this answer.",
+          retryable: reserved.retryable === true,
+          action_id: actionId,
+          job_id: id,
+          status: fresh.status,
+          gate_state: freshContract?.gate_state || "unknown",
+          work_item_id: fresh.work_item_id || current.work_item_id,
+        };
+      }
       return {
         ok: false,
-        reason: "gate_resolution_in_progress",
-        message: "This gate is owned by an active run. Answer it in that run, or retry after its lease is released.",
-        retryable: true,
+        reason: reserved.safe_reason || reserved.outcome || "answer_reservation_failed",
+        message: "The active run could not reserve this answer.",
+        retryable: reserved.outcome === "stale_generation",
         job_id: id,
         status: fresh.status,
         gate_state: freshContract?.gate_state || "unknown",

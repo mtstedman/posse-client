@@ -25,6 +25,7 @@ import { RunCloseoutController } from "./RunCloseoutController.js";
 import { RunDisplayActions } from "./RunDisplayActions.js";
 import { RunDisplaySnapshotController } from "./RunDisplaySnapshotController.js";
 import { RunIdleAutoMergeController } from "./RunIdleAutoMergeController.js";
+import { RunHumanAnswerRelay } from "./RunHumanAnswerRelay.js";
 import { RunSchedulerLoopCallbacks } from "./RunSchedulerLoopCallbacks.js";
 import { RunShutdownController } from "./RunShutdownController.js";
 import {
@@ -77,6 +78,7 @@ export class RunSession {
     this._stopRunDisplaySnapshots = null;
     this._cleanupRunAtlas = null;
     this._bossyLocalStream = null;
+    this._humanAnswerRelay = null;
     this._processResourceDisposal = null;
   }
 
@@ -108,6 +110,9 @@ export class RunSession {
     const stopDisplaySnapshots = this._stopRunDisplaySnapshots;
     this._stopRunDisplaySnapshots = null;
     try { stopDisplaySnapshots?.(); } catch { /* best effort */ }
+    const humanAnswerRelay = this._humanAnswerRelay;
+    this._humanAnswerRelay = null;
+    try { humanAnswerRelay?.stop?.(); } catch { /* best effort */ }
     const display = this._activeDisplay;
     this._activeDisplay = null;
     try { display?.stop?.(); } catch { /* best effort */ }
@@ -2704,6 +2709,18 @@ export class RunSession {
     researchPayload,
     refreshDisplaySnapshotsForQueue,
   }).wire();
+  if (display) {
+    const humanAnswerRelay = new RunHumanAnswerRelay({
+      display,
+      onError: (err) => {
+        log?.warn?.("run", "Reserved human-answer relay poll failed", {
+          error: String(err?.message || err),
+        });
+      },
+    });
+    this._humanAnswerRelay = humanAnswerRelay;
+    humanAnswerRelay.start();
+  }
   const shutdown = new RunShutdownController({
     getDisplay: () => display,
     worker,

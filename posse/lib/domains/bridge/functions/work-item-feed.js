@@ -55,6 +55,11 @@ const QUESTION_KINDS = new Set([
   "partial_work_recovery", "dead_letter_recovery", "pipeline_head_recovery",
   "one_shot_file_scope", "push_offer", "legacy_unstructured",
 ]);
+const LIVE_OWNER_DELIVERY_QUESTION_KINDS = new Set([
+  "file_scope_approval", "assessment_review", "assessment_transport_recovery",
+  "assessment_retry_limit", "blocked_recovery", "partial_work_recovery",
+  "dead_letter_recovery", "pipeline_head_recovery", "one_shot_file_scope",
+]);
 const NUDGE_STATES = new Set([
   "queued", "signaled", "retrieved", "accepted", "rejected", "deferred", "superseded", "expired",
 ]);
@@ -224,6 +229,9 @@ function storedQuestionChoices(kind, payload) {
   const entries = kind === "one_shot_file_scope"
     ? payload?.selector?.options
     : payload?.choices;
+  if ((!Array.isArray(entries) || entries.length === 0) && LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(kind)) {
+    return (QUESTION_CHOICE_IDS[kind] || []).map(storedChoiceRecord).filter(Boolean);
+  }
   if (!validStoredChoiceEntries(kind, entries)) return [];
   return entries.map(storedChoiceRecord).filter(Boolean);
 }
@@ -236,9 +244,12 @@ function questionStateForJob(job) {
   return "closed";
 }
 
-function observedQuestionStateForJob(job, observedAt = new Date().toISOString()) {
+function observedQuestionStateForJob(job, observedAt = new Date().toISOString(), {
+  allowLiveOwnerDelivery = false,
+} = {}) {
   const state = questionStateForJob(job);
-  return state === "open" && jobHasLiveLeaseAt(job, observedAt) ? "pending" : state;
+  if (state !== "open" || !jobHasLiveLeaseAt(job, observedAt)) return state;
+  return allowLiveOwnerDelivery ? "open" : "pending";
 }
 
 function storedQuestionAction(db, questionId) {
@@ -716,17 +727,22 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
   try { job = db.prepare("SELECT * FROM jobs WHERE id = ? AND work_item_id = ?").get(Number(match[1]), row.work_item_id); } catch { return null; }
   if (!job || job.job_type !== "human_input") return null;
   const payload = parseJsonObject(job.payload_json);
-  const questions = Array.isArray(payload.questions) && payload.questions.length > 0
+  const rawQuestions = Array.isArray(payload.questions) && payload.questions.length > 0
     ? payload.questions
     : [payload.prompt || job.title || "Human input requested"];
-  const index = Number(match[2]);
-  if (!Number.isSafeInteger(index) || index < 0 || index >= questions.length) return null;
   const questionKind = storedQuestionKind(payload);
   const choices = storedQuestionChoices(questionKind, payload);
+  const questions = choices.length > 0 && rawQuestions.length > 1
+    ? [rawQuestions.join("\n\n")]
+    : rawQuestions;
+  const index = Number(match[2]);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= questions.length) return null;
   const actionRow = storedQuestionAction(db, questionId);
   const action = actionMetadata(actionRow);
-  let state = observedQuestionStateForJob(job);
-  if (action?.state === "reserved") state = "pending";
+  let state = observedQuestionStateForJob(job, new Date().toISOString(), {
+    allowLiveOwnerDelivery: LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(questionKind),
+  });
+  if (["reserved", "delivered"].includes(action?.state)) state = "pending";
   if (kind === "answer") state = action?.result?.question_state
     || (event.outcome === "accepted" ? "answered" : "rejected");
   const fallbackEventId = kind === "answer" ? `event:${row.id}` : null;
@@ -752,7 +768,11 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
     state,
     opened_at: job.created_at,
     expires_at: payload.expires_at || null,
-    generation: String(action?.descriptor?.question_generation ?? job.bridge_change_seq ?? 0),
+    generation: String(
+      action?.descriptor?.question_generation
+      ?? db.prepare("SELECT generation FROM human_gates WHERE gate_job_id = ?").get(job.id)?.generation
+      ?? 1
+    ),
     choices,
     capability: actionable ? "question.answer" : null,
     answer,
@@ -820,7 +840,7 @@ function projectedInteractionQuestion(row, event, db, questionId, kind) {
   let state = questionRow.status === "active" ? "open"
     : questionRow.status === "answered" ? "answered"
       : QUESTION_STATES.has(questionRow.status) ? questionRow.status : "closed";
-  if (action?.state === "reserved") state = "pending";
+  if (["reserved", "delivered"].includes(action?.state)) state = "pending";
   if (answer) state = "answered";
   if (kind === "answer" && event.outcome && event.outcome !== "accepted") state = "rejected";
   const actionable = kind === "question" && state === "open" && choices.length > 0 && questionKind !== "legacy_unstructured";

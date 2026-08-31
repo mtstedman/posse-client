@@ -146,6 +146,7 @@ export function buildHumanPromptIdentity(job, payload = {}, {
     gate_job_id: job.id,
     gate_kind: gate?.gate_kind || payload.gate_kind || payload.review_type || payload.subtype || "clarification",
     gate_generation: Number(gate?.generation || 1),
+    question_generation: String(gate?.generation || 1),
     age_ms: Number.isFinite(createdMs) ? Math.max(0, nowMs - createdMs) : null,
     retry_chain: lineage,
   };
@@ -183,6 +184,10 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
     // "running" for the whole prompt — invisible to and unclaimable by the
     // bridge, and missed by every waiting_on_human sweep.
     updateJobStatus(job.id, "waiting_on_human", { leaseToken });
+    // The typed question generation is the durable human-gate generation. It
+    // remains stable across lease renewal/recovery, unlike bridge_change_seq.
+    promptIdentity.question_generation = String(getHumanGate(job.id)?.generation || 1);
+    promptOptions.ownerLeaseToken = leaseToken;
     const DISPLAY_TIMEOUT_MS = 3600 * 1000;
     let timer;
     const timeout = new Promise((_, reject) => {
