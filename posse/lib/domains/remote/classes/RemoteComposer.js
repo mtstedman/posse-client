@@ -395,9 +395,19 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
     && issued.coordination?.subAgentV1 === true;
   const subAgentNextInputEnabled = subAgentEnabled
     && issued.coordination?.subAgentNextInputV1 === true;
+  const localDispatchAgentEnabled = packet?.agent_coordination?.dispatch_agent_v1 === true;
+  const dispatchAgentEnabled = issued.valid
+    && localDispatchAgentEnabled
+    && issued.coordination?.dispatchAgentV1 === true;
+  const localWebResearchHandoffEnabled = packet?.agent_coordination?.web_research_handoff_v1 === true;
+  const webResearchHandoffEnabled = issued.valid
+    && localWebResearchHandoffEnabled
+    && issued.coordination?.webResearchHandoffV1 === true;
   const effectiveToolSurface = issued.toolSurface.filter(
     (name) => (name !== "tools.agent_handoff" || handoffEnabled)
-      && (name !== "tools.sub_agent" || subAgentEnabled),
+      && (name !== "tools.sub_agent" || subAgentEnabled)
+      && (name !== "tools.dispatch_agent" || dispatchAgentEnabled)
+      && (name !== "tools.web_research_handoff" || webResearchHandoffEnabled),
   );
   const projectedIssuance = {
     ...(issuance && typeof issuance === "object" ? issuance : {}),
@@ -421,6 +431,8 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
       agent_handoff_compact_v3: compactHandoffV3Enabled,
       sub_agent_v1: subAgentEnabled,
       sub_agent_next_input_v1: subAgentNextInputEnabled,
+      dispatch_agent_v1: dispatchAgentEnabled,
+      web_research_handoff_v1: webResearchHandoffEnabled,
       status: "experimental",
     },
   };
@@ -438,12 +450,16 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
     agent_handoff_compact_v3: compactHandoffV3Enabled,
     sub_agent_v1: subAgentEnabled,
     sub_agent_next_input_v1: subAgentNextInputEnabled,
+    dispatch_agent_v1: dispatchAgentEnabled,
+    web_research_handoff_v1: webResearchHandoffEnabled,
     remote_acknowledged: issued.coordination?.agentHandoffV1 === true,
     compact_remote_acknowledged: issued.coordination?.agentHandoffCompactV1 === true,
     compact_v2_remote_acknowledged: issued.coordination?.agentHandoffCompactV2 === true,
     compact_v3_remote_acknowledged: issued.coordination?.agentHandoffCompactV3 === true,
     sub_agent_remote_acknowledged: issued.coordination?.subAgentV1 === true,
     sub_agent_next_input_remote_acknowledged: issued.coordination?.subAgentNextInputV1 === true,
+    dispatch_agent_remote_acknowledged: issued.coordination?.dispatchAgentV1 === true,
+    web_research_handoff_remote_acknowledged: issued.coordination?.webResearchHandoffV1 === true,
   };
   const policy = issued.toolPolicy;
   packet.tool_policy = {

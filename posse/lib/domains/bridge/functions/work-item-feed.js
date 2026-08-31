@@ -17,6 +17,7 @@ import {
   readRunTelemetryEntries,
 } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { getSetting } from "../../queue/functions/settings.js";
+import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import { redactBridgeValue } from "./redaction.js";
 
 export {
@@ -233,6 +234,11 @@ function questionStateForJob(job) {
   if (job?.status === "succeeded") return "answered";
   if (FAILED_JOB_STATUS_SET.has(job?.status)) return "rejected";
   return "closed";
+}
+
+function observedQuestionStateForJob(job, observedAt = new Date().toISOString()) {
+  const state = questionStateForJob(job);
+  return state === "open" && jobHasLiveLeaseAt(job, observedAt) ? "pending" : state;
 }
 
 function storedQuestionAction(db, questionId) {
@@ -719,7 +725,7 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
   const choices = storedQuestionChoices(questionKind, payload);
   const actionRow = storedQuestionAction(db, questionId);
   const action = actionMetadata(actionRow);
-  let state = questionStateForJob(job);
+  let state = observedQuestionStateForJob(job);
   if (action?.state === "reserved") state = "pending";
   if (kind === "answer") state = action?.result?.question_state
     || (event.outcome === "accepted" ? "answered" : "rejected");

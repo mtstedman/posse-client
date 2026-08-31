@@ -22,10 +22,15 @@ import {
   getWorkItem,
   listJobsByWorkItem,
   logEvent,
+  setJobResult,
   updateJobStatus,
   updateJobPayload,
   updateWorkItemResearchSkip,
 } from "../../queue/functions/index.js";
+import {
+  beginHumanGateResolution,
+  completeHumanGateResolution,
+} from "../../queue/functions/human-gates.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
@@ -85,6 +90,38 @@ function setWorkItemApproval(wiId, state, feedback = null) {
     SET plan_approval_state = ?, plan_rejection_feedback = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE id = ?
   `).run(state, feedback, wiId);
+}
+
+function planGateResolutionPayload(action, {
+  actor,
+  actorType,
+  feedback = null,
+} = {}) {
+  return {
+    action,
+    answer: action,
+    feedback: feedback || null,
+    unattended: actorType !== EVENT_ACTORS.HUMAN,
+    source: actor || (actorType === EVENT_ACTORS.HUMAN ? "human" : "system"),
+  };
+}
+
+function beginPlanGateResolution(gate, action) {
+  return beginHumanGateResolution({
+    gateJobId: gate.id,
+    action,
+    requireLease: false,
+  });
+}
+
+function completePlanGateResolution(gate, resolution) {
+  const completed = completeHumanGateResolution({
+    gateJobId: gate.id,
+    resolution,
+  });
+  if (!completed.ok) {
+    throw new Error(`plan gate #${gate.id} audit completion failed: ${completed.reason}`);
+  }
 }
 
 function safeJsonObject(value) {
@@ -251,17 +288,27 @@ export function approvePlan(wiId, {
   if (!wi) return { ok: false, reason: "no_such_wi" };
   const gate = findPendingGate(wiId);
   if (!gate) return { ok: false, reason: "no_pending_gate" };
-  updateJobStatus(gate.id, "succeeded");
-  setWorkItemApproval(wiId, "approved", null);
-  logEvent({
-    work_item_id: wiId,
-    job_id: gate.id,
-    event_type: EVENT_TYPES.PLAN_APPROVED,
-    actor_type: actorType,
-    actor_id: actor,
-    message: `Plan approved; downstream jobs may proceed`,
-  });
-  return { ok: true, gateJobId: gate.id };
+  const db = getDb();
+  return db.transaction(() => {
+    const claimed = beginPlanGateResolution(gate, "approve");
+    if (!claimed.ok) return { ok: false, reason: claimed.reason };
+    const resolution = planGateResolutionPayload("approve", { actor, actorType });
+    setWorkItemApproval(wiId, "approved", null);
+    setJobResult(gate.id, resolution);
+    completePlanGateResolution(gate, resolution);
+    if (!updateJobStatus(gate.id, "succeeded")) {
+      throw new Error(`plan gate #${gate.id} could not transition to succeeded`);
+    }
+    logEvent({
+      work_item_id: wiId,
+      job_id: gate.id,
+      event_type: EVENT_TYPES.PLAN_APPROVED,
+      actor_type: actorType,
+      actor_id: actor,
+      message: `Plan approved; downstream jobs may proceed`,
+    });
+    return { ok: true, gateJobId: gate.id };
+  })();
 }
 
 /**
@@ -269,58 +316,76 @@ export function approvePlan(wiId, {
  * downstream cascade for this plan). Optionally records feedback on the WI.
  * Does NOT itself spawn a replan — the CLI is responsible for that.
  */
-export function rejectPlan(wiId, { feedback = null, actor = "operator" } = {}) {
+export function rejectPlan(wiId, {
+  feedback = null,
+  actor = "operator",
+  actorType = EVENT_ACTORS.HUMAN,
+} = {}) {
   const wi = getWorkItem(wiId);
   if (!wi) return { ok: false, reason: "no_such_wi" };
   const gate = findPendingGate(wiId);
   if (!gate) return { ok: false, reason: "no_pending_gate" };
 
-  // Cancel the gate so dependents see a hard-dep failure (triggers the
-  // scheduler's deadlock cancellation). We still also explicitly cancel the
-  // created jobs to avoid relying on the deadlock timing.
-  updateJobStatus(gate.id, "canceled");
+  const db = getDb();
+  return db.transaction(() => {
+    const claimed = beginPlanGateResolution(gate, "reject");
+    if (!claimed.ok) return { ok: false, reason: claimed.reason };
+    const payload = parseJobPayload(gate);
+    const gated = Array.isArray(payload?.gated_job_ids) ? payload.gated_job_ids : [];
+    const rejectedArtifactIds = markRejectedArtificerArtifacts(wiId, gated, { feedback, gateJobId: gate.id });
+    const promoteAlreadyRanCount = countSucceededPromoteJobs(gated);
+    let canceled = 0;
+    for (const targetId of gated) {
+      const j = getJob(targetId);
+      if (!j) continue;
+      if (TERMINAL_JOB_STATUSES.includes(j.status)) continue;
+      updateJobStatus(j.id, "canceled");
+      canceled += 1;
+    }
+    // Stash the feedback on the gate payload too so `posse plan review` can
+    // show it after rejection.
+    try {
+      updateJobPayload(gate.id, JSON.stringify({
+        ...payload,
+        rejection_feedback: feedback,
+        rejected_at: new Date().toISOString(),
+        rejected_artifact_ids: rejectedArtifactIds,
+        promote_already_ran_count: promoteAlreadyRanCount,
+      }));
+    } catch { /* best effort */ }
 
-  const payload = parseJobPayload(gate);
-  const gated = Array.isArray(payload?.gated_job_ids) ? payload.gated_job_ids : [];
-  const rejectedArtifactIds = markRejectedArtificerArtifacts(wiId, gated, { feedback, gateJobId: gate.id });
-  const promoteAlreadyRanCount = countSucceededPromoteJobs(gated);
-  let canceled = 0;
-  for (const targetId of gated) {
-    const j = getJob(targetId);
-    if (!j) continue;
-    if (TERMINAL_JOB_STATUSES.includes(j.status)) continue;
-    updateJobStatus(j.id, "canceled");
-    canceled += 1;
-  }
-  // Stash the feedback on the gate payload too so `posse plan review` can
-  // show it after rejection.
-  try {
-    updateJobPayload(gate.id, JSON.stringify({
-      ...payload,
-      rejection_feedback: feedback,
-      rejected_at: new Date().toISOString(),
-      rejected_artifact_ids: rejectedArtifactIds,
-      promote_already_ran_count: promoteAlreadyRanCount,
-    }));
-  } catch { /* best effort */ }
-
-  setWorkItemApproval(wiId, "rejected", feedback || null);
-  logEvent({
-    work_item_id: wiId,
-    job_id: gate.id,
-    event_type: EVENT_TYPES.PLAN_REJECTED,
-    actor_type: EVENT_ACTORS.HUMAN,
-    actor_id: actor,
-    message: `Plan rejected; ${canceled} downstream job(s) canceled${rejectedArtifactIds.length ? `; ${rejectedArtifactIds.length} artifact(s) marked rejected` : ""}${promoteAlreadyRanCount ? `; ${promoteAlreadyRanCount} promote job(s) had already run` : ""}`,
-    event_json: JSON.stringify({
-      gate_job_id: gate.id,
+    const resolution = {
+      ...planGateResolutionPayload("reject", { actor, actorType, feedback }),
       canceled_count: canceled,
-      feedback: feedback || null,
       rejected_artifact_ids: rejectedArtifactIds,
       promote_already_ran_count: promoteAlreadyRanCount,
-    }),
-  });
-  return { ok: true, gateJobId: gate.id, canceledCount: canceled, rejectedArtifactIds, promoteAlreadyRanCount };
+    };
+    setWorkItemApproval(wiId, "rejected", feedback || null);
+    setJobResult(gate.id, resolution);
+    completePlanGateResolution(gate, resolution);
+    // A rejected gate is a completed human decision even though the job uses
+    // `canceled` so hard dependencies cannot run. Because the gate contract is
+    // already resolved, updateJobStatus preserves that audit state.
+    if (!updateJobStatus(gate.id, "canceled")) {
+      throw new Error(`plan gate #${gate.id} could not transition to canceled`);
+    }
+    logEvent({
+      work_item_id: wiId,
+      job_id: gate.id,
+      event_type: EVENT_TYPES.PLAN_REJECTED,
+      actor_type: actorType,
+      actor_id: actor,
+      message: `Plan rejected; ${canceled} downstream job(s) canceled${rejectedArtifactIds.length ? `; ${rejectedArtifactIds.length} artifact(s) marked rejected` : ""}${promoteAlreadyRanCount ? `; ${promoteAlreadyRanCount} promote job(s) had already run` : ""}`,
+      event_json: JSON.stringify({
+        gate_job_id: gate.id,
+        canceled_count: canceled,
+        feedback: feedback || null,
+        rejected_artifact_ids: rejectedArtifactIds,
+        promote_already_ran_count: promoteAlreadyRanCount,
+      }),
+    });
+    return { ok: true, gateJobId: gate.id, canceledCount: canceled, rejectedArtifactIds, promoteAlreadyRanCount };
+  })();
 }
 
 /**

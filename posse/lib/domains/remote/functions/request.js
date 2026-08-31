@@ -95,6 +95,8 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
       agent_handoff_compact_v2: packet?.agent_coordination?.agent_handoff_compact_v2 === true,
       agent_handoff_compact_v3: packet?.agent_coordination?.agent_handoff_compact_v3 === true,
       sub_agent_v1: packet?.agent_coordination?.sub_agent_v1 === true,
+      dispatch_agent_v1: packet?.agent_coordination?.dispatch_agent_v1 === true,
+      web_research_handoff_v1: packet?.agent_coordination?.web_research_handoff_v1 === true,
     },
   };
   const provider = String(providerName || "")

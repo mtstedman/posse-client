@@ -7,6 +7,7 @@
 
 import { createHash } from "crypto";
 import { spawn, spawnSync } from "child_process";
+import path from "path";
 import {
   getArtifacts,
   storeArtifact,
@@ -259,6 +260,29 @@ function commandExecutable(command) {
   return raw.replace(/\\/g, "/").split("/").pop().toLowerCase();
 }
 
+function safeRelativeTestDirectory(value) {
+  const raw = String(value || "").trim().replace(/\\/g, "/");
+  if (!raw || raw.includes("\0") || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) return null;
+  const segments = raw.split("/").filter((segment) => segment !== ".");
+  if (segments.length === 0 || segments.some((segment) => !segment || segment === "..")) return null;
+  if (segments.some((segment) => !/^[A-Za-z0-9._@+-]+$/.test(segment))) return null;
+  return segments.join("/");
+}
+
+function splitPlannerTestInvocation(command) {
+  const value = String(command || "").trim();
+  const match = value.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))\s*&&\s*(.+)$/i);
+  if (!match) {
+    return { command: value, cwd_relative: null, invalid_directory: false };
+  }
+  const cwdRelative = safeRelativeTestDirectory(match[1] || match[2] || match[3]);
+  return {
+    command: String(match[4] || "").trim(),
+    cwd_relative: cwdRelative,
+    invalid_directory: !cwdRelative,
+  };
+}
+
 function classifyNestedRunnerInfrastructureFailure(command, result) {
   if (result?.status !== "failed") return result;
   const executable = commandExecutable(command);
@@ -307,15 +331,20 @@ export function validatePlannerTestCommand(command) {
   const value = String(command || "").trim();
   if (!value) return { ok: false, reason: "test_command_is_empty" };
   if (/[\r\n]/.test(value)) return { ok: false, reason: "test_command_contains_newline" };
-  if (/&&|\|\||[;|<>`]|\$\(/.test(value)) {
+  const invocation = splitPlannerTestInvocation(value);
+  if (invocation.invalid_directory) {
+    return { ok: false, reason: "test_command_contains_unsafe_working_directory" };
+  }
+  const executableCommand = invocation.command;
+  if (/&&|\|\||[;|<>`]|\$\(/.test(executableCommand)) {
     return { ok: false, reason: "test_command_contains_shell_composition" };
   }
-  if (/%/.test(value)) {
+  if (/%/.test(executableCommand)) {
     return { ok: false, reason: "test_command_contains_shell_expansion" };
   }
 
-  const executable = commandExecutable(value);
-  const normalized = value.toLowerCase();
+  const executable = commandExecutable(executableCommand);
+  const normalized = executableCommand.toLowerCase();
   const words = normalized.match(/(?:"[^"]*"|'[^']*'|[^\s]+)/g) || [];
   const args = words.slice(1).map((word) => word.replace(/^['"]|['"]$/g, ""));
   const hasArg = (expected) => args.includes(expected);
@@ -351,6 +380,7 @@ export function validatePlannerTestCommand(command) {
     // assessor of the executable evidence the confidence policy assumes.
     ok = args.some((arg) => (
       /(?:^|[/\\])(?:phpunit|[^/\\]*tests?[^/\\]*)\.php$/.test(arg)
+      || /(?:^|[/\\])(?:run[-_.])?(?:checks?|verify|lint|typecheck|spec)(?:[-_.][^/\\]*)?\.php$/.test(arg)
       || (/(?:^|[/\\])tests?[/\\][^\s]*\.php$/.test(arg)
         && !/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(arg))
     ));
@@ -364,7 +394,12 @@ export function validatePlannerTestCommand(command) {
       || args.some((arg) => /^(?:test|tests|check|spec)$/.test(arg));
   }
   return ok
-    ? { ok: true, reason: null }
+    ? {
+        ok: true,
+        reason: null,
+        execution_command: executableCommand,
+        cwd_relative: invocation.cwd_relative,
+      }
     : { ok: false, reason: `unrecognized_test_runner:${executable || "missing"}` };
 }
 
@@ -384,6 +419,8 @@ export function resolveFrozenTestPlan(job = {}, payload = {}) {
   return {
     schema_version: RECEIPT_SCHEMA_VERSION,
     command,
+    execution_command: validation.execution_command || command,
+    cwd_relative: validation.cwd_relative || null,
     source,
     plan_id: sha256(`${source}\0${command}`),
     validation_error: validation.ok ? null : validation.reason,
@@ -417,9 +454,19 @@ function compactFailureFingerprint(result = {}) {
   return sha256([
     result.status,
     result.code ?? "unknown",
-    result.stdout || "",
-    result.stderr || "",
+    normalizeFailureFingerprintText(result.stdout),
+    normalizeFailureFingerprintText(result.stderr),
   ].join("\0"));
+}
+
+export function normalizeFailureFingerprintText(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/(\.(?:[cm]?[jt]sx?|php|py|rb|go|rs|java|cs|cpp|c|h)):\d+(?::\d+)?/gi, "$1:<line>")
+    .replace(/(\.(?:[cm]?[jt]sx?|php|py|rb|go|rs|java|cs|cpp|c|h))\(\d+(?::\d+)?\)/gi, "$1(<line>)")
+    .replace(/\bon line \d+\b/gi, "on line <line>")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
 }
 
 async function currentCommit(cwd) {
@@ -557,12 +604,16 @@ async function executeReceipt({
     });
   }
 
-  const rawResult = await runCommand(plan.command, {
-    cwd,
+  const executionCommand = plan.execution_command || plan.command;
+  const executionCwd = plan.cwd_relative
+    ? path.resolve(cwd, plan.cwd_relative)
+    : cwd;
+  const rawResult = await runCommand(executionCommand, {
+    cwd: executionCwd,
     timeoutMs,
     trustedShell: plan.source === "task_ab_acceptance",
   });
-  const result = classifyNestedRunnerInfrastructureFailure(plan.command, rawResult);
+  const result = classifyNestedRunnerInfrastructureFailure(executionCommand, rawResult);
   const after = await porcelain(cwd);
   const afterCommit = await currentCommit(cwd);
   const afterHeadRef = await currentHeadRef(cwd);
@@ -608,6 +659,8 @@ async function executeReceipt({
     phase,
     plan_id: plan.plan_id,
     command: plan.command,
+    execution_command: executionCommand,
+    cwd_relative: plan.cwd_relative || null,
     source: plan.source,
     commit_hash: commitHash || actualCommit,
     executed_commit_hash: actualCommit,

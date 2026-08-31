@@ -167,6 +167,8 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (tool.suite === "tools" && tool.name === "agent_handoff") return coordination.agentHandoff === true;
   if (tool.suite === "tools" && tool.name === "sub_agent") return coordination.subAgent === true;
   if (tool.suite === "tools" && tool.name === "sub_agent_next_input") return coordination.subAgentNextInput === true;
+  if (tool.suite === "tools" && tool.name === "dispatch_agent") return coordination.dispatchAgent === true;
+  if (tool.suite === "tools" && tool.name === "web_research_handoff") return coordination.webResearchHandoff === true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
@@ -185,6 +187,8 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  *   coordinationAvailable?: boolean,
  *   subAgentAvailable?: boolean,
  *   subAgentNextInputAvailable?: boolean,
+ *   dispatchAgentAvailable?: boolean,
+ *   webResearchHandoffAvailable?: boolean,
  * }} [options]
  */
 export function normalizeIssuedToolSurface(value, {
@@ -194,6 +198,8 @@ export function normalizeIssuedToolSurface(value, {
   coordinationAvailable = false,
   subAgentAvailable = false,
   subAgentNextInputAvailable = false,
+  dispatchAgentAvailable = false,
+  webResearchHandoffAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
   const out = [];
@@ -203,6 +209,8 @@ export function normalizeIssuedToolSurface(value, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,
       subAgentNextInput: subAgentNextInputAvailable,
+      dispatchAgent: dispatchAgentAvailable,
+      webResearchHandoff: webResearchHandoffAvailable,
     })) continue;
     if (!out.includes(tool.canonical)) out.push(tool.canonical);
   }
@@ -325,6 +333,8 @@ function failClosedIssuedPolicy() {
       agentHandoffCompactV2: false,
       agentHandoffCompactV3: false,
       subAgentV1: false,
+      dispatchAgentV1: false,
+      webResearchHandoffV1: false,
     },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(policy);
@@ -366,6 +376,8 @@ export function normalizeRemoteIssuedPolicy(value, {
       && coordinationSource?.sub_agent_v1 === true,
     subAgentNextInputV1: coordinationSource?.agent_handoff_v1 === true
       && coordinationSource?.sub_agent_next_input_v1 === true,
+    dispatchAgentV1: coordinationSource?.dispatch_agent_v1 === true,
+    webResearchHandoffV1: coordinationSource?.web_research_handoff_v1 === true,
   };
   const toolSurface = normalizeIssuedToolSurface(
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
@@ -376,6 +388,8 @@ export function normalizeRemoteIssuedPolicy(value, {
       coordinationAvailable: coordination.agentHandoffV1,
       subAgentAvailable: coordination.subAgentV1,
       subAgentNextInputAvailable: coordination.subAgentNextInputV1,
+      dispatchAgentAvailable: coordination.dispatchAgentV1,
+      webResearchHandoffAvailable: coordination.webResearchHandoffV1,
     },
   );
   const childToolSurface = normalizeIssuedToolSurface(source.child_tools, {
@@ -385,6 +399,8 @@ export function normalizeRemoteIssuedPolicy(value, {
     coordinationAvailable: coordination.agentHandoffV1,
     subAgentAvailable: false,
     subAgentNextInputAvailable: coordination.subAgentNextInputV1,
+    dispatchAgentAvailable: false,
+    webResearchHandoffAvailable: false,
   }).filter((name) => name === "tools.sub_agent_next_input");
   const childCursorIssued = childToolSurface.includes("tools.sub_agent_next_input")
     || toolSurface.includes("tools.sub_agent_next_input");
@@ -393,6 +409,10 @@ export function normalizeRemoteIssuedPolicy(value, {
     && childToolSurface.includes("tools.sub_agent_next_input")
     && toolSurface.includes("tools.agent_handoff")
     && toolSurface.includes("tools.sub_agent");
+  const dispatchAgentEnabled = coordination.dispatchAgentV1
+    && toolSurface.includes("tools.dispatch_agent");
+  const webResearchHandoffEnabled = coordination.webResearchHandoffV1
+    && toolSurface.includes("tools.web_research_handoff");
   const effectiveToolSurface = subAgentEnabled
     ? toolSurface
     : toolSurface.filter((name) => name !== "tools.sub_agent");
@@ -418,6 +438,8 @@ export function normalizeRemoteIssuedPolicy(value, {
       agentHandoffCompactV3: coordination.agentHandoffCompactV3
         && toolSurface.includes("tools.agent_handoff"),
       subAgentV1: subAgentEnabled,
+      dispatchAgentV1: dispatchAgentEnabled,
+      webResearchHandoffV1: webResearchHandoffEnabled,
       ...(coordination.subAgentNextInputV1 && childCursorIssued
         ? { subAgentNextInputV1: true }
         : {}),
@@ -469,6 +491,8 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
       sub_agent_v1: issued.coordination.subAgentV1,
       sub_agent_next_input_v1: "subAgentNextInputV1" in issued.coordination
         && issued.coordination.subAgentNextInputV1 === true,
+      dispatch_agent_v1: issued.coordination.dispatchAgentV1 === true,
+      web_research_handoff_v1: issued.coordination.webResearchHandoffV1 === true,
     },
   };
   if (!isRegisteredRemoteToolSurface(source)) return sanitized;
@@ -523,6 +547,8 @@ export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue,
     || candidate.coordination.agentHandoffCompactV2 && !authority.coordination.agentHandoffCompactV2
     || candidate.coordination.agentHandoffCompactV3 && !authority.coordination.agentHandoffCompactV3
     || candidate.coordination.subAgentV1 && !authority.coordination.subAgentV1
+    || candidate.coordination.dispatchAgentV1 && !authority.coordination.dispatchAgentV1
+    || candidate.coordination.webResearchHandoffV1 && !authority.coordination.webResearchHandoffV1
     || candidateNextInput && !authorityNextInput) {
     return null;
   }
@@ -650,6 +676,12 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
   if (attachment.subAgent !== true) {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "sub_agent");
   }
+  if (attachment.dispatchAgent !== true) {
+    toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "dispatch_agent");
+  }
+  if (attachment.webResearchHandoff !== true) {
+    toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "web_research_handoff");
+  }
   return {
     ...signed,
     role: runtimeRole,
@@ -726,9 +758,11 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const localAgentHandoffCompactV2 = packet?.agent_coordination?.agent_handoff_compact_v2 === true;
   const localAgentHandoffCompactV3 = packet?.agent_coordination?.agent_handoff_compact_v3 === true;
   const localSubAgent = packet?.agent_coordination?.sub_agent_v1 === true;
-  let executionIssuance = opts._subAgentChild === true
+  const localDispatchAgent = packet?.agent_coordination?.dispatch_agent_v1 === true;
+  const localWebResearchHandoff = packet?.agent_coordination?.web_research_handoff_v1 === true;
+  let executionIssuance = opts._subAgentChild === true || opts._webResearchChild === true
     ? remoteIssuance
-    : (remoteIssuance && (!localAgentHandoff || !localSubAgent)
+    : (remoteIssuance && (!localAgentHandoff || !localSubAgent || !localDispatchAgent || !localWebResearchHandoff)
     ? {
         ...remoteIssuance,
         coordination: {
@@ -741,6 +775,8 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
             && localAgentHandoffCompactV2
             && localAgentHandoffCompactV3,
           sub_agent_v1: localSubAgent,
+          dispatch_agent_v1: localDispatchAgent,
+          web_research_handoff_v1: localWebResearchHandoff,
         },
       }
     : remoteIssuance);

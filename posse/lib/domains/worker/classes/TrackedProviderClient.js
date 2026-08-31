@@ -38,7 +38,7 @@ import {
 } from "../../providers/functions/execution-routing.js";
 import { getMaxOutputTokensForProvider } from "../../providers/functions/shared/turns.js";
 import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
-import { buildResumeHandoff } from "../../handoff/functions/index.js";
+import { buildResumeHandoff, composePromptRemoteAware } from "../../handoff/functions/index.js";
 import { bindAutoExpandedDevBriefEvidenceToAgentCall } from "../../handoff/functions/helpers/hash-ref-packet.js";
 import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
@@ -75,6 +75,7 @@ import {
   buildCitationChildPrompt,
   subAgentRuntime,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
+import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
 import {
@@ -135,6 +136,8 @@ function agentGateSurfaceFingerprint(options = {}, providerName = "") {
       agentHandoffCompactV3: issued.coordination?.agentHandoffCompactV3 === true,
       subAgentV1: issued.coordination?.subAgentV1 === true,
       subAgentNextInputV1: issued.coordination?.subAgentNextInputV1 === true,
+      dispatchAgentV1: issued.coordination?.dispatchAgentV1 === true,
+      webResearchHandoffV1: issued.coordination?.webResearchHandoffV1 === true,
     },
     researcherSchemaDiet: String(options?.role || "").trim().toLowerCase() === "researcher"
       && resolveAtlasResearcherSchemaDiet(),
@@ -437,6 +440,7 @@ const DEFAULT_DEPS = {
   retainReplayToolUses,
   agentHandoffTerminator,
   finalizeAgentHandoffForProvider,
+  composePromptRemoteAware,
   publishContextBudgetCheckpoint,
   markUsageSegmentsIncomplete,
   recordUsageSegment,
@@ -593,6 +597,7 @@ function isSessionReuseCandidate({ providerName, opts, job_id, work_item_id }) {
   const provider = String(providerName || "").toLowerCase();
   if (!provider) return false;
   if (opts?._subAgentChild === true) return false;
+  if (opts?._webResearchChild === true) return false;
   // Provider self-declares session-resume support via the capabilities flag
   // on its module. Replaces a hardcoded ["openai","claude","codex"] whitelist
   // so a new provider that supports resume just sets capabilities.sessionResume.
@@ -639,6 +644,10 @@ function providerAgentIdentity(opts = {}, {
     .includes("tools.agent_handoff");
   const subAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.sub_agent");
+  const dispatchAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.dispatch_agent");
+  const webResearchHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.web_research_handoff");
   const coordinationChild = opts._subAgentChild === true;
   const coordinationKey = coordinationChild ? "child" : (subAgent ? "subagents" : (agentHandoff ? "handoff" : "off"));
   const surfaceFingerprint = agentGateSurfaceFingerprint(opts);
@@ -654,6 +663,8 @@ function providerAgentIdentity(opts = {}, {
       reusable: true,
       agentHandoff,
       subAgent,
+      dispatchAgent,
+      webResearchHandoff,
       coordinationChild,
       atlasAvailable,
       ...(coordinationChild && opts._coordinationChildPermitId
@@ -670,6 +681,8 @@ function providerAgentIdentity(opts = {}, {
     reusable: false,
     agentHandoff,
     subAgent,
+    dispatchAgent,
+    webResearchHandoff,
     coordinationChild,
     atlasAvailable,
     ...(coordinationChild && opts._coordinationChildPermitId
@@ -689,6 +702,10 @@ function agentJobAttachment(opts = {}, context = {}) {
     .includes("tools.agent_handoff");
   const subAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.sub_agent");
+  const dispatchAgent = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.dispatch_agent");
+  const webResearchHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.web_research_handoff");
   const issuedToolAllowlist = opts?._remoteIssuedPolicy?.valid === true
     && opts._remoteIssuedPolicy?.toolAllowlist
     && typeof opts._remoteIssuedPolicy.toolAllowlist === "object"
@@ -715,6 +732,8 @@ function agentJobAttachment(opts = {}, context = {}) {
     allowImageGeneration: opts.needsImageGeneration === true,
     agentHandoff,
     subAgent,
+    dispatchAgent,
+    webResearchHandoff,
     ...(issuedToolAllowlist ? { toolAllowlist: issuedToolAllowlist } : {}),
     coordinationChild: opts._subAgentChild === true,
     atlasAvailable: issuedToolAllowlist
@@ -1285,6 +1304,8 @@ export class TrackedProviderClient {
       work_item_id,
       job_id,
       attempt_id: observationContext?.attempt_id ?? null,
+      parent_agent_call_id: opts._parentAgentCallId ?? null,
+      child_kind: opts._childKind ?? null,
       role: opts._agentCallRole || opts.role,
       model_tier: tier,
       model_name: modelName,
@@ -1339,6 +1360,10 @@ export class TrackedProviderClient {
       },
     });
     const handoffRequired = remoteHandoffCapability && localHandoffCapability;
+    const webResearchHandoffTerminal = opts._webResearchChild === true
+      && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.webResearchHandoffV1 === true
+      && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.web_research_handoff_v1 === true;
+    const terminalReceiptRequired = handoffRequired || webResearchHandoffTerminal;
     const handoffToolSchema = agentHandoffToolSchemaTelemetry(
       opts.role,
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
@@ -1351,13 +1376,13 @@ export class TrackedProviderClient {
               || resolveAtlasResearcherTypedDispatcher()
               || resolveAtlasResearcherWorkflow()))),
     );
-    const terminalAbortController = handoffRequired ? new AbortController() : null;
+    const terminalAbortController = terminalReceiptRequired ? new AbortController() : null;
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);
     let terminalHandoffStop = null;
     let terminalProviderError = null;
     let terminalAbortIssuedAt = null;
     let providerReturnedAt = null;
-    const unregisterAgentHandoffTerminal = handoffRequired
+    const unregisterAgentHandoffTerminal = terminalReceiptRequired
       ? this.deps.agentHandoffTerminator.subscribe(agentCallId, (event) => {
           if (terminalHandoffStop) return;
           terminalHandoffStop = {
@@ -1542,6 +1567,8 @@ export class TrackedProviderClient {
           reusable: true,
           agentHandoff: preparedAgent.mcpGate?.contractBootConfig?.agentHandoff === true,
           subAgent: preparedAgent.mcpGate?.contractBootConfig?.subAgent === true,
+          dispatchAgent: preparedAgent.mcpGate?.contractBootConfig?.dispatchAgent === true,
+          webResearchHandoff: preparedAgent.mcpGate?.contractBootConfig?.webResearchHandoff === true,
           coordinationChild: false,
         }
       : providerAgentIdentity(effectiveCapabilityOpts, {
@@ -1556,6 +1583,8 @@ export class TrackedProviderClient {
     let retainReusableAgent = false;
     let unregisterSubAgentParent = null;
     let unregisterSubAgentChild = null;
+    let unregisterWebResearchParent = null;
+    let unregisterWebResearchChild = null;
     const agentCallStartedAt = Date.now();
 
     try {
@@ -1564,6 +1593,12 @@ export class TrackedProviderClient {
           agentCallId,
           batchId: effectiveCapabilityOpts._subAgentCursor.batchId,
           dispatchId: effectiveCapabilityOpts._subAgentCursor.dispatchId,
+        });
+      }
+      if (effectiveCapabilityOpts?._webResearchDispatch) {
+        unregisterWebResearchChild = webResearchRuntime.bindChild({
+          agentCallId,
+          dispatchId: effectiveCapabilityOpts._webResearchDispatch.dispatchId,
         });
       }
       if (!dispatcher || typeof dispatcher.dispatch !== "function") {
@@ -1680,10 +1715,102 @@ export class TrackedProviderClient {
                 allowedProviders: [providerName],
                 abortSignal: childSignal,
                 _subAgentChild: true,
+                _parentAgentCallId: agentCallId,
+                _childKind: "citation",
                 _coordinationChildPermitId: childPermitId,
                 _coordinationChildRemoteToolSurface: childGateSurface,
                 _agentCallRole: "subagent",
                 _subAgentCursor: { batchId, dispatchId },
+              },
+              {
+                job_id,
+                work_item_id,
+                attempt_id: observationContext?.attempt_id ?? null,
+                cwd,
+                jobProvider: providerName,
+                jobModelName: modelName,
+                complexity: "low",
+              },
+            );
+          },
+        });
+      }
+      const webResearchEnabled = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true
+        && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.dispatch_agent_v1 === true
+        && opts._webResearchChild !== true;
+      if (webResearchEnabled) {
+        unregisterWebResearchParent = webResearchRuntime.registerParent({
+          agentCallId,
+          runChild: async ({ dispatchId, question, signal }) => {
+            const childSessionPacket = {
+              recipient: "researcher",
+              job_type: "research",
+              prompt_profile: "researcher_web_child",
+              research_role_mode: "web",
+              work_item_id,
+              job_id,
+              title: "Isolated web research",
+              cwd,
+              attempt: { count: 1, max: 1, last_error: null },
+              tool_policy: {
+                allow_read: false,
+                allow_write: false,
+                allow_shell: false,
+                allow_tests: false,
+              },
+              budgets: { fallback_reads_remaining: 0 },
+              atlas: { active: false, prefetchFailed: false },
+              agent_coordination: {
+                mode: "subagents",
+                agent_handoff_v1: false,
+                agent_handoff_compact_v1: false,
+                agent_handoff_compact_v2: false,
+                agent_handoff_compact_v3: false,
+                sub_agent_v1: false,
+                dispatch_agent_v1: false,
+                web_research_handoff_v1: true,
+                status: "experimental",
+                source: "web_research_child",
+              },
+            };
+            const childPrompt = await this.deps.composePromptRemoteAware(
+              childSessionPacket,
+              `WEB RESEARCH QUESTION:\n${question}`,
+              { providerName },
+            );
+            const childSignal = combinedAbortSignal(abortSignal, signal);
+            return await this.call(
+              childPrompt,
+              {
+                role: "researcher",
+                roleMode: "web",
+                modelTier: tier,
+                modelName,
+                reasoningEffort: "low",
+                activity: "isolated web research",
+                allowWrite: false,
+                allowShell: false,
+                allowTests: false,
+                projectDbCapability: "none",
+                projectDbWrite: false,
+                needsImageGeneration: false,
+                disableAtlas: true,
+                disableSystemTools: true,
+                fallbackReads: 0,
+                maxTurns: 8,
+                maxOutputTokens: 4096,
+                skipRolePrompt: true,
+                recyclingMode: "fresh",
+                stableContext: childSessionPacket.stable_context || null,
+                sessionPacket: childSessionPacket,
+                remoteSystemPrompt: childSessionPacket.remote_system_prompt || null,
+                allowedProviders: [providerName],
+                abortSignal: childSignal,
+                _webResearchChild: true,
+                _parentAgentCallId: agentCallId,
+                _childKind: "web_research",
+                _agentCallRole: "web_researcher",
+                _webResearchDispatch: { dispatchId },
               },
               {
                 job_id,
@@ -2237,6 +2364,8 @@ export class TrackedProviderClient {
         unregisterAgentHandoffTerminal?.();
         unregisterSubAgentParent?.();
         unregisterSubAgentChild?.();
+        unregisterWebResearchParent?.();
+        unregisterWebResearchChild?.();
         try {
           if (agent && agentLease) await dispatcher.release({
             agent,

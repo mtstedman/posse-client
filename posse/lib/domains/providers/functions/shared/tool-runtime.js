@@ -27,6 +27,10 @@ import {
   sealSubAgentHandoff,
   subAgentCompletionSignal,
 } from "../../../sub-agent/classes/SubAgentRuntime.js";
+import {
+  executeDispatchAgent,
+  submitWebResearchHandoff,
+} from "../../../web-research/classes/WebResearchRuntime.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
@@ -239,6 +243,12 @@ const OBSERVED_TOOL_FORMATTERS = {
   },
   sub_agent_next_input(input = {}) {
     return { target: String(input.position ?? ""), summary: `SubAgentInput: ${input.position ?? "?"}` };
+  },
+  dispatch_agent(input = {}) {
+    return { target: input.route || "", summary: `DispatchAgent: ${input.route || "?"}` };
+  },
+  web_research_handoff(input = {}) {
+    return { target: input.protocol || "", summary: `WebResearchHandoff: ${(input.findings || []).length} finding(s)` };
   },
   read_file(input = {}) {
     return { target: input.path || "", summary: `Read: ${input.path || "?"}` };
@@ -461,6 +471,15 @@ export function createStandardToolHandlerMap({
       const ambient = getObservationContext() || {};
       const result = await executeSubAgentNextInput(args || {}, { context: ambient });
       return JSON.stringify(result);
+    },
+    async dispatch_agent(args) {
+      const ambient = getObservationContext() || {};
+      const result = await executeDispatchAgent(args || {}, { context: ambient });
+      return JSON.stringify(result);
+    },
+    web_research_handoff(args) {
+      const ambient = getObservationContext() || {};
+      return JSON.stringify(submitWebResearchHandoff(ambient.agent_call_id, args || {}));
     },
     request_scope(args, ctx) {
       const result = beginLiveScopeRequest(args, ctx);

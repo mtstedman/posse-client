@@ -5,6 +5,7 @@ import { runHumanInputJob } from "../../worker/functions/execution/human-input-j
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getHumanGate, getJob } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
+import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
 import {
@@ -155,7 +156,30 @@ export async function answerHumanInput(jobId, args = {}, {
   }
 
   const claim = claimHumanInputJob(id, { leaseSeconds: args.lease_seconds });
-  if (!claim) return { ok: false, reason: "job_not_claimable" };
+  if (!claim) {
+    const fresh = getJob(id);
+    const freshContract = getHumanGate(id);
+    if (fresh?.status === "waiting_on_human" && jobHasLiveLeaseAt(fresh, now())) {
+      return {
+        ok: false,
+        reason: "gate_resolution_in_progress",
+        message: "This gate is owned by an active run. Answer it in that run, or retry after its lease is released.",
+        retryable: true,
+        job_id: id,
+        status: fresh.status,
+        gate_state: freshContract?.gate_state || "unknown",
+        work_item_id: fresh.work_item_id || current.work_item_id,
+      };
+    }
+    return {
+      ok: false,
+      reason: "job_not_claimable",
+      job_id: id,
+      status: fresh?.status || "unknown",
+      gate_state: freshContract?.gate_state || "unknown",
+      work_item_id: fresh?.work_item_id || current.work_item_id,
+    };
+  }
 
   const display = {
     askQuestions: async () => answers,

@@ -11,7 +11,10 @@ PRAGMA foreign_keys = ON;
 --  10 = + durable bridge command idempotency results.
 --  11 = + disabled waiting-lane preparation contracts and durable state.
 --  12 = + durable shared-trunk merge journal and advisory claim mirrors.
-PRAGMA user_version = 13;
+--  13 = + durable live pairing-session journal.
+--  14 = + canonical parentage for child provider calls.
+--  15 = + web-research child provider-call parentage.
+PRAGMA user_version = 15;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -664,6 +667,8 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   work_item_id INTEGER,
   job_id INTEGER,
   attempt_id INTEGER,
+  parent_agent_call_id INTEGER,
+  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('citation','web_research')),
 
   role TEXT NOT NULL,
   model_tier TEXT NOT NULL,
@@ -712,7 +717,12 @@ CREATE TABLE IF NOT EXISTS agent_calls (
 
   FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
   FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
-  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
+  FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL,
+  FOREIGN KEY (parent_agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+  CHECK (
+    (parent_agent_call_id IS NULL AND child_kind IS NULL)
+    OR (parent_agent_call_id IS NOT NULL AND child_kind IS NOT NULL)
+  )
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_calls_job
@@ -726,6 +736,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item
 
 CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch
   ON agent_calls(role, atlas_prefetch_status);
+
+CREATE INDEX IF NOT EXISTS idx_agent_calls_parent
+  ON agent_calls(parent_agent_call_id, created_at);
 
 CREATE TABLE IF NOT EXISTS provider_usage_segments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

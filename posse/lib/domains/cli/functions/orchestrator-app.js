@@ -2569,7 +2569,7 @@ async function cmdGate() {
     console.error(`\n  ${C.red}Action is not valid for gate job #${result.job_id}.${C.reset}`);
     console.error(`  ${C.dim}Allowed actions: ${choices}${C.reset}\n`);
   } else {
-    console.error(`\n  ${C.red}Could not resolve gate${result.job_id ? ` job #${result.job_id}` : ""}: ${result.reason}.${C.reset}\n`);
+    console.error(`\n  ${C.red}Could not resolve gate${result.job_id ? ` job #${result.job_id}` : ""}: ${result.message || result.reason}.${C.reset}\n`);
   }
   process.exitCode = result.exitCode || 1;
   return result;

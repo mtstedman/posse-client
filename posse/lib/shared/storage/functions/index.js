@@ -111,6 +111,9 @@ import {
   WAITING_LANE_DEMAND_REASON_LIST_SQL,
   WAITING_LANE_STATE_LIST_SQL,
 } from "../../../catalog/waiting-lane.js";
+import {
+  AGENT_CALL_CHILD_KIND_LIST_SQL,
+} from "../../../catalog/agent-call.js";
 
 export {
   JOB_ATTEMPT_WORKER_TYPES,
@@ -464,6 +467,10 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           work_item_id INTEGER,
           job_id INTEGER,
           attempt_id INTEGER,
+          parent_agent_call_id INTEGER,
+          child_kind TEXT CHECK (
+            child_kind IS NULL OR child_kind IN (${AGENT_CALL_CHILD_KIND_LIST_SQL})
+          ),
           role TEXT NOT NULL,
           model_tier TEXT NOT NULL,
           model_name TEXT,
@@ -504,7 +511,12 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
           FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
-          FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
+          FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL,
+          FOREIGN KEY (parent_agent_call_id) REFERENCES ${quoteIdent(tableName)}(id) ON DELETE CASCADE,
+          CHECK (
+            (parent_agent_call_id IS NULL AND child_kind IS NULL)
+            OR (parent_agent_call_id IS NOT NULL AND child_kind IS NOT NULL)
+          )
         )
       `;
 }
@@ -514,6 +526,7 @@ export function createAgentCallsIndexes(db) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_role ON agent_calls(role, created_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item ON agent_calls(work_item_id, created_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch ON agent_calls(role, atlas_prefetch_status)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_parent ON agent_calls(parent_agent_call_id, created_at)`);
 }
 
 export function agentInteractionsCreateSql(tableName = "agent_interactions") {
@@ -945,6 +958,60 @@ function repairAgentCallsExtendedThinkingSchema(db) {
 
 export function __testRepairAgentCallsExtendedThinkingSchema(db) {
   return repairAgentCallsExtendedThinkingSchema(db);
+}
+
+function needsAgentCallsParentageRepair(db) {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_calls'`
+  ).get();
+  if (!row?.sql) return false;
+  const cols = new Set(getTableColumnNames(db, "agent_calls"));
+  if (!cols.has("parent_agent_call_id") || !cols.has("child_kind")) return true;
+  return !/child_kind\s+TEXT\s+CHECK[\s\S]*?'citation'/iu.test(row.sql)
+    || !/FOREIGN KEY\s*\(\s*parent_agent_call_id\s*\)\s*REFERENCES\s+["`\[]?agent_calls[\s\S]*?ON DELETE CASCADE/iu.test(row.sql)
+    || !/parent_agent_call_id IS NULL AND child_kind IS NULL/iu.test(row.sql)
+    || !/parent_agent_call_id IS NOT NULL AND child_kind IS NOT NULL/iu.test(row.sql);
+}
+
+function repairAgentCallsParentageSchema(db) {
+  if (!needsAgentCallsParentageRepair(db)) return false;
+  withForeignKeysDisabled(db, () => db.transaction(() => {
+    const tmpName = "_agent_calls_parentage_repair";
+    db.exec(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
+    db.exec(agentCallsCreateSql(tmpName));
+    copyAgentCallsForExtendedThinkingRepair(db, "agent_calls", tmpName);
+    db.exec(`DROP TABLE ${quoteIdent("agent_calls")}`);
+    db.exec(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("agent_calls")}`);
+    createAgentCallsIndexes(db);
+  })());
+  return true;
+}
+
+function needsAgentCallsChildKindsRepair(db) {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_calls'`
+  ).get();
+  if (!row?.sql) return false;
+  return needsAgentCallsParentageRepair(db)
+    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'web_research'/iu.test(row.sql);
+}
+
+function repairAgentCallsChildKindsSchema(db) {
+  if (!needsAgentCallsChildKindsRepair(db)) return false;
+  withForeignKeysDisabled(db, () => db.transaction(() => {
+    const tmpName = "_agent_calls_child_kinds_repair";
+    db.exec(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
+    db.exec(agentCallsCreateSql(tmpName));
+    copyAgentCallsForExtendedThinkingRepair(db, "agent_calls", tmpName);
+    db.exec(`DROP TABLE ${quoteIdent("agent_calls")}`);
+    db.exec(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("agent_calls")}`);
+    createAgentCallsIndexes(db);
+  })());
+  return true;
+}
+
+export function __testRepairAgentCallsParentageSchema(db) {
+  return repairAgentCallsParentageSchema(db);
 }
 
 
@@ -2089,6 +2156,7 @@ export function getDb() {
         `CREATE INDEX IF NOT EXISTS idx_agent_calls_role ON agent_calls(role, created_at)`,
         `CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item ON agent_calls(work_item_id, created_at)`,
         `CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch ON agent_calls(role, atlas_prefetch_status)`,
+        `CREATE INDEX IF NOT EXISTS idx_agent_calls_parent ON agent_calls(parent_agent_call_id, created_at)`,
       ]);
 
       fixTable("agent_interactions", agentInteractionsCreateSql("agent_interactions"), [
@@ -2752,6 +2820,18 @@ export function getDb() {
     name: "pairing_sessions",
     needs: needsPairingSessionSchema,
     migrate: installPairingSessionSchema,
+  });
+  runHostMigration(_db, {
+    version: 14,
+    name: "agent_calls_parentage",
+    needs: needsAgentCallsParentageRepair,
+    migrate: repairAgentCallsParentageSchema,
+  });
+  runHostMigration(_db, {
+    version: 15,
+    name: "agent_calls_web_research_child_kind",
+    needs: needsAgentCallsChildKindsRepair,
+    migrate: repairAgentCallsChildKindsSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

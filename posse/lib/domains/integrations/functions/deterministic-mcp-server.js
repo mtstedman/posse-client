@@ -39,7 +39,14 @@ import {
   isSensitiveEnvFileOrTargetPath,
   safePath,
 } from "../../../shared/tools/functions/toolkit/index.js";
-import { TOOL_AGENT_HANDOFF, TOOL_PROJECT_DB_QUERY, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT } from "../../../catalog/native-tools.js";
+import {
+  TOOL_AGENT_HANDOFF,
+  TOOL_DISPATCH_AGENT,
+  TOOL_PROJECT_DB_QUERY,
+  TOOL_SUB_AGENT,
+  TOOL_SUB_AGENT_NEXT_INPUT,
+  TOOL_WEB_RESEARCH_HANDOFF,
+} from "../../../catalog/native-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
@@ -64,6 +71,10 @@ import {
   prepareSubAgentHandoff,
   sealSubAgentHandoff,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
+import {
+  executeDispatchAgent,
+  submitWebResearchHandoff,
+} from "../../web-research/classes/WebResearchRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
@@ -1482,6 +1493,8 @@ addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
 }));
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
+addToolSchema(TOOL_DISPATCH_AGENT);
+addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
 
 // Atlas-active researchers use the ordinary bounded read_file fallback. The
 // chain ledger remains available only when Atlas is absent.
@@ -2516,6 +2529,22 @@ async function executeSubAgentNextInputTool(args = {}) {
   return JSON.stringify(result);
 }
 
+async function executeDispatchAgentTool(args = {}) {
+  const result = await executeDispatchAgent(args, {
+    context: {
+      workItemId: mcpWorkItemId,
+      jobId: mcpJobId,
+      attemptId: mcpAttemptId,
+      agentCallId: mcpAgentCallId,
+    },
+  });
+  return JSON.stringify(result);
+}
+
+function executeWebResearchHandoffTool(args = {}) {
+  return JSON.stringify(submitWebResearchHandoff(mcpAgentCallId, args));
+}
+
 // Attach this server's executors to a ToolRegistry seeded with the shared suite
 // metadata, so the MCP runtime's handler set flows through the same registry the
 // embedded OpenAI/Grok runtime builds from. Executors and role gating are
@@ -2525,6 +2554,8 @@ mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || 
 mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
 mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
 mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
+mcpToolRegistry.attach("dispatch_agent", (args) => executeDispatchAgentTool(args || {}));
+mcpToolRegistry.attach("web_research_handoff", (args) => executeWebResearchHandoffTool(args || {}));
 mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2685,6 +2716,8 @@ function rebuildNativeToolSchemas() {
   }));
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
+  addToolSchema(TOOL_DISPATCH_AGENT);
+  addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
   if (ownerHotGateway) {
     addToolSchema(readFileSchemaForCurrentBoot());
     addToolSchema(TOOL_CHAIN_READ);
@@ -2733,6 +2766,8 @@ function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
   mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
   mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
+  mcpToolRegistry.attach("dispatch_agent", (args) => executeDispatchAgentTool(args || {}));
+  mcpToolRegistry.attach("web_research_handoff", (args) => executeWebResearchHandoffTool(args || {}));
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));

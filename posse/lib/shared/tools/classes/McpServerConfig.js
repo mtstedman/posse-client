@@ -343,6 +343,8 @@ function expectedMcpToolNames(role, bootPayload = {}) {
       needsImageGeneration: bootPayload.allowImageGeneration === true,
       agentHandoff: bootPayload.agentHandoff === true,
       subAgent: bootPayload.subAgent === true,
+      dispatchAgent: bootPayload.dispatchAgent === true,
+      webResearchHandoff: bootPayload.webResearchHandoff === true,
       atlasAvailable: bootPayload.atlasAvailable === true,
     });
   } catch {
@@ -640,6 +642,8 @@ function buildDeterministicMcpBootPayload(role, {
   projectDbCapability = null,
   agentHandoff = false,
   subAgent = false,
+  dispatchAgent = false,
+  webResearchHandoff = false,
   coordinationChild = false,
 } = {}) {
   const resolvedProjectRoot = path.resolve(projectRoot || cwd || process.cwd());
@@ -652,6 +656,8 @@ function buildDeterministicMcpBootPayload(role, {
     needsImageGeneration: allowImageGeneration,
     agentHandoff: agentHandoff === true,
     subAgent: subAgent === true,
+    dispatchAgent: dispatchAgent === true,
+    webResearchHandoff: webResearchHandoff === true,
     atlasAvailable: atlasEnabled,
   });
   const allowShell = expectedTools.includes("bash");
@@ -689,6 +695,8 @@ function buildDeterministicMcpBootPayload(role, {
       allowImageGeneration,
       agentHandoff: agentHandoff === true,
       subAgent: subAgent === true,
+      dispatchAgent: dispatchAgent === true,
+      webResearchHandoff: webResearchHandoff === true,
       coordinationChild: coordinationChild === true,
       role,
       providerName: providerName || null,
@@ -1311,6 +1319,8 @@ export class McpServerConfig {
       // contract instead of requiring every adapter to copy this flag.
       agentHandoff: opts.mcpGate?.contractBootConfig?.agentHandoff === true,
       subAgent: opts.mcpGate?.contractBootConfig?.subAgent === true,
+      dispatchAgent: opts.mcpGate?.contractBootConfig?.dispatchAgent === true,
+      webResearchHandoff: opts.mcpGate?.contractBootConfig?.webResearchHandoff === true,
       coordinationChild: opts.mcpGate?.contractBootConfig?.coordinationChild === true,
     });
     let remoteResolution = null;

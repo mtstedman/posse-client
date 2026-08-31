@@ -49,13 +49,13 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `planner`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -128,7 +128,7 @@ Runtime handoff projection by role:
 | `assessor` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome`, `profile`, `protocol` | `confidence`, `evidence`, `proof`, `questions`, `repair`, `verdict` |
 | `dev` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` |
 | `planner` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `tasks` | `tasks` |
-| `researcher` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `profile`, `questions`, `related_files`, `summary` |
+| `researcher` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `profile`, `questions`, `related_files`, `summary`, `verification_targets` |
 | `subagent` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `handoffs`, `outcome`, `profile`, `protocol` |
 
 The exact role-specific handoff schemas are retained in the JSON contract pin.
@@ -382,6 +382,27 @@ Citation storage. Store inline text, a materialized ref slice, or a batch of chu
 | `owner_scope` | `string` | Optional | values "work_item", "job" | Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item. |
 | `source_ref` | `string` | Conditional | max length 512 | Existing materialized ref alias such as #a3f9 for a server-side slice. Combine with lines or offset and limit. |
 | `text` | `string` | Conditional | min length 1; max length 60000 | Inline authored or assembled content to store, up to 60000 characters. Existing stored material can be selected with source_ref. |
+
+### `tools.dispatch_agent`
+
+Remote roles: `planner`, `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `dispatch_agent` |
+| Tool reference token | `tools.dispatch_agent` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `coordination` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Dispatch one isolated specialty agent and wait for its bounded result. The web route receives only the question, performs web search/fetch in its own context, and returns parent-visible evidence selectors without exposing its browsing transcript.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `question` | `string` | Required | min length 1; max length 2000 | Self-contained web research question for the isolated agent. |
+| `route` | `string` | Required | values "web" | Specialty agent route. Only web is currently supported. |
 
 ### `tools.edit_file`
 
@@ -1099,6 +1120,29 @@ Validate an artifact output directory against the configured artifact contract a
 | `min_bytes` | `integer` | Optional |  | Optional minimum byte size for non-manifest output files. |
 | `output_root` | `string` | Optional |  | Artifact output directory to validate. Defaults to the working directory. |
 | `task_mode` | `string` | Optional | values "image", "report", "content", "intake_processing" | Artifact task mode. Default: image. |
+
+### `tools.web_research_handoff`
+
+Remote roles: `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `web_research_handoff` |
+| Tool reference token | `tools.web_research_handoff` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `coordination` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Submit the web specialty agent's sole final result. Every finding must name an exact HTTP(S) source URL. The runtime validates and materializes accepted findings into evidence refs visible to the calling agent.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `findings` | `array<object>` | Required | min items 1; max items 12 |  |
+| `gaps` | `array<string>` | Optional | max items 6 |  |
+| `protocol` | `string` | Required | values "posse.web_research.v1" |  |
+| `summary` | `string` | Required | min length 1; max length 2000 |  |
 
 ### `tools.write_file`
 

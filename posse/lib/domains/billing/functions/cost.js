@@ -11,10 +11,17 @@ import {
   listUsageSegmentsForAgentCalls,
   resolveCanonicalCallAccounting,
 } from "./usage-segments.js";
+import {
+  accountingRoleForAgentCall,
+  attributeAgentCallParents,
+  childKindForAgentCall,
+  firstRequestInputTokens,
+  isAttributedChildAgentCall,
+} from "./child-attribution.js";
 
 const GROUP_FIELDS = Object.freeze({
   provider: (call) => call.provider || "unknown",
-  role: (call) => call.role || "unknown",
+  role: (call) => accountingRoleForAgentCall(call),
   tier: (call) => call.model_tier || "unknown",
   model: (call) => `${call.provider || "?"}:${call.model_name || "unknown"}`,
   wi: (call) => (call.work_item_id == null ? "unknown" : `WI#${call.work_item_id}`),
@@ -66,6 +73,45 @@ function preloadUsageSegments(rows, db) {
   return listUsageSegmentsForAgentCalls(rows.map((row) => row.id), { db });
 }
 
+function preloadParentAncestors(rows, db) {
+  const known = new Map(rows
+    .map((row) => [Number(row?.id), row])
+    .filter(([id]) => Number.isInteger(id) && id > 0));
+  let pending = [...new Set(rows
+    .map((row) => Number(row?.parent_agent_call_id))
+    .filter((id) => Number.isInteger(id) && id > 0 && !known.has(id)))];
+  while (pending.length > 0) {
+    const nextPending = [];
+    for (let offset = 0; offset < pending.length; offset += 500) {
+      const chunk = pending.slice(offset, offset + 500);
+      const placeholders = chunk.map(() => "?").join(",");
+      const parents = db.prepare(`
+        SELECT id, parent_agent_call_id, child_kind, role
+        FROM agent_calls
+        WHERE id IN (${placeholders})
+      `).all(...chunk);
+      for (const parent of parents) {
+        const id = Number(parent.id);
+        if (known.has(id)) continue;
+        known.set(id, parent);
+        const ancestorId = Number(parent.parent_agent_call_id);
+        if (Number.isInteger(ancestorId) && ancestorId > 0 && !known.has(ancestorId)) {
+          nextPending.push(ancestorId);
+        }
+      }
+    }
+    pending = [...new Set(nextPending)];
+  }
+  const rowIds = new Set(rows.map((row) => Number(row?.id)));
+  return [...known.values()].filter((row) => !rowIds.has(Number(row.id)));
+}
+
+function attributeCostRows(rows, db) {
+  return attributeAgentCallParents(rows, {
+    ancestors: preloadParentAncestors(rows, db),
+  });
+}
+
 function costPrecision({ callCount, exactCostCalls, estimatedCostCalls, unknownCostCalls }) {
   if (callCount > 0 && unknownCostCalls === callCount) return "unknown";
   if (unknownCostCalls > 0) return "partial";
@@ -92,6 +138,65 @@ function aggregateCacheDiscountRatio(inputTokens, billableInputTokens) {
   return Math.max(0, Math.min(1, 1 - (billable / input)));
 }
 
+function accumulateChildBreakdown(byKey, call, usageSegments = []) {
+  if (!isAttributedChildAgentCall(call)) return;
+  const parentRole = accountingRoleForAgentCall(call);
+  const kind = childKindForAgentCall(call) || "unknown";
+  const key = `${parentRole}\u0000${kind}`;
+  let entry = byKey.get(key);
+  if (!entry) {
+    entry = {
+      parentRole,
+      kind,
+      callCount: 0,
+      calls: 0,
+      billableTokens: 0,
+      billableUnknownCalls: 0,
+      knownCostUsd: 0,
+      exactCostCalls: 0,
+      estimatedCostCalls: 0,
+      unknownCostCalls: 0,
+      spinupTokens: 0,
+      spinupUnknownCalls: 0,
+    };
+    byKey.set(key, entry);
+  }
+  entry.callCount += 1;
+  entry.calls += 1;
+  if (Number.isFinite(call.billable_tokens)) entry.billableTokens += call.billable_tokens;
+  else entry.billableUnknownCalls += 1;
+  if (Number.isFinite(call.resolved_cost_usd)) entry.knownCostUsd += call.resolved_cost_usd;
+  if (call.cost_precision === "exact") entry.exactCostCalls += 1;
+  else if (call.cost_precision === "estimated") entry.estimatedCostCalls += 1;
+  else entry.unknownCostCalls += 1;
+  const spinup = firstRequestInputTokens(usageSegments, call);
+  if (spinup == null) entry.spinupUnknownCalls += 1;
+  else entry.spinupTokens += spinup;
+}
+
+function finalizeChildBreakdowns(byKey) {
+  return [...byKey.values()]
+    .map((entry) => {
+      const precision = costPrecision(entry);
+      return {
+        parentRole: entry.parentRole,
+        kind: entry.kind,
+        calls: entry.calls,
+        billableTokens: entry.billableUnknownCalls > 0 ? null : entry.billableTokens,
+        billableUnknownCalls: entry.billableUnknownCalls,
+        costUsd: exposedCostUsd(entry.knownCostUsd, precision),
+        knownCostUsd: entry.knownCostUsd,
+        costPrecision: precision,
+        unknownCostCalls: entry.unknownCostCalls,
+        spinupTokens: entry.spinupUnknownCalls > 0 ? null : entry.spinupTokens,
+        measuredSpinupTokens: entry.spinupTokens,
+        spinupUnknownCalls: entry.spinupUnknownCalls,
+      };
+    })
+    .sort((left, right) => left.parentRole.localeCompare(right.parentRole)
+      || left.kind.localeCompare(right.kind));
+}
+
 /**
  * Total cost for a single work item.
  * `totalCostUsd` is null when every call is unknown and otherwise contains the
@@ -104,8 +209,9 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   if (wiId == null) return null;
   if (!db) db = getDb();
   const { where, params } = buildWhere({ wiId, since });
-  const rows = db.prepare(`
-    SELECT id, work_item_id, job_id, role, provider, model_tier, model_name,
+  const rawRows = db.prepare(`
+    SELECT id, work_item_id, job_id, parent_agent_call_id, child_kind,
+           role, provider, model_tier, model_name,
            input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
            cost_estimate_usd, billing_precision, exact_billable_input_tokens,
            long_context_tier_input_tokens, provider_request_duration_ms,
@@ -113,6 +219,7 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     FROM agent_calls
     ${where}
   `).all(...params);
+  const rows = attributeCostRows(rawRows, db);
   const segmentsByCall = preloadUsageSegments(rows, db);
 
   let totalCost = 0;
@@ -128,8 +235,11 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   let estimatedCostCalls = 0;
   let exactUsageCalls = 0;
   let inexactUsageCalls = 0;
+  const childBreakdowns = new Map();
   for (const raw of rows) {
-    const call = enrichCall(raw, db, segmentsByCall.get(Number(raw.id)) || []);
+    const usageSegments = segmentsByCall.get(Number(raw.id)) || [];
+    const call = enrichCall(raw, db, usageSegments);
+    accumulateChildBreakdown(childBreakdowns, call, usageSegments);
     if (Number.isFinite(call.resolved_cost_usd)) totalCost += call.resolved_cost_usd;
     totalInput += call.input_tokens || 0;
     totalCachedInput += call.cached_input_tokens || 0;
@@ -176,6 +286,7 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     exactUsageCoverage: exactUsageCalls + inexactUsageCalls > 0
       ? exactUsageCalls / (exactUsageCalls + inexactUsageCalls)
       : null,
+    children: finalizeChildBreakdowns(childBreakdowns),
   };
 }
 
@@ -187,8 +298,9 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   const keyFn = GROUP_FIELDS[groupBy] || GROUP_FIELDS.provider;
   const db = getDb();
   const { where, params } = buildWhere({ wiId, since });
-  const rows = db.prepare(`
-    SELECT id, work_item_id, job_id, role, provider, model_tier, model_name,
+  const rawRows = db.prepare(`
+    SELECT id, work_item_id, job_id, parent_agent_call_id, child_kind,
+           role, provider, model_tier, model_name,
            input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
            cost_estimate_usd, billing_precision, exact_billable_input_tokens,
            long_context_tier_input_tokens, provider_request_duration_ms,
@@ -196,6 +308,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     FROM agent_calls
     ${where}
   `).all(...params);
+  const rows = attributeCostRows(rawRows, db);
   const segmentsByCall = preloadUsageSegments(rows, db);
 
   const groups = new Map();
@@ -204,8 +317,11 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   let totalCachedInput = 0;
   let totalBillableInput = 0;
   let totalOutput = 0;
+  const childBreakdowns = new Map();
   for (const raw of rows) {
-    const call = enrichCall(raw, db, segmentsByCall.get(Number(raw.id)) || []);
+    const usageSegments = segmentsByCall.get(Number(raw.id)) || [];
+    const call = enrichCall(raw, db, usageSegments);
+    accumulateChildBreakdown(childBreakdowns, call, usageSegments);
     const key = keyFn(call);
     if (!groups.has(key)) {
       groups.set(key, {
@@ -247,6 +363,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   }
 
   const out = [...groups.values()].sort((a, b) => b.costUsd - a.costUsd);
+  const children = finalizeChildBreakdowns(childBreakdowns);
   for (const entry of out) {
     entry.knownCostUsd = entry.costUsd;
     entry.costPrecision = costPrecision(entry);
@@ -262,6 +379,9 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     entry.exactUsageCoverage = entry.exactUsageCalls + entry.inexactUsageCalls > 0
       ? entry.exactUsageCalls / (entry.exactUsageCalls + entry.inexactUsageCalls)
       : null;
+    if (groupBy === "role") {
+      entry.children = children.filter((child) => child.parentRole === entry.key);
+    }
   }
   const totalCallCount = rows.length;
   const totalUnknownCostCalls = out.reduce((acc, entry) => acc + entry.unknownCostCalls, 0);
@@ -304,6 +424,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     costPer1kOutputTokensUsd: out.some((entry) => entry.inexactUsageCalls > 0)
       ? null
       : costPer1kOutputTokens(grandCost, totalOutput),
+    children,
     groups: out,
   };
 }

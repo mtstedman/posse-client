@@ -13,6 +13,7 @@ import {
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
 } from "./handoff.js";
 import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
+import { WEB_RESEARCH_PROTOCOL } from "./web-research.js";
 
 // Compatibility facade. Existing consumers retain this path while catalog
 // families can be imported directly by new, bounded owners.
@@ -1649,6 +1650,71 @@ export const TOOL_SUB_AGENT = {
         additionalProperties: false,
       },
     ],
+  },
+};
+
+export const TOOL_DISPATCH_AGENT = {
+  type: "function",
+  name: "dispatch_agent",
+  description:
+    "Dispatch one isolated specialty agent and wait for its bounded result. " +
+    "The web route receives only the question, performs web search/fetch in its own context, and returns parent-visible evidence selectors without exposing its browsing transcript.",
+  parameters: {
+    type: "object",
+    properties: {
+      route: {
+        type: "string",
+        enum: ["web"],
+        description: "Specialty agent route. Only web is currently supported.",
+      },
+      question: {
+        type: "string",
+        minLength: 1,
+        maxLength: 2000,
+        description: "Self-contained web research question for the isolated agent.",
+      },
+    },
+    required: ["route", "question"],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_WEB_RESEARCH_HANDOFF = {
+  type: "function",
+  name: "web_research_handoff",
+  description:
+    "Submit the web specialty agent's sole final result. Every finding must name an exact HTTP(S) source URL. " +
+    "The runtime validates and materializes accepted findings into evidence refs visible to the calling agent.",
+  parameters: {
+    type: "object",
+    properties: {
+      protocol: { type: "string", enum: [WEB_RESEARCH_PROTOCOL] },
+      summary: { type: "string", minLength: 1, maxLength: 2000 },
+      findings: {
+        type: "array",
+        minItems: 1,
+        maxItems: 12,
+        items: {
+          type: "object",
+          properties: {
+            claim: { type: "string", minLength: 1, maxLength: 800 },
+            url: { type: "string", minLength: 1, maxLength: 2000 },
+            title: { type: "string", minLength: 1, maxLength: 300 },
+            published_at: { type: "string", minLength: 1, maxLength: 80 },
+            confidence: { type: "string", enum: ["low", "medium", "high"] },
+          },
+          required: ["claim", "url", "confidence"],
+          additionalProperties: false,
+        },
+      },
+      gaps: {
+        type: "array",
+        maxItems: 6,
+        items: { type: "string", minLength: 1, maxLength: 500 },
+      },
+    },
+    required: ["protocol", "summary", "findings"],
+    additionalProperties: false,
   },
 };
 

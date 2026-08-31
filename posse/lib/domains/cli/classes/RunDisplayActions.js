@@ -2,7 +2,30 @@ import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { createOperatorNudge } from "../../queue/functions/index.js";
+import { parseJobPayload } from "../../queue/functions/payload.js";
+import {
+  approvePlan as approvePlanGate,
+  rejectPlan as rejectPlanGate,
+} from "../../planning/functions/plan-approval.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
+
+function planApprovalAnswer(answers = []) {
+  const first = Array.isArray(answers) ? answers[0] : answers;
+  const value = first && typeof first === "object" ? first.answer : first;
+  return String(value || "").trim().toLowerCase();
+}
+
+function planApprovalContext(workItem, payload = {}) {
+  const lines = [`Task: ${String(workItem?.title || "Plan awaiting approval").slice(0, 500)}`];
+  const summary = payload.summary;
+  if (summary != null) {
+    const text = typeof summary === "string" ? summary : JSON.stringify(summary);
+    if (text) lines.push(`Summary: ${text.slice(0, 1400)}`);
+  }
+  const gatedCount = Array.isArray(payload.gated_job_ids) ? payload.gated_job_ids.length : 0;
+  if (gatedCount > 0) lines.push(`Status: ${gatedCount} downstream job(s) blocked pending this decision.`);
+  return lines.join("\n");
+}
 
 export class RunDisplayActions {
   constructor({
@@ -35,6 +58,8 @@ export class RunDisplayActions {
     researchBudgetToReasoningEffort,
     researchPayload,
     refreshDisplaySnapshotsForQueue = () => {},
+    approvePlan = approvePlanGate,
+    rejectPlan = rejectPlanGate,
   } = {}) {
     this.display = display;
     this.worker = worker;
@@ -65,7 +90,10 @@ export class RunDisplayActions {
     this.researchBudgetToReasoningEffort = researchBudgetToReasoningEffort;
     this.researchPayload = researchPayload;
     this.refreshDisplaySnapshotsForQueue = refreshDisplaySnapshotsForQueue;
+    this.approvePlan = approvePlan;
+    this.rejectPlan = rejectPlan;
     this.liveReviewPromise = null;
+    this.planApprovalPrompts = new Map();
   }
 
   wire() {
@@ -83,6 +111,92 @@ export class RunDisplayActions {
 
   getLiveReviewPromise() {
     return this.liveReviewPromise;
+  }
+
+  surfacePlanApprovalGates(activeJobs = []) {
+    if (!this.display?.askQuestions) return [];
+    const pending = (Array.isArray(activeJobs) ? activeJobs : [])
+      .filter((job) => (
+        job?.job_type === "human_input"
+        && job?.status === "waiting_on_human"
+        && parseJobPayload(job)?.subtype === "plan_approval"
+      ));
+    const pendingIds = new Set(pending.map((job) => Number(job.id)));
+    for (const gateId of this.planApprovalPrompts.keys()) {
+      if (pendingIds.has(Number(gateId))) continue;
+      this.display.cancelQuestionsForJob?.(gateId);
+    }
+
+    const launched = [];
+    for (const gate of pending) {
+      if (this.planApprovalPrompts.has(gate.id)) continue;
+      let resurfaceAfterAnswer = false;
+      const payload = parseJobPayload(gate);
+      const workItem = this.getWorkItem?.(gate.work_item_id);
+      const payloadQuestions = Array.isArray(payload.questions)
+        ? payload.questions.map((question) => String(question || "").trim()).filter(Boolean)
+        : [];
+      const questions = payloadQuestions.length > 0
+        ? [payloadQuestions.join("\n\n")]
+        : ["Approve or reject the current plan?"];
+      const prompt = this.display.askQuestions(
+        gate.id,
+        questions,
+        planApprovalContext(workItem, payload),
+        gate.work_item_id,
+        {
+          choices: ["approve", "reject"],
+          promptIdentity: {
+            work_item_id: gate.work_item_id ?? null,
+            original_job_id: payload.plan_job_id ?? gate.parent_job_id ?? null,
+            gate_job_id: gate.id,
+            gate_kind: "plan_approval",
+            age_ms: Number.isFinite(Date.parse(gate.created_at || ""))
+              ? Math.max(0, Date.now() - Date.parse(gate.created_at))
+              : null,
+          },
+        },
+      ).then((answers) => {
+        const action = planApprovalAnswer(answers);
+        const freshGate = this.getJob?.(gate.id);
+        if (!freshGate || freshGate.status !== "waiting_on_human") return null;
+        if (action !== "approve" && action !== "reject") {
+          resurfaceAfterAnswer = true;
+          this.display.addEvent?.(`${this.C.yellow}Plan gate #${gate.id} was not resolved: choose approve or reject.${this.C.reset}`);
+          return { ok: false, reason: "invalid_plan_approval_answer" };
+        }
+        const result = action === "reject"
+          ? this.rejectPlan(gate.work_item_id, { actor: "tui", actorType: EVENT_ACTORS.HUMAN })
+          : this.approvePlan(gate.work_item_id, { actor: "tui", actorType: EVENT_ACTORS.HUMAN });
+        if (!result?.ok) {
+          this.display.addEvent?.(`${this.C.yellow}Plan gate #${gate.id} could not be resolved: ${result?.reason || "unknown error"}${this.C.reset}`);
+          return result;
+        }
+        const label = action === "reject" ? "rejected" : "approved";
+        this.display.addEvent?.(`${action === "reject" ? this.C.yellow : this.C.green}Plan ${label} for WI#${gate.work_item_id}; gate #${gate.id} closed.${this.C.reset}`);
+        this.refreshWorkItemStatus?.(gate.work_item_id);
+        this.refreshDisplaySnapshotsForQueue();
+        return result;
+      }).catch((err) => {
+        const message = String(err?.message || err || "");
+        if (!/Prompt withdrawn|Display aborted/i.test(message)) {
+          this.display.addEvent?.(`${this.C.red}Plan gate #${gate.id} prompt failed: ${message}${this.C.reset}`);
+        }
+        return null;
+      }).finally(() => {
+        this.planApprovalPrompts.delete(gate.id);
+        if (resurfaceAfterAnswer) {
+          try {
+            this.surfacePlanApprovalGates([this.getJob?.(gate.id) || gate]);
+          } catch (err) {
+            this.display.addEvent?.(`${this.C.red}Plan gate #${gate.id} could not be re-prompted: ${err?.message || err}${this.C.reset}`);
+          }
+        }
+      });
+      this.planApprovalPrompts.set(gate.id, prompt);
+      launched.push(prompt);
+    }
+    return launched;
   }
 
   inject(description) {

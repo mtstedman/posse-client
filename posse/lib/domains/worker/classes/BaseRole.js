@@ -140,6 +140,8 @@ export class BaseRole {
           reusable: true,
           agentHandoff: packet?.agent_coordination?.agent_handoff_v1 === true,
           subAgent: packet?.agent_coordination?.sub_agent_v1 === true,
+          dispatchAgent: packet?.agent_coordination?.dispatch_agent_v1 === true,
+          webResearchHandoff: packet?.agent_coordination?.web_research_handoff_v1 === true,
           ...(atlasAvailable != null ? { atlasAvailable } : {}),
           handoffRequest: packet || {
             job_id: job?.id ?? null,

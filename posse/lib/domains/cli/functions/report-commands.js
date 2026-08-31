@@ -321,6 +321,23 @@ export function runCostCommand(args = []) {
     if (totals.unknownCostCalls > 0) {
       console.log(`  ${C.yellow}!${C.reset}  ${totals.unknownCostCalls} call(s) had unknown pricing - edit with ${C.cyan}posse cost pricing set${C.reset}`);
     }
+    if (Array.isArray(totals.children) && totals.children.length > 0) {
+      console.log(`\n  ${C.bold}Attributed child calls${C.reset}`);
+      for (const child of totals.children) {
+        const spinup = child.spinupTokens == null
+          ? `unknown (${child.spinupUnknownCalls} call${child.spinupUnknownCalls === 1 ? "" : "s"})`
+          : formatCostTokens(child.spinupTokens);
+        const billable = child.billableTokens == null
+          ? `unknown (${child.billableUnknownCalls} call${child.billableUnknownCalls === 1 ? "" : "s"})`
+          : formatCostTokens(child.billableTokens);
+        const childCost = child.costUsd == null ? "unknown" : formatUsd(child.costUsd);
+        console.log(
+          `  ${child.parentRole}/${child.kind}`.padEnd(30)
+          + ` ${childCost.padStart(9)}`
+          + `  ${C.dim}${billable} billable, ${spinup} first-turn input, ${child.calls} calls${C.reset}`,
+        );
+      }
+    }
     console.log(`\n  ${C.bold}By ${groupBy}${C.reset}`);
     for (const row of grouped.groups) {
       const diag = formatCostDiagnostics(row);

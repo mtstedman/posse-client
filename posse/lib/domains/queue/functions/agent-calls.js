@@ -16,6 +16,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { discardHashRefTraversalsForAgentCall } from "./hash-refs.js";
+import { isAgentCallChildKind } from "../../../catalog/agent-call.js";
 
 // Provider-native web tool uses are replayed after the agent process returns,
 // so they can land a beat after finished_at while still belonging to the call.
@@ -30,6 +31,8 @@ export function createAgentCall({
   work_item_id = null,
   job_id = null,
   attempt_id = null,
+  parent_agent_call_id = null,
+  child_kind = null,
   role,
   model_tier,
   model_name = null,
@@ -46,17 +49,30 @@ export function createAgentCall({
   prior_session_handle = null,
   session_handle = null,
 } = {}) {
+  const parentAgentCallId = parent_agent_call_id == null
+    ? null
+    : Number(parent_agent_call_id);
+  const normalizedChildKind = child_kind == null ? null : String(child_kind).trim();
+  if ((parentAgentCallId == null) !== (normalizedChildKind == null)) {
+    throw new Error("agent call parent_agent_call_id and child_kind must be provided together");
+  }
+  if (parentAgentCallId != null && (!Number.isInteger(parentAgentCallId) || parentAgentCallId <= 0)) {
+    throw new Error("agent call parent_agent_call_id must be a positive integer");
+  }
+  if (normalizedChildKind != null && !isAgentCallChildKind(normalizedChildKind)) {
+    throw new Error(`unknown agent call child_kind: ${normalizedChildKind}`);
+  }
   const db = getDb();
   const info = db.prepare(`
     INSERT INTO agent_calls (
-      work_item_id, job_id, attempt_id,
+      work_item_id, job_id, attempt_id, parent_agent_call_id, child_kind,
       role, model_tier, model_name, activity,
       prompt_chars, max_turns_configured, max_output_tokens_configured, provider,
       reasoning_effort, extended_thinking, atlas_method, atlas_prefetch_status, skills,
       prior_session_handle, session_handle, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    work_item_id, job_id, attempt_id,
+    work_item_id, job_id, attempt_id, parentAgentCallId, normalizedChildKind,
     role, model_tier, model_name, activity,
     prompt_chars, max_turns_configured, max_output_tokens_configured, provider,
     reasoning_effort, extended_thinking ? 1 : 0, atlas_method, atlas_prefetch_status, normalizeSkillsColumn(skills),

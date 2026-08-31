@@ -2752,6 +2752,7 @@ export class RunSession {
     hasAutoMergeableCompletedWorkItems,
     autoMergePendingReviewBlockers,
     describePendingReviewLockBlockers,
+    surfacePlanApprovalGates: (activeJobs) => displayActions.surfacePlanApprovalGates(activeJobs),
   });
   await scheduler.runLoop(
     (job) => worker.execute(job),

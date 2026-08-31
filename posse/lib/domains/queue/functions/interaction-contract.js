@@ -5,6 +5,7 @@ import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js"
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { now, runImmediateTransaction } from "./common.js";
+import { jobHasLiveLeaseAt } from "./lease-state.js";
 import { createOperatorNudge } from "./agent-interactions.js";
 import { logEvent } from "./events.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
@@ -387,6 +388,11 @@ function gateQuestionState(job) {
   return "closed";
 }
 
+function observedGateQuestionState(job, observedAt) {
+  const state = gateQuestionState(job);
+  return state === "open" && jobHasLiveLeaseAt(job, observedAt) ? "pending" : state;
+}
+
 function hasPendingQuestionAction(db, questionId) {
   return Boolean(db.prepare(`
     SELECT 1
@@ -479,7 +485,7 @@ function projectGateQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS)
       : [payload.prompt || job.title || "Human input requested"];
     for (let index = 0; index < questions.length && out.length < limit; index += 1) {
       const questionId = `gate:${job.id}:${index}`;
-      const ownerState = gateQuestionState(job);
+      const ownerState = observedGateQuestionState(job, observedAt);
       const state = hasPendingQuestionAction(db, questionId) ? "pending" : ownerState;
       const actionable = state === "open" && choices.length > 0 && HANDLER_BY_KIND.has(kind);
       out.push({
@@ -711,8 +717,9 @@ function locateQuestion(db, { workItemId, jobId, questionId } = {}) {
     if (!Number.isSafeInteger(questionIndex) || questionIndex < 0 || questionIndex >= questions.length) return null;
     const kind = typedKindForGate(payload);
     const choices = gateChoiceRecords(kind, payload);
-    const ownerState = gateQuestionState(job);
-    const state = isExpired(payload.expires_at, now()) && ["open", "pending"].includes(ownerState)
+    const observedAt = now();
+    const ownerState = observedGateQuestionState(job, observedAt);
+    const state = isExpired(payload.expires_at, observedAt) && ["open", "pending"].includes(ownerState)
       ? "expired" : ownerState;
     return {
       type: "gate",
@@ -746,8 +753,8 @@ function locateQuestion(db, { workItemId, jobId, questionId } = {}) {
 function questionStateAfterTransition(db, questionId, fallback = "pending") {
   const gateMatch = String(questionId).match(/^gate:([1-9]\d*):/);
   if (gateMatch) {
-    const job = db.prepare(`SELECT status FROM jobs WHERE id = ?`).get(Number(gateMatch[1]));
-    return job ? gateQuestionState(job) : "closed";
+    const job = db.prepare(`SELECT status, lease_token, lease_expires_at FROM jobs WHERE id = ?`).get(Number(gateMatch[1]));
+    return job ? observedGateQuestionState(job, now()) : "closed";
   }
   const interactionId = interactionRowId(questionId);
   const row = interactionId ? db.prepare(`SELECT status FROM agent_interactions WHERE id = ?`).get(interactionId) : null;
@@ -785,8 +792,10 @@ function storedGitPushCompletion(db, action) {
     && (ownerResult.pushed === true || ownerResult.already_up_to_date === true)) {
     return { state: "answered", accepted: true, safeReasonCode: null };
   }
-  if (OPEN_GATE_STATUS_SET.has(job.status)) return { state: "open", accepted: null, safeReasonCode: null };
-  return { state: gateQuestionState(job), accepted: false, safeReasonCode: "question_closed" };
+  if (OPEN_GATE_STATUS_SET.has(job.status)) {
+    return { state: observedGateQuestionState(job, now()), accepted: null, safeReasonCode: null };
+  }
+  return { state: observedGateQuestionState(job, now()), accepted: false, safeReasonCode: "question_closed" };
 }
 
 function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}) {
@@ -862,8 +871,15 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
       } };
     }
     if (question.state !== "open") {
+      const pending = question.state === "pending";
       return { result: {
-        ...baseActionResult({ actionId, actionKind: "question.answer", target, outcome: "gate_closed", safeReasonCode: "question_closed" }),
+        ...baseActionResult({
+          actionId,
+          actionKind: "question.answer",
+          target,
+          outcome: pending ? "pending" : "gate_closed",
+          safeReasonCode: pending ? "question_resolution_in_progress" : "question_closed",
+        }),
         question_state: question.state,
         result_event_id: null,
       } };

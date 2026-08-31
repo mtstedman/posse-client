@@ -2658,6 +2658,7 @@ export function requeueWaitingHumanInputJobs({
       WHERE status = 'waiting_on_human' AND job_type = 'human_input'
     `).all()
       .filter((job) => !isPushOfferJob(job))
+      .filter((job) => parseJobPayload(job).subtype !== "plan_approval")
       .filter((job) => typeof filter !== "function" || filter(job));
 
     if (parked.length === 0) return [];
@@ -2728,7 +2729,9 @@ export function resurfaceParkedHumanGates({ snoozeSec = 600 } = {}) {
         AND (j.lease_token IS NULL OR j.lease_expires_at IS NULL OR j.lease_expires_at < ?)
         AND j.updated_at < ?
         AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
-    `).all(ts, cutoff).filter((job) => !isPushOfferJob(job));
+    `).all(ts, cutoff)
+      .filter((job) => !isPushOfferJob(job))
+      .filter((job) => parseJobPayload(job).subtype !== "plan_approval");
 
     if (parked.length === 0) return [];
 

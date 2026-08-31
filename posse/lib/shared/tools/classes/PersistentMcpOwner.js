@@ -64,6 +64,7 @@ import {
   rejectAgentHandoffForLaterTool,
 } from "../../../domains/handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
+import { acknowledgeWebResearchHandoffReceipt } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import {
   assertSubAgentParentReady,
   executeSubAgent,
@@ -1521,6 +1522,82 @@ function mcpResultTextChars(result) {
   }
   return total;
 }
+
+// Final source transport hygiene. Source coverage temporarily injects
+// `sourceVersion` and `repositoryIdentity` into result data for owner-side
+// custody. Hash-ref compaction can remove the content before the later
+// materialization pass gets a chance to delete those internal fields, leaving
+// them in the model-visible envelope. Strip them only after every custody and
+// citation stage has completed.
+//
+// A source window also carries file text as a JSON string, so every newline,
+// quote, and backslash is escaped and re-fed on every model turn. Lift the
+// verbatim source into a second raw text block while retaining the compact
+// header and any evidence-ref/control suffix. Hash-ref surfacing adds that
+// suffix before this stage, so parse the first structured value rather than
+// requiring the entire text block to be JSON.
+const DEESCAPE_MIN_CONTENT_CHARS = 200;
+function stripInternalSourceCoverageFields(value) {
+  if (!value || typeof value !== "object") return 0;
+  let removed = 0;
+  if (!Array.isArray(value)) {
+    for (const key of ["sourceVersion", "repositoryIdentity"]) {
+      if (!Object.hasOwn(value, key)) continue;
+      delete value[key];
+      removed += 1;
+    }
+  }
+  for (const child of Array.isArray(value) ? value : Object.values(value)) {
+    removed += stripInternalSourceCoverageFields(child);
+  }
+  return removed;
+}
+
+function finalizeSourceTransport(result) {
+  const content = result?.content;
+  if (!Array.isArray(content) || content.length === 0) return result;
+  let mutated = false;
+  const nextContent = [];
+  for (const part of content) {
+    if (part?.type !== "text" || typeof part.text !== "string") {
+      nextContent.push(part);
+      continue;
+    }
+    const structured = firstStructuredJsonValue(part.text);
+    const parsed = structured.value;
+    if (!parsed || typeof parsed !== "object") {
+      nextContent.push(part);
+      continue;
+    }
+    const removedFields = stripInternalSourceCoverageFields(parsed);
+    const suffix = structured.remainder;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || typeof parsed.content !== "string" || parsed.content.length < DEESCAPE_MIN_CONTENT_CHARS
+      || typeof parsed.repo_rel_path !== "string") {
+      nextContent.push(removedFields > 0
+        ? { ...part, text: [JSON.stringify(parsed), suffix].filter(Boolean).join("\n\n") }
+        : part);
+      mutated ||= removedFields > 0;
+      continue;
+    }
+    const source = parsed.content;
+    const header = { ...parsed };
+    delete header.content;
+    // Minimal marker: the verbatim source is the next text block. Kept short so
+    // the escaping saved on the source dominates the header cost even on small
+    // windows.
+    header.content_next_block = true;
+    nextContent.push({
+      ...part,
+      text: [JSON.stringify(header), suffix].filter(Boolean).join("\n\n"),
+    });
+    nextContent.push({ type: "text", text: source });
+    mutated = true;
+  }
+  return mutated ? { ...result, content: nextContent } : result;
+}
+
+export const __testFinalizeSourceTransport = finalizeSourceTransport;
 
 function isMemoryToolAction(action) {
   return String(action || "").startsWith("memory.");
@@ -4051,13 +4128,19 @@ export class PersistentMcpOwner {
       if (method === AGENT_HANDOFF_RECEIPT_NOTIFICATION) {
         const agentCallId = session?.bootConfig?.agentCallId;
         const record = getAgentHandoffRecord(agentCallId);
-        const accepted = record && ["staged", "committed"].includes(record.status);
+        let accepted = !!record && ["staged", "committed"].includes(record.status);
         if (accepted) {
           agentHandoffTerminator.acknowledge(agentCallId, {
             source: "mcp_receipt",
             role: session?.bootConfig?.role || null,
             sessionId: id,
             digest: record.packet_digest || null,
+          });
+        } else {
+          accepted = acknowledgeWebResearchHandoffReceipt(agentCallId, {
+            source: "mcp_receipt",
+            role: session?.bootConfig?.role || null,
+            sessionId: id,
           });
         }
         sendJson(res, 200, {
@@ -4581,7 +4664,7 @@ export class PersistentMcpOwner {
           )
         : null;
       const terminalHandoffReceipt = completedTool?.suite === "tools"
-        && completedTool.name === "agent_handoff"
+        && ["agent_handoff", "web_research_handoff"].includes(completedTool.name)
         && mcpToolCallSuccess(response);
       sendJson(res, 200, {
         ok: true,
@@ -5503,6 +5586,7 @@ export class PersistentMcpOwner {
         result = composed("coverage_materialize", materializeSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name }));
       }
       result = composed("compaction", compactResearcherTypedAtlasResult(result, session, toolName, toolArgs));
+      result = composed("source_transport_finalize", finalizeSourceTransport(result));
       for (const transform of providerTransforms) {
         result = composed("transform_annotations", annotateOwnerResultTransform(result, transform));
       }

@@ -67,6 +67,8 @@ import {
   getAgentHandoffToolSchemaForRole,
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
+  TOOL_DISPATCH_AGENT,
+  TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../../catalog/native-tools.js";
 
 export {
@@ -113,6 +115,8 @@ export {
   TOOL_AGENT_HANDOFF_REPORT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_SUB_AGENT,
+  TOOL_DISPATCH_AGENT,
+  TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../../catalog/native-tools.js";
 
 import {
@@ -260,6 +264,20 @@ export const TOOL_CATALOG = {
     summary: "Advance a citation child's backend-owned ordered input cursor.",
     budgetExempt: true,
     observation: { type: "tool.sub_agent_next_input", label: "SubAgentInput", format: "generic", targetKeys: ["position"] },
+  },
+  dispatch_agent: {
+    schema: TOOL_DISPATCH_AGENT,
+    access: "coordination",
+    summary: "Dispatch one isolated specialty agent; the web route returns parent-visible cited findings.",
+    budgetExempt: true,
+    observation: { type: "tool.dispatch_agent", label: "DispatchAgent", format: "generic", targetKeys: ["route"] },
+  },
+  web_research_handoff: {
+    schema: TOOL_WEB_RESEARCH_HANDOFF,
+    access: "coordination",
+    summary: "Submit a web specialty agent's bounded source-backed findings.",
+    budgetExempt: true,
+    observation: { type: "tool.web_research_handoff", label: "WebResearchHandoff", format: "generic", targetKeys: ["protocol"] },
   },
   read_file: {
     schema: TOOL_READ_FILE,
@@ -687,6 +705,8 @@ export const TOOL_OBSERVATION_ALIASES = Object.freeze({
 
 function roleAllowlistForTool(toolName) {
   if (toolName === "sub_agent_next_input") return new Set(["subagent"]);
+  if (toolName === "web_research_handoff") return new Set(["researcher"]);
+  if (toolName === "dispatch_agent") return new Set(["researcher", "planner"]);
   if (toolName === "agent_handoff") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
   }
@@ -809,7 +829,7 @@ function executionSpecForEntry(entry) {
   };
 }
 
-export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false } = {}) {
+export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false, dispatchAgent = false, webResearchHandoff = false } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   const config = ROLE_TOOL_ALLOWLISTS[role] || ROLE_TOOL_ALLOWLISTS.default;
   const key = allowWrite ? "write" : "read";
@@ -823,6 +843,8 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     names.unshift("sub_agent");
   }
+  if (dispatchAgent && ["researcher", "planner"].includes(role)) names.unshift("dispatch_agent");
+  if (webResearchHandoff && role === "researcher") names.unshift("web_research_handoff");
   return names;
 }
 
@@ -854,6 +876,8 @@ export function getDeterministicMcpToolNames(role, {
   needsImageGeneration = false,
   agentHandoff = false,
   subAgent = false,
+  dispatchAgent = false,
+  webResearchHandoff = false,
   atlasAvailable = false,
 } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
@@ -894,6 +918,8 @@ export function getDeterministicMcpToolNames(role, {
   if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     tools.unshift("sub_agent");
   }
+  if (dispatchAgent && ["researcher", "planner"].includes(role)) tools.unshift("dispatch_agent");
+  if (webResearchHandoff && role === "researcher") tools.unshift("web_research_handoff");
   return tools;
 }
 

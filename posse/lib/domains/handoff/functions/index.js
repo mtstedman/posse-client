@@ -860,6 +860,8 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
   const subAgentEnabled = coordinationMode === "subagents"
     && ["researcher", "dev", "artificer"].includes(recipient)
     && packet.job_type !== "fix";
+  const dispatchAgentEnabled = coordinationMode === "subagents"
+    && ["researcher", "planner"].includes(recipient);
   packet.agent_coordination = {
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
@@ -867,6 +869,8 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     agent_handoff_compact_v2: handoffEnabled,
     agent_handoff_compact_v3: handoffEnabled,
     sub_agent_v1: subAgentEnabled,
+    dispatch_agent_v1: dispatchAgentEnabled,
+    web_research_handoff_v1: false,
     status: "experimental",
     source: "repo_setting_snapshot",
   };
