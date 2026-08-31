@@ -11,6 +11,42 @@ import {
   isArtifactScopedPath,
 } from "./plan-routing.js";
 
+const GENERATED_IMAGE_FORMATS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+const NON_GENERATABLE_IMAGE_FORMATS = new Set([
+  ".svg", ".gif", ".avif", ".bmp", ".tif", ".tiff", ".ico",
+]);
+
+function generatedRasterPath(value) {
+  const normalized = String(value || "").replace(/\\/g, "/").trim();
+  const ext = path.posix.extname(normalized).toLowerCase();
+  if (!ext || GENERATED_IMAGE_FORMATS.has(ext) || !NON_GENERATABLE_IMAGE_FORMATS.has(ext)) return normalized;
+  return `${normalized.slice(0, -ext.length)}.png`;
+}
+
+function normalizeExplicitImageGenerationTask(task) {
+  const declared = Array.isArray(task?.files_to_create) ? task.files_to_create : [];
+  const replacements = declared
+    .map((file) => [String(file || ""), generatedRasterPath(file)])
+    .filter(([from, to]) => from && to && from !== to);
+  if (replacements.length === 0) return task;
+
+  const rewriteText = (value) => {
+    if (typeof value !== "string") return value;
+    let rewritten = value;
+    for (const [from, to] of replacements) rewritten = rewritten.split(from).join(to);
+    return rewritten;
+  };
+  return {
+    ...task,
+    task_spec: rewriteText(task.task_spec),
+    instructions: rewriteText(task.instructions),
+    success_criteria: Array.isArray(task.success_criteria)
+      ? task.success_criteria.map(rewriteText)
+      : rewriteText(task.success_criteria),
+    files_to_create: declared.map(generatedRasterPath),
+  };
+}
+
 export function resolvePromoteSourceDir(task, tasks, artifactDirAbs) {
   const normalizedArtifactRoot = String(artifactDirAbs || "").replace(/\\/g, "/").replace(/\/+$/, "");
   const normalizedSource = String(task?.source_dir || "").replace(/\\/g, "/").replace(/\/+$/, "");
@@ -284,6 +320,7 @@ function buildImageSplitPieces(task, imageFiles, artifactDirAbs, sourceTaskIndex
       task.task_spec || task.instructions || "",
       "",
       "File-kind split: generate the image asset(s) as artifact output. Do not edit repo code in this job.",
+      "Real image generation is required: call generate_image for the requested visuals. Do not hand-author SVG or substitute text/vector markup.",
       "Image outputs:",
       ...imageOutputLines,
     ].filter(Boolean).join("\n"),
@@ -306,14 +343,17 @@ function buildImageSplitPieces(task, imageFiles, artifactDirAbs, sourceTaskIndex
 
 export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMode, normalizedJobType } = {}) {
   if (!task || task._file_kind_split_done || task.job_type === "human_input" || task.job_type === "promote") return null;
-  const summary = getCreateFileKindSummary(task, artifactDirAbs);
   const pathOnlyIsIntent = taskMode === "image" || !!task.needs_image_generation;
-  const requestedImageGenerationOutput = hasRequestedImageGenerationOutput(task, { pathOnlyIsIntent });
-  const requestedImageOutputs = requestedImageGenerationOutput ? collectRequestedImageOutputs(task) : [];
+  const routedTask = pathOnlyIsIntent ? normalizeExplicitImageGenerationTask(task) : task;
+  const summary = getCreateFileKindSummary(routedTask, artifactDirAbs);
+  const requestedImageGenerationOutput = hasRequestedImageGenerationOutput(routedTask, { pathOnlyIsIntent });
+  const requestedImageOutputs = requestedImageGenerationOutput
+    ? collectRequestedImageOutputs(routedTask).map(generatedRasterPath)
+    : [];
   if (summary.createFiles.length === 0 && !requestedImageGenerationOutput) return null;
 
-  const filesToModify = Array.isArray(task.files_to_modify) ? task.files_to_modify : [];
-  const filesToDelete = Array.isArray(task.files_to_delete) ? task.files_to_delete : [];
+  const filesToModify = Array.isArray(routedTask.files_to_modify) ? routedTask.files_to_modify : [];
+  const filesToDelete = Array.isArray(routedTask.files_to_delete) ? routedTask.files_to_delete : [];
   const hasRepoEdits = filesToModify.length > 0 || filesToDelete.length > 0;
   const nonImageCreateFiles = summary.createFiles.filter((file) => !summary.imageFiles.includes(file));
   const hasCodeOutputs = summary.codeFiles.length > 0;
@@ -324,7 +364,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
     if (hasCodeOutputs && (normalizedJobType !== "dev" || taskMode !== "code" || task.output_root || task.needs_image_generation)) {
       return {
         normalizedTask: {
-          ...task,
+          ...routedTask,
           job_type: "dev",
           task_mode: "code",
           needs_image_generation: false,
@@ -345,17 +385,22 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
     || nonImageCreateFiles.length > 0;
 
   if (!shouldSplit) {
-    if (normalizedJobType !== "artificer" || taskMode !== "image" || !task.needs_image_generation) {
+    if (normalizedJobType !== "artificer" || taskMode !== "image" || !routedTask.needs_image_generation || routedTask !== task) {
       return {
         normalizedTask: {
-          ...task,
+          ...routedTask,
           job_type: "artificer",
           task_mode: "image",
           needs_image_generation: true,
-          output_root: task.output_root || artifactDirAbs,
-          create_roots: Array.isArray(task.create_roots) && task.create_roots.length > 0
-            ? task.create_roots
-            : [task.output_root || artifactDirAbs],
+          output_root: routedTask.output_root || artifactDirAbs,
+          create_roots: Array.isArray(routedTask.create_roots) && routedTask.create_roots.length > 0
+            ? routedTask.create_roots
+            : [routedTask.output_root || artifactDirAbs],
+          task_spec: [
+            routedTask.task_spec || routedTask.instructions || "",
+            "",
+            "Real image generation is required: call generate_image for the requested visuals. Do not hand-author SVG or substitute text/vector markup.",
+          ].filter(Boolean).join("\n"),
           _file_kind_split_done: true,
         },
         reason: `image output(s) require artificer/image: ${(imageFilesForSplit.length > 0 ? imageFilesForSplit : ["requested image output"]).join(", ")}`,
@@ -364,11 +409,11 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
     return null;
   }
 
-  const { imageTask, promoteTask } = buildImageSplitPieces(task, imageFilesForSplit, artifactDirAbs, index);
+  const { imageTask, promoteTask } = buildImageSplitPieces(routedTask, imageFilesForSplit, artifactDirAbs, index);
   const hasDownstreamCodeSplit = hasCodeOutputs || hasRepoEdits || nonImageCreateFiles.length > 0;
   if (!hasDownstreamCodeSplit) {
-    imageTask.depends_on_index = Array.isArray(task.depends_on_index)
-      ? task.depends_on_index.filter(Number.isInteger)
+    imageTask.depends_on_index = Array.isArray(routedTask.depends_on_index)
+      ? routedTask.depends_on_index.filter(Number.isInteger)
       : [];
   }
   const splitTasks = [imageTask];
@@ -382,10 +427,10 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
 
   if (hasDownstreamCodeSplit) {
     const devCreateFiles = nonImageCreateFiles;
-    const originalDependencies = Array.isArray(task.depends_on_index) ? task.depends_on_index : [];
+    const originalDependencies = Array.isArray(routedTask.depends_on_index) ? routedTask.depends_on_index : [];
     const devTask = {
-      ...task,
-      title: `Code changes for: ${task.title}`.slice(0, 120),
+      ...routedTask,
+      title: `Code changes for: ${routedTask.title}`.slice(0, 120),
       job_type: "dev",
       task_mode: "code",
       needs_image_generation: false,
@@ -394,7 +439,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
       create_roots: [],
       depends_on_index: [...new Set([...originalDependencies, finalDependencyIndex])],
       task_spec: [
-        task.task_spec || task.instructions || "",
+        routedTask.task_spec || routedTask.instructions || "",
         "",
         "File-kind split: image outputs are generated/promoted by prerequisite jobs. Do not create or edit these image files in this dev job:",
         ...(imageFilesForSplit.length > 0

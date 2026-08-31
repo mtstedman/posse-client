@@ -400,6 +400,8 @@ const HANDOFF_SELECTOR_STRING_PATTERN =
   "^(?:#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?|[^#\\r\\n]+:L?[0-9]+(?:-L?[0-9]+)?)$";
 const HANDOFF_REF_SELECTOR_STRING_PATTERN =
   "^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$";
+const ASSESSOR_HANDOFF_SELECTOR_STRING_PATTERN =
+  "^(?:#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?|[^#\\r\\n]+(?::L?[0-9]+(?:-L?[0-9]+)?)?)$";
 
 function evidenceSelector({
   maxLineCount = 2000,
@@ -1483,10 +1485,10 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
         maxItems: 8,
         items: {
           type: "string",
-          pattern: HANDOFF_SELECTOR_STRING_PATTERN,
-          description: "A visible #ref or surfaced path with an optional line range.",
+          pattern: ASSESSOR_HANDOFF_SELECTOR_STRING_PATTERN,
+          description: "Visible #ref, source range, or inspected relative binary path.",
         },
-        description: "Visible stored refs or surfaced file ranges supporting a fail verdict.",
+        description: "Fail evidence; inspected binary paths need no line range.",
       },
       questions: {
         type: "array",

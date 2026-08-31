@@ -41,6 +41,7 @@ import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { isTransientCommitInfraFailure } from "./commit-infra.js";
 import { isBridgePresenceFresh } from "../../../queue/functions/runtime-status.js";
+import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 
 const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
 
@@ -471,6 +472,8 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   const deterministicPolicyConflict = isDeterministicPolicyConflict(errorDetails);
   const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails) || deterministicPolicyConflict;
   const transientCommitInfraFailure = isTransientCommitInfraFailure(errorOrMsg);
+  const terminalProtocolFailure = isRetryableTerminalHandoffError(errorOrMsg);
+  const suppressOperatorRecovery = suppressHumanRecovery || terminalProtocolFailure;
 
   if (worker.shuttingDown) {
     const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
@@ -635,7 +638,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
       : buildFastFailureProviderHint(job, getAttempts(job.id));
     const recovery = spawnDeadLetterRecoveryForDependents(worker, job, freshJob, {
       providerHint,
-      suppressHumanRecovery,
+      suppressHumanRecovery: suppressOperatorRecovery,
     });
     const { dependents, isRecoveryJob } = recovery;
     const deadLetterPayload = parseJobPayload(job);
@@ -644,7 +647,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     // branch at all: the dead letter silently flipped the work item to failed.
     // Stall-exhausted dead letters keep their own capped recovery branch below.
     const isMutatingLeaf = !isOneshotLeaf && !stallExhausted && (job.job_type === "dev" || job.job_type === "fix");
-    if (!suppressHumanRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
+    if (!suppressOperatorRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
       if (recoveryIsUnattended(worker)) {
         emitUnattendedRecoverySkipped(worker, job, isMutatingLeaf ? (job.job_type === "fix" ? "Fix" : "Dev") : (isOneshotLeaf ? "One-shot" : "Research"), {
           recovery_kind: isMutatingLeaf ? "dead_letter_recovery" : (isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery"),
@@ -709,7 +712,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           message: `${isOneshotLeaf ? "One-shot" : "Research"} dead-letter recovery: spawned human_input #${recoveryJob.id}`,
         });
       }
-    } else if (!suppressHumanRecovery && dependents.length === 0 && !isRecoveryJob && stallExhausted) {
+    } else if (!suppressOperatorRecovery && dependents.length === 0 && !isRecoveryJob && stallExhausted) {
       const stallRecoveryCount = stallRecoveryRetryCount(job);
       if (stallRecoveryCount >= MAX_STALL_EXHAUSTED_RECOVERY_RETRIES) {
         worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} stall recovery cap reached for job #${job.id}; leaving dead-lettered${C.reset}`);
@@ -769,7 +772,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     }
 
     worker._releaseLease(job, leaseToken, "dead_letter");
-    if (suppressHumanRecovery) {
+    if (suppressOperatorRecovery) {
       cancelDeadlockedJobsAtomic(`terminal-provider-failure:${job.id}`, {
         workItemId: job.work_item_id,
       });

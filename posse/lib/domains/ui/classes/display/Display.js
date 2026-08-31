@@ -1163,7 +1163,10 @@ export class Display {
       const wiTag = workItemId ? `WI#${workItemId} ` : "";
       this.addEvent(`${C.yellow}\u26a0 ${wiTag}${questions.length} question(s) need your input (job #${jobId})${C.reset}`);
 
-      if (!this._inputMode) {
+      // Agent View owns an explicit per-agent answer action. Keep newly
+      // surfaced questions queued there so `[a] answer` remains reachable;
+      // standard/log view preserves the immediate prompt behavior.
+      if (!this._inputMode && this._rightMode !== "monitor") {
         this._startAnswering();
       }
     });

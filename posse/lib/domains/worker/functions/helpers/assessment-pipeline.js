@@ -176,6 +176,12 @@ function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
   const count = Number(fresh.assessment_attempt_count || 0);
   const max = Math.max(1, Number(fresh.assessment_max_attempts || 3));
   if (count >= max) {
+    if (isRetryableTerminalHandoffError(error)) {
+      setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
+      worker.emit(job.id, `${C.red}[assessor] Terminal handoff repair budget exhausted; failing without an operator gate${C.reset}`);
+      worker._releaseLease(job, leaseToken, "failed");
+      return { gated: false, terminalProtocolFailure: true };
+    }
     setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
     const reviewJob = createJob({
       work_item_id: job.work_item_id,

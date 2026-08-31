@@ -37,6 +37,7 @@ import {
   sanitizeExecutionHintsForRole,
 } from "../../providers/functions/execution-routing.js";
 import { getMaxOutputTokensForProvider } from "../../providers/functions/shared/turns.js";
+import { ProviderTurnBudget } from "../../providers/classes/ProviderTurnBudget.js";
 import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
 import { buildResumeHandoff, composePromptRemoteAware } from "../../handoff/functions/index.js";
 import { bindAutoExpandedDevBriefEvidenceToAgentCall } from "../../handoff/functions/helpers/hash-ref-packet.js";
@@ -58,7 +59,10 @@ import {
   issuedToolSurfaceForProviderPolicy,
   narrowProviderOptionsToRemoteIssuance,
 } from "../../../shared/tools/functions/issued-tool-policy.js";
-import { finalizeAgentHandoffForProvider } from "../../handoff/functions/agent-handoff.js";
+import {
+  finalizeAgentHandoffForProvider,
+  getLatestAgentHandoffRejection,
+} from "../../handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
 import {
   getAgentHandoffToolSchemaForRole,
@@ -440,6 +444,7 @@ const DEFAULT_DEPS = {
   retainReplayToolUses,
   agentHandoffTerminator,
   finalizeAgentHandoffForProvider,
+  getLatestAgentHandoffRejection,
   composePromptRemoteAware,
   publishContextBudgetCheckpoint,
   markUsageSegmentsIncomplete,
@@ -1849,9 +1854,44 @@ export class TrackedProviderClient {
           !terminalHandoffStop
           || abortSignal?.aborted
           || error?.terminalHandoffStopCompatible === false
-        ) throw error;
+        ) {
+          // A provider can time out or hit its turn ceiling after one or more
+          // rejected terminal handoffs. Preserve that protocol failure instead
+          // of exposing only the generic provider wrapper: assessment recovery
+          // can then retry the assessor independently, and dead-letter handling
+          // knows this is an internal harness fault rather than an operator
+          // decision. External cancellation still wins the race.
+          const rejection = handoffRequired && !abortSignal?.aborted
+            ? this.deps.getLatestAgentHandoffRejection?.(agentCallId)
+            : null;
+          if (rejection) {
+            const handoffError = new Error(
+              `agent_handoff was rejected (${rejection.code}: ${rejection.message})`,
+              { cause: error },
+            );
+            handoffError.code = "TERMINAL_PROTOCOL_ERROR";
+            handoffError.handoffCode = rejection.code;
+            if (rejection.issues?.length > 0) handoffError.issues = rejection.issues;
+            if (rejection.failing_selectors?.length > 0) {
+              handoffError.failing_selectors = rejection.failing_selectors;
+            }
+            handoffError.output = error?.output || "";
+            handoffError.stats = error?.stats || {};
+            throw handoffError;
+          }
+          throw error;
+        }
+        const terminalResult = { output: "", stats: error?.stats || {} };
+        // Terminal handoff shutdown bypasses BaseProvider's normal successful
+        // result boundary. Apply the same provider-neutral turn guard before
+        // accepting the synthesized result so an abort receipt cannot turn an
+        // over-budget call into success.
+        new ProviderTurnBudget({
+          providerName,
+          requestedMaxTurns: resolvedMaxTurns,
+        }).finalize(terminalResult);
         terminalProviderError = error;
-        providerResult = { output: "", stats: error?.stats || {} };
+        providerResult = terminalResult;
       }
       providerReturnedAt ??= Date.now();
       if (abortSignal?.aborted) {

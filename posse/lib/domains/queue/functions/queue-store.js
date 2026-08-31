@@ -3407,6 +3407,8 @@ export function clearAll() {
       db.prepare(`DELETE FROM session_recycle_savings`).run();
       db.prepare(`DELETE FROM job_sessions`).run();
       db.prepare(`DELETE FROM session_lanes`).run();
+      db.prepare(`DELETE FROM context_budget_checkpoints`).run();
+      db.prepare(`DELETE FROM source_reaccess_authorizations`).run();
       db.prepare(`DELETE FROM job_attempts`).run();
       db.prepare(`DELETE FROM job_dependencies`).run();
       db.prepare(`DELETE FROM jobs`).run();

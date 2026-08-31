@@ -345,19 +345,21 @@ export function parseAgentHandoffEvidenceSelector(value) {
     const pathMatch = refMatch
       ? null
       : raw.match(/^(.+):(?:l)?(\d+)(?:-(?:l)?(\d+))?$/i);
-    if (!refMatch && !pathMatch) {
-      fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence selector: ${String(value).slice(0, 80)}`);
-    }
     if (refMatch) {
       [, ref] = refMatch;
       if (refMatch[2]) {
         start = Number(refMatch[2]);
         end = Number(refMatch[3] || refMatch[2]);
       }
-    } else {
+    } else if (pathMatch) {
       sourcePath = String(pathMatch[1] || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
       start = Number(pathMatch[2]);
       end = Number(pathMatch[3] || pathMatch[2]);
+    } else {
+      // Bare paths are useful for inspected binary artifacts, which have no
+      // meaningful source line coordinates. Materialization still requires a
+      // successful current-call artifact inspection and normal path policy.
+      sourcePath = raw.replace(/\\/g, "/").replace(/^\.\//, "");
     }
   } else {
     const selector = exactKeys(value, ["ref", "path", "lines"], "evidence selector");
@@ -394,9 +396,6 @@ export function parseAgentHandoffEvidenceSelector(value) {
   if (sourcePath != null) {
     const pathError = evidenceSourcePathSyntaxError(sourcePath);
     if (pathError) fail("AGENT_HANDOFF_SELECTOR_INVALID", pathError);
-    if (start == null) {
-      fail("AGENT_HANDOFF_SELECTOR_INVALID", `File-backed evidence selector ${sourcePath} requires a line range`);
-    }
   }
   if (qualifiedPath != null) {
     const pathError = evidenceSourcePathSyntaxError(qualifiedPath);
@@ -1142,6 +1141,36 @@ function successfulToolReadCandidates(context) {
   return candidates;
 }
 
+function successfulArtifactInspectionCandidates(context) {
+  const attemptId = Number(context?.attemptId ?? context?.attempt_id) || null;
+  const agentCallId = Number(context?.agentCallId ?? context?.agent_call_id) || null;
+  if (!attemptId || !agentCallId) return [];
+  const database = context?.db || getDb();
+  let rows = [];
+  try {
+    rows = database.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'tool.read_image_metadata'
+      ORDER BY id ASC
+    `).all(attemptId);
+  } catch {
+    return [];
+  }
+  const candidates = [];
+  for (const row of rows) {
+    let detail;
+    try { detail = JSON.parse(row.detail_json || "{}"); } catch { continue; }
+    if (Number(detail?.agent_call_id) !== agentCallId) continue;
+    if (detail?.phase !== "finish" || detail?.ok === false) continue;
+    if (detail?.outcome && detail.outcome !== "succeeded") continue;
+    const sourcePath = observedToolReadPath(detail, context);
+    if (sourcePath) candidates.push({ path: sourcePath, artifact_inspection: "read_image_metadata" });
+  }
+  return candidates;
+}
+
 function mergedLineRanges(ranges = []) {
   const sorted = ranges
     .filter((range) => Number.isInteger(range?.start) && Number.isInteger(range?.end) && range.start > 0 && range.end >= range.start)
@@ -1185,6 +1214,21 @@ function surfacedPathCandidates(context) {
       source_version: null,
       restrict_to_opened_ranges: true,
       opened_ranges: [{ start: candidate.start, end: candidate.end }],
+    });
+  }
+  for (const candidate of successfulArtifactInspectionCandidates(context)) {
+    const existing = byPath.get(candidate.path);
+    if (existing) {
+      existing.artifact_inspection = candidate.artifact_inspection;
+      continue;
+    }
+    byPath.set(candidate.path, {
+      path: candidate.path,
+      repository_identity: null,
+      source_version: null,
+      restrict_to_opened_ranges: false,
+      opened_ranges: [],
+      artifact_inspection: candidate.artifact_inspection,
     });
   }
   for (const window of findVisibleHashRefSourceWindowsForContext(context, {
@@ -1249,6 +1293,75 @@ function materializeWorktreeEvidenceSelector(selector, context) {
     fail("AGENT_HANDOFF_CONTEXT_INVALID", "File-backed evidence requires the current job worktree");
   }
   const resolved = resolveSurfacedEvidencePath(selector.path, context);
+  if (selector.start == null) {
+    if (!resolved.artifact_inspection) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED",
+        `Evidence path ${resolved.path} requires a line range unless it was inspected as an artifact in the current agent call`,
+      );
+    }
+    const readableArtifact = resolveDeterministicReadableFile(
+      projectDir,
+      resolved.path,
+      context?.scopePredicates || null,
+    );
+    if (!readableArtifact.ok) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_PATH_INVALID",
+        `Evidence path ${resolved.path} is not readable: ${readableArtifact.error}`,
+      );
+    }
+    const bytes = fs.readFileSync(readableArtifact.path);
+    const artifactSummary = JSON.stringify({
+      path: resolved.path,
+      size_bytes: bytes.length,
+      sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+      inspected_by: resolved.artifact_inspection,
+    });
+    const payload = `[posse.artifact_evidence.v1]\n${artifactSummary}`;
+    const surfaced = surfaceHashRefForContext(context, {
+      entryKind: "materialized",
+      payloadText: payload,
+      descriptor: {
+        kind: "artifact_evidence",
+        tool: resolved.artifact_inspection,
+        path: resolved.path,
+      },
+      objectType: "tool_result",
+      source: `system:${resolved.artifact_inspection}`,
+      note: resolved.path,
+      sizeChars: payload.length,
+      recomputable: false,
+      metadata: {
+        surfaced_by: "agent_handoff_artifact_path_selector",
+        fetch_class: "visible_copy",
+        tool: resolved.artifact_inspection,
+        handoff_evidence_pinned: true,
+        path: resolved.path,
+        line_semantics: "materialized",
+        ...hashRefModelVisibility(context, {
+          visibility: "full",
+          ranges: [{ start: 0, end: payload.length }],
+          issuedAs: "evidence",
+        }),
+      },
+    }, { ownerScope: "work_item", db: context?.db || getDb() });
+    if (!surfaced?.ok || !surfaced.entry?.ref) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED",
+        `Artifact evidence path ${resolved.path} could not be stored`,
+      );
+    }
+    const materialized = materializeAgentHandoffEvidenceSelector({
+      ref: surfaced.entry.ref,
+      lines: { start: 1, end: 2 },
+    }, context, { expectedLineSemantics: "materialized" });
+    return {
+      ...materialized,
+      selector_kind: "path",
+      source_selector: resolved.path,
+    };
+  }
   const readable = resolveDeterministicReadableFile(
     projectDir,
     resolved.path,
@@ -3521,7 +3634,7 @@ function handoffSelectorFailureHint(code) {
     return "Fetch the traversal ref first or cite an evidence ref already visible to this agent call.";
   }
   if (code === "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED") {
-    return "Read the cited source range before retrying the handoff.";
+    return "Read the cited source range, or inspect a binary artifact with read_image_metadata, before retrying the handoff.";
   }
   return "Correct this selector and retry the handoff.";
 }
@@ -3872,6 +3985,54 @@ function positiveInt(value) {
   return Number.isInteger(number) && number > 0 ? number : null;
 }
 
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function successfulImageGenerationObserved(context) {
+  const attemptId = positiveInt(context?.attemptId ?? context?.attempt_id);
+  const agentCallId = positiveInt(context?.agentCallId ?? context?.agent_call_id);
+  if (!attemptId || !agentCallId) return false;
+  let rows = [];
+  try {
+    rows = (context?.db || getDb()).prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'tool.generate_image'
+      ORDER BY id ASC
+    `).all(attemptId);
+  } catch {
+    return false;
+  }
+  return rows.some((row) => {
+    const detail = parseJsonObject(row?.detail_json);
+    return Number(detail.agent_call_id) === agentCallId
+      && detail.phase === "finish"
+      && detail.ok !== false
+      && (!detail.outcome || detail.outcome === "succeeded");
+  });
+}
+
+function enforceArtificerImageGeneration(packet, call, context) {
+  const role = String(call?.role || packet?.role || "").trim().toLowerCase();
+  const complete = packet?.profile === "artificer.result.v1"
+    && (packet?.completion?.status === "COMPLETE" || packet?.outcome === "complete");
+  if (role !== "artificer" || !complete) return;
+  const payload = parseJsonObject(call?.payload_json);
+  if (payload.task_mode !== "image" && payload.needs_image_generation !== true) return;
+  if (successfulImageGenerationObserved(context)) return;
+  fail(
+    "AGENT_HANDOFF_IMAGE_GENERATION_REQUIRED",
+    "Image artificer completion requires a successful generate_image tool call in the current agent call. Generate a raster image (.png, .jpg, .jpeg, or .webp), validate it, then retry agent_handoff; hand-authored SVG does not satisfy this task",
+  );
+}
+
 function handoffRow(agentCallId, db = getDb()) {
   const id = positiveInt(agentCallId);
   if (!id) return null;
@@ -3962,6 +4123,10 @@ function latestAgentHandoffRejection(agentCallId, db = getDb()) {
   }
 }
 
+export function getLatestAgentHandoffRejection(agentCallId, { db = getDb() } = {}) {
+  return latestAgentHandoffRejection(agentCallId, db);
+}
+
 export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
   const row = handoffRow(agentCallId, db);
   if (!row) return null;
@@ -4042,9 +4207,10 @@ export function stageAgentHandoff(args, {
   if (!agentCallId) fail("AGENT_HANDOFF_CONTEXT_INVALID", "agent_handoff requires an active agent call");
   const database = ensureSchema(db);
   const call = database.prepare(`
-    SELECT work_item_id, job_id, attempt_id, role
-    FROM agent_calls
-    WHERE id = ?
+    SELECT ac.work_item_id, ac.job_id, ac.attempt_id, ac.role, j.payload_json
+    FROM agent_calls ac
+    LEFT JOIN jobs j ON j.id = ac.job_id
+    WHERE ac.id = ?
   `).get(agentCallId);
   if (!call) fail("AGENT_HANDOFF_CONTEXT_INVALID", "agent_handoff agent call does not exist");
   const resolvedContext = {
@@ -4058,6 +4224,7 @@ export function stageAgentHandoff(args, {
   };
   const effectiveRole = String(call.role || role || "");
   const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
+  enforceArtificerImageGeneration(packet, call, resolvedContext);
   const diagnostics = {
     ...(packet.ignored_field_count > 0 ? {
       ignored_field_count: packet.ignored_field_count,

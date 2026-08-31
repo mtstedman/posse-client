@@ -146,6 +146,12 @@ function parkAssessmentFailure(worker, job, leaseToken, error, {
   const message = String(error?.message || error || "Assessment unavailable");
   preserveAssessmentOnlyRetryPayload(worker, job);
   if (count >= max) {
+    if (isRetryableTerminalHandoffError(error)) {
+      setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
+      worker.emit(job.id, `${C.red}[assess-only] Terminal handoff repair budget exhausted; failing without an operator gate${C.reset}`);
+      worker._releaseLease(job, leaseToken, "failed");
+      return { gated: false, terminalProtocolFailure: true };
+    }
     setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
     const reviewJob = createJob({
       work_item_id: job.work_item_id,
@@ -475,8 +481,9 @@ export class AssessmentHandoffAdapter {
       });
       worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${assessErr.message.split("\n")[0]}${C.reset}`);
       // The developer's committed output remains authoritative. Assessment
-      // transport/tool/protocol failures have their own retry budget and can
-      // only end in an assessment recovery gate.
+      // Transport/tool failures have their own retry budget. Terminal handoff
+      // protocol failures are internal harness faults and fail closed without
+      // asking the operator to repair them.
       parkAssessmentFailure(worker, job, leaseToken, assessErr);
     }
     return { handled: true, currentAttemptId: assessAttempt.attempt.id };

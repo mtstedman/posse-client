@@ -187,6 +187,9 @@ export class ArtificerRole extends BaseRole {
       Array.isArray(payload.files_to_create) && payload.files_to_create.length > 0
         ? `EXPECTED FILES: ${payload.files_to_create.join(", ")}`
         : null,
+      needsImageGeneration
+        ? "REAL IMAGE GENERATION REQUIRED: Call generate_image for the requested visual output. Do not hand-author SVG or substitute text/vector markup."
+        : null,
       inputRoots.length > 0 ? `INPUT ROOTS (read-only): ${inputRoots.join(", ")}` : null,
       "",
       promptLiteral("INSTRUCTIONS", payload.task_spec || job.title),
