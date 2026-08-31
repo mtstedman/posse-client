@@ -784,6 +784,13 @@ function _spawnRecoveryJobsForVerdict({
       success_criteria: originalSuccessCriteria,
       ...(originalTestCommand ? { test_command: originalTestCommand } : {}),
       ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
+      ...(currentPayload.risk != null ? { risk: currentPayload.risk } : {}),
+      ...(currentPayload._execution_policy && typeof currentPayload._execution_policy === "object"
+        ? { _execution_policy: currentPayload._execution_policy }
+        : {}),
+      ...(currentPayload._assess_pass_confidence_floor != null
+        ? { _assess_pass_confidence_floor: currentPayload._assess_pass_confidence_floor }
+        : {}),
       _planner_set_files: origPlannerSetFiles,
       _fix_satisfiability_fingerprint: fixFingerprint,
       ...oneshotPayloadFields,

@@ -1310,7 +1310,7 @@ export async function handlePostExecutionForWorker({
           wtPath
           && MUTATING_JOB_TYPES.has(job.job_type)
           && requiresGitNoopCheckFromModule(job, noOpPayload)
-          && !committedHash
+          && !hasFileChanges
         ) {
           const branchDiffScopePaths = [
             ...(noOpPayload.files_to_modify || []),

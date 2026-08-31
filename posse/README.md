@@ -34,8 +34,10 @@ Key behavior:
 - Artifact workflows for reports, content, images, and intake processing.
 - Durable typed human-input and review gates with one authoritative,
   idempotent resolution per original job and recovery kind.
-- Independent assessment retry accounting: assessor transport/tool failures
-  preserve completed implementation and escalate assessment only.
+- Independent per-implementation assessment retry accounting: assessor
+  transport/tool failures preserve completed implementation and escalate
+  assessment only; a new implementation attempt starts a fresh assessment
+  retry budget.
 - Handoff-owned creation materialization: planners declare exact
   `files_to_create`, but writing providers receive existing
   `files_to_modify` paths and no generic creation authority.

@@ -767,6 +767,16 @@ export async function callProvider(promptText, {
         if (assessorCeiling) {
           emit(`${C.yellow}  [budget] ${call.name} denied - assessor tool-call ceiling ${assessorCeiling.cap} reached${C.reset}`);
           recordedToolUse.blockedReason = assessorCeiling.reason;
+          recordedToolUse.status = "rejected";
+          recordedToolUse.rejection = assessorCeiling.text;
+          recordedToolUse.observation_detail = {
+            assessment_budget_exhausted: true,
+            assessment_budget_reason: assessorCeiling.reason,
+            assessment_budget_used: assessorCeiling.used,
+            assessment_budget_cap: assessorCeiling.cap,
+            tool_name: call.name,
+            transport: "embedded_provider",
+          };
           toolResults.push({
             type: "function_call_output",
             call_id: call.call_id,
@@ -780,10 +790,22 @@ export async function callProvider(promptText, {
           readCount++;
           if (readCount > maxReads) {
             emit(`${C.yellow}  [budget] read_file denied - ${maxReads} fallback reads exhausted${C.reset}`);
+            const readBudgetText = `Error: Fallback read budget exhausted (max ${maxReads}). The file contents you need should already be in the prompt context. If critical context is missing, return MISSING_CONTEXT with the files you need.`;
+            recordedToolUse.blockedReason = "fallback_read_ceiling";
+            recordedToolUse.status = "rejected";
+            recordedToolUse.rejection = readBudgetText;
+            recordedToolUse.observation_detail = {
+              assessment_budget_exhausted: true,
+              assessment_budget_reason: "fallback_read_ceiling",
+              assessment_budget_used: maxReads,
+              assessment_budget_cap: maxReads,
+              tool_name: call.name,
+              transport: "embedded_provider",
+            };
             toolResults.push({
               type: "function_call_output",
               call_id: call.call_id,
-              output: `Error: Fallback read budget exhausted (max ${maxReads}). The file contents you need should already be in the prompt context. If critical context is missing, return MISSING_CONTEXT with the files you need.`,
+              output: readBudgetText,
             });
             continue;
           }

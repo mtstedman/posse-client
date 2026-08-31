@@ -43,13 +43,29 @@ export const IMAGE_EXTS = new Set([
   ".bmp", ".tif", ".tiff", ".ico",
 ]);
 
-const EXPLICIT_MEDIA_DELIVERABLE_RE = /\b(?:rich|custom|original|generated|hero|banner|background|marketing|product)\s+(?:images?|photos?|illustrations?|artwork|visuals?)\b|\b(?:create|generate|produce|add|include|supply|design)\s+(?:[\w-]+\s+){0,3}(?:images?|photos?|illustrations?|artwork)\b/i;
-const MEDIA_DELIVERABLE_NEGATION_RE = /\b(?:do not|don't|without|no need to|must not)\s+(?:create|generate|produce|add|include|supply|design)\b[^.\n]{0,80}\b(?:images?|photos?|illustrations?|artwork)\b/i;
+const AUTHORED_MEDIA_NOUN = "(?:images?|photos?|illustrations?|artwork|visuals?|graphics?|logos?|icons?|favicons?|banners?)";
+const EXPLICIT_MEDIA_DELIVERABLE_RE = new RegExp(
+  `\\b(?:create|generate|produce|supply|design|render|illustrate)\\b[^.\\n]{0,80}\\b${AUTHORED_MEDIA_NOUN}\\b`
+  + `|\\b(?:add|include)\\s+(?:[\\w-]+\\s+){0,3}(?:rich|custom|original|generated|marketing)\\s+${AUTHORED_MEDIA_NOUN}\\b`,
+  "i",
+);
+const MEDIA_DELIVERABLE_NEGATION_RE = new RegExp(
+  `\\b(?:do not|don't|without|no need to|must not)\\s+(?:create|generate|produce|add|include|supply|design|render|illustrate)\\b[^.\\n]{0,80}\\b${AUTHORED_MEDIA_NOUN}\\b`,
+  "i",
+);
+const MEDIA_CODE_CONTEXT_RE = /\b(?:upload|loading|lazy\s+load|resiz(?:e|ing)|thumbnails?|srcset|dimensions?|urls?|tables?|migrations?|caches?|sitemaps?|director(?:y|ies)|tests?|placeholders?|carousels?|components?|resolvers?|foreign\s+keys?)\b/i;
 
 export function planCoverageGaps(workItem = {}, tasks = []) {
   const requestText = [workItem?.title, workItem?.description].filter(Boolean).join("\n");
-  const requiresGeneratedMedia = EXPLICIT_MEDIA_DELIVERABLE_RE.test(requestText)
-    && !MEDIA_DELIVERABLE_NEGATION_RE.test(requestText);
+  const requiresGeneratedMedia = requestText
+    .split(/[\n.!?;]+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .some((segment) => (
+      EXPLICIT_MEDIA_DELIVERABLE_RE.test(segment)
+      && !MEDIA_DELIVERABLE_NEGATION_RE.test(segment)
+      && !MEDIA_CODE_CONTEXT_RE.test(segment)
+    ));
   if (!requiresGeneratedMedia) return [];
   const hasMediaTask = (Array.isArray(tasks) ? tasks : []).some((task) => {
     const taskText = [task?.title, task?.task_spec, ...(Array.isArray(task?.success_criteria) ? task.success_criteria : [task?.success_criteria])]

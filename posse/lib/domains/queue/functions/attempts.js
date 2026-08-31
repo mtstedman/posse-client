@@ -50,7 +50,10 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     const newCount = job.attempt_count + 1;
     db.prepare(`
       UPDATE jobs
-      SET attempt_count = ?, state_version = state_version + 1, updated_at = ?
+      SET attempt_count = ?,
+          assessment_attempt_count = 0,
+          state_version = state_version + 1,
+          updated_at = ?
       WHERE id = ?
     `).run(newCount, now(), jobId);
 

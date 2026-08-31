@@ -28,7 +28,7 @@ import {
   now,
   runImmediateTransaction,
 } from "./common.js";
-import { flushEventsNow, logDurableEvent, logEvent } from "./events.js";
+import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
 import { getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
@@ -602,12 +602,10 @@ function reviewGateNeedsRetirement(job) {
 }
 
 function hasRecordedReviewResolution(job) {
-  const row = getDb().prepare(`
-    SELECT event_json FROM events
-    WHERE job_id = ? AND event_type IN (?, ?)
-    ORDER BY id DESC
-    LIMIT 1
-  `).get(job.id, EVENT_TYPES.JOB_REVIEW_RESOLVED, EVENT_TYPES.JOB_REVIEW_SKIPPED);
+  const row = getEvents(job.id, 100).find((event) => (
+    event.event_type === EVENT_TYPES.JOB_REVIEW_RESOLVED
+    || event.event_type === EVENT_TYPES.JOB_REVIEW_SKIPPED
+  ));
   if (!row?.event_json) return false;
   try {
     const detail = JSON.parse(row.event_json);
@@ -623,6 +621,10 @@ const REVIEW_SETTLEMENT_ORIGINAL_STATUSES = new Set([
   "waiting_on_review",
   "blocked",
   "awaiting_assessment",
+]);
+const TERMINAL_REVIEW_ASSESSMENT_STATES = new Set([
+  "assessment_waived",
+  "assessment_failed",
 ]);
 
 function workItemApprovalGateOriginalJobId(job) {
@@ -691,7 +693,10 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
         expectedStatuses: [job.status],
       }) || changed;
     }
-    if (job.assessor_verdict === "needs_review") {
+    if (
+      job.assessor_verdict === "needs_review"
+      && !TERMINAL_REVIEW_ASSESSMENT_STATES.has(job.assessment_state)
+    ) {
       // Approval is a human/system resolution, not a new assessor verdict.
       // Preserve the model's actual needs_review result and record the override
       // in the review event/lifecycle instead of rewriting history to pass/high.

@@ -113,7 +113,9 @@ import { rewriteDependenciesAfterSplit } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
 import { deriveAndRecordAssessmentScopes } from "./assessment-scopes.js";
 import {
+  normalizeExplicitImageGenerationTask,
   resolvePromoteSourceDir,
+  rewriteTaskImageOutputPaths,
   routePromoteTaskByOutputDir,
   splitTaskByCreateFileKind,
 } from "./task-splitting.js";
@@ -788,6 +790,35 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
       };
 
+      // Normalize explicit generated-image formats before compiling any task.
+      // Sibling consumers can legally precede the producer in the planner
+      // array, so repairing paths only when the producer reaches the main loop
+      // can leave already-created jobs pointing at the old extension.
+      const planRasterReplacements = new Map();
+      for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+        const task = tasks[taskIndex];
+        const explicitImageIntent = task?.task_mode === "image"
+          || task?.job_type === "image"
+          || !!task?.needs_image_generation
+          || hasRequestedImageGenerationOutput(task, { pathOnlyIsIntent: false });
+        if (!explicitImageIntent) continue;
+        const normalized = normalizeExplicitImageGenerationTask(task);
+        tasks[taskIndex] = normalized.task;
+        for (const [from, to] of normalized.replacements) planRasterReplacements.set(from, to);
+      }
+      if (planRasterReplacements.size > 0) {
+        const replacements = [...planRasterReplacements.entries()];
+        for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+          tasks[taskIndex] = rewriteTaskImageOutputPaths(tasks[taskIndex], replacements);
+        }
+        for (const [from, to] of replacements) {
+          worker.emit(
+            planJob.id,
+            `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: renamed ${from} -> ${to} (generate_image cannot produce ${path.posix.extname(from).slice(1) || "that format"})`,
+          );
+        }
+      }
+
       for (let i = 0; i < tasks.length; i++) {
         let t = tasks[i];
         if (!t || !t.title) {
@@ -1108,6 +1139,21 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
         let normalizedJobType = PLANNER_ALLOWED_TYPES.has(t.job_type) ? t.job_type : jobType;
         const fileKindRoute = splitTaskByCreateFileKind(t, i, artifactDirAbs, { taskMode, normalizedJobType });
+        if (fileKindRoute?.replacements?.length > 0) {
+          for (let siblingIndex = 0; siblingIndex < tasks.length; siblingIndex += 1) {
+            if (siblingIndex === i) continue;
+            tasks[siblingIndex] = rewriteTaskImageOutputPaths(
+              tasks[siblingIndex],
+              fileKindRoute.replacements,
+            );
+          }
+          for (const [from, to] of fileKindRoute.replacements) {
+            worker.emit(
+              planJob.id,
+              `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: renamed ${from} -> ${to} (generate_image cannot produce ${path.posix.extname(from).slice(1) || "that format"})`,
+            );
+          }
+        }
         if (fileKindRoute?.splitTasks?.length > 1) {
           if (splitGroupCrossesTaskCap(i, fileKindRoute.splitTasks.length)) {
             dropSplitGroupAtCap(t, i, fileKindRoute.splitTasks, "file_kind_split");

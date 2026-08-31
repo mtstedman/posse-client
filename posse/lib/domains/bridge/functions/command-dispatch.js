@@ -223,7 +223,7 @@ function reviewPassAlreadyApplied(resolved) {
   if (wi?.merge_state === "merged") return true;
   const originalJobId = Number(resolved.payload?.original_job_id);
   const originalJob = Number.isInteger(originalJobId) ? getJob(originalJobId) : null;
-  if (originalJob?.status !== "succeeded" || originalJob?.assessor_verdict === "fail") {
+  if (originalJob?.status !== "succeeded") {
     return false;
   }
   if (resolved.job.status === "succeeded") return true;

@@ -23,13 +23,43 @@ function generatedRasterPath(value) {
   return `${normalized.slice(0, -ext.length)}.png`;
 }
 
-function normalizeExplicitImageGenerationTask(task) {
+export function normalizeExplicitImageGenerationTask(task) {
   const declared = Array.isArray(task?.files_to_create) ? task.files_to_create : [];
   const replacements = declared
     .map((file) => [String(file || ""), generatedRasterPath(file)])
     .filter(([from, to]) => from && to && from !== to);
-  if (replacements.length === 0) return task;
+  if (replacements.length === 0) return { task, replacements: [] };
 
+  const rewriteText = (value) => {
+    if (typeof value !== "string") return value;
+    let rewritten = value;
+    for (const [from, to] of replacements) rewritten = rewritten.split(from).join(to);
+    return rewritten;
+  };
+  return {
+    task: {
+      ...task,
+      task_spec: rewriteText(task.task_spec),
+      instructions: rewriteText(task.instructions),
+      success_criteria: Array.isArray(task.success_criteria)
+        ? task.success_criteria.map(rewriteText)
+        : rewriteText(task.success_criteria),
+      files_to_create: declared.map(generatedRasterPath),
+    },
+    replacements,
+  };
+}
+
+export function rewriteTaskImageOutputPaths(task, replacements = []) {
+  if (!task || !Array.isArray(replacements) || replacements.length === 0) return task;
+  const rewritePath = (value) => {
+    if (typeof value !== "string") return value;
+    for (const [from, to] of replacements) {
+      if (value === from) return to;
+      if (value.endsWith(`/${from}`)) return `${value.slice(0, -from.length)}${to}`;
+    }
+    return value;
+  };
   const rewriteText = (value) => {
     if (typeof value !== "string") return value;
     let rewritten = value;
@@ -43,7 +73,19 @@ function normalizeExplicitImageGenerationTask(task) {
     success_criteria: Array.isArray(task.success_criteria)
       ? task.success_criteria.map(rewriteText)
       : rewriteText(task.success_criteria),
-    files_to_create: declared.map(generatedRasterPath),
+    files_to_modify: Array.isArray(task.files_to_modify)
+      ? task.files_to_modify.map(rewritePath)
+      : task.files_to_modify,
+    files_to_create: Array.isArray(task.files_to_create)
+      ? task.files_to_create.map(rewritePath)
+      : task.files_to_create,
+    mappings: Array.isArray(task.mappings)
+      ? task.mappings.map((mapping) => ({
+          ...mapping,
+          pattern: rewritePath(mapping?.pattern),
+          dest: rewritePath(mapping?.dest),
+        }))
+      : task.mappings,
   };
 }
 
@@ -344,7 +386,11 @@ function buildImageSplitPieces(task, imageFiles, artifactDirAbs, sourceTaskIndex
 export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMode, normalizedJobType } = {}) {
   if (!task || task._file_kind_split_done || task.job_type === "human_input" || task.job_type === "promote") return null;
   const pathOnlyIsIntent = taskMode === "image" || !!task.needs_image_generation;
-  const routedTask = pathOnlyIsIntent ? normalizeExplicitImageGenerationTask(task) : task;
+  const normalizedImageTask = pathOnlyIsIntent
+    ? normalizeExplicitImageGenerationTask(task)
+    : { task, replacements: [] };
+  const routedTask = normalizedImageTask.task;
+  const replacements = normalizedImageTask.replacements;
   const summary = getCreateFileKindSummary(routedTask, artifactDirAbs);
   const requestedImageGenerationOutput = hasRequestedImageGenerationOutput(routedTask, { pathOnlyIsIntent });
   const requestedImageOutputs = requestedImageGenerationOutput
@@ -372,6 +418,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
           create_roots: [],
           _file_kind_split_done: true,
         },
+        replacements,
         reason: `source-file output(s) require dev/code: ${summary.codeFiles.join(", ")}`,
       };
     }
@@ -403,6 +450,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
           ].filter(Boolean).join("\n"),
           _file_kind_split_done: true,
         },
+        replacements,
         reason: `image output(s) require artificer/image: ${(imageFilesForSplit.length > 0 ? imageFilesForSplit : ["requested image output"]).join(", ")}`,
       };
     }
@@ -454,6 +502,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
   return {
     splitTasks,
     finalIndex: index + splitTasks.length - 1,
+    replacements,
     reason: `split mixed create scope by requested output (images: ${imageFilesForSplit.length || 1}, non-images: ${nonImageCreateFiles.length}, repo edits: ${filesToModify.length + filesToDelete.length})`,
   };
 }

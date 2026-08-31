@@ -174,8 +174,54 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   const fresh = getJob(job.id) || job;
   const count = Number(fresh.assessment_attempt_count || 0);
   const max = Math.max(1, Number(fresh.assessment_max_attempts || 3));
-  if (count >= max) {
+  const gateImmediately = error?.assessmentGateImmediately === true;
+  if (count >= max || gateImmediately) {
     const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
+    if (!terminalProtocolFailure) {
+      setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
+      const reviewJob = createJob({
+        work_item_id: job.work_item_id,
+        job_type: "human_input",
+        title: `Assessment unavailable: ${String(job.title || "").slice(0, 70)}`,
+        parent_job_id: job.id,
+        priority: "high",
+        model_tier: "cheap",
+        payload_json: JSON.stringify({
+          original_job_id: job.id,
+          gate_kind: "assessment_retry_exhausted",
+          review_type: "assessment_retry_limit",
+          questions: [
+            `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
+            "Choose retry_assessment, pass, fail, explicit waiver, or replan.",
+          ],
+          context: "The implementation commit is preserved. This gate controls assessment only.",
+        }),
+      });
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Assessment infrastructure requires operator review after ${count}/${max} attempts`,
+        event_json: JSON.stringify({
+          attempts: count,
+          max_attempts: max,
+          terminal_protocol_failure: false,
+          error: message.slice(0, 2000),
+          operator_actionable: true,
+          gate_job_id: reviewJob.id,
+          gated_immediately: gateImmediately,
+        }),
+      });
+      worker.emit(job.id, `${C.yellow}[assessor] Assessment unavailable; opened review gate #${reviewJob.id}${C.reset}`);
+      worker._releaseLease(job, leaseToken, "waiting_on_review");
+      return {
+        gated: true,
+        infrastructureFailure: true,
+        terminalProtocolFailure: false,
+        reviewJob,
+      };
+    }
     setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
     setJobError(job.id, `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`);
     logEvent({
@@ -883,6 +929,7 @@ function _buildLocalAssessmentEvidence({
   fileVerification = "",
   assessmentDiffNarrative = "",
   assessmentScopedDiff = "",
+  assessmentDependencyDiffs = "",
   assessmentFileSnapshots = "",
   registeredTestRunEvidence = "",
   workerStatusOutput = "",
@@ -890,35 +937,111 @@ function _buildLocalAssessmentEvidence({
   const primaryChangeEvidence = assessmentScopedDiff
     || assessmentDiffNarrative
     || assessmentFileSnapshots;
-  const evidenceBudgetChars = 60_000;
+  const evidenceBudgetChars = 84_000;
   const sections = [];
   let usedChars = 0;
   const appendWhole = (value, label) => {
     const text = String(value || "").trim();
-    if (!text) return;
+    if (!text) return false;
     if (usedChars + text.length > evidenceBudgetChars) {
       sections.push(`[${label} omitted because the bounded assessment evidence packet is full]`);
-      return;
+      return false;
     }
     sections.push(text);
     usedChars += text.length;
+    return true;
   };
   // Receipts and the primary change view are indivisible evidence. In
   // particular, never turn a complete diff into a misleading partial diff at
   // this final assembly boundary.
   appendWhole(registeredTestRunEvidence, "registered test evidence");
-  appendWhole(primaryChangeEvidence, "primary change evidence");
+  const primaryChangeEvidenceAttached = appendWhole(primaryChangeEvidence, "primary change evidence");
+  const dependencyChangeEvidenceAttached = appendWhole(assessmentDependencyDiffs, "dependency change evidence");
   appendWhole(fileVerification, "scope verification evidence");
   if (workerStatusOutput && !registeredTestRunEvidence) {
     const prefix = "WORKER STATUS (context only; never proof):\n";
     const remaining = Math.max(0, evidenceBudgetChars - usedChars - prefix.length);
     if (remaining > 0) sections.push(`${prefix}${String(workerStatusOutput).slice(0, remaining)}`);
   }
+  return {
+    text: [
+      `LOCAL ASSESSMENT EVIDENCE`,
+      `This block was attached by the local client after remote prompt compilation. Treat deterministic receipts, the primary change view, and labeled read-only upstream dependency contracts as ground truth. Worker status is context only, never proof.`,
+      sections.join("\n") || null,
+    ].filter(Boolean).join("\n"),
+    primaryChangeEvidenceAttached,
+    dependencyChangeEvidenceAttached,
+  };
+}
+
+function _renderAssessmentDependencyDiffs(assessmentContext = null) {
+  const entries = Array.isArray(assessmentContext?.dependency_git_diffs)
+    ? assessmentContext.dependency_git_diffs
+    : [];
+  if (entries.length === 0) return "";
+  const sections = entries.map((entry) => {
+    const header = [
+      `DEPENDENCY JOB #${entry.job_id}: ${entry.title || "upstream dependency"}`,
+      `dependency_kind: ${entry.dependency_kind || "hard"}`,
+      `commit: ${entry.commit_hash || "unknown"}`,
+      Array.isArray(entry.files) && entry.files.length > 0
+        ? `files_in_attached_dependency_view: ${JSON.stringify(entry.files)}`
+        : null,
+    ].filter(Boolean).join("\n");
+    if (entry.diff) return `${header}\n${entry.diff}`;
+    const reason = entry.status === "over_inline_cap"
+      ? `diff omitted because it exceeds the dependency inline cap (${entry.bytes ?? "unknown"} bytes)`
+      : "diff prefetch failed";
+    return `${header}\n[${reason}]${entry.stat ? `\n${entry.stat}` : ""}`;
+  });
   return [
-    `LOCAL ASSESSMENT EVIDENCE`,
-    `This block was attached by the local client after remote prompt compilation. Treat deterministic receipts and the single primary change view as ground truth. Worker status is context only, never proof.`,
-    sections.join("\n") || null,
-  ].filter(Boolean).join("\n");
+    `UPSTREAM DEPENDENCY CONTRACT DIFFS (READ-ONLY CONTEXT — not current task scope):`,
+    `These direct dependencies completed before this job. Use their supplied contract changes to assess integration; do not require the current job to edit these files unless they are also in the current writable scope.`,
+    sections.join("\n\n"),
+  ].join("\n");
+}
+
+function assessmentBudgetInfrastructureError(message, detail = {}, {
+  retryable = true,
+  gateImmediately = false,
+} = {}) {
+  const error = new Error(String(message || "Assessment budget exhausted"));
+  error.code = "POSSE_ASSESSMENT_BUDGET_EXHAUSTED";
+  error.assessmentRetryable = retryable;
+  error.assessmentGateImmediately = gateImmediately;
+  error.assessmentBudgetExhausted = true;
+  error.assessmentBudgetDetail = detail;
+  return error;
+}
+
+function assessorToolBudgetExhaustion(agentCallId, jobId = null) {
+  const callId = Number(agentCallId);
+  if (!Number.isInteger(callId) || callId <= 0) return null;
+  try {
+    const rows = getDb().prepare(`
+      SELECT observation_type, detail_json
+      FROM job_observations
+      WHERE job_id = ?
+        AND observation_type LIKE 'tool.%'
+      ORDER BY id DESC
+      LIMIT 5000
+    `).all(Number(jobId) || null);
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      if (Number(detail?.agent_call_id) !== callId || detail?.assessment_budget_exhausted !== true) continue;
+      return {
+        observation_type: row.observation_type,
+        reason: detail.assessment_budget_reason || "tool_budget_exhausted",
+        used: Number(detail.assessment_budget_used) || null,
+        cap: Number(detail.assessment_budget_cap) || null,
+        tool: detail.tool_name || null,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function _formatLineNumberedFile(raw = "", startLine = 1) {
@@ -1099,6 +1222,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const assessmentScopedDiff = assessmentContext?.scoped_git_diff
     ? `\nSCOPED GIT DIFF (COMPLETE — do not re-derive via git):\n${assessmentContext.scoped_git_diff}\n`
     : "";
+  const assessmentDependencyDiffs = _renderAssessmentDependencyDiffs(assessmentContext);
   const diffPrefetchStatus = String(assessmentContext?.scoped_git_diff_status || "");
   const diffStatusNotice = diffPrefetchStatus === "over_inline_cap"
     ? [
@@ -1352,17 +1476,19 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     assessorAtlasPrefetchStatus = null;
   }
 
-  const localAssessmentEvidence = _buildLocalAssessmentEvidence({
+  const localAssessmentEvidencePacket = _buildLocalAssessmentEvidence({
     fileVerification,
     assessmentDiffNarrative,
     assessmentScopedDiff,
+    assessmentDependencyDiffs,
     assessmentFileSnapshots,
     registeredTestRunEvidence,
     workerStatusOutput,
   });
+  const localAssessmentEvidence = localAssessmentEvidencePacket.text;
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
-    `Use the deterministic scope and test receipts plus the single attached primary change view. If that bounded evidence cannot resolve a material criterion, use an issued read tool rather than requesting repository contents from the human.`,
+    `Use the deterministic scope and test receipts plus the attached primary change view and any labeled read-only upstream contract diffs. If that bounded evidence cannot resolve a material criterion, use an issued read tool rather than requesting repository contents from the human.`,
     `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
@@ -1417,6 +1543,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let response;
   let trustedAssessorEvidenceChars = null;
   let trustedAssessorClaims = [];
+  let toolBudgetExhaustion = null;
   const assessorMaxToolCalls = getAssessorMaxToolCalls();
   const assessorDeepthink = !!parseJobPayload(job).deepthink;
   const assessmentInputKey = crypto.createHash("sha256").update(JSON.stringify({
@@ -1474,16 +1601,14 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       const reason = callBudget.exceeded
         ? `Assessment call budget exhausted (${callBudget.used}/${callBudget.cap} calls) for this attempt.`
         : `Assessment input-token budget exhausted (${tokenBudget.spent}/${tokenBudget.cap} tokens) for this job.`;
-      return {
-        verdict: "needs_review",
-        confidence: "none",
-        reasons: [reason],
-        spawn_jobs: [],
-        human_questions: [],
-        suggestions: [],
-        raw: "",
-        _disable_internal_retry: true,
-      };
+      throw assessmentBudgetInfrastructureError(
+        reason,
+        callBudget.exceeded ? callBudget : tokenBudget,
+        {
+          retryable: !tokenBudget.exceeded,
+          gateImmediately: tokenBudget.exceeded,
+        },
+      );
     }
     // Inherit deepthink from the job being assessed: if the task author
     // marked it deepthink, the assessment deserves the same budget so it
@@ -1513,6 +1638,26 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       sessionPacket: assessorPacket || null,
       skipRolePrompt: !!assessorPacket?.remote_prompt_composed,
       deepthink: assessorDeepthink,
+      _attachedSourceEvidence: [
+            localAssessmentEvidencePacket.primaryChangeEvidenceAttached
+              && assessmentScopedDiff
+              && Array.isArray(assessmentContext?.scoped_git_diff_source_ranges)
+              ? {
+                  kind: "assessment_primary_diff",
+                  text: assessmentScopedDiff.trim(),
+                  ranges: assessmentContext.scoped_git_diff_source_ranges,
+                }
+              : null,
+            localAssessmentEvidencePacket.dependencyChangeEvidenceAttached
+              && assessmentDependencyDiffs
+              && Array.isArray(assessmentContext?.dependency_git_diff_source_ranges)
+              ? {
+                  kind: "assessment_dependency_diff",
+                  text: assessmentDependencyDiffs,
+                  ranges: assessmentContext.dependency_git_diff_source_ranges,
+                }
+              : null,
+          ].filter(Boolean),
     }, {
       job_id: job.id,
       work_item_id: job.work_item_id,
@@ -1523,6 +1668,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     });
     response = result.output;
     if (Number.isInteger(result.agentCallId)) {
+      toolBudgetExhaustion = assessorToolBudgetExhaustion(result.agentCallId, job.id);
       const handoffRecord = getAgentHandoffRecord(result.agentCallId);
       const packet = handoffRecord?.packet;
       trustedAssessorEvidenceChars = packet?.profile === "assessor.verdict.v1"
@@ -1557,7 +1703,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       content_long: response,
       content_json: {
         assessment_input_key: assessmentInputKey,
-        verdict_parse_succeeded: _isReusableAssessorVerdict(verdictJson, verdict),
+        verdict_parse_succeeded: !toolBudgetExhaustion && _isReusableAssessorVerdict(verdictJson, verdict),
         ...(trustedAssessorEvidenceChars == null
           ? {}
           : { assessor_handoff_evidence_chars: trustedAssessorEvidenceChars }),
@@ -1578,6 +1724,15 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     const err = new Error("Assessor reported blocked file-system access despite deterministic verification context");
     err.assessmentRetryable = true;
     throw err;
+  }
+  if (toolBudgetExhaustion && !["pass", "fail", "needs_replan"].includes(String(verdict?.verdict || "").toLowerCase())) {
+    const budgetLabel = toolBudgetExhaustion.cap == null
+      ? toolBudgetExhaustion.reason
+      : `${toolBudgetExhaustion.reason} (${toolBudgetExhaustion.used}/${toolBudgetExhaustion.cap})`;
+    throw assessmentBudgetInfrastructureError(
+      `Assessment tool access was exhausted by the harness: ${budgetLabel}`,
+      toolBudgetExhaustion,
+    );
   }
   // No prose-recovery fallback: if JSON extraction failed we fall through to
   // the parse_error verdict below, which lets the worker re-run assessment at
@@ -2607,6 +2762,7 @@ export async function runPostExecutionAssessment(worker, {
         throw routeError;
       }
       const assessmentContext = await attachAssessmentDiffContextAsync({
+        job_id: job.id,
         task_mode: taskMode,
         manifest,
         contract_violations: contractViolations,
@@ -2895,8 +3051,10 @@ export async function runPostExecutionAssessment(worker, {
       const stallKilled = !!assessErr?.stallKill || /stalled.*killed|killed by stall detector/i.test(assessErrMessage);
       const terminalHandoffRetry = assessmentTerminalHandoffRetryDecision(job.id, assessErr);
       const terminalHandoffMissing = terminalHandoffRetry.retryable;
-      if (isProviderError(assessErr) || assessErr?.assessmentRetryable || turnBudgetExhausted || stallKilled || terminalHandoffMissing) {
-        const retryLabel = assessErr?.assessmentRetryable
+      if (isProviderError(assessErr) || assessErr?.assessmentRetryable || assessErr?.assessmentGateImmediately || turnBudgetExhausted || stallKilled || terminalHandoffMissing) {
+        const retryLabel = assessErr?.assessmentGateImmediately
+          ? "Assessment budget exhausted"
+          : assessErr?.assessmentRetryable
           ? "Environment/tooling error during assessment"
           : (terminalHandoffMissing
             ? "Assessment terminal handoff missing"
@@ -2911,7 +3069,9 @@ export async function runPostExecutionAssessment(worker, {
           // commit completed even though its attached assessment did not.
           status: "succeeded",
           duration_ms: Date.now() - startTime,
-          error_text: assessErr?.assessmentRetryable
+          error_text: assessErr?.assessmentGateImmediately
+            ? `Assessment budget exhausted: ${assessErr.message}`
+            : assessErr?.assessmentRetryable
             ? `Assessment environment error: ${assessErr.message}`
             : (stallKilled
               ? `Assessment stalled: ${assessErr.message}`
@@ -2977,7 +3137,7 @@ export async function runPostExecutionAssessment(worker, {
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
-          event_type: assessErr?.assessmentRetryable
+          event_type: (assessErr?.assessmentRetryable || assessErr?.assessmentGateImmediately)
             ? EVENT_TYPES.JOB_ASSESSMENT_ENVIRONMENT_ERROR
             : (stallKilled
               ? EVENT_TYPES.JOB_STALL_KILLED
@@ -2990,7 +3150,7 @@ export async function runPostExecutionAssessment(worker, {
 
         const assessBackoff = terminalHandoffMissing
           ? 2
-          : assessErr?.assessmentRetryable
+          : (assessErr?.assessmentRetryable || assessErr?.assessmentGateImmediately)
           ? 5
           : (turnBudgetExhausted || stallKilled
             ? 2

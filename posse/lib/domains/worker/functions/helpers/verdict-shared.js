@@ -137,7 +137,7 @@ export function capVerdictForHighRiskVerificationGap(
     : "";
   const postChange = testRun?.postChange || testRun?.post_change || null;
   if (command && postChange?.status === "passed") return verdict;
-  if (scopedVerification?.status === "passed" && scopedVerification?.executed_commit_hash) {
+  if (!postChange && scopedVerification?.status === "passed" && scopedVerification?.executed_commit_hash) {
     return {
       ...verdict,
       verification_status: "scoped_checks_passed",

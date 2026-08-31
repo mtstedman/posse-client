@@ -440,7 +440,7 @@ function frozenTestPlanFromReceipt(receipt = {}) {
   // `cd htdocs && npm run typecheck` back into a direct spawn of `cd`.
   const executionCommand = typeof receipt.execution_command === "string"
     ? receipt.execution_command.trim()
-    : "";
+    : (receipt.execution_command == null && receipt.cwd_relative == null ? command : "");
   const cwdRelative = receipt.cwd_relative == null
     ? null
     : safeRelativeTestDirectory(receipt.cwd_relative);

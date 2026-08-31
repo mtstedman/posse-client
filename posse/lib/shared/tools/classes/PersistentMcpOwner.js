@@ -1412,6 +1412,48 @@ function mcpToolTextPayload(text) {
   };
 }
 
+/**
+ * @param {{
+ *   session?: any,
+ *   toolName?: string,
+ *   toolArgs?: Record<string, any>,
+ *   reason?: string|null,
+ *   text?: string|null,
+ *   used?: number|null,
+ *   cap?: number|null,
+ * }} [input]
+ */
+function recordOwnerAssessorBudgetExhaustion({
+  session,
+  toolName,
+  toolArgs,
+  reason,
+  text,
+  used,
+  cap,
+} = {}) {
+  const error = {
+    code: "assessor_tool_budget_exhausted",
+    message: String(text || "Assessor tool budget exhausted"),
+    details: { reason, used, cap },
+  };
+  recordOwnerToolObservation({
+    session,
+    toolName,
+    toolArgs,
+    result: mcpToolErrorPayload(error.message, error),
+    durationMs: 0,
+    observationDetail: {
+      assessment_budget_exhausted: true,
+      assessment_budget_reason: reason,
+      assessment_budget_used: used,
+      assessment_budget_cap: cap,
+      tool_name: toolName,
+      transport: "mcp_owner",
+    },
+  });
+}
+
 const deliveredTraversalRefsBySession = new WeakMap();
 
 function deliveredTraversalRefs(text, requestedRefs = []) {
@@ -4206,6 +4248,15 @@ export class PersistentMcpOwner {
             maxToolCalls: session?.bootConfig?.assessorMaxToolCalls,
           });
           if (ceiling.blocked) {
+            recordOwnerAssessorBudgetExhaustion({
+              session,
+              toolName,
+              toolArgs,
+              reason: ceiling.reason,
+              text: ceiling.text,
+              used: ceiling.used,
+              cap: ceiling.cap,
+            });
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -4230,6 +4281,16 @@ export class PersistentMcpOwner {
               : 0;
             session._assessorFallbackReadCount = Number(session._assessorFallbackReadCount || 0);
             if (session._assessorFallbackReadCount >= fallbackReadCap) {
+              const budgetText = "Assessor read budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.";
+              recordOwnerAssessorBudgetExhaustion({
+                session,
+                toolName,
+                toolArgs,
+                reason: "fallback_read_ceiling",
+                text: budgetText,
+                used: session._assessorFallbackReadCount,
+                cap: fallbackReadCap,
+              });
               sendJson(res, 200, {
                 ok: true,
                 bootId: this.bootId,
@@ -4240,7 +4301,7 @@ export class PersistentMcpOwner {
                   result: {
                     content: [{
                       type: "text",
-                      text: "Assessor read budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+                      text: budgetText,
                     }],
                     isError: false,
                   },

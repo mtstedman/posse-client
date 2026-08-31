@@ -135,6 +135,11 @@ export class RunDisplayActions {
       });
     this.liveReviewPromise = null;
     this.humanGatePrompts = new Map();
+    // Reservation ids must never repeat across processes: a rejected answer is
+    // persisted and replayed verbatim for an identical action_id, so a fresh
+    // process re-answering the same still-open gate needs a fresh identity.
+    this.humanGateSessionToken = `${process.pid.toString(36)}-${Date.now().toString(36)}`;
+    this.humanGateActionSequence = 0;
     // Compatibility for callers/tests that inspected the old plan-only map.
     this.planApprovalPrompts = this.humanGatePrompts;
   }
@@ -167,6 +172,7 @@ export class RunDisplayActions {
       .filter((job) => (
         job?.job_type === "human_input"
         && job?.status === "waiting_on_human"
+        && ["plan_approval", "push_offer"].includes(parseJobPayload(job)?.subtype)
         && humanGateChoices(parseJobPayload(job)).length > 0
       ));
     const pendingIds = new Set(pending.map((job) => Number(job.id)));
@@ -230,8 +236,9 @@ export class RunDisplayActions {
           this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} was not resolved: choose ${choices.join(" or ")}.${this.C.reset}`);
           return { ok: false, reason: "invalid_human_gate_answer" };
         }
+        const actionSequence = ++this.humanGateActionSequence;
         const result = await this.answerWorkItemQuestionChoice({
-          action_id: `tui-gate:${gate.id}:${generation}:${action}`,
+          action_id: `tui-gate:${gate.id}:${generation}:${this.humanGateSessionToken}:${actionSequence}:${action}`,
           work_item_id: String(gate.work_item_id),
           job_id: String(gate.id),
           question_id: `gate:${gate.id}:0`,

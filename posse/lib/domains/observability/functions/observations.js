@@ -58,6 +58,7 @@ const RESEARCH_INFRASTRUCTURE_FAILURE_CODES = new Set([
   "native_unavailable",
   "native_transport_error",
   "atlas_storage_error",
+  "indexed_file_missing",
   "code_response_too_large",
   "code_window_response_too_large",
 ]);
@@ -1853,6 +1854,22 @@ export function filterProviderToolUseReplay(toolUses = [], { skipToolkitDetermin
   });
 }
 
+function summarizeToolUseForReconciliation(toolUse, cwd = null) {
+  const rawTool = String(toolUse?.tool || "").trim();
+  const input = toolUse?.input || {};
+  if (_isPosseGatewayMcpTool(rawTool) && !_resolveAtlasAction(rawTool, input)) {
+    const cwdNorm = cwd ? _normalizePath(cwd).replace(/\/+$/, "") : null;
+    const rel = (target) => {
+      const normalized = _normalizePath(target);
+      if (!cwdNorm || !normalized.startsWith(cwdNorm)) return normalized;
+      const relative = normalized.slice(cwdNorm.length).replace(/^\/+/, "");
+      return relative || ".";
+    };
+    return _summarizeCatalogToolUse(rawTool, input, cwdNorm, rel);
+  }
+  return _summarizeToolUse(toolUse, cwd);
+}
+
 export function reconcileProviderToolUseReplay({
   tool_uses = [],
   replay_tool_uses = [],
@@ -1881,7 +1898,22 @@ export function reconcileProviderToolUseReplay({
     }));
   }
 
-  const persisted = getObservationsByJob(normalizedJobId, 5000).flatMap((row) => {
+  // Reconciliation only needs the live durable ledger. Reading through
+  // getObservationsByJob() also scans and merges the complete JSONL telemetry
+  // stream, which makes this provider hot path grow with run history.
+  let persistedRows = [];
+  try {
+    persistedRows = getDb().prepare(`
+      SELECT observation_type, summary, detail_json
+      FROM job_observations
+      WHERE job_id = ? AND observation_type LIKE 'tool.%'
+      ORDER BY id DESC
+      LIMIT 5000
+    `).all(normalizedJobId);
+  } catch {
+    persistedRows = [];
+  }
+  const persisted = persistedRows.flatMap((row) => {
     if (!String(row?.observation_type || "").startsWith("tool.")) return [];
     try {
       const detail = JSON.parse(String(row.detail_json || "{}"));
@@ -1889,6 +1921,8 @@ export function reconcileProviderToolUseReplay({
       return [{
         observation_type: String(row.observation_type),
         summary: String(row.summary || ""),
+        phase: String(detail?.phase || ""),
+        inv: detail?.inv == null ? null : String(detail.inv),
         consumed: false,
       }];
     } catch {
@@ -1909,12 +1943,22 @@ export function reconcileProviderToolUseReplay({
       output.push(toolUse);
       continue;
     }
-    const summary = _summarizeToolUse(toolUse, cwd);
-    const matching = summary == null ? null : persisted.find((row) => (
-      !row.consumed
-      && row.observation_type === summary.observation_type
-      && (row.summary === summary.summary || row.summary.startsWith(`${summary.summary} —`))
-    ));
+    const summary = summarizeToolUseForReconciliation(toolUse, cwd);
+    const matching = summary == null ? null : (
+      persisted.find((row) => (
+        !row.consumed
+        && row.observation_type === summary.observation_type
+        && (row.summary === summary.summary || row.summary.startsWith(`${summary.summary} —`))
+      ))
+      // finishToolInvocation intentionally permits a result-specific summary.
+      // Agent-call identity, canonical type, and an unconsumed finish record
+      // are the durable proof that the toolkit already logged the call.
+      || persisted.find((row) => (
+        !row.consumed
+        && row.observation_type === summary.observation_type
+        && row.phase === "finish"
+      ))
+    );
     if (matching) {
       matching.consumed = true;
       continue;

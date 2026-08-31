@@ -25,7 +25,14 @@ import { HANDOFF_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
 
 import fs from "fs";
 import path from "path";
-import { getIntSetting, getSetting, logEvent } from "../../queue/functions/index.js";
+import {
+  getAttempts,
+  getDependencies,
+  getIntSetting,
+  getJob,
+  getSetting,
+  logEvent,
+} from "../../queue/functions/index.js";
 import {
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
 } from "../../settings/functions/catalog.js";
@@ -1942,6 +1949,86 @@ function _applyAtlasShadowGuardrails(packet) {
 }
 
 const ASSESSMENT_INLINE_DIFF_MAX_BYTES = 50_000;
+const ASSESSMENT_DEPENDENCY_DIFF_MAX_BYTES = 24_000;
+const ASSESSMENT_DEPENDENCY_MAX_JOBS = 4;
+const ASSESSMENT_DEPENDENCY_MAX_FILES = 32;
+
+function normalizeAssessmentDiffPath(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "/dev/null") return "";
+  const unprefixed = raw.startsWith("b/") ? raw.slice(2) : raw;
+  return unprefixed.replace(/\\/g, "/");
+}
+
+function mergeAssessmentSourceRanges(ranges = []) {
+  const byIdentity = new Map();
+  for (const range of ranges) {
+    const sourcePath = normalizeAssessmentDiffPath(range?.path);
+    const start = Number(range?.start_line);
+    const end = Number(range?.end_line);
+    if (!sourcePath || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) continue;
+    const sourceVersion = String(range?.source_version || "").trim() || null;
+    const origin = String(range?.origin || "assessment_inline_diff").trim() || "assessment_inline_diff";
+    const dependencyJobId = Number(range?.dependency_job_id) || null;
+    const key = JSON.stringify([sourcePath, sourceVersion, origin, dependencyJobId]);
+    const entry = byIdentity.get(key) || {
+      path: sourcePath,
+      source_version: sourceVersion,
+      origin,
+      ...(dependencyJobId ? { dependency_job_id: dependencyJobId } : {}),
+      ranges: [],
+    };
+    entry.ranges.push({ start, end });
+    byIdentity.set(key, entry);
+  }
+  return [...byIdentity.values()].flatMap((entry) => {
+    const sorted = entry.ranges.sort((left, right) => left.start - right.start || left.end - right.end);
+    const merged = [];
+    for (const range of sorted) {
+      const previous = merged.at(-1);
+      if (previous && range.start <= previous.end + 1) previous.end = Math.max(previous.end, range.end);
+      else merged.push({ ...range });
+    }
+    return merged.map((range) => ({
+      path: entry.path,
+      start_line: range.start,
+      end_line: range.end,
+      source_version: entry.source_version,
+      origin: entry.origin,
+      ...(entry.dependency_job_id ? { dependency_job_id: entry.dependency_job_id } : {}),
+    }));
+  });
+}
+
+export function assessmentInlineDiffSourceRanges(rawDiff, {
+  sourceVersion = null,
+  origin = "assessment_inline_diff",
+  dependencyJobId = null,
+} = {}) {
+  const ranges = [];
+  let currentPath = "";
+  for (const line of String(rawDiff || "").split(/\r?\n/)) {
+    if (line.startsWith("+++ ")) {
+      currentPath = normalizeAssessmentDiffPath(line.slice(4));
+      continue;
+    }
+    if (!currentPath) continue;
+    const hunk = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/.exec(line);
+    if (!hunk) continue;
+    const start = Number(hunk[1]);
+    const count = hunk[2] == null ? 1 : Number(hunk[2]);
+    if (!Number.isInteger(start) || !Number.isInteger(count) || start < 1 || count < 1) continue;
+    ranges.push({
+      path: currentPath,
+      start_line: start,
+      end_line: start + count - 1,
+      source_version: String(sourceVersion || "").trim() || null,
+      origin,
+      ...(Number(dependencyJobId) > 0 ? { dependency_job_id: Number(dependencyJobId) } : {}),
+    });
+  }
+  return mergeAssessmentSourceRanges(ranges);
+}
 
 function assessmentDiffRange(assessmentContext) {
   const head = String(assessmentContext?.commit_hash || "").trim();
@@ -1954,6 +2041,7 @@ function applyAssessmentInlineDiff(assessmentContext, rawDiff, { stat = "", fail
   const diff = String(rawDiff || "").trim();
   const bytes = Buffer.byteLength(diff, "utf8");
   delete assessmentContext.scoped_git_diff;
+  delete assessmentContext.scoped_git_diff_source_ranges;
   assessmentContext.scoped_git_diff_bytes = bytes || null;
   assessmentContext.scoped_git_diff_stat = String(stat || "").trim() || null;
   if (failed) {
@@ -1961,12 +2049,203 @@ function applyAssessmentInlineDiff(assessmentContext, rawDiff, { stat = "", fail
   } else if (diff && bytes <= ASSESSMENT_INLINE_DIFF_MAX_BYTES) {
     assessmentContext.scoped_git_diff = diff;
     assessmentContext.scoped_git_diff_status = "complete";
+    assessmentContext.scoped_git_diff_source_ranges = assessmentInlineDiffSourceRanges(diff, {
+      sourceVersion: assessmentContext.commit_hash || assessmentContext.branch_net_diff_head || null,
+    });
   } else if (diff || bytes > ASSESSMENT_INLINE_DIFF_MAX_BYTES) {
     assessmentContext.scoped_git_diff_status = "over_inline_cap";
   } else {
     assessmentContext.scoped_git_diff_status = "empty";
   }
   return assessmentContext;
+}
+
+function assessmentDependencyAttempts(assessmentContext) {
+  const taskMode = String(assessmentContext?.task_mode || "code").trim().toLowerCase();
+  if (taskMode !== "code") return [];
+  const jobId = Number(assessmentContext?.job_id);
+  if (!Number.isInteger(jobId) || jobId <= 0) return [];
+  let currentJob;
+  let dependencies;
+  try {
+    currentJob = getJob(jobId);
+    dependencies = getDependencies(jobId)
+      .filter((dependency) => dependency.dep_status === "succeeded")
+      .slice(0, ASSESSMENT_DEPENDENCY_MAX_JOBS);
+  } catch {
+    return [];
+  }
+  const candidates = [];
+  for (const dependency of dependencies) {
+    let dependencyJob;
+    let attempt;
+    try {
+      dependencyJob = getJob(dependency.depends_on_job_id);
+      if (!dependencyJob
+        || dependencyJob.work_item_id !== currentJob?.work_item_id
+        || !ASSESSABLE_JOB_TYPES.has(dependencyJob.job_type)) continue;
+      attempt = getAttempts(dependencyJob.id)
+        .filter((entry) => entry.status === "succeeded" && String(entry.commit_hash || "").trim())
+        .sort((left, right) => Number(right.attempt_number || 0) - Number(left.attempt_number || 0))[0];
+    } catch {
+      continue;
+    }
+    if (!attempt) continue;
+    candidates.push({
+      dependency_kind: dependency.dependency_kind,
+      job: dependencyJob,
+      attempt,
+    });
+  }
+  return candidates;
+}
+
+function dependencyDiffRange(attempt) {
+  const head = String(attempt?.commit_hash || "").trim();
+  const base = String(attempt?.commit_base_hash || "").trim();
+  if (!head) return "";
+  return base ? `${base}..${head}` : `${head}^!`;
+}
+
+function assessmentDependencyPathList(raw = "") {
+  return [...new Set(String(raw || "")
+    .split(/\r?\n/)
+    .map(normalizeAssessmentDiffPath)
+    .filter(Boolean))]
+    .slice(0, ASSESSMENT_DEPENDENCY_MAX_FILES);
+}
+
+function dependencyContextEntry(candidate, {
+  diff = "",
+  stat = "",
+  paths = [],
+  currentChanges = "",
+  currentHead = "",
+  inlineBudgetBytes = ASSESSMENT_DEPENDENCY_DIFF_MAX_BYTES,
+  failed = false,
+} = {}) {
+  const bytes = Buffer.byteLength(String(diff || ""), "utf8");
+  const withinInlineBudget = bytes <= Math.max(0, Number(inlineBudgetBytes) || 0);
+  const currentChangedPaths = new Set(assessmentDependencyPathList(currentChanges));
+  const sourceRanges = failed || !withinInlineBudget
+    ? []
+    : assessmentInlineDiffSourceRanges(diff, {
+        sourceVersion: currentHead || candidate.attempt.commit_hash,
+        origin: "assessment_dependency_diff",
+        dependencyJobId: candidate.job.id,
+      }).filter((range) => !currentChangedPaths.has(range.path));
+  return {
+    job_id: candidate.job.id,
+    title: candidate.job.title,
+    dependency_kind: candidate.dependency_kind,
+    commit_hash: candidate.attempt.commit_hash,
+    commit_base_hash: candidate.attempt.commit_base_hash || null,
+    files: paths,
+    stat: String(stat || "").trim() || null,
+    diff: !failed && diff && withinInlineBudget ? String(diff).trim() : null,
+    status: failed
+      ? "prefetch_failed"
+      : !withinInlineBudget ? "over_inline_cap" : "complete",
+    bytes,
+    source_ranges: sourceRanges,
+  };
+}
+
+function attachAssessmentDependencyDiffs(assessmentContext, cwd) {
+  const currentHead = String(assessmentContext?.commit_hash || assessmentContext?.branch_net_diff_head || "").trim();
+  const entries = [];
+  let remainingInlineBytes = ASSESSMENT_DEPENDENCY_DIFF_MAX_BYTES;
+  for (const candidate of assessmentDependencyAttempts(assessmentContext)) {
+    const range = dependencyDiffRange(candidate.attempt);
+    if (!range) continue;
+    try {
+      const paths = assessmentDependencyPathList(gitExec(["diff", "--name-only", range], cwd, {
+        timeoutMs: 15000,
+        maxBuffer: 1024 * 1024 * 2,
+      }));
+      if (paths.length === 0) continue;
+      const diff = gitExec(["diff", "--unified=6", range, "--", ...paths], cwd, {
+        timeoutMs: 15000,
+        maxBuffer: 1024 * 1024 * 8,
+      });
+      const stat = gitExec(["diff", "--stat", "--summary", range, "--", ...paths], cwd, {
+        timeoutMs: 15000,
+        maxBuffer: 1024 * 1024 * 2,
+      });
+      const currentChanges = currentHead
+        ? gitExec(["diff", "--name-only", `${candidate.attempt.commit_hash}..${currentHead}`, "--", ...paths], cwd, {
+            timeoutMs: 15000,
+            maxBuffer: 1024 * 1024 * 2,
+          })
+        : paths.join("\n");
+      const entry = dependencyContextEntry(candidate, {
+        diff,
+        stat,
+        paths,
+        currentChanges,
+        currentHead,
+        inlineBudgetBytes: remainingInlineBytes,
+      });
+      entries.push(entry);
+      if (entry.diff) remainingInlineBytes = Math.max(0, remainingInlineBytes - entry.bytes);
+    } catch {
+      entries.push(dependencyContextEntry(candidate, { failed: true }));
+    }
+  }
+  assessmentContext.dependency_git_diffs = entries;
+  assessmentContext.dependency_git_diff_source_ranges = mergeAssessmentSourceRanges(
+    entries.flatMap((entry) => entry.source_ranges || []),
+  );
+}
+
+async function attachAssessmentDependencyDiffsAsync(assessmentContext, cwd) {
+  const currentHead = String(assessmentContext?.commit_hash || assessmentContext?.branch_net_diff_head || "").trim();
+  const entries = [];
+  let remainingInlineBytes = ASSESSMENT_DEPENDENCY_DIFF_MAX_BYTES;
+  for (const candidate of assessmentDependencyAttempts(assessmentContext)) {
+    const range = dependencyDiffRange(candidate.attempt);
+    if (!range) continue;
+    try {
+      const rawPaths = await gitExecAsync(["diff", "--name-only", range], cwd, {
+        timeoutMs: 15000,
+        maxBuffer: 1024 * 1024 * 2,
+      });
+      const paths = assessmentDependencyPathList(rawPaths);
+      if (paths.length === 0) continue;
+      const [diff, stat, currentChanges] = await Promise.all([
+        gitExecAsync(["diff", "--unified=6", range, "--", ...paths], cwd, {
+          timeoutMs: 15000,
+          maxBuffer: 1024 * 1024 * 8,
+        }),
+        gitExecAsync(["diff", "--stat", "--summary", range, "--", ...paths], cwd, {
+          timeoutMs: 15000,
+          maxBuffer: 1024 * 1024 * 2,
+        }),
+        currentHead
+          ? gitExecAsync(["diff", "--name-only", `${candidate.attempt.commit_hash}..${currentHead}`, "--", ...paths], cwd, {
+              timeoutMs: 15000,
+              maxBuffer: 1024 * 1024 * 2,
+            })
+          : Promise.resolve(paths.join("\n")),
+      ]);
+      const entry = dependencyContextEntry(candidate, {
+        diff,
+        stat,
+        paths,
+        currentChanges,
+        currentHead,
+        inlineBudgetBytes: remainingInlineBytes,
+      });
+      entries.push(entry);
+      if (entry.diff) remainingInlineBytes = Math.max(0, remainingInlineBytes - entry.bytes);
+    } catch {
+      entries.push(dependencyContextEntry(candidate, { failed: true }));
+    }
+  }
+  assessmentContext.dependency_git_diffs = entries;
+  assessmentContext.dependency_git_diff_source_ranges = mergeAssessmentSourceRanges(
+    entries.flatMap((entry) => entry.source_ranges || []),
+  );
 }
 
 export function __testApplyAssessmentInlineDiff(assessmentContext, rawDiff, options = {}) {
@@ -2001,14 +2280,19 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
   const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
   if (branchNetDiff || assessmentContext.branch_net_diff_truncated === true) {
-    return branchAssessmentDiffContext(assessmentContext, branchNetDiff);
+    branchAssessmentDiffContext(assessmentContext, branchNetDiff);
+    attachAssessmentDependencyDiffs(assessmentContext, cwd);
+    return assessmentContext;
   }
   const diffRange = assessmentDiffRange(assessmentContext);
   const scopedPaths = [...new Set([
     ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
     ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
   ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
-  if (!diffRange || scopedPaths.length === 0) return assessmentContext;
+  if (!diffRange || scopedPaths.length === 0) {
+    attachAssessmentDependencyDiffs(assessmentContext, cwd);
+    return assessmentContext;
+  }
   try {
     const diffArgs = ["diff", "--unified=6", diffRange, "--", ...scopedPaths];
     const statArgs = ["diff", "--stat", "--summary", diffRange, "--", ...scopedPaths];
@@ -2021,6 +2305,7 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
   } catch {
     applyAssessmentInlineDiff(assessmentContext, "", { failed: true });
   }
+  attachAssessmentDependencyDiffs(assessmentContext, cwd);
   attachDiffNarrative(assessmentContext, cwd);
   return assessmentContext;
 }
@@ -2029,14 +2314,19 @@ export async function attachAssessmentDiffContextAsync(assessmentContext = null,
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
   const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
   if (branchNetDiff || assessmentContext.branch_net_diff_truncated === true) {
-    return branchAssessmentDiffContext(assessmentContext, branchNetDiff);
+    branchAssessmentDiffContext(assessmentContext, branchNetDiff);
+    await attachAssessmentDependencyDiffsAsync(assessmentContext, cwd);
+    return assessmentContext;
   }
   const diffRange = assessmentDiffRange(assessmentContext);
   const scopedPaths = [...new Set([
     ...(Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : []),
     ...(Array.isArray(assessmentContext.files_reverted) ? assessmentContext.files_reverted : []),
   ].filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
-  if (!diffRange || scopedPaths.length === 0) return assessmentContext;
+  if (!diffRange || scopedPaths.length === 0) {
+    await attachAssessmentDependencyDiffsAsync(assessmentContext, cwd);
+    return assessmentContext;
+  }
   try {
     const [stdout, stat] = await Promise.all([
       gitExecAsync(["diff", "--unified=6", diffRange, "--", ...scopedPaths], cwd, {
@@ -2052,6 +2342,7 @@ export async function attachAssessmentDiffContextAsync(assessmentContext = null,
   } catch {
     applyAssessmentInlineDiff(assessmentContext, "", { failed: true });
   }
+  await attachAssessmentDependencyDiffsAsync(assessmentContext, cwd);
   await attachDiffNarrativeAsync(assessmentContext, cwd);
   return assessmentContext;
 }

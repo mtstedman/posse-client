@@ -405,6 +405,31 @@ function positiveIntegerOrNull(value) {
   return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
 }
 
+function normalizeAttachedSourceEvidence(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 8).flatMap((entry) => {
+    const text = String(entry?.text || "");
+    const kind = String(entry?.kind || "attached_source").trim() || "attached_source";
+    if (!text || !Array.isArray(entry?.ranges)) return [];
+    const ranges = entry.ranges.slice(0, 128).flatMap((range) => {
+      const sourcePath = String(range?.path || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
+      const start = Number(range?.start_line);
+      const end = Number(range?.end_line);
+      if (!sourcePath || path.posix.isAbsolute(sourcePath)
+        || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return [];
+      return [{
+        path: sourcePath,
+        start_line: start,
+        end_line: end,
+        source_version: String(range?.source_version || "").trim() || null,
+        origin: String(range?.origin || kind).trim() || kind,
+        dependency_job_id: Number(range?.dependency_job_id) || null,
+      }];
+    });
+    return ranges.length > 0 ? [{ text, kind, ranges }] : [];
+  });
+}
+
 // Production defaults are captured at module import time. Tests should pass
 // explicit deps into TrackedProviderClient instead of monkey-patching modules.
 const DEFAULT_DEPS = {
@@ -1286,13 +1311,16 @@ export class TrackedProviderClient {
       recordRecoveryCheckpoint,
       logAgentActivity,
       recordProviderToolBatchObservations,
+      recordObservation,
       recordToolUseObservations,
       retainReplayOutput,
       retainReplayPrompt,
       retainReplayToolUses,
       runWithObservationContext,
     } = this.deps;
+    const attachedSourceEvidence = normalizeAttachedSourceEvidence(opts._attachedSourceEvidence);
     const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
+    delete effectiveCapabilityOpts._attachedSourceEvidence;
     const localHandoffCapability = effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
     const remoteHandoffCapability = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true;
     assertExpectedCoordination(effectiveCapabilityOpts, {
@@ -1337,6 +1365,37 @@ export class TrackedProviderClient {
       work_item_id: work_item_id ?? observationContext?.work_item_id ?? null,
       job_id: job_id ?? observationContext?.job_id ?? null,
       agent_call_id: agentCallId,
+    };
+    const recordedAttachedSourceRanges = new Set();
+    const bindAttachedSourceEvidence = (deliveredPrompt) => {
+      if (String(opts._agentCallRole || opts.role || "").trim().toLowerCase() !== "assessor") return;
+      const promptText = String(deliveredPrompt || "");
+      for (const block of attachedSourceEvidence) {
+        if (!promptText.includes(block.text)) continue;
+        for (const range of block.ranges) {
+          const identity = JSON.stringify([block.kind, range.path, range.start_line, range.end_line, range.source_version]);
+          if (recordedAttachedSourceRanges.has(identity)) continue;
+          recordedAttachedSourceRanges.add(identity);
+          recordObservation({
+            work_item_id,
+            job_id,
+            attempt_id: observationContext?.attempt_id ?? null,
+            observation_type: "source.coverage",
+            summary: `delivered ${block.kind} source coverage ${range.path}:${range.start_line}-${range.end_line}`,
+            detail: {
+              delivery_state: "delivered",
+              delivery_origin: block.kind,
+              agent_call_id: agentCallId,
+              repository_identity: cwd ? path.resolve(cwd) : null,
+              source_version: range.source_version,
+              repo_rel_path: range.path,
+              start_line: range.start_line,
+              end_line: range.end_line,
+              ...(range.dependency_job_id ? { dependency_job_id: range.dependency_job_id } : {}),
+            },
+          });
+        }
+      }
     };
     try {
       bindAutoExpandedDevBriefEvidenceToAgentCall(effectiveCapabilityOpts?.sessionPacket, {
@@ -1506,6 +1565,7 @@ export class TrackedProviderClient {
       },
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
         const promptText = typeof finalPrompt === "string" ? finalPrompt : String(finalPrompt ?? "");
+        bindAttachedSourceEvidence(promptText);
         retainReplayPrompt?.(agentCallId, {
           prompt: promptText,
           systemPrompt,
@@ -1855,7 +1915,6 @@ export class TrackedProviderClient {
         if (
           !terminalHandoffStop
           || abortSignal?.aborted
-          || error?.terminalHandoffStopCompatible === false
         ) {
           // A provider can time out or hit its turn ceiling after one or more
           // rejected terminal handoffs. Preserve that protocol failure instead
@@ -1866,7 +1925,10 @@ export class TrackedProviderClient {
           const rejection = handoffRequired && !abortSignal?.aborted
             ? this.deps.getLatestAgentHandoffRejection?.(agentCallId)
             : null;
-          if (rejection) {
+          const providerInfrastructureFailure = this.isProviderError(error)
+            || isRuntimeModelError(error)
+            || !!error?.stallKill;
+          if (rejection && !providerInfrastructureFailure) {
             const handoffError = new Error(
               `agent_handoff was rejected (${rejection.code}: ${rejection.message})`,
               { cause: error },
@@ -1879,7 +1941,11 @@ export class TrackedProviderClient {
             }
             handoffError.output = error?.output || "";
             handoffError.stats = error?.stats || {};
+            handoffError.toolUses = error?.toolUses || [];
             throw handoffError;
+          }
+          if (rejection) {
+            try { error.handoffRejection = rejection; } catch { /* preserve the original provider error */ }
           }
           throw error;
         }

@@ -196,6 +196,7 @@ export class PlannerRole extends BaseRole {
           ].join("\n")
         : "";
     const compactPlannerHandoff = plannerCtx.plannerPacket?.agent_coordination?.agent_handoff_compact_v1 === true;
+    const previousAttemptError = String(plannerCtx.plannerPacket?.attempt?.last_error || "").trim();
     const atlasDevBriefContract = plannerCtx.plannerPacket?.atlas?.active
       ? compactPlannerHandoff
         ? [
@@ -231,6 +232,12 @@ export class PlannerRole extends BaseRole {
       plannerCtx.plannerOutputBindingRules,
       plannerCtx.desiredOutputsBlock,
       job ? loadNudges(job.id, { attemptId: plannerCtx.attemptId }) : "",
+      previousAttemptError
+        ? promptLiteral(
+            "PREVIOUS ATTEMPT ERROR (repair this exact failure before resubmitting)",
+            previousAttemptError.slice(0, 2000),
+          )
+        : "",
       plannerCtx.plannerRoutingContext,
       [
         "FINAL COVERAGE CHECK (before submitting):",
@@ -934,7 +941,8 @@ export class PlannerRole extends BaseRole {
     const coverageGaps = planCoverageGaps(ctx.workItem, tasks);
     if (coverageGaps.length > 0) {
       const detail = `Planner coverage check failed: ${coverageGaps.join("; ")}`;
-      emit(worker, job.id, `${C.red}[planner]${C.reset} WI#${job.work_item_id}: ${detail}`);
+      const attemptCount = Number(ctx.plannerPacket?.attempt?.count || 1);
+      emit(worker, job.id, `${attemptCount <= 1 ? C.red : C.yellow}[planner]${C.reset} WI#${job.work_item_id}: ${detail}`);
       logBadInputFailure(job, {
         attemptId: ctx.attemptId,
         layer: "planner",
@@ -943,7 +951,7 @@ export class PlannerRole extends BaseRole {
         detail,
         snippet: output,
       });
-      throw new Error(detail);
+      if (attemptCount <= 1) throw new Error(detail);
     }
     worker.createJobsFromPlan(job, tasks, {
       atlasDevBriefsEnabled: !!ctx.plannerPacket?.atlas?.active,

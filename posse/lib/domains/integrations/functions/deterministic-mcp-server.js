@@ -3666,6 +3666,27 @@ async function handleRequest(msg) {
         used: assessorBudget.used,
         cap: assessorBudget.cap,
       });
+      const budgetInvocation = beginToolInvocation({
+        tool: toolName,
+        input: args,
+        cwd: workspaceCwd,
+      });
+      finishToolInvocation(budgetInvocation, {
+        tool: toolName,
+        input: args,
+        cwd: workspaceCwd,
+        ok: false,
+        outcome: "rejected",
+        rejection: assessorBudget.text,
+        extraDetail: {
+          assessment_budget_exhausted: true,
+          assessment_budget_reason: assessorBudget.reason,
+          assessment_budget_used: assessorBudget.used,
+          assessment_budget_cap: assessorBudget.cap,
+          tool_name: toolName,
+          transport: "deterministic_mcp",
+        },
+      });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: assessorBudget.text }],
         isError: false,

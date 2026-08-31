@@ -459,15 +459,15 @@ export class DisplayInputController {
 
     // ── Normal mode ──
     if (this._inputMode === "question") {
+      const fixedChoices = Array.isArray(this._activeQ?.choices) ? this._activeQ.choices : [];
       // A question may already be active when the operator switches views.
       // Honor Agent View's advertised answer hotkey before closed-choice
       // handling consumes the key as unsupported free-form input.
-      if (this._rightMode === "monitor" && matchesHotkey(str, key, "a")) {
+      if (fixedChoices.length > 0 && this._rightMode === "monitor" && matchesHotkey(str, key, "a")) {
         this._startAnsweringForJob(this._monitorSelectedJobId);
         this.requestRender({ force: true });
         return;
       }
-      const fixedChoices = Array.isArray(this._activeQ?.choices) ? this._activeQ.choices : [];
       const digit = digitInput(str, key);
       if (digit != null && this._submitChoice(digit - 1)) {
         this.requestRender({ force: true });
