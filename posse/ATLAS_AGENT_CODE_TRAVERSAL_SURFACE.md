@@ -43,7 +43,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `dev`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -836,6 +836,30 @@ Read basic image metadata (format, dimensions, byte size).
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `path` | `string` | Required |  | Image file path. |
+
+### `tools.request_scope`
+
+Remote roles: `dev`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `request_scope` |
+| Tool reference token | `tools.request_scope` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `write` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Request one consolidated human approval for exact file paths outside the current writable scope. Prefer requests[] before editing when several paths are known.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `access` | `string` | Conditional | values "modify", "create" | Whether the job needs permission to modify an existing file or create a new file. |
+| `operation` | `string` | Conditional | values "write_file", "edit_file" | Mutation that needs the expanded scope. |
+| `path` | `string` | Conditional |  | Exact repository-relative file path that needs writable scope. |
+| `reason` | `string` | Optional |  | Short explanation of why this exact path is required for the current task. |
+| `requests` | `array<object>` | Conditional | min items 1; max items 24 | Exact paths to approve together in one human decision. |
 
 ### `atlas.review.analyze`
 

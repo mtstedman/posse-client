@@ -296,14 +296,6 @@ export class FixRole extends BaseRole {
 
     const fixDriftContext = worker.detectDrift(job, fixFiles, fixCwd);
     const fixNudgeContext = loadNudges(job.id, { attemptId: ctx.attemptId });
-    const fixText = [
-      payload.task_spec || "",
-      payload.fix_instructions || "",
-      ...(Array.isArray(payload.assessor_feedback) ? payload.assessor_feedback : []),
-    ].join("\n").toLowerCase();
-    const hasScopedPng = [...fixFiles, ...fixCreateFiles].some((file) => String(file || "").toLowerCase().endsWith(".png"));
-    const shouldHintResizeTool = hasScopedPng && /\b(resize|aspect ratio|dimensions?|crop|scale)\b/.test(fixText);
-
     const fixFallbackReads = packet.budgets?.fallback_reads_remaining ?? null;
     const fixTaskMode = payload.task_mode || "code";
     const fixNeedsImageGen = !!payload.needs_image_generation;
@@ -355,15 +347,6 @@ export class FixRole extends BaseRole {
       promptLiteral("TASK", job.title),
       "",
       promptLiteral("FIX INSTRUCTIONS", payload.task_spec || payload.fix_instructions || payload.instructions || job.title),
-      [
-        "",
-        "SCOPE CONTINUITY:",
-        "- Before the first out-of-scope edit, batch every known additional exact path in one request_scope requests[] call with a reason per path.",
-        "- Do not request directories or serialize predictable file approvals.",
-      ].join("\n"),
-      shouldHintResizeTool
-        ? "\nTOOL HINT:\nUse `clean_image` with mode=resize for PNG aspect-ratio or dimension fixes when the existing asset just needs resizing. Prefer resizing the current file over regenerating it."
-        : null,
       originalOutput ? `\nPREVIOUS DEV OUTPUT (read-only context):\n${originalOutput.slice(0, 2000)}` : null,
     ].filter((value) => value !== null).join("\n");
   }
