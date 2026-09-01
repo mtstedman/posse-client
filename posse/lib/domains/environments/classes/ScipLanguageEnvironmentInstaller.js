@@ -85,14 +85,15 @@ export class ScipLanguageEnvironmentInstaller {
    * @param {number} stepIndex
    * @param {string} step
    * @param {() => Promise<T> | T} action
+   * @param {{ totalSteps?: number }} [options]
    */
-  async runStep(stepIndex, step, action) {
+  async runStep(stepIndex, step, action, { totalSteps = this.installPlan().length } = {}) {
     if (!this.harness) return await action();
     return await this.harness.runStep({
       language: this.language,
       step,
       stepIndex,
-      totalSteps: this.installPlan().length,
+      totalSteps,
       platform: this.platform,
       action,
     });

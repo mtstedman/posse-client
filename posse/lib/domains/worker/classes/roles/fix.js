@@ -355,6 +355,12 @@ export class FixRole extends BaseRole {
       promptLiteral("TASK", job.title),
       "",
       promptLiteral("FIX INSTRUCTIONS", payload.task_spec || payload.fix_instructions || payload.instructions || job.title),
+      [
+        "",
+        "SCOPE CONTINUITY:",
+        "- Before the first out-of-scope edit, batch every known additional exact path in one request_scope requests[] call with a reason per path.",
+        "- Do not request directories or serialize predictable file approvals.",
+      ].join("\n"),
       shouldHintResizeTool
         ? "\nTOOL HINT:\nUse `clean_image` with mode=resize for PNG aspect-ratio or dimension fixes when the existing asset just needs resizing. Prefer resizing the current file over regenerating it."
         : null,

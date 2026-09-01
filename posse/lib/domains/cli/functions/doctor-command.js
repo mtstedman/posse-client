@@ -49,6 +49,12 @@ function progressText(value) {
   return firstLine(value);
 }
 
+function isDependencyWarning(value) {
+  const text = progressText(value);
+  return /(?:^|:\s*)(?:(?:composer|npm|pnpm|yarn|pip|php)\s+)?(?:warn(?:ing)?|deprecation notice|deprecated)\b/iu.test(text)
+    || /\bpackage\s+\S+\s+is abandoned\b/iu.test(text);
+}
+
 function stepOrdinal(event = {}) {
   const index = Number(event.stepIndex || 0);
   const total = Number(event.totalSteps || 0);
@@ -131,6 +137,7 @@ function createDoctorProgressRenderer({ log, colors, json }) {
     if (json) return;
     const text = progressText(message);
     if (!text) return;
+    if (isDependencyWarning(text)) return;
     if (sawStructuredScipInstall && /^SCIP deps:/iu.test(text)) return;
     log(`  ${colors.dim}[doctor]${colors.reset} ${text}`);
   };

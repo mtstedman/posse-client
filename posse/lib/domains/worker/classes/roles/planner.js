@@ -567,6 +567,11 @@ export class PlannerRole extends BaseRole {
       "- Migration, build, code-generation, server-start, and deploy commands are not tests. Select an existing test/check command that validates their behavior; if none exists, omit test_command.",
       "- The worker freezes that command before DEV and runs it once before and once after implementation; DEV must not run it.",
       "- If no existing suite applies, omit test_command instead of inventing one. Test execution is verification metadata, not a success criterion.",
+      "Smooth task shaping for code work:",
+      "- Do not put a cross-subsystem audit into one giant dev task. Split backend routing, provider integration, frontend callers, migrations, and integration verification when they can be completed and assessed independently.",
+      "- As a strong heuristic, split a task that owns more than 8 exact repository files or more than 2 independent subsystems. Preserve dependencies and finish with the narrowest existing integration check.",
+      "- Enumerate every already-predictable writable file. Runtime scope requests are for discoveries, not a substitute for planning known callers, shared types, migrations, or tests.",
+      "- Keep operational commands separate from verification: a migration or generator may require approval to execute, but its successful exit is never evidence that the resulting behavior is correct.",
       // Conditional: empty when this repo has no project-db config, so
       // unconfigured repos see no db-task guidance at all.
       ...buildProjectDbRoutingLines(plannerReadRoot),

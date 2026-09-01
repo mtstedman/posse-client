@@ -225,6 +225,15 @@ export class DeveloperRole extends BaseRole {
       promptLiteral("TASK", job.title),
       "",
       promptLiteral("INSTRUCTIONS", payload.task_spec || job.title),
+      !dbOnlyTask
+        ? [
+          "",
+          "SCOPE CONTINUITY:",
+          "- After inspection and before the first out-of-scope edit, identify every additional exact file the task will require.",
+          "- Call request_scope once with requests[] for those exact paths and one reason per path. Do not request a directory or ask one file at a time.",
+          "- Continue the same implementation after the consolidated decision; ordinary edit_file enforcement remains the fallback for an unanticipated path.",
+        ].join("\n")
+        : null,
       dbOnlyTask
         ? [
           "",

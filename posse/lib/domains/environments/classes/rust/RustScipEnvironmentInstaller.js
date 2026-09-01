@@ -34,9 +34,11 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   }
 
   async install() {
+    const wrapper = this.commandPath(this.commandSegments, "scip-rust");
+    const reuseExisting = !this.force && fileExists(wrapper);
+    const totalSteps = reuseExisting ? 1 : (this.dryRun ? 2 : this.installPlan().length);
     const existing = await this.runStep(1, "check scip-rust wrapper", async () => {
-      const wrapper = this.commandPath(this.commandSegments, "scip-rust");
-      if (this.force || !fileExists(wrapper)) return null;
+      if (!reuseExisting) return null;
       if (this.dryRun) return this.ok("ok", "scip-rust wrapper present");
       const validation = await this.validateRustAnalyzer();
       if (!validation.ok) return this.failed(`scip-rust wrapper exists, but ${validation.message}`);
@@ -46,13 +48,13 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
       // analyzer path whenever dependency setup runs.
       await this.writeRustWrapper(validation.path);
       return this.ok("ok", "scip-rust wrapper already installed");
-    });
+    }, { totalSteps });
     if (existing?.ok === true || existing?.ok === false) return existing;
 
     if (this.dryRun) {
-      return await this.runStep(5, "write scip-rust wrapper", async () => (
+      return await this.runStep(2, "write scip-rust wrapper", async () => (
         this.ok("dry-run", `would install rust-analyzer if needed and write scip-rust wrapper in ${this.binDir}`)
-      ));
+      ), { totalSteps });
     }
 
     const toolchain = await this.runStep(2, "check Rust toolchain", async () => {
@@ -60,7 +62,7 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
         return this.failed("Rust toolchain not found on PATH; install Rust or deselect Rust in atlas_scip_languages");
       }
       return this.ok("ok", "Rust toolchain present");
-    });
+    }, { totalSteps });
     if (toolchain?.ok === false) return toolchain;
 
     let analyzerPath = null;
@@ -69,19 +71,19 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
       if (!validation.ok) return this.failed(validation.message);
       analyzerPath = validation.path;
       return this.ok("ok", "rust-analyzer available");
-    });
+    }, { totalSteps });
     if (analyzer?.ok === false) return analyzer;
 
     const prepared = await this.runStep(4, "prepare Posse scip/bin", async () => {
       await fs.promises.mkdir(this.binDir, { recursive: true });
       return this.ok("ok", `prepared ${this.binDir}`);
-    });
+    }, { totalSteps });
     if (prepared?.ok === false) return prepared;
 
     return await this.runStep(5, "write scip-rust wrapper", async () => {
       await this.writeRustWrapper(analyzerPath);
       return this.ok("installed", "installed scip-rust wrapper");
-    });
+    }, { totalSteps });
   }
 
   status() {

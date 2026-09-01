@@ -31,7 +31,7 @@ export function handle(job, verdict, ctx) {
   const asksForClarification = hasOperatorOnlyQuestion && priorClarifications.length === 0;
   const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
   if (
-    !hasOperatorOnlyQuestion
+    !asksForClarification
     && !verdict?._disable_internal_retry
     && queueInternalAssessmentRetry(job, verdict, retryReason, {
       leaseToken: ctx.leaseToken,
@@ -39,6 +39,23 @@ export function handle(job, verdict, ctx) {
     })
   ) {
     log(`${C.yellow}[assessor] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before asking the operator${reasonBrief}`);
+    return;
+  }
+
+  if (!asksForClarification) {
+    const changed = typeof ctx.updateJobStatus === "function"
+      ? ctx.updateJobStatus("failed")
+      : updateJobStatus(job.id, "failed");
+    if (!changed) return;
+    log(`${C.yellow}[assessor] NEEDS REVIEW EXHAUSTED${C.reset} WI#${job.work_item_id} job #${job.id}: automatic assessment recovery exhausted; failed closed without an operator gate${reasonBrief}`);
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
+      actor_type: EVENT_ACTORS.ASSESSOR,
+      message: `Automatic assessment recovery exhausted without an operator-only question: ${retryReason}`,
+      event_json: JSON.stringify({ operator_actionable: false, retry_reason: retryReason }),
+    });
     return;
   }
 
@@ -50,9 +67,7 @@ export function handle(job, verdict, ctx) {
 
   // Always spawn a human_input job. Without one, waiting_on_review is a
   // permanent trap with no mechanism to unblock.
-  const questions = asksForClarification || (!hasOperatorOnlyQuestion && explicitHumanQuestions.length > 0)
-    ? explicitHumanQuestions
-    : [`Job #${job.id} ("${job.title}") needs human review.\nReasons: ${verdict.reasons.join("; ")}\nShould this pass or fail?`];
+  const questions = explicitHumanQuestions;
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,
     title: `Review needed: ${job.title}`,
@@ -77,7 +92,7 @@ export function handle(job, verdict, ctx) {
 }
 
 export function handleParseError(job, verdict, ctx) {
-  const { emitLog: log, spawnedJobs, spawnFromAssessor } = ctx;
+  const { emitLog: log } = ctx;
 
   const retryReason = verdict.reasons?.[0] || "assessor output could not be parsed";
   if (!verdict?._disable_internal_retry && queueInternalAssessmentRetry(job, verdict, retryReason, {
@@ -88,79 +103,46 @@ export function handleParseError(job, verdict, ctx) {
   }
 
   const changed = typeof ctx.updateJobStatus === "function"
-    ? ctx.updateJobStatus("waiting_on_review")
-    : updateJobStatus(job.id, "waiting_on_review");
+    ? ctx.updateJobStatus("failed")
+    : updateJobStatus(job.id, "failed");
   if (!changed) return;
-  log(`${C.yellow}[assessor] PARSE ERROR${C.reset} WI#${job.work_item_id} job #${job.id}: could not parse verdict, flagged for review`);
+  log(`${C.yellow}[assessor] PARSE ERROR EXHAUSTED${C.reset} WI#${job.work_item_id} job #${job.id}: failed closed without an operator gate`);
   logBadInput(job, verdict, "parse_error", verdict.reasons.join("; "));
-
-  const rawExcerpt = (verdict.raw || "").slice(0, 500).trim();
-  const reviewJob = spawnFromAssessor("failed", "human_input", {
-    work_item_id: job.work_item_id,
-    title: `Assessment unparseable: ${job.title.slice(0, 60)}`,
-    parent_job_id: job.id,
-    priority: "high",
-    model_tier: "cheap",
-    payload_json: JSON.stringify({
-      original_job_id: job.id,
-      questions: [
-        `The assessor could not produce valid JSON for job #${job.id} ("${job.title}"), ` +
-        `but here is what it said:\n\n${rawExcerpt}\n\nShould this pass or fail?`,
-      ],
-      context: verdict.reasons.join("; "),
-      review_type: "assessment_parse_error",
-      question_kind: "assessment_review",
-      choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
-    }),
-  });
-  spawnedJobs.push(reviewJob);
-  log(`${C.yellow}[assessor]${C.reset} spawned review #${reviewJob.id}`);
 
   logEvent({
     work_item_id: job.work_item_id,
     job_id: job.id,
     event_type: EVENT_TYPES.JOB_ASSESSMENT_PARSE_ERROR,
     actor_type: EVENT_ACTORS.ASSESSOR,
-    message: `Assessment unparseable - flagged for human review. Reasons: ${verdict.reasons.join("; ")}`,
+    message: `Assessment unparseable after automatic recovery; failed closed without an operator gate. Reasons: ${verdict.reasons.join("; ")}`,
+    event_json: JSON.stringify({ operator_actionable: false }),
   });
 }
 
 export function handleUnknownVerdict(job, verdict, ctx) {
-  const { emitLog: log, spawnedJobs, spawnFromAssessor } = ctx;
+  const { emitLog: log } = ctx;
 
-  log(`${C.yellow}[assessor] UNKNOWN VERDICT "${verdict.verdict}"${C.reset} WI#${job.work_item_id} job #${job.id}: flagged for review`);
+  const retryReason = `unknown assessor verdict "${verdict.verdict}"`;
+  if (!verdict?._disable_internal_retry && queueInternalAssessmentRetry(job, verdict, retryReason, {
+    leaseToken: ctx.leaseToken,
+    recordAssessorVerdict: ctx.recordAssessorVerdict,
+  })) {
+    return;
+  }
+
+  log(`${C.yellow}[assessor] UNKNOWN VERDICT "${verdict.verdict}"${C.reset} WI#${job.work_item_id} job #${job.id}: failed closed without an operator gate`);
   const changed = typeof ctx.updateJobStatus === "function"
-    ? ctx.updateJobStatus("waiting_on_review")
-    : updateJobStatus(job.id, "waiting_on_review");
+    ? ctx.updateJobStatus("failed")
+    : updateJobStatus(job.id, "failed");
   if (!changed) return;
   logBadInput(job, verdict, "unknown_verdict", `Unknown verdict "${verdict.verdict}"`);
-
-  const unknownReviewJob = spawnFromAssessor("failed", "human_input", {
-    work_item_id: job.work_item_id,
-    title: `Unknown verdict "${verdict.verdict}": ${job.title.slice(0, 50)}`,
-    parent_job_id: job.id,
-    priority: "high",
-    model_tier: "cheap",
-    payload_json: JSON.stringify({
-      original_job_id: job.id,
-      questions: [
-        `The assessor returned an unknown verdict "${verdict.verdict}" for job #${job.id} ("${job.title}"). ` +
-        `Reasons: ${verdict.reasons.join("; ")}. ` +
-        "Please review the work and indicate pass/fail.",
-      ],
-      context: verdict.raw || "",
-      review_type: "unknown_verdict",
-      question_kind: "assessment_review",
-      choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
-    }),
-  });
-  spawnedJobs.push(unknownReviewJob);
 
   logEvent({
     work_item_id: job.work_item_id,
     job_id: job.id,
     event_type: EVENT_TYPES.JOB_UNKNOWN_VERDICT,
     actor_type: EVENT_ACTORS.ASSESSOR,
-    message: `Unknown verdict "${verdict.verdict}" - flagged for human review`,
+    message: `Unknown verdict "${verdict.verdict}" after automatic recovery; failed closed without an operator gate`,
+    event_json: JSON.stringify({ operator_actionable: false }),
   });
 }

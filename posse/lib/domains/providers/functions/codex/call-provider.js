@@ -584,7 +584,7 @@ export async function callProvider(promptText, {
     });
     let lastRolloutUsagePollMs = 0;
     let liveProviderRequestCount = 0;
-    let killedByTurnBudget = false;
+    let turnBudgetWarningEmitted = false;
     let killedByStallDetector = false;
     let stallKillReason = "no_output";
     let lastActivity = Date.now();
@@ -682,12 +682,16 @@ export async function callProvider(promptText, {
           });
           if (
             turnBudget.exceeded
-            && !killedByTurnBudget
-            && processTerminator.snapshot().terminationRequestedAt == null
+            && !turnBudgetWarningEmitted
           ) {
-            killedByTurnBudget = true;
-            emit(`${C.yellow}[cap] Codex exceeded ${turnLimit} provider turns (${turnBudget.observedTurns}/${turnLimit}) -- stopping process${C.reset}`);
-            processTerminator.requestTermination("turn_budget");
+            // A productive provider session is more valuable than a cold
+            // retry. Treat maxTurns as an observability target for Codex: the
+            // CLI has no native per-request ceiling, and killing it here
+            // throws away its cache, worktree context, and near-terminal
+            // handoff. Genuine non-progress is still bounded independently by
+            // the byte/semantic stall detector below.
+            turnBudgetWarningEmitted = true;
+            emit(`${C.yellow}[budget] Codex passed the ${turnLimit}-turn planning target (${turnBudget.observedTurns}); continuing the same productive session${C.reset}`);
           }
         } catch { /* rollout tailing must not break provider execution */ }
       }
@@ -908,29 +912,6 @@ export async function callProvider(promptText, {
           attachProof: stats.mcpAttachProof,
         });
       } catch { /* telemetry only */ }
-
-      if (killedByTurnBudget) {
-        const usedTurns = stats.numTurns ?? liveProviderRequestCount;
-        const err = new Error(`Codex exhausted turn budget (${usedTurns}/${turnLimit})`);
-        err.code = "PROVIDER_TURN_BUDGET_EXCEEDED";
-        err.stats = {
-          ...stats,
-          numTurns: usedTurns,
-          maxTurns: turnLimit,
-          turnBudgetExceeded: true,
-          turnBudgetStatus: "terminated_overage",
-        };
-        // If agent_handoff was durably committed before the stop raced the
-        // provider close, TrackedProviderClient keeps that handoff authoritative.
-        err.terminalHandoffStopCompatible = true;
-        err.stdout = stdout;
-        err.stderr = stderr;
-        err.output = finalOutput || stdout.trim() || null;
-        err.partialOutput = err.output;
-        err.toolUses = toolUses;
-        reject(err);
-        return;
-      }
 
       if (code === 0) {
         if (stats.mcpAttachMissingProof) {

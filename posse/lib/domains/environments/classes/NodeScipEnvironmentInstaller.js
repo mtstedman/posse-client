@@ -48,22 +48,24 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
 
   async install() {
     const packageJson = path.join(this.nodeDir, "package.json");
+    const existingCommand = this.findCommandPath(this.commandSegments, this.commandName);
+    const reuseExisting = !this.force && Boolean(existingCommand);
+    const totalSteps = reuseExisting ? 2 : (this.dryRun ? 3 : this.installPlan().length);
     const manifest = await this.runStep(1, "check managed Node package root", async () => {
       const sourcePackageJson = path.join(this.sourceNodeDir, "package.json");
       if (!fs.existsSync(sourcePackageJson)) return this.failed(`missing ${sourcePackageJson}`);
       await this.preparePackageRoot();
       if (!this.dryRun && !fs.existsSync(packageJson)) return this.failed(`missing ${packageJson}`);
       return this.ok("ok", "managed Node package root present");
-    });
+    }, { totalSteps });
     if (manifest?.ok === false) return manifest;
 
     const existing = await this.runStep(2, `check ${this.commandName}`, async () => {
-      const command = this.findCommandPath(this.commandSegments, this.commandName);
-      if (this.force || !command) return null;
+      if (!reuseExisting) return null;
       const validation = await this.validateCommand();
       if (!validation.ok) return this.failed(validation.message);
       return this.ok("ok", `${this.commandName} already installed`);
-    });
+    }, { totalSteps });
     if (existing?.ok === false) return existing;
     if (existing?.ok === true) return existing;
 
@@ -76,14 +78,14 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
       });
       if (!run.ok) return this.failed(`npm install failed: ${run.message}`);
       return this.ok("installed", "installed SCIP Node indexers");
-    });
+    }, { totalSteps });
     if (install?.ok === false || install?.status === "dry-run") return install;
 
     const validation = await this.runStep(4, `validate ${this.commandName}`, async () => {
       const result = await this.validateCommand();
       if (!result.ok) return this.failed(result.message);
       return this.ok("installed", `installed ${this.commandName}`);
-    });
+    }, { totalSteps });
     return validation;
   }
 

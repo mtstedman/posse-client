@@ -105,6 +105,7 @@ import {
   assessorCallBudgetStatus,
   getAssessorMaxToolCalls,
   isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus,
+  raiseAssessmentFallbackReadsForScope,
 } from "../execution/assessment-policy.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
@@ -177,51 +178,6 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   const gateImmediately = error?.assessmentGateImmediately === true;
   if (count >= max || gateImmediately) {
     const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
-    if (!terminalProtocolFailure) {
-      setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
-      const reviewJob = createJob({
-        work_item_id: job.work_item_id,
-        job_type: "human_input",
-        title: `Assessment unavailable: ${String(job.title || "").slice(0, 70)}`,
-        parent_job_id: job.id,
-        priority: "high",
-        model_tier: "cheap",
-        payload_json: JSON.stringify({
-          original_job_id: job.id,
-          gate_kind: "assessment_retry_exhausted",
-          review_type: "assessment_retry_limit",
-          questions: [
-            `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
-            "Choose retry_assessment, pass, fail, explicit waiver, or replan.",
-          ],
-          context: "The implementation commit is preserved. This gate controls assessment only.",
-        }),
-      });
-      logEvent({
-        work_item_id: job.work_item_id,
-        job_id: job.id,
-        event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
-        actor_type: EVENT_ACTORS.WORKER,
-        message: `Assessment infrastructure requires operator review after ${count}/${max} attempts`,
-        event_json: JSON.stringify({
-          attempts: count,
-          max_attempts: max,
-          terminal_protocol_failure: false,
-          error: message.slice(0, 2000),
-          operator_actionable: true,
-          gate_job_id: reviewJob.id,
-          gated_immediately: gateImmediately,
-        }),
-      });
-      worker.emit(job.id, `${C.yellow}[assessor] Assessment unavailable; opened review gate #${reviewJob.id}${C.reset}`);
-      worker._releaseLease(job, leaseToken, "waiting_on_review");
-      return {
-        gated: true,
-        infrastructureFailure: true,
-        terminalProtocolFailure: false,
-        reviewJob,
-      };
-    }
     setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
     setJobError(job.id, `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`);
     logEvent({
@@ -229,16 +185,17 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
       job_id: job.id,
       event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; failed without creating a human verdict gate`,
+      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; failed closed without interrupting the operator`,
       event_json: JSON.stringify({
         attempts: count,
         max_attempts: max,
         terminal_protocol_failure: terminalProtocolFailure,
         error: message.slice(0, 2000),
         operator_actionable: false,
+        gated_immediately: gateImmediately,
       }),
     });
-    worker.emit(job.id, `${C.red}[assessor] Assessment infrastructure exhausted; failing without an operator verdict gate${C.reset}`);
+    worker.emit(job.id, `${C.red}[assessor] Assessment infrastructure exhausted; failed closed without a human gate${C.reset}`);
     worker._releaseLease(job, leaseToken, "failed");
     return {
       gated: false,
@@ -1597,18 +1554,34 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   } else try {
     const tokenBudget = assessorTokenBudgetStatus(job.id);
     const callBudget = assessorCallBudgetStatus(job.id, attemptId);
-    if (tokenBudget.exceeded || callBudget.exceeded) {
-      const reason = callBudget.exceeded
-        ? `Assessment call budget exhausted (${callBudget.used}/${callBudget.cap} calls) for this attempt.`
-        : `Assessment input-token budget exhausted (${tokenBudget.spent}/${tokenBudget.cap} tokens) for this job.`;
+    if (callBudget.exceeded) {
+      const reason = `Assessment call budget exhausted (${callBudget.used}/${callBudget.cap} calls) for this attempt.`;
       throw assessmentBudgetInfrastructureError(
         reason,
-        callBudget.exceeded ? callBudget : tokenBudget,
+        callBudget,
         {
-          retryable: !tokenBudget.exceeded,
-          gateImmediately: tokenBudget.exceeded,
+          retryable: true,
+          gateImmediately: false,
         },
       );
+    }
+    if (tokenBudget.exceeded) {
+      // Token spend is a diagnostic target, not a reason to discard an
+      // otherwise productive assessment and pay for it again. The bounded
+      // parse-retry count and per-attempt call ceiling still prevent loops.
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attemptId,
+        event_type: EVENT_TYPES.JOB_ASSESSMENT_PARSE_RETRY_BUDGET_EXCEEDED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Assessment passed the ${tokenBudget.cap}-token diagnostic target at ${tokenBudget.spent}; continuing the same recovery flow`,
+        event_json: JSON.stringify({
+          soft_limit: true,
+          spent: tokenBudget.spent,
+          target: tokenBudget.cap,
+        }),
+      });
     }
     // Inherit deepthink from the job being assessed: if the task author
     // marked it deepthink, the assessment deserves the same budget so it
@@ -2190,7 +2163,6 @@ export async function runPostExecutionAssessment(worker, {
   wtPath,
 }, {
   assessmentRetryFallbackReads,
-  isAssessorParseRetryBudgetExceeded,
   isProviderError,
   logBadInputFailure,
   shouldFastPassArtifactAssessment,
@@ -2857,7 +2829,10 @@ export async function runPostExecutionAssessment(worker, {
         ...assessOpts,
         modelTier: initialAssessmentTier,
         reasoningEffort: assessmentReasoningEffort,
-        fallbackReads: assessmentRetryFallbackReads(initialAssessmentTier, 0),
+        fallbackReads: raiseAssessmentFallbackReadsForScope(
+          assessmentRetryFallbackReads(initialAssessmentTier, 0),
+          { assessmentContext: assessOpts.assessmentContext, payload: jobPayloadForAssess },
+        ),
         trackedCall,
       });
 
@@ -2879,12 +2854,9 @@ export async function runPostExecutionAssessment(worker, {
             detail: `${lastAssessmentTier}-tier assessment parse error: ${(verdict.reasons || []).join("; ")}`,
             snippet: verdict.raw || "",
           });
-          const budget = isAssessorParseRetryBudgetExceeded(job.id);
           const callBudget = assessorCallBudgetStatus(job.id, attempt.id);
-          if (budget.exceeded || callBudget.exceeded) {
-            const message = callBudget.exceeded
-              ? `Assessment retry call budget exhausted (${callBudget.used}/${callBudget.cap} calls) before ${retryTier}-tier retry`
-              : `Assessment retry token budget exceeded (${budget.spent}/${budget.cap} input tokens) before ${retryTier}-tier retry`;
+          if (callBudget.exceeded) {
+            const message = `Assessment retry call budget exhausted (${callBudget.used}/${callBudget.cap} calls) before ${retryTier}-tier retry`;
             worker.emit(job.id, `${C.yellow}[assessor] WI#${job.work_item_id} job #${job.id} ${message}${C.reset}`);
             logEvent({
               work_item_id: job.work_item_id,
@@ -2912,7 +2884,10 @@ export async function runPostExecutionAssessment(worker, {
               ...assessOpts,
               modelTier: retryTier,
               reasoningEffort: assessmentReasoningEffort,
-              fallbackReads: assessmentRetryFallbackReads(retryTier, 1),
+              fallbackReads: raiseAssessmentFallbackReadsForScope(
+                assessmentRetryFallbackReads(retryTier, 1),
+                { assessmentContext: assessOpts.assessmentContext, payload: jobPayloadForAssess },
+              ),
               trackedCall,
             });
             lastAssessmentTier = retryTier;
@@ -2936,12 +2911,9 @@ export async function runPostExecutionAssessment(worker, {
             detail: `${lastAssessmentTier}-tier assessment parse error: ${(verdict.reasons || []).join("; ")}`,
             snippet: verdict.raw || "",
           });
-          const budget = isAssessorParseRetryBudgetExceeded(job.id);
           const callBudget = assessorCallBudgetStatus(job.id, attempt.id);
-          if (budget.exceeded || callBudget.exceeded) {
-            const message = callBudget.exceeded
-              ? `Assessment retry call budget exhausted (${callBudget.used}/${callBudget.cap} calls) before ${retryTier}-tier retry`
-              : `Assessment retry token budget exceeded (${budget.spent}/${budget.cap} input tokens) before ${retryTier}-tier retry`;
+          if (callBudget.exceeded) {
+            const message = `Assessment retry call budget exhausted (${callBudget.used}/${callBudget.cap} calls) before ${retryTier}-tier retry`;
           worker.emit(job.id, `${C.yellow}[assessor] WI#${job.work_item_id} job #${job.id} ${message}${C.reset}`);
           logEvent({
             work_item_id: job.work_item_id,
@@ -2971,7 +2943,10 @@ export async function runPostExecutionAssessment(worker, {
             reasoningEffort: assessmentReasoningEffort,
             // Second (strong-tier) retry — index 2, not 1; the copy/pasted block
             // gave the strong-tier retry the standard-tier fallback-read budget. (B13)
-            fallbackReads: assessmentRetryFallbackReads(retryTier, 2),
+            fallbackReads: raiseAssessmentFallbackReadsForScope(
+              assessmentRetryFallbackReads(retryTier, 2),
+              { assessmentContext: assessOpts.assessmentContext, payload: jobPayloadForAssess },
+            ),
             trackedCall,
           });
           lastAssessmentTier = retryTier;

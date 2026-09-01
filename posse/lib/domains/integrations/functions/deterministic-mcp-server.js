@@ -9,6 +9,7 @@ import {
   TOOL_READ_FILE,
   TOOL_WRITE_FILE,
   TOOL_EDIT_FILE,
+  TOOL_REQUEST_SCOPE,
   TOOL_CREATE_TEST_SUITE,
   TOOL_CREATE_TEST,
   TOOL_READ_IMAGE_METADATA,
@@ -1520,7 +1521,7 @@ addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_GET_BRIEF);
 addToolSchema(TOOL_PROJECT_DB_QUERY);
 if (writeEnabled) {
-  for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
+  for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
     addToolSchema(schema);
   }
 }
@@ -1615,24 +1616,33 @@ function isPendingLiveScopeResult(result) {
 }
 
 async function requestScopeExpansionWithinJob(args = {}) {
-  const result = requestJobScopeExpansion({
-    jobId: mcpJobId,
-    workItemId: mcpWorkItemId,
-    attemptId: mcpAttemptId,
-    agentCallId: mcpAgentCallId,
-    path: args.path,
-    access: args.access,
-    operation: args.operation,
-    reason: args.reason,
-    source: "deterministic_mcp_internal_tool",
-    liveWait: true,
-  });
-  if (result?.approved === true) {
-    // Widen the subprocess-local predicates so this same MCP invocation can
-    // finish the blocked operation. The queue already persisted the grant.
-    grantApprovedScopeEntries(result, effectiveScopePredicates);
+  const entries = Array.isArray(args?.requests) && args.requests.length > 0
+    ? args.requests.slice(0, 24)
+    : [args || {}];
+  let pendingResult = null;
+  let lastResult = null;
+  for (const entry of entries) {
+    const result = requestJobScopeExpansion({
+      jobId: mcpJobId,
+      workItemId: mcpWorkItemId,
+      attemptId: mcpAttemptId,
+      agentCallId: mcpAgentCallId,
+      path: entry.path,
+      access: entry.access,
+      operation: entry.operation,
+      reason: entry.reason,
+      source: entries.length > 1 ? "deterministic_mcp_scope_batch_tool" : "deterministic_mcp_internal_tool",
+      liveWait: true,
+    });
+    lastResult = result;
+    if (result?.approved === true) {
+      // Widen the subprocess-local predicates so this same MCP invocation can
+      // finish the blocked operation. The queue already persisted the grant.
+      grantApprovedScopeEntries(result, effectiveScopePredicates);
+    }
+    if (isPendingLiveScopeResult(result)) pendingResult = result;
   }
-  return result;
+  return pendingResult || lastResult;
 }
 
 async function requestScopeWithinJob(args = {}) {
@@ -2738,7 +2748,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_GET_BRIEF);
   addToolSchema(TOOL_PROJECT_DB_QUERY);
   if (writeEnabled) {
-    for (const schema of [TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
+    for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
       addToolSchema(schema);
     }
   }

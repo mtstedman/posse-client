@@ -82,6 +82,7 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "move_file",
   "optimize_image",
   "prune_artifact_output",
+  "request_scope",
   "reencode_image",
   "resize_image",
   "write_file",
@@ -410,28 +411,39 @@ export function createStandardToolHandlerMap({
   };
   const beginLiveScopeRequest = (args, ctx) => {
     const ambient = getObservationContext() || {};
-    const result = requestJobScopeExpansion({
-      jobId: ambient.job_id,
-      workItemId: ambient.work_item_id,
-      attemptId: ambient.attempt_id,
-      agentCallId: ambient.agent_call_id,
-      path: args.path,
-      access: args.access,
-      operation: args.operation,
-      reason: args.reason,
-      source: "embedded_internal_tool",
-      liveWait: true,
-    });
-    if (result?.approved === true) {
-      grantApprovedScopeEntries(result, ctx?.scopePredicates);
+    const entries = Array.isArray(args?.requests) && args.requests.length > 0
+      ? args.requests.slice(0, 24)
+      : [args || {}];
+    let pendingResult = null;
+    let lastResult = null;
+    for (const entry of entries) {
+      const result = requestJobScopeExpansion({
+        jobId: ambient.job_id,
+        workItemId: ambient.work_item_id,
+        attemptId: ambient.attempt_id,
+        agentCallId: ambient.agent_call_id,
+        path: entry.path,
+        access: entry.access,
+        operation: entry.operation,
+        reason: entry.reason,
+        source: entries.length > 1 ? "embedded_scope_batch_tool" : "embedded_internal_tool",
+        liveWait: true,
+      });
+      lastResult = result;
+      if (result?.approved === true) {
+        grantApprovedScopeEntries(result, ctx?.scopePredicates);
+      }
+      if (
+        result?.live === true
+        && ["scope_approval_pending", "scope_approval_batched"].includes(result?.code)
+      ) {
+        pendingResult = result;
+      }
     }
-    if (
-      result?.live === true
-      && ["scope_approval_pending", "scope_approval_batched"].includes(result?.code)
-    ) {
-      return { [LIVE_SCOPE_WAIT]: true, request: result, resume: null };
+    if (pendingResult) {
+      return { [LIVE_SCOPE_WAIT]: true, request: pendingResult, resume: null };
     }
-    return result;
+    return lastResult;
   };
   const handlers = {
     agent_handoff(args, ctx) {

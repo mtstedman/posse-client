@@ -28,7 +28,6 @@ import {
   countInternalAssessmentRetries,
   getAssessmentInternalRetryLimit,
 } from "./assessment-shared.js";
-import { isAssessorParseRetryBudgetExceeded } from "../execution/assessment-policy.js";
 import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
@@ -76,10 +75,10 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     .slice(-1600);
   return {
     ...verdict,
-    verdict: "needs_review",
+    verdict: "fail",
     _disable_internal_retry: true,
     reasons: [
-      `Deterministic frozen test regressed from passing at baseline to ${postChange?.status || "failing"} after the change; a terminal pass is not allowed.${outputTail ? `\nPost-change receipt tail:\n${outputTail}` : ""}`,
+      `The automatic post-change test regressed from passing at baseline to ${postChange?.status || "failing"}; the change must be repaired before it can pass.${outputTail ? `\nTest output tail:\n${outputTail}` : ""}`,
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
@@ -175,6 +174,20 @@ export function capVerdictForHighRiskVerificationGap(
 
   const operationalOnly = postChange?.status === "passed"
     && postChange?.verification_eligible === false;
+  if (!command || operationalOnly) {
+    return {
+      ...verdict,
+      verification_status: operationalOnly
+        ? "operational_execution_not_verification"
+        : "source_assessment_only",
+      reasons: operationalOnly
+        ? [
+            "The approved operational command ran, but correctness is based on the assessor's source/diff evidence rather than treating that operation as a test.",
+            ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+          ]
+        : verdict.reasons,
+    };
+  }
   const status = operationalOnly
     ? "an approved operational execution, not a test"
     : postChange?.status || (command ? "not_run" : "not_declared");
@@ -183,10 +196,10 @@ export function capVerdictForHighRiskVerificationGap(
     : postChange?.validation_error || postChange?.reason || null;
   return {
     ...verdict,
-    verdict: "needs_review",
+    verdict: "fail",
     _disable_internal_retry: true,
     reasons: [
-      `High-risk code requires a successful frozen post-change verification receipt before terminal pass; verification was ${status}${detail ? ` (${detail})` : ""}.`,
+      `The declared automatic post-change test was ${status}${detail ? ` (${detail})` : ""}; Posse will repair or fail the task internally instead of asking for a verification receipt.`,
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
@@ -513,9 +526,8 @@ export function prepareVerdictForDispatch(job, verdict) {
       ...prepared,
       verdict: "needs_review",
       confidence: "low",
-      _disable_internal_retry: true,
       reasons: [
-        "A low-confidence pass is non-terminal and requires human review.",
+        "A low-confidence pass is non-terminal and requires one stronger automatic assessment.",
         ...(Array.isArray(prepared.reasons) ? prepared.reasons : []),
       ],
     };
@@ -740,18 +752,6 @@ function _queueInternalAssessmentRetry(
 ) {
   const retryCount = countInternalAssessmentRetries(job.id);
   if (retryCount >= maxRetries) return false;
-  const retryBudget = isAssessorParseRetryBudgetExceeded(job.id);
-  if (retryBudget.exceeded) {
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.JOB_ASSESSMENT_PARSE_RETRY_BUDGET_EXCEEDED,
-      actor_type: EVENT_ACTORS.ASSESSOR,
-      message: `Assessment retry budget exceeded (${retryBudget.spent}/${retryBudget.cap} input tokens)`,
-      event_json: JSON.stringify(retryBudget),
-    });
-    return false;
-  }
   let payload = {};
   try {
     payload = job?.payload_json

@@ -139,39 +139,57 @@ export const TOOL_EDIT_FILE = {
   },
 };
 
-// Internal-only coordination primitive. It is deliberately present in the
-// canonical catalog so every runtime can execute the same operation, but its
-// tool-suite declaration advertises it on no transport. Out-of-scope mutation
-// handlers invoke it themselves; agents do not spend a second tool call asking
-// for the scope they just demonstrated they need.
+const SCOPE_REQUEST_ENTRY_PROPERTIES = Object.freeze({
+  path: {
+    type: "string",
+    description: "Exact repository-relative file path that needs writable scope.",
+  },
+  access: {
+    type: "string",
+    enum: ["modify", "create"],
+    description: "Whether the job needs permission to modify an existing file or create a new file.",
+  },
+  operation: {
+    type: "string",
+    enum: ["write_file", "edit_file"],
+    description: "Mutation that needs the expanded scope.",
+  },
+  reason: {
+    type: "string",
+    description: "Short explanation of why this exact path is required for the current task.",
+  },
+});
+
+// Writable-scope coordination primitive. Mutation handlers invoke the
+// single-path form automatically at a boundary. Dev/fix agents may use the
+// batch form proactively after inspection so one exact, reviewable approval
+// covers every predicted file instead of interrupting the session per file.
 export const TOOL_REQUEST_SCOPE = {
   type: "function",
   name: "request_scope",
   description:
-    "Pause the current job and request human approval for one exact file path outside its writable scope.",
+    "Request one consolidated human approval for exact file paths outside the current writable scope. Prefer requests[] before editing when several paths are known.",
   parameters: {
     type: "object",
     properties: {
-      path: {
-        type: "string",
-        description: "Exact repository-relative file path that needs writable scope.",
-      },
-      access: {
-        type: "string",
-        enum: ["modify", "create"],
-        description: "Whether the job needs permission to modify an existing file or create a new file.",
-      },
-      operation: {
-        type: "string",
-        enum: ["write_file", "edit_file"],
-        description: "Mutation that encountered the scope boundary.",
-      },
-      reason: {
-        type: "string",
-        description: "Short explanation of why this path is required for the current task.",
+      ...SCOPE_REQUEST_ENTRY_PROPERTIES,
+      requests: {
+        type: "array",
+        minItems: 1,
+        maxItems: 24,
+        description: "Exact paths to approve together in one human decision.",
+        items: {
+          type: "object",
+          properties: SCOPE_REQUEST_ENTRY_PROPERTIES,
+          required: ["path", "access", "operation"],
+          additionalProperties: false,
+        },
       },
     },
-    required: ["path", "access", "operation"],
+    oneOf: [
+      { required: ["path", "access", "operation"] },
+      { required: ["requests"] },
+    ],
     additionalProperties: false,
   },
 };

@@ -2,11 +2,11 @@ import path from "path";
 import {
   acquireAssessmentBarrier,
   completeAttempt,
-  createJob,
   getJob,
   getWorkItem,
   incrementAndCreateAssessmentAttempt,
   isLeaseValid,
+  setJobError,
   setAssessmentLifecycle,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
@@ -52,6 +52,7 @@ import {
 import {
   assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
   buildPriorAssessmentFindings as _buildPriorAssessmentFindings,
+  raiseAssessmentFallbackReadsForScope as _raiseAssessmentFallbackReadsForScope,
 } from "../../functions/execution/assessment-policy.js";
 import {
   logAttemptSkippedStaleLease as _logAttemptSkippedStaleLease,
@@ -160,34 +161,12 @@ function parkAssessmentFailure(worker, job, leaseToken, error, {
   const message = String(error?.message || error || "Assessment unavailable");
   preserveAssessmentOnlyRetryPayload(worker, job);
   if (count >= max) {
-    if (isRetryableTerminalHandoffError(error)) {
-      setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
-      worker.emit(job.id, `${C.red}[assess-only] Terminal handoff repair budget exhausted; failing without an operator gate${C.reset}`);
-      worker._releaseLease(job, leaseToken, "failed");
-      return { gated: false, terminalProtocolFailure: true };
-    }
-    setAssessmentLifecycle(job.id, "assessment_needs_human", { error: message });
-    const reviewJob = createJob({
-      work_item_id: job.work_item_id,
-      job_type: "human_input",
-      title: `Assessment unavailable: ${String(job.title || "").slice(0, 70)}`,
-      parent_job_id: job.id,
-      priority: "high",
-      model_tier: "cheap",
-      payload_json: JSON.stringify({
-        original_job_id: job.id,
-        gate_kind: "assessment_retry_exhausted",
-        review_type: "assessment_retry_limit",
-        questions: [
-          `Assessment for job #${job.id} could not complete after ${count} attempt(s): ${message.split("\n")[0].slice(0, 180)}`,
-          "Choose retry_assessment, pass, fail, explicit waiver, or replan.",
-        ],
-        context: "The implementation commit is preserved. This gate controls assessment only.",
-      }),
-    });
-    worker.emit(job.id, `${C.yellow}[assess-only] Assessment retry budget exhausted; opened review gate #${reviewJob.id}${C.reset}`);
-    worker._releaseLease(job, leaseToken, "waiting_on_review");
-    return { gated: true, reviewJob };
+    const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
+    setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
+    setJobError(job.id, `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`);
+    worker.emit(job.id, `${C.red}[assess-only] Assessment recovery exhausted; failed closed without a human gate${C.reset}`);
+    worker._releaseLease(job, leaseToken, "failed");
+    return { gated: false, terminalProtocolFailure };
   }
   setAssessmentLifecycle(job.id, "assessment_unavailable", { error: message });
   const readyAt = new Date(Date.now() + delayMs).toISOString();
@@ -239,26 +218,31 @@ export class AssessmentHandoffAdapter {
     const assessmentSource = loadAssessmentSource(job.id);
     if (!assessmentSource.ok) {
       const missing = new Error(`Assessment evidence is unavailable: ${assessmentSource.reason}`);
-      setAssessmentLifecycle(job.id, "assessment_needs_human", { error: missing.message });
-      const reviewJob = createJob({
-        work_item_id: job.work_item_id,
-        job_type: "human_input",
-        title: `Assessment evidence unavailable: ${String(job.title || "").slice(0, 60)}`,
-        parent_job_id: job.id,
-        priority: "high",
-        model_tier: "cheap",
-        payload_json: JSON.stringify({
-          original_job_id: job.id,
-          gate_kind: "assessor_evidence_unavailable",
-          review_type: "assessment_evidence_missing",
-          questions: [
-            `Job #${job.id} was queued for assessment-only recovery, but no implementation attempt has a matching response with either a commit or a VERIFIED_NO_CHANGE result.`,
-            "Restore a matching response/source, then choose retry_assessment; or choose pass, fail, explicit waiver, or replan.",
-          ],
-        }),
-      });
-      worker.emit(job.id, `${C.yellow}[assess-only] Missing prior evidence; opened review gate #${reviewJob.id}${C.reset}`);
-      worker._releaseLease(job, leaseToken, "waiting_on_review");
+      const recoveryCount = Math.max(0, Number(cleanPayload?._assessment_source_recovery_count || 0));
+      if (recoveryCount < 1) {
+        const recoveryPayload = { ...cleanPayload };
+        delete recoveryPayload._assess_only;
+        delete recoveryPayload._assess_model_tier;
+        delete recoveryPayload._assess_reasoning_effort;
+        delete recoveryPayload._assess_model_name;
+        recoveryPayload._assessment_source_recovery_count = recoveryCount + 1;
+        recoveryPayload._assessment_source_recovery_reason = missing.message.slice(0, 1000);
+        updateJobPayload(job.id, JSON.stringify(recoveryPayload));
+        setAssessmentLifecycle(job.id, "assessment_unavailable", { error: missing.message });
+        worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source; resuming implementation once to repair terminal evidence${C.reset}`);
+        if (typeof worker._releaseWithoutAttemptPenalty === "function") {
+          worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+            readyAt: new Date().toISOString(),
+          });
+        } else {
+          worker._releaseLease(job, leaseToken, "queued");
+        }
+      } else {
+        setAssessmentLifecycle(job.id, "assessment_failed", { error: missing.message, completed: true });
+        setJobError(job.id, `${missing.message}; automatic source repair already attempted`);
+        worker.emit(job.id, `${C.red}[assess-only] Missing bound source after automatic repair; failed closed without a human gate${C.reset}`);
+        worker._releaseLease(job, leaseToken, "failed");
+      }
       return { handled: true };
     }
 
@@ -441,7 +425,10 @@ export class AssessmentHandoffAdapter {
           abortSignal: assessAc?.signal || null,
           modelTier: effectiveTier,
           reasoningEffort: assessmentReasoningEffort,
-          fallbackReads: _assessmentRetryFallbackReads(effectiveTier, fallbackRetryCount),
+          fallbackReads: _raiseAssessmentFallbackReadsForScope(
+            _assessmentRetryFallbackReads(effectiveTier, fallbackRetryCount),
+            { assessmentContext, payload: jobPayloadForAssess },
+          ),
           priorAssessmentFindings,
           routedProviderName: providerName,
           cwd: assessmentCwd,

@@ -1133,10 +1133,15 @@ async function ensureComposerProject(entry, opts) {
     return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: "would run composer install" };
   }
   opts.onProgress?.(`${entry.label}: composer install`);
-  const run = await runCommand(composer.command, [...composer.args, "install"], {
+  const run = await runCommand(composer.command, [
+    ...composer.args,
+    "install",
+    "--no-interaction",
+    "--no-progress",
+    "--no-ansi",
+  ], {
     cwd: entry.root,
     timeoutMs: opts.timeoutMs,
-    onProgress: (line) => opts.onProgress?.(`${entry.label}: ${line}`),
   });
   let generatedIgnore = null;
   if (!run.ok) {

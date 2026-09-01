@@ -59,7 +59,8 @@ export function processVerdict(job, verdict, {
 
   // Map parse_error to valid DB values (CHECK constraint only allows
   // pass/fail/blocked/needs_replan/needs_review/not_assessed).
-  const dbVerdict = verdict.verdict === "parse_error" ? "needs_review" : verdict.verdict;
+  const validDbVerdicts = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
+  const dbVerdict = validDbVerdicts.has(verdict.verdict) ? verdict.verdict : "needs_review";
   const dbConfidence = normalizedConfidence;
 
   let verdictRecorded = false;

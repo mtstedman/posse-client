@@ -33,17 +33,19 @@ export class GoScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller
   }
 
   async install() {
+    const existingCommand = this.findCommandPath(this.commandSegments, "scip-go");
+    const reuseExisting = !this.force && Boolean(existingCommand);
+    const totalSteps = reuseExisting ? 1 : (this.dryRun ? 2 : this.installPlan().length);
     const existing = await this.runStep(1, "check scip-go", async () => {
-      const command = this.findCommandPath(this.commandSegments, "scip-go");
-      if (this.force || !command) return null;
+      if (!reuseExisting) return null;
       return this.ok("ok", "scip-go already installed");
-    });
+    }, { totalSteps });
     if (existing?.ok === true || existing?.ok === false) return existing;
 
     if (this.dryRun) {
-      return await this.runStep(4, "run go install", async () => (
+      return await this.runStep(2, "run go install", async () => (
         this.ok("dry-run", `would run go install github.com/scip-code/scip-go/cmd/scip-go@latest with GOBIN=${this.binDir}`)
-      ));
+      ), { totalSteps });
     }
 
     const toolchain = await this.runStep(2, "check Go toolchain", async () => {
@@ -51,13 +53,13 @@ export class GoScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller
         return this.failed("Go toolchain not found on PATH; install Go or deselect Go in atlas_scip_languages");
       }
       return this.ok("ok", "Go toolchain present");
-    });
+    }, { totalSteps });
     if (toolchain?.ok === false) return toolchain;
 
     const prepared = await this.runStep(3, "prepare Posse scip/bin", async () => {
       await fs.promises.mkdir(this.binDir, { recursive: true });
       return this.ok("ok", `prepared ${this.binDir}`);
-    });
+    }, { totalSteps });
     if (prepared?.ok === false) return prepared;
 
     const install = await this.runStep(4, "run go install", async () => {
@@ -67,7 +69,7 @@ export class GoScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller
       });
       if (!run.ok) return this.failed(`go install failed: ${run.message}`);
       return this.ok("installed", "installed scip-go");
-    });
+    }, { totalSteps });
     if (install?.ok === false) return install;
 
     return await this.runStep(5, "validate scip-go", async () => {
@@ -75,7 +77,7 @@ export class GoScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller
         return this.failed("go install completed, but scip-go was not found in Posse scip/bin");
       }
       return this.ok("installed", "installed scip-go");
-    });
+    }, { totalSteps });
   }
 
   status() {

@@ -32,10 +32,14 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
 
   async install() {
     const found = await this.resolveInstalledCommand();
+    const reuseExisting = !this.force && Boolean(found);
+    const totalSteps = reuseExisting
+      ? 1
+      : (this.platform === "win32" || this.dryRun ? 2 : this.installPlan().length);
     const existing = await this.runStep(1, "check scip-clang", async () => {
-      if (this.force || !found) return null;
+      if (!reuseExisting) return null;
       return this.ok("ok", "scip-clang already installed");
-    });
+    }, { totalSteps });
     if (existing?.ok === true || existing?.ok === false) return existing;
 
     if (this.platform === "win32") {
@@ -44,13 +48,13 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
         ok: true,
         status: "skipped",
         message: "scip-clang has no Windows build; C/C++ SCIP stays off (use WSL or atlas_scip_index_command)",
-      }));
+      }), { totalSteps });
     }
 
     if (this.dryRun) {
-      return await this.runStep(4, "download scip-clang", async () => (
+      return await this.runStep(2, "download scip-clang", async () => (
         this.ok("dry-run", `would download scip-clang ${SCIP_CLANG_VERSION} into ${this.binDir}`)
-      ));
+      ), { totalSteps });
     }
 
     const curl = await this.runStep(2, "check curl", async () => {
@@ -58,18 +62,18 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
         return this.failed("curl not found; install curl or place scip-clang on PATH / in Posse scip/bin");
       }
       return this.ok("ok", "curl present");
-    });
+    }, { totalSteps });
     if (curl?.ok === false) return curl;
 
     const prepared = await this.runStep(3, "prepare Posse scip/bin", async () => {
       await fs.promises.mkdir(this.binDir, { recursive: true });
       return this.ok("ok", `prepared ${this.binDir}`);
-    });
+    }, { totalSteps });
     if (prepared?.ok === false) return prepared;
 
     const downloaded = await this.runStep(4, "download scip-clang", async () => {
       return await this.downloadClang();
-    });
+    }, { totalSteps });
     if (downloaded?.ok === false) return downloaded;
 
     return await this.runStep(5, "validate scip-clang", async () => {
@@ -80,7 +84,7 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
         return this.failed(`downloaded scip-clang failed its --version probe: ${probe.message}`);
       }
       return this.ok("installed", `installed scip-clang ${SCIP_CLANG_VERSION}`);
-    });
+    }, { totalSteps });
   }
 
   status() {

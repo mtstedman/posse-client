@@ -63,9 +63,10 @@ export function resolveCodexLiveTurnBudget({
   return {
     observedTurns,
     maxTurns: configuredMaxTurns,
-    // maxTurns is inclusive. Codex has no native per-request ceiling, so the
-    // rollout tailer can only prove the boundary after a request completes.
-    // Preserve that one-request grace for terminal agent_handoff.
+    // maxTurns is inclusive. Codex has no native per-request ceiling. This
+    // signal is intentionally observational: callers warn once and let a
+    // productive session finish, while independent stall detection handles
+    // genuine non-progress.
     exceeded: configuredMaxTurns != null
       && configuredMaxTurns > 0
       && observedTurns > configuredMaxTurns,

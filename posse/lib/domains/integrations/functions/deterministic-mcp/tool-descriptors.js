@@ -362,8 +362,8 @@ export const TOOL_CATALOG = {
   request_scope: {
     schema: TOOL_REQUEST_SCOPE,
     access: "write",
-    summary: "Pause the current job for human approval of one exact writable file path.",
-    observation: { type: "tool.scope_request", label: "ScopeRequest", format: "file", pathKeys: ["path"], requireTarget: true },
+    summary: "Request one consolidated approval for exact writable file paths.",
+    observation: { type: "tool.scope_request", label: "ScopeRequest", format: "file", pathKeys: ["path"], arrayPathKeys: ["requests"], requireTarget: true },
   },
   move_file: {
     schema: TOOL_MOVE_FILE,
@@ -547,7 +547,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // dev/fix provider starts, then moved into files_to_modify. write_file
       // remains registered for compatibility/artificer output but must not be
       // issued on this surface; edit_file can populate the empty file.
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
@@ -587,7 +587,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   }),
   deterministicMcp: Object.freeze({
     read: Object.freeze(["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
-    write: Object.freeze(["write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output"]),
+    write: Object.freeze(["request_scope", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output"]),
     // Read-only image inspection (dev/artificer/assessor). clean_image is a
     // mutation and is gated to artificer separately — keep it out of this set.
     imageHelpers: Object.freeze(["read_image_metadata", "validate_artifact_output"]),
@@ -886,7 +886,8 @@ export function getDeterministicMcpToolNames(role, {
   const tools = [...DETERMINISTIC_READ_TOOLS];
   if (roleUsesDeterministicWriteMcp(role)) {
     tools.push(...DETERMINISTIC_WRITE_TOOLS.filter((name) => (
-      role !== "dev" || name !== "write_file"
+      (role !== "dev" || name !== "write_file")
+      && (role === "dev" || name !== "request_scope")
     )));
   }
   if (roleUsesDeterministicImageHelpers(role)) tools.push(...DETERMINISTIC_IMAGE_HELPER_TOOLS);

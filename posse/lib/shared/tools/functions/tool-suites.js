@@ -67,9 +67,11 @@ const TOOLS_SUITE = [
   { name: "create_test_suite", mutatesWorktree: true, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
   { name: "run_test", mutatesWorktree: false, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
   { name: "run_test_suite", mutatesWorktree: false, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
+  // Dev/fix agents may proactively consolidate exact scope requests. The
+  // ordinary write/edit boundary still invokes the same executor internally.
+  { name: "request_scope", mutatesWorktree: false, advertise: ["function", "mcp"] },
   // Embedded-executable helpers, advertised on no transport today.
   { name: "pull_brief", mutatesWorktree: false, advertise: [] },
-  { name: "request_scope", mutatesWorktree: false, advertise: [] },
   { name: "resize_image", mutatesWorktree: false, advertise: [] },
   { name: "optimize_image", mutatesWorktree: false, advertise: [] },
   { name: "reencode_image", mutatesWorktree: false, advertise: [] },

@@ -66,6 +66,41 @@ export function assessmentRetryFallbackReads(modelTier = "cheap", retryCount = 0
   return assessorFallbackReads(base + progressiveBonus, modelTier);
 }
 
+/**
+ * Right-size the assessor's optional read allowance to the exact task surface.
+ * This is an allowance, not a target: narrow jobs retain the configured base,
+ * while broad/no-change reviews are not forced into a cold assessment retry
+ * merely because the planner named more than four files.
+ */
+export function raiseAssessmentFallbackReadsForScope(baseReads, {
+  assessmentContext = null,
+  payload = null,
+} = {}) {
+  const exactPaths = new Set();
+  const add = (values) => {
+    if (!Array.isArray(values)) return;
+    for (const value of values) {
+      const pathValue = typeof value === "string"
+        ? value
+        : (value?.path || value?.file || value?.file_path || null);
+      const normalized = String(pathValue || "").replace(/\\/g, "/").trim();
+      if (normalized) exactPaths.add(normalized);
+    }
+  };
+  for (const key of [
+    "allowed_files",
+    "allowed_create_files",
+    "files_committed",
+    "files_requested",
+    "scoped_git_diff_source_ranges",
+  ]) add(assessmentContext?.[key]);
+  for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "must_modify"]) {
+    add(payload?.[key]);
+  }
+  const base = Number.isFinite(Number(baseReads)) ? Math.max(0, Math.floor(Number(baseReads))) : 0;
+  return exactPaths.size > 0 ? Math.max(base, exactPaths.size + 2) : base;
+}
+
 export function getAssessorMaxToolCalls() {
   const raw = getSetting(SETTING_KEYS.ASSESSOR_MAX_TOOL_CALLS);
   if (raw == null || raw === "") return 12;
