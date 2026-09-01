@@ -30,7 +30,7 @@ const ASSESSOR_SPAWN_ROLE = Object.freeze({
  *
  * @param {object} job - The assessed job
  * @param {object} verdict - Result from assessResult()
- * @returns {object} { action, spawnedJobs }
+ * @returns {object} { action, spawnedJobs, effectiveVerdict }
  */
 export function processVerdict(job, verdict, {
   emit = null,
@@ -140,5 +140,5 @@ export function processVerdict(job, verdict, {
       break;
   }
 
-  return { action: verdict.verdict, spawnedJobs };
+  return { action: verdict.verdict, spawnedJobs, effectiveVerdict: verdict };
 }

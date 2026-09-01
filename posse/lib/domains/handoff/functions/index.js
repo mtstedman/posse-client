@@ -69,6 +69,7 @@ import {
   parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule,
   researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule,
   sanitizeResearcherStructuredOutput as sanitizeResearcherStructuredOutputFromModule,
+  researcherPacketToStructuredOutput as researcherPacketToStructuredOutputFromModule,
 } from "./helpers/researcher-output.js";
 import { detectPendingMergeAsync as detectPendingMergeAsyncFromModule } from "./helpers/merge-state.js";
 import {
@@ -2602,6 +2603,12 @@ export function normalizeResearcherCitationTriage(parsed, opts = {}) {
 export function sanitizeResearcherStructuredOutput(output) {
   return sanitizeResearcherStructuredOutputFromModule(output);
 }
+
+export function researcherPacketToStructuredOutput(packet) {
+  return researcherPacketToStructuredOutputFromModule(packet);
+}
+
+export { getLatestCommittedAgentHandoffPacket } from "./agent-handoff.js";
 
 export {
   bindAutoExpandedDevBriefEvidenceToAgentCall,

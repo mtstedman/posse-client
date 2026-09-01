@@ -9,6 +9,10 @@ import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-re
 import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.js";
 import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
 import { normalizeAtlasIdentifierList } from "../../atlas/functions/v2/contracts/identifiers.js";
+import {
+  normalizeResearchEvidenceReuseMode,
+  recordSourceCoverageReuseShadow,
+} from "../functions/evidence-reuse-telemetry.js";
 
 const COVERAGE_OBSERVATION = "source.coverage";
 const activeReservations = new Map();
@@ -118,14 +122,17 @@ function releaseReservation(reservation, outcome) {
 }
 
 export class SourceCoverageOwner {
-  /** @param {{cwd?: string, workItemId?: number | null, jobId?: number | null, attemptId?: number | null, agentCallId?: number | null, repositoryIdentity?: string | null, db?: any}} [options] */
-  constructor({ cwd, workItemId, jobId, attemptId, agentCallId, repositoryIdentity = null, db = getDb() } = {}) {
+  /** @param {{cwd?: string, workItemId?: number | null, jobId?: number | null, attemptId?: number | null, agentCallId?: number | null, repositoryIdentity?: string | null, evidenceReuseMode?: "off" | "shadow" | null, db?: any}} [options] */
+  constructor({ cwd, workItemId, jobId, attemptId, agentCallId, repositoryIdentity = null, evidenceReuseMode = null, db = getDb() } = {}) {
     this.cwd = path.resolve(cwd || process.cwd());
     this.workItemId = Number(workItemId) || null;
     this.jobId = Number(jobId) || null;
     this.attemptId = Number(attemptId) || null;
     this.agentCallId = Number(agentCallId) || null;
     this.repositoryIdentity = String(repositoryIdentity || this.cwd);
+    this.evidenceReuseMode = evidenceReuseMode == null
+      ? null
+      : normalizeResearchEvidenceReuseMode(evidenceReuseMode);
     this.db = db;
     this.missingWorkItemObservationRecorded = false;
   }
@@ -205,7 +212,7 @@ export class SourceCoverageOwner {
     return token;
   }
 
-  #coveredResult(row, coverage, reason) {
+  #coveredResult(row, coverage, reason, { fresh = null, requestedStartLine = null, requestedEndLine = null } = {}) {
     const stored = fetchHashRefForContext(
       contextFor(this),
       coverage.evidence_ref,
@@ -220,6 +227,17 @@ export class SourceCoverageOwner {
       job_id: Number(row.job_id),
       attempt_id: Number(row.attempt_id),
     };
+    recordSourceCoverageReuseShadow({
+      owner: this,
+      coverage,
+      stored,
+      fresh,
+      reason,
+      requestedStartLine,
+      requestedEndLine,
+      coverageScope,
+      mode: this.evidenceReuseMode,
+    });
     const authorization = this.#authorization({ ...coverage, observationId: row.id });
     return {
       covered: true,
@@ -256,7 +274,11 @@ export class SourceCoverageOwner {
         if (normalizePath(coverage.repo_rel_path) !== requestedFile) continue;
         const fresh = this.#freshSource(requestedFile);
         if (!fresh || fresh.sourceVersion !== coverage.source_version) continue;
-        const result = this.#coveredResult(row, coverage, "complete_file");
+        const result = this.#coveredResult(row, coverage, "complete_file", {
+          fresh,
+          requestedStartLine: 1,
+          requestedEndLine: splitEditableLines(fresh.source).lines.length,
+        });
         if (result) return result;
       }
     }
@@ -308,7 +330,12 @@ export class SourceCoverageOwner {
     // selector as a whole, so exact-selector admission fails open.
     if (delivered.size === 1) {
       const [{ row, coverage, selectorMatch }] = delivered.values();
-      const result = this.#coveredResult(row, coverage, selectorMatch);
+      const fresh = this.#freshSource(coverage.repo_rel_path);
+      const result = this.#coveredResult(row, coverage, selectorMatch, {
+        fresh,
+        requestedStartLine: coverage.start_line,
+        requestedEndLine: coverage.end_line,
+      });
       if (result) return result;
     }
     if (delivered.size > 1) return { covered: false, reason: "multiple_regions_fail_open" };
@@ -333,7 +360,11 @@ export class SourceCoverageOwner {
       if (Number(coverage.start_line) > requestedStart || Number(coverage.end_line) < requestedEnd) continue;
       const fresh = this.#freshSource(relative);
       if (!fresh || fresh.sourceVersion !== coverage.source_version) continue;
-      const result = this.#coveredResult(row, coverage, "contained_interval");
+      const result = this.#coveredResult(row, coverage, "contained_interval", {
+        fresh,
+        requestedStartLine: requestedStart,
+        requestedEndLine: requestedEnd,
+      });
       if (result) {
         // Interval admission happens after the native selector has resolved.
         // Surface the interval that this call resolved, not the potentially

@@ -43,6 +43,111 @@ export function parseResearcherStructuredOutput(output) {
   return null;
 }
 
+function researcherEvidenceRefs(report = {}) {
+  const lanes = { proof: [], support: [], decoy: [] };
+  const selector = (item = {}) => ({
+    ref: item.ref,
+    ...(item.lines && item.selector !== item.ref ? {
+      lines: {
+        start: item.lines.start,
+        count: item.lines.end - item.lines.start + 1,
+      },
+    } : {}),
+  });
+  for (const claim of Array.isArray(report.claims) ? report.claims : []) {
+    const detail = claim?.[1] || {};
+    for (const item of ["evidence", "proof", "support"].flatMap((lane) => (
+      Array.isArray(detail[lane]) ? detail[lane] : []
+    ))) {
+      const grounded = ["Tool Result", "Full Tool Call"].includes(item?.provenance?.kind);
+      const lane = item?.selector_kind === "path" || item?.path || !grounded
+        ? "support"
+        : "proof";
+      lanes[lane].push(selector(item));
+    }
+    for (const entry of Array.isArray(detail.decoy) ? detail.decoy : []) {
+      const [item, reason] = Array.isArray(entry) ? entry : [];
+      if (!item) continue;
+      lanes.decoy.push({ ...selector(item), why: reason });
+    }
+  }
+  return lanes;
+}
+
+/**
+ * Project a validated, materialized researcher terminal packet into the
+ * structured appendix vocabulary consumed by planning. This intentionally
+ * accepts both terminal researcher profiles: report packets are historical
+ * compatibility input for build workflows whose remote selected the wrong
+ * terminal profile.
+ */
+export function researcherPacketToStructuredOutput(packet) {
+  if (!packet || !["researcher.pipeline.v1", "researcher.report.v1"].includes(packet.profile)) {
+    const error = new Error("Expected a validated researcher terminal packet");
+    error.code = "RESEARCHER_PACKET_INVALID";
+    throw error;
+  }
+  const first = Array.isArray(packet.handoffs) ? packet.handoffs[0] : null;
+  const report = first?.report;
+  if (!report || typeof report !== "object") {
+    const error = new Error("Researcher terminal packet is missing its report");
+    error.code = "RESEARCHER_PACKET_INVALID";
+    throw error;
+  }
+
+  const refs = researcherEvidenceRefs(report);
+  const research = report.research && typeof report.research === "object"
+    ? report.research
+    : {};
+  const files = [...new Set([
+    ...(Array.isArray(report.scope?.key_files) ? report.scope.key_files : []),
+    ...(Array.isArray(report.scope?.files_to_modify) ? report.scope.files_to_modify : []),
+    ...(Array.isArray(report.scope?.files_to_create) ? report.scope.files_to_create : []),
+  ])];
+  const relatedFiles = [...new Set(
+    Array.isArray(report.scope?.related_files) ? report.scope.related_files : [],
+  )];
+  const plannerFilePriorities = Array.isArray(research.planner_file_priorities)
+    ? research.planner_file_priorities
+    : files.map((filePath, index) => ({
+        path: filePath,
+        rank: index + 1,
+        reason: "agent_handoff evidence",
+      }));
+  const patterns = Object.fromEntries(
+    (Array.isArray(research.patterns) ? research.patterns : [])
+      .filter((entry) => entry?.name)
+      .map((entry) => [entry.name, entry.description]),
+  );
+  const questions = Array.isArray(research.question_details) && research.question_details.length > 0
+    ? research.question_details
+    : (Array.isArray(report.questions) ? report.questions : []);
+
+  return {
+    synthesis: report.summary || "",
+    claims: (Array.isArray(report.claims) ? report.claims : [])
+      .map((claim) => claim?.[0])
+      .filter(Boolean),
+    key_files: files,
+    related_files: relatedFiles,
+    key_symbols: Array.isArray(research.key_symbols) ? research.key_symbols : [],
+    memories: Array.isArray(research.memories) ? research.memories : [],
+    planner_file_priorities: plannerFilePriorities,
+    proof: refs.proof,
+    support: refs.support,
+    decoy: refs.decoy,
+    patterns,
+    constraints: Array.isArray(report.constraints) ? report.constraints : [],
+    ...(research.scope_estimate ? { scope_estimate: research.scope_estimate } : {}),
+    ...(Array.isArray(research.absence_checks) ? { absence_checks: research.absence_checks } : {}),
+    ...(Array.isArray(research.verification_targets) ? {
+      verification_targets: research.verification_targets,
+    } : {}),
+    questions_for_human: packet.outcome === "input_required",
+    questions,
+  };
+}
+
 const RESEARCHER_MEMORY_TITLE_MAX = 120;
 const RESEARCHER_MEMORY_CONTENT_MAX = 1200;
 const RESEARCHER_CITATION_WHY_MAX = 180;

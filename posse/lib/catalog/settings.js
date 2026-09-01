@@ -93,6 +93,7 @@ export const SETTING_KEYS = Object.freeze({
   PLANNER_UNDER_SCOPED_BROAD_GATE: "planner_under_scoped_broad_gate",
   RESEARCH_TRAVERSAL_COMPLETION_CHECK: "research_traversal_completion_check",
   RESEARCH_TRAVERSAL_COMPLETION_MAX_CHARS: "research_traversal_completion_max_chars",
+  RESEARCH_EVIDENCE_REUSE: "research_evidence_reuse",
   POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",
   POSSE_REMOTE_TIMEOUT_MS: "posse_remote_timeout_ms",
   POSSE_LOCAL_GENERATION_ENABLED: "posse_local_generation_enabled",
@@ -217,6 +218,7 @@ export const PLAN_APPROVAL_MODE_VALUES = Object.freeze(Object.values(PLAN_APPROV
 export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "warn", "enforce"]);
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
+export const RESEARCH_EVIDENCE_REUSE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const ATLAS_SHADOW_GUARDRAILS_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const ATLAS_HANDOFF_PREFETCH_MODE_VALUES = Object.freeze(["on", "off"]);
 export const ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);

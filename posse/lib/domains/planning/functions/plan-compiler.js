@@ -10,7 +10,6 @@ import { getIntSetting } from "../../queue/functions/index.js";
 import {
   addDependency,
   applyDelegation,
-  getArtifactsByWorkItem,
   getDependents,
   getJob,
   getSetting,
@@ -46,8 +45,8 @@ import {
 import {
   hasWritableScope,
   normalizeResearcherCitationTriage,
-  parseResearcherStructuredOutput,
 } from "../../handoff/functions/index.js";
+import { resolveResearchContextForWorkItem } from "../../research/functions/research-context.js";
 import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import {
   normalizeRiskTags,
@@ -472,11 +471,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         const resolved = path.resolve(worker.projectDir, raw).replace(/\\/g, "/").replace(/\/+$/, "");
         return resolved === projectRootAbs ? raw : null;
       };
-      const researchArtifacts = getArtifactsByWorkItem(planJob.work_item_id, "response")
-        .filter((artifact) => {
-          const sourceJob = artifact?.job_id ? getJob(artifact.job_id) : null;
-          return sourceJob?.job_type === "research";
-        });
+      const researchContext = resolveResearchContextForWorkItem({
+        workItemId: planJob.work_item_id,
+        plannerJob: planJob,
+        researchSkipped: !!modalityWorkItem?.research_skipped,
+        researchSkipReason: modalityWorkItem?.research_skip_reason,
+      });
+      planJob._researchContinuity = researchContext.provenance;
       let researchMaterialFallbackPacket = null;
 
       const releasePromoteClaimsForJob = (jobId) => {
@@ -598,9 +599,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           }),
         });
       };
-      for (const artifact of researchArtifacts) {
-        const parsed = parseResearcherStructuredOutput(String(artifact?.content_long || ""));
-        if (!parsed) continue;
+      const resolvedResearchData = researchContext.structuredData;
+      if (resolvedResearchData) {
+        const parsed = resolvedResearchData;
         const triage = normalizeResearcherCitationTriage(parsed, {
           maxRefsPerLane: 16,
           maxWhyChars: 180,

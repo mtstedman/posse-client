@@ -18,7 +18,6 @@ import {
   storeArtifact,
 } from "../../../queue/functions/index.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
-import { parseJobPayload } from "../../../queue/functions/payload.js";
 import {
   artifactsDir,
   contextDir,
@@ -30,12 +29,14 @@ import {
   composePromptRemoteAware,
   handoff,
   normalizeResearcherKeySymbols,
-  parseResearcherStructuredOutput,
   renderAtlasHandoffSections,
   _parseFunctions,
 } from "../../../handoff/functions/index.js";
 import { resolvePlannerBudgetFromResearchScope } from "../../../handoff/functions/helpers/execution-policy.js";
-import { buildSyntheticResearchBrief } from "../../../research/functions/routing.js";
+import {
+  recordResearchContinuityObservation,
+  resolveResearchContextForWorkItem,
+} from "../../../research/functions/research-context.js";
 import {
   buildIntakeHintsBlock,
   getWorkItemIntakeHints,
@@ -302,72 +303,55 @@ export class PlannerRole extends BaseRole {
     const fastDir = path.join(ctxDir, "planner", "fast");
     const fullDir = path.join(ctxDir, "planner", "full");
     const researchSkipped = !!workItem?.research_skipped;
-    const researchArtifacts = getArtifactsByWorkItem(job.work_item_id, "response")
-      .filter((artifact) => {
-        if (researchSkipped && artifact.job_id == null) return true;
-        const relatedJob = getJob(artifact.job_id);
-        if (!relatedJob || relatedJob.job_type !== "research") return false;
-        const relatedPayload = parseJobPayload(relatedJob);
-        if (relatedPayload?.role_mode === "child") return false;
-        if (relatedPayload?.fanout_shadow === true) return false;
-        return true;
-      });
+    const researchContext = resolveResearchContextForWorkItem({
+      workItemId: job.work_item_id,
+      plannerJob: job,
+      researchSkipped,
+      researchSkipReason: workItem?.research_skip_reason,
+    });
+    const researchArtifacts = researchContext.brief ? [researchContext] : [];
 
     let keyFiles = [];
     let keySymbols = [];
     let relatedFiles = [];
     let plannerFilePriorities = [];
-    let structuredData = null;
-    let researchBrief = "";
-    let lastRawResearchBrief = "";
+    let structuredData = researchContext.structuredData
+      ? { ...researchContext.structuredData }
+      : null;
+    const researchBrief = researchContext.brief;
     const droppedResearcherPaths = [];
-    for (const artifact of researchArtifacts) {
-      const artifactContent = artifact.content_long || "";
-      lastRawResearchBrief = artifactContent;
-      const parsed = parseResearcherStructuredOutput(artifactContent);
-      if (!parsed) continue;
-      // Keep the authoritative brief paired with the structured data it parsed
-      // from: only the last fully-parsed artifact wins. A trailing unparseable
-      // artifact must not leave the brief and structuredData sourced from
-      // different artifacts.
-      researchBrief = artifactContent;
-      const sanitizedKeyFiles = sanitizeResearcherFileList(parsed.key_files, worker.projectDir, "key_files");
-      const sanitizedRelatedFiles = sanitizeResearcherFileList(parsed.related_files, worker.projectDir, "related_files");
-      const sanitizedPlannerPriorities = sanitizeResearcherFilePriorities(parsed, worker.projectDir);
-      const artifactDroppedResearcherPaths = [
+    if (structuredData) {
+      const sanitizedKeyFiles = sanitizeResearcherFileList(structuredData.key_files, worker.projectDir, "key_files");
+      const sanitizedRelatedFiles = sanitizeResearcherFileList(structuredData.related_files, worker.projectDir, "related_files");
+      const sanitizedPlannerPriorities = sanitizeResearcherFilePriorities(structuredData, worker.projectDir);
+      const projectedDroppedResearcherPaths = [
         ...sanitizedKeyFiles.dropped,
         ...sanitizedRelatedFiles.dropped,
         ...sanitizedPlannerPriorities.dropped,
       ];
-      droppedResearcherPaths.push(...artifactDroppedResearcherPaths);
+      droppedResearcherPaths.push(...projectedDroppedResearcherPaths);
       const priorityPaths = sanitizedPlannerPriorities.files.map((entry) => entry.path);
       keyFiles = priorityPaths.length > 0
         ? [...new Set([...priorityPaths, ...sanitizedKeyFiles.files])]
         : sanitizedKeyFiles.files;
-      keySymbols = normalizeResearcherKeySymbols(parsed);
+      keySymbols = normalizeResearcherKeySymbols(structuredData);
       relatedFiles = sanitizedRelatedFiles.files;
       plannerFilePriorities = sanitizedPlannerPriorities.files;
       structuredData = {
-        ...parsed,
+        ...structuredData,
         key_files: keyFiles,
         key_symbols: keySymbols,
         related_files: relatedFiles,
       };
       delete structuredData.ranked_files;
-      if (plannerFilePriorities.length > 0 || Array.isArray(parsed.planner_file_priorities) || Array.isArray(parsed.ranked_files)) {
+      if (plannerFilePriorities.length > 0
+        || Array.isArray(researchContext.structuredData.planner_file_priorities)
+        || Array.isArray(researchContext.structuredData.ranked_files)) {
         structuredData.planner_file_priorities = plannerFilePriorities;
       }
-      if (artifactDroppedResearcherPaths.length > 0) {
-        structuredData.dropped_research_files = artifactDroppedResearcherPaths;
+      if (projectedDroppedResearcherPaths.length > 0) {
+        structuredData.dropped_research_files = projectedDroppedResearcherPaths;
       }
-    }
-    // No artifact parsed into structured output: fall back to the most recent
-    // raw artifact content so a freeform brief is still surfaced (structuredData
-    // stays null, matching the absence of parseable structure).
-    if (!researchBrief) researchBrief = lastRawResearchBrief;
-    if (researchSkipped && !researchBrief) {
-      researchBrief = buildSyntheticResearchBrief(workItem.research_skip_reason || "deterministic no_research route");
-      structuredData = parseResearcherStructuredOutput(researchBrief);
     }
     const researchScopePolicy = resolvePlannerBudgetFromResearchScope({
       keyFiles,
@@ -395,6 +379,13 @@ export class PlannerRole extends BaseRole {
         event_json: JSON.stringify({ dropped: droppedResearcherPaths.slice(0, 100) }),
       });
     }
+    recordResearchContinuityObservation({
+      plannerJob: job,
+      attemptId: ctx?.attemptId || null,
+      provenance: researchContext.provenance,
+      structuredData,
+      droppedPathCount: droppedResearcherPaths.length,
+    });
     const fullFiles = [...new Set([...keyFiles, ...relatedFiles])];
 
     let fullCount = 0;
@@ -593,6 +584,14 @@ export class PlannerRole extends BaseRole {
           || (disableAtlasForReadRoot ? `read_root_mount_failed: ${atlasReadMount.reason}` : null),
         title: workItem.title || "",
         project_context: (payload.task_spec || workItem.description || "").slice(0, 4000),
+        research_continuity: researchContext.provenance,
+        research_evidence: structuredData ? {
+          key_files: keyFiles,
+          planner_file_priorities: plannerFilePriorities,
+          proof: Array.isArray(structuredData.proof) ? structuredData.proof : [],
+          support: Array.isArray(structuredData.support) ? structuredData.support : [],
+          decoy: Array.isArray(structuredData.decoy) ? structuredData.decoy : [],
+        } : null,
         files_to_modify: [],
         context_hints: {
           atlas_seed_files: keyFiles,
@@ -683,6 +682,7 @@ export class PlannerRole extends BaseRole {
       plannerReadRoot,
       plannerRoleMode,
       plannerRoutingContext,
+      researchContinuity: researchContext.provenance,
       primaryPlanText,
       projectDir: worker.projectDir,
       promptArtifact: { stored: false },

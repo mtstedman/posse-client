@@ -1,6 +1,7 @@
 import path from "path";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getAgentCalls, getArtifacts, getSetting } from "../../../queue/functions/index.js";
+import { getObservationsByJob } from "../../../observability/functions/observations.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
 
@@ -155,6 +156,58 @@ export function buildPriorAssessmentFindings(jobId) {
   const recent = reviewArtifacts.slice(-2);
   if (recent.length === 0) return "";
   const sections = [];
+  const budgetAttempts = [];
+  for (const artifact of recent) {
+    try {
+      const metadata = typeof artifact?.content_json === "string"
+        ? JSON.parse(artifact.content_json)
+        : artifact?.content_json;
+      if (metadata?.tool_budget_exhaustion) budgetAttempts.push(metadata.tool_budget_exhaustion);
+    } catch {
+      // A malformed legacy metadata row must not suppress the usable review.
+    }
+  }
+  if (budgetAttempts.length > 0) {
+    const latest = budgetAttempts.at(-1);
+    const blocked = (Array.isArray(latest?.blocked_requests) ? latest.blocked_requests : [])
+      .map((request) => String(request?.summary || request?.tool || "").trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    let consumed = [];
+    try {
+      const rows = getObservationsByJob(jobId, 5000);
+      const latestCallId = rows.reduce((max, row) => {
+        let detail;
+        try { detail = JSON.parse(String(row?.detail_json || "{}")); } catch { return max; }
+        return detail?.assessment_budget_exhausted === true
+          ? Math.max(max, Number(detail?.agent_call_id) || 0)
+          : max;
+      }, 0);
+      consumed = rows
+        .map((row) => {
+          let detail;
+          try { detail = JSON.parse(String(row?.detail_json || "{}")); } catch { return null; }
+          if (Number(detail?.agent_call_id) !== latestCallId) return null;
+          if (!String(row?.observation_type || "").startsWith("tool.")) return null;
+          if (detail?.assessment_budget_exhausted === true) return null;
+          return String(row?.summary || detail?.tool_name || "").trim();
+        })
+        .filter(Boolean)
+        .slice(0, 8);
+    } catch {
+      consumed = [];
+    }
+    sections.push([
+      "ASSESSMENT RETRY EVIDENCE PLAN (harness-generated):",
+      `The prior attempt exhausted ${latest?.reason || "the read budget"}${latest?.cap == null ? "" : ` at ${latest.used ?? latest.cap}/${latest.cap}`}.`,
+      consumed.length > 0
+        ? `Do not repeat these already-consumed broad reads unless a blocked selector strictly requires it: ${consumed.join("; ")}`
+        : "Do not repeat broad survey, skeleton, or whole-diff preparation already represented in the prior review.",
+      blocked.length > 0
+        ? `Use the first available reads on these previously blocked targeted requests: ${blocked.join("; ")}`
+        : "Use the first available reads only on the exact source bodies the prior review identified as missing.",
+    ].join("\n"));
+  }
   for (const artifact of recent) {
     const text = String(artifact?.content_long || artifact?.content_json || "").trim();
     if (!text) continue;

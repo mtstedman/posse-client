@@ -194,6 +194,14 @@ function tightAnswerContractEnabled() {
 }
 
 function isResearchReportMode(workItem, payload, intakeHints) {
+  // Research jobs normally feed spawnPlanAfterResearch, including work items
+  // whose eventual deliverable is a report or answer. Select the report
+  // terminal schema only when workflow state explicitly says this researcher
+  // is itself terminal; report-like wording and intake classification are not
+  // sufficient because planners require researcher.pipeline.v1.
+  const terminalResearch = payload?.spawn_planner === false
+    || payload?.terminal_research_output === true;
+  if (!terminalResearch) return false;
   const mode = String(payload?.task_mode || workItem?.mode || "").trim().toLowerCase();
   return mode === "report"
     || mode === "question"

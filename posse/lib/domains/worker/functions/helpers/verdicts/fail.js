@@ -41,6 +41,7 @@ import {
   providerForAffinityRoute,
 } from "../../../../../shared/policies/functions/provider-affinity.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
+import { operationalCommandApprovalRequest } from "../test-execution-receipt.js";
 
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();
@@ -405,6 +406,13 @@ function _extractOriginalPayloadContext(job) {
     ? origPayload.test_command.trim()
     : "";
   const origTaskAbTestCommand = origPayload._task_ab_test_command === true && !!originalTestCommand;
+  const originalOperationalCommand = !origTaskAbTestCommand
+    ? operationalCommandApprovalRequest(originalTestCommand)
+    : null;
+  // Exact operational approval is deliberately job-scoped. Passing its command
+  // text to a descendant without a fresh gate turns it back into a rejected
+  // planner test; passing the approval itself would silently broaden authority.
+  const inheritableTestCommand = originalOperationalCommand ? "" : originalTestCommand;
   const originalDevBrief = origPayload.dev_brief && typeof origPayload.dev_brief === "object"
     ? origPayload.dev_brief
     : null;
@@ -420,7 +428,8 @@ function _extractOriginalPayloadContext(job) {
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
-    origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
+    origOneshotOrigin, originalTestCommand: inheritableTestCommand, origTaskAbTestCommand,
+    originalOperationalCommand,
     originalDevBrief, originalHashRefPacket,
   };
 }
@@ -538,6 +547,7 @@ function _spawnRecoveryJobsForVerdict({
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
+    originalOperationalCommand,
     originalDevBrief, originalHashRefPacket,
   } = origCtx;
   // One-shot lineage marker survives every recovery spawn so later fixes and
@@ -784,6 +794,14 @@ function _spawnRecoveryJobsForVerdict({
       success_criteria: originalSuccessCriteria,
       ...(originalTestCommand ? { test_command: originalTestCommand } : {}),
       ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
+      ...(originalOperationalCommand ? {
+        _parent_operational_command_omitted: {
+          schema_version: 1,
+          command_sha256: originalOperationalCommand.command_sha256,
+          source_job_id: job.id,
+          reason: "operator_approval_is_job_scoped",
+        },
+      } : {}),
       ...(currentPayload.risk != null ? { risk: currentPayload.risk } : {}),
       ...(currentPayload._execution_policy && typeof currentPayload._execution_policy === "object"
         ? { _execution_policy: currentPayload._execution_policy }

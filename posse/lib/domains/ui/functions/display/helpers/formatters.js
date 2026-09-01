@@ -128,7 +128,7 @@ export function _isLowSignalStructuredMarker(text) {
 
 export function _isLowSignalAssessorMarker(text) {
   const normalized = String(text || "").trim();
-  return /^(?:\[assessor\]\s*)?(?:success|completed)\s*:/i.test(normalized);
+  return /^(?:\[assessor\]\s*)?(?:success|completed|start|finish)\s*:/i.test(normalized);
 }
 
 export function _isLowSignalWorkerCompletionMarker(text, role = null) {

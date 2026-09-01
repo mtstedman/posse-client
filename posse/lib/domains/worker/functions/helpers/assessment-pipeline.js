@@ -145,6 +145,16 @@ export function taskAbAssessorTier(workItem) {
   return ["cheap", "standard", "strong"].includes(tier) ? tier : null;
 }
 
+export function effectiveAssessmentFallbackReads(requestedReads, issuedReads = null) {
+  const requested = requestedReads == null ? Number.NaN : Number(requestedReads);
+  let effective = Number.isFinite(requested) ? Math.max(0, requested) : null;
+  const issued = issuedReads == null ? Number.NaN : Number(issuedReads);
+  if (Number.isFinite(issued) && issued >= 0) {
+    effective = effective == null ? issued : Math.min(effective, issued);
+  }
+  return effective;
+}
+
 function markAssessmentRetryAssessOnly(job, pendingFileRequests = null) {
   if (!job || !ASSESSABLE_JOB_TYPES.has(job.job_type)) return false;
   const payload = parseJobPayload(job);
@@ -156,13 +166,27 @@ function markAssessmentRetryAssessOnly(job, pendingFileRequests = null) {
   return true;
 }
 
+export function assessmentLifecycleStateFromOutcome(freshJob, verdict = null) {
+  // processVerdict may deterministically cap a raw model pass to an effective
+  // failure (for example, when required verification was rejected). The outer
+  // job status is therefore authoritative whenever it is terminal; consulting
+  // the raw verdict first produced assessment_passed + status=failed rows.
+  if (freshJob?.status === "succeeded") return "assessment_passed";
+  if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
+    return "assessment_needs_human";
+  }
+  if (freshJob?.status === "failed") return "assessment_failed";
+  if (verdict?.verdict === "pass") return "assessment_passed";
+  if (verdict?.verdict === "fail") return "assessment_failed";
+  return null;
+}
+
 function updateAssessmentLifecycleFromVerdict(jobId, freshJob, verdict = null) {
-  if (freshJob?.status === "succeeded" || verdict?.verdict === "pass") {
-    setAssessmentLifecycle(jobId, "assessment_passed", { completed: true });
-  } else if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
-    setAssessmentLifecycle(jobId, "assessment_needs_human");
-  } else if (freshJob?.status === "failed" || verdict?.verdict === "fail") {
-    setAssessmentLifecycle(jobId, "assessment_failed", { completed: true });
+  const state = assessmentLifecycleStateFromOutcome(freshJob, verdict);
+  if (state === "assessment_passed" || state === "assessment_failed") {
+    setAssessmentLifecycle(jobId, state, { completed: true });
+  } else if (state === "assessment_needs_human") {
+    setAssessmentLifecycle(jobId, state);
   }
 }
 
@@ -976,29 +1000,44 @@ function assessorToolBudgetExhaustion(agentCallId, jobId = null) {
   if (!Number.isInteger(callId) || callId <= 0) return null;
   try {
     const rows = getDb().prepare(`
-      SELECT observation_type, detail_json
+      SELECT observation_type, summary, detail_json
       FROM job_observations
       WHERE job_id = ?
         AND observation_type LIKE 'tool.%'
       ORDER BY id DESC
       LIMIT 5000
     `).all(Number(jobId) || null);
+    const blockedRequests = [];
+    let exhaustion = null;
     for (const row of rows) {
       let detail;
       try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
       if (Number(detail?.agent_call_id) !== callId || detail?.assessment_budget_exhausted !== true) continue;
-      return {
-        observation_type: row.observation_type,
-        reason: detail.assessment_budget_reason || "tool_budget_exhausted",
-        used: Number(detail.assessment_budget_used) || null,
-        cap: Number(detail.assessment_budget_cap) || null,
+      if (!exhaustion) {
+        exhaustion = {
+          observation_type: row.observation_type,
+          reason: detail.assessment_budget_reason || "tool_budget_exhausted",
+          used: Number(detail.assessment_budget_used) || null,
+          cap: Number(detail.assessment_budget_cap) || null,
+          tool: detail.tool_name || null,
+        };
+      }
+      const request = {
         tool: detail.tool_name || null,
+        args: detail.args && typeof detail.args === "object" ? detail.args : null,
+        summary: String(row.summary || "").slice(0, 500) || null,
       };
+      const key = JSON.stringify(request);
+      if (!blockedRequests.some((entry) => JSON.stringify(entry) === key)) {
+        blockedRequests.push(request);
+      }
     }
+    return exhaustion
+      ? { ...exhaustion, blocked_requests: blockedRequests.slice(0, 12) }
+      : null;
   } catch {
     return null;
   }
-  return null;
 }
 
 function _formatLineNumberedFile(raw = "", startLine = 1) {
@@ -1396,6 +1435,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let atlasBlock = "";
   let assessorAtlasPrefetchStatus = null;
   let assessorPacket = null;
+  let effectiveFallbackReads = effectiveAssessmentFallbackReads(fallbackReads);
   try {
     const packetPayload = {
       ...parsedJobPayload,
@@ -1424,6 +1464,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         : {},
     });
     await handoff(assessorPacket, { providerName: assessorProvider });
+    effectiveFallbackReads = effectiveAssessmentFallbackReads(
+      effectiveFallbackReads,
+      assessorPacket?.budgets?.fallback_reads_remaining,
+    );
     if (!artifactAssessmentRoute) {
       atlasBlock = renderAtlasHandoffSections(assessorPacket) || "";
       assessorAtlasPrefetchStatus = assessorPacket?.atlas?.prefetchStatus || null;
@@ -1447,7 +1491,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `Use the deterministic scope and test receipts plus the attached primary change view and any labeled read-only upstream contract diffs. If that bounded evidence cannot resolve a material criterion, use an issued read tool rather than requesting repository contents from the human.`,
     `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
-    Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
+    Number.isFinite(Number(effectiveFallbackReads)) ? `Effective fallback read budget for this assessment attempt: ${Math.max(0, Number(effectiveFallbackReads))}.` : null,
     workflowModeBlock,
     verificationCapabilityBlock,
     atlasBlock || null,
@@ -1480,7 +1524,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     verificationCapabilityBlock,
     atlasBlock,
     priorAssessmentFindings,
-    fallbackReads,
+    fallbackReads: effectiveFallbackReads,
   });
   let providerPrompt = prompt;
   if (assessorPacket) {
@@ -1501,6 +1545,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let trustedAssessorEvidenceChars = null;
   let trustedAssessorClaims = [];
   let toolBudgetExhaustion = null;
+  let priorMatchingToolBudgetExhaustion = false;
   const assessorMaxToolCalls = getAssessorMaxToolCalls();
   const assessorDeepthink = !!parseJobPayload(job).deepthink;
   const assessmentInputKey = crypto.createHash("sha256").update(JSON.stringify({
@@ -1509,7 +1554,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     provider: assessorProvider,
     modelTier,
     reasoningEffort,
-    fallbackReads: Number.isFinite(Number(fallbackReads)) ? Number(fallbackReads) : null,
+    fallbackReads: Number.isFinite(Number(effectiveFallbackReads)) ? Number(effectiveFallbackReads) : null,
     assessorMaxToolCalls,
     deepthink: assessorDeepthink,
     taskBoundaryRetryDepth,
@@ -1599,7 +1644,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       scopedFiles: providerScope.scopedFiles,
       createFiles: providerScope.createFiles,
       createRoots: providerScope.createRoots,
-      fallbackReads,
+      fallbackReads: effectiveFallbackReads,
       assessorMaxToolCalls,
       abortSignal,
       atlasPrefetchStatus: assessorPacket?.atlas?.prefetchStatus || assessorAtlasPrefetchStatus,
@@ -1642,6 +1687,19 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     response = result.output;
     if (Number.isInteger(result.agentCallId)) {
       toolBudgetExhaustion = assessorToolBudgetExhaustion(result.agentCallId, job.id);
+      if (toolBudgetExhaustion) {
+        const priorArtifact = getArtifacts(job.id, "review").at(-1);
+        try {
+          const metadata = typeof priorArtifact?.content_json === "string"
+            ? JSON.parse(priorArtifact.content_json)
+            : priorArtifact?.content_json;
+          const prior = metadata?.tool_budget_exhaustion;
+          priorMatchingToolBudgetExhaustion = prior?.reason === toolBudgetExhaustion.reason
+            && Number(prior?.cap) === Number(toolBudgetExhaustion.cap);
+        } catch {
+          priorMatchingToolBudgetExhaustion = false;
+        }
+      }
       const handoffRecord = getAgentHandoffRecord(result.agentCallId);
       const packet = handoffRecord?.packet;
       trustedAssessorEvidenceChars = packet?.profile === "assessor.verdict.v1"
@@ -1677,6 +1735,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       content_json: {
         assessment_input_key: assessmentInputKey,
         verdict_parse_succeeded: !toolBudgetExhaustion && _isReusableAssessorVerdict(verdictJson, verdict),
+        ...(toolBudgetExhaustion ? { tool_budget_exhaustion: toolBudgetExhaustion } : {}),
         ...(trustedAssessorEvidenceChars == null
           ? {}
           : { assessor_handoff_evidence_chars: trustedAssessorEvidenceChars }),
@@ -1702,6 +1761,28 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     const budgetLabel = toolBudgetExhaustion.cap == null
       ? toolBudgetExhaustion.reason
       : `${toolBudgetExhaustion.reason} (${toolBudgetExhaustion.used}/${toolBudgetExhaustion.cap})`;
+    if (priorMatchingToolBudgetExhaustion) {
+      const blocked = (toolBudgetExhaustion.blocked_requests || [])
+        .map((request) => request.summary || request.tool)
+        .filter(Boolean)
+        .slice(0, 4);
+      return {
+        ...verdict,
+        verdict: "needs_review",
+        confidence: "none",
+        reasons: [
+          `Assessment evidence access exhausted the same effective harness budget twice: ${budgetLabel}. Automatic retries stopped because the retry retained the same evidence authority and hit the same ceiling again.`,
+          ...(blocked.length > 0 ? [`Still-blocked targeted reads: ${blocked.join("; ")}`] : []),
+          ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+        ],
+        human_questions: [
+          "Please review the listed unresolved source selectors and decide whether the implementation has enough evidence to accept, repair, or leave unmerged.",
+        ],
+        spawn_jobs: [],
+        _disable_internal_retry: true,
+        _assessment_infrastructure_review: true,
+      };
+    }
     throw assessmentBudgetInfrastructureError(
       `Assessment tool access was exhausted by the harness: ${budgetLabel}`,
       toolBudgetExhaustion,
@@ -2312,7 +2393,7 @@ export async function runPostExecutionAssessment(worker, {
       return;
     }
     const emitFn = (msg) => worker.emit(job.id, msg);
-    const { action } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+    const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
     log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
     jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence}) — ${passMsg.slice(0, 100)}` });
     recordObservation({
@@ -2325,7 +2406,7 @@ export async function runPostExecutionAssessment(worker, {
     });
 
     const freshJob = getJob(job.id);
-    updateAssessmentLifecycleFromVerdict(job.id, freshJob, verdict);
+    updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
     const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
     completeAttempt(attempt.id, {
       status: finalStatus,
@@ -2695,7 +2776,7 @@ export async function runPostExecutionAssessment(worker, {
           return;
         }
         const emitFn = (msg) => worker.emit(job.id, msg);
-        const { action } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+        const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
         log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
         jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence}) — ${passMsg.slice(0, 100)}` });
         recordObservation({
@@ -2708,7 +2789,7 @@ export async function runPostExecutionAssessment(worker, {
         });
 
         const freshJob = getJob(job.id);
-        updateAssessmentLifecycleFromVerdict(job.id, freshJob, verdict);
+        updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
         const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
         completeAttempt(attempt.id, {
           status: finalStatus,
@@ -2991,7 +3072,7 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const emitFn = (msg) => worker.emit(job.id, msg);
-      const { action } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+      const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
       log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons?.slice(0, 3) });
       jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence || "?"})${verdict.reasons?.length ? ` — ${verdict.reasons[0].slice(0, 100)}` : ""}` });
 
@@ -3004,7 +3085,7 @@ export async function runPostExecutionAssessment(worker, {
         detail: { reasons: verdict.reasons || [], spawn_jobs: verdict.spawn_jobs || [] },
       });
       const freshJob = getJob(job.id);
-      updateAssessmentLifecycleFromVerdict(job.id, freshJob, verdict);
+      updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
       if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
         worker._releaseLease(job, leaseToken, freshJob.status);
       }

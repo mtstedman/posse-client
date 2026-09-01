@@ -436,13 +436,6 @@ export class ToolContract {
           dangerouslySkipPermissions: true,
         };
       }
-      if (effectiveWebToolsEnabled) {
-        return {
-          tools: "WebFetch,WebSearch",
-          disallowedTools: allNativeDisallow,
-          dangerouslySkipPermissions: true,
-        };
-      }
       const hasScope = (createRoots?.length || 0) > 0;
       if (!hasScope) {
         return {

@@ -648,9 +648,10 @@ export const DETERMINISTIC_IMAGE_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imag
 export const DETERMINISTIC_OCR_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.ocr;
 
 // Native benchmark teams own the whole workflow in one provider session, so
-// they need the same opt-in web lane that Posse splits across researcher and
-// assessor roles. The account toggle and provider policy still fail closed.
-export const WEB_TOOL_ROLES = new Set(["researcher", "assessor", "native"]);
+// they need the same opt-in web lane that Posse splits across researcher,
+// assessor, and artificer roles. The account toggle and provider policy still
+// fail closed.
+export const WEB_TOOL_ROLES = new Set(["researcher", "assessor", "artificer", "native"]);
 export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"]);
 
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([

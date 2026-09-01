@@ -121,6 +121,7 @@ export function capVerdictForHighRiskVerificationGap(
   payload = {},
   testRun = null,
   scopedVerification = null,
+  assessedCommitHash = null,
 ) {
   if (verdict?.verdict !== "pass") return verdict;
   const policy = payload?._execution_policy && typeof payload._execution_policy === "object"
@@ -135,71 +136,74 @@ export function capVerdictForHighRiskVerificationGap(
     ? payload.test_command.trim()
     : "";
   const postChange = testRun?.postChange || testRun?.post_change || null;
-  if (
-    command
+  const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
+  const hasAssessedCommit = /^[0-9a-f]{40,64}$/i.test(requiredCommit);
+  const frozenCommit = String(
+    postChange?.commit_hash || postChange?.executed_commit_hash || "",
+  ).trim().toLowerCase();
+  const frozenVerificationEligible = hasAssessedCommit
     && postChange?.status === "passed"
     && postChange?.verification_eligible !== false
-  ) return verdict;
-  if (!postChange && scopedVerification?.status === "passed" && scopedVerification?.executed_commit_hash) {
+    && frozenCommit === requiredCommit;
+  if (frozenVerificationEligible) {
     return {
       ...verdict,
-      verification_status: "scoped_checks_passed",
-      verification_commit_hash: scopedVerification.executed_commit_hash,
-    };
-  }
-
-  // The execution policy deliberately caps high-risk/no-runner work at a
-  // medium-confidence machine verdict. Do not reintroduce an unconditional
-  // high floor here and turn that explicit policy decision into a human gate.
-  const configuredFloor = normalizeAssessorConfidence(
-    payload?._assess_pass_confidence_floor
-      ?? policy?.assessor?.pass_confidence_floor,
-    { fallback: null, allowNone: true },
-  );
-  if (configuredFloor !== "high") {
-    const confidence = normalizeAssessorConfidence(verdict.confidence, {
-      fallback: "medium",
-      allowNone: true,
-    });
-    return {
-      ...verdict,
-      confidence: confidence === "high" ? "medium" : confidence,
-      verification_status: command ? "declared_verification_unavailable" : "verification_unavailable",
-      reasons: [
-        `Executable verification was unavailable; policy permits at most a medium-confidence source assessment for this task.`,
-        ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
-      ],
+      verification_status: "frozen_test_passed",
+      verification_commit_hash: requiredCommit,
     };
   }
 
   const operationalOnly = postChange?.status === "passed"
     && postChange?.verification_eligible === false;
-  if (!command || operationalOnly) {
+  if (operationalOnly) {
     return {
       ...verdict,
-      verification_status: operationalOnly
-        ? "operational_execution_not_verification"
-        : "source_assessment_only",
-      reasons: operationalOnly
-        ? [
-            "The approved operational command ran, but correctness is based on the assessor's source/diff evidence rather than treating that operation as a test.",
-            ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
-          ]
-        : verdict.reasons,
+      verdict: "needs_review",
+      verification_status: "operational_execution_not_verification",
+      reasons: [
+        "The approved operational command ran, but high-risk code requires verification bound to the assessed commit or explicit human review.",
+        ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+      ],
     };
   }
-  const status = operationalOnly
-    ? "an approved operational execution, not a test"
-    : postChange?.status || (command ? "not_run" : "not_declared");
-  const detail = operationalOnly
-    ? null
-    : postChange?.validation_error || postChange?.reason || null;
+
+  if (command && postChange && postChange.status !== "passed") {
+    const status = postChange.status || "not_run";
+    const detail = postChange.validation_error || postChange.reason || null;
+    return {
+      ...verdict,
+      verdict: "fail",
+      _disable_internal_retry: true,
+      reasons: [
+        `The declared automatic post-change test was ${status}${detail ? ` (${detail})` : ""}; Posse will repair or fail the task internally instead of asking for a verification receipt.`,
+        ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+      ],
+    };
+  }
+
+  const scopedCommit = String(scopedVerification?.executed_commit_hash || "")
+    .trim()
+    .toLowerCase();
+  if (
+    hasAssessedCommit
+    && scopedVerification?.status === "passed"
+    && scopedCommit === requiredCommit
+  ) {
+    return {
+      ...verdict,
+      verification_status: "scoped_checks_passed",
+      verification_commit_hash: requiredCommit,
+    };
+  }
+
   return {
     ...verdict,
-    verdict: "fail",
-    _disable_internal_retry: true,
+    verdict: "needs_review",
+    verification_status: command
+      ? "declared_verification_unavailable"
+      : "source_assessment_only",
     reasons: [
-      `The declared automatic post-change test was ${status}${detail ? ` (${detail})` : ""}; Posse will repair or fail the task internally instead of asking for a verification receipt.`,
+      "High-risk code cannot pass on source assessment alone; verification for the assessed commit or explicit human review is required.",
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
@@ -515,6 +519,7 @@ export function prepareVerdictForDispatch(job, verdict) {
     payload,
     assessedReceipt,
     scopedVerification,
+    assessedCommitHash,
   );
 
   const normalizedPassConfidence = normalizeAssessorConfidence(prepared.confidence, {

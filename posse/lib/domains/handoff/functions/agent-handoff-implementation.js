@@ -56,6 +56,7 @@ import {
   runWithHandoffFieldDiagnostics,
 } from "./helpers/field-diagnostics.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
+import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -4145,6 +4146,106 @@ export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
   return { ...row, packet: parseStoredAgentHandoffPacket(row.materialized_packet_json) };
 }
 
+function handoffCustodyFailure(message) {
+  const error = new Error(message);
+  error.code = "AGENT_HANDOFF_CUSTODY_INVALID";
+  throw error;
+}
+
+/**
+ * Return the terminal packet attached to the newest exact research agent call.
+ * A present packet is a custody boundary: invalid, non-committed, or mismatched
+ * rows fault instead of becoming permission to parse a compatibility artifact.
+ */
+export function getLatestCommittedAgentHandoffPacket({
+  workItemId,
+  jobId,
+  attemptId = null,
+} = {}, { db = getDb() } = {}) {
+  const expectedWorkItemId = positiveInt(workItemId);
+  const expectedJobId = positiveInt(jobId);
+  const expectedAttemptId = attemptId == null ? null : positiveInt(attemptId);
+  if (!expectedWorkItemId || !expectedJobId || (attemptId != null && !expectedAttemptId)) {
+    handoffCustodyFailure("Exact work item and job identities are required to read a terminal handoff");
+  }
+  const database = ensureSchema(db);
+  const params = [expectedWorkItemId, expectedJobId];
+  const attemptClause = expectedAttemptId == null ? "" : " AND ac.attempt_id = ?";
+  if (expectedAttemptId != null) params.push(expectedAttemptId);
+  const row = database.prepare(`
+    SELECT p.*,
+      ac.work_item_id AS call_work_item_id,
+      ac.job_id AS call_job_id,
+      ac.attempt_id AS call_attempt_id,
+      ac.role AS call_role
+    FROM agent_calls ac
+    JOIN ${TABLE} p ON p.agent_call_id = ac.id
+    WHERE ac.work_item_id = ?
+      AND ac.job_id = ?
+      ${attemptClause}
+    ORDER BY ac.id DESC
+    LIMIT 1
+  `).get(...params);
+  if (!row) return null;
+  if (row.status !== "committed") {
+    handoffCustodyFailure(`Newest terminal handoff for research job #${expectedJobId} is ${row.status}`);
+  }
+  if (!row.committed_at) {
+    handoffCustodyFailure(`Committed terminal handoff for research job #${expectedJobId} has no commit timestamp`);
+  }
+  const digest = crypto.createHash("sha256").update(row.materialized_packet_json).digest("hex");
+  if (digest !== row.packet_digest) {
+    handoffCustodyFailure(`Terminal handoff digest verification failed for research job #${expectedJobId}`);
+  }
+  let packet;
+  try {
+    packet = parseStoredAgentHandoffPacket(row.materialized_packet_json);
+  } catch (error) {
+    handoffCustodyFailure(`Terminal handoff packet could not be decoded for research job #${expectedJobId}: ${error?.message || error}`);
+  }
+
+  const identities = [
+    ["work item", expectedWorkItemId, row.call_work_item_id, row.work_item_id, packet.work_item_id],
+    ["job", expectedJobId, row.call_job_id, row.job_id, packet.job_id],
+    ["agent call", row.agent_call_id, packet.agent_call_id],
+  ];
+  const resolvedAttemptId = expectedAttemptId || positiveInt(row.call_attempt_id);
+  if (resolvedAttemptId) {
+    identities.push([
+      "attempt",
+      resolvedAttemptId,
+      row.call_attempt_id,
+      row.attempt_id,
+      packet.attempt_id,
+    ]);
+  }
+  for (const [label, expected, ...values] of identities) {
+    if (values.some((value) => positiveInt(value) !== positiveInt(expected))) {
+      handoffCustodyFailure(`Terminal handoff ${label} identity mismatch for research job #${expectedJobId}`);
+    }
+  }
+  if (row.call_role !== "researcher" || row.role !== row.call_role || packet.role !== row.role) {
+    handoffCustodyFailure(`Terminal handoff role identity mismatch for research job #${expectedJobId}`);
+  }
+  if (packet.profile !== row.profile
+    || !["researcher.pipeline.v1", "researcher.report.v1"].includes(packet.profile)) {
+    handoffCustodyFailure(`Terminal handoff profile identity mismatch for research job #${expectedJobId}`);
+  }
+  if (packet.outcome !== row.outcome) {
+    handoffCustodyFailure(`Terminal handoff outcome identity mismatch for research job #${expectedJobId}`);
+  }
+  return {
+    packet,
+    packet_digest: digest,
+    agent_call_id: positiveInt(row.agent_call_id),
+    work_item_id: expectedWorkItemId,
+    job_id: expectedJobId,
+    attempt_id: resolvedAttemptId,
+    profile: packet.profile,
+    outcome: packet.outcome,
+  };
+}
+
 function mapStoredClaimEvidence(claim, mapEvidence) {
   const detail = claim?.[1];
   if (!detail || typeof detail !== "object") return claim;
@@ -4840,42 +4941,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   if (packet.profile === "dev.result.v1") return `--- DEV RESULT START ---\n${report}\n--- DEV RESULT END ---`;
   if (packet.profile === "artificer.result.v1") return `--- ARTIFICER RESULT START ---\n${report}\n--- ARTIFICER RESULT END ---`;
   if (packet.profile === "researcher.pipeline.v1") {
-    const refs = evidenceRefs(first.report);
-    const research = first.report.research || {};
-    const files = [...new Set([
-      ...(first.report.scope.key_files || []),
-      ...(first.report.scope.files_to_modify || []),
-      ...(first.report.scope.files_to_create || []),
-    ])];
-    const relatedFiles = [...new Set(first.report.scope.related_files || [])];
-    const plannerFilePriorities = Array.isArray(research.planner_file_priorities)
-      ? research.planner_file_priorities
-      : files.map((path, index) => ({ path, rank: index + 1, reason: "agent_handoff evidence" }));
-    const patterns = Object.fromEntries(
-      (research.patterns || []).map((entry) => [entry.name, entry.description]),
-    );
-    const questions = Array.isArray(research.question_details) && research.question_details.length > 0
-      ? research.question_details
-      : first.report.questions;
-    return `\`\`\`json\n${JSON.stringify({
-      synthesis: first.report.summary,
-      claims: first.report.claims.map((claim) => claim[0]).filter(Boolean),
-      key_files: files,
-      related_files: relatedFiles,
-      key_symbols: research.key_symbols || [],
-      memories: research.memories || [],
-      planner_file_priorities: plannerFilePriorities,
-      proof: refs.proof,
-      support: refs.support,
-      decoy: refs.decoy,
-      patterns,
-      constraints: first.report.constraints,
-      ...(research.scope_estimate ? { scope_estimate: research.scope_estimate } : {}),
-      ...(Array.isArray(research.absence_checks) ? { absence_checks: research.absence_checks } : {}),
-      ...(Array.isArray(research.verification_targets) ? { verification_targets: research.verification_targets } : {}),
-      questions_for_human: packet.outcome === "input_required",
-      questions,
-    }, null, 2)}\n\`\`\``;
+    return `\`\`\`json\n${JSON.stringify(researcherPacketToStructuredOutput(packet), null, 2)}\n\`\`\``;
   }
   return report;
 }
