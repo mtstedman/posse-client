@@ -341,8 +341,6 @@ function _correctInferredDesiredOutputsToRepo(workItem, binding, missing = []) {
         ...binding.hints,
         desired_outputs: ["repo"],
         desired_outputs_source: "inferred",
-        needs_review: true,
-        review_reason: "inferred_desired_outputs_impossible_for_code_plan",
         previous_desired_outputs: binding.desiredOutputs,
       },
     };
@@ -408,7 +406,7 @@ function _shouldReplanForDesiredOutputs(job, verdict) {
   if (!hardEnforced) {
     if (binding.source === "inferred" && missing.includes("artifact") && _planShapeIsTerminalCodeOnly(jobs)) {
       return {
-        action: "metadata_correction_review",
+        action: "metadata_correction",
         desiredOutputs,
         missing,
         currentPayload,
@@ -442,32 +440,35 @@ export function prepareVerdictForDispatch(job, verdict) {
   if (_isLikelyArtifactRouteMismatch(job, prepared)) {
     prepared = {
       ...prepared,
-      verdict: "needs_review",
-      _disable_internal_retry: true,
+      verdict: "needs_replan",
       reasons: [
-        "Likely route mismatch: this task was enforced as image artifact mode, but the scoped outputs and task spec look like repo/frontend code deliverables.",
+        "Automatic route correction: this task was enforced as image artifact mode, but the scoped outputs and task spec require repo/frontend code deliverables.",
         ...(prepared.reasons || []),
       ],
-      human_questions: [
-        `Job #${job.id} ("${job.title}") was assessed under image artifact rules, but it appears to be a code/frontend task. Should this be re-routed and replanned instead of fixed as an image artifact? (pass / fail / replan / retry)`,
-      ],
+      human_questions: [],
     };
   }
 
   const outputGap = _shouldReplanForDesiredOutputs(job, prepared);
-  if (outputGap?.action === "metadata_correction_review") {
-    prepared = {
-      ...prepared,
-      verdict: "needs_review",
-      _disable_internal_retry: true,
-      reasons: [
-        `Corrected inferred terminal output hint: desired_outputs [${outputGap.desiredOutputs.join(", ")}] could not be satisfied by the compiled code-only plan, so the work item was reclassified toward repo output instead of replanning for a manufactured artifact.`,
-        ...(prepared.reasons || []),
-      ],
-      human_questions: [
-        `Job #${job.id} ("${job.title}") passed, but an inferred artifact output hint did not match the code-only plan. I corrected desired_outputs to repo. Should this stand as passed, or should the work item be replanned? (pass / replan / fail / retry)`,
-      ],
-    };
+  if (outputGap?.action === "metadata_correction") {
+    prepared = outputGap.corrected
+      ? {
+          ...prepared,
+          reasons: [
+            `Automatically corrected inferred terminal output hint from [${outputGap.desiredOutputs.join(", ")}] to [repo]; the successful code-only plan satisfies the corrected objective.`,
+            ...(prepared.reasons || []),
+          ],
+          human_questions: [],
+        }
+      : {
+          ...prepared,
+          verdict: "needs_replan",
+          reasons: [
+            "Could not persist the deterministic inferred-output correction; replanning is required.",
+            ...(prepared.reasons || []),
+          ],
+          human_questions: [],
+        };
   } else if (outputGap) {
     prepared = {
       ...prepared,

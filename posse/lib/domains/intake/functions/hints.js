@@ -6,6 +6,10 @@ import {
   hasRepoMutationIntent,
   hasUnnegatedVerbIntent,
 } from "./implementation-intent.js";
+import {
+  hasFunctionalFailureIntent,
+  looksLikeImageDepictionRequest,
+} from "./request-semantics.js";
 
 const VALID_INTENTS = new Set([
   "task",
@@ -179,6 +183,8 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
   const strongImplementationIntent = explicitRepoWorkIntent || passiveRequirementIntent
     || repoMutationIntent;
   const bugfixVerbIntent = hasUnnegatedVerbIntent(lower, ["fix", "correct", "repair"]);
+  const functionalFailureIntent = hasFunctionalFailureIntent(lower);
+  const imageDepictionIntent = looksLikeImageDepictionRequest(lower);
 
   // Mutation language is authoritative for build intake. Requests such as
   // "investigate why this loops and fix it" used to hit the broad question
@@ -194,7 +200,10 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "answer";
     hints.output_mode = "auto";
     hints.desired_outputs = ["question_only"];
-  } else if (bugfixVerbIntent || (!questionIntent && /\b(bug|broken|regression|error|crash|failing)\b/.test(lower))) {
+  } else if (bugfixVerbIntent || (!questionIntent && (
+    functionalFailureIntent
+    || (!imageDepictionIntent && /\b(bug|broken|regression|error|crash|failing)\b/.test(lower))
+  ))) {
     hints.intent_type = "bugfix";
     hints.deliverable_type = "code";
     hints.output_mode = "auto";

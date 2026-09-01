@@ -23,6 +23,7 @@ import {
   storeArtifact,
   updateJobPayload,
   updateJobStatus,
+  updateWorkItemRouting,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import {
@@ -122,6 +123,8 @@ import { ASSESSABLE_JOB_TYPES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
+import { correctInferredRoutingToRepo } from "../../intake/functions/objective-contract.js";
+import { evaluatePlanModality } from "./plan-modality.js";
 
 const FRONTEND_DESIGN_SKILL_ID = "frontend-design";
 const REPORT_DELIVERABLE_EXTENSIONS = "md|txt|json|csv|html";
@@ -347,6 +350,99 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           message: `Planner emitted ${tasks.length} tasks; capped to ${maxTasks}`,
         });
         tasks = tasks.slice(0, maxTasks);
+      }
+      const modalityWorkItem = getWorkItem(planJob.work_item_id);
+      const modalityIntakeHints = getWorkItemIntakeHints(
+        modalityWorkItem,
+        modalityWorkItem?.mode || "build",
+      );
+      const modality = evaluatePlanModality({
+        workItem: modalityWorkItem,
+        intakeHints: modalityIntakeHints,
+        tasks,
+      });
+      if (!modality.ok) {
+        const recoveryRound = Math.max(
+          0,
+          Number.parseInt(planJobPayload._planner_modality_recovery_round || 0, 10) || 0,
+        );
+        const errorMessage = "Planner plan modality mismatch: repository output required but no repository execution task was planned";
+        logEvent({
+          work_item_id: planJob.work_item_id,
+          job_id: planJob.id,
+          event_type: EVENT_TYPES.PLAN_MODALITY_MISMATCH,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: errorMessage,
+          event_json: JSON.stringify({
+            recovery_round: recoveryRound,
+            required_outputs: modality.requiredOutputs,
+            observed_outputs: modality.observedOutputs,
+            missing_outputs: modality.missingOutputs,
+            task_shapes: modality.taskShapes,
+          }),
+        });
+
+        if (recoveryRound === 0) {
+          const corrected = correctInferredRoutingToRepo(modalityWorkItem, modalityIntakeHints);
+          updateWorkItemRouting(planJob.work_item_id, {
+            mode: corrected.mode,
+            metadata: corrected.metadata,
+          });
+          updateJobPayload(planJob.id, JSON.stringify({
+            ...planJobPayload,
+            deepthink_budget: maxResearchBudget(
+              getResearchBudget(modalityWorkItem, planJobPayload),
+              "high",
+            ),
+            deepthink: true,
+            _planner_modality_recovery_round: 1,
+            _planner_modality_recovery_reason: "missing_repo_execution_task",
+            _planner_modality_required_outputs: modality.requiredOutputs,
+            _planner_modality_observed_outputs: modality.observedOutputs,
+          }));
+          worker.emit(
+            planJob.id,
+            `${C.yellow}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: corrected inferred routing to repo/build and retrying planner after artifact-only plan`,
+          );
+          logEvent({
+            work_item_id: planJob.work_item_id,
+            job_id: planJob.id,
+            event_type: EVENT_TYPES.PLAN_MODALITY_RECOVERY,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: "Corrected inferred routing to repo/build before automatic planner retry",
+            event_json: JSON.stringify({
+              recovery_round: 1,
+              previous_mode: corrected.previousMode,
+              mode: corrected.mode,
+              mode_source: corrected.modeSource,
+              required_outputs: modality.requiredOutputs,
+            }),
+          });
+        } else {
+          worker.emit(
+            planJob.id,
+            `${C.red}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: planner repeated an artifact-only plan after automatic repo/build correction`,
+          );
+          logEvent({
+            work_item_id: planJob.work_item_id,
+            job_id: planJob.id,
+            event_type: EVENT_TYPES.PLAN_MODALITY_RECOVERY_EXHAUSTED,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: "Automatic plan-modality recovery exhausted",
+            event_json: JSON.stringify({
+              recovery_round: recoveryRound,
+              required_outputs: modality.requiredOutputs,
+              observed_outputs: modality.observedOutputs,
+            }),
+          });
+        }
+        logBadInputFailure(planJob, {
+          layer: "planner",
+          upstream: "validated_plan",
+          classification: "plan_modality_mismatch",
+          detail: errorMessage,
+        });
+        throw new Error(errorMessage);
       }
       // Planners may emit executable work or deterministic promotion. Human
       // gates and other coordination jobs are runtime-owned.

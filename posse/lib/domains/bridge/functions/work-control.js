@@ -45,6 +45,7 @@ export function addBridgeWorkItem(args = {}, context = {}) {
       source: "bridge",
       requested_by: String(context.actor || "bridge"),
       mode: "build",
+      mode_source: "explicit",
     });
 
     if (getLiveSchedulerBlockMessage("main")) {

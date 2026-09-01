@@ -14,6 +14,51 @@ const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 600_000;
 const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
 
+async function _recordImageGenerationTelemetry({
+  provider,
+  model,
+  args,
+  status,
+  startedAt,
+  outputBytes = null,
+  usage = null,
+  error = null,
+} = {}) {
+  try {
+    const { getObservationContext, recordObservation } = await import("../../../observability/functions/observations.js");
+    const context = getObservationContext() || {};
+    const durationMs = Math.max(0, Date.now() - Number(startedAt || Date.now()));
+    const normalizedUsage = usage && typeof usage === "object" ? {
+      input_tokens: Number.isFinite(Number(usage.input_tokens)) ? Number(usage.input_tokens) : null,
+      output_tokens: Number.isFinite(Number(usage.output_tokens)) ? Number(usage.output_tokens) : null,
+      total_tokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null,
+    } : null;
+    recordObservation({
+      work_item_id: context.work_item_id ?? null,
+      job_id: context.job_id ?? null,
+      attempt_id: context.attempt_id ?? null,
+      observation_type: "image.generation",
+      summary: `Image generation ${status}: ${provider}/${model}`,
+      detail: {
+        agent_call_id: context.agent_call_id ?? null,
+        provider,
+        model,
+        status,
+        duration_ms: durationMs,
+        size: args?.size || "1024x1024",
+        quality: args?.quality || "default",
+        output_bytes: Number.isFinite(Number(outputBytes)) ? Number(outputBytes) : null,
+        usage: normalizedUsage,
+        cost_estimate_usd: null,
+        cost_status: "unknown",
+        error: error ? String(error).slice(0, 500) : null,
+      },
+    });
+  } catch {
+    // Image generation must never fail because best-effort telemetry is unavailable.
+  }
+}
+
 // Each image-capable provider owns construction of its OpenAI-shaped client
 // (env vars, baseURL, retry config). Import provider builders lazily so this
 // shared helper can be imported by those same provider modules without a
@@ -333,6 +378,7 @@ async function _executeGenerateImageWithRoute({
   fetchImpl,
   imageTimeoutMs,
 }) {
+  const startedAt = Date.now();
   try {
     const client = await buildImageClient(provider);
     const { params, quality } = provider === "grok"
@@ -341,11 +387,19 @@ async function _executeGenerateImageWithRoute({
 
     const response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs });
     if (!Array.isArray(response?.data) || response.data.length === 0) {
+      await _recordImageGenerationTelemetry({
+        provider, model, args, status: "failed", startedAt, usage: response?.usage,
+        error: "API returned no image data",
+      });
       return "Error: API returned no image data.";
     }
     const imageData = response.data[0]?.b64_json;
     const imageUrl = response.data[0]?.url;
     if (!imageData && !imageUrl) {
+      await _recordImageGenerationTelemetry({
+        provider, model, args, status: "failed", startedAt, usage: response?.usage,
+        error: "API returned no image data",
+      });
       return "Error: API returned no image data.";
     }
 
@@ -354,9 +408,27 @@ async function _executeGenerateImageWithRoute({
       : await _downloadImageWithTimeout(imageUrl, { fetchImpl, timeoutMs: imageTimeoutMs });
 
     _writeImageInRequestedFormat(outputPath, imageBytes, ext);
-    const sizeKB = (fs.statSync(outputPath).size / 1024).toFixed(1);
+    const outputBytes = fs.statSync(outputPath).size;
+    const sizeKB = (outputBytes / 1024).toFixed(1);
+    await _recordImageGenerationTelemetry({
+      provider,
+      model,
+      args,
+      status: "succeeded",
+      startedAt,
+      outputBytes,
+      usage: response?.usage,
+    });
     return `Image saved to ${filename} (${sizeKB} KB, provider=${provider}, model=${model}, quality=${quality || "default"}).`;
   } catch (err) {
+    await _recordImageGenerationTelemetry({
+      provider,
+      model,
+      args,
+      status: "failed",
+      startedAt,
+      error: err?.message || String(err),
+    });
     if (err?.imageGenerationTimeout) {
       return `Error generating image: ${err.message}.`;
     }

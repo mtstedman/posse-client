@@ -66,6 +66,8 @@ import {
   jobHasLivePendingScopeRequest,
   scopeRequestBatchEntries,
 } from "./scope-expansion.js";
+import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
+import { requiresRepositoryExecution } from "../../intake/functions/objective-contract.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -101,6 +103,29 @@ function missingRequiredBuildExecution(wi, jobs) {
   if (!wi || wi.mode !== "build" || isExplicitResearchOnlyWorkItem(wi)) return false;
   if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
   return !jobs.some((job) => MUTATING_JOB_TYPES.has(job.job_type));
+}
+
+function jobProducesRepositoryOutput(job) {
+  if (!job) return false;
+  if (job.job_type === "promote") return true;
+  if (job.job_type !== "dev" && job.job_type !== "fix") return false;
+  const payload = parseJobPayload(job);
+  const taskMode = String(payload.task_mode || "code").trim().toLowerCase();
+  return taskMode === "code" || taskMode === "db";
+}
+
+function missingRequiredRepoExecution(wi, jobs) {
+  if (!wi || isExplicitResearchOnlyWorkItem(wi)) return false;
+  if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
+  const intakeHints = getWorkItemIntakeHints(wi, wi.mode || "build");
+  if (!requiresRepositoryExecution(wi, intakeHints)) return false;
+  return !jobs.some(jobProducesRepositoryOutput);
+}
+
+function missingExecutionReason(wi, jobs) {
+  if (missingRequiredRepoExecution(wi, jobs)) return "missing_required_repo_execution";
+  if (missingRequiredBuildExecution(wi, jobs)) return "missing_required_build_execution";
+  return null;
 }
 
 function isActiveIterativeWorkItemRecord(wi) {
@@ -369,6 +394,15 @@ export function createWorkItem(title, description, priority = "normal", opts = {
   const recycle = ["on", "off"].includes(String(opts.session_recycle || "").toLowerCase())
     ? String(opts.session_recycle).toLowerCase()
     : null;
+  const inputMetadata = opts.metadata && typeof opts.metadata === "object" && !Array.isArray(opts.metadata)
+    ? opts.metadata
+    : null;
+  const modeSource = ["explicit", "inferred"].includes(String(opts.mode_source || "").trim().toLowerCase())
+    ? String(opts.mode_source).trim().toLowerCase()
+    : null;
+  const metadata = modeSource
+    ? { ...(inputMetadata || {}), mode_source: modeSource }
+    : inputMetadata;
   const stmt = db.prepare(`
     INSERT INTO work_items (title, description, priority, source, requested_by, mode, metadata_json, governance_tier, session_recycle)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -380,7 +414,7 @@ export function createWorkItem(title, description, priority = "normal", opts = {
     opts.source || null,
     opts.requested_by || null,
     opts.mode || "build",
-    opts.metadata ? JSON.stringify(opts.metadata) : null,
+    metadata ? JSON.stringify(metadata) : null,
     tier,
     recycle,
   );
@@ -423,10 +457,11 @@ function completionReadinessForWorkItem(id, current, {
   if (!current) return { ok: false, reason: "no_such_wi" };
   const blockers = completionBlockersForWorkItem(id);
   const jobs = listJobsByWorkItem(id).filter((job) => !isShadowFanoutJob(job));
-  if (missingRequiredBuildExecution(current, jobs)) {
+  const executionReason = missingExecutionReason(current, jobs);
+  if (executionReason) {
     return {
       ok: false,
-      reason: "missing_required_build_execution",
+      reason: executionReason,
       blockers,
       jobs,
       reviewPlan: null,
@@ -492,16 +527,19 @@ export function updateWorkItemStatus(id, status, {
         allowTerminalFailureBlockers,
         resolvePendingReviews,
       });
-      if (readiness.reason === "missing_required_build_execution") {
+      if (readiness.reason === "missing_required_build_execution" || readiness.reason === "missing_required_repo_execution") {
+        const repoContractMismatch = readiness.reason === "missing_required_repo_execution";
         logEvent({
           work_item_id: id,
           event_type: EVENT_TYPES.WORK_ITEM_COMPLETION_BLOCKED,
           actor_type: EVENT_ACTORS.SYSTEM,
-          message: "Blocked build completion: research/planning produced no executable job",
+          message: repoContractMismatch
+            ? "Blocked completion: repository objective produced no repository execution job"
+            : "Blocked build completion: research/planning produced no executable job",
           event_json: JSON.stringify({
-            reason: "missing_required_build_execution",
+            reason: readiness.reason,
             pipeline_jobs: readiness.jobs
-              .filter((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))
+              .filter((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type) || MUTATING_JOB_TYPES.has(job.job_type))
               .map((job) => ({
                 job_id: job.id,
                 job_type: job.job_type,
@@ -509,6 +547,15 @@ export function updateWorkItemStatus(id, status, {
               })),
           }),
         });
+        if (repoContractMismatch) {
+          logEvent({
+            work_item_id: id,
+            event_type: EVENT_TYPES.WORK_ITEM_OUTPUT_CONTRACT_MISMATCH,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: "Repository output contract was not satisfied",
+            event_json: JSON.stringify({ reason: readiness.reason }),
+          });
+        }
         return false;
       }
       if (!readiness.ok) {
@@ -1162,6 +1209,17 @@ export function updateWorkItemMetadata(id, metadata) {
   `).run(metadata ? JSON.stringify(metadata) : null, now(), id);
 }
 
+export function updateWorkItemRouting(id, { mode = null, metadata = null } = {}) {
+  const db = getDb();
+  const normalizedMode = String(mode || "").trim().toLowerCase();
+  const nextMode = normalizedMode || null;
+  db.prepare(`
+    UPDATE work_items
+    SET mode = COALESCE(?, mode), metadata_json = ?, updated_at = ?
+    WHERE id = ?
+  `).run(nextMode, metadata ? JSON.stringify(metadata) : null, now(), id);
+}
+
 export function updateWorkItemResearchSkip(id, { skipped = true, reason = null } = {}) {
   const db = getDb();
   db.prepare(`
@@ -1222,10 +1280,26 @@ export function refreshWorkItemStatus(workItemId) {
 
     if (allTerminal) {
       const blockers = completionBlockersForWorkItem(workItemId);
-      const missingBuildExecution = missingRequiredBuildExecution(wi, completionJobs);
+      const executionReason = missingExecutionReason(wi, completionJobs);
+      if (executionReason === "missing_required_repo_execution" && wi.status !== "failed") {
+        logEvent({
+          work_item_id: workItemId,
+          event_type: EVENT_TYPES.WORK_ITEM_OUTPUT_CONTRACT_MISMATCH,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: "Repository output contract was not satisfied at terminal reconciliation",
+          event_json: JSON.stringify({
+            reason: executionReason,
+            terminal_jobs: completionJobs.map((job) => ({
+              job_id: job.id,
+              job_type: job.job_type,
+              status: job.status,
+            })),
+          }),
+        });
+      }
       newStatus = completionJobs.every(j => j.status === "canceled")
         ? "canceled"
-        : (blockers.length === 0 && !missingBuildExecution ? "complete" : "failed");
+        : (blockers.length === 0 && !executionReason ? "complete" : "failed");
     } else if (stateJobs.some(j => j.status === "waiting_on_human")) {
       newStatus = "waiting_on_human";
     } else if (stateJobs.some(j => ["running", "leased", "awaiting_assessment"].includes(j.status))) {

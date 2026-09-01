@@ -199,6 +199,7 @@ export function createApprovedSuggestionFollowUp({
       source: "assessor_suggestion",
       requested_by: "human",
       mode: "build",
+      mode_source: "explicit",
       governance_tier: sourceWorkItem.governance_tier || "mvp",
       metadata: {
         from_suggestion: true,

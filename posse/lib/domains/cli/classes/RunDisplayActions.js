@@ -296,6 +296,7 @@ export class RunDisplayActions {
     const item = this.createWorkItem(title, description, "normal", {
       source: "inject",
       mode,
+      mode_source: "inferred",
       metadata: this.researchBudgetMetadata({}, deepthinkBudget),
     });
     this.updateWorkItemStatus(item.id, "planning");
@@ -315,7 +316,11 @@ export class RunDisplayActions {
     }
 
     const title = prompt.split("\n")[0].slice(0, 100);
-    const item = this.createWorkItem(title, prompt, "normal", { source: "image", mode: "image" });
+    const item = this.createWorkItem(title, prompt, "normal", {
+      source: "image",
+      mode: "image",
+      mode_source: "explicit",
+    });
     this.ensureArtifactDirs(this.wiScopeId(item.id), "image", this.projectDir);
     const outputRoot = this.artifactsDir(this.wiScopeId(item.id), this.projectDir).replace(/\\/g, "/");
     const imgProvider = imageRoute.provider;
@@ -454,6 +459,7 @@ export class RunDisplayActions {
     const deepthinkBudget = "normal";
     const item = this.createWorkItem(title, question, "normal", {
       source: "ask",
+      mode_source: "explicit",
       metadata: this.researchBudgetMetadata({ mode: "question" }, deepthinkBudget),
     });
     this.updateWorkItemStatus(item.id, "planning");

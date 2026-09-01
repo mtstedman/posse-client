@@ -1,4 +1,5 @@
 import { hasExplicitRepoWorkIntent, hasRepoMutationIntent } from "./implementation-intent.js";
+import { hasFunctionalFailureIntent } from "./request-semantics.js";
 
 const IMAGE_MODE_ACTION_RE = /\b(generate|create|make|draw|design)\b/i;
 const IMAGE_MODE_NOUN_RE = /\b(images?|photos?|pictures?|illustrations?|banners?|icons?|logos?|artworks?|mermaid)\b/i;
@@ -24,6 +25,10 @@ export function inferWiMode(text) {
   // request in build mode.
   const repoMutationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
   if (repoMutationIntent || hasExplicitRepoWorkIntent(lower)) return null;
+  // Operational failure reports that mention an image-generation control are
+  // build work, not requests for a generated image. Questions remain neutral
+  // here so intake hints can retain their read-only contract.
+  if (hasFunctionalFailureIntent(lower)) return null;
   if (hasImageModeIntent(lower)) return "image";
   const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
   const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";

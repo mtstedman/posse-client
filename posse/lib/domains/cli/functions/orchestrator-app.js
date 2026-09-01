@@ -1270,7 +1270,9 @@ async function cmdAdd() {
   // Use first line as title, full text as description
   const title = description.split("\n")[0].slice(0, 100);
 
-  const mode = parseModeFlagFromArgv() || inferWiMode(description) || "build";
+  const explicitMode = parseModeFlagFromArgv();
+  const mode = explicitMode || inferWiMode(description) || "build";
+  const modeSource = explicitMode ? "explicit" : "inferred";
   const tier = parseTierFlagFromArgv() || "mvp";
   const parsedResearchBudget = parseResearchBudgetFromArgv();
   const defaultDeepthink = isResearchBudgetDeep(parsedResearchBudget.budget);
@@ -1289,6 +1291,7 @@ async function cmdAdd() {
   const iterationProfile = workflowMode ? getIterativeWorkflowProfile(workflowMode) : null;
   const item = createWorkItem(title, description, priority, {
     mode,
+    mode_source: modeSource,
     governance_tier: tier,
     session_recycle: sessionRecycle,
     metadata: researchBudgetMetadata({
@@ -1352,7 +1355,9 @@ async function cmdInject() {
   }
 
   const title = description.split("\n")[0].slice(0, 100);
-  const mode = parseModeFlagFromArgv() || inferWiMode(description) || "build";
+  const explicitMode = parseModeFlagFromArgv();
+  const mode = explicitMode || inferWiMode(description) || "build";
+  const modeSource = explicitMode ? "explicit" : "inferred";
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
   const requestedRedTeamPlan = RED_TEAM_PLAN || (workflowMode ? ITERATE_RED_TEAM_PLAN : false);
   const workflowRedTeamPlan = workflowMode ? requestedRedTeamPlan : false;
@@ -1369,6 +1374,7 @@ async function cmdInject() {
   const item = createWorkItem(title, description, "normal", {
     source: "inject",
     mode,
+    mode_source: modeSource,
     session_recycle: sessionRecycle,
     metadata: researchBudgetMetadata({
       research_budget_explicit: parsedResearchBudget.explicit,
@@ -1451,6 +1457,7 @@ function cmdAsk() {
   }, { requestText: question, fallbackMode: "build" });
   const item = createWorkItem(title, question, "normal", {
     source: "ask",
+    mode_source: "explicit",
     metadata: researchBudgetMetadata({
       mode: "question",
       intake_hints: intakeHints,
@@ -1497,7 +1504,11 @@ async function cmdImage() {
   const provider = imageRoute.provider;
 
   const title = prompt.split("\n")[0].slice(0, 100);
-  const item = createWorkItem(title, prompt, "normal", { source: "image", mode: "image" });
+  const item = createWorkItem(title, prompt, "normal", {
+    source: "image",
+    mode: "image",
+    mode_source: "explicit",
+  });
 
   // Pre-create artifact directories
   const dirs = ensureArtifactDirs(wiScopeId(item.id), "image", PROJECT_DIR);
