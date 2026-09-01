@@ -54,6 +54,24 @@ export function resolveCodexCloseTurns({
   return recovered != null && recovered > 0 ? recovered : null;
 }
 
+export function resolveCodexLiveTurnBudget({
+  providerRequestCount = 0,
+  maxTurns = null,
+} = {}) {
+  const observedTurns = token(providerRequestCount) ?? 0;
+  const configuredMaxTurns = token(maxTurns);
+  return {
+    observedTurns,
+    maxTurns: configuredMaxTurns,
+    // maxTurns is inclusive. Codex has no native per-request ceiling, so the
+    // rollout tailer can only prove the boundary after a request completes.
+    // Preserve that one-request grace for terminal agent_handoff.
+    exceeded: configuredMaxTurns != null
+      && configuredMaxTurns > 0
+      && observedTurns > configuredMaxTurns,
+  };
+}
+
 function dayDirectories(startedAtMs) {
   const timestamp = Number(startedAtMs);
   if (!Number.isFinite(timestamp)) return [];

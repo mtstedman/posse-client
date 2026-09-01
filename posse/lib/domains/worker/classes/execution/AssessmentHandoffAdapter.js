@@ -95,6 +95,21 @@ const ATTEMPT_STATUS_MAP = {
   blocked: "blocked",
 };
 
+export function assessmentFallbackRetryCount({
+  assessmentAttemptCount = 1,
+  internalRetryCount = 0,
+} = {}) {
+  const priorAssessmentAttempts = Math.max(
+    0,
+    Math.floor(Number(assessmentAttemptCount) || 1) - 1,
+  );
+  const recordedInternalRetries = Math.max(
+    0,
+    Math.floor(Number(internalRetryCount) || 0),
+  );
+  return Math.max(priorAssessmentAttempts, recordedInternalRetries);
+}
+
 export function retryAssessmentOnlyAfterTerminalHandoffError(
   worker,
   job,
@@ -304,6 +319,14 @@ export class AssessmentHandoffAdapter {
       { resolveModel: resolveAssessModel },
     );
     const internalAssessRetries = countInternalAssessmentRetries(job.id);
+    // Tool/transport failures requeue assessment without producing the
+    // `job.assessment_internal_retry` event used by verdict escalation. Count
+    // prior assessment attempts too, otherwise those retries receive the same
+    // read allowance and deterministically hit the same ceiling again.
+    const fallbackRetryCount = assessmentFallbackRetryCount({
+      assessmentAttemptCount: assessAttempt.assessmentAttemptCount,
+      internalRetryCount: internalAssessRetries,
+    });
     const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
     // Keep _assess_only set until acquireAssessmentBarrier atomically moves the
     // job into awaiting_assessment. Clearing it earlier opens an unprotected
@@ -427,7 +450,7 @@ export class AssessmentHandoffAdapter {
           abortSignal: assessAc?.signal || null,
           modelTier: effectiveTier,
           reasoningEffort: assessmentReasoningEffort,
-          fallbackReads: _assessmentRetryFallbackReads(effectiveTier, internalAssessRetries),
+          fallbackReads: _assessmentRetryFallbackReads(effectiveTier, fallbackRetryCount),
           priorAssessmentFindings,
           routedProviderName: providerName,
           cwd: assessmentCwd,

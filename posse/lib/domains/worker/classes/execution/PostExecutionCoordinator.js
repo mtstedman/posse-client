@@ -482,7 +482,19 @@ export async function handlePostExecutionForWorker({
             this._cleanupWorktreeIfDone(job.work_item_id);
             return;
           }
-          const preCommitPayload = this.parsePayload(job);
+          // Live scope approval mutates the durable job payload while the
+          // provider call is still running. The `job` argument is the snapshot
+          // captured before that call, so using it here can let the write tool
+          // accept an approved path and then make the scoped commit reject the
+          // same path as out of scope. Reload at the commit boundary, where the
+          // durable approval is authoritative.
+          const preCommitJob = getJob(job.id) || job;
+          const preCommitPayload = this.parsePayload(preCommitJob);
+          if (preCommitJob !== job && typeof preCommitJob.payload_json === "string") {
+            // Keep later no-op and assessment boundaries on the same approved
+            // scope snapshot used by the commit validator.
+            job.payload_json = preCommitJob.payload_json;
+          }
           // The delete-noop shortcut may only skip the scoped commit when the
           // agent verifiably wrote nothing. Removal-task classification is
           // keyword-based and delete targets can be inferred from prose, so a

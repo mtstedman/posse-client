@@ -37,7 +37,7 @@ import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRout
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
-import { createCodexRolloutUsageTailer, reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
+import { createCodexRolloutUsageTailer, reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, resolveCodexLiveTurnBudget, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
 import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
@@ -583,6 +583,8 @@ export async function callProvider(promptText, {
       startAtEnd: !!resumeSessionHandle,
     });
     let lastRolloutUsagePollMs = 0;
+    let liveProviderRequestCount = 0;
+    let killedByTurnBudget = false;
     let killedByStallDetector = false;
     let stallKillReason = "no_output";
     let lastActivity = Date.now();
@@ -666,11 +668,26 @@ export async function callProvider(promptText, {
         lastRolloutUsagePollMs = now;
         try {
           rolloutUsageTailer.setSessionHandle(latestSessionHandle);
-          for (const usage of rolloutUsageTailer.poll()) {
+          const liveUsages = rolloutUsageTailer.poll();
+          liveProviderRequestCount += liveUsages.length;
+          for (const usage of liveUsages) {
             if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
               console.error(`[ctx-debug] rollout tail usage ${JSON.stringify(usage)}`);
             }
             emitUsageProgress({ provider: "codex", modelName: modelToUse, ...usage });
+          }
+          const turnBudget = resolveCodexLiveTurnBudget({
+            providerRequestCount: liveProviderRequestCount,
+            maxTurns: turnLimit,
+          });
+          if (
+            turnBudget.exceeded
+            && !killedByTurnBudget
+            && processTerminator.snapshot().terminationRequestedAt == null
+          ) {
+            killedByTurnBudget = true;
+            emit(`${C.yellow}[cap] Codex exceeded ${turnLimit} provider turns (${turnBudget.observedTurns}/${turnLimit}) -- stopping process${C.reset}`);
+            processTerminator.requestTermination("turn_budget");
           }
         } catch { /* rollout tailing must not break provider execution */ }
       }
@@ -891,6 +908,29 @@ export async function callProvider(promptText, {
           attachProof: stats.mcpAttachProof,
         });
       } catch { /* telemetry only */ }
+
+      if (killedByTurnBudget) {
+        const usedTurns = stats.numTurns ?? liveProviderRequestCount;
+        const err = new Error(`Codex exhausted turn budget (${usedTurns}/${turnLimit})`);
+        err.code = "PROVIDER_TURN_BUDGET_EXCEEDED";
+        err.stats = {
+          ...stats,
+          numTurns: usedTurns,
+          maxTurns: turnLimit,
+          turnBudgetExceeded: true,
+          turnBudgetStatus: "terminated_overage",
+        };
+        // If agent_handoff was durably committed before the stop raced the
+        // provider close, TrackedProviderClient keeps that handoff authoritative.
+        err.terminalHandoffStopCompatible = true;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        err.output = finalOutput || stdout.trim() || null;
+        err.partialOutput = err.output;
+        err.toolUses = toolUses;
+        reject(err);
+        return;
+      }
 
       if (code === 0) {
         if (stats.mcpAttachMissingProof) {
