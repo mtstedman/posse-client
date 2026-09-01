@@ -3,8 +3,6 @@ import {
   acquireAssessmentBarrier,
   completeAttempt,
   createJob,
-  getArtifacts,
-  getAttempts,
   getJob,
   getWorkItem,
   incrementAndCreateAssessmentAttempt,
@@ -72,6 +70,7 @@ import {
 import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
+import { loadAssessmentSource } from "../../functions/execution/assessment-source.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -237,25 +236,9 @@ export class AssessmentHandoffAdapter {
       ? cleanPayload._assess_reasoning_effort
       : null;
     const assessmentReasoningEffort = harnessAssessorEffort() || assessReasoningEffortOverride || "medium";
-    // Retrieve the previous attempt's stored output.
-    const prevAttempts = getAttempts(job.id);
-    const lastWithCommit = [...prevAttempts].reverse().find(a => a.commit_hash);
-    const prevOutput = getArtifacts(job.id, "response");
-    // Pair the assessed commit with the SAME attempt's output. Taking the
-    // last response artifact unconditionally can feed attempt N's commit
-    // alongside attempt N+1's prose (e.g. a later attempt that stored output
-    // but produced no commit), so the assessor would judge a diff against
-    // unrelated narrative. Prefer the response whose attempt_id matches the
-    // committing attempt; fall back to the last artifact only when none match.
-    const matchedOutput = lastWithCommit
-      ? [...prevOutput].reverse().find(o => o.attempt_id === lastWithCommit.id)
-      : null;
-    const storedOutput = matchedOutput
-      ? matchedOutput.content_long
-      : (prevOutput.length > 0 ? prevOutput[prevOutput.length - 1].content_long : "");
-
-    if (!lastWithCommit || !storedOutput) {
-      const missing = new Error("Assessment evidence is unavailable: no prior committed output was found.");
+    const assessmentSource = loadAssessmentSource(job.id);
+    if (!assessmentSource.ok) {
+      const missing = new Error(`Assessment evidence is unavailable: ${assessmentSource.reason}`);
       setAssessmentLifecycle(job.id, "assessment_needs_human", { error: missing.message });
       const reviewJob = createJob({
         work_item_id: job.work_item_id,
@@ -267,10 +250,10 @@ export class AssessmentHandoffAdapter {
         payload_json: JSON.stringify({
           original_job_id: job.id,
           gate_kind: "assessor_evidence_unavailable",
-          review_type: "assessment_parse_error",
+          review_type: "assessment_evidence_missing",
           questions: [
-            `Job #${job.id} was queued for assessment-only recovery, but its commit/output evidence is missing.`,
-            "Choose retry_assessment after restoring evidence, pass, fail, explicit waiver, or replan.",
+            `Job #${job.id} was queued for assessment-only recovery, but no implementation attempt has a matching response with either a commit or a VERIFIED_NO_CHANGE result.`,
+            "Restore a matching response/source, then choose retry_assessment; or choose pass, fail, explicit waiver, or replan.",
           ],
         }),
       });
@@ -279,7 +262,10 @@ export class AssessmentHandoffAdapter {
       return { handled: true };
     }
 
-    worker.emit(job.id, `${C.cyan}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: orphaned assessment — skipping dev, re-assessing prior commit ${lastWithCommit.commit_hash.slice(0, 8)}`);
+    const sourceLabel = assessmentSource.kind === "commit"
+      ? `prior commit ${assessmentSource.commitHash.slice(0, 8)}`
+      : `prior VERIFIED_NO_CHANGE result from attempt #${assessmentSource.attempt.id}`;
+    worker.emit(job.id, `${C.cyan}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: orphaned assessment — skipping dev, re-assessing ${sourceLabel}`);
 
     const barrier = acquireAssessmentBarrier(job.id, leaseToken);
     if (!barrier.ok) {
@@ -311,7 +297,7 @@ export class AssessmentHandoffAdapter {
 
     // Re-run assessment with the stored output (reuse the existing attempt).
     const { role, provider, providerName } = await resolveAssessmentOnlyProvider(worker.agentDispatcher);
-    const assessAttemptCount = assessAttempt.attemptCount || (prevAttempts.length + 1);
+    const assessAttemptCount = assessAttempt.attemptCount || (Number(assessmentSource.attempt?.attempt_number || 0) + 1);
     const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
     const effectiveTier = provider.escalateTier(
       assessModelTierOverride || "cheap",
@@ -359,7 +345,7 @@ export class AssessmentHandoffAdapter {
         job,
         payload: jobPayloadForAssess,
         cwd: assessmentCwd,
-        commitHash: lastWithCommit.commit_hash || null,
+        commitHash: assessmentSource.commitHash,
         attemptId: assessAttempt.attempt.id,
         cleanupWorktree: wtPath
           ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
@@ -396,34 +382,39 @@ export class AssessmentHandoffAdapter {
       let filesCommittedError = null;
       // Attempts persist the pre-commit HEAD, so multi-commit attempts diff
       // base..head; older rows without a base fall back to the final commit.
-      const commitBaseHash = String(lastWithCommit.commit_base_hash || "").trim() || null;
-      const commitDiffRevs = commitBaseHash
-        ? [commitBaseHash, lastWithCommit.commit_hash]
-        : [`${lastWithCommit.commit_hash}^!`];
+      const commitBaseHash = assessmentSource.commitBaseHash;
+      const commitDiffRevs = assessmentSource.commitHash
+        ? (commitBaseHash
+          ? [commitBaseHash, assessmentSource.commitHash]
+          : [`${assessmentSource.commitHash}^!`])
+        : null;
       // File names must be worktree-root-relative to match the scope contract
       // (the live path computes them in wtPath), not artifact output_root.
       const commitListCwd = wtPath || worker.projectDir;
-      try {
-        filesCommitted = (await gitExecAsync([
-          "diff",
-          "--no-renames",
-          "--name-only",
-          "--relative",
-          ...commitDiffRevs,
-        ], commitListCwd))
-          .split("\n")
-          .map((line) => String(line || "").replace(/\\/g, "/").trim())
-          .filter(Boolean);
-      } catch (error) {
-        filesCommittedUnknown = true;
-        filesCommittedError = error?.message || String(error);
+      if (commitDiffRevs) {
+        try {
+          filesCommitted = (await gitExecAsync([
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "--relative",
+            ...commitDiffRevs,
+          ], commitListCwd))
+            .split("\n")
+            .map((line) => String(line || "").replace(/\\/g, "/").trim())
+            .filter(Boolean);
+        } catch (error) {
+          filesCommittedUnknown = true;
+          filesCommittedError = error?.message || String(error);
+        }
       }
       const assessmentContext = await attachAssessmentDiffContextAsync({
         task_mode: jobPayloadForAssess.task_mode || "code",
         manifest: null,
-        commit_hash: lastWithCommit.commit_hash || null,
+        commit_hash: assessmentSource.commitHash,
         commit_base_hash: commitBaseHash,
         output_root: jobPayloadForAssess.output_root || null,
+        verified_no_change: assessmentSource.kind === "verified_no_change",
         allowed_files: jobPayloadForAssess.files_to_modify || [],
         allowed_create_files: jobPayloadForAssess.files_to_create || [],
         allowed_delete_files: scopedDeleteTargetsFromModule(job, jobPayloadForAssess),
@@ -440,7 +431,7 @@ export class AssessmentHandoffAdapter {
       }
       const assessmentSession = new AssessmentSession({
         job,
-        output: storedOutput,
+        output: assessmentSource.output,
         attemptId: assessAttempt.attempt.id,
         providerClient: worker.providerClient,
         worker,
@@ -485,7 +476,7 @@ export class AssessmentHandoffAdapter {
       completeAttempt(assessAttempt.attempt.id, {
         status: ATTEMPT_STATUS_MAP[freshJob?.status] || "failed",
         duration_ms: Date.now() - assessStart,
-        output_chars: storedOutput.length,
+        output_chars: assessmentSource.output.length,
       });
       spawnDeferredAssessmentFileRequestFollowUp(
         worker,

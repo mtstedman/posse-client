@@ -74,6 +74,7 @@ const ASSESSMENT_REVIEW_TYPES = new Set([
   "assessment",
   "needs_review",
   "assessment_parse_error",
+  "assessment_evidence_missing",
   "unknown_verdict",
   "assessment_transport_error",
   "assessment_retry_limit",
@@ -108,6 +109,7 @@ import {
   PROVIDER_AFFINITY_ROUTES,
   providerForAffinityRoute,
 } from "../../../../shared/policies/functions/provider-affinity.js";
+import { loadAssessmentSource } from "./assessment-source.js";
 
 function isOneshotScopeSelectionPayload(payload) {
   return payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
@@ -413,6 +415,32 @@ export async function runHumanInputJob(worker, job, {
       if (reviewAction !== "unknown") selectedAction = reviewAction;
     }
     selectedAction ||= "respond";
+    if (
+      selectedAction === "retry_assessment"
+      && (
+        payload.review_type === "assessment_evidence_missing"
+        || payload.gate_kind === "assessor_evidence_unavailable"
+      )
+    ) {
+      const assessmentSource = loadAssessmentSource(payload.original_job_id);
+      if (!assessmentSource.ok) {
+        const message = [
+          `Assessment evidence is still unavailable for job #${payload.original_job_id}.`,
+          assessmentSource.reason,
+          "Restore the matching response/source before retrying assessment; this gate remains open.",
+        ].join(" ");
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: message,
+        });
+        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+        refreshAndExtractInsights(job.work_item_id);
+        worker._cleanupWorktreeIfDone(job.work_item_id);
+        return;
+      }
+    }
     const resolutionClaim = beginHumanGateResolution({
       gateJobId: job.id,
       leaseToken,

@@ -46,6 +46,7 @@ const FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying",
 const REVIEW_KIND_BY_TYPE = new Map([
   ["needs_review", "assessment_review"],
   ["assessment_parse_error", "assessment_review"],
+  ["assessment_evidence_missing", "assessment_transport_recovery"],
   ["unknown_verdict", "assessment_review"],
   ["replan_limit", "assessment_review"],
   ["assessment_transport_error", "assessment_transport_recovery"],

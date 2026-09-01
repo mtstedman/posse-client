@@ -81,6 +81,7 @@ const QUESTION_CHOICE_IDS = Object.freeze({
 const QUESTION_KIND_BY_REVIEW_TYPE = new Map([
   ["needs_review", "assessment_review"],
   ["assessment_parse_error", "assessment_review"],
+  ["assessment_evidence_missing", "assessment_transport_recovery"],
   ["unknown_verdict", "assessment_review"],
   ["replan_limit", "assessment_review"],
   ["assessment_transport_error", "assessment_transport_recovery"],

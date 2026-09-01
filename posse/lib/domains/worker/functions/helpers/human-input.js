@@ -27,6 +27,7 @@ const HARNESS_REVIEW_ANSWERS = Object.freeze({
   assessment: "fail",
   needs_review: "fail",
   assessment_parse_error: "fail",
+  assessment_evidence_missing: "fail",
   unknown_verdict: "fail",
   assessment_transport_error: "fail",
   assessment_retry_limit: "fail",
