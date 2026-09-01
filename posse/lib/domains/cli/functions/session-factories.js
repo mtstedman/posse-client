@@ -93,6 +93,12 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) 
     eligibleWorkItemIds.add(Number(item.id));
     const gate = findPendingGate(item.id);
     if (!gate) continue;
+    let gatePayload = {};
+    try { gatePayload = JSON.parse(gate.payload_json || "{}"); } catch { gatePayload = {}; }
+    // Exact operational-command authorization is human-owned. Headless and
+    // non-interactive policy may approve ordinary plans, but must leave these
+    // gates parked until an operator reviews the command text.
+    if (gatePayload?.requires_interactive_approval === true) continue;
     const approved = approvePlan(item.id, {
       actor: "non_interactive_policy",
       actorType: EVENT_ACTORS.SYSTEM,

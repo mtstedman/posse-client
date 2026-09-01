@@ -48,6 +48,7 @@ import {
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { operationalCommandApprovalRequest } from "../../worker/functions/helpers/test-execution-receipt.js";
 
 // Document allowed plan_approval_state values. The DB column is untyped for
 // migration simplicity; this set is the authoritative list.
@@ -99,7 +100,16 @@ export function isPlanApprovalSuppressedForRun() {
   return _planApprovalOverride === PLAN_APPROVAL_MODES.AUTO_APPROVE;
 }
 
-export function planApprovalRequirement({ hasCriticalRisk = false } = {}) {
+export function planApprovalRequirement({
+  hasCriticalRisk = false,
+  hasOperationalCommands = false,
+} = {}) {
+  // Operational commands are never covered by auto-approve or a per-run plan
+  // approval override. They require an actual person to authorize the exact
+  // direct-spawn command before any dependent implementation can run.
+  if (hasOperationalCommands) {
+    return { required: true, reason: "operational_command" };
+  }
   const mode = getPlanApprovalMode();
   if (mode === PLAN_APPROVAL_MODES.ALL_PLANS) {
     return { required: true, reason: "configured" };
@@ -251,14 +261,32 @@ export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
   const db = getDb();
   return db.transaction(() => {
     const wiId = planJob.work_item_id;
+    const operationalCommands = Array.isArray(summary?.operational_commands)
+      ? summary.operational_commands
+      : [];
+    const requiresInteractiveApproval = operationalCommands.length > 0;
+    const operationalCommandLines = operationalCommands.map((item) => {
+      const jobId = Number(item?.job_id);
+      const title = String(item?.title || "operational task").trim().slice(0, 120);
+      const command = String(item?.command || "").trim().slice(0, 500);
+      return `Job #${jobId}: ${title}\nCommand: ${command}`;
+    });
     const payload = {
       subtype: "plan_approval",
       question_kind: "plan_approval",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval,
-      questions: ["Approve or reject the current plan?"],
+      questions: [requiresInteractiveApproval
+        ? [
+            "Approve the following exact operational command(s)?",
+            "They will run by direct spawn after implementation and may modify project or local data.",
+            "Approval permits execution only; it is not test evidence and does not approve correctness.",
+            ...operationalCommandLines,
+          ].join("\n\n")
+        : "Approve or reject the current plan?"],
       plan_job_id: planJob.id,
       gated_job_ids: targets.slice(),
       summary: summary || null,
+      requires_interactive_approval: requiresInteractiveApproval,
       created_at: new Date().toISOString(),
     };
 
@@ -325,10 +353,57 @@ export function approvePlan(wiId, {
   if (!wi) return { ok: false, reason: "no_such_wi" };
   const gate = findPendingGate(wiId);
   if (!gate) return { ok: false, reason: "no_pending_gate" };
+  const gatePayload = parseJobPayload(gate);
+  if (gatePayload?.requires_interactive_approval === true && actorType !== EVENT_ACTORS.HUMAN) {
+    return { ok: false, reason: "interactive_operator_approval_required" };
+  }
   const db = getDb();
   return db.transaction(() => {
+    const gatedJobIds = new Set(
+      (Array.isArray(gatePayload?.gated_job_ids) ? gatePayload.gated_job_ids : [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isSafeInteger(id) && id > 0),
+    );
+    const operationalCommands = Array.isArray(gatePayload?.summary?.operational_commands)
+      ? gatePayload.summary.operational_commands
+      : [];
+    const approvals = [];
+    for (const item of operationalCommands) {
+      const jobId = Number(item?.job_id);
+      const job = getJob(jobId);
+      const jobPayload = parseJobPayload(job);
+      const request = operationalCommandApprovalRequest(jobPayload?.test_command);
+      const required = jobPayload?._operational_command_approval_required;
+      if (
+        !job
+        || job.work_item_id !== wiId
+        || !gatedJobIds.has(jobId)
+        || !request
+        || request.command !== String(item?.command || "").trim()
+        || request.command_sha256 !== item?.command_sha256
+        || required?.command_sha256 !== request.command_sha256
+      ) {
+        return { ok: false, reason: "operational_command_contract_changed", jobId };
+      }
+      approvals.push({ job, jobPayload, request });
+    }
     const claimed = beginPlanGateResolution(gate, "approve");
     if (!claimed.ok) return { ok: false, reason: claimed.reason };
+    const approvedAt = new Date().toISOString();
+    for (const { job, jobPayload, request } of approvals) {
+      updateJobPayload(job.id, JSON.stringify({
+        ...jobPayload,
+        _operator_approved_command: {
+          schema_version: 1,
+          command_sha256: request.command_sha256,
+          gate_job_id: gate.id,
+          approved_at: approvedAt,
+          approved_by: actor,
+          execution_phase: request.execution_phase,
+          verification_eligible: false,
+        },
+      }));
+    }
     const resolution = planGateResolutionPayload("approve", { actor, actorType });
     setWorkItemApproval(wiId, "approved", null);
     setJobResult(gate.id, resolution);
@@ -342,9 +417,23 @@ export function approvePlan(wiId, {
       event_type: EVENT_TYPES.PLAN_APPROVED,
       actor_type: actorType,
       actor_id: actor,
-      message: `Plan approved; downstream jobs may proceed`,
+      message: approvals.length > 0
+        ? `Plan approved; ${approvals.length} exact operational command(s) authorized and downstream jobs may proceed`
+        : `Plan approved; downstream jobs may proceed`,
+      event_json: approvals.length > 0
+        ? JSON.stringify({
+            gate_job_id: gate.id,
+            operational_commands: approvals.map(({ job, request }) => ({
+              job_id: job.id,
+              command: request.command,
+              command_sha256: request.command_sha256,
+              execution_phase: request.execution_phase,
+              verification_eligible: false,
+            })),
+          })
+        : null,
     });
-    return { ok: true, gateJobId: gate.id };
+    return { ok: true, gateJobId: gate.id, approvedOperationalCommandCount: approvals.length };
   })();
 }
 

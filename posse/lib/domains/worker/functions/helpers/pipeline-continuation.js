@@ -303,14 +303,12 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
       : taskSpec;
   };
 
-  // Helper: deduplicate file paths and derive create_roots from parent dirs
+  // Helper: deduplicate exact file paths. Writing continuations are authorized
+  // only for files_to_create; parent directories must never become generic
+  // creation roots merely because a human approved an exact file.
   const buildFileScope = (files) => {
     const uniquePaths = [...new Set(files.map(r => r.path))];
-    const parentDirs = [...new Set(uniquePaths.map(f => {
-      const dir = f.replace(/\\/g, "/").replace(/\/[^/]+$/, "");
-      return dir === f ? "" : dir; // no slash = root-level file -> empty
-    }).filter(Boolean))];
-    return { filePaths: uniquePaths, createRoots: parentDirs };
+    return { filePaths: uniquePaths };
   };
 
   // -- Auto-approved files (low + mid risk): dev job, no gate --
@@ -356,7 +354,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
 
   // -- High-risk files: human_input gate -> dev job --
   if (needsApproval.length > 0) {
-    const { filePaths: approvalPaths, createRoots: approvalRoots } = buildFileScope(needsApproval);
+    const { filePaths: approvalPaths } = buildFileScope(needsApproval);
     const fileDesc = needsApproval
       .map(r => `- ${r.path}${r.reason ? ` — ${r.reason}` : ""}`)
       .join("\n");
@@ -399,7 +397,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
         task_spec: buildFileCreateSpec(needsApproval),
         files_to_modify: [],
         files_to_create: approvalPaths,
-        create_roots: approvalRoots,
+        create_roots: [],
         success_criteria: approvalPaths.map(f => `File ${f} exists with appropriate content`),
       }),
     });

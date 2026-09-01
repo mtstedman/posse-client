@@ -106,8 +106,8 @@ const TURN_CONFIGS = Object.freeze({
       formula: "linear",
     }),
     defaults: Object.freeze({
-      researcher: 8,
-      planner: 2,
+      researcher: 10,
+      planner: 4,
       preflight: 2,
       delegator: 2,
       assessor: 6,

@@ -53,7 +53,10 @@ import {
   normalizeRiskTags,
   resolveTaskExecutionPolicy,
 } from "../../handoff/functions/helpers/execution-policy.js";
-import { validatePlannerTestCommand } from "../../worker/functions/helpers/test-execution-receipt.js";
+import {
+  operationalCommandApprovalRequest,
+  validatePlannerTestCommand,
+} from "../../worker/functions/helpers/test-execution-receipt.js";
 import { validateSkillIds } from "../../../shared/skills/functions/registry.js";
 import {
   buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule,
@@ -1792,15 +1795,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         // will reject must not raise the assessor's pass-confidence floor —
         // it can never produce the executable evidence the floor assumes.
         let plannerTestCommandValid = null;
+        let operationalCommandApproval = null;
         if (shouldApplyExecutionPolicy && !pinnedTestCommand) {
           const declaredTestCommand = typeof t.test_command === "string" ? t.test_command.trim() : "";
           if (declaredTestCommand) {
             const testCommandValidation = validatePlannerTestCommand(declaredTestCommand);
             plannerTestCommandValid = testCommandValidation.ok;
             if (!testCommandValidation.ok) {
+              operationalCommandApproval = operationalCommandApprovalRequest(declaredTestCommand);
               worker.emit(
                 planJob.id,
-                `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" fails runner validation (${testCommandValidation.reason}) — assessor policy treats the task as untested`,
+                `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" fails runner validation (${testCommandValidation.reason}) — assessor policy treats the task as untested${operationalCommandApproval ? "; exact-command human approval is required before post-change execution" : ""}`,
               );
             }
           }
@@ -1872,6 +1877,15 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: pinnedTestCommand || t.test_command || null,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
+              ...(operationalCommandApproval ? {
+                _operational_command_approval_required: {
+                  schema_version: operationalCommandApproval.schema_version,
+                  command_sha256: operationalCommandApproval.command_sha256,
+                  validation_reason: operationalCommandApproval.validation_reason,
+                  execution_phase: operationalCommandApproval.execution_phase,
+                  verification_eligible: false,
+                },
+              } : {}),
               ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),
               ...(activeHashRefPacket ? { hash_ref_packet: activeHashRefPacket } : {}),
               ...(devBriefResult.droppedFiles.length > 0 ? { dropped_dev_brief_files: devBriefResult.droppedFiles } : {}),
@@ -2297,8 +2311,26 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           const createdPayload = parseJobPayload(createdJob);
           return Number(createdPayload?._execution_policy?.risk_score || 0) >= 5;
         });
+        const operationalCommands = createdIds.flatMap((jobId) => {
+          const createdJob = getJob(jobId);
+          if (!createdJob || !["dev", "fix"].includes(createdJob.job_type)) return [];
+          const createdPayload = parseJobPayload(createdJob);
+          const required = createdPayload?._operational_command_approval_required;
+          const request = operationalCommandApprovalRequest(createdPayload?.test_command);
+          if (!request || required?.command_sha256 !== request.command_sha256) return [];
+          return [{
+            job_id: createdJob.id,
+            title: createdJob.title,
+            command: request.command,
+            command_sha256: request.command_sha256,
+            cwd_relative: request.cwd_relative,
+            execution_phase: request.execution_phase,
+            verification_eligible: false,
+          }];
+        });
         const approval = planApprovalRequirement({
           hasCriticalRisk: criticalRiskJobIds.length > 0,
+          hasOperationalCommands: operationalCommands.length > 0,
         });
         if (approval.required) {
           if (createdIds.length > 0) {
@@ -2309,6 +2341,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               job_count: createdIds.length,
               approval_reason: approval.reason,
               critical_risk_job_ids: criticalRiskJobIds,
+              operational_commands: operationalCommands,
             });
             if (!Number.isSafeInteger(Number(gateId)) || Number(gateId) <= 0) {
               throw new Error("required approval gate did not return a valid job id");

@@ -282,13 +282,12 @@ function resolveAssessorPolicy({
     reasons.push(testCommandRejected
       ? "declared test command failed runner validation; treated as untested"
       : "code task has no repository-declared test command");
-    // Without an executable verification step, an honest assessor tops out
-    // at medium confidence — demanding "high" here just converts every pass
-    // into a needs_review human gate. Cap the floor at what is attainable
-    // and compensate with the stronger assessor tier above instead.
+    // Critical/high-risk code must fail closed when executable verification is
+    // unavailable. Keeping the high floor lets verdict dispatch convert a
+    // source-only pass into one explicit review gate instead of silently
+    // accepting an unverified migration, auth, security, or payment change.
     if (passConfidenceFloor === "high") {
-      passConfidenceFloor = "medium";
-      reasons.push("pass-confidence floor capped at medium: no executable verification available");
+      reasons.push("high-risk pass requires executable verification or human review");
     }
   }
 

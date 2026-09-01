@@ -136,7 +136,11 @@ export function capVerdictForHighRiskVerificationGap(
     ? payload.test_command.trim()
     : "";
   const postChange = testRun?.postChange || testRun?.post_change || null;
-  if (command && postChange?.status === "passed") return verdict;
+  if (
+    command
+    && postChange?.status === "passed"
+    && postChange?.verification_eligible !== false
+  ) return verdict;
   if (!postChange && scopedVerification?.status === "passed" && scopedVerification?.executed_commit_hash) {
     return {
       ...verdict,
@@ -169,8 +173,14 @@ export function capVerdictForHighRiskVerificationGap(
     };
   }
 
-  const status = postChange?.status || (command ? "not_run" : "not_declared");
-  const detail = postChange?.validation_error || postChange?.reason || null;
+  const operationalOnly = postChange?.status === "passed"
+    && postChange?.verification_eligible === false;
+  const status = operationalOnly
+    ? "an approved operational execution, not a test"
+    : postChange?.status || (command ? "not_run" : "not_declared");
+  const detail = operationalOnly
+    ? null
+    : postChange?.validation_error || postChange?.reason || null;
   return {
     ...verdict,
     verdict: "needs_review",

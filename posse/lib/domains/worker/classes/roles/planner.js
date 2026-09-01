@@ -564,6 +564,7 @@ export class PlannerRole extends BaseRole {
       "- Identify one narrow existing repository-declared test command per dev/fix task and set test_command on that task.",
       "- When the research brief supplies verification_targets, preserve one applicable exact command on the corresponding task; do not replace a targeted security or regression check with unrelated generic verification.",
       "- Prefer a package/manifest script or a single recognized test runner. Do not compose shell pipelines, setup steps, or cleanup commands.",
+      "- Migration, build, code-generation, server-start, and deploy commands are not tests. Select an existing test/check command that validates their behavior; if none exists, omit test_command.",
       "- The worker freezes that command before DEV and runs it once before and once after implementation; DEV must not run it.",
       "- If no existing suite applies, omit test_command instead of inventing one. Test execution is verification metadata, not a success criterion.",
       // Conditional: empty when this repo has no project-db config, so
