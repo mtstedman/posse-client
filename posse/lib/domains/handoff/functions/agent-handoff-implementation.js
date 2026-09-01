@@ -2737,10 +2737,16 @@ function researcherEvidenceSelectors(value, context) {
         const selector = researcherEvidenceSelector(entry, context);
         return selector == null ? [] : [selector];
       } catch (error) {
-        if (!isCleanableEvidenceRangeError(error)) throw error;
+        const action = isCleanableEvidenceRangeError(error)
+          ? "drop_invalid_range"
+          : String(error?.code || "") === "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED"
+            ? "drop_advisory_research_selector"
+            : null;
+        if (!action) throw error;
         recordEvidenceCleanup(context, {
-          action: "drop_invalid_range",
+          action,
           selector: entry,
+          code: error.code,
           message: error.message,
         });
         return [];
@@ -3672,7 +3678,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   };
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
     normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
-    { role: normalizedRole, context },
+    { role: normalizedRole, context: materializationContext },
   );
   const serialized = JSON.stringify(normalizedArgs ?? null);
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
