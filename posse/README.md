@@ -167,6 +167,8 @@ Use `posse help` for the full CLI reference.
 - `run`: execute pending jobs.
 - `go`: run `plan` and `run` together.
 - `status [--active] [--limit N|all] [--json]`: show bounded job/work-item status, filter to active work, or emit JSON.
+- `serve [--pair]`: expose this clone's queue and controls to paired phone/web clients.
+- `pair [host|join|status|leave]`: collaborate from separate clones through a shared Git side trunk and see bounded, read-only peer work-item/job summaries outside the local queue.
 - `health`: show stuck-job and failure signals.
 - `dashboard`: show the TUI dashboard.
 - `review`: generate review output and collect approval decisions.

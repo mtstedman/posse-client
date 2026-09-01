@@ -12,7 +12,8 @@ installCliWarningFilter();
 //   run                 Execute pending jobs
 //   go                  plan + run in one shot
 //   status              Show job status
-//   serve               Start local bridge API/WS server
+//   serve               Pair phone/web clients to this clone's control bridge
+//   pair                Collaborate across clones through a shared Git side trunk
 //   health              Show failure/stuck-job health signals
 //   dashboard           Visual job board
 //   review              Final report + approve/reject
@@ -2622,6 +2623,11 @@ const COMMAND_USAGE = {
     console.log(`  Resolve a parked human gate without starting the scheduler.`);
     console.log(`  ${C.dim}Common actions: pass, fail, retry, replan, skip. The gate's catalogued choices remain authoritative.${C.reset}\n`);
   },
+  serve: () => {
+    console.log(`\n  Usage: posse serve [--show-token] [--pair]`);
+    console.log(`  Start this clone's HTTP+WebSocket control bridge for phone/web clients.`);
+    console.log(`  ${C.dim}This does not join clones or share Git work; use \`posse pair\` for multi-user shared-trunk collaboration.${C.reset}\n`);
+  },
   pair: () => {
     console.log(`\n  Usage:`);
     console.log(`    posse pair [host] [--remote origin] [--branch posse/pair-name]`);
@@ -2629,8 +2635,10 @@ const COMMAND_USAGE = {
     console.log(`    posse pair join <CODE>`);
     console.log(`    posse pair status`);
     console.log(`    posse pair leave`);
-    console.log(`\n  Opens or joins a persistent Posse-to-Posse shared-trunk session.`);
-    console.log(`  ${C.dim}This is separate from phone pairing via \`posse serve --pair\`.${C.reset}\n`);
+    console.log(`\n  Opens or joins multi-user collaboration across separate clones on one shared Git side trunk.`);
+    console.log(`  Live participants see bounded, read-only peer WI/job summaries outside their local queue.`);
+    console.log(`  Each clone keeps its own queue and database; peer activity is never scheduled locally.`);
+    console.log(`  ${C.dim}This does not expose a phone/web control bridge; use \`posse serve --pair\` for that.${C.reset}\n`);
   },
   unpair: () => {
     console.log(`\n  Usage: posse unpair [--json]`);
@@ -2740,7 +2748,7 @@ ${aliasDiagnostic}
     ${C.cyan}queue${C.reset}      Show all work items and their status
     ${C.cyan}status${C.reset}     Detailed job-level status
     ${C.dim}             status [--active] [--limit N|all] [--json]${C.reset}
-    ${C.cyan}serve${C.reset}      Start local bridge HTTP+WS API
+    ${C.cyan}serve${C.reset}      Control this clone from paired phone/web clients
     ${C.dim}             serve [--show-token] [--pair]${C.reset}
     ${C.cyan}health${C.reset}     Failure/stuck-job health summary
     ${C.cyan}dashboard${C.reset}  Visual job board
@@ -2779,9 +2787,10 @@ ${aliasDiagnostic}
     ${C.dim}             shared-trunk-smoke [--json]${C.reset}
     ${C.cyan}pairing-preflight${C.reset}  Verify this member's shared-remote access
     ${C.dim}             pairing-preflight [--json]${C.reset}
-    ${C.cyan}pair${C.reset}       Open or join a Posse-to-Posse shared session
+    ${C.cyan}pair${C.reset}       Collaborate across clones on a shared Git side trunk
     ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
-    ${C.cyan}unpair${C.reset}     Leave pairing and restore the original branch/settings
+    ${C.dim}             Shows read-only peer WIs/jobs outside the local queue; unlike serve, pair does not connect phone/web clients${C.reset}
+    ${C.cyan}unpair${C.reset}     Leave shared-trunk pairing and restore the original branch/settings
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}
     ${C.cyan}atlas-v2${C.reset}     Inspect/manage the ATLAS v2 ledger, views, and warmer queue

@@ -9,6 +9,10 @@ const PAIRING_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}-[ABCDEFGHJKMNPQRS
 const TOKEN_RE = /^pp[hm]_[0-9a-f]{32}$/u;
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/u;
 const SESSION_STATUSES = new Set(["active", "closed", "expired"]);
+const PEER_ROLES = new Set(["host", "member"]);
+const MAX_PEERS = 100;
+const MAX_WORK_ITEMS = 50;
+const MAX_JOBS = 100;
 
 function invalidResponse(endpoint, detail, status = null) {
   const error = new Error(`Pairing relay returned an invalid ${endpoint} response: ${detail}`);
@@ -64,6 +68,60 @@ function validateRepository(endpoint, payload, status) {
   requiredString(endpoint, repository, "branch", { maxLength: 255, status });
 }
 
+function optionalPeerWorkItems(endpoint, peer, status) {
+  if (!Array.isArray(peer.work_items) || peer.work_items.length > MAX_WORK_ITEMS) {
+    throw invalidResponse(endpoint, "peer work_items is invalid", status);
+  }
+  for (const item of peer.work_items) {
+    const record = recordPayload(endpoint, item, status);
+    if (!Number.isSafeInteger(record.id) || record.id <= 0) {
+      throw invalidResponse(endpoint, "peer work item id is invalid", status);
+    }
+    requiredString(endpoint, record, "title", { maxLength: 240, status });
+    requiredString(endpoint, record, "status", { maxLength: 40, status });
+    requiredString(endpoint, record, "priority", { maxLength: 20, status });
+  }
+}
+
+function validatePeers(endpoint, response, status) {
+  if (response.peers == null) {
+    response.peers = [];
+    return;
+  }
+  if (!Array.isArray(response.peers) || response.peers.length > MAX_PEERS) {
+    throw invalidResponse(endpoint, "peers is invalid", status);
+  }
+  for (const value of response.peers) {
+    const peer = recordPayload(endpoint, value, status);
+    requiredString(endpoint, peer, "instance_id", { maxLength: 128, status });
+    requiredString(endpoint, peer, "label", { maxLength: 160, status });
+    if (!PEER_ROLES.has(peer.role)) {
+      throw invalidResponse(endpoint, "peer role is invalid", status);
+    }
+    const updatedAt = requiredString(endpoint, peer, "updated_at", { maxLength: 64, status });
+    if (!Number.isFinite(Date.parse(updatedAt))) {
+      throw invalidResponse(endpoint, "peer updated_at is invalid", status);
+    }
+    optionalPeerWorkItems(endpoint, peer, status);
+    if (peer.jobs == null) peer.jobs = [];
+    if (!Array.isArray(peer.jobs) || peer.jobs.length > MAX_JOBS) {
+      throw invalidResponse(endpoint, "peer jobs is invalid", status);
+    }
+    for (const value of peer.jobs) {
+      const job = recordPayload(endpoint, value, status);
+      if (!Number.isSafeInteger(job.id) || job.id <= 0) {
+        throw invalidResponse(endpoint, "peer job id is invalid", status);
+      }
+      if (job.work_item_id != null && (!Number.isSafeInteger(job.work_item_id) || job.work_item_id <= 0)) {
+        throw invalidResponse(endpoint, "peer job work_item_id is invalid", status);
+      }
+      requiredString(endpoint, job, "title", { maxLength: 240, status });
+      requiredString(endpoint, job, "status", { maxLength: 40, status });
+      requiredString(endpoint, job, "job_type", { maxLength: 40, status });
+    }
+  }
+}
+
 export function validatePairingRemoteResponse(endpoint, payload, status = null) {
   const response = recordPayload(endpoint, payload, status);
   if (endpoint === "leave") {
@@ -107,6 +165,7 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
     if (!Number.isSafeInteger(response.active_members) || response.active_members < 0) {
       throw invalidResponse(endpoint, "active_members is invalid", status);
     }
+    validatePeers(endpoint, response, status);
   } else if (endpoint !== "resolve") {
     throw invalidResponse(endpoint, "unknown endpoint contract", status);
   }
@@ -202,7 +261,7 @@ export function createPairingRemoteClient({
     resolve: (code) => validatedRequest("resolve", { body: { code } }),
     join: (code, instanceId) => validatedRequest("join", { body: { code, instance_id: instanceId } }),
     status: (token) => validatedRequest("status", { method: "GET", token }),
-    heartbeat: (token) => validatedRequest("heartbeat", { token }),
+    heartbeat: (token, presence = null) => validatedRequest("heartbeat", { token, body: presence }),
     leave: (token) => validatedRequest("leave", { token }),
   });
 }

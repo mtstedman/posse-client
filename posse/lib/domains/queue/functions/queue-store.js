@@ -3513,6 +3513,8 @@ export function clearAll() {
       db.prepare(`DELETE FROM session_lanes`).run();
       db.prepare(`DELETE FROM context_budget_checkpoints`).run();
       db.prepare(`DELETE FROM source_reaccess_authorizations`).run();
+      db.prepare(`DELETE FROM shared_trunk_claim_deferrals`).run();
+      db.prepare(`DELETE FROM shared_trunk_merge_operations`).run();
       db.prepare(`DELETE FROM job_attempts`).run();
       db.prepare(`DELETE FROM job_dependencies`).run();
       db.prepare(`DELETE FROM jobs`).run();

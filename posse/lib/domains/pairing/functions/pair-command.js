@@ -37,8 +37,15 @@ import {
   touchPairingState,
   updatePairingEnrollment,
 } from "./state.js";
+import {
+  collectPairingPresence,
+  diffPairingPeerActivity,
+} from "./work-items.js";
 
-const HEARTBEAT_MS = 15_000;
+// This is both the lease heartbeat and the peer-work sync cadence. Five
+// seconds keeps the terminal feed live without turning queue changes into one
+// remote request apiece.
+const HEARTBEAT_MS = 5_000;
 const PAIRING_SETTING_KEYS = Object.freeze([
   SETTING_KEYS.TARGET_BRANCH,
   SETTING_KEYS.SHARED_TRUNK_BRANCH,
@@ -245,9 +252,35 @@ async function unpair(projectDir, remoteClient, state = getLivePairingState()) {
   return { ok: local.ok, local, remote, role: state.role };
 }
 
-async function monitorPairing(remoteClient, stateId) {
+function printPeerActivityChanges(C, status, seen, { json = false } = {}) {
+  const changes = diffPairingPeerActivity(status?.peers, seen);
+  for (const change of changes) {
+    if (json) {
+      console.log(JSON.stringify({
+        event: "pairing_peer_activity",
+        scope: "peer_read_only",
+        local_queue: false,
+        ...change,
+      }));
+      continue;
+    }
+    const verb = change.kind === "spawned" ? "started" : "updated";
+    const entity = change.entity_type === "job" ? change.job : change.work_item;
+    const entityLabel = change.entity_type === "job"
+      ? `job #${entity.id}${entity.work_item_id ? ` (WI#${entity.work_item_id})` : ""} ${entity.job_type}`
+      : `WI#${entity.id}`;
+    console.log(
+      `  ${C.dim}[pair peer · read-only]${C.reset} ${change.peer.label} ${verb} `
+      + `${C.cyan}${entityLabel}${C.reset} `
+      + `${entity.status}: ${entity.title}`,
+    );
+  }
+}
+
+async function monitorPairing(remoteClient, stateId, { projectDir = process.cwd(), C, json = false } = {}) {
   let stoppedBySignal = false;
   let consecutiveFailures = 0;
+  const seenPeerActivity = new Map();
   const stop = () => { stoppedBySignal = true; };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -258,10 +291,11 @@ async function monitorPairing(remoteClient, stateId) {
       try {
         status = validatePairingRemoteResponse(
           "heartbeat",
-          await remoteClient.heartbeat(state.relay_token),
+          await remoteClient.heartbeat(state.relay_token, collectPairingPresence(projectDir)),
         );
         assertPairingStatusMatches(state, status);
         touchPairingState(stateId);
+        printPeerActivityChanges(C, status, seenPeerActivity, { json });
         consecutiveFailures = 0;
       } catch (error) {
         consecutiveFailures += 1;
@@ -290,6 +324,23 @@ function printActive(C, state, status = null) {
   console.log(`  State: ${status?.status || state.phase}`);
   if (status && Number.isFinite(status.active_members)) {
     console.log(`  Connected members: ${status.active_members}`);
+  }
+  const peers = status?.peers || [];
+  const peerItems = peers.flatMap((peer) => (
+    (peer.work_items || []).map((workItem) => ({ peer, workItem }))
+  ));
+  const peerJobs = peers.flatMap((peer) => (
+    (peer.jobs || []).map((job) => ({ peer, job }))
+  ));
+  if (peerItems.length > 0 || peerJobs.length > 0) {
+    console.log("  Peer work (read-only; not in this clone's queue):");
+    for (const { peer, workItem } of peerItems) {
+      console.log(`    [peer ${peer.label}] WI#${workItem.id} ${workItem.status}: ${workItem.title}`);
+    }
+    for (const { peer, job } of peerJobs) {
+      const wi = job.work_item_id ? ` WI#${job.work_item_id}` : "";
+      console.log(`    [peer ${peer.label}] job #${job.id}${wi} ${job.job_type}/${job.status}: ${job.title}`);
+    }
   }
   if (state.last_error) console.log(`  ${C.yellow}Restore blocked:${C.reset} ${state.last_error}`);
   console.log("");
@@ -363,7 +414,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       console.log(`  Others join with: ${C.cyan}posse pair ${started.code}${C.reset}`);
       console.log(`  ${C.dim}This pairing session stays open until you press Ctrl-C or run \`posse pair leave\`.${C.reset}\n`);
     }
-    const outcome = await monitorPairing(remoteClient, state.id);
+    const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
     if (outcome.reason !== "local_leave") {
       const result = await unpair(root, remoteClient, getPairingState(state.id));
       if (!result.ok) throw Object.assign(new Error(result.local.message), { code: result.local.code });
@@ -478,7 +529,7 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       console.log(`\n  ${C.green}Paired.${C.reset} Switched to ${sharedBranch}.`);
       console.log(`  ${C.dim}This pairing session stays connected until the host closes it, Ctrl-C, or \`posse pair leave\`.${C.reset}\n`);
     }
-    const outcome = await monitorPairing(remoteClient, state.id);
+    const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
     if (outcome.reason !== "local_leave") {
       const result = await unpair(root, remoteClient, getPairingState(state.id));
       if (!result.ok) throw Object.assign(new Error(result.local.message), { code: result.local.code });
