@@ -48,6 +48,7 @@ export function getWorkItemModeSource(workItem = null, metadata = null) {
 export function requiredWorkItemOutputs(workItem = null, intakeHints = {}) {
   const metadata = parseWorkItemMetadata(workItem);
   const mode = String(workItem?.mode || "build").trim().toLowerCase() || "build";
+  const source = String(workItem?.source || "").trim().toLowerCase();
   const modeSource = getWorkItemModeSource(workItem, metadata);
   const desiredOutputs = normalizedOutputs(intakeHints.desired_outputs);
   const desiredSource = normalizedSource(intakeHints.desired_outputs_source);
@@ -55,6 +56,11 @@ export function requiredWorkItemOutputs(workItem = null, intakeHints = {}) {
   const outputModeSource = normalizedSource(intakeHints.output_mode_source);
   const text = workItem?.description || workItem?.title || "";
 
+  // These CLI entry points are themselves explicit terminal-output contracts.
+  // In particular, `ask` historically stores the default DB mode (`build`),
+  // which must not turn a research-only question into a repository objective.
+  if (source === "ask") return ["question_only"];
+  if (source === "image") return ["artifact"];
   if (desiredSource === "explicit" && desiredOutputs.length > 0) return desiredOutputs;
   if (outputModeSource === "explicit") {
     if (outputMode === "repo") return ["repo"];
@@ -82,6 +88,7 @@ export function requiredWorkItemOutputs(workItem = null, intakeHints = {}) {
 export function requiresRepositoryExecution(workItem = null, intakeHints = {}) {
   const metadata = parseWorkItemMetadata(workItem);
   const mode = String(workItem?.mode || "build").trim().toLowerCase() || "build";
+  const source = String(workItem?.source || "").trim().toLowerCase();
   const modeSource = getWorkItemModeSource(workItem, metadata);
   const desiredOutputs = normalizedOutputs(intakeHints.desired_outputs);
   const desiredSource = normalizedSource(intakeHints.desired_outputs_source);
@@ -91,6 +98,7 @@ export function requiresRepositoryExecution(workItem = null, intakeHints = {}) {
   const intentSource = normalizedSource(intakeHints.intent_type_source);
   const text = workItem?.description || workItem?.title || "";
 
+  if (source === "ask" || source === "image") return false;
   if (desiredSource === "explicit") return desiredOutputs.includes("repo");
   if (outputModeSource === "explicit" && outputMode !== "auto") return outputMode === "repo";
   if (modeSource === "explicit") return mode === "build";

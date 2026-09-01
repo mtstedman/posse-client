@@ -55,10 +55,25 @@ function stepOrdinal(event = {}) {
   return index > 0 && total > 0 ? `[${index}/${total}] ` : "";
 }
 
-function formatLanguageStep(event = {}) {
+function formatLanguageStep(event = {}, { includeOrdinal = true } = {}) {
   const language = String(event.language || "environment");
   const step = firstLine(event.step || event.message || "install");
-  return `${language} ${stepOrdinal(event)}${step}`.trim();
+  const ordinal = includeOrdinal ? stepOrdinal(event) : "";
+  return `${language} ${ordinal}${step}`.trim();
+}
+
+function formatLanguageStepFailure(event = {}) {
+  const label = formatLanguageStep(event, { includeOrdinal: false });
+  const message = progressText(event);
+  const language = String(event.language || "environment");
+  const index = Number(event.stepIndex || 0);
+  const total = Number(event.totalSteps || 0);
+  const prefix = `${language} ${index}/${total} failed:`;
+  const detail = message.startsWith(prefix)
+    ? firstLine(message.slice(prefix.length))
+    : message;
+  const step = firstLine(event.step);
+  return detail && detail !== step ? `${label} - ${detail}` : label;
 }
 
 function createDoctorProgressRenderer({ log, colors, json }) {
@@ -87,11 +102,17 @@ function createDoctorProgressRenderer({ log, colors, json }) {
       return true;
     }
     if (kind === "environment.install.step.completed") {
-      log(`    ${colors.green}+${colors.reset} ${formatLanguageStep(event)}`);
+      // The started event already rendered this logical step and its ordinal.
+      // Rendering the completion event as a second line makes a normal run
+      // look like 1, 1, 2, 2 rather than a step counter.
       return true;
     }
-    if (kind === "environment.install.step.failed" || kind === "environment.install.language.failed") {
-      log(`    ${colors.red}x${colors.reset} ${progressText(event) || formatLanguageStep(event)}`);
+    if (kind === "environment.install.step.failed") {
+      log(`    ${colors.red}x${colors.reset} ${formatLanguageStepFailure(event)}`);
+      return true;
+    }
+    if (kind === "environment.install.language.failed") {
+      log(`    ${colors.red}x${colors.reset} ${progressText(event) || formatLanguageStep(event, { includeOrdinal: false })}`);
       return true;
     }
     if (kind === "environment.install.completed") {

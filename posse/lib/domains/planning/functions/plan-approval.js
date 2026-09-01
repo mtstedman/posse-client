@@ -243,51 +243,58 @@ function countSucceededPromoteJobs(gatedJobIds) {
  */
 export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
   if (!planJob || !planJob.work_item_id) return null;
-  const targets = (createdJobIds || []).filter((id) => Number.isFinite(Number(id)));
+  const targets = [...new Set((Array.isArray(createdJobIds) ? createdJobIds : [])
+    .map((id) => Number(id))
+    .filter((id) => Number.isSafeInteger(id) && id > 0))];
   if (targets.length === 0) return null;
 
-  const wiId = planJob.work_item_id;
-  const payload = {
-    subtype: "plan_approval",
-    question_kind: "plan_approval",
-    choices: WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval,
-    questions: ["Approve or reject the current plan?"],
-    plan_job_id: planJob.id,
-    gated_job_ids: targets.slice(),
-    summary: summary || null,
-    created_at: new Date().toISOString(),
-  };
+  const db = getDb();
+  return db.transaction(() => {
+    const wiId = planJob.work_item_id;
+    const payload = {
+      subtype: "plan_approval",
+      question_kind: "plan_approval",
+      choices: WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval,
+      questions: ["Approve or reject the current plan?"],
+      plan_job_id: planJob.id,
+      gated_job_ids: targets.slice(),
+      summary: summary || null,
+      created_at: new Date().toISOString(),
+    };
 
-  const gate = createJob({
-    work_item_id: wiId,
-    job_type: "human_input",
-    title: `Plan approval: ${(getWorkItem(wiId)?.title || planJob.title || "").slice(0, 60)}`,
-    parent_job_id: planJob.id,
-    priority: "high",
-    model_tier: "cheap",
-    reasoning_effort: "low",
-    max_attempts: 1,
-    payload_json: JSON.stringify(payload),
-  });
+    const gate = createJob({
+      work_item_id: wiId,
+      job_type: "human_input",
+      title: `Plan approval: ${(getWorkItem(wiId)?.title || planJob.title || "").slice(0, 60)}`,
+      parent_job_id: planJob.id,
+      priority: "high",
+      model_tier: "cheap",
+      reasoning_effort: "low",
+      max_attempts: 1,
+      payload_json: JSON.stringify(payload),
+    });
 
-  for (const targetId of targets) {
-    addDependency(targetId, gate.id, "hard");
-  }
-  // Park the gate at waiting_on_human immediately. The human_input handler
-  // never runs (no scheduler lease on a waiting_on_human job), so the gate
-  // sits until approve/reject.
-  updateJobStatus(gate.id, "waiting_on_human");
-  setWorkItemApproval(wiId, "pending", null);
+    for (const targetId of targets) {
+      addDependency(targetId, gate.id, "hard");
+    }
+    // Park the gate at waiting_on_human immediately. The human_input handler
+    // never runs (no scheduler lease on a waiting_on_human job), so the gate
+    // sits until approve/reject.
+    if (!updateJobStatus(gate.id, "waiting_on_human")) {
+      throw new Error(`plan gate #${gate.id} could not transition to waiting_on_human`);
+    }
+    setWorkItemApproval(wiId, "pending", null);
 
-  logEvent({
-    work_item_id: wiId,
-    job_id: gate.id,
-    event_type: EVENT_TYPES.PLAN_APPROVAL_GATE_CREATED,
-    actor_type: EVENT_ACTORS.PLANNER,
-    message: `Plan approval gate created; ${targets.length} downstream job(s) blocked pending review`,
-    event_json: JSON.stringify({ gate_job_id: gate.id, gated_job_ids: targets }),
-  });
-  return gate.id;
+    logEvent({
+      work_item_id: wiId,
+      job_id: gate.id,
+      event_type: EVENT_TYPES.PLAN_APPROVAL_GATE_CREATED,
+      actor_type: EVENT_ACTORS.PLANNER,
+      message: `Plan approval gate created; ${targets.length} downstream job(s) blocked pending review`,
+      event_json: JSON.stringify({ gate_job_id: gate.id, gated_job_ids: targets }),
+    });
+    return gate.id;
+  })();
 }
 
 /**
@@ -423,35 +430,41 @@ export function rejectPlan(wiId, {
  * rejection feedback visible in its payload. Caller-decided — see CLI.
  */
 export function respawnAfterRejection(wiId, { feedback = null, rejectedArtifactIds = [] } = {}) {
-  const wi = getWorkItem(wiId);
-  if (!wi) return { ok: false, reason: "no_such_wi" };
-  if (wi.research_skipped) {
-    updateWorkItemResearchSkip(wiId, { skipped: false, reason: null });
-  }
-  const researchBudget = getResearchBudget(wi);
-  const researchJob = createJob({
-    work_item_id: wiId,
-    job_type: "research",
-    title: `Research (after plan rejection): ${(wi.title || "").slice(0, 60)}`,
-    priority: wi.priority || "normal",
-    model_tier: researchModelTierForBudget(researchBudget),
-    reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
-    payload_json: JSON.stringify({
-      deepthink_budget: researchBudget,
-      deepthink: isResearchBudgetDeep(researchBudget),
-      replan_after_rejection: true,
-      previous_rejection_feedback: feedback || null,
-      rejected_artifact_ids: Array.isArray(rejectedArtifactIds) ? rejectedArtifactIds : [],
-    }),
-  });
-  // The planner that follows will see the rejection feedback via the WI row's
-  // plan_rejection_feedback column (and the research payload we just built).
-  logEvent({
-    work_item_id: wiId,
-    job_id: researchJob.id,
-    event_type: EVENT_TYPES.PLAN_REPLAN_SPAWNED,
-    actor_type: EVENT_ACTORS.HUMAN,
-    message: `Research job spawned for replan after rejection`,
-  });
-  return { ok: true, researchJobId: researchJob.id };
+  const db = getDb();
+  return db.transaction(() => {
+    const wi = getWorkItem(wiId);
+    if (!wi) return { ok: false, reason: "no_such_wi" };
+    // The rejection remains available as planner feedback, but it is no longer
+    // the current approval state once a replacement plan cycle has started.
+    setWorkItemApproval(wiId, "not_required", feedback || wi.plan_rejection_feedback || null);
+    if (wi.research_skipped) {
+      updateWorkItemResearchSkip(wiId, { skipped: false, reason: null });
+    }
+    const researchBudget = getResearchBudget(wi);
+    const researchJob = createJob({
+      work_item_id: wiId,
+      job_type: "research",
+      title: `Research (after plan rejection): ${(wi.title || "").slice(0, 60)}`,
+      priority: wi.priority || "normal",
+      model_tier: researchModelTierForBudget(researchBudget),
+      reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+      payload_json: JSON.stringify({
+        deepthink_budget: researchBudget,
+        deepthink: isResearchBudgetDeep(researchBudget),
+        replan_after_rejection: true,
+        previous_rejection_feedback: feedback || null,
+        rejected_artifact_ids: Array.isArray(rejectedArtifactIds) ? rejectedArtifactIds : [],
+      }),
+    });
+    // The planner that follows will see the rejection feedback via the WI row's
+    // plan_rejection_feedback column (and the research payload we just built).
+    logEvent({
+      work_item_id: wiId,
+      job_id: researchJob.id,
+      event_type: EVENT_TYPES.PLAN_REPLAN_SPAWNED,
+      actor_type: EVENT_ACTORS.HUMAN,
+      message: `Research job spawned for replan after rejection`,
+    });
+    return { ok: true, researchJobId: researchJob.id };
+  })();
 }

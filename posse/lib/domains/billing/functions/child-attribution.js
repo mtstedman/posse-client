@@ -3,6 +3,12 @@ function positiveId(value) {
   return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
 }
 
+function nonNegativeFinite(value) {
+  if (value == null || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
 // Resolve accounting ownership without rewriting the persisted execution
 // identity. A child remains role=subagent in agent_calls, while role rollups
 // can charge it to the root parent that authorized the spend.
@@ -97,14 +103,12 @@ export function firstRequestInputTokens(segments = [], call = {}) {
     .filter((segment) => positiveId(segment?.request_ordinal) != null)
     .sort((left, right) => Number(left.request_ordinal) - Number(right.request_ordinal));
   if (ordered.length > 0 && Number(ordered[0].request_ordinal) === 1) {
-    const value = Number(ordered[0].input_tokens);
-    return Number.isFinite(value) && value >= 0 ? value : null;
+    return nonNegativeFinite(ordered[0].input_tokens);
   }
   // A one-turn aggregate is itself the first turn. Multi-turn aggregates do
   // not contain enough information to reconstruct spin-up honestly.
   if (Number(call?.turns_used) === 1) {
-    const value = Number(call?.input_tokens);
-    return Number.isFinite(value) && value >= 0 ? value : null;
+    return nonNegativeFinite(call?.input_tokens);
   }
   return null;
 }

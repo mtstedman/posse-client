@@ -210,10 +210,14 @@ export class WebResearchRuntime {
   constructor({
     readSetting = getSetting,
     maxActiveChildren = WEB_RESEARCH_LIMITS.maxActiveChildren,
+    timeoutMs = WEB_RESEARCH_LIMITS.timeoutMs,
     surfaceFinding = surfaceFindingForParent,
   } = {}) {
     this.readSetting = readSetting;
     this.maxActiveChildren = maxActiveChildren;
+    this.timeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? Number(timeoutMs)
+      : WEB_RESEARCH_LIMITS.timeoutMs;
     this.surfaceFinding = surfaceFinding;
     this.parents = new Map();
     this.dispatches = new Map();
@@ -371,17 +375,32 @@ export class WebResearchRuntime {
     const timeout = setTimeout(() => {
       dispatch.controller.abort(runtimeError(
         "WEB_RESEARCH_TIMEOUT",
-        `Web research exceeded ${WEB_RESEARCH_LIMITS.timeoutMs}ms`,
+        `Web research exceeded ${this.timeoutMs}ms`,
         { stage: "child" },
       ));
-    }, WEB_RESEARCH_LIMITS.timeoutMs);
+    }, this.timeoutMs);
     timeout.unref?.();
+    /** @type {() => void} */
+    let handleAbort = () => {};
+    const abortPromise = new Promise((_, reject) => {
+      handleAbort = () => {
+        reject(dispatch.controller.signal.reason || runtimeError(
+          "WEB_RESEARCH_ABORTED",
+          "Web research was aborted",
+          { stage: "control" },
+        ));
+      };
+      dispatch.controller.signal.addEventListener("abort", handleAbort, { once: true });
+    });
     try {
-      const result = await registration.runChild({
-        dispatchId: dispatch.id,
-        question,
-        signal: dispatch.controller.signal,
-      });
+      const result = await Promise.race([
+        registration.runChild({
+          dispatchId: dispatch.id,
+          question,
+          signal: dispatch.controller.signal,
+        }),
+        abortPromise,
+      ]);
       if (dispatch.controller.signal.aborted) throw dispatch.controller.signal.reason;
       if (!dispatch.packet) {
         throw runtimeError(
@@ -404,6 +423,7 @@ export class WebResearchRuntime {
       };
     } finally {
       clearTimeout(timeout);
+      dispatch.controller.signal.removeEventListener("abort", handleAbort);
       if (dispatch.childAgentCallId) this.childBindings.delete(dispatch.childAgentCallId);
       this.dispatches.delete(dispatch.id);
       this.activeChildren = Math.max(0, this.activeChildren - 1);

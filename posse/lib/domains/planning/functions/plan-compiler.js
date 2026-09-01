@@ -83,7 +83,7 @@ import {
 import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
 import { planArtifactReuse as planArtifactReuseFromModule } from "./artifact-reuse.js";
 import {
-  createPlanApprovalGate,
+  createPlanApprovalGate as createPlanApprovalGateFromModule,
   planApprovalRequirement,
 } from "./plan-approval.js";
 import {
@@ -119,7 +119,7 @@ import {
   routePromoteTaskByOutputDir,
   splitTaskByCreateFileKind,
 } from "./task-splitting.js";
-import { ASSESSABLE_JOB_TYPES } from "../../../catalog/job.js";
+import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
@@ -315,6 +315,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   fileKindProjectDir = worker.projectDir,
   artifactTaskSlug = (title, mode) => `${String(mode || "task")}-${String(title || "task")}`,
   buildIntermediateReportTask = (task) => task,
+  createPlanApprovalGate = createPlanApprovalGateFromModule,
   logBadInputFailure = () => {},
   normalizePlannerScore = (value) => value,
   promoteWaitingLaneDevDemand = promoteWaitingLaneOnDevDemand,
@@ -2309,14 +2310,22 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               approval_reason: approval.reason,
               critical_risk_job_ids: criticalRiskJobIds,
             });
-            if (gateId != null) {
-              worker.emit(planJob.id, `${C.yellow}[plan-approval]${C.reset} WI#${planJob.work_item_id}: ${createdIds.length} job(s) blocked pending approval (gate job #${gateId})`);
+            if (!Number.isSafeInteger(Number(gateId)) || Number(gateId) <= 0) {
+              throw new Error("required approval gate did not return a valid job id");
             }
+            worker.emit(planJob.id, `${C.yellow}[plan-approval]${C.reset} WI#${planJob.work_item_id}: ${createdIds.length} job(s) blocked pending approval (gate job #${gateId})`);
           }
         }
       } catch (err) {
-        // Gate creation must not break a successful plan compilation. Log and
-        // continue — operators see the event in the event log.
+        // Approval is an execution policy, not optional observability. If its
+        // gate cannot be materialized, cancel the just-compiled batch and fail
+        // the plan so no queued write job can bypass the configured review.
+        const canceledJobIds = [];
+        for (const jobId of allCreatedJobIds) {
+          const createdJob = getJob(jobId);
+          if (!createdJob || TERMINAL_JOB_STATUSES.includes(createdJob.status)) continue;
+          if (updateJobStatus(jobId, "canceled")) canceledJobIds.push(jobId);
+        }
         worker.emit(planJob.id, `${C.red}[plan-approval]${C.reset} WI#${planJob.work_item_id}: gate creation failed — ${err?.message || String(err)}`);
         logEvent({
           work_item_id: planJob.work_item_id,
@@ -2324,6 +2333,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           event_type: EVENT_TYPES.PLAN_APPROVAL_GATE_FAILED,
           actor_type: EVENT_ACTORS.SYSTEM,
           message: `Plan approval gate creation failed: ${err?.message || String(err)}`,
+          event_json: JSON.stringify({ canceled_job_ids: canceledJobIds }),
         });
+        const gateError = new Error(
+          `Plan approval gate creation failed: ${err?.message || String(err)}`,
+          { cause: err },
+        );
+        gateError.code = "PLAN_APPROVAL_GATE_FAILED";
+        throw gateError;
       }
 }

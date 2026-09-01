@@ -14,6 +14,12 @@ const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 600_000;
 const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
 
+function _nonNegativeFiniteOrNull(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 async function _recordImageGenerationTelemetry({
   provider,
   model,
@@ -29,9 +35,9 @@ async function _recordImageGenerationTelemetry({
     const context = getObservationContext() || {};
     const durationMs = Math.max(0, Date.now() - Number(startedAt || Date.now()));
     const normalizedUsage = usage && typeof usage === "object" ? {
-      input_tokens: Number.isFinite(Number(usage.input_tokens)) ? Number(usage.input_tokens) : null,
-      output_tokens: Number.isFinite(Number(usage.output_tokens)) ? Number(usage.output_tokens) : null,
-      total_tokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null,
+      input_tokens: _nonNegativeFiniteOrNull(usage.input_tokens),
+      output_tokens: _nonNegativeFiniteOrNull(usage.output_tokens),
+      total_tokens: _nonNegativeFiniteOrNull(usage.total_tokens),
     } : null;
     recordObservation({
       work_item_id: context.work_item_id ?? null,
@@ -47,7 +53,7 @@ async function _recordImageGenerationTelemetry({
         duration_ms: durationMs,
         size: args?.size || "1024x1024",
         quality: args?.quality || "default",
-        output_bytes: Number.isFinite(Number(outputBytes)) ? Number(outputBytes) : null,
+        output_bytes: _nonNegativeFiniteOrNull(outputBytes),
         usage: normalizedUsage,
         cost_estimate_usd: null,
         cost_status: "unknown",

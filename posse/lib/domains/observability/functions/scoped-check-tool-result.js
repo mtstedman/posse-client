@@ -1,6 +1,12 @@
 const MAX_COMMAND_CHARS = 1200;
 const MAX_SCOPED_FILES = 250;
 
+function nonNegativeFiniteOrNull(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 function parseResult(resultText) {
   if (typeof resultText !== "string" || !resultText.trimStart().startsWith("{")) return null;
   try {
@@ -21,7 +27,7 @@ export function scopedCheckToolResultObservation({ tool, resultText = "" } = {})
     name: String(check?.name || "check").slice(0, 80),
     status: String(check?.status || "unknown").slice(0, 40),
     command: check?.command == null ? null : String(check.command).slice(0, MAX_COMMAND_CHARS),
-    duration_ms: Number.isFinite(Number(check?.duration_ms)) ? Number(check.duration_ms) : null,
+    duration_ms: nonNegativeFiniteOrNull(check?.duration_ms),
   }));
   const executedCommitHash = /^[0-9a-f]{40,64}$/i.test(String(payload.executed_commit_hash || ""))
     ? String(payload.executed_commit_hash).toLowerCase()
