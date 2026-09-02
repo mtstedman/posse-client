@@ -13,11 +13,13 @@ import { MutationPolicy } from "../../../scope/classes/MutationPolicy.js";
 
 const SHELL_OPERATOR_RE = /[;&|<>]/;
 const SENSITIVE_SUBPROCESS_ENV_KEY_RE = /api[_-]?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|^posse_key$/i;
+const COMMAND_INFLUENCING_ENV_KEY_RE = /^(?:bash_env$|bash_func_|cdpath$|dyld_|env$|git_|globignore$|ifs$|ld_|magic$|pager$|less$|lessopen$|ripgrep_config_path$|grep_options$|node_options$|pythonpath$|pythonhome$|shellopts$|tmp$|temp$|tmpdir$)/i;
 
 function scrubBashSubprocessEnv(baseEnv = process.env) {
   const env = {};
   for (const [key, value] of Object.entries(baseEnv || {})) {
-    if (SENSITIVE_SUBPROCESS_ENV_KEY_RE.test(String(key || ""))) continue;
+    if (SENSITIVE_SUBPROCESS_ENV_KEY_RE.test(String(key || ""))
+      || COMMAND_INFLUENCING_ENV_KEY_RE.test(String(key || ""))) continue;
     env[key] = value;
   }
   return env;
@@ -409,9 +411,12 @@ export function createBashExecutor({
   execSyncImpl = execSync,
   execFileSyncImpl = execFileSync,
 } = {}) {
-  return function execBash(args, cwd) {
+  return function execBash(args, cwd, scopePredicates = null) {
     const cmd = args.command;
-    const auth = new MutationPolicy({ cwd }).authorizeBash(cmd);
+    const policy = scopePredicates?.policy instanceof MutationPolicy
+      ? scopePredicates.policy
+      : new MutationPolicy({ cwd });
+    const auth = policy.authorizeBash(cmd);
     if (!auth.ok) return auth.error;
     const timeout = Math.min(args.timeout || 60000, 120000);
     const maxBuffer = 1024 * 1024;

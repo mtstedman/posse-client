@@ -147,7 +147,7 @@ Remote roles: `artificer`, `assessor`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Execute a read-only inspection command or test/build runner and return stdout+stderr. On Windows this runs through PowerShell when shell features are needed; prefer repo-native test commands and PowerShell-compatible syntax over Unix-only filters. Use the declared-scope check capability for covered lint and typecheck work. Workspace changes use scoped mutation capabilities.
+Execute a supported read-only inspection utility and return stdout+stderr. Supported utilities include cat, head, tail, ls, find, wc, file, du, diff, grep, rg, echo, pwd, and whoami. On Windows this runs through PowerShell when shell features are needed; use PowerShell-compatible inspection syntax. Verification, version-history operations, and workspace changes are handled by separately issued capabilities.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -562,7 +562,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Calculate a deterministic file hash for verification. Returns structured metadata with SHA-256 by default.
+Calculate a deterministic file hash for verification, up to 512 MiB. Returns structured metadata with SHA-256 by default.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

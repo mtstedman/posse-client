@@ -1,5 +1,6 @@
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
+import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 
 export const PAIRING_AUTH_ROUTE = "pairing:session";
 export const PAIRING_PROTOCOL = "posse.pairing.v1";
@@ -13,6 +14,7 @@ const PEER_ROLES = new Set(["host", "member"]);
 const MAX_PEERS = 100;
 const MAX_WORK_ITEMS = 50;
 const MAX_JOBS = 100;
+const MAX_PAIRING_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 function invalidResponse(endpoint, detail, status = null) {
   const error = new Error(`Pairing relay returned an invalid ${endpoint} response: ${detail}`);
@@ -180,8 +182,20 @@ function responseError(body, status) {
   return error;
 }
 
-async function readJson(response) {
-  const text = await response.text();
+async function readJson(response, endpoint) {
+  let text;
+  try {
+    text = await readResponseTextWithLimit(response, {
+      maxBytes: MAX_PAIRING_RESPONSE_BYTES,
+      operation: "pairing relay request",
+      url: "trusted pairing relay",
+    });
+  } catch (error) {
+    if (error?.code === "POSSE_REMOTE_RESPONSE_TOO_LARGE") {
+      throw invalidResponse(endpoint, `response exceeds ${MAX_PAIRING_RESPONSE_BYTES} bytes`, response.status);
+    }
+    throw error;
+  }
   if (!text) return {};
   try {
     return JSON.parse(text);
@@ -239,7 +253,7 @@ export function createPairingRemoteClient({
       }
       let payload;
       try {
-        payload = await readJson(response);
+        payload = await readJson(response, endpoint);
       } catch (cause) {
         if (cause?.code === "pairing_invalid_response") throw cause;
         throw transportError(cause);

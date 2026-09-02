@@ -57,3 +57,15 @@ export const DEPENDENCY_SYNC_INSTALL_ENV_KEYS = Object.freeze([
 
 export const SCIP_DEPENDENCY_INSTALL_ENV_KEYS = COMMON_DEPENDENCY_INSTALL_ENV_KEYS;
 export const DEPENDENCY_INSTALL_ENV_PREFIXES = Object.freeze(["pip_"]);
+
+// Repository-authored tests execute below the provider credential boundary.
+// Keep only process/runtime location and presentation state; application and
+// Posse configuration must be supplied by fixtures, never inherited secrets.
+export const TEST_SUBPROCESS_ENV_KEYS = Object.freeze([
+  "allusersprofile", "appdata", "ci", "comspec", "home", "homedrive",
+  "homepath", "lang", "lc_all", "lc_ctype", "localappdata", "logname",
+  "no_color", "node_env", "os", "path", "pathext", "programdata",
+  "programfiles", "programfiles(x86)", "programw6432", "systemdrive",
+  "systemroot", "temp", "term", "tmp", "tmpdir", "tz", "user",
+  "userdomain", "username", "userprofile", "windir",
+]);

@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { execSync, spawnSync } from "child_process";
+import { StringDecoder } from "string_decoder";
 
 import { guardToolWriteLock } from "../../../../domains/queue/functions/write-lock-guard.js";
 import { createInspectFileExecutor } from "../../../../domains/worker/functions/helpers/file-inspector.js";
@@ -86,6 +87,9 @@ import {
 import { normPath, resolvePathWithin } from "../../../scope/functions/path.js";
 
 const READ_FILE_DEFAULT_LIMIT = 2000;
+const READ_FILE_STREAM_CHUNK_BYTES = 64 * 1024;
+const READ_FILE_LARGE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
+const HASH_FILE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 const EDIT_FILE_MAX_PATTERN_CHARS = 500;
 const EDIT_FILE_REPLACE_PATTERN_TIMEOUT_MS = 2000;
 const EDIT_FILE_MAX_PATTERN_MATCHES = 10000;
@@ -337,6 +341,73 @@ function boundedSearchRows(rows, { offset, headLimit, maxChars = CONTEXT_SEARCH_
   return output.join("\n").slice(0, maxChars);
 }
 
+function readLargeFilePage(filePath, { offset, limit, maxBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES }) {
+  const firstLine = offset + 1;
+  const endLine = firstLine + limit;
+  const selected = [];
+  const decoder = new StringDecoder("utf8");
+  const buffer = Buffer.allocUnsafe(READ_FILE_STREAM_CHUNK_BYTES);
+  let selectedBytes = 0;
+  let currentLine = 1;
+  let currentText = "";
+  let totalBytes = 0;
+  let newlineCount = 0;
+  let endedWithNewline = false;
+  const fd = fs.openSync(filePath, "r");
+
+  const append = (value) => {
+    if (currentLine < firstLine || currentLine >= endLine || !value) return;
+    selectedBytes += Buffer.byteLength(value, "utf8");
+    if (selectedBytes > maxBytes) {
+      throw new Error(`Requested line range exceeds the ${maxBytes}-byte read limit.`);
+    }
+    currentText += value;
+  };
+  const finishLine = () => {
+    if (currentLine >= firstLine && currentLine < endLine) {
+      const line = currentText.endsWith("\r") ? currentText.slice(0, -1) : currentText;
+      selected.push(line);
+    }
+    currentText = "";
+    currentLine += 1;
+  };
+  const consume = (text) => {
+    let start = 0;
+    for (;;) {
+      const newline = text.indexOf("\n", start);
+      if (newline < 0) break;
+      append(text.slice(start, newline));
+      finishLine();
+      newlineCount += 1;
+      endedWithNewline = true;
+      start = newline + 1;
+    }
+    if (start < text.length) {
+      append(text.slice(start));
+      endedWithNewline = false;
+    }
+  };
+
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+      if (totalBytes > READ_FILE_LARGE_MAX_SIZE_BYTES) {
+        throw new Error(`File exceeds the ${READ_FILE_LARGE_MAX_SIZE_BYTES}-byte paged read limit.`);
+      }
+      consume(decoder.write(buffer.subarray(0, bytesRead)));
+    }
+    consume(decoder.end());
+    if (totalBytes > 0 && !endedWithNewline) finishLine();
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const totalLines = totalBytes === 0 ? 0 : newlineCount + (endedWithNewline ? 0 : 1);
+  return { selected: totalLines === 0 ? [] : selected, totalLines };
+}
+
 
 
 export function createDeterministicToolkit({
@@ -359,24 +430,42 @@ export function createDeterministicToolkit({
   const wrapDeterministicExecutor = createObservationWrapper({ skipObservationLogging });
 
   function execReadFile(args, cwd, scopePredicates) {
+    const structured = hasStructuredReadOptionsFromModule(args);
+    const explicitPage = args.offset != null || args.limit != null;
     const readable = resolveDeterministicReadableFile(cwd, args.path, scopePredicates, {
-      maxSizeBytes: DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
+      maxSizeBytes: explicitPage && !structured
+        ? READ_FILE_LARGE_MAX_SIZE_BYTES
+        : DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
       safePathImpl,
     });
     if (!readable.ok) return `Error: ${readable.error}`;
     const filePath = readable.path;
     const stat = readable.stat;
 
-    const content = fs.readFileSync(filePath, "utf-8");
-    const { lines } = splitEditableLinesFromModule(content);
     const offset = Math.max(0, toPositiveInt(args.offset, 1) - 1);
     const limit = toPositiveInt(args.limit, READ_FILE_DEFAULT_LIMIT);
+    if (stat.size > DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES) {
+      try {
+        const page = readLargeFilePage(filePath, { offset, limit });
+        if (page.selected.length === 0) {
+          return `File has ${page.totalLines} lines. Requested offset ${offset + 1} is beyond end of file.`;
+        }
+        const remaining = page.totalLines - offset - limit;
+        const numbered = formatNumberedLinesFromModule(page.selected, offset + 1);
+        return numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : "");
+      } catch (err) {
+        return `Error: ${err?.message || String(err)}`;
+      }
+    }
+
+    const content = fs.readFileSync(filePath, "utf-8");
+    const { lines } = splitEditableLinesFromModule(content);
     const selected = lines.slice(offset, offset + limit);
     if (selected.length === 0) {
       return `File has ${lines.length} lines. Requested offset ${offset + 1} is beyond end of file.`;
     }
     const remaining = lines.length - offset - limit;
-    if (hasStructuredReadOptionsFromModule(args)) {
+    if (structured) {
       return buildStructuredReadResultFromModule({
         args,
         displayPath: args.path,
@@ -823,8 +912,38 @@ export function createDeterministicToolkit({
           isDirectory: stat.isDirectory(),
         }, null, 2);
       }
+      if (stat.size > HASH_FILE_MAX_SIZE_BYTES) {
+        return JSON.stringify({
+          path: toDisplayPath(cwd, filePath),
+          exists: true,
+          isFile: true,
+          error: `File exceeds the ${HASH_FILE_MAX_SIZE_BYTES}-byte hash limit.`,
+        }, null, 2);
+      }
       const algorithm = args.algorithm || "sha256";
-      const hash = crypto.createHash(algorithm).update(fs.readFileSync(filePath)).digest("hex");
+      const hasher = crypto.createHash(algorithm);
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      const fd = fs.openSync(filePath, "r");
+      let totalBytes = 0;
+      try {
+        for (;;) {
+          const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+          if (bytesRead === 0) break;
+          totalBytes += bytesRead;
+          if (totalBytes > HASH_FILE_MAX_SIZE_BYTES) {
+            return JSON.stringify({
+              path: toDisplayPath(cwd, filePath),
+              exists: true,
+              isFile: true,
+              error: `File exceeds the ${HASH_FILE_MAX_SIZE_BYTES}-byte hash limit.`,
+            }, null, 2);
+          }
+          hasher.update(buffer.subarray(0, bytesRead));
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      const hash = hasher.digest("hex");
       return JSON.stringify({
         path: toDisplayPath(cwd, filePath),
         exists: true,

@@ -14,6 +14,12 @@ import Database from "better-sqlite3";
 
 export const DEFAULT_MAX_ROWS = 200;
 
+function boundedRemoteReadStatement(statement, maxRows) {
+  const sql = String(statement || "").trim().replace(/;\s*$/, "");
+  if (!/^(?:SELECT|WITH|VALUES|TABLE)\b/i.test(sql)) return sql;
+  return `SELECT * FROM (${sql}) AS posse_bounded_query LIMIT ${Math.max(1, maxRows + 1)}`;
+}
+
 /** Lazy-import an optional driver, with an actionable message if it's absent. */
 async function loadOptionalDriver(moduleName) {
   try {
@@ -87,7 +93,8 @@ async function executePostgres({ connection, statement, isRead, readOnly, maxRow
     // single-statement guard would let stacked SQL through. Under the extended
     // protocol PostgreSQL rejects "multiple commands in a prepared statement",
     // making single-statement enforcement authoritative at the wire level.
-    const result = await client.query({ text: statement, queryMode: "extended" });
+    const queryText = isRead ? boundedRemoteReadStatement(statement, maxRows) : statement;
+    const result = await client.query({ text: queryText, queryMode: "extended" });
     if (isRead) {
       const allRows = Array.isArray(result.rows) ? result.rows : [];
       const rows = allRows.slice(0, maxRows);
@@ -114,7 +121,8 @@ async function executeMysql({ connection, statement, isRead, readOnly, maxRows, 
     if (readOnly) {
       await conn.query("SET SESSION TRANSACTION READ ONLY");
     }
-    const [result, fields] = await conn.query(statement);
+    const queryText = isRead ? boundedRemoteReadStatement(statement, maxRows) : statement;
+    const [result, fields] = await conn.query(queryText);
     if (isRead && Array.isArray(result)) {
       const rows = result.slice(0, maxRows);
       const columns = (fields || []).map((f) => f.name);

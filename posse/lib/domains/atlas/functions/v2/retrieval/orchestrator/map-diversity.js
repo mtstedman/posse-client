@@ -25,10 +25,10 @@
  */
 export function diversifyComparableCandidates(candidates, options) {
   const input = Array.isArray(candidates) ? candidates : [];
-  if (input.length <= 1) return input.slice();
-  if (!options || typeof options.groupOf !== "function") return input.slice();
-
-  const limit = boundedLimit(options.limit, input.length);
+  const limit = boundedLimit(options?.limit, input.length);
+  if (limit === 0) return [];
+  if (input.length <= 1) return input.slice(0, limit);
+  if (!options || typeof options.groupOf !== "function") return input.slice(0, limit);
   const slack = boundedSlack(options.relativeScoreSlack);
   const scoreOf = typeof options.scoreOf === "function"
     ? options.scoreOf

@@ -12,7 +12,69 @@ export { TOOL_GENERATE_IMAGE } from "../../../integrations/functions/determinist
 
 const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 600_000;
 const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
+const MAX_IMAGE_DOWNLOAD_REDIRECTS = 3;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
+
+function _assertTrustedImageDownloadUrl(url, provider) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || ""));
+  } catch {
+    throw new Error("Image API returned an invalid download URL.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("Image API returned a non-HTTPS download URL.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("Image API returned a download URL containing credentials.");
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  const trusted = provider === "grok" && (hostname === "x.ai" || hostname.endsWith(".x.ai"));
+  if (!trusted) {
+    throw new Error(`Image API returned an untrusted download host for provider ${provider || "unknown"}.`);
+  }
+  return parsed;
+}
+
+async function _readImageBytesWithLimit(response, maxBytes) {
+  const declaredLength = Number(response.headers?.get?.("content-length") || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error(`Downloaded image exceeds the ${maxBytes}-byte limit.`);
+  }
+  const chunks = [];
+  let total = 0;
+  const append = (value) => {
+    const chunk = Buffer.from(value);
+    total += chunk.length;
+    if (total > maxBytes) throw new Error(`Downloaded image exceeds the ${maxBytes}-byte limit.`);
+    chunks.push(chunk);
+  };
+  if (response?.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        append(value);
+      }
+    } catch (err) {
+      try { await reader.cancel(); } catch { /* best effort */ }
+      throw err;
+    } finally {
+      try { reader.releaseLock?.(); } catch { /* best effort */ }
+    }
+  } else if (response?.body && typeof response.body[Symbol.asyncIterator] === "function") {
+    try {
+      for await (const value of response.body) append(value);
+    } catch (err) {
+      try { response.body.destroy?.(); } catch { /* best effort */ }
+      throw err;
+    }
+  } else {
+    append(await response.arrayBuffer());
+  }
+  return Buffer.concat(chunks, total);
+}
 
 function _nonNegativeFiniteOrNull(value) {
   if (value == null || value === "") return null;
@@ -210,16 +272,9 @@ async function _downloadImageWithTimeout(url, {
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
   maxBytes = MAX_DOWNLOADED_IMAGE_BYTES,
+  provider,
 } = {}) {
-  let parsed;
-  try {
-    parsed = new URL(String(url || ""));
-  } catch {
-    throw new Error("Image API returned an invalid download URL.");
-  }
-  if (parsed.protocol !== "https:") {
-    throw new Error("Image API returned a non-HTTPS download URL.");
-  }
+  let parsed = _assertTrustedImageDownloadUrl(url, provider);
   if (typeof fetchImpl !== "function") {
     throw new Error("Image download transport is unavailable.");
   }
@@ -228,17 +283,24 @@ async function _downloadImageWithTimeout(url, {
   const timer = setTimeout(() => controller.abort(_buildImageTimeoutError(timeoutMs)), timeoutMs);
   timer.unref?.();
   try {
-    const response = await fetchImpl(parsed.href, { signal: controller.signal, redirect: "follow" });
+    let response;
+    for (let redirects = 0; ; redirects += 1) {
+      response = await fetchImpl(parsed.href, { signal: controller.signal, redirect: "manual" });
+      if (![301, 302, 303, 307, 308].includes(Number(response?.status))) break;
+      if (redirects >= MAX_IMAGE_DOWNLOAD_REDIRECTS) {
+        throw new Error(`Image download exceeded ${MAX_IMAGE_DOWNLOAD_REDIRECTS} redirects.`);
+      }
+      const location = response.headers?.get?.("location");
+      if (!location) throw new Error("Image download redirect omitted its location.");
+      try { await response.body?.cancel?.(); } catch { /* best effort */ }
+      parsed = _assertTrustedImageDownloadUrl(new URL(location, parsed).href, provider);
+    }
     if (!response?.ok) {
       throw new Error(`Image download failed with HTTP ${response?.status || "unknown"}.`);
     }
-    const declaredLength = Number(response.headers?.get?.("content-length") || 0);
-    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-      throw new Error(`Downloaded image exceeds the ${maxBytes}-byte limit.`);
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
+    if (response.url) _assertTrustedImageDownloadUrl(response.url, provider);
+    const bytes = await _readImageBytesWithLimit(response, maxBytes);
     if (bytes.length === 0) throw new Error("Downloaded image was empty.");
-    if (bytes.length > maxBytes) throw new Error(`Downloaded image exceeds the ${maxBytes}-byte limit.`);
     return bytes;
   } catch (err) {
     if (controller.signal.aborted && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
@@ -292,6 +354,7 @@ export async function execGenerateImageInternal(args = {}, {
   buildImageClient = _buildImageClient,
   fetchImpl = globalThis.fetch,
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
+  imageDownloadMaxBytes = MAX_DOWNLOADED_IMAGE_BYTES,
   enforceProviderAvailability = buildImageClient === _buildImageClient,
 } = {}) {
   if (!args.prompt || typeof args.prompt !== "string") {
@@ -345,6 +408,7 @@ export async function execGenerateImageInternal(args = {}, {
       buildImageClient,
       fetchImpl,
       imageTimeoutMs,
+      imageDownloadMaxBytes,
     });
   }
 
@@ -370,6 +434,7 @@ export async function execGenerateImageInternal(args = {}, {
     buildImageClient,
     fetchImpl,
     imageTimeoutMs,
+    imageDownloadMaxBytes,
   });
 }
 
@@ -383,6 +448,7 @@ async function _executeGenerateImageWithRoute({
   buildImageClient,
   fetchImpl,
   imageTimeoutMs,
+  imageDownloadMaxBytes,
 }) {
   const startedAt = Date.now();
   try {
@@ -409,9 +475,25 @@ async function _executeGenerateImageWithRoute({
       return "Error: API returned no image data.";
     }
 
+    const compactImageData = imageData ? String(imageData).replace(/\s/g, "") : "";
+    const base64Padding = compactImageData.endsWith("==") ? 2 : compactImageData.endsWith("=") ? 1 : 0;
+    const estimatedImageBytes = compactImageData
+      ? Math.max(0, Math.floor(compactImageData.length * 3 / 4) - base64Padding)
+      : 0;
+    if (estimatedImageBytes > imageDownloadMaxBytes) {
+      throw new Error(`Generated image exceeds the ${imageDownloadMaxBytes}-byte limit.`);
+    }
     const imageBytes = imageData
-      ? Buffer.from(imageData, "base64")
-      : await _downloadImageWithTimeout(imageUrl, { fetchImpl, timeoutMs: imageTimeoutMs });
+      ? Buffer.from(compactImageData, "base64")
+      : await _downloadImageWithTimeout(imageUrl, {
+          fetchImpl,
+          timeoutMs: imageTimeoutMs,
+          maxBytes: imageDownloadMaxBytes,
+          provider,
+        });
+    if (imageBytes.length > imageDownloadMaxBytes) {
+      throw new Error(`Generated image exceeds the ${imageDownloadMaxBytes}-byte limit.`);
+    }
 
     _writeImageInRequestedFormat(outputPath, imageBytes, ext);
     const outputBytes = fs.statSync(outputPath).size;

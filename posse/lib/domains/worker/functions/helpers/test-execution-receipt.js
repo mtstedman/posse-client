@@ -16,13 +16,25 @@ import {
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
 import { isSafeDirectNodeTestScriptArgs } from "../../../../shared/scope/functions/test-command.js";
+import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
+import { filterProcessEnv } from "../../../../shared/platform/functions/process-env.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
 const RECEIPT_SCHEMA_VERSION = 1;
 const MAX_STREAM_CHARS = 256 * 1024;
 const MAX_EVIDENCE_OUTPUT_CHARS = 1600;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const TERMINATION_GRACE_MS = 250;
+const TERMINATION_SETTLE_MS = 5_000;
 const REUSABLE_RECEIPT_STATUSES = new Set(["passed", "failed", "rejected", "timed_out"]);
+const MUTATING_TEST_FLAGS = new Set([
+  "--basetemp", "--blockprofile", "--coverprofile", "--cpuprofile", "--html",
+  "--cov-report", "--junitxml", "--memprofile", "--mutexprofile", "--out-dir", "--outdir",
+  "--output", "--outputdir", "--report-log", "--result-log",
+  "--self-contained-html", "--target-dir", "--test-reporter-destination",
+  "--test-update-snapshots", "--trace", "--tsbuildinfofile",
+]);
+const SENSITIVE_PARENT_ENV_NAME_RE = /(?:^|_)(?:api_?key|access_?key|private_?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|pat|cookie|session)(?:_|$)|^posse_key$/i;
 
 function sha256(value) {
   return createHash("sha256").update(String(value || ""), "utf8").digest("hex");
@@ -37,13 +49,27 @@ function appendBounded(current, chunk, maxChars = MAX_STREAM_CHARS) {
   };
 }
 
+function parentSecretValues(baseEnv = process.env) {
+  return [...new Set(Object.entries(baseEnv || {})
+    .filter(([key, value]) => SENSITIVE_PARENT_ENV_NAME_RE.test(key) && String(value || "").length >= 6)
+    .map(([, value]) => String(value)))]
+    .sort((a, b) => b.length - a.length);
+}
+
+function redactExactValues(value, secrets) {
+  let output = String(value || "");
+  for (const secret of secrets) output = output.split(secret).join("[REDACTED:parent-env]");
+  return output;
+}
+
 function killProcessTree(child, {
   platform = process.platform,
   spawnSyncImpl = spawnSync,
+  force = false,
 } = {}) {
   if (platform !== "win32" && child?.pid) {
     try {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
       return true;
     } catch {
       // Fall through to killing the direct child.
@@ -61,7 +87,7 @@ function killProcessTree(child, {
     }
   }
   try {
-    return !!child?.kill?.();
+    return !!child?.kill?.(force ? "SIGKILL" : "SIGTERM");
   } catch {
     return false;
   }
@@ -125,6 +151,8 @@ async function runCommand(command, {
   const startedAt = Date.now();
   return await new Promise((resolve) => {
     let child;
+    const env = filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS });
+    const secrets = parentSecretValues(process.env);
     try {
       if (trustedShell) {
         child = spawn(command, {
@@ -133,6 +161,7 @@ async function runCommand(command, {
           shell: true,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
+          env,
         });
       } else {
         const [executable, ...args] = parseCommandArguments(command);
@@ -144,6 +173,7 @@ async function runCommand(command, {
           windowsHide: true,
           windowsVerbatimArguments: invocation.windowsVerbatimArguments,
           stdio: ["ignore", "pipe", "pipe"],
+          env,
         });
       }
     } catch (error) {
@@ -166,6 +196,9 @@ async function runCommand(command, {
     let stdoutTruncated = false;
     let stderrTruncated = false;
     let settled = false;
+    let timedOut = false;
+    let forceTimer = null;
+    let settleTimer = null;
 
     const finish = ({
       code = null,
@@ -176,6 +209,8 @@ async function runCommand(command, {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      if (settleTimer) clearTimeout(settleTimer);
       const status = timedOut
         ? "timed_out"
         : error
@@ -190,10 +225,10 @@ async function runCommand(command, {
         signal,
         timed_out: timedOut,
         duration_ms: Date.now() - startedAt,
-        stdout,
+        stdout: redactExactValues(stdout, secrets),
         stderr: error
-          ? [stderr, error.message || String(error)].filter(Boolean).join("\n")
-          : stderr,
+          ? redactExactValues([stderr, error.message || String(error)].filter(Boolean).join("\n"), secrets)
+          : redactExactValues(stderr, secrets),
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
         reason: error ? `test_runner_spawn_failed:${error.code || "unknown"}` : null,
@@ -201,8 +236,21 @@ async function runCommand(command, {
     };
 
     const timer = setTimeout(() => {
+      timedOut = true;
       killProcessTree(child);
-      finish({ code: 124, timedOut: true });
+      forceTimer = setTimeout(() => killProcessTree(child, { force: true }), TERMINATION_GRACE_MS);
+      forceTimer.unref?.();
+      settleTimer = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref?.();
+        finish({
+          code: 124,
+          timedOut: true,
+          error: Object.assign(new Error("Timed-out test process tree did not report exit after forced termination."), { code: "ETIMEDOUT" }),
+        });
+      }, TERMINATION_SETTLE_MS);
+      settleTimer.unref?.();
     }, Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
 
     child.stdout?.setEncoding?.("utf8");
@@ -217,10 +265,12 @@ async function runCommand(command, {
       stderr = bounded.value;
       stderrTruncated = stderrTruncated || bounded.truncated;
     });
-    child.on("error", (error) => finish({ code: error?.code ?? null, error }));
-    child.on("close", (code, signal) => finish({ code, signal }));
+    child.on("error", (error) => finish({ code: error?.code ?? null, error, timedOut }));
+    child.on("close", (code, signal) => finish({ code: timedOut ? 124 : code, signal, timedOut }));
   });
 }
+
+export { runCommand as __testRunFrozenCommand };
 
 function parseReceiptArtifact(artifact) {
   if (!artifact?.content_json) return null;
@@ -379,6 +429,26 @@ export function validatePlannerTestCommand(command) {
   const normalized = executableCommand.toLowerCase();
   const words = normalized.match(/(?:"[^"]*"|'[^']*'|[^\s]+)/g) || [];
   const args = words.slice(1).map((word) => word.replace(/^['"]|['"]$/g, ""));
+  const flagName = (arg) => String(arg || "").toLowerCase().split("=", 1)[0];
+  if (args.some((arg) => MUTATING_TEST_FLAGS.has(flagName(arg)))) {
+    return { ok: false, reason: "test_command_contains_mutating_output_flag" };
+  }
+  const runnerSpecificMutatingFlags = executable === "go" || executable === "go.exe"
+    ? new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"])
+    : executable === "dotnet" || executable === "dotnet.exe"
+      ? new Set(["-o"])
+      : new Set();
+  if (args.some((arg) => runnerSpecificMutatingFlags.has(flagName(arg)))) {
+    return { ok: false, reason: "test_command_contains_mutating_output_flag" };
+  }
+  for (const arg of args) {
+    const values = arg.includes("=") ? [arg, arg.slice(arg.indexOf("=") + 1)] : [arg];
+    if (values.some((value) => path.isAbsolute(value)
+      || /^[A-Za-z]:[\\/]/.test(value)
+      || String(value).replace(/\\/g, "/").split("/").includes(".."))) {
+      return { ok: false, reason: "test_command_contains_unsafe_path" };
+    }
+  }
   const hasArg = (expected) => args.includes(expected);
   const safeTaskPattern = /^(?:test|tests|check|typecheck|lint|verify|spec)(?::|$)/;
 

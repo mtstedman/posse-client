@@ -2587,7 +2587,7 @@ if (writeEnabled) {
   mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
 }
 if (allowBash && execBash) {
-  mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
+  mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, effectiveScopePredicates));
 }
 if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
   const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
@@ -2799,7 +2799,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
   }
   if (allowBash && execBash) {
-    mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd));
+    mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, effectiveScopePredicates));
   }
   if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
     const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };

@@ -3,7 +3,6 @@ import { validateScopedPath } from "../functions/validation.js";
 import fs from "fs";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
-import { isSafeDirectNodeTestScriptArgs } from "../functions/test-command.js";
 
 const BLOCKED_ALWAYS = /^\s*(rm\s+-rf\s+[\/~]|shutdown|reboot|mkfs|dd\s|format\s|del\s+\/[sq]|:(){ :|curl\s.*\|\s*sh|wget\s.*\|\s*sh)/i;
 const BLOCKED_MUTATING_COMMAND = new RegExp(
@@ -18,8 +17,8 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
-const READONLY_BASH_ALLOWLIST = /^\s*(npm\s+test|npm\s+run|node\s+--test\b|npx\s+(?:tsc|eslint|prettier|jest|vitest|mocha)\b|pnpm\s+(test|run|exec)|yarn\s+(test|run)|tsc\s|eslint\s|prettier\s|jest\s|vitest\s|mocha\s|pip\s+show|python3?\s+-m\s+(?:pytest|unittest|build)\b|pytest\s|ruff\s|mypy\s|flake8\s|black\s+--check|composer\s+(test|run)|phpunit\s|cargo\s+(test|check|build|clippy)|rustfmt\s+--check|go\s+(test|vet|build)|make\s|cmake\s|gradle\s|mvn\s|dotnet\s+(test|build)|cat\s|head\s|tail\s|ls\s|find\s|wc\s|file\s|du\s|diff\s|sort\s|uniq\s|grep\s|rg\s|git\s+diff|git\s+log|git\s+status|git\s+show|echo\s|pwd|whoami)/i;
-const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
+const READONLY_BASH_ALLOWLIST = /^\s*(cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|ls(?:\s|$)|find(?:\s|$)|wc(?:\s|$)|file(?:\s|$)|du(?:\s|$)|diff(?:\s|$)|grep(?:\s|$)|rg(?:\s|$)|echo(?:\s|$)|pwd\s*$|whoami\s*$)/i;
+const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
 const GO_OUTPUT_FLAGS = new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
 const CARGO_OUTPUT_FLAGS = new Set(["--target-dir", "--out-dir"]);
 const DOTNET_OUTPUT_FLAGS = new Set(["-o", "--output"]);
@@ -27,7 +26,11 @@ const TSC_OUTPUT_FLAGS = new Set(["--outdir", "--outfile", "--tsbuildinfofile"])
 const TEST_OUTPUT_FLAGS = new Set(["--junitxml", "--html", "--self-contained-html", "--cov-report", "--basetemp", "--result-log", "--report-log"]);
 const NODE_TEST_MUTATING_FLAGS = new Set(["--test-reporter-destination", "--test-update-snapshots"]);
 const PYTHON_BUILD_OUTPUT_FLAGS = new Set(["--outdir"]);
-const SORT_OUTPUT_FLAGS = new Set(["-o", "--output"]);
+const SORT_OUTPUT_FLAGS = new Set(["-o", "--output", "-t", "--temporary-directory"]);
+const SORT_COMMAND_FLAGS = new Set(["--compress-program"]);
+const RIPGREP_COMMAND_FLAGS = new Set(["--pre"]);
+const GIT_UNSAFE_READ_FLAGS = new Set(["-c", "--config-env", "--ext-diff", "--textconv", "--output"]);
+const FILE_MUTATING_FLAGS = new Set(["-c", "--compile"]);
 const FIXER_FLAGS = new Set(["--fix", "--write"]);
 const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
 const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*))/;
@@ -157,6 +160,92 @@ function blockedBashArgumentReason(command) {
   }
   if (commandName === "sort" && hasFlag(lower.slice(1), SORT_OUTPUT_FLAGS)) {
     return "sort explicit output path";
+  }
+  if (commandName === "sort" && hasFlag(lower.slice(1), SORT_COMMAND_FLAGS)) {
+    return "sort external command";
+  }
+  if (commandName === "rg" && hasFlag(lower.slice(1), RIPGREP_COMMAND_FLAGS)) {
+    return "ripgrep external preprocessor";
+  }
+  if (commandName === "git" && hasFlag(lower.slice(1), GIT_UNSAFE_READ_FLAGS)) {
+    return "git external configuration or output flag";
+  }
+  if (commandName === "file" && hasFlag(lower.slice(1), FILE_MUTATING_FLAGS)) {
+    return "file magic compilation output";
+  }
+  return null;
+}
+
+const PRIVATE_BASH_PATH_PARTS = new Set([".git", ".claude", ".codex", ".posse", ".posse-worktrees", ".posse-test-suites"]);
+
+function resolvedExistingPrefix(filePath) {
+  let probe = filePath;
+  for (;;) {
+    try {
+      const real = fs.realpathSync(probe);
+      return path.resolve(real, path.relative(probe, filePath));
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) return filePath;
+      probe = parent;
+    }
+  }
+}
+
+function pathIsInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function readonlyBashPathReason(policy, command) {
+  const words = shellWords(command);
+  for (const token of words.slice(1)) {
+    const values = [token];
+    const equals = token.indexOf("=");
+    if (equals >= 0 && equals < token.length - 1) values.push(token.slice(equals + 1));
+    for (const rawValue of values) {
+      const value = cleanShellPathToken(rawValue);
+      if (!value || value === "-" || /^\d+$/.test(value) || /^\d*>&\d+$/.test(value)) continue;
+      const normalized = value.replace(/\\/g, "/");
+      const parts = normalized.split("/").filter(Boolean).map((part) => part.toLowerCase());
+      if (/^~(?:[^/]*\/|$)/.test(normalized)) {
+        return `shell home expansion is outside the workspace read boundary: ${value}`;
+      }
+      if (parts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))) {
+        return `private workspace path is not readable through bash: ${value}`;
+      }
+      const hasTraversal = parts.includes("..");
+      const absolute = path.isAbsolute(value);
+      const lexical = absolute ? path.resolve(value) : path.resolve(policy.cwd, value);
+      const exists = fs.existsSync(lexical);
+      if (!absolute && /[*?\[\]{}]/.test(value) && typeof fs.globSync === "function") {
+        for (const match of fs.globSync(value, { cwd: policy.cwd })) {
+          const expanded = path.resolve(policy.cwd, match);
+          const expandedParts = String(match).replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase());
+          if (expandedParts.some((part) => part.startsWith("-"))) {
+            return `shell glob expands to an option-like path: ${value}`;
+          }
+          if (expandedParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))
+            || agentHiddenReadablePathReason(match)) {
+            return `shell glob resolves to a private workspace path: ${value}`;
+          }
+          const real = resolvedExistingPrefix(expanded);
+          if (!pathIsInside(policy.cwd, real) && !policy.isWithinScopeRoot(real)) {
+            return `shell glob resolves outside the workspace read boundary: ${value}`;
+          }
+        }
+      }
+      if (!absolute && !hasTraversal && !exists) continue;
+      if (!pathIsInside(policy.cwd, lexical) && !policy.isWithinScopeRoot(lexical)) {
+        return `path escapes the workspace read boundary: ${value}`;
+      }
+      if (exists) {
+        const real = resolvedExistingPrefix(lexical);
+        if (!pathIsInside(policy.cwd, real) && !policy.isWithinScopeRoot(real)) {
+          return `path resolves outside the workspace read boundary: ${value}`;
+        }
+      }
+    }
   }
   return null;
 }
@@ -679,6 +768,9 @@ export class MutationPolicy {
     if (!cmd || typeof command !== "string") {
       return { ok: false, error: "Error: No command provided." };
     }
+    if (/[\r\n]/.test(cmd) || /<\(|>\(/.test(cmd) || /(^|[^&])&([^&]|$)/.test(cmd)) {
+      return { ok: false, error: "Error: Newlines, process substitution, and background shell operators are not allowed in sandboxed bash." };
+    }
     if (isSensitiveEnvCommand(cmd)) {
       return { ok: false, error: "Error: Access to .env files is blocked. Use documented config examples or code paths instead." };
     }
@@ -698,13 +790,17 @@ export class MutationPolicy {
       }
     }
     if (BLOCKED_MUTATING_COMMAND.test(cmd) || BLOCKED_INLINE_SCRIPT_WRITE.test(cmd)) {
-      return { ok: false, error: `Error: Mutating command blocked - the shell is limited to read-only inspection and test/build runners. Use an issued scoped file-mutation tool for workspace changes: ${cmd.slice(0, 100)}` };
+      return { ok: false, error: `Error: Mutating command blocked - the shell is limited to read-only inspection utilities. Use an issued scoped tool for execution or workspace changes: ${cmd.slice(0, 100)}` };
     }
 
     for (const sub of subcommands) {
       const blockedArgReason = blockedBashArgumentReason(sub);
       if (blockedArgReason) {
-        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - the shell is limited to read-only inspection and test/build runners. Use an issued scoped file-mutation tool for workspace changes: ${sub.slice(0, 100)}` };
+        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - the shell is limited to read-only inspection utilities. Use an issued scoped tool for execution or workspace changes: ${sub.slice(0, 100)}` };
+      }
+      const blockedPathReason = readonlyBashPathReason(this, sub);
+      if (blockedPathReason) {
+        return { ok: false, error: `Error: Read-only bash path blocked (${blockedPathReason}). Use the issued scoped file tools.` };
       }
       const syntax = scopedSyntaxCommand(this, sub);
       if (syntax.recognized) {
@@ -713,12 +809,8 @@ export class MutationPolicy {
         }
         continue;
       }
-      const words = shellWords(sub);
-      if (shellCommandName(words[0]) === "node" && isSafeDirectNodeTestScriptArgs(words.slice(1))) {
-        continue;
-      }
       if (!READONLY_BASH_ALLOWLIST.test(sub)) {
-        return { ok: false, error: `Error: Command not in allowlist - bash is restricted to test/build/lint runners and read-only utilities. File writes must go through write_file/edit_file: ${sub.slice(0, 100)}` };
+        return { ok: false, error: `Error: Command not in allowlist - bash is restricted to read-only inspection utilities. Use the issued frozen-test or scoped-check tools for execution: ${sub.slice(0, 100)}` };
       }
     }
     return { ok: true, subcommands };

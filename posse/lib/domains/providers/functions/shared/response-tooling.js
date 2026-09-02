@@ -28,9 +28,8 @@ function bashReadOnly(extra = "") {
   return {
     ...TOOL_BASH,
     description:
-      "Execute a READ-ONLY shell command for repo-native inspection or verification (git log, git diff, test/build runners, etc.). " +
-      "On Windows, use PowerShell-compatible syntax and avoid Unix-only filters such as head/wc or Bash-only operators. " +
-      "Do NOT use this to modify files or run destructive commands." +
+      "Execute a supported READ-ONLY inspection utility. Supported utilities include cat, head, tail, ls, find, wc, file, du, diff, grep, rg, echo, pwd, and whoami. " +
+      "On Windows, use PowerShell-compatible inspection syntax. Verification, version-history operations, and workspace changes use separately issued capabilities." +
       (extra ? " " + extra : ""),
   };
 }

@@ -2,6 +2,8 @@
 
 import fs from "fs";
 import path from "path";
+import { createHash } from "crypto";
+import { pipeline } from "stream/promises";
 import { ScipLanguageEnvironmentInstaller } from "../ScipLanguageEnvironmentInstaller.js";
 import {
   commandOnPath,
@@ -10,6 +12,11 @@ import {
 } from "../../functions/scip-install-runtime.js";
 
 const SCIP_CLANG_VERSION = "v0.4.0";
+const SCIP_CLANG_MAX_BYTES = 200 * 1024 * 1024;
+export const SCIP_CLANG_SHA256 = Object.freeze({
+  "scip-clang-arm64-darwin": "ff042fbc8a029f09f4b69fc7692e290e21c52923593207ee52d4e7439473ec64",
+  "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784",
+});
 
 export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller {
   get language() {
@@ -122,10 +129,37 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
     const tmpDest = `${dest}.download`;
     const errors = [];
     for (const asset of this.releaseAssetCandidates()) {
+      const expectedSha256 = SCIP_CLANG_SHA256[asset];
+      if (!expectedSha256) {
+        errors.push(`${asset}: no pinned checksum is available`);
+        continue;
+      }
       const url = `https://github.com/sourcegraph/scip-clang/releases/download/${SCIP_CLANG_VERSION}/${asset}`;
-      const run = await runCommand("curl", ["-fsSL", "--retry", "2", "-o", tmpDest, url], { timeoutMs: this.timeoutMs });
+      const run = await runCommand("curl", [
+        "-fsSL", "--retry", "2", "--max-filesize", String(SCIP_CLANG_MAX_BYTES),
+        "-o", tmpDest, url,
+      ], { timeoutMs: this.timeoutMs });
       if (!run.ok) {
         errors.push(`${asset}: ${run.message || "download failed"}`);
+        await unlinkIfExists(tmpDest);
+        continue;
+      }
+      const stat = await fs.promises.stat(tmpDest).catch(() => null);
+      if (!stat || stat.size <= 0 || stat.size > SCIP_CLANG_MAX_BYTES) {
+        errors.push(`${asset}: downloaded binary size is outside the allowed range`);
+        await unlinkIfExists(tmpDest);
+        continue;
+      }
+      let actualSha256;
+      try {
+        actualSha256 = await sha256File(tmpDest);
+      } catch (err) {
+        errors.push(`${asset}: checksum failed: ${err?.message || err}`);
+        await unlinkIfExists(tmpDest);
+        continue;
+      }
+      if (actualSha256 !== expectedSha256) {
+        errors.push(`${asset}: SHA-256 checksum mismatch`);
         await unlinkIfExists(tmpDest);
         continue;
       }
@@ -137,6 +171,12 @@ export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstal
       `scip-clang ${SCIP_CLANG_VERSION} download failed (${errors.join("; ")}); download manually from https://github.com/sourcegraph/scip-clang/releases into ${this.binDir}`,
     );
   }
+}
+
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  await pipeline(fs.createReadStream(file), hash);
+  return hash.digest("hex");
 }
 
 async function unlinkIfExists(file) {

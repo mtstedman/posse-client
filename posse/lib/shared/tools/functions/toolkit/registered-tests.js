@@ -11,6 +11,8 @@ import {
   resolveManagedPythonRuntimeForProject,
 } from "../../../../domains/runtime/functions/python-runtime.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
+import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
+import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 
 const SUPPORTED_LANGUAGES = new Set(["javascript", "node", "js", "python", "py"]);
 const JS_LANGUAGES = new Set(["javascript", "node", "js"]);
@@ -27,39 +29,6 @@ const DEFAULT_TIMEOUT_MS = 30000;
 const WORKSPACE_AUDIT_MAX_FILE_BYTES = 50 * 1024 * 1024;
 const WORKSPACE_AUDIT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const WORKSPACE_AUDIT_SKIP_DIRS = createWorkspaceSkipDirs();
-const REGISTERED_TEST_ENV_ALLOWLIST = new Set([
-  "allusersprofile",
-  "appdata",
-  "ci",
-  "comspec",
-  "home",
-  "homedrive",
-  "homepath",
-  "lang",
-  "lc_all",
-  "lc_ctype",
-  "localappdata",
-  "logname",
-  "no_color",
-  "os",
-  "path",
-  "pathext",
-  "programdata",
-  "programfiles",
-  "programfiles(x86)",
-  "programw6432",
-  "systemdrive",
-  "systemroot",
-  "temp",
-  "term",
-  "tmp",
-  "tmpdir",
-  "user",
-  "userdomain",
-  "username",
-  "userprofile",
-  "windir",
-]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -233,12 +202,7 @@ function summarizeWorkspaceChanges(changes) {
 }
 
 function buildRegisteredTestEnv(baseEnv = process.env) {
-  const env = {};
-  for (const [key, value] of Object.entries(baseEnv || {})) {
-    if (!REGISTERED_TEST_ENV_ALLOWLIST.has(String(key || "").toLowerCase())) continue;
-    env[key] = value;
-  }
-  return env;
+  return filterProcessEnv(baseEnv, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS });
 }
 
 function normalizeName(value, label = "name") {

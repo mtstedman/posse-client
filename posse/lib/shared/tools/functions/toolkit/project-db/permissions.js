@@ -30,6 +30,15 @@ const READ_VERBS = new Set([
   "PRAGMA", "EXPLAIN", "SHOW", "DESCRIBE", "DESC",
 ]);
 
+// SQLite PRAGMAs are not uniformly observational: assignments and commands
+// such as journal_mode, wal_checkpoint, and optimize can mutate durable state.
+// Keep the agent surface to the small introspection subset it actually needs.
+const READ_ONLY_PRAGMAS = new Set([
+  "collation_list", "compile_options", "database_list", "foreign_key_list",
+  "function_list", "index_info", "index_list", "index_xinfo", "module_list",
+  "pragma_list", "table_info", "table_list", "table_xinfo",
+]);
+
 // Postgres dollar-quoted string delimiter: `$tag$` where tag is an optional
 // identifier (letter/underscore first, then alphanumerics; never digit-led, so
 // numbered params like `$1` are NOT delimiters). Inside `$tag$ … $tag$` every
@@ -223,6 +232,16 @@ export function authorizeProjectDbStatement(sql, grantedPermissions = []) {
   // is a data-modifying CTE, and `SELECT ... INTO` writes a table — so the tool
   // itself rejects any operation outside the grant, regardless of leading verb.
   const masked = maskSqlLiterals(statement);
+
+  if (verb === "PRAGMA") {
+    const pragma = masked.match(/^\s*PRAGMA\s+(?:(?:[A-Za-z_][A-Za-z0-9_]*)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?\s*$/i);
+    if (!pragma || !READ_ONLY_PRAGMAS.has(String(pragma[1] || "").toLowerCase())) {
+      return { ok: false, error: "Only allowlisted read-only SQLite introspection PRAGMAs are permitted." };
+    }
+  }
+  if (verb === "INSERT" && /^\s*INSERT\s+OR\s+REPLACE\b/i.test(masked)) {
+    return { ok: false, error: "INSERT OR REPLACE can overwrite or delete existing rows and is not permitted; use explicit INSERT or UPDATE semantics." };
+  }
 
   // EXPLAIN ANALYZE actually executes the analyzed statement.
   if (/^\s*EXPLAIN\b/i.test(masked) && /\bANALYZE\b/i.test(masked)) {

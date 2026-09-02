@@ -27,6 +27,7 @@ import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/det
 import { classifyProviderError, createCircuitBreaker, createRetryWrapper } from "../shared/api-resilience.js";
 import { callAbortableResponsesCreate, createAbortableResponsesCaller } from "../shared/abortable-responses.js";
 import { getDefaultImageModel, getProviderTierDefaults } from "../model-catalog.js";
+import { readResponseTextWithLimit } from "../../../remote/functions/client.js";
 import { buildGrokImageGenerateParams, isUnsupportedReasoningError, supportsReasoningEffort } from "./image-params.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 import { normalizeProviderUsage } from "../shared/usage-normalization.js";
@@ -45,6 +46,7 @@ export { extractJson };
 import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
 import { createAssessorToolLoopBudget } from "../shared/assessor-tool-loop-budget.js";
 const LIVE_CHANNEL_TURN_LIMIT = 12;
+const GROK_IMAGE_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 
 function abortableThrottle(ms, signal = null) {
   if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,7 +151,11 @@ function buildGrokImageClient(apiKey, { fetchImpl = globalThis.fetch } = {}) {
           body: JSON.stringify(params),
           signal: options.signal,
         });
-        const body = await response.text();
+        const body = await readResponseTextWithLimit(response, {
+          maxBytes: GROK_IMAGE_RESPONSE_MAX_BYTES,
+          operation: "xAI image generation",
+          url: "https://api.x.ai/v1/images/generations",
+        });
         let parsed;
         try {
           parsed = JSON.parse(body);

@@ -9,6 +9,7 @@ export class ProviderUsageRuntimeCache {
     this.readAsync = readAsync;
     this.cache = { at: 0, summaries: [], currentRunProviderUsage: [] };
     this.refreshPromise = null;
+    this.generation = 0;
   }
 
   configure({ now = null, readSync = null, readAsync = null } = {}) {
@@ -22,6 +23,7 @@ export class ProviderUsageRuntimeCache {
   // provider-usage snapshot (or an async refresh that resolves late) leaks into the
   // next test's render. Harmless in production, where it is simply never called.
   reset() {
+    this.generation += 1;
     this.cache = { at: 0, summaries: [], currentRunProviderUsage: [] };
     this.refreshPromise = null;
   }
@@ -62,8 +64,10 @@ export class ProviderUsageRuntimeCache {
   }
 
   async refreshAsync(opts = {}) {
+    const generation = this.generation;
     try {
-      this.cache = this._normalizeSnapshot(await this.readAsync(opts) || {});
+      const next = this._normalizeSnapshot(await this.readAsync(opts) || {});
+      if (generation === this.generation) this.cache = next;
     } catch {
       // Keep the last good snapshot so rendering stays cheap and stable.
     }
@@ -73,14 +77,22 @@ export class ProviderUsageRuntimeCache {
   async refreshIfChanged(opts = {}) {
     const before = JSON.stringify(this.cache);
     if (this.refreshPromise) return this.refreshPromise;
+    const generation = this.generation;
     this.refreshPromise = (async () => {
-      await this.refreshAsync(opts);
+      let next;
+      try {
+        next = this._normalizeSnapshot(await this.readAsync(opts) || {});
+      } catch {
+        return false;
+      }
+      if (generation !== this.generation) return false;
+      this.cache = next;
       return before !== JSON.stringify(this.cache);
     })();
     try {
       return await this.refreshPromise;
     } finally {
-      this.refreshPromise = null;
+      if (generation === this.generation) this.refreshPromise = null;
     }
   }
 }
