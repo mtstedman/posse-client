@@ -107,6 +107,7 @@ import {
   isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus,
   raiseAssessmentFallbackReadsForScope,
 } from "../execution/assessment-policy.js";
+import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -115,9 +116,9 @@ export {
   renderAssessmentTaskBoundary,
 } from "./assessment-task-boundary.js";
 
-function readSettingText(key) {
+function readSettingText(key, projectDir = null) {
   try {
-    const value = getSetting(key);
+    const value = getSetting(key, projectDir ? { projectDir } : {});
     return value == null ? "" : String(value).trim();
   } catch {
     return "";
@@ -529,6 +530,78 @@ function _looksLikeAssessorVerdictObject(value) {
     );
 }
 
+const PIXEL_VISUAL_EVIDENCE_TOOL_NAMES = new Set([
+  "view_image",
+  "inspect_image",
+  "analyze_image",
+  "image_preview",
+]);
+const UNSUCCESSFUL_VISUAL_TOOL_STATUSES = new Set([
+  "blocked",
+  "cancelled",
+  "canceled",
+  "denied",
+  "error",
+  "failed",
+  "rejected",
+]);
+
+function imageAssessmentRequiresPixelEvidence(payload = {}) {
+  if (String(payload?.task_mode || "").trim().toLowerCase() !== "image") return false;
+  const criteria = Array.isArray(payload?.success_criteria) ? payload.success_criteria : [];
+  const text = [payload?.task_spec, ...criteria]
+    .map((value) => String(value || ""))
+    .join("\n");
+  return /\b(?:visual(?:ly)?|artwork|art direction|scene|depict(?:s|ed|ing)?|composition|layout|sty(?:le|led|ling)|theme|recognizable|copied|character|screenshot|readable at|look and feel|original (?:art|artwork|illustration|design|composition|layout|visual|scene))\b/i.test(text);
+}
+
+function imageAssessmentHasPixelEvidence(toolUses = []) {
+  return (Array.isArray(toolUses) ? toolUses : []).some((use) => {
+    const raw = String(use?.tool || use?.name || use?.tool_name || "")
+      .trim()
+      .toLowerCase();
+    const normalizedName = raw
+      .split("__")
+      .at(-1)
+      .replace(/^tools[._]/, "");
+    return PIXEL_VISUAL_EVIDENCE_TOOL_NAMES.has(normalizedName)
+      && !UNSUCCESSFUL_VISUAL_TOOL_STATUSES.has(String(use?.status || "").trim().toLowerCase());
+  });
+}
+
+function applyImageVisualEvidencePolicy({
+  payload = {},
+  verdict = null,
+  toolUses = [],
+  pixelEvidenceObserved = false,
+} = {}) {
+  if (!verdict || String(verdict.verdict || "").toLowerCase() !== "pass") return verdict;
+  if (
+    !imageAssessmentRequiresPixelEvidence(payload)
+    || pixelEvidenceObserved
+    || imageAssessmentHasPixelEvidence(toolUses)
+  ) return verdict;
+  return {
+    ...verdict,
+    verdict: "needs_review",
+    confidence: "none",
+    reasons: [
+      "Automatic visual acceptance was withheld: artifact validation, dimensions, metadata, and OCR do not prove semantic scene matching, composition, style, originality, or copied-layout criteria without pixel-level inspection.",
+      ..._normalizeAssessmentTextList(verdict.reasons),
+    ],
+    human_questions: [
+      "Please visually inspect the generated image deliverables and confirm whether their scenes, composition, style, and originality satisfy the listed visual criteria.",
+    ],
+    spawn_jobs: [],
+    _disable_internal_retry: true,
+    _assessment_visual_review: true,
+  };
+}
+
+export function __testApplyImageVisualEvidencePolicy(options = {}) {
+  return applyImageVisualEvidencePolicy(options);
+}
+
 const ASSESSOR_VALID_VERDICTS = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
 
 function _isReusableAssessorVerdict(verdictJson, verdict) {
@@ -691,6 +764,7 @@ function _buildVerificationCapabilityBlock(payload = {}) {
     `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
     `A configured test command is a verification recipe, not product behavior, unless the objective explicitly requires that literal invocation to work. If its launcher is unavailable, one obvious equivalent launcher or targeted invocation may establish the same criterion.`,
     `When a DETERMINISTIC TEST EXECUTION RECEIPT or DETERMINISTIC ASSESSOR TEST EXECUTION is attached, the orchestration layer already ran that frozen command outside model context. Treat the receipt as ground truth and do not rerun the command.`,
+    `When a DETERMINISTIC CHANGED-FILE CHECK RECEIPT is attached, the harness already ran scoped lint, syntax, and available project typechecks for every listed changed file. Treat its per-file coverage and unavailable statuses as final for this attempt; do not rerun those checks through run_scoped_checks or shell.`,
     `Do not request a repository file or human intervention solely to supply an executable alias or change test discovery after equivalent evidence proves the behavior.`,
     `If no equivalent evidence can establish a genuinely required criterion, return blocked once with the missing capability named. Do not retry the same assessment hoping the capability appears.`,
     contract ? `Task verification contract:\n${JSON.stringify(contract, null, 2)}` : null,
@@ -908,6 +982,7 @@ export function __testRerunFailedRegisteredTestsForAssessment(opts = {}) {
 
 function _buildLocalAssessmentEvidence({
   fileVerification = "",
+  scopedCheckEvidence = "",
   assessmentDiffNarrative = "",
   assessmentScopedDiff = "",
   assessmentDependencyDiffs = "",
@@ -918,7 +993,18 @@ function _buildLocalAssessmentEvidence({
   const primaryChangeEvidence = assessmentScopedDiff
     || assessmentDiffNarrative
     || assessmentFileSnapshots;
-  const evidenceBudgetChars = 84_000;
+  const completePrimaryDiffContract = assessmentScopedDiff
+    ? [
+        `COMPLETE PRIMARY DIFF CONTRACT:`,
+        `The attached SCOPED GIT DIFF is the full diff for the entire assessed task scope, not a summary or excerpt.`,
+        `Do not spend issued tools re-fetching, reconstructing, or symbol-resolving changes already present in it. Use source reads only for material surrounding context that the diff does not contain.`,
+      ].join("\n")
+    : "";
+  // The primary diff is accepted upstream through 128K. Keep enough room here
+  // for that indivisible view plus deterministic test receipts; otherwise the
+  // final assembly boundary would silently undo the handoff decision and send
+  // the assessor back through repository reads.
+  const evidenceBudgetChars = 224_000;
   const sections = [];
   let usedChars = 0;
   const appendWhole = (value, label) => {
@@ -935,8 +1021,9 @@ function _buildLocalAssessmentEvidence({
   // Receipts and the primary change view are indivisible evidence. In
   // particular, never turn a complete diff into a misleading partial diff at
   // this final assembly boundary.
-  appendWhole(registeredTestRunEvidence, "registered test evidence");
   const primaryChangeEvidenceAttached = appendWhole(primaryChangeEvidence, "primary change evidence");
+  appendWhole(scopedCheckEvidence, "deterministic changed-file check evidence");
+  appendWhole(registeredTestRunEvidence, "registered test evidence");
   const dependencyChangeEvidenceAttached = appendWhole(assessmentDependencyDiffs, "dependency change evidence");
   appendWhole(fileVerification, "scope verification evidence");
   if (workerStatusOutput && !registeredTestRunEvidence) {
@@ -948,11 +1035,16 @@ function _buildLocalAssessmentEvidence({
     text: [
       `LOCAL ASSESSMENT EVIDENCE`,
       `This block was attached by the local client after remote prompt compilation. Treat deterministic receipts, the primary change view, and labeled read-only upstream dependency contracts as ground truth. Worker status is context only, never proof.`,
+      completePrimaryDiffContract || null,
       sections.join("\n") || null,
     ].filter(Boolean).join("\n"),
     primaryChangeEvidenceAttached,
     dependencyChangeEvidenceAttached,
   };
+}
+
+export function __testBuildLocalAssessmentEvidence(options = {}) {
+  return _buildLocalAssessmentEvidence(options);
 }
 
 function _renderAssessmentDependencyDiffs(assessmentContext = null) {
@@ -1216,7 +1308,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   const assessmentScopedDiff = assessmentContext?.scoped_git_diff
-    ? `\nSCOPED GIT DIFF (COMPLETE — do not re-derive via git):\n${assessmentContext.scoped_git_diff}\n`
+    ? `\nSCOPED GIT DIFF (COMPLETE FULL DIFF FOR ASSESSED TASK SCOPE — DO NOT RE-FETCH OR RECONSTRUCT):\n${assessmentContext.scoped_git_diff}\n`
     : "";
   const assessmentDependencyDiffs = _renderAssessmentDependencyDiffs(assessmentContext);
   const diffPrefetchStatus = String(assessmentContext?.scoped_git_diff_status || "");
@@ -1479,6 +1571,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
 
   const localAssessmentEvidencePacket = _buildLocalAssessmentEvidence({
     fileVerification,
+    scopedCheckEvidence: assessmentContext?.scoped_check_evidence || "",
     assessmentDiffNarrative,
     assessmentScopedDiff,
     assessmentDependencyDiffs,
@@ -1544,6 +1637,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let response;
   let trustedAssessorEvidenceChars = null;
   let trustedAssessorClaims = [];
+  let assessorToolUses = [];
+  let imagePixelEvidenceObserved = false;
   let toolBudgetExhaustion = null;
   let priorMatchingToolBudgetExhaustion = false;
   const assessorMaxToolCalls = getAssessorMaxToolCalls();
@@ -1584,9 +1679,11 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       trustedAssessorClaims = Array.isArray(metadata?.assessor_handoff_claims)
         ? metadata.assessor_handoff_claims
         : [];
+      imagePixelEvidenceObserved = metadata?.image_pixel_evidence_observed === true;
     } catch {
       trustedAssessorEvidenceChars = null;
       trustedAssessorClaims = [];
+      imagePixelEvidenceObserved = false;
     }
     logEvent({
       work_item_id: job.work_item_id,
@@ -1685,6 +1782,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       jobModelName: null,
     });
     response = result.output;
+    assessorToolUses = Array.isArray(result?.stats?.toolUses) ? result.stats.toolUses : [];
+    imagePixelEvidenceObserved = imageAssessmentHasPixelEvidence(assessorToolUses);
     if (Number.isInteger(result.agentCallId)) {
       toolBudgetExhaustion = assessorToolBudgetExhaustion(result.agentCallId, job.id);
       if (toolBudgetExhaustion) {
@@ -1725,6 +1824,12 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   // Unwrap single-element array — LLMs sometimes wrap the verdict object in brackets
   if (Array.isArray(verdict) && verdict.length === 1 && _looksLikeAssessorVerdictObject(verdict[0])) verdict = verdict[0];
   verdict = _normalizeAssessorVerdictShape(verdict, response);
+  verdict = applyImageVisualEvidencePolicy({
+    payload: parsedJobPayload,
+    verdict,
+    toolUses: assessorToolUses,
+    pixelEvidenceObserved: imagePixelEvidenceObserved,
+  });
 
   if (!reusableReview) {
     storeArtifact({
@@ -1735,6 +1840,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       content_json: {
         assessment_input_key: assessmentInputKey,
         verdict_parse_succeeded: !toolBudgetExhaustion && _isReusableAssessorVerdict(verdictJson, verdict),
+        ...(imagePixelEvidenceObserved ? { image_pixel_evidence_observed: true } : {}),
+        ...(verdict?._assessment_visual_review ? { visual_evidence_review_required: true } : {}),
         ...(toolBudgetExhaustion ? { tool_budget_exhaustion: toolBudgetExhaustion } : {}),
         ...(trustedAssessorEvidenceChars == null
           ? {}
@@ -1898,6 +2005,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     raw: response,
     ...(trustedAssessorClaims.length === 0 ? {} : { _assessor_claims: trustedAssessorClaims }),
     ...(verdict._disable_internal_retry ? { _disable_internal_retry: true } : {}),
+    ...(verdict._assessment_visual_review ? { _assessment_visual_review: true } : {}),
   };
   const taskBoundary = buildAssessmentTaskBoundary(job);
   const boundaryViolation = classifySiblingOnlyAssessmentFailure(normalizedVerdict, taskBoundary);
@@ -2497,7 +2605,7 @@ export async function runPostExecutionAssessment(worker, {
       }
     }
 
-    const preAssessCmd = readSettingText("pre_assess_cmd") || null;
+    const preAssessCmd = readSettingText("canonical_verify_cmd", worker.projectDir) || readSettingText("pre_assess_cmd") || null;
     const hooksSkipped = readSettingBool("skip_hooks", false) || readSettingBool("skip_hook_post_dev_verify", false);
     if (shouldRunPreAssessCommand({
       command: preAssessCmd,
@@ -2850,21 +2958,44 @@ export async function runPostExecutionAssessment(worker, {
       if (taskAbAssessmentEvidence) {
         assessmentContext.task_ab_test_evidence = taskAbAssessmentEvidence;
       }
+      const assessmentCwd = (isArtifactMode(taskMode) && jobPayloadForAssess.output_root)
+        ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
+        : (wtPath || worker.projectDir);
+      const scopedCheckReceipt = await ensureAssessmentScopedCheckEvidence({
+        job,
+        attemptId: attempt.id,
+        cwd: assessmentCwd,
+        assessmentContext,
+        cleanupWorktree: async () => snapshotAndResetDirtyWorktreeAsync(
+          assessmentCwd,
+          worker.projectDir,
+          {
+            reason: `assessment-scoped-check-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+            branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+            wiId: job.work_item_id,
+            onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
+          },
+        ),
+      });
+      if (scopedCheckReceipt) {
+        assessmentContext.scoped_check_evidence = scopedCheckReceipt.evidence;
+        worker.emit(
+          job.id,
+          `${C.dim}[assessor-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,
+        );
+      }
       const assessOpts = {
         silent: worker.silent,
         autoApprove: worker.autoApprove,
         agentDispatcher: worker.agentDispatcher,
         routedProviderName: assessorProvider,
         abortSignal: jobAc?.signal || null,
-        cwd: (isArtifactMode(taskMode) && jobPayloadForAssess.output_root)
-          ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
-          : (wtPath || worker.projectDir),
+        cwd: assessmentCwd,
         assessmentContext,
         attemptId: attempt.id,
         allowMutatingRunners: !!wtPath,
       };
       const rawTrackedCall = getWorkerProviderCall(worker);
-      const assessmentCwd = assessOpts.cwd;
       const usesProjectDirCwd = !wtPath
         && taskMode === "code"
         && path.resolve(assessmentCwd) === path.resolve(worker.projectDir);

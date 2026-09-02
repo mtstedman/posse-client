@@ -321,10 +321,11 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
       review_type: "blocked_recovery",
       question_kind: "blocked_recovery",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
+      verification_failure_class: verdict._verification_failure_class || null,
       questions: [
         `Work item has ${failedCount} failed dev/fix jobs and needs a terminal recovery decision.\n\nLatest failure: "${job.title}"\nAssessor reasons: ${verdict.reasons.join("; ")}\n\n--- FULL FAILURE HISTORY ---\n${failureHistory}`,
       ],
-      context: `Automatic escalation: failure threshold (${failedCount}/${threshold}) exceeded. Choose retry, replan, skip, pass, or fail. The decision is applied directly to failed job #${job.id}; it is not an informational no-op.`,
+      context: `Automatic escalation: failure threshold (${failedCount}/${threshold}) exceeded. Choose retry, replan, skip, explicit_waiver, or fail. An explicit waiver records that failed verification was intentionally accepted; no ordinary pass is available.`,
     }),
   });
   spawnedJobs.push(escalationJob);
@@ -367,10 +368,11 @@ function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth,
       review_type: "blocked_recovery",
       question_kind: "blocked_recovery",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
+      verification_failure_class: verdict._verification_failure_class || null,
       questions: [
         `Job "${job.title}" has been through ${fixChainDepth} fix cycles and is still failing.\n\nLatest assessor reasons: ${verdict.reasons.join("; ")}\n\n--- FIX CHAIN HISTORY ---\n${chainHistory}`,
       ],
-      context: `Fix chain: ${fixChainDepth} deep. Choose retry, replan, skip, pass, or fail. The decision is applied directly to failed job #${job.id}; it is not an informational no-op.`,
+      context: `Fix chain: ${fixChainDepth} deep. Choose retry, replan, skip, explicit_waiver, or fail. An explicit waiver records that failed verification was intentionally accepted; no ordinary pass is available.`,
     }),
   });
   spawnedJobs.push(chainEscalation);
@@ -391,12 +393,29 @@ function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth,
 
 function _extractOriginalPayloadContext(job) {
   const origPayload = parseJobPayload(job);
+  const rootJobId = Number.isSafeInteger(Number(origPayload.root_job_id))
+    ? Number(origPayload.root_job_id)
+    : Number.isSafeInteger(Number(origPayload.original_job_id))
+      ? Number(origPayload.original_job_id)
+      : job.id;
+  const rootTitle = String(origPayload.root_title || origPayload.original_title || job.title || "");
   const originalFiles = Array.isArray(origPayload.files_to_modify) ? origPayload.files_to_modify : [];
   const originalCreateFiles = Array.isArray(origPayload.files_to_create) ? origPayload.files_to_create : [];
   const originalDeleteFiles = Array.isArray(origPayload.files_to_delete) ? origPayload.files_to_delete : [];
   let originalCreateRoots = Array.isArray(origPayload.create_roots) ? origPayload.create_roots : [];
-  const originalSuccessCriteria = Array.isArray(origPayload.success_criteria) ? origPayload.success_criteria : [];
-  const originalTaskSpec = String(origPayload.task_spec || origPayload.instructions || "");
+  const originalSuccessCriteria = Array.isArray(origPayload.root_success_criteria)
+    ? origPayload.root_success_criteria
+    : Array.isArray(origPayload.success_criteria)
+      ? origPayload.success_criteria
+      : [];
+  const originalTaskSpec = String(
+    origPayload.root_task_spec
+    || origPayload.original_task_spec
+    || origPayload.task_spec
+    || origPayload.instructions
+    || "",
+  );
+  const rootBaseCommit = String(origPayload.root_base_commit || origPayload.commit_base_hash || "").trim() || null;
   const origTaskMode = origPayload.task_mode || "code";
   const origOutputRoot = origPayload.output_root || null;
   const origNeedsImageGen = !!origPayload.needs_image_generation;
@@ -425,12 +444,16 @@ function _extractOriginalPayloadContext(job) {
     originalCreateRoots = _mergeUniquePaths(originalCreateRoots, [origOutputRoot]);
   }
   return {
+    rootJobId, rootTitle, rootBaseCommit,
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand: inheritableTestCommand, origTaskAbTestCommand,
     originalOperationalCommand,
     originalDevBrief, originalHashRefPacket,
+    verificationPlanInvalid: origPayload._verification_plan_invalid && typeof origPayload._verification_plan_invalid === "object"
+      ? origPayload._verification_plan_invalid
+      : null,
   };
 }
 
@@ -543,12 +566,13 @@ function _spawnRecoveryJobsForVerdict({
   job, verdict, currentPayload, origCtx, ctx, log, spawnFromAssessor, spawnedJobs,
 }) {
   const {
+    rootJobId, rootTitle, rootBaseCommit,
     originalFiles, originalCreateFiles, originalDeleteFiles, originalCreateRoots,
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
     originalOperationalCommand,
-    originalDevBrief, originalHashRefPacket,
+    originalDevBrief, originalHashRefPacket, verificationPlanInvalid,
   } = origCtx;
   // One-shot lineage marker survives every recovery spawn so later fixes and
   // file-request follow-ups keep the tightened one-shot policies.
@@ -779,6 +803,11 @@ function _spawnRecoveryJobsForVerdict({
     const fixPayload = {
       original_job_id: job.id,
       original_title: job.title,
+      root_job_id: rootJobId,
+      root_title: rootTitle,
+      root_task_spec: originalTaskSpec,
+      root_success_criteria: originalSuccessCriteria,
+      ...(rootBaseCommit ? { root_base_commit: rootBaseCommit } : {}),
       fix_instructions: fixInstructions,
       assessor_feedback: verdict.reasons,
       original_task_spec: originalTaskSpec,
@@ -794,6 +823,7 @@ function _spawnRecoveryJobsForVerdict({
       success_criteria: originalSuccessCriteria,
       ...(originalTestCommand ? { test_command: originalTestCommand } : {}),
       ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
+      ...(verificationPlanInvalid ? { _verification_plan_invalid: verificationPlanInvalid } : {}),
       ...(originalOperationalCommand ? {
         _parent_operational_command_omitted: {
           schema_version: 1,
@@ -849,7 +879,7 @@ function _spawnRecoveryJobsForVerdict({
           choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
           questions: [
             `The same failure/scope fingerprint (${fixFingerprint.slice(0, 12)}) already occurred in this fix lineage.`,
-            "Choose retry with materially new guidance, replan, pass, fail, or skip.",
+            "Choose retry with materially new guidance, replan, explicit_waiver, fail, or skip.",
           ],
           context: "Posse did not enqueue another identical fix because it would repeat an unsatisfiable repair loop.",
           fix_satisfiability_fingerprint: fixFingerprint,

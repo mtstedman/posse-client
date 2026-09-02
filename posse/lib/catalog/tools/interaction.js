@@ -6,7 +6,7 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   assessment_review: Object.freeze(["pass", "fail", "skip", "replan"]),
   assessment_transport_recovery: Object.freeze(["retry", "pass", "fail", "skip", "replan"]),
   assessment_retry_limit: Object.freeze(["pass", "fail", "skip", "replan"]),
-  blocked_recovery: Object.freeze(["retry", "skip", "replan", "pass", "fail"]),
+  blocked_recovery: Object.freeze(["retry", "skip", "replan", "explicit_waiver", "fail"]),
   partial_work_recovery: Object.freeze(["extend", "commit", "revert"]),
   dead_letter_recovery: Object.freeze([
     "retry", "retry:claude", "retry:openai", "retry:codex", "retry:grok", "skip", "fail",

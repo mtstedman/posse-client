@@ -383,9 +383,12 @@ export async function runHumanInputJob(worker, job, {
       const invalidClosedChoice = actionChoices.length > 0
         && payload.review_type !== "blocked_recovery"
         && !humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      const disallowedBlockedPass = payload.review_type === "blocked_recovery"
+        && classifyBlockedRecoveryAnswer(lastAnswer) === "pass"
+        && !actionChoices.includes("pass");
       const invalidUncataloguedReview = uncataloguedReview
         && classifyReviewAnswer(lastAnswer) === "unknown";
-      if (invalidClosedChoice || invalidUncataloguedReview) {
+      if (invalidClosedChoice || invalidUncataloguedReview || disallowedBlockedPass) {
         const choiceMessage = actionChoices.length > 0
           ? `Human input did not select one of: ${actionChoices.join(", ")}`
           : `Human input did not provide a recognized action for review type ${payload.review_type}`;
@@ -785,7 +788,7 @@ export async function runHumanInputJob(worker, job, {
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const exactRecoveryAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
       const decision = exactRecoveryAction === "explicit_waiver"
-        ? "skip"
+        ? "waive"
         : (exactRecoveryAction === "retry_with_changes"
           ? "retry"
           : classifyBlockedRecoveryAnswer(lastAnswer));
@@ -855,16 +858,26 @@ export async function runHumanInputJob(worker, job, {
           actor_type: EVENT_ACTORS.WORKER,
           message: `Human skipped blocked job via recovery job #${job.id}`,
         });
-      } else if (decision === "pass") {
+      } else if (decision === "waive") {
         await worker._setJobRowStatus(origJob, "succeeded");
-        worker.emit(job.id, `${C.green}[human] Blocked recovery marked job #${origJob.id} succeeded${C.reset}`);
+        setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
+        const origPayload = worker.parsePayload(origJob);
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery explicitly waived failed verification for job #${origJob.id}${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,
           job_id: origJob.id,
           attempt_id: attempt.attempt.id,
-          event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-          actor_type: EVENT_ACTORS.WORKER,
-          message: `Human passed blocked job via recovery job #${job.id}`,
+          event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
+          actor_type: EVENT_ACTORS.HUMAN,
+          message: `Human explicitly waived blocked verification via recovery job #${job.id}`,
+          event_json: JSON.stringify({
+            human_resolution: "explicit_waiver",
+            resolution_job_id: job.id,
+            verification_failure_class: payload.verification_failure_class || null,
+            verification_plan: origPayload._verification_plan_invalid || null,
+            assessor_verdict_preserved: origJob.assessor_verdict,
+            assessor_confidence_preserved: origJob.assessor_confidence || null,
+          }),
         });
       } else if (decision === "fail") {
         restoreGateDependentsToOriginal();
@@ -880,7 +893,7 @@ export async function runHumanInputJob(worker, job, {
         });
       } else {
         finalHumanStatus = "failed";
-        worker.emit(job.id, `${C.yellow}[human] Blocked recovery answer was not actionable; expected retry, skip, replan, pass, or fail${C.reset}`);
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery answer was not actionable; expected retry, skip, replan, explicit_waiver, or fail${C.reset}`);
       }
     }
 

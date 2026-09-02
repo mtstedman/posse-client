@@ -90,14 +90,49 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
 
   // Serialized step list for the optional onChange mirror (bridge
   // instance_status). Kept tiny: identifiers and counters only.
-  const serializeSteps = () =>
-    [...steps.entries()].map(([label, step]) => ({
+  const serializedLayerStatus = (state) => {
+    const value = String(state || "idle");
+    if (value === "done") return "ok";
+    if (value === "failed") return "failed";
+    if (value === "skipped") return "skipped";
+    if (value === "deferred") return "deferred";
+    if (value === "idle" || value === "waiting") return "pending";
+    return "running";
+  };
+
+  const serializeLayer = (label, layer) => layer ? {
+    label,
+    status: serializedLayerStatus(layer.state),
+    ...(Number.isFinite(Number(layer.percent)) ? { percent: Number(layer.percent) } : {}),
+    ...(layer.detail ? { detail: String(layer.detail) } : {}),
+    section: "atlas",
+  } : null;
+
+  const serializeSteps = () => {
+    const rows = [...steps.entries()].map(([label, step]) => ({
       label,
       status: step.status,
       ...(Number.isFinite(Number(step.percent)) ? { percent: Number(step.percent) } : {}),
       ...(step.detail ? { detail: String(step.detail) } : {}),
       section: step.section,
     }));
+    // Keep the global tail before per-language rows so the bounded durable
+    // mirror always contains ONNX completion even in a many-language repo.
+    for (const layer of [
+      serializeLayer("ATLAS merge", zip),
+      serializeLayer("ATLAS tree", tree),
+      serializeLayer("ONNX encode", encode),
+    ]) {
+      if (layer) rows.push(layer);
+    }
+    for (const [lang, entry] of langs.entries()) {
+      for (const side of ["atlas", "scip"]) {
+        const layer = serializeLayer(`${side.toUpperCase()} ${lang}`, entry?.[side]);
+        if (layer) rows.push(layer);
+      }
+    }
+    return rows;
+  };
 
   const notifyChange = () => {
     if (typeof onChange !== "function") return;
@@ -246,6 +281,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       if (!merged.finishedAt) merged.finishedAt = Date.now();
     }
     entry[side] = merged;
+    notifyChange();
   };
 
   const updateZip = (patch = {}) => {
@@ -261,6 +297,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       merged.finishedAt = Date.now();
     }
     zip = merged;
+    notifyChange();
   };
 
   /**
@@ -289,6 +326,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       merged.finishedAt = Date.now();
     }
     tree = merged;
+    notifyChange();
   };
 
   /**
@@ -319,6 +357,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       merged.finishedAt = Date.now();
     }
     encode = merged;
+    notifyChange();
   };
 
   // === RENDER ===

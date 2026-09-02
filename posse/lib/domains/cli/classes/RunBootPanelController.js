@@ -142,12 +142,20 @@ export class RunBootPanelController {
 
   queueStatusMirror(steps) {
     this.statusPending = steps;
+    // Background ATLAS/ONNX completion can arrive after the boot monitor was
+    // disposed for TUI handoff. Persist those late transitions synchronously;
+    // an unref'ed debounce timer is not a durable completion boundary.
+    if (this.monitorDisposed) {
+      this.flushStatusMirror();
+      return;
+    }
     if (this.statusTimer) return;
     this.statusTimer = setTimeout(() => this.flushStatusMirror(), 500);
     this.statusTimer.unref?.();
   }
 
   flushStatusMirror() {
+    if (this.statusTimer) clearTimeout(this.statusTimer);
     this.statusTimer = null;
     const steps = this.statusPending;
     this.statusPending = null;
@@ -315,6 +323,9 @@ export class RunBootPanelController {
         activity: stepPatch.activity ?? previous.activity ?? null,
         section,
       });
+      if (["ok", "warning", "failed", "skipped", "deferred"].includes(resolvedStatus)) {
+        this.flushStatusMirror();
+      }
     }
     if (this.getDisplay()) return;
     this.ensureMonitor();
@@ -557,6 +568,7 @@ export class RunBootPanelController {
       this.monitorTimer = null;
     }
     if (final) {
+      this.flushStatusMirror();
       this.stopStallDetector();
       if (this.monitorDisposed) {
         this.terminalOutputIntercept.release();

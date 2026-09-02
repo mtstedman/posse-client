@@ -282,6 +282,26 @@ export class WorkerExecutionCoordinator {
           summary: `Frozen pre-development test baseline ${baselineLabel}`,
           detail: testReceiptObservationDetail(baselineReceipt),
         });
+        if (baselineReceipt.status === "invalid_test_plan") {
+          const invalidPayload = worker.parsePayload(job);
+          invalidPayload._verification_plan_invalid = {
+            schema_version: 1,
+            failure_class: "verification_plan_invalid",
+            command: baselineReceipt.command || null,
+            reason: baselineReceipt.reason || baselineReceipt.validation_error || "invalid_test_plan",
+            cwd_relative: baselineReceipt.cwd_relative || null,
+            detected_phase: "baseline",
+            detected_at: baselineReceipt.created_at || new Date().toISOString(),
+          };
+          delete invalidPayload.test_command;
+          delete invalidPayload._task_ab_test_command;
+          job.payload_json = JSON.stringify(invalidPayload);
+          updateJobPayload(job.id, job.payload_json);
+          worker.emit(
+            job.id,
+            `${C.yellow}[test-intake] WI#${job.work_item_id} job #${job.id}: planner verification recipe is invalid (${invalidPayload._verification_plan_invalid.reason}); continuing without treating it as a product failure${C.reset}`,
+          );
+        }
         if (baselineReceipt.status === "infrastructure_error") {
           throw new Error(`Pre-development test infrastructure unavailable: ${baselineReceipt.reason || "unknown infrastructure failure"}`);
         }

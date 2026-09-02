@@ -682,7 +682,12 @@ function requestedToolPolicyName(name, args = {}) {
   return {
     suite: "tools",
     name: stripToolsPrefix(raw),
-    nested: "",
+    // A scoped diff is primary change evidence, not a fallback repository
+    // read. Preserve the operation here so every persistent MCP transport
+    // classifies it the same way as the deterministic gateway.
+    nested: stripToolsPrefix(raw) === "git_history"
+      ? String(args?.op || "").trim().toLowerCase()
+      : "",
   };
 }
 

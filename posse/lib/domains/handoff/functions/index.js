@@ -1949,7 +1949,13 @@ function _applyAtlasShadowGuardrails(packet) {
   return guardrails;
 }
 
-const ASSESSMENT_INLINE_DIFF_MAX_BYTES = 50_000;
+// Keep ordinary application changes deterministic and model-visible. The old
+// 50K all-or-nothing boundary omitted WI #97's 74.8K three-file diff, then made
+// the assessor spend its source-read allowance reconstructing evidence the
+// harness already held. 128K is still bounded (large generated/vendor patches
+// stay on the paged per-file path) while fitting comfortably inside the
+// assessment diagnostic context target.
+const ASSESSMENT_INLINE_DIFF_MAX_BYTES = 128_000;
 const ASSESSMENT_DEPENDENCY_DIFF_MAX_BYTES = 24_000;
 const ASSESSMENT_DEPENDENCY_MAX_JOBS = 4;
 const ASSESSMENT_DEPENDENCY_MAX_FILES = 32;

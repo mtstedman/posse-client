@@ -72,6 +72,7 @@ import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
 import { loadAssessmentSource } from "../../functions/execution/assessment-source.js";
+import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -412,6 +413,29 @@ export class AssessmentHandoffAdapter {
       const deterministicTestEvidence = renderTestExecutionEvidence(deterministicTestRun || {});
       if (deterministicTestEvidence) {
         assessmentContext.task_ab_test_evidence = deterministicTestEvidence;
+      }
+      const scopedCheckReceipt = await ensureAssessmentScopedCheckEvidence({
+        job,
+        attemptId: assessAttempt.attempt.id,
+        cwd: assessmentCwd,
+        assessmentContext,
+        cleanupWorktree: async () => snapshotAndResetDirtyWorktreeAsync(
+          assessmentCwd,
+          worker.projectDir,
+          {
+            reason: `assessment-scoped-check-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+            branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+            wiId: job.work_item_id,
+            onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
+          },
+        ),
+      });
+      if (scopedCheckReceipt) {
+        assessmentContext.scoped_check_evidence = scopedCheckReceipt.evidence;
+        worker.emit(
+          job.id,
+          `${C.dim}[assessor-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,
+        );
       }
       const assessmentSession = new AssessmentSession({
         job,

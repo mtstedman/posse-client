@@ -23,10 +23,13 @@ const ASSESSOR_FALLBACK_READ_TOOL_KEYS = new Set([
 ]);
 
 export function assessorFallbackReadKey(requested = {}) {
-  const action = requested.suite === "atlas"
-    ? (requested.nested || requested.name)
-    : requested.name;
-  return `${requested.suite || ""}.${action || ""}`;
+  const suite = String(requested.suite || "");
+  const name = String(requested.name || "");
+  const nested = String(requested.nested || "");
+  const action = suite === "atlas"
+    ? (nested || name)
+    : (name === "git_history" && nested === "diff" ? "git_history.diff" : name);
+  return `${suite}.${action || ""}`;
 }
 
 export function assessorFallbackReadCallKey(toolName, args = {}) {
@@ -38,7 +41,9 @@ export function assessorFallbackReadCallKey(toolName, args = {}) {
   if (atlasTool) normalizedToolName = normalizedToolName.replaceAll("_", ".");
   const action = ["query", "code"].includes(normalizedToolName)
     ? String(args.action || args.gatewayAction || args.targetAction || normalizedToolName)
-    : normalizedToolName;
+    : (!atlasTool && normalizedToolName === "git_history" && String(args.op || "").trim().toLowerCase() === "diff")
+      ? "git_history.diff"
+      : normalizedToolName;
   return `${atlasTool ? "atlas" : "tools"}.${action}`;
 }
 

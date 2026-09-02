@@ -332,6 +332,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   skip_hook_pre_push_gate: "Skip pre-push checks",
   pre_assess_cmd: "Command before assessment",
   pre_push_verify_cmd: "Command before push",
+  canonical_verify_cmd: "Canonical repository verification command",
   assessor_fallback_reads: "Assessor fallback reads",
   assessor_fallback_reads_retry_step: "Extra reads per retry",
   assessor_internal_retry_limit: "Assessment retry limit",
@@ -928,6 +929,7 @@ export const SETTINGS_GROUPS = Object.freeze([
       "skip_hook_pre_push_gate",
       "pre_assess_cmd",
       "pre_push_verify_cmd",
+      "canonical_verify_cmd",
     ]),
   },
   {

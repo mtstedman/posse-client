@@ -55,6 +55,7 @@ import {
 import {
   operationalCommandApprovalRequest,
   validatePlannerTestCommand,
+  validatePlannerTestCommandForRepository,
 } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { validateSkillIds } from "../../../shared/skills/functions/registry.js";
 import {
@@ -1797,12 +1798,28 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         // it can never produce the executable evidence the floor assumes.
         let plannerTestCommandValid = null;
         let operationalCommandApproval = null;
+        let rejectedPlannerTestCommand = null;
+        const declaredTestCommand = typeof t.test_command === "string" ? t.test_command.trim() : "";
         if (shouldApplyExecutionPolicy && !pinnedTestCommand) {
-          const declaredTestCommand = typeof t.test_command === "string" ? t.test_command.trim() : "";
           if (declaredTestCommand) {
             const testCommandValidation = validatePlannerTestCommand(declaredTestCommand);
-            plannerTestCommandValid = testCommandValidation.ok;
-            if (!testCommandValidation.ok) {
+            const repositoryValidation = testCommandValidation.ok
+              ? validatePlannerTestCommandForRepository(declaredTestCommand, worker.projectDir)
+              : testCommandValidation;
+            plannerTestCommandValid = repositoryValidation.ok;
+            if (testCommandValidation.ok && !repositoryValidation.ok) {
+              rejectedPlannerTestCommand = {
+                schema_version: 1,
+                failure_class: "verification_plan_invalid",
+                command: declaredTestCommand,
+                reason: repositoryValidation.reason,
+                detected_phase: "plan_compile",
+              };
+              worker.emit(
+                planJob.id,
+                `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: omitted invalid repository test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" (${repositoryValidation.reason}); deterministic changed-file checks remain required`,
+              );
+            } else if (!testCommandValidation.ok) {
               operationalCommandApproval = operationalCommandApprovalRequest(declaredTestCommand);
               worker.emit(
                 planJob.id,
@@ -1811,6 +1828,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             }
           }
         }
+        const compiledTestCommand = pinnedTestCommand
+          || (rejectedPlannerTestCommand ? null : (t.test_command || null));
         const executionPolicy = shouldApplyExecutionPolicy
           ? resolveTaskExecutionPolicy({
               task: t,
@@ -1876,8 +1895,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               create_roots: t.create_roots || [],
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
-              test_command: pinnedTestCommand || t.test_command || null,
+              test_command: compiledTestCommand,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
+              ...(rejectedPlannerTestCommand ? { _verification_plan_invalid: rejectedPlannerTestCommand } : {}),
               ...(operationalCommandApproval ? {
                 _operational_command_approval_required: {
                   schema_version: operationalCommandApproval.schema_version,
@@ -2120,8 +2140,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               files_to_delete: t.files_to_delete || [],
               create_roots: t.create_roots || [],
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
-              test_command: pinnedTestCommand || t.test_command || null,
+              test_command: compiledTestCommand,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
+              ...(rejectedPlannerTestCommand ? { _verification_plan_invalid: rejectedPlannerTestCommand } : {}),
               ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),
               ...(activeHashRefPacket ? { hash_ref_packet: activeHashRefPacket } : {}),
               ...(devBriefResult.droppedFiles.length > 0 ? { dropped_dev_brief_files: devBriefResult.droppedFiles } : {}),

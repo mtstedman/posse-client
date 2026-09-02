@@ -293,6 +293,7 @@ export const SETTINGS_CATALOG = [
   { key: "codex_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Codex CLI binary (empty = auto-detect)" },
   { key: "pre_assess_cmd",       default: "",      description: "Optional shell command to run before assessment" },
   { key: "pre_push_verify_cmd",  default: "",      description: "Optional shell command to run before pushing" },
+  { key: "canonical_verify_cmd", default: "", scope: "repo", description: "Repository-owned canonical verification command run before assessment and push" },
   { key: "posse_log_scrub_secrets", default: "true", valueType: "boolean", description: "Scrub secret-looking values from prompt and output logs" },
   { key: "posse_log_level",        default: "info", options: LOG_LEVEL_VALUES, description: "Minimum runtime file-log level: debug, info, warn, or error" },
   { key: "skip_hooks",           default: "false", valueType: "boolean", description: "Skip all deterministic safety hooks" },

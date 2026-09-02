@@ -84,14 +84,15 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   };
 }
 
-function latestSuccessfulScopedCheckVerification(jobId, assessedCommitHash) {
+function latestScopedCheckVerification(jobId, assessedCommitHash) {
   const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
   if (!/^[0-9a-f]{40,64}$/i.test(requiredCommit)) return null;
   try {
     const rows = getDb().prepare(`
       SELECT detail_json, created_at
       FROM job_observations
-      WHERE job_id = ? AND observation_type = 'tool.run_scoped_checks'
+      WHERE job_id = ?
+        AND observation_type IN ('tool.run_scoped_checks', 'assessment.scoped_checks')
       ORDER BY id DESC
       LIMIT 20
     `).all(jobId);
@@ -99,8 +100,7 @@ function latestSuccessfulScopedCheckVerification(jobId, assessedCommitHash) {
       let detail;
       try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
       const result = detail?.scoped_check_result;
-      if (detail?.outcome !== "succeeded" || detail?.ok !== true) continue;
-      if (result?.status !== "passed" || result?.ok !== true) continue;
+      if (!result || typeof result !== "object") continue;
       const executedCommit = String(result.executed_commit_hash || "").trim().toLowerCase();
       if (!/^[0-9a-f]{40,64}$/i.test(executedCommit) || executedCommit !== requiredCommit) continue;
       return {
@@ -114,6 +114,22 @@ function latestSuccessfulScopedCheckVerification(jobId, assessedCommitHash) {
     return null;
   }
   return null;
+}
+
+function scopedCheckFailureSummary(scopedVerification = null) {
+  const failures = Array.isArray(scopedVerification?.failures)
+    ? scopedVerification.failures
+    : [];
+  const rendered = failures.slice(0, 8).map((failure) => [
+    failure?.check || "check",
+    failure?.file || null,
+    failure?.line ? `line ${failure.line}` : null,
+    failure?.rule || null,
+    failure?.message || null,
+  ].filter(Boolean).join(" — "));
+  return rendered.length > 0
+    ? rendered.join("\n")
+    : String(scopedVerification?.summary || "deterministic changed-file checks failed");
 }
 
 export function capVerdictForHighRiskVerificationGap(
@@ -130,7 +146,36 @@ export function capVerdictForHighRiskVerificationGap(
   const riskScore = Number(policy.risk_score ?? payload?.risk ?? 0);
   const isCodeTask = policy?.structural_facts?.is_code_task === true
     || String(payload?.task_mode || "code") === "code";
-  if (!isCodeTask || !Number.isFinite(riskScore) || riskScore < 4) return verdict;
+  if (!isCodeTask) return verdict;
+
+  const scopedStatus = String(scopedVerification?.status || "").toLowerCase();
+  if (scopedStatus === "failed") {
+    return {
+      ...verdict,
+      verdict: "fail",
+      confidence: "high",
+      verification_status: "scoped_checks_failed",
+      _verification_failure_class: "product_regression",
+      reasons: [
+        `Deterministic changed-file checks failed for the assessed commit:\n${scopedCheckFailureSummary(scopedVerification)}`,
+        ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+      ],
+    };
+  }
+  if (scopedStatus === "incomplete" || scopedVerification?.coverage_complete === false) {
+    return {
+      ...verdict,
+      verdict: "needs_review",
+      verification_status: "scoped_check_coverage_incomplete",
+      _verification_failure_class: "verification_coverage_incomplete",
+      reasons: [
+        `Deterministic changed-file verification was incomplete: ${scopedVerification?.summary || "not every changed file was checked"}.`,
+        ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+      ],
+    };
+  }
+
+  if (!Number.isFinite(riskScore) || riskScore < 4) return verdict;
 
   const command = typeof payload?.test_command === "string"
     ? payload.test_command.trim()
@@ -170,10 +215,23 @@ export function capVerdictForHighRiskVerificationGap(
   if (command && postChange && postChange.status !== "passed") {
     const status = postChange.status || "not_run";
     const detail = postChange.validation_error || postChange.reason || null;
+    if (status === "invalid_test_plan") {
+      return {
+        ...verdict,
+        verdict: "needs_replan",
+        verification_status: "verification_plan_invalid",
+        _verification_failure_class: "verification_plan_invalid",
+        reasons: [
+          `The declared verification recipe is invalid${detail ? ` (${detail})` : ""}; replan verification instead of editing product code.`,
+          ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+        ],
+      };
+    }
     return {
       ...verdict,
       verdict: "fail",
       _disable_internal_retry: true,
+      _verification_failure_class: "product_regression",
       reasons: [
         `The declared automatic post-change test was ${status}${detail ? ` (${detail})` : ""}; Posse will repair or fail the task internally instead of asking for a verification receipt.`,
         ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
@@ -191,7 +249,9 @@ export function capVerdictForHighRiskVerificationGap(
   ) {
     return {
       ...verdict,
-      verification_status: "scoped_checks_passed",
+      verification_status: payload?._verification_plan_invalid
+        ? "scoped_checks_substituted_invalid_plan"
+        : "scoped_checks_passed",
       verification_commit_hash: requiredCommit,
     };
   }
@@ -512,7 +572,7 @@ export function prepareVerdictForDispatch(job, verdict) {
   const assessedCommitHash = [...getAttempts(job.id)].reverse()
     .find((attempt) => attempt.commit_hash)?.commit_hash || null;
   const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
-  const scopedVerification = latestSuccessfulScopedCheckVerification(job.id, assessedCommitHash);
+  const scopedVerification = latestScopedCheckVerification(job.id, assessedCommitHash);
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
   prepared = capVerdictForHighRiskVerificationGap(
     prepared,

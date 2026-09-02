@@ -7,6 +7,7 @@
 
 import { createHash } from "crypto";
 import { spawn, spawnSync } from "child_process";
+import fs from "fs";
 import path from "path";
 import {
   getArtifacts,
@@ -308,6 +309,37 @@ function classifyNestedRunnerInfrastructureFailure(command, result) {
   };
 }
 
+function classifyPackageManagerTestPlanFailure(command, result) {
+  if (result?.status !== "failed") return result;
+  const executable = commandExecutable(command);
+  if (!["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
+    return result;
+  }
+  const output = [result.stdout, result.stderr]
+    .map((value) => String(value || ""))
+    .filter(Boolean)
+    .join("\n");
+  const manifestMissing = (
+    /could not read package\.json/i.test(output)
+    || /could not find (?:a )?package\.json/i.test(output)
+    || /enoent[^\n]*package\.json/i.test(output)
+    || /no package\.json (?:was )?found/i.test(output)
+  );
+  const scriptMissing = (
+    /missing script:\s*["']?[^\s"']+/i.test(output)
+    || /err_pnpm_no_script/i.test(output)
+    || /command ["'][^"']+["'] not found/i.test(output)
+    || /script (?:not found|not found in package\.json)/i.test(output)
+  );
+  if (!manifestMissing && !scriptMissing) return result;
+  return {
+    ...result,
+    status: "invalid_test_plan",
+    ok: null,
+    reason: manifestMissing ? "test_manifest_missing" : "test_script_missing",
+  };
+}
+
 function packageManagerTaskArgs(args = []) {
   const remaining = [...args];
   // args arrive lowercased (the whole command is normalized before splitting),
@@ -401,6 +433,109 @@ export function validatePlannerTestCommand(command) {
         cwd_relative: invocation.cwd_relative,
       }
     : { ok: false, reason: `unrecognized_test_runner:${executable || "missing"}` };
+}
+
+function packageManagerScriptInvocation(command) {
+  const invocation = splitPlannerTestInvocation(command);
+  if (invocation.invalid_directory) return null;
+  let words;
+  try {
+    words = parseCommandArguments(invocation.command);
+  } catch {
+    return null;
+  }
+  const executable = commandExecutable(words[0]);
+  if (!["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
+    return null;
+  }
+  const manager = executable.replace(/\.(?:cmd|exe)$/i, "");
+  const args = words.slice(1);
+  let cwdRelative = invocation.cwd_relative;
+  let workspaceScoped = false;
+  const cwdFlags = manager === "npm"
+    ? new Set(["--prefix"])
+    : manager === "yarn"
+      ? new Set(["--cwd"])
+      : manager === "pnpm"
+        ? new Set(["--dir", "-c"])
+        : new Set(["--cwd"]);
+  const taskArgs = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    const lower = String(arg).toLowerCase();
+    const equalFlag = [...cwdFlags].find((flag) => lower.startsWith(`${flag}=`));
+    if (equalFlag) {
+      cwdRelative = safeRelativeTestDirectory(arg.slice(equalFlag.length + 1));
+      if (!cwdRelative) return { invalid: "test_command_contains_unsafe_working_directory" };
+      continue;
+    }
+    if (cwdFlags.has(lower)) {
+      cwdRelative = safeRelativeTestDirectory(args[index + 1]);
+      if (!cwdRelative) return { invalid: "test_command_contains_unsafe_working_directory" };
+      index++;
+      continue;
+    }
+    // Workspace/filter/config flags do not change the manifest root. Skip
+    // their values so they cannot be mistaken for a script name.
+    if (["--filter", "-f", "--config-dir", "--store-dir", "--virtual-store-dir", "--workspace-dir"].includes(lower)) {
+      if (["--filter", "-f"].includes(lower)) workspaceScoped = true;
+      if (!arg.includes("=")) index++;
+      continue;
+    }
+    if (lower.startsWith("--filter=") || lower.startsWith("-f=")) {
+      workspaceScoped = true;
+      continue;
+    }
+    if (lower.startsWith("-")) continue;
+    taskArgs.push(arg);
+  }
+  const first = String(taskArgs[0] || "");
+  const script = first.toLowerCase() === "run"
+    ? String(taskArgs[1] || "")
+    : String(first || "");
+  return {
+    manager,
+    cwd_relative: cwdRelative || null,
+    script: script || null,
+    workspace_scoped: workspaceScoped,
+    built_in: manager === "bun" && script === "test",
+  };
+}
+
+export function validatePlannerTestCommandForRepository(command, cwd) {
+  const shape = validatePlannerTestCommand(command);
+  if (!shape.ok) return shape;
+  const packageInvocation = packageManagerScriptInvocation(command);
+  if (!packageInvocation) return shape;
+  if (packageInvocation.invalid) return { ok: false, reason: packageInvocation.invalid };
+  if (packageInvocation.built_in) return { ...shape, repository_validated: true, built_in: true };
+  const root = packageInvocation.cwd_relative
+    ? path.resolve(cwd, packageInvocation.cwd_relative)
+    : path.resolve(cwd);
+  const projectRoot = path.resolve(cwd);
+  if (root !== projectRoot && !root.startsWith(`${projectRoot}${path.sep}`)) {
+    return { ok: false, reason: "test_command_contains_unsafe_working_directory" };
+  }
+  const manifestPath = path.join(root, "package.json");
+  if (!fs.existsSync(manifestPath)) {
+    return { ok: false, reason: "test_manifest_missing" };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch {
+    return { ok: false, reason: "test_manifest_invalid" };
+  }
+  const script = packageInvocation.script;
+  if (!packageInvocation.workspace_scoped && (!script || typeof manifest?.scripts?.[script] !== "string")) {
+    return { ok: false, reason: `test_script_missing:${script || "unknown"}` };
+  }
+  return {
+    ...shape,
+    repository_validated: true,
+    manifest_relative: path.relative(projectRoot, manifestPath).replace(/\\/g, "/"),
+    script,
+  };
 }
 
 /**
@@ -637,6 +772,35 @@ async function executeReceipt({
       created_at: new Date().toISOString(),
     });
   }
+  if (plan.source === "planner" && phase === "baseline") {
+    const repositoryValidation = validatePlannerTestCommandForRepository(plan.command, cwd);
+    if (!repositoryValidation.ok) {
+      return storeReceipt(job, attemptId, {
+        kind: RECEIPT_KIND,
+        schema_version: RECEIPT_SCHEMA_VERSION,
+        phase,
+        plan_id: plan.plan_id,
+        command: plan.command,
+        source: plan.source,
+        verification_eligible: false,
+        validation_error: repositoryValidation.reason,
+        commit_hash: commitHash || actualCommit,
+        executed_commit_hash: null,
+        status: "invalid_test_plan",
+        ok: null,
+        exit_code: null,
+        duration_ms: 0,
+        failure_fingerprint: null,
+        reason: repositoryValidation.reason,
+        cleanup_status: "not_attempted",
+        stdout: "",
+        stderr: "",
+        stdout_truncated: false,
+        stderr_truncated: false,
+        created_at: new Date().toISOString(),
+      });
+    }
+  }
   if (commitHash && actualCommit && commitHash !== actualCommit && !testedIntegratedDescendant) {
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
@@ -697,7 +861,13 @@ async function executeReceipt({
     timeoutMs,
     trustedShell: plan.source === "task_ab_acceptance",
   });
-  const result = classifyNestedRunnerInfrastructureFailure(executionCommand, rawResult);
+  const plannerClassifiedResult = plan.source === "planner" && phase === "baseline"
+    ? classifyPackageManagerTestPlanFailure(executionCommand, rawResult)
+    : rawResult;
+  const result = classifyNestedRunnerInfrastructureFailure(
+    executionCommand,
+    plannerClassifiedResult,
+  );
   const after = await porcelain(cwd);
   const afterCommit = await currentCommit(cwd);
   const afterHeadRef = await currentHeadRef(cwd);
@@ -957,7 +1127,8 @@ export function renderTestExecutionEvidence({
   const baselineOutput = ["failed", "timed_out"].includes(baseline?.status)
     ? compactOutput(baseline)
     : "";
-  const rejected = baseline?.status === "rejected" || postChange?.status === "rejected";
+  const rejected = [baseline?.status, postChange?.status]
+    .some((status) => ["rejected", "invalid_test_plan"].includes(status));
   const operational = plan.source === "operator_approved_operation";
   return [
     operational

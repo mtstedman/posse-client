@@ -82,6 +82,7 @@ const CHOICE_COPY = Object.freeze({
   skip: ["Skip", "Skip this work and continue where policy permits."],
   replan: ["Replan", "Return the Work Item to its planning path."],
   retry: ["Retry", "Retry through the canonical owner transition."],
+  explicit_waiver: ["Explicit waiver", "Accept the current work while recording that deterministic verification did not pass."],
   "retry:claude": ["Retry with Claude", "Retry through the Claude provider path."],
   "retry:openai": ["Retry with OpenAI", "Retry through the OpenAI provider path."],
   "retry:codex": ["Retry with Codex", "Retry through the Codex provider path."],

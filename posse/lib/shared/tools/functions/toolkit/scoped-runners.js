@@ -863,6 +863,11 @@ function combineRootChecks(name, projectCwd, entries) {
   const failed = normalized.filter(({ check }) => check.status === "failed");
   const unavailable = normalized.filter(({ check }) => ["unavailable", "skipped"].includes(check.status));
   const passed = normalized.filter(({ check }) => check.status === "passed");
+  const targets = [...new Set(normalized.flatMap(({ group, check }) => (
+    (Array.isArray(check.targets) ? check.targets : [])
+      .map((file) => projectFailurePath(projectCwd, group, file))
+      .filter(Boolean)
+  )))];
   const status = failed.length > 0
     ? "failed"
     : unavailable.length > 0
@@ -872,13 +877,14 @@ function combineRootChecks(name, projectCwd, entries) {
         : "unavailable";
   return {
     name,
+    coverage: name === "typecheck" ? "project_root" : "file",
     status,
     reason: status === "unavailable"
       ? unavailable.map(({ group, check }) => (
           `${group.root_relative}: ${check.reason || check.status}`
         )).join("; ") || "no runnable verifier"
       : null,
-    targets: normalized.flatMap(({ group }) => group.project_files),
+    targets,
     command: normalized.map(({ check }) => check.command).filter(Boolean).join(" && ") || null,
     durationMs: normalized.reduce((sum, { check }) => sum + (Number(check.durationMs) || 0), 0),
     failures: failed.flatMap(({ check }) => check.failures || []),
@@ -934,10 +940,16 @@ export function runScopedChecks({
       cwd,
       groups.map((group) => ({
         group,
-        check: runTypecheck(group.root, {
-          packageManager: group.package_manager,
-          packageManagerReady: group.package_manager_ready,
-        }),
+        check: {
+          ...runTypecheck(group.root, {
+            packageManager: group.package_manager,
+            packageManagerReady: group.package_manager_ready,
+          }),
+          // A configured typecheck runs at package-root scope. Associate every
+          // changed file in that root with its result without running the same
+          // project-wide command once per file.
+          targets: group.files,
+        },
       })),
     ));
   }
@@ -975,11 +987,13 @@ export function runScopedChecks({
     readiness: verificationReadinessManifest(cwd, files, requested),
     checks: checks.map((check) => ({
       name: check.name,
+      coverage: check.coverage || "file",
       status: check.status,
       reason: check.reason || null,
       target_count: check.targets?.length ?? null,
       duration_ms: check.durationMs ?? null,
       command: check.command || null,
+      targets: check.targets || [],
       subchecks: check.subchecks || null,
     })),
     failures: [...failures, ...outputFailures].slice(0, MAX_FAILURES),

@@ -41,6 +41,11 @@ function settingProjectDir(projectDir = null) {
 export function resolveRepoSettingPath(projectDir = null) {
   const cwd = settingProjectDir(projectDir);
   try {
+    const commonDirRaw = gitExec(["rev-parse", "--git-common-dir"], cwd, { timeoutMs: 2000 }).trim();
+    const commonDir = path.resolve(cwd, commonDirRaw || ".git");
+    if (path.basename(commonDir).toLowerCase() === ".git") {
+      return path.dirname(commonDir);
+    }
     const root = gitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 2000 }).trim();
     return path.resolve(root || cwd);
   } catch {

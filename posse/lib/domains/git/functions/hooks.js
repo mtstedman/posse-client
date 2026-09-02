@@ -124,9 +124,9 @@ function execFileText(command, args, {
   });
 }
 
-function readSettingText(key) {
+function readSettingText(key, projectDir = null) {
   try {
-    const value = getSetting(key);
+    const value = getSetting(key, projectDir ? { projectDir } : {});
     return value == null ? "" : String(value).trim();
   } catch {
     return "";
@@ -560,7 +560,7 @@ function verifyCommandFailureOutput(heading, cmd, err, tailLines) {
 }
 
 function postDevVerify({ cwd }) {
-  const cmd = readSettingText("pre_assess_cmd");
+  const cmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_assess_cmd");
   if (!cmd) return { ok: true, output: "" };
 
   try {
@@ -572,7 +572,7 @@ function postDevVerify({ cwd }) {
 }
 
 async function postDevVerifyAsync({ cwd }) {
-  const cmd = readSettingText("pre_assess_cmd");
+  const cmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_assess_cmd");
   if (!cmd) return { ok: true, output: "" };
 
   try {
@@ -705,7 +705,7 @@ function prePushGate({ cwd, nativeParity = {} }) {
     }
   }
 
-  const verifyCmd = readSettingText("pre_push_verify_cmd");
+  const verifyCmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_push_verify_cmd");
   if (verifyCmd) {
     try {
       runHookShellCommand(verifyCmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
@@ -759,7 +759,7 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
     }
   }
 
-  const verifyCmd = readSettingText("pre_push_verify_cmd");
+  const verifyCmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_push_verify_cmd");
   if (verifyCmd) {
     try {
       await runHookShellCommandAsync(verifyCmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
