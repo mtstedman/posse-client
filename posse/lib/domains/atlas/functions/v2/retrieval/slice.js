@@ -24,6 +24,7 @@ import { recordPrefetchAccess } from "./prefetch.js";
 import { isDefaultVisibleSymbol } from "./hygiene.js";
 import { ensureEmbeddingsForView } from "../embeddings/on-demand.js";
 import { logAtlasError } from "../verbose-errors.js";
+import { diversifyComparableCandidates } from "./orchestrator/map-diversity.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").Ledger} Ledger */
@@ -183,7 +184,25 @@ export async function sliceBuild({ view, versionId, params, ledger, repoRoot, re
 
   const applySearchResult = (result) => {
     const sync = /** @type {HybridSearchResult} */ (result);
-    for (const sym of sync.symbols.slice(0, 10)) addEntry(sym);
+    // Treat retrieval as a code-map candidate generator, not as ten final
+    // answers. Preserve the strongest anchor, diversify comparable hits by
+    // file, then let the dependency slice below determine the neighborhood.
+    // We rank the complete pool before stopping at ten NEW entries so an
+    // explicit seed duplicated by search does not waste an entry slot.
+    const ranked = diversifyComparableCandidates(sync.items, {
+      groupOf: (entry, index) => entry?.payload?.repo_rel_path || `unknown:${index}`,
+      scoreOf: (entry, index) => Number.isFinite(Number(entry?.score))
+        ? Number(entry.score)
+        : 1 / (index + 1),
+      pinned: (_entry, index) => index === 0,
+    });
+    let added = 0;
+    for (const entry of ranked) {
+      const before = seenGlobalIds.size;
+      addEntry(entry?.payload || null);
+      if (seenGlobalIds.size > before) added += 1;
+      if (added >= 10) break;
+    }
   };
 
   if (params.taskText && semanticEntryDiscovery) {
