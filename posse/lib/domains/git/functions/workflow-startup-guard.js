@@ -597,8 +597,10 @@ export function createStartupDirtyGuardHelpers(context) {
   function dirtyTreeGuardMessage({ reason, dirtyLines, policy }) {
     const preview = dirtyLines.slice(0, 12).join("\n");
     const more = dirtyLines.length > 12 ? `... and ${dirtyLines.length - 12} more` : "";
-    const action = policy === "commit"
+    const action = dirtyLines.some(isUnmergedPorcelainLine)
       ? "Resolve the conflicted paths, then restart Posse."
+      : policy === "commit"
+        ? "Commit or stash the remaining changes, then restart Posse."
       : "Commit or stash these changes, or set startup_dirty_tree_policy=commit to let Posse commit them before boot.";
     return [
       `Startup dirty tree guard blocked ${reason}: ${dirtyLines.length} uncommitted change(s) in ${projectDir}.`,
@@ -606,6 +608,20 @@ export function createStartupDirtyGuardHelpers(context) {
       more,
       action,
     ].filter(Boolean).join("\n");
+  }
+
+  function dirtyTreeBlockedResult({ reason, dirtyLines, policy }) {
+    const hasConflicts = dirtyLines.some(isUnmergedPorcelainLine);
+    return {
+      ok: false,
+      blocked: true,
+      dirty: true,
+      policy,
+      action: "blocked",
+      blockReason: hasConflicts ? "unmerged_paths" : "uncommitted_changes",
+      dirtyCount: dirtyLines.length,
+      message: dirtyTreeGuardMessage({ reason, dirtyLines, policy }),
+    };
   }
 
   function stageDirtyLines(dirtyLines) {
@@ -663,7 +679,8 @@ export function createStartupDirtyGuardHelpers(context) {
       return { ok: true, dirty: false, policy: mode, action: "clean" };
     }
     if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
-      throw new Error(dirtyTreeGuardMessage({ reason, dirtyLines, policy: mode }));
+      emitPhase("target tree has uncommitted changes");
+      return dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode });
     }
 
     try {
@@ -742,7 +759,12 @@ export function createStartupDirtyGuardHelpers(context) {
       return { ok: true, dirty: false, policy: mode, action: "clean", waitingLaneFilesystemRecovery, sharedTrunkRecovery };
     }
     if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
-      throw new Error(dirtyTreeGuardMessage({ reason, dirtyLines, policy: mode }));
+      emitPhase("target tree has uncommitted changes");
+      return {
+        ...dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode }),
+        waitingLaneFilesystemRecovery,
+        sharedTrunkRecovery,
+      };
     }
 
     try {

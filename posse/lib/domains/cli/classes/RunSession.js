@@ -1049,7 +1049,7 @@ export class RunSession {
   if (typeof guardStartupDirtyTree === "function") {
     updateBootStep("startup work tree", { section: "workspace", status: "running", force: true });
     try {
-      await Promise.resolve(guardStartupDirtyTree({
+      const guardResult = await Promise.resolve(guardStartupDirtyTree({
         reason: "run start",
         onPhase: (event = {}) => {
           if (event.detail) {
@@ -1063,6 +1063,20 @@ export class RunSession {
           }
         },
       }));
+      if (guardResult?.ok === false && guardResult?.blocked === true) {
+        const message = guardResult.message || "Run blocked because the target work tree has uncommitted changes.";
+        updateBootStep("startup work tree", {
+          section: "workspace",
+          status: "warning",
+          detail: firstLine(message),
+          showDetail: true,
+          force: true,
+        });
+        try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+        console.log(`\n  ${C.yellow}Run blocked: ${message}${C.reset}\n`);
+        process.exitCode = 2;
+        return guardResult;
+      }
       updateBootStep("startup work tree", { section: "workspace", status: "ok", force: true });
     } catch (err) {
       updateBootStep("startup work tree", {

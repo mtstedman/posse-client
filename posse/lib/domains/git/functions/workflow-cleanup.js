@@ -41,13 +41,14 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     recoveryPruneMinIntervalMs = undefined,
   } = {}) {
     if (!skipDirtyTreeGuard) {
-      await guardStartupDirtyTreeAsync({
+      const guardResult = await guardStartupDirtyTreeAsync({
         reason: "startup cleanup",
         signal,
         onPhase: (event) => {
           if (typeof onMsg === "function" && event?.detail) onMsg(`Git dirty tree: ${event.detail}`);
         },
       });
+      if (guardResult?.ok === false) return guardResult;
       throwIfAborted(signal);
     }
     const gcOptions = { signal };
