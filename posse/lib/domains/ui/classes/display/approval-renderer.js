@@ -231,6 +231,30 @@ function approvalCostDisplay(data = {}) {
   return `${amount} exact`;
 }
 
+const APPROVAL_TAB_NAMES = Object.freeze(["Tasks", "Tokens", "Research", "Details", "Changes"]);
+
+function approvalTabLegendLines(width) {
+  const maxWidth = Math.max(20, Math.floor(Number(width) || 0));
+  const prefix = " Sections:";
+  const choices = [
+    ...APPROVAL_TAB_NAMES.map((name, index) => `[${index + 1}] ${name}`),
+    "[Tab] Cycle",
+  ];
+  const lines = [];
+  let line = prefix;
+  for (const choice of choices) {
+    const separator = line === prefix ? " " : "  ";
+    if (line !== prefix && line.length + separator.length + choice.length > maxWidth) {
+      lines.push(line);
+      line = ` ${choice}`;
+      continue;
+    }
+    line += `${separator}${choice}`;
+  }
+  lines.push(line);
+  return lines;
+}
+
 // ─── Display ────────────────────────────────────────────────────────────────
 
 
@@ -245,7 +269,6 @@ export class DisplayApprovalRenderer {
       ? this._normalizeApprovalViewState()
       : this._approvalData[this._approvalIdx];
     if (!current) return;
-    const TAB_NAMES = ["Tasks", "Tokens", "Research", "Details", "Changes"];
     const builders = [
       () => this._buildTabTasks(current, fullW),
       () => this._buildTabTokens(current, fullW),
@@ -256,7 +279,7 @@ export class DisplayApprovalRenderer {
     const content = builders[this._approvalTab]();
 
     // Tab bar
-    const tabBar = TAB_NAMES.map((name, i) => {
+    const tabBar = APPROVAL_TAB_NAMES.map((name, i) => {
       const num = `${i + 1}`;
       if (i === this._approvalTab) {
         return `${C.bold}${C.cyan}[${num}:${name}]${C.reset}`;
@@ -289,10 +312,10 @@ export class DisplayApprovalRenderer {
       const undecided = this._approvalData.filter((d) => !d._decision && !d._isInfo).length;
       navLines.push(` ${C.yellow}${C.bold}Leave review?${C.reset} ${C.yellow}${undecided} undecided item${undecided === 1 ? "" : "s"} will stay pending.${C.reset}  ${C.dim}[Enter/y] Leave  [Esc/n] Keep reviewing${C.reset}`);
     } else if (current._isInfo) {
-      navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
+      navLines.push(` ${C.cyan}[INFO]${C.reset} ${C.dim}Research-only \u2014 no action needed.  [\u2190\u2192] WI  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`);
     } else {
       const dirtyState = getReviewDirtyState(current.worktreeStatus);
-      const sharedActions = `${C.red}[d]${C.reset} Delete  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [Tab/1-5] Section  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`;
+      const sharedActions = `${C.red}[d]${C.reset} Delete  ${C.cyan}[m]${C.reset} Memories  ${C.dim}[s] Skip  [\u2190\u2192] WI  [\u2191\u2193] Scroll  [Enter/Esc] Finish${C.reset}`;
       if (dirtyState.canDecide) {
         navLines.push(` ${C.green}[a]${C.reset} Approve  ${C.red}[r]${C.reset} Re-queue  ${sharedActions}`);
       } else {
@@ -302,6 +325,9 @@ export class DisplayApprovalRenderer {
         if (dirtyState.canDiscard) resolutionActions.push(`${C.red}[x]${C.reset} Discard\u2026`);
         navLines.push(` ${C.yellow}${C.bold}Resolve dirty files before approval or re-queue:${C.reset} ${resolutionActions.join("  ")}  ${sharedActions}`);
       }
+    }
+    if (!this._approvalRequeueConfirm && !this._approvalExitConfirm) {
+      navLines.push(...approvalTabLegendLines(fullW).map((line) => `${C.cyan}${line}${C.reset}`));
     }
 
     // Always-visible action feedback: the in-flight/most-recent git action and
