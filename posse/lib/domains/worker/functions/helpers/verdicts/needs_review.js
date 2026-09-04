@@ -23,15 +23,19 @@ export function handle(job, verdict, ctx) {
   const explicitHumanQuestions = Array.isArray(verdict.human_questions)
     ? verdict.human_questions.filter((question) => String(question || "").trim())
     : [];
-  const hasOperatorOnlyQuestion = explicitHumanQuestions.some((question) => !isAssessmentDispositionQuestion(question));
+  const harnessOwnedReview = verdict?._assessment_infrastructure_review === true;
+  const hasOperatorOnlyQuestion = !harnessOwnedReview
+    && explicitHumanQuestions.some((question) => !isAssessmentDispositionQuestion(question));
   const jobPayload = parseJobPayload(job);
   const priorClarifications = Array.isArray(jobPayload?._human_clarifications)
     ? jobPayload._human_clarifications
     : [];
+  const visualAcceptanceReview = verdict?._assessment_visual_review === true;
   const asksForClarification = hasOperatorOnlyQuestion && priorClarifications.length === 0;
+  const asksForOperatorReview = visualAcceptanceReview || asksForClarification;
   const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
   if (
-    !asksForClarification
+    !asksForOperatorReview
     && !verdict?._disable_internal_retry
     && queueInternalAssessmentRetry(job, verdict, retryReason, {
       leaseToken: ctx.leaseToken,
@@ -42,7 +46,7 @@ export function handle(job, verdict, ctx) {
     return;
   }
 
-  if (!asksForClarification) {
+  if (!asksForOperatorReview) {
     const changed = typeof ctx.updateJobStatus === "function"
       ? ctx.updateJobStatus("failed")
       : updateJobStatus(job.id, "failed");
@@ -78,13 +82,14 @@ export function handle(job, verdict, ctx) {
       original_job_id: job.id,
       questions,
       context: verdict.reasons,
-      ...(asksForClarification
-        ? { allow_best_judgment: true }
-        : {
+      ...(visualAcceptanceReview
+        ? {
             review_type: "needs_review",
             question_kind: "assessment_review",
             choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
-          }),
+            visual_acceptance_review: true,
+          }
+        : { allow_best_judgment: true }),
     }),
   });
   spawnedJobs.push(humanJob);

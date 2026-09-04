@@ -420,6 +420,15 @@ export function createStatusCommands({ targetBranch, C = defaultColors } = {}) {
       }
     }
 
+    console.log(`\n  ${C.bold}Publication Offers (Optional):${C.reset}`);
+    if (!Array.isArray(healthData.publicationOffers) || healthData.publicationOffers.length === 0) {
+      console.log(`    ${C.dim}none${C.reset}`);
+    } else {
+      for (const job of healthData.publicationOffers) {
+        console.log(`    ${C.cyan}#${job.id}${C.reset} WI#${job.work_item_id} ${job.status}: ${job.title.slice(0, 70)} ${C.dim}(updated ${job.updated_at})${C.reset}`);
+      }
+    }
+
     if (healthData.recentDeadLetters.length > 0) {
       console.log(`\n  ${C.bold}Recent Dead Letters:${C.reset}`);
       for (const job of healthData.recentDeadLetters) {

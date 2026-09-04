@@ -1,8 +1,9 @@
 import path from "node:path";
 
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { BRIDGE_NON_AGENT_JOB_TYPES } from "../../../catalog/bridge.js";
+import { BRIDGE_NON_AGENT_JOB_TYPES, BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
+import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   fileLaneId,
@@ -29,6 +30,7 @@ const PRODUCTIVE_JOB_TYPES = new Set(["delegate", "dev", "assess", "fix", "summa
 const PLANNING_JOB_TYPES = new Set(["plan"]);
 const RESEARCH_JOB_TYPES = new Set(["research", "preflight"]);
 const CURRENT_AGENT_EXCLUDED_JOB_TYPES = new Set(BRIDGE_NON_AGENT_JOB_TYPES);
+const OPEN_GATE_STATUS_SET = new Set(BRIDGE_OPEN_GATE_STATUSES);
 
 function workItemState(status) {
   const mapped = {
@@ -70,13 +72,25 @@ function agentJobs(jobs) {
 function summaryRow(workItem, jobs, group, canonicalIndex, queuePosition, isPrimary) {
   const metadata = metadataForWorkItem(workItem);
   const currentJobs = activeAgentJobs(jobs);
+  // The work-item and job rows can lag a durable human-gate resolution until
+  // reconciliation runs. Only advertise operator input when an actually open
+  // (or pre-contract legacy) gate remains; otherwise the overview contradicts
+  // its own empty questions projection and creates a phantom phone badge.
+  const needsInput = jobs.some((job) => (
+    job.job_type === "human_input"
+    && OPEN_GATE_STATUS_SET.has(job.status)
+    && humanGateStateAllowsAnswer(job.human_gate_state)
+  ));
+  const projectedState = workItem.status === "waiting_on_human" && !needsInput
+    ? "running"
+    : workItemState(workItem.status);
   return {
     work_item_id: String(workItem.id),
     canonical_index: canonicalIndex,
     group,
     title: safeText(workItem.title, 200, { nullable: false }),
     objective_summary: safeText(metadata.objective_summary || workItem.description, 500),
-    state: group === "queued" ? "queued" : workItemState(workItem.status),
+    state: group === "queued" ? "queued" : projectedState,
     phase: group === "queued" ? "queued" : projectWorkItemPhase(workItem, jobs),
     state_since: workItem.updated_at || workItem.created_at || null,
     queue_position: group === "queued" ? queuePosition : null,
@@ -85,7 +99,7 @@ function summaryRow(workItem, jobs, group, canonicalIndex, queuePosition, isPrim
       ? Math.max(0, Math.min(100, Number(metadata.progress_percent)))
       : null,
     active_agent_count: currentJobs.length,
-    needs_input: workItem.status === "waiting_on_human" || jobs.some((job) => job.status === "waiting_on_human"),
+    needs_input: needsInput,
     has_failure: workItem.status === "failed" || jobs.some((job) => FAILED_JOB_SET.has(job.status)),
     is_primary: Boolean(isPrimary),
   };
@@ -302,7 +316,12 @@ export async function projectWorkItemOverview(args = {}, context = {}) {
   const activeLimit = positiveBound(args.active_limit, 50, WORK_ITEM_BOUNDS.ACTIVE);
   const queuedLimit = positiveBound(args.queued_limit, 50, WORK_ITEM_BOUNDS.QUEUED);
   const workItems = db.prepare("SELECT * FROM work_items ORDER BY created_at, id").all();
-  const jobs = db.prepare("SELECT * FROM jobs ORDER BY created_at, id").all();
+  const jobs = db.prepare(`
+    SELECT j.*, hg.gate_state AS human_gate_state
+    FROM jobs j
+    LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+    ORDER BY j.created_at, j.id
+  `).all();
   const jobsByWorkItem = new Map();
   for (const job of jobs) {
     const list = jobsByWorkItem.get(Number(job.work_item_id)) || [];

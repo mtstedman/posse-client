@@ -10,6 +10,7 @@ import {
   FAILED_JOB_STATUSES_SQL,
   PARKED_JOB_STATUSES_SQL,
   PROVIDER_QUEUE_JOB_STATUSES_SQL,
+  PUSH_OFFER_SUBTYPE,
   now,
 } from "./common.js";
 
@@ -108,9 +109,18 @@ export function getPipelineHealth(opts = {}) {
   const jobsByStatus = db.prepare(`
     SELECT status, COUNT(*) as count
     FROM jobs
+    WHERE NOT (
+      job_type = 'human_input'
+      AND COALESCE(
+        CASE WHEN json_valid(payload_json) = 1
+          THEN json_extract(payload_json, '$.subtype')
+        END,
+        ''
+      ) = ?
+    )
     GROUP BY status
     ORDER BY count DESC, status ASC
-  `).all();
+  `).all(PUSH_OFFER_SUBTYPE);
 
   const deadLettersByType = db.prepare(`
     SELECT job_type, COUNT(*) as count, MAX(updated_at) as last_seen_at
@@ -132,9 +142,32 @@ export function getPipelineHealth(opts = {}) {
     SELECT id, work_item_id, job_type, title, status, updated_at
     FROM jobs
     WHERE status IN (${PARKED_JOB_STATUSES_SQL})
+      AND NOT (
+        job_type = 'human_input'
+        AND COALESCE(
+          CASE WHEN json_valid(payload_json) = 1
+            THEN json_extract(payload_json, '$.subtype')
+          END,
+          ''
+        ) = ?
+      )
     ORDER BY updated_at ASC, id ASC
     LIMIT 10
-  `).all();
+  `).all(PUSH_OFFER_SUBTYPE);
+  const publicationOffers = db.prepare(`
+    SELECT id, work_item_id, job_type, title, status, updated_at
+    FROM jobs
+    WHERE status IN (${PARKED_JOB_STATUSES_SQL})
+      AND job_type = 'human_input'
+      AND COALESCE(
+        CASE WHEN json_valid(payload_json) = 1
+          THEN json_extract(payload_json, '$.subtype')
+        END,
+        ''
+      ) = ?
+    ORDER BY updated_at ASC, id ASC
+    LIMIT 10
+  `).all(PUSH_OFFER_SUBTYPE);
 
   const stuckJobs = db.prepare(`
     SELECT id, work_item_id, job_type, title, status, updated_at, lease_expires_at
@@ -185,6 +218,7 @@ export function getPipelineHealth(opts = {}) {
     deadLettersByType,
     recentDeadLetters,
     parkedJobs,
+    publicationOffers,
     stuckJobs,
     topErrorSignatures,
     providerHealth,

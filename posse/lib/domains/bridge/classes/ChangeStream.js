@@ -13,6 +13,7 @@ import {
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
   TERMINAL_JOB_STATUSES,
 } from "../../../catalog/job.js";
+import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import {
   AGENT_ACTIVITY_KINDS,
   AGENT_ACTIVITY_LIMITS,
@@ -26,8 +27,8 @@ import { bridgeGateAnswerContract, bridgeGateKindForJob } from "../functions/gat
 import { buildReviewBrief } from "../functions/review-brief.js";
 import {
   projectBridgeGateDetail,
-  projectBridgeJob,
-  projectBridgeWorkItem,
+  projectBridgeJobState,
+  projectBridgeWorkItemFromJobs,
 } from "../functions/state-snapshot.js";
 import { workItemCost } from "../../billing/functions/cost.js";
 import {
@@ -100,7 +101,10 @@ function isReadyOneshotScopeSelection(payload = {}) {
 }
 
 function isOpenGateJob(job, payload = {}) {
-  return OPEN_GATE_STATUSES.has(job?.status) && isReadyOneshotScopeSelection(payload);
+  const contractAllowsOpen = humanGateStateAllowsAnswer(job?.human_gate_state);
+  return OPEN_GATE_STATUSES.has(job?.status)
+    && contractAllowsOpen
+    && isReadyOneshotScopeSelection(payload);
 }
 
 function promptFromGatePayload(payload) {
@@ -348,9 +352,10 @@ export class ChangeStream extends EventEmitter {
     // job that gets touched again emits nothing (gate_closed requires a known
     // previous status), which is the desired behavior.
     const rows = this.db.prepare(`
-      SELECT id, status, payload_json
-      FROM jobs
-      WHERE job_type = 'human_input'
+      SELECT j.id, j.status, j.payload_json, hg.gate_state AS human_gate_state
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.job_type = 'human_input'
     `).all();
     for (const row of rows) {
       if (TERMINAL_JOB_STATUS_SET.has(row.status)) continue;
@@ -636,7 +641,7 @@ export class ChangeStream extends EventEmitter {
       this.workItemCursor = { updatedAt: row.updated_at || this.workItemCursor.updatedAt, id: Number(row.id) };
       this.emitBridgeEvent(
         BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED,
-        projectBridgeWorkItem(row, this.activeJobCountForWorkItem(row.id)),
+        this.projectWorkItem(row),
       );
     }
   }
@@ -653,14 +658,20 @@ export class ChangeStream extends EventEmitter {
       this.workItemCursor = { seq: Math.max(Number(this.workItemCursor.seq || 0), Number(row.bridge_change_seq || 0)) };
       this.emitBridgeEvent(
         BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED,
-        projectBridgeWorkItem(row, this.activeJobCountForWorkItem(row.id)),
+        this.projectWorkItem(row),
       );
     }
   }
 
-  activeJobCountForWorkItem(workItemId) {
-    const rows = this.db.prepare(`SELECT status FROM jobs WHERE work_item_id = ?`).all(workItemId);
-    return rows.filter((row) => !TERMINAL_JOB_STATUS_SET.has(row.status)).length;
+  projectWorkItem(workItem) {
+    const jobs = this.db.prepare(`
+      SELECT j.id, j.job_type, j.status, j.payload_json,
+             hg.gate_state AS human_gate_state
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.work_item_id = ?
+    `).all(workItem.id);
+    return projectBridgeWorkItemFromJobs(workItem, jobs);
   }
 
   pollJobs() {
@@ -669,16 +680,17 @@ export class ChangeStream extends EventEmitter {
       return;
     }
     const rows = this.db.prepare(`
-      SELECT *
-      FROM jobs
-      WHERE updated_at > ?
-         OR (updated_at = ? AND id > ?)
-      ORDER BY updated_at ASC, id ASC
+      SELECT j.*, hg.gate_state AS human_gate_state
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.updated_at > ?
+         OR (j.updated_at = ? AND j.id > ?)
+      ORDER BY j.updated_at ASC, j.id ASC
       LIMIT 250
     `).all(this.jobCursor.updatedAt, this.jobCursor.updatedAt, this.jobCursor.id);
     for (const row of rows) {
       this.jobCursor = { updatedAt: row.updated_at || this.jobCursor.updatedAt, id: Number(row.id) };
-      const jobPayload = projectBridgeJob(row);
+      const jobPayload = projectBridgeJobState(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
       this.markCostDirtyOnTerminal(row);
@@ -687,15 +699,16 @@ export class ChangeStream extends EventEmitter {
 
   pollJobsByChangeSeq() {
     const rows = this.db.prepare(`
-      SELECT *
-      FROM jobs
-      WHERE bridge_change_seq > ?
-      ORDER BY bridge_change_seq ASC, id ASC
+      SELECT j.*, hg.gate_state AS human_gate_state
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.bridge_change_seq > ?
+      ORDER BY j.bridge_change_seq ASC, j.id ASC
       LIMIT 250
     `).all(this.jobCursor.seq);
     for (const row of rows) {
       this.jobCursor = { seq: Math.max(Number(this.jobCursor.seq || 0), Number(row.bridge_change_seq || 0)) };
-      const jobPayload = projectBridgeJob(row);
+      const jobPayload = projectBridgeJobState(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
       this.markCostDirtyOnTerminal(row);

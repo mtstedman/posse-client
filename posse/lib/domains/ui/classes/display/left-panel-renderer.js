@@ -10,8 +10,9 @@ import {
   JOB_TYPE_COLORS_KEY,
   jobLabel,
   jobDisplayStatus,
+  jobHumanGateIsAnswerable,
   jobIsDisplayFailure,
-  jobIsBackgroundAtlasWarm,
+  reviewVisibleJobs,
   workItemDisplayStatus,
 } from "../../functions/display/helpers/job-status.js";
 import {
@@ -57,7 +58,10 @@ function queueJobDisplayState(job, { active = false } = {}) {
   const status = String(job?.status || "").toLowerCase();
   if (active || status === "running" || status === "leased") return "running";
   if (status === "awaiting_assessment") return "assessing";
-  if (status === "waiting_on_human" || (job?.job_type === "human_input" && status !== "succeeded")) return "input";
+  if (status === "waiting_on_human") {
+    return jobHumanGateIsAnswerable(job) ? "input" : "blocked";
+  }
+  if (jobHumanGateIsAnswerable(job) && status !== "succeeded") return "input";
   if (status === "waiting_on_review") return "review";
   if (status === "blocked") return "blocked";
   if (status === "queued") return "queued";
@@ -386,10 +390,10 @@ export class DisplayLeftPanelRenderer {
 
     try {
       const { workItems, jobs: allJobs, dirtyState = null } = this._getQueueData();
-      // Background ATLAS warm jobs are reported by the context-health readiness
-      // bars (see _buildAtlasReadinessLines), not as queue rows, so the queue
-      // shows only normal work-item jobs.
-      const normalJobs = allJobs.filter((job) => !jobIsBackgroundAtlasWarm(job));
+      // Optional context accelerators are reported by readiness bars, and
+      // publication offers have their own explicit action surface. Neither is
+      // foreground queue work.
+      const normalJobs = reviewVisibleJobs(allJobs);
       const jobsByWi = new Map();
       for (const job of normalJobs) {
         if (!jobsByWi.has(job.work_item_id)) jobsByWi.set(job.work_item_id, []);
@@ -602,7 +606,7 @@ export class DisplayLeftPanelRenderer {
     if (displayStatus === "recovered") return `${C.yellow}\u21bb`;
     if (j.status === "awaiting_assessment") return `${C.cyan}\u2026`;
     if (displayStatus === "failed" || displayStatus === "dead_letter") return `${C.red}\u2717`;
-    if (j.status === "waiting_on_human" || (j.job_type === "human_input" && j.status !== "succeeded")) return `${C.yellow}\u26a0`;
+    if (jobHumanGateIsAnswerable(j) && j.status !== "succeeded") return `${C.yellow}\u26a0`;
     if (j.status === "waiting_on_review") return `${C.magenta}?`;
     if (j.status === "blocked") return `${C.yellow}\u2016`;
     if (j.status === "queued") return `${C.blue}\u25cb`;
@@ -638,9 +642,9 @@ export class DisplayLeftPanelRenderer {
 
   _jobStatusTag(j) {
     if (j.job_type === "atlas_warm") return this._atlasWarmStatusTag(j);
-    if (j.status === "waiting_on_human") return ` ${C.yellow}needs input${C.reset}`;
+    if (j.status === "waiting_on_human" && jobHumanGateIsAnswerable(j)) return ` ${C.yellow}needs input${C.reset}`;
     if (j.status === "waiting_on_review") return ` ${C.magenta}needs review${C.reset}`;
-    if (j.job_type === "human_input" && ["running", "queued"].includes(j.status)) return ` ${C.yellow}input needed${C.reset}`;
+    if (jobHumanGateIsAnswerable(j) && ["running", "queued"].includes(j.status)) return ` ${C.yellow}input needed${C.reset}`;
     if (j.status === "awaiting_assessment") return ` ${C.cyan}assessing${C.reset}`;
     return "";
   }

@@ -115,6 +115,11 @@ function _syncAssessorWorkerDisplay(display, job, {
   });
 }
 
+export function scopedCommitCreated(commitResult, headBefore) {
+  if (typeof commitResult?.createdCommit === "boolean") return commitResult.createdCommit;
+  return String(commitResult?.hash || "") !== String(headBefore || "");
+}
+
 export class PostExecutionCoordinator {
   constructor(worker) {
     this.worker = worker;
@@ -615,6 +620,7 @@ export async function handlePostExecutionForWorker({
             }
             const {
               hash: commitHash,
+              createdCommit,
               reverted,
               createdViaModifyScope,
               createdOutOfScope,
@@ -829,7 +835,7 @@ export async function handlePostExecutionForWorker({
               });
             }
 
-            if (commitHash !== headBefore) {
+            if (scopedCommitCreated({ hash: commitHash, createdCommit }, headBefore)) {
               // A two-parent commit is not by itself task output. When the
               // merge left the first parent's tree unchanged, keep the commit
               // for coordination/audit history but send the attempt through

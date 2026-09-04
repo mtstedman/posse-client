@@ -13,7 +13,6 @@ import {
   getArtifacts,
   getAttempts,
   getJob,
-  getSetting,
   getWorkItem,
   isLeaseValid,
   logEvent,
@@ -60,7 +59,6 @@ import {
 import { scopedDeleteTargets } from "./mutation-guards.js";
 import {
   sanitizeHumanQuestions,
-  isRepoFileAccessQuestion,
 } from "./human-question-classifier.js";
 import {
   buildWorkflowModeBlock,
@@ -108,6 +106,12 @@ import {
   raiseAssessmentFallbackReadsForScope,
 } from "../execution/assessment-policy.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
+import {
+  assessmentWorktreeDirtySummary,
+  inspectAssessmentWorktreeReadiness,
+} from "./assessment-worktree-readiness.js";
+import { ensureConfiguredVerification } from "./configured-verification.js";
+import { repairTestDependencies } from "./test-dependency-repair.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -115,23 +119,6 @@ export {
   classifySiblingOnlyAssessmentFailure,
   renderAssessmentTaskBoundary,
 } from "./assessment-task-boundary.js";
-
-function readSettingText(key, projectDir = null) {
-  try {
-    const value = getSetting(key, projectDir ? { projectDir } : {});
-    return value == null ? "" : String(value).trim();
-  } catch {
-    return "";
-  }
-}
-
-function readSettingBool(key, fallback = false) {
-  const value = readSettingText(key).toLowerCase();
-  if (!value) return fallback;
-  if (["1", "true", "yes", "on"].includes(value)) return true;
-  if (["0", "false", "no", "off"].includes(value)) return false;
-  return fallback;
-}
 
 export function taskAbAssessorTier(workItem) {
   let metadata = workItem?.metadata_json;
@@ -182,13 +169,29 @@ export function assessmentLifecycleStateFromOutcome(freshJob, verdict = null) {
   return null;
 }
 
-function updateAssessmentLifecycleFromVerdict(jobId, freshJob, verdict = null) {
+export function assessmentVerdictFailureText(freshJob, verdict = null) {
+  if (assessmentLifecycleStateFromOutcome(freshJob, verdict) !== "assessment_failed") return null;
+  const verdictName = String(verdict?.verdict || freshJob?.assessor_verdict || "failed").trim() || "failed";
+  const reasons = (Array.isArray(verdict?.reasons) ? verdict.reasons : [])
+    .map((reason) => String(reason || "").trim())
+    .filter(Boolean);
+  const detail = reasons.length > 0 ? reasons.join("; ") : "No assessor reason was recorded.";
+  return `Assessment verdict ${verdictName}: ${detail}`.slice(0, 4000);
+}
+
+export function updateAssessmentLifecycleFromVerdict(jobId, freshJob, verdict = null) {
   const state = assessmentLifecycleStateFromOutcome(freshJob, verdict);
+  const error = assessmentVerdictFailureText(freshJob, verdict);
   if (state === "assessment_passed" || state === "assessment_failed") {
-    setAssessmentLifecycle(jobId, state, { completed: true });
+    setAssessmentLifecycle(jobId, state, { error, completed: true });
   } else if (state === "assessment_needs_human") {
     setAssessmentLifecycle(jobId, state);
   }
+  // Events and observations are retention-bounded. Keep the terminal reason
+  // on the job row as well so a failed assessment remains diagnosable after
+  // its detailed telemetry has been pruned.
+  if (state === "assessment_failed" && error) setJobError(jobId, error);
+  return { state, error };
 }
 
 export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
@@ -1878,13 +1881,16 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         verdict: "needs_review",
         confidence: "none",
         reasons: [
-          `Assessment evidence access exhausted the same effective harness budget twice: ${budgetLabel}. Automatic retries stopped because the retry retained the same evidence authority and hit the same ceiling again.`,
+          `Assessment evidence access exhausted the same effective harness budget twice: ${budgetLabel}. Automatic retries stopped and the assessment will fail closed because the retry retained the same evidence authority and hit the same ceiling again.`,
           ...(blocked.length > 0 ? [`Still-blocked targeted reads: ${blocked.join("; ")}`] : []),
           ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
         ],
-        human_questions: [
-          "Please review the listed unresolved source selectors and decide whether the implementation has enough evidence to accept, repair, or leave unmerged.",
-        ],
+        // A harness-owned read ceiling is not a product or policy decision.
+        // Leaving this as an apparent operator-only question routed the second
+        // budget miss into a human gate even though a person cannot restore
+        // evidence authority from the prompt. The needs_review handler fails
+        // closed when no genuine operator question remains.
+        human_questions: [],
         spawn_jobs: [],
         _disable_internal_retry: true,
         _assessment_infrastructure_review: true,
@@ -1901,13 +1907,12 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   // prose-regex recovery synthesized fake verdicts that masked parser failures
   // and prevented the tier-bump retry from firing.
 
+  // Keep this trust bit outside the provider-supplied verdict object. A model
+  // must not be able to label its own response as harness infrastructure and
+  // force the dispatcher down an internal-only path.
+  let harnessInfrastructureReview = false;
   if (verdict) {
     const originalHumanQuestions = Array.isArray(verdict.human_questions) ? verdict.human_questions : [];
-    const strippedRepoFileQuestions = originalHumanQuestions.filter((question) =>
-      isRepoFileAccessQuestion(question, {
-        context: [response, ...(Array.isArray(verdict.reasons) ? verdict.reasons : [])].join("\n"),
-      })
-    );
     const sanitizedHumanQuestions = sanitizeHumanQuestions(originalHumanQuestions, {
       context: [response, ...(Array.isArray(verdict.reasons) ? verdict.reasons : [])].join("\n"),
     });
@@ -1916,26 +1921,19 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         ...verdict,
         human_questions: sanitizedHumanQuestions,
       };
-      const accessContext = [
-        response,
-        ...(Array.isArray(verdict.reasons) ? verdict.reasons : []),
-        ...originalHumanQuestions,
-      ].join("\n");
       if (
-        sanitizedHumanQuestions.length === 0
-        && (
-          strippedRepoFileQuestions.length > 0
-          || _looksLikeAssessorAccessLimitation(accessContext)
-        )
+        originalHumanQuestions.length > 0
+        && sanitizedHumanQuestions.length === 0
       ) {
+        harnessInfrastructureReview = true;
         const rawReasons = Array.isArray(verdict.reasons) ? verdict.reasons : [];
         verdict = {
           ...verdict,
           verdict: ["blocked", "needs_review"].includes(String(verdict.verdict || "").toLowerCase())
-            ? "blocked"
+            ? "needs_review"
             : verdict.verdict,
           reasons: [
-            "Assessor asked the human for repository file contents or diffs that must be verified from local assessment context; sanitized the request and disabled internal assessment retry.",
+            "Assessor asked the human for repository evidence or implementation intent that must be resolved from local assessment context; sanitized the request and will fail closed without an operator gate.",
             ...rawReasons,
           ],
           human_questions: [],
@@ -2006,6 +2004,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     ...(trustedAssessorClaims.length === 0 ? {} : { _assessor_claims: trustedAssessorClaims }),
     ...(verdict._disable_internal_retry ? { _disable_internal_retry: true } : {}),
     ...(verdict._assessment_visual_review ? { _assessment_visual_review: true } : {}),
+    ...(harnessInfrastructureReview ? { _assessment_infrastructure_review: true } : {}),
   };
   const taskBoundary = buildAssessmentTaskBoundary(job);
   const boundaryViolation = classifySiblingOnlyAssessmentFailure(normalizedVerdict, taskBoundary);
@@ -2467,6 +2466,40 @@ export async function runPostExecutionAssessment(worker, {
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
+    const readiness = committedHash
+      ? await inspectAssessmentWorktreeReadiness(wtPath)
+      : { ready: true };
+    if (!readiness.ready) {
+      setAssessmentLifecycle(job.id, "implementation_complete");
+      markAssessmentRetryAssessOnly(job, pendingFileRequests);
+      completeAttempt(attempt.id, {
+        status: "succeeded",
+        duration_ms: Date.now() - startTime,
+        output_chars: output.length,
+      });
+      const detail = assessmentWorktreeDirtySummary(readiness);
+      worker.emit(
+        job.id,
+        `${C.dim}[assessor] WI#${job.work_item_id} job #${job.id}: deferred until the committed worktree is clean (${detail})${C.reset}`,
+      );
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.id,
+        event_type: EVENT_TYPES.JOB_ASSESSMENT_DEFERRED_FOR_DIRTY_WORKTREE,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: "Deferred assessment before budget consumption because the worktree was not clean after barrier acquisition",
+        event_json: JSON.stringify({
+          dirty_count: readiness.dirty_count,
+          dirty_paths: readiness.dirty_paths.slice(0, 100),
+        }),
+      });
+      worker._releaseLease(job, leaseToken, "queued", {
+        readyAt: new Date(Date.now() + 2_000).toISOString(),
+      });
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
   }
   if (shouldRunAssessment && !skipAssessForFileRequest) {
     setAssessmentLifecycle(job.id, "implementation_complete");
@@ -2514,12 +2547,13 @@ export async function runPostExecutionAssessment(worker, {
     });
 
     const freshJob = getJob(job.id);
-    updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
+    const assessmentOutcome = updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
     const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
     completeAttempt(attempt.id, {
       status: finalStatus,
       duration_ms: Date.now() - startTime,
       output_chars: output.length,
+      error_text: finalStatus === "failed" ? assessmentOutcome.error : null,
     });
     if (freshJob?.status === "succeeded" && hasPendingFileRequests() && !spawnedFileRequestFollowUp) {
       spawnPendingFileRequestsOnce();
@@ -2555,6 +2589,12 @@ export async function runPostExecutionAssessment(worker, {
               branchName: getWorkItem(job.work_item_id)?.branch_name || null,
               wiId: job.work_item_id,
               onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
+            })
+          : null,
+        repairDependencies: wtPath
+          ? () => repairTestDependencies(worker, job, wtPath, {
+              signal: worker._abortControllers?.get(job.id)?.signal || null,
+              phase: "assessor",
             })
           : null,
       });
@@ -2605,132 +2645,31 @@ export async function runPostExecutionAssessment(worker, {
       }
     }
 
-    const preAssessCmd = readSettingText("canonical_verify_cmd", worker.projectDir) || readSettingText("pre_assess_cmd") || null;
-    const hooksSkipped = readSettingBool("skip_hooks", false) || readSettingBool("skip_hook_post_dev_verify", false);
-    if (shouldRunPreAssessCommand({
-      command: preAssessCmd,
+    const configuredVerification = await ensureConfiguredVerification(worker, {
+      job,
+      attemptId: attempt.id,
+      assessedCommitHash: committedHash,
       wtPath,
       preAssessAlreadyVerified,
-      hooksSkipped,
-    })) {
-      try {
-        worker.emit(job.id, `${C.dim}[pre-assess] Running: ${preAssessCmd}${C.reset}`);
-        recordObservation({
-          work_item_id: job.work_item_id,
-          job_id: job.id,
-          attempt_id: attempt.id,
-          observation_type: "command.pre_assess",
-          summary: "Running pre-assess command",
-          detail: { command: preAssessCmd, cwd: wtPath, source: "setting" },
-        });
-        const preAssessBeforePorcelain = await gitPorcelainZAsync(wtPath);
-        await runShellCommandAsync(preAssessCmd, { cwd: wtPath, timeoutMs: 120000 });
-        const preAssessAfterPorcelain = await gitPorcelainZAsync(wtPath);
-        const dirtyEntries = diffPorcelainEntries(preAssessBeforePorcelain, preAssessAfterPorcelain);
-        if (dirtyEntries.length > 0 || preAssessAfterPorcelain !== preAssessBeforePorcelain) {
-          const dirtyPaths = dirtyEntries.map((entry) => entry.path).filter(Boolean);
-          const preview = dirtyPaths.slice(0, 10).join(", ");
-          const more = dirtyPaths.length > 10 ? " ..." : "";
-          const hookMsg = `Pre-assessment hook left worktree dirty${preview ? `: ${preview}${more}` : ""}`;
-          let snapshotDir = null;
-          let snapshotError = null;
-          try {
-            const wiForHook = getWorkItem(job.work_item_id);
-            snapshotDir = await snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
-              reason: `pre-assess-dirty-wi-${job.work_item_id}-job-${job.id}`,
-              branchName: wiForHook?.branch_name || null,
-              wiId: job.work_item_id,
-              onMsg: (msg) => worker.emit(job.id, `${C.dim}[pre-assess] ${msg}${C.reset}`),
-            });
-          } catch (snapshotErr) {
-            snapshotError = snapshotErr?.message || String(snapshotErr);
-          }
-          worker.emit(job.id, `${C.yellow}[pre-assess] ${hookMsg}${snapshotDir ? ` (snapshot: ${snapshotDir})` : ""}${C.reset}`);
-          logEvent({
-            work_item_id: job.work_item_id,
-            job_id: job.id,
-            attempt_id: attempt.id,
-            event_type: EVENT_TYPES.WORKTREE_PRE_ASSESS_DIRTY,
-            actor_type: EVENT_ACTORS.WORKER,
-            message: hookMsg,
-            event_json: JSON.stringify({
-              command: preAssessCmd,
-              cwd: wtPath,
-              changed_paths: dirtyPaths.slice(0, 100),
-              changed_entries: dirtyEntries.slice(0, 100),
-              before_entries: parsePorcelainZ(preAssessBeforePorcelain).slice(0, 100),
-              after_entries: parsePorcelainZ(preAssessAfterPorcelain).slice(0, 100),
-              snapshot_dir: snapshotDir,
-              snapshot_error: snapshotError,
-            }),
-          });
-          recordObservation({
-            work_item_id: job.work_item_id,
-            job_id: job.id,
-            attempt_id: attempt.id,
-            observation_type: "command.pre_assess",
-            summary: hookMsg,
-            detail: {
-              command: preAssessCmd,
-              cwd: wtPath,
-              status: "dirty",
-              changed_paths: dirtyPaths,
-              snapshot_dir: snapshotDir,
-              snapshot_error: snapshotError,
-            },
-          });
-          completeAttempt(attempt.id, {
-            status: "succeeded",
-            duration_ms: Date.now() - startTime,
-            error_text: hookMsg,
-          });
-          setJobError(job.id, hookMsg);
-          routeAssessmentInfrastructureFailure(worker, job, leaseToken, new Error(hookMsg), {
-            pendingFileRequests,
-          });
-          return;
-        }
-        worker.emit(job.id, `${C.green}[pre-assess] Passed${C.reset}`);
-        recordObservation({
-          work_item_id: job.work_item_id,
-          job_id: job.id,
-          attempt_id: attempt.id,
-          observation_type: "command.pre_assess",
-          summary: "Pre-assess command passed",
-          detail: {
-            command: preAssessCmd,
-            cwd: wtPath,
-            status: "passed",
-            source: "setting",
-          },
-        });
-      } catch (hookErr) {
-        const hookMsg = `Pre-assessment hook failed: ${hookErr.message.split("\n")[0]}`;
-        worker.emit(job.id, `${C.red}[pre-assess] ${hookMsg}${C.reset}`);
-        recordObservation({
-          work_item_id: job.work_item_id,
-          job_id: job.id,
-          attempt_id: attempt.id,
-          observation_type: "command.pre_assess",
-          summary: hookMsg,
-          detail: {
-            command: preAssessCmd,
-            cwd: wtPath,
-            status: "failed",
-            source: "setting",
-          },
-        });
-        completeAttempt(attempt.id, {
-          status: "succeeded",
-          duration_ms: Date.now() - startTime,
-          error_text: hookMsg,
-        });
-        setJobError(job.id, hookMsg);
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, hookErr, {
-          pendingFileRequests,
-        });
-        return;
-      }
+    });
+    if (configuredVerification.status === "failed") {
+      const failureMessage = configuredVerification.message
+        || configuredVerification.error?.message
+        || "Pre-assessment hook failed";
+      completeAttempt(attempt.id, {
+        status: "succeeded",
+        duration_ms: Date.now() - startTime,
+        error_text: failureMessage,
+      });
+      setJobError(job.id, failureMessage);
+      routeAssessmentInfrastructureFailure(
+        worker,
+        job,
+        leaseToken,
+        configuredVerification.error || new Error(failureMessage),
+        { pendingFileRequests },
+      );
+      return;
     }
 
     try {
@@ -2897,12 +2836,13 @@ export async function runPostExecutionAssessment(worker, {
         });
 
         const freshJob = getJob(job.id);
-        updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
+        const assessmentOutcome = updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
         const finalStatus = freshJob?.status === "succeeded" ? "succeeded" : "failed";
         completeAttempt(attempt.id, {
           status: finalStatus,
           duration_ms: Date.now() - startTime,
           output_chars: output.length,
+          error_text: finalStatus === "failed" ? assessmentOutcome.error : null,
         });
         if (freshJob?.status === "succeeded" && hasPendingFileRequests() && !spawnedFileRequestFollowUp) {
           spawnPendingFileRequestsOnce();
@@ -3216,7 +3156,7 @@ export async function runPostExecutionAssessment(worker, {
         detail: { reasons: verdict.reasons || [], spawn_jobs: verdict.spawn_jobs || [] },
       });
       const freshJob = getJob(job.id);
-      updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
+      const assessmentOutcome = updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
       if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
         worker._releaseLease(job, leaseToken, freshJob.status);
       }
@@ -3226,6 +3166,7 @@ export async function runPostExecutionAssessment(worker, {
         status: finalStatus,
         duration_ms: Date.now() - startTime,
         output_chars: output.length,
+        error_text: finalStatus === "failed" ? assessmentOutcome.error : null,
       });
       if (freshJob?.status === "succeeded" && hasPendingFileRequests() && !spawnedFileRequestFollowUp) {
         spawnPendingFileRequestsOnce();

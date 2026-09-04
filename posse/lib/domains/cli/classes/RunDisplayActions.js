@@ -1,9 +1,18 @@
+import { createHash } from "node:crypto";
+
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { humanInputChoicesForPayload } from "../../../catalog/human-input.js";
+import {
+  humanGateStateAllowsAnswer,
+  humanInputChoicesForPayload,
+} from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
-import { createOperatorNudge, getHumanGate as getHumanGateContract } from "../../queue/functions/index.js";
+import {
+  createOperatorNudge,
+  getHumanGate as getHumanGateContract,
+  requeueWaitingHumanInputJobs as requeueWaitingHumanInputJobsFromStore,
+} from "../../queue/functions/index.js";
 import { answerWorkItemQuestionChoice as answerQuestionChoice } from "../../queue/functions/interaction-contract.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import {
@@ -92,6 +101,8 @@ export class RunDisplayActions {
     approvePlan = approvePlanGate,
     rejectPlan = rejectPlanGate,
     getHumanGate = getHumanGateContract,
+    claimHumanGatePromptPresentation = null,
+    requeueWaitingHumanInputJobs = requeueWaitingHumanInputJobsFromStore,
     answerWorkItemQuestionChoice = answerQuestionChoice,
     executeHumanGateTransition = null,
   } = {}) {
@@ -127,6 +138,8 @@ export class RunDisplayActions {
     this.approvePlan = approvePlan;
     this.rejectPlan = rejectPlan;
     this.getHumanGate = getHumanGate;
+    this.claimHumanGatePromptPresentation = claimHumanGatePromptPresentation;
+    this.requeueWaitingHumanInputJobs = requeueWaitingHumanInputJobs;
     this.answerWorkItemQuestionChoice = answerWorkItemQuestionChoice;
     this.executeHumanGateTransition = executeHumanGateTransition
       || createWorkItemTransitionExecutor({ projectDir, actor: "tui" }, {
@@ -135,6 +148,12 @@ export class RunDisplayActions {
       });
     this.liveReviewPromise = null;
     this.humanGatePrompts = new Map();
+    this.humanGatePromptSignatures = new Map();
+    // A rejected/invalid prompt must not recursively reopen on every scheduler
+    // snapshot. The signature is cleared by an explicit Answer action, a gate
+    // generation change, or the bounded resurface policy incrementing its
+    // durable counter.
+    this.humanGatePromptSuppressions = new Map();
     // Reservation ids must never repeat across processes: a rejected answer is
     // persisted and replayed verbatim for an identical action_id, so a fresh
     // process re-answering the same still-open gate needs a fresh identity.
@@ -154,11 +173,7 @@ export class RunDisplayActions {
     this.display.onSkipJob = (jobId) => this.skip(jobId);
     this.display.onReviewPending = () => this.reviewPending();
     this.display.onAsk = (question) => this.ask(question);
-    this.display.onAnswerJob = (jobId) => {
-      const gate = this.getJob?.(Number(jobId));
-      if (!gate) return false;
-      return this.surfaceActionableHumanGates([gate], { authoritative: false }).length > 0;
-    };
+    this.display.onAnswerJob = (jobId) => this.answerJob(jobId);
     return this;
   }
 
@@ -166,27 +181,79 @@ export class RunDisplayActions {
     return this.liveReviewPromise;
   }
 
-  surfaceActionableHumanGates(activeJobs = [], { authoritative = true } = {}) {
+  answerJob(jobId) {
+    const gateId = Number(jobId);
+    const gate = this.getJob?.(gateId);
+    if (!gate || gate.job_type !== "human_input") return false;
+    const contract = this.getHumanGate?.(gateId);
+    if (!humanGateStateAllowsAnswer(contract?.gate_state)) return false;
+
+    const launched = this.surfaceActionableHumanGates([gate], {
+      authoritative: false,
+      explicit: true,
+    });
+    if (launched.length > 0) return true;
+
+    // Ordinary clarification/review gates are resolved by the human_input
+    // worker because their answers drive type-specific continuation logic.
+    // If that worker parked after a timeout or restart, an explicit Answer
+    // action should requeue this one gate immediately instead of forcing the
+    // operator to wait for the broad automatic reminder sweep.
+    if (gate.status === "waiting_on_human" && typeof this.requeueWaitingHumanInputJobs === "function") {
+      const revived = this.requeueWaitingHumanInputJobs({
+        filter: (candidate) => Number(candidate?.id) === gateId,
+        reason: "operator explicitly requested this prompt",
+      });
+      if (Array.isArray(revived) && revived.some((entry) => Number(entry?.job_id) === gateId)) {
+        this.display.addEvent?.(`${this.C.cyan}Gate #${gateId} queued for an immediate prompt.${this.C.reset}`);
+        this.refreshDisplaySnapshotsForQueue();
+        return true;
+      }
+    }
+
+    // A queued gate has already been requested and will be claimed by the
+    // scheduler. Treat the action as accepted so the hotkey does not fall
+    // through while the prompt is materializing asynchronously.
+    return gate.status === "queued";
+  }
+
+  surfaceActionableHumanGates(activeJobs = [], { authoritative = true, explicit = false } = {}) {
     if (!this.display?.askQuestions) return [];
-    const pending = (Array.isArray(activeJobs) ? activeJobs : [])
-      .filter((job) => (
-        job?.job_type === "human_input"
-        && job?.status === "waiting_on_human"
-        && ["plan_approval", "push_offer"].includes(parseJobPayload(job)?.subtype)
-        && humanGateChoices(parseJobPayload(job)).length > 0
-      ));
-    const pendingIds = new Set(pending.map((job) => Number(job.id)));
+    const candidates = (Array.isArray(activeJobs) ? activeJobs : [])
+      .filter((job) => {
+        const subtype = parseJobPayload(job)?.subtype;
+        if (
+          job?.job_type !== "human_input"
+          || job?.status !== "waiting_on_human"
+          || !["plan_approval", "push_offer"].includes(subtype)
+          || humanGateChoices(parseJobPayload(job)).length === 0
+        ) return false;
+        const contract = this.getHumanGate?.(job.id);
+        return humanGateStateAllowsAnswer(contract?.gate_state);
+      });
+    // Plan approval blocks execution, so the run may present it proactively.
+    // A push offer is an out-of-band publication convenience: keep it visible
+    // in the queue/Bridge, but only open its prompt after the operator selects
+    // Answer. This prevents every boot, snapshot, and idle callback from
+    // turning completed work back into an unsolicited question.
+    const pending = candidates.filter((job) => (
+      parseJobPayload(job)?.subtype === "plan_approval" || explicit
+    ));
+    // An automatic refresh must not withdraw an explicitly opened push prompt.
+    const pendingIds = new Set(candidates.map((job) => Number(job.id)));
     if (authoritative) {
       for (const gateId of this.humanGatePrompts.keys()) {
         if (pendingIds.has(Number(gateId))) continue;
         this.display.cancelQuestionsForJob?.(gateId);
       }
+      for (const gateId of this.humanGatePromptSuppressions.keys()) {
+        if (pendingIds.has(Number(gateId))) continue;
+        this.humanGatePromptSuppressions.delete(gateId);
+      }
     }
 
     const launched = [];
     for (const gate of pending) {
-      if (this.humanGatePrompts.has(gate.id) || this.display.hasQuestionsForJob?.(gate.id)) continue;
-      let resurfaceAfterAnswer = false;
       const payload = parseJobPayload(gate);
       const workItem = this.getWorkItem?.(gate.work_item_id);
       const choices = humanGateChoices(payload);
@@ -196,12 +263,58 @@ export class RunDisplayActions {
       const questions = payloadQuestions.length > 0
         ? [payloadQuestions.join("\n\n")]
         : [String(payload.prompt || gate.title || "Human input requested")];
+      const context = humanGateContext(workItem, gate, payload);
       const gateContract = this.getHumanGate?.(gate.id);
       const generation = String(gateContract?.generation || 1);
-      const prompt = this.display.askQuestions(
+      const resurfaceCount = Math.max(
+        0,
+        Number.parseInt(String(payload._human_prompt_resurface_count || 0), 10) || 0,
+      );
+      const promptContentHash = createHash("sha256")
+        .update(JSON.stringify({ questions, choices, context }))
+        .digest("hex")
+        .slice(0, 16);
+      const promptSignature = `${generation}:${resurfaceCount}:${promptContentHash}`;
+      const activePrompt = this.humanGatePrompts.get(gate.id);
+      if (activePrompt) {
+        if (this.humanGatePromptSignatures.get(gate.id) === promptSignature) continue;
+        // The durable gate was materially revised after this process rendered
+        // it. Withdraw the stale question before presenting the new generation;
+        // otherwise an innocent approval of the old text could authorize new
+        // jobs or operational commands that were never shown to the operator.
+        if (typeof this.display.cancelQuestionsForJob !== "function") continue;
+        this.display.cancelQuestionsForJob(gate.id);
+        if (this.display.hasQuestionsForJob?.(gate.id)) continue;
+        if (this.humanGatePrompts.get(gate.id) === activePrompt) {
+          this.humanGatePrompts.delete(gate.id);
+          this.humanGatePromptSignatures.delete(gate.id);
+        }
+      } else if (this.display.hasQuestionsForJob?.(gate.id)) {
+        continue;
+      }
+      if (explicit) this.humanGatePromptSuppressions.delete(gate.id);
+      else if (this.humanGatePromptSuppressions.get(gate.id) === promptSignature) continue;
+      if (!explicit && typeof this.claimHumanGatePromptPresentation === "function") {
+        let presentation;
+        try {
+          presentation = this.claimHumanGatePromptPresentation(gate.id);
+        } catch (err) {
+          this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+          this.display.addEvent?.(`${this.C.red}Gate #${gate.id} presentation could not be reserved: ${err?.message || err}${this.C.reset}`);
+          continue;
+        }
+        if (presentation === false || presentation?.claimed === false) {
+          this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+          continue;
+        }
+      }
+      // Enter the promise chain before asking the display so a synchronous
+      // renderer/input failure follows the same bounded suppression path as
+      // an asynchronously rejected prompt.
+      const prompt = Promise.resolve().then(() => this.display.askQuestions(
         gate.id,
         questions,
-        humanGateContext(workItem, gate, payload),
+        context,
         gate.work_item_id,
         {
           choices,
@@ -225,15 +338,15 @@ export class RunDisplayActions {
               : null,
           },
         },
-      ).then(async (answers) => {
+      )).then(async (answers) => {
         const answer = firstPromptAnswer(answers);
         const action = choices.find((choice) => choice === answer)
           || choices.find((choice) => choice.toLowerCase() === answer.toLowerCase());
         const freshGate = this.getJob?.(gate.id);
         if (!freshGate || freshGate.status !== "waiting_on_human") return null;
         if (!action) {
-          resurfaceAfterAnswer = true;
-          this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} was not resolved: choose ${choices.join(" or ")}.${this.C.reset}`);
+          this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+          this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} was not resolved: choose ${choices.join(" or ")}. It remains parked; press Answer to retry.${this.C.reset}`);
           return { ok: false, reason: "invalid_human_gate_answer" };
         }
         const actionSequence = ++this.humanGateActionSequence;
@@ -251,10 +364,13 @@ export class RunDisplayActions {
         });
         const accepted = result?.outcome === "accepted" || result?.ok === true;
         if (!accepted) {
-          resurfaceAfterAnswer = this.getJob?.(gate.id)?.status === "waiting_on_human";
-          this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} could not be resolved: ${result?.safe_reason || result?.reason || result?.outcome || "unknown error"}${this.C.reset}`);
+          if (this.getJob?.(gate.id)?.status === "waiting_on_human") {
+            this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+          }
+          this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} could not be resolved: ${result?.safe_reason || result?.reason || result?.outcome || "unknown error"}. It remains parked; press Answer to retry.${this.C.reset}`);
           return result;
         }
+        this.humanGatePromptSuppressions.delete(gate.id);
         this.display.addEvent?.(`${this.C.green}Gate #${gate.id} resolved with ${action}.${this.C.reset}`);
         this.refreshWorkItemStatus?.(gate.work_item_id);
         this.refreshDisplaySnapshotsForQueue();
@@ -262,20 +378,20 @@ export class RunDisplayActions {
       }).catch((err) => {
         const message = String(err?.message || err || "");
         if (!/Prompt withdrawn|Display aborted/i.test(message)) {
+          if (this.getJob?.(gate.id)?.status === "waiting_on_human") {
+            this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+          }
           this.display.addEvent?.(`${this.C.red}Gate #${gate.id} prompt failed: ${message}${this.C.reset}`);
         }
         return null;
       }).finally(() => {
-        this.humanGatePrompts.delete(gate.id);
-        if (resurfaceAfterAnswer) {
-          try {
-            this.surfaceActionableHumanGates([this.getJob?.(gate.id) || gate], { authoritative: false });
-          } catch (err) {
-            this.display.addEvent?.(`${this.C.red}Gate #${gate.id} could not be re-prompted: ${err?.message || err}${this.C.reset}`);
-          }
+        if (this.humanGatePrompts.get(gate.id) === prompt) {
+          this.humanGatePrompts.delete(gate.id);
+          this.humanGatePromptSignatures.delete(gate.id);
         }
       });
       this.humanGatePrompts.set(gate.id, prompt);
+      this.humanGatePromptSignatures.set(gate.id, promptSignature);
       launched.push(prompt);
     }
     return launched;

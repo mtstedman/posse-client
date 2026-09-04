@@ -13,6 +13,7 @@ import {
   enqueueHumanGateEffect,
   extendAssessmentMaxAttempts,
   getDependents,
+  getHumanGate,
   getJob,
   getWorkItem,
   getAttempts,
@@ -25,6 +26,7 @@ import {
   reopenHumanGateResolution,
   requestParkedJobResumeAfterGate,
   supersedeHumanGate,
+  setJobResult,
   setAssessmentLifecycle,
   setAttemptCommitHash,
   storeArtifact,
@@ -272,6 +274,18 @@ export async function runHumanInputJob(worker, job, {
 } = {}) {
   let payload = worker.parsePayload(job);
   let activeJob = job;
+  const durableGate = getHumanGate(job.id);
+  if (durableGate?.gate_state === "resolved" || durableGate?.gate_state === "superseded") {
+    const terminalStatus = durableGate.gate_state === "resolved" ? "succeeded" : "canceled";
+    worker.emit(
+      job.id,
+      `${C.yellow}[human] Skipped closed gate #${job.id} (${durableGate.gate_state}); settling stale job state${C.reset}`,
+    );
+    worker._releaseLease(job, leaseToken, terminalStatus);
+    refreshAndExtractInsights(job.work_item_id);
+    worker._cleanupWorktreeIfDone(job.work_item_id);
+    return;
+  }
   const attempt = incrementAndCreateAttempt(job.id, leaseToken, "human", "human", null);
   if (!attempt) {
     logAttemptSkippedStaleLease(job, "human", "Skipped human_input attempt because the lease was stale or expired");
@@ -344,6 +358,12 @@ export async function runHumanInputJob(worker, job, {
 
     const output = await worker._humanInputHandler(activeJob, abortSignal, { leaseToken });
     const outputEnvelope = payloadObject(output);
+    const unattendedResolution = outputEnvelope.unattended === true;
+    const resolutionActorType = unattendedResolution ? EVENT_ACTORS.SYSTEM : EVENT_ACTORS.HUMAN;
+    const resolutionActorLabel = unattendedResolution ? "Unattended policy" : "Human";
+    const scopeSelectionSource = unattendedResolution
+      ? `${String(outputEnvelope.source || "unattended_policy")}_scope_selection`
+      : "human_scope_selection";
     const deliveredMetadata = Array.isArray(outputEnvelope.answers)
       ? [...outputEnvelope.answers].reverse().find((answer) => (
           answer && typeof answer === "object"
@@ -501,11 +521,11 @@ export async function runHumanInputJob(worker, job, {
         };
         const outcome = createOneshotDevJob(wi, {
           routing,
-          source: "human_scope_selection",
+          source: scopeSelectionSource,
           projectDir: worker.projectDir,
           candidateFiles: [selection.file],
           parentJob: job,
-          demotionSource: "human_scope_selection",
+          demotionSource: scopeSelectionSource,
           demoteOnGateFailure: false,
         });
         continuation = outcome.job || null;
@@ -516,10 +536,12 @@ export async function runHumanInputJob(worker, job, {
           routing: {
             ...(scope.routing || {}),
             bucket: "no_research",
-            reason: "user explicitly selected planning from the one-shot scope gate",
+            reason: unattendedResolution
+              ? `${String(outputEnvelope.source || "unattended policy")} selected planning from the one-shot scope gate`
+              : "user explicitly selected planning from the one-shot scope gate",
           },
           budget: scope.fallback_budget || "low",
-          source: "human_scope_selection",
+          source: scopeSelectionSource,
           parentJob: job,
         });
         continuationKind = "plan";
@@ -536,7 +558,7 @@ export async function runHumanInputJob(worker, job, {
         job_id: job.id,
         attempt_id: attempt.attempt.id,
         event_type: EVENT_TYPES.ONESHOT_SCOPE_SELECTION_RESOLVED,
-        actor_type: EVENT_ACTORS.HUMAN,
+        actor_type: resolutionActorType,
         message: continuation
           ? `One-shot scope selection spawned ${continuation.job_type} job #${continuation.id}`
           : `One-shot scope selection ended without a continuation (${selection.action})`,
@@ -782,6 +804,31 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
+    if (payload.original_job_id && payload.review_type === "artifact_routing_admin") {
+      const origJob = getJob(payload.original_job_id);
+      const answers = extractHumanAnswers(output);
+      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
+      const decision = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      handledReviewDecision = true;
+      if (!origJob) {
+        finalHumanStatus = "failed";
+        worker.emit(job.id, `${C.yellow}[human] Artifact-routing review could not find original job #${payload.original_job_id}${C.reset}`);
+      } else if (decision === "acknowledge") {
+        worker.emit(job.id, `${C.cyan}[human] Artifact-routing failure for job #${origJob.id} acknowledged; rerun after correcting runtime configuration${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: origJob.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
+          actor_type: resolutionActorType,
+          message: `${resolutionActorLabel} acknowledged artifact-routing failure via admin review job #${job.id}`,
+        });
+      } else {
+        finalHumanStatus = "failed";
+        worker.emit(job.id, `${C.yellow}[human] Artifact-routing review answer was not actionable; expected acknowledge${C.reset}`);
+      }
+    }
+
     if (payload.original_job_id && payload.review_type === "blocked_recovery") {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
@@ -868,8 +915,8 @@ export async function runHumanInputJob(worker, job, {
           job_id: origJob.id,
           attempt_id: attempt.attempt.id,
           event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
-          actor_type: EVENT_ACTORS.HUMAN,
-          message: `Human explicitly waived blocked verification via recovery job #${job.id}`,
+          actor_type: resolutionActorType,
+          message: `${resolutionActorLabel} explicitly waived blocked verification via recovery job #${job.id}`,
           event_json: JSON.stringify({
             human_resolution: "explicit_waiver",
             resolution_job_id: job.id,
@@ -978,6 +1025,16 @@ export async function runHumanInputJob(worker, job, {
             answer: lastAnswer,
           }),
         });
+      } else if (decision.action === "fail") {
+        worker.emit(job.id, `${C.yellow}[human] Dead-letter recovery confirmed failure of original job #${payload.original_job_id}; no retry was created${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: payload.original_job_id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_DEAD_LETTER_RECOVERY_FAILED,
+          actor_type: resolutionActorType,
+          message: `${resolutionActorLabel} confirmed dead-lettered job failure via recovery job #${job.id}`,
+        });
       } else {
         finalHumanStatus = "failed";
         worker.emit(job.id, `${C.yellow}[human] Dead-letter recovery did not produce a retry; keeping dependent job(s) blocked${C.reset}`);
@@ -1028,8 +1085,8 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
-              actor_type: EVENT_ACTORS.HUMAN,
-              message: `Legacy pass action on unexecuted job was recorded as an explicit waiver via job #${job.id}`,
+              actor_type: resolutionActorType,
+              message: `${resolutionActorLabel} pass action on unexecuted job was recorded as an explicit waiver via job #${job.id}`,
               event_json: JSON.stringify({
                 human_resolution: "explicit_waiver",
                 resolution_job_id: job.id,
@@ -1056,8 +1113,8 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-              actor_type: EVENT_ACTORS.HUMAN,
-              message: `Human review accepted original job via job #${job.id}; assessor verdict preserved`,
+              actor_type: resolutionActorType,
+              message: `${resolutionActorLabel} review accepted original job via job #${job.id}; assessor verdict preserved`,
               event_json: JSON.stringify({
                 human_resolution: "pass",
                 resolution_job_id: job.id,
@@ -1084,8 +1141,8 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_RESOLVED,
-              actor_type: EVENT_ACTORS.HUMAN,
-              message: `Human review rejected original job via job #${job.id}; assessor verdict preserved`,
+              actor_type: resolutionActorType,
+              message: `${resolutionActorLabel} review rejected original job via job #${job.id}; assessor verdict preserved`,
               event_json: JSON.stringify({
                 human_resolution: "fail",
                 resolution_job_id: job.id,
@@ -1161,8 +1218,8 @@ export async function runHumanInputJob(worker, job, {
               job_id: origJob.id,
               attempt_id: attempt.attempt.id,
               event_type: EVENT_TYPES.JOB_REVIEW_SKIPPED,
-              actor_type: EVENT_ACTORS.HUMAN,
-              message: `Human explicitly waived review via job #${job.id}`,
+              actor_type: resolutionActorType,
+              message: `${resolutionActorLabel} explicitly waived review via job #${job.id}`,
               event_json: JSON.stringify({
                 human_resolution: "explicit_waiver",
                 resolution_job_id: job.id,
@@ -1257,6 +1314,14 @@ export async function runHumanInputJob(worker, job, {
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
+    // Keep the job row self-contained for startup context and other durable
+    // consumers. Human-input execution used to persist only an artifact and
+    // the typed gate resolution, while those consumers read result_json.
+    // Preserve the structured envelope (including unattended provenance) so
+    // automatic policy decisions cannot later masquerade as human guidance.
+    setJobResult(job.id, Object.keys(outputEnvelope).length > 0
+      ? outputEnvelope
+      : { answer: String(output || "") });
     storeArtifact({
       work_item_id: job.work_item_id,
       job_id: job.id,

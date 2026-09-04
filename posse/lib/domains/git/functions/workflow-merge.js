@@ -4,8 +4,10 @@
 import fs from "fs";
 import path from "path";
 import {
+  finalizeApprovedWorkItemMerge,
   getWorkItem,
   getWorkItemMergeDependencies,
+  listWorkItems,
   listCrossWiMergeBlockers,
   logEvent,
   updateWorkItemMetadata,
@@ -47,7 +49,7 @@ export function createMergeWorkflowHelpers(context, {
   sweepOrphanedInferTsconfig,
   validatePushCandidate = () => ({ ok: true }),
 }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
+  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
   const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
   const preserveDirtyWorktreeSnapshot = context.preserveDirtyWorktreeSnapshot || nativePreserveDirtyWorktreeSnapshot;
   const canonicalWorktreePath = context.worktreePath || nativeWorktreePath;
@@ -75,6 +77,10 @@ export function createMergeWorkflowHelpers(context, {
     return gitExec(args, cwd, { timeoutMs: GIT_MERGE_TIMEOUT_MS, trim });
   }
 
+  function gitMergeExecAsync(args, cwd, { trim = true } = {}) {
+    return gitExecAsync(args, cwd, { timeoutMs: GIT_MERGE_TIMEOUT_MS, trim });
+  }
+
   function firstGitLine(err) {
     return String(err?.stderr || err?.stdout || err?.message || err || "")
       .split("\n")
@@ -96,6 +102,72 @@ export function createMergeWorkflowHelpers(context, {
   function expectedSquashSubject(branch, mergeTargetBranch = currentTargetBranch()) {
     const targetBranch = mergeTargetBranch;
     return `Squash merge ${branch} into ${targetBranch}`;
+  }
+
+  async function canonicalSquashMergeEvidence(workItem, cwd = projectDir, {
+    targetBranch = currentTargetBranch(),
+  } = {}) {
+    const branch = String(workItem?.branch_name || "").trim();
+    const mergeBase = String(workItem?.merge_base_hash || "").trim();
+    if (!branch || branch === targetBranch || !/^[0-9a-f]{40}$/i.test(mergeBase)) return null;
+    const updatedAtMs = Date.parse(String(workItem?.updated_at || ""));
+    if (!Number.isFinite(updatedAtMs)) return null;
+    let rows;
+    try {
+      rows = await gitMergeExecAsync([
+        "log",
+        "--format=%H%x09%ct%x09%s",
+        `${mergeBase}..${targetBranch}`,
+      ], cwd);
+    } catch {
+      return null;
+    }
+    const expectedSubject = expectedSquashSubject(branch, targetBranch);
+    for (const row of rows.split("\n")) {
+      const [mergeHash = "", committedAt = "", ...subjectParts] = row.split("\t");
+      if (subjectParts.join("\t") !== expectedSubject || !/^[0-9a-f]{40}$/i.test(mergeHash)) continue;
+      const committedAtMs = Number(committedAt) * 1000;
+      // Git commit timestamps have one-second precision while SQLite rows have
+      // millisecond precision. Permit only that truncation window; an older
+      // canonical commit must not re-close a work item that was later reopened.
+      if (!Number.isFinite(committedAtMs) || committedAtMs + 999 < updatedAtMs) continue;
+      return { mergeHash, targetBranch, branch };
+    }
+    return null;
+  }
+
+  async function reconcileCanonicalSquashMergeWorkItems(cwd = projectDir) {
+    const targetBranch = currentTargetBranch();
+    const result = { reconciled: 0, inspected: 0, failures: [] };
+    for (const workItem of listWorkItems(["complete", "failed"])) {
+      if (!workItem?.branch_name || workItem.merge_state === "merged") continue;
+      result.inspected += 1;
+      const evidence = await canonicalSquashMergeEvidence(workItem, cwd, { targetBranch });
+      if (!evidence) continue;
+      try {
+        const settled = finalizeApprovedWorkItemMerge(workItem.id);
+        if (!settled?.ok) {
+          result.failures.push({ work_item_id: workItem.id, reason: settled?.reason || "queue_settlement_failed" });
+          continue;
+        }
+        logEvent({
+          work_item_id: workItem.id,
+          event_type: EVENT_TYPES.WORK_ITEM_MERGED,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Recovered canonical squash merge of ${evidence.branch} into ${evidence.targetBranch} at ${evidence.mergeHash}`,
+          event_json: JSON.stringify({
+            branch: evidence.branch,
+            target_branch: evidence.targetBranch,
+            merge_hash: evidence.mergeHash,
+            recovered: "canonical_squash_commit",
+          }),
+        });
+        result.reconciled += 1;
+      } catch (err) {
+        result.failures.push({ work_item_id: workItem.id, reason: firstGitLine(err) });
+      }
+    }
+    return result;
   }
 
   function squashCommitArgs(subject, sharedTrunkOperationId = null) {
@@ -661,43 +733,35 @@ export function createMergeWorkflowHelpers(context, {
     }
 
     const initialHeads = mergeHeads(branch, targetBranch, cwd);
-    // The retry flag bypasses the unchanged-heads skip below without clearing
-    // the memo: success clears it and deterministic failures overwrite it, so
-    // an eager clear here would only lose the memo when the retry dies on a
-    // transient path.
     const priorDeterministicFailure = workItemMetadata(wiId)[DETERMINISTIC_MERGE_FAILURE_KEY];
     if (mergeFailureHeadsUnchanged(priorDeterministicFailure, initialHeads)) {
-      if (retryDeterministicConflict) {
-        log(`Retrying the prior deterministic conflict for ${branch} at the operator's request`, {
-          json: {
-            branch,
-            target: targetBranch,
-            deterministic_conflict_retry: true,
-            branch_head: initialHeads.branchHead,
-            target_head: initialHeads.targetHead,
-          },
-        });
-      } else {
-        const message = `Merge skipped: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict`;
-        log(message, {
-          json: {
-            branch,
-            target: targetBranch,
-            deterministic_conflict_unchanged: true,
-            branch_head: initialHeads.branchHead,
-            target_head: initialHeads.targetHead,
-            prior_error: priorDeterministicFailure.error || null,
-          },
-        });
-        return {
-          ok: false,
-          deterministicConflict: true,
-          unchangedConflict: true,
-          branchHead: initialHeads.branchHead,
-          targetHead: initialHeads.targetHead,
-          message,
-        };
-      }
+      // A content conflict is a pure function of the two tree heads. A manual
+      // approval used to bypass this memo and rerun the identical merge, which
+      // could only reproduce the conflict and looked like lock contention.
+      // Require the source or target to move before spending another attempt.
+      const message = retryDeterministicConflict
+        ? `Merge retry blocked: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict`
+        : `Merge skipped: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict`;
+      log(message, {
+        json: {
+          branch,
+          target: targetBranch,
+          deterministic_conflict_unchanged: true,
+          retry_requested: retryDeterministicConflict,
+          branch_head: initialHeads.branchHead,
+          target_head: initialHeads.targetHead,
+          prior_error: priorDeterministicFailure.error || null,
+        },
+      });
+      return {
+        ok: false,
+        deterministicConflict: true,
+        unchangedConflict: true,
+        retryRequested: retryDeterministicConflict,
+        branchHead: initialHeads.branchHead,
+        targetHead: initialHeads.targetHead,
+        message,
+      };
     }
 
     const sourceDirty = sourceWorktreeDirtyState(wiId);
@@ -1481,11 +1545,13 @@ export function createMergeWorkflowHelpers(context, {
 
 
   return {
+    canonicalSquashMergeEvidence,
     gitDiffStat,
     gitDiffStatAsync,
     gitMergeToTarget,
     gitMergeToTargetAsync,
     mergeIterativePassToTarget,
+    reconcileCanonicalSquashMergeWorkItems,
     queueAtlasMainRefreshAfterMerge,
     refreshAtlasMainAfterMerge,
   };

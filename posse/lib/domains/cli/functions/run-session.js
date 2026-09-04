@@ -18,6 +18,7 @@ import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
 import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-network-banner.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { isPushOfferJob } from "../../queue/functions/common.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { closeLog } from "../../../shared/telemetry/functions/logging/logger.js";
@@ -41,6 +42,10 @@ export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;
 export const TUI_SNAPSHOT_WORKER_URL = new URL("./tui-snapshot-worker.js", import.meta.url);
 export const TUI_SNAPSHOT_THREAD_MANAGER = new ThreadManager();
 export const EMPTY_TOOL_SNAPSHOT = { jobs: [], recent: [], activeLocks: { work_items: [], jobs: [] } };
+
+export function operationalRunJobs(jobs = []) {
+  return (Array.isArray(jobs) ? jobs : []).filter((job) => !isPushOfferJob(job));
+}
 
 export function firstLine(value, fallback = "unknown") {
   return String(value || fallback).trim().split(/\r?\n/)[0] || fallback;

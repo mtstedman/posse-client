@@ -1,8 +1,21 @@
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { resolveManagedPythonRuntimeForProject } from "./python-runtime.js";
 
 let runtimePathOverrides = {};
+let testRuntimeRoot = null;
+
+function isUnderTest() {
+  return Boolean(process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN);
+}
+
+function getTestRuntimeLogDir() {
+  if (!testRuntimeRoot) {
+    testRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "posse-test-runtime-"));
+  }
+  return path.join(testRuntimeRoot, "logs");
+}
 
 function overridePath(key) {
   const value = runtimePathOverrides?.[key];
@@ -52,6 +65,14 @@ export function getRuntimeResourcesDir(projectDir = null, cwd = null) {
 export function getRuntimeLogDir(projectDir = null, cwd = null) {
   const override = overridePath("logDir");
   if (override) return override;
+  const runtimeRootOverride = overridePath("runtimeRoot");
+  if (runtimeRootOverride) return path.join(runtimeRootOverride, "logs");
+  // Direct unit tests often exercise an in-memory database without installing
+  // runtime-path overrides. Keep their logger side effects out of the source
+  // checkout while preserving explicit fixture/project destinations.
+  if (isUnderTest() && !overridePath("projectDir") && projectDir == null && cwd == null) {
+    return getTestRuntimeLogDir();
+  }
   const projectRoot = normalizeProjectDir(projectDir, cwd);
   return path.join(getRuntimeRoot(projectRoot, cwd), "logs");
 }
@@ -99,6 +120,11 @@ export function setRuntimePathOverrides(overrides = null) {
 }
 
 export const setRuntimePathOverridesForTests = setRuntimePathOverrides;
+
+/** Snapshot the exact override layer so nested test fixtures can restore it. */
+export function getRuntimePathOverridesForTests() {
+  return { ...runtimePathOverrides };
+}
 
 export function normalizeProviderPaths({ cwd = null, projectDir = null } = {}) {
   const normalizedCwd = normalizeCwd(cwd);

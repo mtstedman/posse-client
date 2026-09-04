@@ -6,21 +6,29 @@
 // PUSH_OFFER_SUBTYPE exclusions keep them out of work-item status math.
 //
 // Lifecycle: created/refreshed at run wrap-up when unpushed commits exist
-// (singleton — a new offer supersedes the previous one); closed by
-// `git.push` from the bridge, a TTY push at the terminal, an explicit
-// decline, or superseded at the next run boot (a fresh offer with current
-// state is recreated at that run's wrap-up).
+// (singleton — a changed HEAD supersedes the previous one); closed by
+// `git.push` from the bridge, a TTY push at the terminal, or an explicit
+// decline. An unchanged open offer is reused across runs, and a decline is
+// remembered until the exact publication HEAD changes, avoiding repeat phone
+// prompts for the same decision.
 
 import {
   createJob,
   forceUpdateJobStatus,
+  getHumanGate,
   getJob,
   listWorkItems,
   setJobResult,
 } from "./index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
-import { PUSH_OFFER_SUBTYPE, TERMINAL_WORK_ITEM_STATUSES, runImmediateTransaction } from "./common.js";
+import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
+import {
+  PUSH_OFFER_SUBTYPE,
+  TERMINAL_WORK_ITEM_STATUSES,
+  now,
+  runImmediateTransaction,
+} from "./common.js";
 import { withMergeLockSync } from "./locks.js";
 
 const OPEN_GATE_STATUSES = ["queued", "waiting_on_human"];
@@ -31,8 +39,30 @@ export function closePushOfferGate(jobId, status, result, {
 } = {}) {
   const db = getDb();
   const execute = () => {
+    const gate = getHumanGate(jobId);
+    if (!humanGateStateAllowsAnswer(gate?.gate_state)) return false;
     if (!forceUpdateJobStatus(jobId, status, { expectedStatuses })) return false;
     setJobResult(jobId, result);
+    const explicitAction = status === "succeeded"
+      ? "push"
+      : status === "canceled" && result?.declined === true
+        ? "decline"
+        : null;
+    if (explicitAction) {
+      const ts = now();
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state = 'resolved',
+            resolution_action = ?,
+            resolution_payload_json = ?,
+            resolver_lease_token = NULL,
+            resolution_error = NULL,
+            resolved_at = COALESCE(resolved_at, ?),
+            updated_at = ?
+        WHERE gate_job_id = ?
+          AND gate_state IN ('resolved', 'superseded')
+      `).run(explicitAction, JSON.stringify(result ?? {}), ts, ts, jobId);
+    }
     return true;
   };
   if (db.inTransaction) return execute();
@@ -44,11 +74,13 @@ export function findOpenPushOfferJob() {
   const db = getDb();
   const row = db
     .prepare(
-      `SELECT id FROM jobs
-       WHERE job_type = 'human_input'
-         AND status IN ${OPEN_GATE_STATUSES_SQL}
-         AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'
-       ORDER BY id DESC
+      `SELECT j.id FROM jobs j
+       LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+       WHERE j.job_type = 'human_input'
+         AND j.status IN ${OPEN_GATE_STATUSES_SQL}
+         AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
+         AND j.payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'
+       ORDER BY j.id DESC
        LIMIT 1`,
     )
     .get();
@@ -59,10 +91,12 @@ function cancelOpenPushOfferGatesInTransaction(reason, { remote = null, branch =
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT id, payload_json FROM jobs
-       WHERE job_type = 'human_input'
-         AND status IN ${OPEN_GATE_STATUSES_SQL}
-         AND payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
+      `SELECT j.id, j.payload_json FROM jobs j
+       LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+       WHERE j.job_type = 'human_input'
+         AND j.status IN ${OPEN_GATE_STATUSES_SQL}
+         AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
+         AND j.payload_json LIKE '%"subtype":"${PUSH_OFFER_SUBTYPE}"%'`,
     )
     .all();
   let canceled = 0;
@@ -80,10 +114,51 @@ function cancelOpenPushOfferGatesInTransaction(reason, { remote = null, branch =
   return canceled;
 }
 
+function parsedObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function latestPushOfferForTarget(remote, branch) {
+  return getDb().prepare(`
+    SELECT j.*, hg.gate_state
+    FROM jobs j
+    LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE j.job_type = 'human_input'
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.subtype')
+        ELSE NULL END = ?
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.remote')
+        ELSE NULL END = ?
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.push_branch')
+        ELSE NULL END = ?
+    ORDER BY j.id DESC
+    LIMIT 1
+  `).get(PUSH_OFFER_SUBTYPE, remote, branch) || null;
+}
+
+function samePublicationState(job, { headHash, aheadCount }) {
+  if (!job) return false;
+  const payload = parsedObject(job.payload_json);
+  const recordedHead = String(payload.push_head_hash || "").trim();
+  if (headHash) return recordedHead === headHash;
+  // Compatibility for callers/tests that cannot resolve a Git HEAD. This is
+  // deliberately weaker and never matches a production offer that recorded
+  // a head hash.
+  return !recordedHead
+    && (Number.isFinite(payload.ahead_count) ? Number(payload.ahead_count) : null) === aheadCount;
+}
+
 /**
- * Cancel every open push-offer gate (normally at most one). Used when a new
- * run boots (the offer's ahead-count is about to go stale) and when a fresh
- * offer supersedes an old one.
+ * Cancel every open push-offer gate (normally at most one). Used when current
+ * Git state proves there is nothing to push, or for explicit administrative
+ * cleanup. Changed-HEAD upserts supersede older offers transactionally.
  */
 export function cancelOpenPushOfferGates(reason = "superseded") {
   const db = getDb();
@@ -168,10 +243,36 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
 
   const db = getDb();
   const outcome = withMergeLockSync(() => runImmediateTransaction(db, () => {
-    cancelOpenPushOfferGatesInTransaction("superseded_by_new_offer");
-
     const remote = String(state.effectiveRemote || "origin");
     const branch = String(state.pushBranch);
+    const headCandidate = String(state.pushHeadHash || "").trim().toLowerCase();
+    const headHash = /^[0-9a-f]{40,64}$/.test(headCandidate) ? headCandidate : null;
+    const latest = latestPushOfferForTarget(remote, branch);
+    if (samePublicationState(latest, { headHash, aheadCount })) {
+      if (
+        OPEN_GATE_STATUSES.includes(latest.status)
+        && humanGateStateAllowsAnswer(latest.gate_state)
+      ) {
+        return {
+          ok: true,
+          jobId: Number(latest.id),
+          workItemId: Number(latest.work_item_id),
+          reused: true,
+        };
+      }
+      const result = parsedObject(latest.result_json);
+      if (latest.status === "canceled" && result.declined === true) {
+        return {
+          ok: false,
+          reason: "previously_declined",
+          jobId: Number(latest.id),
+          workItemId: Number(latest.work_item_id),
+        };
+      }
+    }
+
+    cancelOpenPushOfferGatesInTransaction("superseded_by_new_offer");
+
     const countText = aheadCount != null ? `${aheadCount} commit(s)` : "pending commits";
     const payload = {
       subtype: PUSH_OFFER_SUBTYPE,
@@ -179,6 +280,7 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.push_offer,
       remote,
       push_branch: branch,
+      push_head_hash: headHash,
       target_branch: String(state.targetBranch || branch),
       ahead_count: aheadCount,
       merged_count: mergedCount,
@@ -208,7 +310,7 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
     // Straight to waiting_on_human: the scheduler must never lease this into
     // a terminal prompt — the gate is answered out-of-band (phone/CLI).
     forceUpdateJobStatus(jobId, "waiting_on_human");
-    return { ok: true, jobId, workItemId };
+    return { ok: true, jobId, workItemId, reused: false };
   }), {
     ownerId: `merge-${process.pid}-push-offer-upsert`,
   });

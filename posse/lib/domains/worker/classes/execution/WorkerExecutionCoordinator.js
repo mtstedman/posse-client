@@ -45,9 +45,7 @@ import {
 import {
   snapshotAndResetDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
-import {
-  ensureBootDependenciesInWorker,
-} from "../../../system/functions/dependency-sync.js";
+import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import {
   handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
   handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
@@ -233,37 +231,10 @@ export class WorkerExecutionCoordinator {
             })
           : null,
         repairDependencies: wtPath
-          ? async () => {
-              worker.emit(
-                job.id,
-                `${C.dim}[test-intake] WI#${job.work_item_id} job #${job.id}: repository test dependencies unavailable; repairing the isolated worktree once${C.reset}`,
-              );
-              return await ensureBootDependenciesInWorker({
-                projectDir: wtPath,
-                includeNode: true,
-                includePython: false,
-                includeComposer: false,
-                includeGo: false,
-                includeCargo: false,
-                includeNativeBinaries: false,
-                includeJinaModel: false,
-                includeScip: false,
-                includeTestTools: false,
-                // Only the worktree's own packages decide this repair: a
-                // pre-existing posse-root dependency failure must not discard
-                // a successful worktree install (observed live 2026-08-30:
-                // "posse npm" failed on node-pty while "repo npm" succeeded,
-                // and the honest baseline was thrown away with the attempt).
-                includePosseRoot: false,
-                adoptNodeInstall: true,
-              }, {
-                signal: executeAbortController?.signal || null,
-                onProgress: (message) => worker.emit(
-                  job.id,
-                  `${C.dim}[test-intake] ${message}${C.reset}`,
-                ),
-              });
-            }
+          ? () => repairTestDependencies(worker, job, wtPath, {
+              signal: executeAbortController?.signal || null,
+              phase: "intake",
+            })
           : null,
       });
       if (baselineReceipt) {

@@ -463,6 +463,7 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
 export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   stallExhausted = false,
   suppressHumanRecovery = false,
+  providerErrorExhausted = false,
 } = {}) {
   const freshJob = getJob(job.id);
   const errorDetails = getErrorDetails(errorOrMsg);
@@ -473,7 +474,13 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails) || deterministicPolicyConflict;
   const transientCommitInfraFailure = isTransientCommitInfraFailure(errorOrMsg);
   const terminalProtocolFailure = isRetryableTerminalHandoffError(errorOrMsg);
-  const suppressOperatorRecovery = suppressHumanRecovery || terminalProtocolFailure;
+  // Provider errors reach this path only after the penalty-free transient
+  // retry budget is exhausted. At that point the provider client has already
+  // tried its configured runtime fallback(s), so opening one human gate per
+  // failed job turns a shared outage into prompt spam without adding a useful
+  // decision. Keep the ordinary bounded job retries, but retire terminal jobs
+  // without an operator recovery gate.
+  const suppressOperatorRecovery = suppressHumanRecovery || terminalProtocolFailure || providerErrorExhausted;
 
   if (worker.shuttingDown) {
     const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
@@ -695,8 +702,8 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           payload_json: JSON.stringify({
             original_job_id: job.id,
             review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
-            question_kind: "pipeline_head_recovery",
-            choices: WORK_ITEM_QUESTION_CHOICE_IDS.pipeline_head_recovery,
+            question_kind: "dead_letter_recovery",
+            choices: deadLetterRecoveryChoices(),
             questions: [
               `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
             ],
@@ -773,7 +780,10 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
 
     worker._releaseLease(job, leaseToken, "dead_letter");
     if (suppressOperatorRecovery) {
-      cancelDeadlockedJobsAtomic(`terminal-provider-failure:${job.id}`, {
+      const suppressionReason = providerErrorExhausted
+        ? "provider-retry-exhausted"
+        : (terminalProtocolFailure ? "terminal-protocol-failure" : "operator-recovery-suppressed");
+      cancelDeadlockedJobsAtomic(`${suppressionReason}:${job.id}`, {
         workItemId: job.work_item_id,
       });
     }

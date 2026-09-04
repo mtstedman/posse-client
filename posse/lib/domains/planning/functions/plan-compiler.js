@@ -1821,10 +1821,24 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               );
             } else if (!testCommandValidation.ok) {
               operationalCommandApproval = operationalCommandApprovalRequest(declaredTestCommand);
-              worker.emit(
-                planJob.id,
-                `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" fails runner validation (${testCommandValidation.reason}) — assessor policy treats the task as untested${operationalCommandApproval ? "; exact-command human approval is required before post-change execution" : ""}`,
-              );
+              if (operationalCommandApproval) {
+                worker.emit(
+                  planJob.id,
+                  `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" is an operational command (${testCommandValidation.reason}) — assessor policy treats the task as untested; exact-command human approval is required before post-change execution`,
+                );
+              } else {
+                rejectedPlannerTestCommand = {
+                  schema_version: 1,
+                  failure_class: "verification_plan_invalid",
+                  command: declaredTestCommand,
+                  reason: testCommandValidation.reason,
+                  detected_phase: "plan_compile",
+                };
+                worker.emit(
+                  planJob.id,
+                  `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: omitted unsafe test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" (${testCommandValidation.reason}); deterministic changed-file checks remain required`,
+                );
+              }
             }
           }
         }

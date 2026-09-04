@@ -1,5 +1,9 @@
 import { forceUpdateJobStatus, listJobsByWorkItem, logEvent } from "../../queue/functions/index.js";
-import { ACTIVE_LEASE_STATUSES, STALE_CANCELABLE_JOB_STATUSES } from "../../queue/functions/common.js";
+import {
+  ACTIVE_LEASE_STATUSES,
+  isDeferredImplementationAssessmentJob,
+  STALE_CANCELABLE_JOB_STATUSES,
+} from "../../queue/functions/common.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
@@ -25,6 +29,7 @@ export function cancelSupersededPlanChildren(worker, planJob) {
       activeOlderCount += 1;
       continue;
     }
+    if (isDeferredImplementationAssessmentJob(job)) continue;
     if (!staleStatuses.has(job.status)) continue;
     if (!forceUpdateJobStatus(job.id, "canceled")) continue;
     canceledCount += 1;

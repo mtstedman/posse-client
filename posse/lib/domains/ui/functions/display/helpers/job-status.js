@@ -1,11 +1,17 @@
 // lib/display/helpers/job-status.js
 
-import { FAILED_JOB_STATUSES, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
+import {
+  FAILED_JOB_STATUSES,
+  PARKED_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES,
+  isPushOfferJob,
+} from "../../../../queue/functions/common.js";
 import {
   MUTATING_JOB_TYPES,
   QUEUE_LOCKING_JOB_TYPES,
   jobTypeIsNonCompletionBlocking,
 } from "../../../../../catalog/job.js";
+import { humanGateStateAllowsAnswer } from "../../../../../catalog/human-input.js";
 
 export const JOB_TYPE_ABBR = {
   research: "R",
@@ -47,6 +53,12 @@ export function jobIsBackgroundAtlasWarm(job) {
   return BACKGROUND_ATLAS_WARM_JOB_TYPES.has(job?.job_type);
 }
 
+export function jobHumanGateIsAnswerable(job) {
+  if (job?.job_type !== "human_input") return false;
+  const gateState = job?.human_gate_state ?? job?.gate_state ?? null;
+  return humanGateStateAllowsAnswer(gateState);
+}
+
 export const REVIEW_WRITE_JOB_TYPES = MUTATING_JOB_TYPES;
 export const APPROVAL_REPO_WRITE_JOB_TYPES = QUEUE_LOCKING_JOB_TYPES;
 
@@ -59,11 +71,11 @@ export function jobIsRepoWriteStep(job) {
 }
 
 // Optional accelerators (atlas_warm, waiting_lane_prepare, and any future
-// member of the canonical set) never participate in reviewability or
-// assessment, so a failed optional job cannot fail an otherwise successful
-// review. Foreground job types stay review-visible, including when they fail.
+// member of the canonical set) and out-of-band publication offers never
+// participate in reviewability or assessment. Foreground job types stay
+// review-visible, including ordinary human gates and failed work.
 export function jobIsNonCompletionBlocking(job) {
-  return jobTypeIsNonCompletionBlocking(job?.job_type);
+  return jobTypeIsNonCompletionBlocking(job?.job_type) || isPushOfferJob(job);
 }
 
 export function jobIsReviewVisible(job) {
@@ -154,9 +166,13 @@ export function workItemDisplayStatus(wi, jobs = []) {
   // legitimate follow-up work first clears merge_state through the reopen API.
   if (wi?.merge_state === "merged") return "complete";
   const status = wi?.status || "unknown";
-  const activeJobs = jobs.filter((job) => !terminal.has(job.status));
+  const visibleJobs = reviewVisibleJobs(jobs);
+  const activeJobs = visibleJobs.filter((job) => !terminal.has(job.status));
+  const hasAnswerableHumanGate = activeJobs.some((job) => (
+    job.status === "waiting_on_human" && jobHumanGateIsAnswerable(job)
+  ));
   if (status !== "canceled" && activeJobs.length > 0) {
-    if (activeJobs.some((job) => job.status === "waiting_on_human")) return "waiting_on_human";
+    if (hasAnswerableHumanGate) return "waiting_on_human";
     if (activeJobs.some((job) => ["running", "leased", "awaiting_assessment"].includes(job.status))) return "running";
     if (activeJobs.some((job) => job.status === "waiting_on_review")) return "waiting_on_review";
     if (activeJobs.some((job) => job.status === "blocked")) return "blocked";
@@ -166,9 +182,10 @@ export function workItemDisplayStatus(wi, jobs = []) {
         : "running";
     }
   }
-  if (status !== "failed" || jobs.length === 0) return status;
-  if (!jobs.every((job) => terminal.has(job.status))) return wi.status;
-  const states = jobs.map((job) => jobDisplayStatus(job, jobs));
+  if (status === "waiting_on_human" && !hasAnswerableHumanGate) return "running";
+  if (status !== "failed" || visibleJobs.length === 0) return status;
+  if (!visibleJobs.every((job) => terminal.has(job.status))) return wi.status;
+  const states = visibleJobs.map((job) => jobDisplayStatus(job, visibleJobs));
   const hasCompletedWork = states.some((status) => status === "succeeded" || status === "recovered");
   return hasCompletedWork && states.every((status) => !JOB_FAILURE_STATUSES.has(status))
     ? "complete"
@@ -185,7 +202,13 @@ export function computeJobProgressStats(jobs = []) {
   const running = allJobs.filter((job) => job?.status === "running").length;
   const queued = allJobs.filter((job) => job?.status === "queued").length;
   const parked = allJobs.filter((job) => PARKED_JOB_STATUS_SET.has(job?.status)).length;
-  const waitingOnHuman = allJobs.filter((job) => job?.status === "waiting_on_human").length;
+  const waitingOnHuman = allJobs.filter((job) => (
+    job?.status === "waiting_on_human"
+    && (
+      job?.job_type !== "human_input"
+      || jobHumanGateIsAnswerable(job)
+    )
+  )).length;
   const waitingOnReview = allJobs.filter((job) => job?.status === "waiting_on_review").length;
   const blocked = allJobs.filter((job) => job?.status === "blocked").length;
   const assessing = allJobs.filter((job) => job?.status === "awaiting_assessment").length;

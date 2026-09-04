@@ -28,11 +28,16 @@ const TERMINATION_GRACE_MS = 250;
 const TERMINATION_SETTLE_MS = 5_000;
 const REUSABLE_RECEIPT_STATUSES = new Set(["passed", "failed", "rejected", "timed_out"]);
 const MUTATING_TEST_FLAGS = new Set([
+  "-u", "--accept", "--bless", "--coverage", "--cov", "--fix", "--record",
   "--basetemp", "--blockprofile", "--coverprofile", "--cpuprofile", "--html",
   "--cov-report", "--junitxml", "--memprofile", "--mutexprofile", "--out-dir", "--outdir",
   "--output", "--outputdir", "--report-log", "--result-log",
-  "--self-contained-html", "--target-dir", "--test-reporter-destination",
-  "--test-update-snapshots", "--trace", "--tsbuildinfofile",
+  "--self-contained-html", "--snapshot-update", "--target-dir", "--test-reporter-destination",
+  "--test-update-snapshots", "--trace", "--tsbuildinfofile", "--update", "--update-golden",
+  "--update-snapshot", "--update-snapshots", "--updatesnapshot", "--write",
+]);
+const INTERACTIVE_TEST_FLAGS = new Set([
+  "--inspect", "--inspect-brk", "--open", "--ui", "--watch", "--watchall", "--watch-all",
 ]);
 const SENSITIVE_PARENT_ENV_NAME_RE = /(?:^|_)(?:api_?key|access_?key|private_?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|pat|cookie|session)(?:_|$)|^posse_key$/i;
 
@@ -320,6 +325,19 @@ function safeRelativeTestDirectory(value) {
   return segments.join("/");
 }
 
+function directRepositoryShellTestScript(value) {
+  const relative = safeRelativeTestDirectory(value);
+  if (!relative || !relative.includes("/") || !/\.sh$/i.test(relative)) return null;
+  const segments = relative.split("/");
+  const root = segments[0].toLowerCase();
+  const basename = segments.at(-1).toLowerCase();
+  if (root === "test" || root === "tests") return relative;
+  if (root !== "scripts") return null;
+  return /^(?:run[-_.])?(?:tests?|checks?|verify|lint|typecheck|spec)(?:[-_.][^/]*)?\.sh$/.test(basename)
+    ? relative
+    : null;
+}
+
 function splitPlannerTestInvocation(command) {
   const value = String(command || "").trim();
   const match = value.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))\s*&&\s*(.+)$/i);
@@ -334,23 +352,79 @@ function splitPlannerTestInvocation(command) {
   };
 }
 
-function classifyNestedRunnerInfrastructureFailure(command, result) {
+function composerDependencyInstallMissing(projectRoot) {
+  const root = path.resolve(String(projectRoot || ""));
+  if (!root || !fs.existsSync(path.join(root, "composer.json"))) return false;
+  return !fs.existsSync(path.join(root, "vendor", "autoload.php"))
+    || !fs.existsSync(path.join(root, "vendor", "composer", "installed.json"));
+}
+
+function composerLockedDependencyClassFileMissing(projectRoot, output) {
+  const root = path.resolve(String(projectRoot || ""));
+  const lockPath = path.join(root, "composer.lock");
+  if (!root || !fs.existsSync(lockPath)) return false;
+  const missingClasses = [...String(output || "").matchAll(
+    /(?:Class|Interface|Trait)\s+["']([^"']+)["']\s+not found/gi,
+  )]
+    .map((match) => String(match[1] || "").replace(/^\\+/, ""))
+    .filter(Boolean);
+  if (missingClasses.length === 0) return false;
+
+  let lock;
+  try { lock = JSON.parse(fs.readFileSync(lockPath, "utf8")); }
+  catch { return false; }
+  const packages = [
+    ...(Array.isArray(lock?.packages) ? lock.packages : []),
+    ...(Array.isArray(lock?.["packages-dev"]) ? lock["packages-dev"] : []),
+  ];
+  for (const dependency of packages) {
+    const packageName = String(dependency?.name || "").trim();
+    const psr4 = dependency?.autoload?.["psr-4"];
+    if (!packageName || !psr4 || typeof psr4 !== "object" || Array.isArray(psr4)) continue;
+    for (const [rawPrefix, rawDirs] of Object.entries(psr4)) {
+      const prefix = String(rawPrefix || "").replace(/^\\+/, "");
+      if (!prefix) continue;
+      for (const className of missingClasses) {
+        if (!className.toLowerCase().startsWith(prefix.toLowerCase())) continue;
+        const relativeClass = className.slice(prefix.length).replace(/\\/g, path.sep);
+        const autoloadDirs = Array.isArray(rawDirs) ? rawDirs : [rawDirs];
+        const candidates = autoloadDirs
+          .map((dir) => String(dir || "").trim())
+          .filter(Boolean)
+          .map((dir) => path.join(root, "vendor", packageName, dir, `${relativeClass}.php`));
+        if (candidates.length > 0 && candidates.every((candidate) => !fs.existsSync(candidate))) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function classifyNestedRunnerInfrastructureFailure(command, result, { projectRoot = null } = {}) {
   if (result?.status !== "failed") return result;
   const executable = commandExecutable(command);
-  if (!["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
-    return result;
-  }
   const output = [result.stdout, result.stderr]
     .map((value) => String(value || ""))
     .filter(Boolean)
     .join("\n");
-  const nestedExecutableMissing = (
+  const packageManager = ["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"]
+    .includes(executable);
+  const nestedExecutableMissing = packageManager && (
     /\bspawn\s+ENOENT\b/i.test(output)
     || /\bnode_modules missing\b/i.test(output)
     || /(?:^|\n)(?:\/bin\/)?(?:ba)?sh:\s*\d*:\s*[^\n]+:\s*(?:not found|command not found)\b/i.test(output)
     || /is not recognized as an internal or external command/i.test(output)
   );
-  if (!nestedExecutableMissing) return result;
+  const composerSymbolMissing = /(?:Class|Interface|Trait)\s+["'][^"']+["']\s+not found/i.test(output);
+  const composerAutoloadMissing = /Failed opening required [^\n]*vendor[\\/]autoload\.php/i.test(output)
+    || /failed to open stream[^\n]*vendor[\\/]autoload\.php/i.test(output);
+  const composerClassMissing = ["php", "php.exe"].includes(executable)
+    && (
+      (composerDependencyInstallMissing(projectRoot) && (composerSymbolMissing || composerAutoloadMissing))
+      || (composerSymbolMissing && composerLockedDependencyClassFileMissing(projectRoot, output))
+    );
+  if (!nestedExecutableMissing && !composerClassMissing) return result;
   return {
     ...result,
     status: "infrastructure_error",
@@ -390,7 +464,7 @@ function classifyPackageManagerTestPlanFailure(command, result) {
   };
 }
 
-function packageManagerTaskArgs(args = []) {
+function packageManagerTaskArgs(args = [], manager = "") {
   const remaining = [...args];
   // args arrive lowercased (the whole command is normalized before splitting),
   // so "-f" here matches pnpm's -F/--filter and "-c" matches -C/--dir. Both
@@ -401,10 +475,17 @@ function packageManagerTaskArgs(args = []) {
   const optionsWithValues = new Set([
     "--filter", "-f", "--dir", "-c", "--config-dir", "--store-dir",
     "--virtual-store-dir", "--workspace-dir", "--prefix", "--cwd",
+    "--workspace", "-w",
   ]);
   while (remaining.length > 0 && remaining[0].startsWith("-")) {
     const option = remaining.shift();
     if (!option.includes("=") && optionsWithValues.has(option)) remaining.shift();
+  }
+  // Yarn classic expresses workspace selection as a subcommand rather than
+  // an option (`yarn workspace <name> test`). The package selector is not the
+  // script name and must not turn an ordinary test into an operational gate.
+  if (manager === "yarn" && remaining[0] === "workspace" && remaining[1]) {
+    remaining.splice(0, 2);
   }
   return remaining;
 }
@@ -426,12 +507,27 @@ export function validatePlannerTestCommand(command) {
   }
 
   const executable = commandExecutable(executableCommand);
+  let directShellScript = null;
+  let directShellInterpreter = false;
+  try {
+    const parsedWords = parseCommandArguments(executableCommand);
+    directShellInterpreter = ["bash", "sh", "bash.exe", "sh.exe"].includes(executable);
+    directShellScript = directRepositoryShellTestScript(
+      directShellInterpreter ? parsedWords[1] : parsedWords[0],
+    );
+  } catch {
+    directShellScript = null;
+    directShellInterpreter = false;
+  }
   const normalized = executableCommand.toLowerCase();
   const words = normalized.match(/(?:"[^"]*"|'[^']*'|[^\s]+)/g) || [];
   const args = words.slice(1).map((word) => word.replace(/^['"]|['"]$/g, ""));
   const flagName = (arg) => String(arg || "").toLowerCase().split("=", 1)[0];
   if (args.some((arg) => MUTATING_TEST_FLAGS.has(flagName(arg)))) {
     return { ok: false, reason: "test_command_contains_mutating_output_flag" };
+  }
+  if (args.some((arg) => INTERACTIVE_TEST_FLAGS.has(flagName(arg)))) {
+    return { ok: false, reason: "test_command_contains_interactive_flag" };
   }
   const runnerSpecificMutatingFlags = executable === "go" || executable === "go.exe"
     ? new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"])
@@ -454,7 +550,8 @@ export function validatePlannerTestCommand(command) {
 
   let ok = false;
   if (["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
-    const taskArgs = packageManagerTaskArgs(args);
+    const manager = executable.replace(/\.(?:cmd|exe)$/i, "");
+    const taskArgs = packageManagerTaskArgs(args, manager);
     ok = safeTaskPattern.test(taskArgs[0] || "")
       || (taskArgs[0] === "run" && safeTaskPattern.test(taskArgs[1] || ""));
   } else if (["node", "node.exe"].includes(executable)) {
@@ -485,7 +582,11 @@ export function validatePlannerTestCommand(command) {
       || /(?:^|[/\\])(?:run[-_.])?(?:checks?|verify|lint|typecheck|spec)(?:[-_.][^/\\]*)?\.php$/.test(arg)
       || (/(?:^|[/\\])tests?[/\\][^\s]*\.php$/.test(arg)
         && !/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(arg))
-    ));
+    )) || (
+      /\.php$/.test(args[0] || "")
+      && args.length === 2
+      && args[1] === "--validate"
+    );
   } else if (["composer", "composer.bat"].includes(executable)) {
     ok = args[0] === "test" || (args[0] === "run" && /^(?:test|check)(?::|$)/.test(args[1] || ""));
   } else if (["bundle", "bundle.bat"].includes(executable)) {
@@ -494,6 +595,11 @@ export function validatePlannerTestCommand(command) {
     ok = executable.startsWith("rspec")
       || executable.startsWith("ctest")
       || args.some((arg) => /^(?:test|tests|check|spec)$/.test(arg));
+  } else if (directShellScript) {
+    // Repository-owned executable test wrappers are equivalent to accepted
+    // package/manifest scripts. The repository-aware validation pass below
+    // proves the exact path is a regular executable file before it is frozen.
+    ok = true;
   }
   return ok
     ? {
@@ -501,6 +607,10 @@ export function validatePlannerTestCommand(command) {
         reason: null,
         execution_command: executableCommand,
         cwd_relative: invocation.cwd_relative,
+        ...(directShellScript ? {
+          direct_script_relative: directShellScript,
+          direct_script_interpreter: directShellInterpreter,
+        } : {}),
       }
     : { ok: false, reason: `unrecognized_test_runner:${executable || "missing"}` };
 }
@@ -522,6 +632,8 @@ function packageManagerScriptInvocation(command) {
   const args = words.slice(1);
   let cwdRelative = invocation.cwd_relative;
   let workspaceScoped = false;
+  let workspaceSelector = null;
+  let allWorkspaces = false;
   const cwdFlags = manager === "npm"
     ? new Set(["--prefix"])
     : manager === "yarn"
@@ -547,17 +659,34 @@ function packageManagerScriptInvocation(command) {
     }
     // Workspace/filter/config flags do not change the manifest root. Skip
     // their values so they cannot be mistaken for a script name.
-    if (["--filter", "-f", "--config-dir", "--store-dir", "--virtual-store-dir", "--workspace-dir"].includes(lower)) {
-      if (["--filter", "-f"].includes(lower)) workspaceScoped = true;
+    if (["--filter", "-f", "--workspace", "-w", "--config-dir", "--store-dir", "--virtual-store-dir", "--workspace-dir"].includes(lower)) {
+      if (["--filter", "-f", "--workspace", "-w"].includes(lower)) {
+        workspaceScoped = true;
+        workspaceSelector = String(args[index + 1] || "").trim() || null;
+      }
       if (!arg.includes("=")) index++;
       continue;
     }
-    if (lower.startsWith("--filter=") || lower.startsWith("-f=")) {
+    if (lower.startsWith("--filter=") || lower.startsWith("-f=") || lower.startsWith("--workspace=") || lower.startsWith("-w=")) {
       workspaceScoped = true;
+      workspaceSelector = String(arg.slice(arg.indexOf("=") + 1) || "").trim() || null;
+      continue;
+    }
+    if (
+      (manager === "npm" && ["--workspaces", "--ws"].includes(lower))
+      || (manager === "pnpm" && ["--recursive", "-r"].includes(lower))
+    ) {
+      workspaceScoped = true;
+      allWorkspaces = true;
       continue;
     }
     if (lower.startsWith("-")) continue;
     taskArgs.push(arg);
+  }
+  if (manager === "yarn" && String(taskArgs[0] || "").toLowerCase() === "workspace" && taskArgs[1]) {
+    workspaceScoped = true;
+    workspaceSelector = String(taskArgs[1]).trim() || null;
+    taskArgs.splice(0, 2);
   }
   const first = String(taskArgs[0] || "");
   const script = first.toLowerCase() === "run"
@@ -568,13 +697,217 @@ function packageManagerScriptInvocation(command) {
     cwd_relative: cwdRelative || null,
     script: script || null,
     workspace_scoped: workspaceScoped,
+    workspace_selector: workspaceSelector,
+    all_workspaces: allWorkspaces,
+    if_present: args.some((arg) => String(arg).toLowerCase() === "--if-present"),
     built_in: manager === "bun" && script === "test",
   };
+}
+
+function workspacePatterns(projectRoot, rootManifest = {}) {
+  const declared = Array.isArray(rootManifest.workspaces)
+    ? rootManifest.workspaces
+    : Array.isArray(rootManifest.workspaces?.packages)
+      ? rootManifest.workspaces.packages
+      : [];
+  const patterns = declared.map((value) => String(value || "").trim()).filter(Boolean);
+  const pnpmWorkspacePath = path.join(projectRoot, "pnpm-workspace.yaml");
+  if (fs.existsSync(pnpmWorkspacePath)) {
+    try {
+      const source = fs.readFileSync(pnpmWorkspacePath, "utf8");
+      for (const match of source.matchAll(/^\s*-\s*['"]?([^'"#\r\n]+?)['"]?\s*(?:#.*)?$/gm)) {
+        const value = String(match[1] || "").trim();
+        if (value) patterns.push(value);
+      }
+    } catch {
+      // The root package manifest remains usable if optional pnpm metadata is unreadable.
+    }
+  }
+  return [...new Set(patterns)];
+}
+
+function declaredWorkspaceManifests(projectRoot, rootManifest = {}, { limit = 100 } = {}) {
+  const root = path.resolve(projectRoot);
+  const manifestPaths = [];
+  const addManifest = (candidate) => {
+    if (manifestPaths.length >= limit) return;
+    const resolved = path.resolve(root, candidate);
+    if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) return;
+    const manifestPath = path.join(resolved, "package.json");
+    try {
+      const stat = fs.lstatSync(manifestPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return;
+    } catch {
+      return;
+    }
+    manifestPaths.push(manifestPath);
+  };
+
+  for (const rawPattern of workspacePatterns(root, rootManifest)) {
+    if (manifestPaths.length >= limit) break;
+    const pattern = String(rawPattern || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+    if (!pattern || pattern.startsWith("/") || pattern.split("/").includes("..")) continue;
+    if (!pattern.includes("*")) {
+      addManifest(pattern);
+      continue;
+    }
+    // Resolve the common, deterministic `base/*` workspace form. Complex
+    // glob semantics stay with the package manager and are not guessed here.
+    if (!pattern.endsWith("/*") || pattern.slice(0, -2).includes("*")) continue;
+    const base = path.resolve(root, pattern.slice(0, -2));
+    if (base === root || !base.startsWith(`${root}${path.sep}`)) continue;
+    let entries = [];
+    try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { entries = []; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || entry.isSymbolicLink?.()) continue;
+      addManifest(path.join(pattern.slice(0, -2), entry.name));
+    }
+  }
+
+  return [...new Set(manifestPaths)].map((manifestPath) => {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      return {
+        manifest,
+        manifest_path: manifestPath,
+        relative_dir: path.relative(root, path.dirname(manifestPath)).replace(/\\/g, "/"),
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+function workspaceScriptValidation(projectRoot, rootManifest, invocation) {
+  const workspaces = declaredWorkspaceManifests(projectRoot, rootManifest);
+  if (workspaces.length === 0) return { ok: false, reason: "test_workspace_missing" };
+  const selector = String(invocation.workspace_selector || "").trim().replace(/^\.\//, "").replace(/\/$/, "");
+  const selectorIsExact = selector && !/[*!?[\]{}]/.test(selector) && !selector.includes("...");
+  const selected = selectorIsExact
+    ? workspaces.filter((entry) => entry.manifest?.name === selector || entry.relative_dir === selector)
+    : workspaces;
+  if (selected.length === 0) return { ok: false, reason: `test_workspace_missing:${selector || "unknown"}` };
+  const withScript = selected.filter((entry) => typeof entry.manifest?.scripts?.[invocation.script] === "string");
+  if (withScript.length === 0) return { ok: false, reason: `test_script_missing:${invocation.script || "unknown"}` };
+  if (
+    invocation.manager === "npm"
+    && invocation.all_workspaces
+    && !invocation.if_present
+    && withScript.length !== selected.length
+  ) {
+    const missing = selected.find((entry) => typeof entry.manifest?.scripts?.[invocation.script] !== "string");
+    return { ok: false, reason: `test_script_missing_in_workspace:${missing?.relative_dir || "unknown"}` };
+  }
+  return {
+    ok: true,
+    workspace_manifest_relative: path.relative(projectRoot, withScript[0].manifest_path).replace(/\\/g, "/"),
+    script_definitions: withScript.map((entry) => ({
+      script: invocation.script,
+      scripts: entry.manifest.scripts,
+    })),
+  };
+}
+
+function referencedPackageScripts(command, scripts = {}) {
+  let words;
+  try { words = parseCommandArguments(command); } catch { return []; }
+  const references = [];
+  const separators = new Set(["&&", "||", ";", "|", "&"]);
+  for (let index = 0; index < words.length; index++) {
+    const executable = commandExecutable(words[index]);
+    if (!["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"].includes(executable)) {
+      continue;
+    }
+    const manager = executable.replace(/\.(?:cmd|exe)$/i, "");
+    const args = [];
+    for (let cursor = index + 1; cursor < words.length; cursor++) {
+      if (separators.has(words[cursor])) break;
+      args.push(String(words[cursor]).toLowerCase());
+    }
+    const taskArgs = packageManagerTaskArgs(args, manager);
+    const first = String(taskArgs[0] || "");
+    const script = (["run", "run-script"].includes(first)
+      ? String(taskArgs[1] || "")
+      : first).replace(/[;&|]+$/u, "");
+    if (script && typeof scripts?.[script] === "string") references.push(script);
+  }
+  return [...new Set(references)];
+}
+
+function declaredScriptValidation(definitions = []) {
+  const validateCommand = (command) => {
+    let words;
+    try { words = parseCommandArguments(command); } catch { words = String(command || "").split(/\s+/); }
+    const flags = words
+      .map((word) => String(word || "").toLowerCase().split("=", 1)[0].replace(/[;&|]+$/u, ""))
+      .filter((word) => word.startsWith("-"));
+    if (flags.some((flag) => MUTATING_TEST_FLAGS.has(flag))) {
+      return { ok: false, reason: "test_script_contains_mutating_output_flag" };
+    }
+    if (flags.some((flag) => INTERACTIVE_TEST_FLAGS.has(flag))) {
+      return { ok: false, reason: "test_script_contains_interactive_flag" };
+    }
+    return { ok: true };
+  };
+
+  for (const definition of definitions) {
+    const scripts = definition?.scripts && typeof definition.scripts === "object"
+      ? definition.scripts
+      : {};
+    const pending = [String(definition?.script || "")];
+    const visited = new Set();
+    while (pending.length > 0) {
+      const script = pending.shift();
+      if (!script || visited.has(script)) continue;
+      visited.add(script);
+      for (const candidate of [`pre${script}`, script, `post${script}`]) {
+        const command = scripts[candidate];
+        if (typeof command !== "string") continue;
+        const validation = validateCommand(command);
+        if (!validation.ok) return validation;
+        for (const nested of referencedPackageScripts(command, scripts)) {
+          if (!visited.has(nested)) pending.push(nested);
+        }
+      }
+    }
+  }
+  return { ok: true };
 }
 
 export function validatePlannerTestCommandForRepository(command, cwd) {
   const shape = validatePlannerTestCommand(command);
   if (!shape.ok) return shape;
+  if (shape.direct_script_relative) {
+    const projectRoot = path.resolve(cwd);
+    const root = shape.cwd_relative
+      ? path.resolve(projectRoot, shape.cwd_relative)
+      : projectRoot;
+    if (root !== projectRoot && !root.startsWith(`${projectRoot}${path.sep}`)) {
+      return { ok: false, reason: "test_command_contains_unsafe_working_directory" };
+    }
+    const scriptPath = path.resolve(root, shape.direct_script_relative);
+    if (scriptPath !== projectRoot && !scriptPath.startsWith(`${projectRoot}${path.sep}`)) {
+      return { ok: false, reason: "test_command_contains_unsafe_path" };
+    }
+    let stat;
+    try {
+      stat = fs.lstatSync(scriptPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return { ok: false, reason: "test_script_missing" };
+      return { ok: false, reason: "test_script_unreadable" };
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      return { ok: false, reason: "test_script_not_regular" };
+    }
+    if (!shape.direct_script_interpreter && process.platform !== "win32" && (stat.mode & 0o111) === 0) {
+      return { ok: false, reason: "test_script_not_executable" };
+    }
+    return {
+      ...shape,
+      repository_validated: true,
+      script_relative: path.relative(projectRoot, scriptPath).replace(/\\/g, "/"),
+    };
+  }
   const packageInvocation = packageManagerScriptInvocation(command);
   if (!packageInvocation) return shape;
   if (packageInvocation.invalid) return { ok: false, reason: packageInvocation.invalid };
@@ -597,14 +930,25 @@ export function validatePlannerTestCommandForRepository(command, cwd) {
     return { ok: false, reason: "test_manifest_invalid" };
   }
   const script = packageInvocation.script;
-  if (!packageInvocation.workspace_scoped && (!script || typeof manifest?.scripts?.[script] !== "string")) {
+  const workspaceValidation = packageInvocation.workspace_scoped
+    ? workspaceScriptValidation(projectRoot, manifest, packageInvocation)
+    : null;
+  if (workspaceValidation && !workspaceValidation.ok) return workspaceValidation;
+  if (!workspaceValidation && (!script || typeof manifest?.scripts?.[script] !== "string")) {
     return { ok: false, reason: `test_script_missing:${script || "unknown"}` };
   }
+  const scriptValidation = declaredScriptValidation(
+    workspaceValidation?.script_definitions || [{ script, scripts: manifest.scripts }],
+  );
+  if (!scriptValidation.ok) return scriptValidation;
   return {
     ...shape,
     repository_validated: true,
     manifest_relative: path.relative(projectRoot, manifestPath).replace(/\\/g, "/"),
     script,
+    ...(workspaceValidation?.workspace_manifest_relative ? {
+      workspace_manifest_relative: workspaceValidation.workspace_manifest_relative,
+    } : {}),
   };
 }
 
@@ -781,16 +1125,6 @@ async function isAncestorCommit(cwd, ancestor, descendant) {
   }
 }
 
-async function restoreGitHead(cwd, { commit, headRef } = {}) {
-  if (!commit) throw new Error("cannot restore test-mutated Git HEAD without the original commit");
-  if (headRef) {
-    await gitExecAsync(["checkout", "--force", headRef], cwd);
-  } else {
-    await gitExecAsync(["checkout", "--detach", "--force", commit], cwd);
-  }
-  await gitExecAsync(["reset", "--hard", commit], cwd);
-}
-
 async function porcelain(cwd) {
   return String(await gitExecAsync(
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -937,6 +1271,7 @@ async function executeReceipt({
   const result = classifyNestedRunnerInfrastructureFailure(
     executionCommand,
     plannerClassifiedResult,
+    { projectRoot: cwd },
   );
   const after = await porcelain(cwd);
   const afterCommit = await currentCommit(cwd);
@@ -953,11 +1288,13 @@ async function executeReceipt({
         }
         await cleanupWorktree();
       }
+      // A WI worktree may host disjoint sibling jobs. If one of those jobs
+      // commits while this test is running, resetting to the captured HEAD
+      // would erase valid sibling progress. A safe test is not authorized to
+      // move HEAD either, so fail as infrastructure and leave the newer branch
+      // state intact; the scheduler can retry once the worktree settles.
       if (headChanged) {
-        await restoreGitHead(cwd, {
-          commit: actualCommit,
-          headRef: originalHeadRef,
-        });
+        throw new Error("worktree HEAD changed during test; refusing to reset possible concurrent progress");
       }
       const [cleaned, restoredCommit, restoredHeadRef] = await Promise.all([
         porcelain(cwd),
@@ -1012,6 +1349,37 @@ async function executeReceipt({
   return receipt;
 }
 
+async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
+  if (receipt?.reason !== "test_task_dependency_unavailable"
+    || typeof repairDependencies !== "function") {
+    return receipt;
+  }
+  let repair = null;
+  try {
+    repair = await repairDependencies(receipt);
+  } catch (error) {
+    repair = { ok: false, error: error?.message || String(error) };
+  }
+  if (repair?.ok !== true) {
+    return {
+      ...receipt,
+      dependency_repair: {
+        ok: false,
+        status: repair?.status || null,
+        error: repair?.error || repair?.message || null,
+      },
+    };
+  }
+  const repairedReceipt = await rerun();
+  return {
+    ...repairedReceipt,
+    dependency_repair: {
+      ok: true,
+      status: repair.status || "ok",
+    },
+  };
+}
+
 export async function ensurePreDevelopmentTestBaseline({
   job,
   payload,
@@ -1047,46 +1415,17 @@ export async function ensurePreDevelopmentTestBaseline({
     timeoutMs,
     cleanupWorktree,
   });
-  if (receipt?.reason !== "test_task_dependency_unavailable"
-    || typeof repairDependencies !== "function") {
-    return receipt;
-  }
-
-  let repair = null;
-  try {
-    repair = await repairDependencies(receipt);
-  } catch (error) {
-    repair = { ok: false, error: error?.message || String(error) };
-  }
-  if (repair?.ok !== true) {
-    return {
-      ...receipt,
-      dependency_repair: {
-        ok: false,
-        status: repair?.status || null,
-        error: repair?.error || repair?.message || null,
-      },
-    };
-  }
-
   // The first receipt remains an honest record of the unavailable toolchain.
   // Re-run at the same commit after repair so the frozen, reusable baseline is
   // the actual repository result rather than an infrastructure failure.
-  const repairedReceipt = await executeReceipt({
+  return retryAfterDependencyRepair(receipt, repairDependencies, () => executeReceipt({
     job,
     plan,
     phase: "baseline",
     cwd,
     timeoutMs,
     cleanupWorktree,
-  });
-  return {
-    ...repairedReceipt,
-    dependency_repair: {
-      ok: true,
-      status: repair.status || "ok",
-    },
-  };
+  }));
 }
 
 export async function ensurePostChangeTestReceipt({
@@ -1097,6 +1436,7 @@ export async function ensurePostChangeTestReceipt({
   attemptId = null,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   cleanupWorktree = null,
+  repairDependencies = null,
 } = {}) {
   if (!cwd) return null;
   const baseline = findFrozenTestBaseline(job?.id);
@@ -1113,7 +1453,7 @@ export async function ensurePostChangeTestReceipt({
       reused: true,
     };
   }
-  const postChange = await executeReceipt({
+  const firstPostChange = await executeReceipt({
     job,
     plan,
     phase: "post_change",
@@ -1123,6 +1463,20 @@ export async function ensurePostChangeTestReceipt({
     timeoutMs,
     cleanupWorktree,
   });
+  const postChange = await retryAfterDependencyRepair(
+    firstPostChange,
+    repairDependencies,
+    () => executeReceipt({
+      job,
+      plan,
+      phase: "post_change",
+      cwd,
+      commitHash: assessedCommit,
+      attemptId,
+      timeoutMs,
+      cleanupWorktree,
+    }),
+  );
   return {
     baseline,
     post_change: postChange,

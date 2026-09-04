@@ -4,6 +4,7 @@ import { stripAnsi, fit } from "../../functions/display/helpers/formatters.js";
 import { formatDuration } from "../../../../shared/format/functions/units.js";
 import {
   jobIsBackgroundAtlasWarm,
+  reviewVisibleJobs,
   workItemDisplayStatus,
   computeJobProgressStats,
   jobReportStatus,
@@ -83,7 +84,7 @@ export class DisplayStatusRenderer {
     try {
       // Only count jobs from visible work items (not complete/canceled)
       const { workItems, jobs } = this._getQueueData();
-      const normalJobs = jobs.filter((job) => !jobIsBackgroundAtlasWarm(job));
+      const normalJobs = reviewVisibleJobs(jobs);
       const visibleWiIds = new Set();
       for (const wi of workItems) {
         const wiJobs = normalJobs.filter(j => j.work_item_id === wi.id);

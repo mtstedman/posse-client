@@ -65,6 +65,13 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     const pushBranch = pushBranchInfo.branch;
+    const pushHeadHash = (() => {
+      try {
+        return gitExec(["rev-parse", pushBranch], projectDir, { nativeParity }).trim() || null;
+      } catch {
+        return null;
+      }
+    })();
     const pushBranchWorkItem = workItemForBranch(pushBranch);
     const pushBranchRemote = (() => {
       try {
@@ -116,6 +123,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       mergedCount,
       pushBranchInfo,
       pushBranch,
+      pushHeadHash,
       pushBranchWorkItem: pushBranchWorkItem ? {
         wiId: pushBranchWorkItem.id,
         title: pushBranchWorkItem.title,
@@ -372,10 +380,24 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       console.log(`  ${C.dim}Push gate not created: ${err?.message || err}${C.reset}`);
     }
 
+    if (pushGate.reason === "previously_declined") {
+      console.log(`  ${C.dim}Push was already declined for this exact ${pushBranch} HEAD; a new commit will create a new offer.${C.reset}`);
+      console.log("");
+      return;
+    }
+    if (pushGate.reused === true) {
+      console.log(`  ${C.dim}The existing push offer is still pending for this exact ${pushBranch} HEAD.${C.reset}`);
+      console.log("");
+      return;
+    }
+
     // Headless/explicit batch mode: never prompt. The gate above carries the
     // offer for the app or a later terminal session.
     if (!process.stdin.isTTY || nonInteractive) {
-      console.log(`  ${C.dim}Push offer available \u2014 answer from the Posse app, or run: git push${C.reset}`);
+      const detail = pushGate.ok
+        ? "Push offer available \u2014 answer from the Posse app, or run: git push"
+        : `Push offer could not be persisted (${pushGate.reason || "unknown"}); run: git push`;
+      console.log(`  ${C.dim}${detail}${C.reset}`);
       console.log("");
       return;
     }

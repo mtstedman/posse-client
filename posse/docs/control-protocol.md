@@ -476,7 +476,8 @@ additive `run` field on the result (`run.start`-shaped). This applies to
 ```jsonc
 // args
 {
-  "job_id": 9821                                // plan approval gate job
+  "job_id": 9821,                               // exact plan approval gate job
+  "gate_generation": 2                         // exact generation shown by the gate identity
 }
 
 // result
@@ -489,6 +490,7 @@ additive `run` field on the result (`run.start`-shaped). This applies to
 // args
 {
   "job_id": 9821,                               // plan approval gate job
+  "gate_generation": 2,                        // exact generation shown by the gate identity
   "feedback": "split the migration and UI changes", // optional
   "replan": true                                // optional
 }
@@ -496,6 +498,10 @@ additive `run` field on the result (`run.start`-shaped). This applies to
 // result
 {}
 ```
+
+Both commands require `job_id` and `gate_generation`. A work-item ID is not an
+approval identity: the current gate may have been revised or replaced since a
+client rendered it. Commands carrying an older generation fail closed.
 
 ### `review.approve`
 

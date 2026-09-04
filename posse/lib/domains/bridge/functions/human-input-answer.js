@@ -104,7 +104,16 @@ function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS
     WHERE id = ?
       AND job_type = 'human_input'
       AND status IN ('queued', 'waiting_on_human')
-      AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)
+      AND (
+        lease_token IS NULL
+        OR lease_expires_at IS NULL
+        OR julianday(lease_expires_at) IS NULL
+        OR julianday(lease_expires_at) < julianday(?)
+      )
+      AND EXISTS (
+        SELECT 1 FROM human_gates hg
+        WHERE hg.gate_job_id = jobs.id AND hg.gate_state = 'open'
+      )
   `).run(owner, leaseToken, expires, ts, jobId, ts);
   if (result.changes === 0) return null;
   return { leaseToken, job: getJob(jobId) };
@@ -124,6 +133,26 @@ export async function answerHumanInput(jobId, args = {}, {
 
   const payload = parseJobPayload(current);
   const contract = getHumanGate(id);
+  if (contract?.gate_state === "resolved") {
+    return {
+      ok: false,
+      reason: "gate_already_resolved",
+      job_id: id,
+      status: current.status,
+      gate_state: contract.gate_state,
+      work_item_id: current.work_item_id,
+    };
+  }
+  if (contract?.gate_state === "superseded") {
+    return {
+      ok: false,
+      reason: "gate_no_longer_applicable",
+      job_id: id,
+      status: current.status,
+      gate_state: contract.gate_state,
+      work_item_id: current.work_item_id,
+    };
+  }
   if (
     args.gate_generation != null
     && Number(args.gate_generation) !== Number(contract?.generation || 1)

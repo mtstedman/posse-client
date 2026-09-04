@@ -53,9 +53,14 @@ export function buildScopePlausibilityWarning(packet = {}) {
   if (!["dev", "fix"].includes(packet?.job_type) || taskMode !== "code") return null;
   const filesToModify = Array.isArray(packet.files_to_modify) ? packet.files_to_modify : [];
   const filesToCreate = Array.isArray(packet.files_to_create) ? packet.files_to_create : [];
+  const filesToDelete = Array.isArray(packet.files_to_delete) ? packet.files_to_delete : [];
   const createRoots = Array.isArray(packet.create_roots) ? packet.create_roots : [];
-  const scopeCount = filesToModify.length + filesToCreate.length + createRoots.length;
-  if (scopeCount === 0 || scopeCount > 2 || createRoots.includes(".")) return null;
+  const scopeCount = filesToModify.length + filesToCreate.length + filesToDelete.length + createRoots.length;
+  // The planner already recommends splitting above eight exact paths. Keep
+  // the warning active throughout that normal task range; the live incident
+  // that prompted this guard began with five paths and still discovered four
+  // more one at a time.
+  if (scopeCount === 0 || scopeCount > 8 || createRoots.includes(".")) return null;
 
   const payload = packet?._raw_payload || {};
   const text = [
@@ -73,6 +78,7 @@ export function buildScopePlausibilityWarning(packet = {}) {
     "SCOPE PLAUSIBILITY WARNING:",
     `This task sounds broad, but writable scope is narrow (${scopeCount} path${scopeCount === 1 ? "" : "s"}).`,
     "Do not compensate by editing adjacent files outside scope.",
-    "If a required fix lives outside the listed writable paths, use FILE_REQUEST/MISSING_CONTEXT with exact files and why they are necessary.",
+    "Before editing, inspect the relevant dependencies and read-only references to identify every additional writable path you expect to need.",
+    "If scope is incomplete, call request_scope once with one requests[] batch containing every exact path and reason; do not trigger one approval per edit.",
   ].join("\n");
 }

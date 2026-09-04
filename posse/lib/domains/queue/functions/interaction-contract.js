@@ -1,6 +1,10 @@
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
 import { WORK_ITEM_ACTION_PROTOCOL } from "../../../catalog/bridge.js";
-import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import {
+  FAILED_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES_SQL,
+} from "../../../catalog/job.js";
 import {
   canonicalHumanGateAction,
   humanInputChoiceFromAnswer,
@@ -29,6 +33,7 @@ const MAX_FEEDBACK_SUMMARY_CHARS = 180;
 const MAX_FEEDBACK_DETAIL_CHARS = 360;
 const MAX_NUDGE_BODY_CHARS = 4000;
 const MAX_ACTION_ID_BYTES = 128;
+const DIRECT_ACTION_RESERVATION_STALE_MS = 30 * 60 * 1000;
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
@@ -38,6 +43,9 @@ const CURRENT_GATE_STATUSES = Object.freeze([
 ]);
 const CURRENT_GATE_STATUSES_SQL = `(${CURRENT_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
 const LIVE_OWNER_DELIVERY_HANDLERS = new Set(["scope", "review", "human_input", "one_shot"]);
+const LIVE_OWNER_DELIVERY_HANDLERS_SQL = [...LIVE_OWNER_DELIVERY_HANDLERS]
+  .map((handler) => `'${handler}'`)
+  .join(",");
 const FEEDBACK_PHASES = new Set([
   "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
 ]);
@@ -51,13 +59,19 @@ const REVIEW_KIND_BY_TYPE = new Map([
   ["replan_limit", "assessment_review"],
   ["assessment_transport_error", "assessment_transport_recovery"],
   ["assessment_retry_limit", "assessment_retry_limit"],
+  ["unexecuted_replan_limit", "unexecuted_replan_recovery"],
   ["blocked_recovery", "blocked_recovery"],
   ["partial_work_recovery", "partial_work_recovery"],
   ["dead_letter_recovery", "dead_letter_recovery"],
   ["stall_exhausted_recovery", "dead_letter_recovery"],
-  ["research_dead_letter_recovery", "pipeline_head_recovery"],
-  ["oneshot_dead_letter_recovery", "pipeline_head_recovery"],
+  ["research_dead_letter_recovery", "dead_letter_recovery"],
+  ["oneshot_dead_letter_recovery", "dead_letter_recovery"],
+  ["artifact_routing_admin", "artifact_routing_admin"],
   ["scope_expansion_request", "file_scope_approval"],
+]);
+const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
+  "research_dead_letter_recovery",
+  "oneshot_dead_letter_recovery",
 ]);
 
 const HANDLER_BY_KIND = new Map([
@@ -66,10 +80,12 @@ const HANDLER_BY_KIND = new Map([
   ["assessment_review", "review"],
   ["assessment_transport_recovery", "review"],
   ["assessment_retry_limit", "review"],
+  ["unexecuted_replan_recovery", "review"],
   ["pipeline_head_recovery", "review"],
   ["blocked_recovery", "human_input"],
   ["partial_work_recovery", "human_input"],
   ["dead_letter_recovery", "human_input"],
+  ["artifact_routing_admin", "human_input"],
   ["one_shot_file_scope", "one_shot"],
   ["push_offer", "git_push"],
 ]);
@@ -346,6 +362,11 @@ function choiceRecord(choiceId, overrides = {}) {
 }
 
 function typedKindForGate(payload) {
+  const reviewKind = REVIEW_KIND_BY_TYPE.get(String(payload?.review_type || ""));
+  // Older pipeline-head recovery rows persisted a question vocabulary that
+  // never matched their dead-letter runtime handler. Prefer the corrected
+  // review contract so those already-open gates become actionable too.
+  if (reviewKind === "dead_letter_recovery") return reviewKind;
   const explicit = String(payload?.question_kind || "").trim();
   if (Object.hasOwn(WORK_ITEM_QUESTION_CHOICE_IDS, explicit)) return explicit;
   if (payload?.subtype === "plan_approval") return "plan_approval";
@@ -354,7 +375,7 @@ function typedKindForGate(payload) {
     return "one_shot_file_scope";
   }
   if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) return "file_scope_approval";
-  return REVIEW_KIND_BY_TYPE.get(String(payload?.review_type || "")) || "legacy_unstructured";
+  return reviewKind || "legacy_unstructured";
 }
 
 function normalizedCandidateId(value) {
@@ -403,11 +424,23 @@ function gateChoiceRecords(kind, payload) {
       ? (WORK_ITEM_QUESTION_CHOICE_IDS[kind] || []).map((choiceId) => choiceRecord(choiceId))
       : [];
   }
-  if (!validChoiceEntries(kind, explicit)) return [];
+  if (!validChoiceEntries(kind, explicit)) {
+    if (
+      kind === "dead_letter_recovery"
+      && payload?.question_kind === "pipeline_head_recovery"
+      && LEGACY_PIPELINE_HEAD_REVIEW_TYPES.has(String(payload?.review_type || ""))
+    ) {
+      return WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery.map((choiceId) => choiceRecord(choiceId));
+    }
+    return [];
+  }
   return explicit.map((entry) => choiceRecord(choiceIdFromEntry(entry), entry));
 }
 
 function gateQuestionState(job) {
+  if (job?.gate_state === "resolving") return "pending";
+  if (job?.gate_state === "resolved") return "answered";
+  if (job?.gate_state === "superseded") return "closed";
   if (OPEN_GATE_STATUS_SET.has(job.status)) return "open";
   if (["running", "assessing"].includes(job.status)) return "pending";
   if (job.status === "succeeded") return "answered";
@@ -430,7 +463,7 @@ function gateQuestionGeneration(jobId) {
   return String(getHumanGate(jobId)?.generation || 1);
 }
 
-function hasPendingQuestionAction(db, questionId) {
+function hasPendingQuestionAction(db, questionId, generation = null) {
   return Boolean(db.prepare(`
     SELECT 1
     FROM agent_interactions
@@ -438,11 +471,15 @@ function hasPendingQuestionAction(db, questionId) {
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.state') IN ('reserved', 'delivered')
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.target.question_id') = ?
+      AND (
+        ? IS NULL
+        OR CAST(json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.descriptor.question_generation') AS TEXT) = ?
+      )
     LIMIT 1
-  `).get(questionId));
+  `).get(questionId, generation, generation));
 }
 
-function pendingQuestionAction(db, questionId) {
+function pendingQuestionAction(db, questionId, generation = null) {
   const row = db.prepare(`
     SELECT *
     FROM agent_interactions
@@ -450,22 +487,28 @@ function pendingQuestionAction(db, questionId) {
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.state') IN ('reserved', 'delivered')
       AND json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.target.question_id') = ?
+      AND (
+        ? IS NULL
+        OR CAST(json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.descriptor.question_generation') AS TEXT) = ?
+      )
     ORDER BY id ASC
     LIMIT 1
-  `).get(questionId);
+  `).get(questionId, generation, generation);
   return row ? { row, action: parseStoredAction(row) } : null;
 }
 
 function currentGateQuestionCount(db, workItemId, observedAt) {
   const rows = db.prepare(`
-    SELECT payload_json
-    FROM jobs
-    WHERE work_item_id = ? AND job_type = 'human_input'
-      AND status IN ${CURRENT_GATE_STATUSES_SQL}
+    SELECT j.payload_json
+    FROM jobs j
+    LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE j.work_item_id = ? AND j.job_type = 'human_input'
+      AND j.status IN ${CURRENT_GATE_STATUSES_SQL}
+      AND (hg.gate_job_id IS NULL OR hg.gate_state IN ('open','resolving'))
       AND (
-        json_extract(payload_json, '$.expires_at') IS NULL
-        OR julianday(json_extract(payload_json, '$.expires_at')) IS NULL
-        OR julianday(json_extract(payload_json, '$.expires_at')) > julianday(?)
+        json_extract(j.payload_json, '$.expires_at') IS NULL
+        OR julianday(json_extract(j.payload_json, '$.expires_at')) IS NULL
+        OR julianday(json_extract(j.payload_json, '$.expires_at')) > julianday(?)
       )
   `).all(workItemId, observedAt);
   return rows.reduce((count, row) => {
@@ -515,15 +558,18 @@ function answerForGate(db, jobId, questionIndex) {
 
 function projectGateQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS) {
   const jobs = db.prepare(`
-    SELECT * FROM jobs
-    WHERE work_item_id = ? AND job_type = 'human_input'
-      AND status IN ${CURRENT_GATE_STATUSES_SQL}
+    SELECT j.*, hg.gate_state
+    FROM jobs j
+    LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE j.work_item_id = ? AND j.job_type = 'human_input'
+      AND j.status IN ${CURRENT_GATE_STATUSES_SQL}
+      AND (hg.gate_job_id IS NULL OR hg.gate_state IN ('open','resolving'))
       AND (
-        json_extract(payload_json, '$.expires_at') IS NULL
-        OR julianday(json_extract(payload_json, '$.expires_at')) IS NULL
-        OR julianday(json_extract(payload_json, '$.expires_at')) > julianday(?)
+        json_extract(j.payload_json, '$.expires_at') IS NULL
+        OR julianday(json_extract(j.payload_json, '$.expires_at')) IS NULL
+        OR julianday(json_extract(j.payload_json, '$.expires_at')) > julianday(?)
       )
-    ORDER BY created_at ASC, id ASC
+    ORDER BY j.created_at ASC, j.id ASC
     LIMIT ?
   `).all(workItemId, observedAt, limit);
   const out = [];
@@ -540,10 +586,11 @@ function projectGateQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS)
       : rawQuestions;
     for (let index = 0; index < questions.length && out.length < limit; index += 1) {
       const questionId = `gate:${job.id}:${index}`;
+      const generation = gateQuestionGeneration(job.id);
       const ownerState = observedGateQuestionState(job, observedAt, {
         allowLiveOwnerDelivery: liveOwnerDeliveryHandler(handler),
       });
-      const state = hasPendingQuestionAction(db, questionId) ? "pending" : ownerState;
+      const state = hasPendingQuestionAction(db, questionId, generation) ? "pending" : ownerState;
       const actionable = state === "open" && choices.length > 0 && handler != null;
       out.push({
         question_id: questionId,
@@ -558,7 +605,7 @@ function projectGateQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS)
         state,
         opened_at: job.created_at,
         expires_at: payload.expires_at || null,
-        generation: gateQuestionGeneration(job.id),
+        generation,
         choices: actionable || state !== "open" ? choices : [],
         capability: actionable ? QUESTION_CAPABILITY : null,
         answer: answerForGate(db, job.id, index),
@@ -767,6 +814,8 @@ function locateQuestion(db, { workItemId, jobId, questionId } = {}) {
     if (positiveId(gateMatch[1]) !== jobId) return null;
     const job = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(jobId);
     if (!job || job.work_item_id !== workItemId || job.job_type !== "human_input") return null;
+    const contract = getHumanGate(job.id);
+    if (contract?.gate_state) job.gate_state = contract.gate_state;
     const payload = parseJsonObject(job.payload_json);
     const rawQuestions = Array.isArray(payload.questions) && payload.questions.length > 0
       ? payload.questions : [payload.prompt || job.title || "Human input requested"];
@@ -820,7 +869,12 @@ function locateQuestion(db, { workItemId, jobId, questionId } = {}) {
 function questionStateAfterTransition(db, questionId, fallback = "pending") {
   const gateMatch = String(questionId).match(/^gate:([1-9]\d*):/);
   if (gateMatch) {
-    const job = db.prepare(`SELECT status, lease_token, lease_expires_at FROM jobs WHERE id = ?`).get(Number(gateMatch[1]));
+    const job = db.prepare(`
+      SELECT j.status, j.lease_token, j.lease_expires_at, hg.gate_state
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.id = ?
+    `).get(Number(gateMatch[1]));
     return job ? observedGateQuestionState(job, now()) : "closed";
   }
   const interactionId = interactionRowId(questionId);
@@ -866,7 +920,10 @@ function storedGitPushCompletion(db, action) {
 }
 
 function storedHumanGateCompletion(db, action) {
-  if (!liveOwnerDeliveryHandler(action?.handler)) return null;
+  // Push completion is proven by the exact remote/HEAD result below. Every
+  // other gate handler, including direct plan approval, can reconcile from
+  // the durable human_gates resolution written by a competing owner.
+  if (action?.handler === "git_push") return null;
   const jobId = positiveId(action.target?.job_id);
   if (!jobId) return { state: "closed", accepted: false, safeReasonCode: "question_not_found" };
   const row = db.prepare(`
@@ -877,6 +934,16 @@ function storedHumanGateCompletion(db, action) {
     WHERE j.id = ?
   `).get(jobId);
   if (!row) return { state: "closed", accepted: false, safeReasonCode: "question_not_found" };
+  if (
+    action?.descriptor?.question_generation
+    && String(action.descriptor.question_generation) !== String(row.generation || 1)
+  ) {
+    return {
+      state: gateQuestionState(row),
+      accepted: false,
+      safeReasonCode: "question_generation_changed",
+    };
+  }
   if (row.gate_state === "resolved") {
     const selected = canonicalHumanGateAction(
       action.descriptor?.owner_action || action.target?.choice_id,
@@ -981,6 +1048,10 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
   }
 
   const db = getDb();
+  // A prior direct plan/push resolver may have crashed after reserving this
+  // question. Reconcile before looking for competing actions so headless
+  // bridge-only deployments recover without an attended relay poll.
+  reconcileAbandonedHumanAnswerDeliveries();
   const reserved = runImmediateTransaction(db, () => {
     const existing = findActionById(db, actionId);
     if (existing) return reconcileReservedQuestionAction(db, existing, target, { actionId });
@@ -1027,7 +1098,7 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
         result_event_id: null,
       } };
     }
-    const competing = pendingQuestionAction(db, questionId);
+    const competing = pendingQuestionAction(db, questionId, generation);
     if (competing) {
       return { result: {
         ...baseActionResult({
@@ -1221,20 +1292,41 @@ export function listReservedHumanAnswerDeliveries({ limit = 32 } = {}) {
 export function reconcileAbandonedHumanAnswerDeliveries() {
   const db = getDb();
   return runImmediateTransaction(db, () => {
+    const observedAt = now();
+    const staleDirectCutoff = new Date(Date.now() - DIRECT_ACTION_RESERVATION_STALE_MS).toISOString();
     const rows = db.prepare(`
       SELECT ai.*
       FROM agent_interactions ai
-      JOIN jobs j ON j.id = ai.job_id
+      LEFT JOIN jobs j ON j.id = ai.job_id
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
       WHERE ai.kind = 'approval' AND ai.status = 'active'
         AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.action_kind') = 'question.answer'
-        AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'delivered'
+        AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') IN ('reserved','delivered')
         AND (
-          j.lease_token IS NULL
-          OR j.lease_expires_at IS NULL
-          OR julianday(j.lease_expires_at) <= julianday(?)
+          j.id IS NULL
+          OR j.status IN (${TERMINAL_JOB_STATUSES_SQL})
+          OR hg.gate_state IN ('resolved','superseded')
+          OR (
+            json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'delivered'
+            AND (
+              j.lease_token IS NULL
+              OR j.lease_expires_at IS NULL
+              OR julianday(j.lease_expires_at) IS NULL
+              OR julianday(j.lease_expires_at) <= julianday(?)
+            )
+          )
+          OR (
+            json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'
+            AND COALESCE(json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.handler'), '')
+              NOT IN (${LIVE_OWNER_DELIVERY_HANDLERS_SQL})
+            AND julianday(COALESCE(
+              json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.reserved_at'),
+              ai.created_at
+            )) <= julianday(?)
+          )
         )
       ORDER BY ai.id ASC
-    `).all(now());
+    `).all(observedAt, staleDirectCutoff);
     let reconciled = 0;
     for (const row of rows) {
       const action = parseStoredAction(row);
@@ -1243,7 +1335,56 @@ export function reconcileAbandonedHumanAnswerDeliveries() {
         row,
         action,
       }, action.target, { actionId: action.action_id });
-      if (outcome.replay?.outcome !== "pending") reconciled += 1;
+      if (outcome.replay?.outcome !== "pending") {
+        const fresh = db.prepare(`SELECT status, metadata_json FROM agent_interactions WHERE id = ?`).get(row.id);
+        const freshAction = parseStoredAction(fresh);
+        if (fresh?.status === "active" && freshAction?.state === "reserved") {
+          const result = {
+            ...baseActionResult({
+              actionId: action.action_id,
+              actionKind: "question.answer",
+              target: action.target,
+              outcome: "rejected",
+              observedAt,
+              safeReasonCode: "reservation_owner_lost",
+            }),
+            question_state: questionStateAfterTransition(
+              db,
+              action.target.question_id,
+              "open",
+            ),
+            result_event_id: null,
+          };
+          completeReservedAction(db, row.id, result);
+        }
+        reconciled += 1;
+        continue;
+      }
+
+      const reservedAtMs = Date.parse(action.reserved_at || row.created_at || "");
+      const staleDirectReservation = action.state === "reserved"
+        && !liveOwnerDeliveryHandler(action.handler)
+        && Number.isFinite(reservedAtMs)
+        && reservedAtMs <= Date.now() - DIRECT_ACTION_RESERVATION_STALE_MS;
+      if (!staleDirectReservation) continue;
+      const result = {
+        ...baseActionResult({
+          actionId: action.action_id,
+          actionKind: "question.answer",
+          target: action.target,
+          outcome: "rejected",
+          observedAt,
+          safeReasonCode: "reservation_owner_lost",
+        }),
+        question_state: questionStateAfterTransition(
+          db,
+          action.target.question_id,
+          "open",
+        ),
+        result_event_id: null,
+      };
+      completeReservedAction(db, row.id, result);
+      reconciled += 1;
     }
     return reconciled;
   });

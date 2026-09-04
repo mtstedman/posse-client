@@ -6,6 +6,7 @@ import {
   getWorkItem,
   incrementAndCreateAssessmentAttempt,
   isLeaseValid,
+  logEvent,
   setJobError,
   setAssessmentLifecycle,
   updateJobPayload,
@@ -23,6 +24,7 @@ import {
   isArtifactMode,
 } from "../../../artifacts/functions/index.js";
 import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
+import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
   scopedDeleteTargets as scopedDeleteTargetsFromModule,
@@ -73,6 +75,12 @@ import {
 } from "../../../queue/functions/sibling-locks.js";
 import { loadAssessmentSource } from "../../functions/execution/assessment-source.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
+import {
+  assessmentWorktreeDirtySummary,
+  inspectAssessmentWorktreeReadiness,
+} from "../../functions/helpers/assessment-worktree-readiness.js";
+import { ensureConfiguredVerification } from "../../functions/helpers/configured-verification.js";
+import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -268,6 +276,33 @@ export class AssessmentHandoffAdapter {
       return { handled: true };
     }
 
+    const readiness = assessmentSource.kind === "commit"
+      ? await inspectAssessmentWorktreeReadiness(wtPath)
+      : { ready: true };
+    if (!readiness.ready) {
+      const detail = assessmentWorktreeDirtySummary(readiness);
+      setAssessmentLifecycle(job.id, "implementation_complete");
+      worker.emit(
+        job.id,
+        `${C.dim}[assess-only] Deferred until the committed worktree is clean (${detail})${C.reset}`,
+      );
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.JOB_ASSESSMENT_DEFERRED_FOR_DIRTY_WORKTREE,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: "Deferred assess-only recovery before budget consumption because the worktree was not clean after barrier acquisition",
+        event_json: JSON.stringify({
+          dirty_count: readiness.dirty_count,
+          dirty_paths: readiness.dirty_paths.slice(0, 100),
+        }),
+      });
+      worker._releaseLease(job, leaseToken, "queued", {
+        readyAt: new Date(Date.now() + 2_000).toISOString(),
+      });
+      return { handled: true };
+    }
+
     const assessAttempt = incrementAndCreateAssessmentAttempt(
       job.id,
       leaseToken,
@@ -340,6 +375,12 @@ export class AssessmentHandoffAdapter {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
             })
           : null,
+        repairDependencies: wtPath
+          ? () => repairTestDependencies(worker, job, wtPath, {
+              signal: assessAc?.signal || null,
+              phase: "assessor",
+            })
+          : null,
       });
       const postReceipt = deterministicTestRun?.post_change || null;
       if (postReceipt) {
@@ -361,6 +402,19 @@ export class AssessmentHandoffAdapter {
         if (["infrastructure_error", "unavailable"].includes(postReceipt.status)) {
           throw new Error(`Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`);
         }
+      }
+      const configuredVerification = await ensureConfiguredVerification(worker, {
+        job,
+        attemptId: assessAttempt.attempt.id,
+        assessedCommitHash: assessmentSource.commitHash,
+        // Configured repository verification has the same root-relative
+        // contract in attached and recovery assessment paths. Artifact
+        // inspection may use output_root, but the verifier must not.
+        wtPath: wtPath || worker.projectDir,
+      });
+      if (configuredVerification.status === "failed") {
+        throw configuredVerification.error
+          || new Error(configuredVerification.message || "Pre-assessment hook failed");
       }
       let filesCommitted = [];
       let filesCommittedUnknown = false;

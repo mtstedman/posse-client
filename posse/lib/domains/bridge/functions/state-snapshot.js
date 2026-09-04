@@ -12,6 +12,7 @@ import {
   listWorkItems,
 } from "../../queue/functions/index.js";
 import {
+  isPushOfferJob,
   TERMINAL_JOB_STATUSES,
   TERMINAL_WORK_ITEM_STATUSES,
 } from "../../queue/functions/common.js";
@@ -21,6 +22,10 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { composeInstanceStatus } from "./instance-status.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
+import {
+  humanGateStateAllowsAnswer,
+  humanGateStateIsActive,
+} from "../../../catalog/human-input.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "./gate-contract.js";
 import { buildReviewBrief } from "./review-brief.js";
 
@@ -65,12 +70,16 @@ function finiteNumber(value, fallback = null) {
  * database row here: columns such as `source`, descriptions, metadata, and
  * future raw fields are intentionally outside the remote-control boundary.
  */
-export function projectBridgeWorkItem(row, activeJobs = 0) {
+export function projectBridgeWorkItem(row, activeJobs = 0, { hasOpenGate = null } = {}) {
   if (!row) return null;
+  const rawStatus = String(row.status || "");
+  const status = rawStatus === "waiting_on_human" && hasOpenGate === false
+    ? "running"
+    : rawStatus;
   return {
     id: finiteNumber(row.id, 0),
     title: boundedText(row.title, MAX_SUMMARY_CHARS) || "",
-    status: String(row.status || ""),
+    status,
     priority: String(row.priority || "normal"),
     active_job_count: Math.max(0, finiteNumber(activeJobs, 0)),
   };
@@ -92,6 +101,18 @@ export function projectBridgeJob(row) {
     provider: row.provider == null ? null : boundedText(row.provider, 200),
     model_name: row.model_name == null ? null : boundedText(row.model_name, 300),
   };
+}
+
+export function projectBridgeJobState(row) {
+  if (!row) return null;
+  let status = row.status;
+  if (row.job_type === "human_input" && !TERMINAL_JOB_STATUS_SET.has(status)) {
+    const gateState = humanGateContractState(row);
+    if (gateState === "resolving") status = "running";
+    else if (gateState === "resolved") status = "succeeded";
+    else if (gateState === "superseded") status = "canceled";
+  }
+  return projectBridgeJob(status === row.status ? row : { ...row, status });
 }
 
 /**
@@ -183,8 +204,27 @@ function normalizeLatestEvents(rows) {
     .map(projectBridgeEventRecord);
 }
 
+function humanGateContractState(job) {
+  if (job?.job_type !== "human_input") return null;
+  if (job.human_gate_state != null) return job.human_gate_state;
+  return getHumanGate(job.id)?.gate_state ?? null;
+}
+
+function isDurablyActiveJob(job) {
+  if (TERMINAL_JOB_STATUS_SET.has(job?.status)) return false;
+  if (job?.job_type !== "human_input") return true;
+  return humanGateStateIsActive(humanGateContractState(job));
+}
+
 function activeJobCount(jobs = []) {
-  return jobs.filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status)).length;
+  return jobs.filter((job) => isDurablyActiveJob(job) && !isPushOfferJob(job)).length;
+}
+
+export function projectBridgeWorkItemFromJobs(workItem, jobs = []) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  return projectBridgeWorkItem(workItem, activeJobCount(rows), {
+    hasOpenGate: rows.some((job) => !isPushOfferJob(job) && isOpenGateJob(job)),
+  });
 }
 
 function promptFromGatePayload(payload, fallback = null) {
@@ -267,6 +307,8 @@ export function normalizeGate(job) {
 
 function isOpenGateJob(job) {
   if (job?.job_type !== "human_input" || !OPEN_GATE_STATUSES.has(job.status)) return false;
+  const gateState = humanGateContractState(job);
+  if (!humanGateStateAllowsAnswer(gateState)) return false;
   const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
     ? job.payload
     : parseJobPayload(job);
@@ -275,7 +317,7 @@ function isOpenGateJob(job) {
 
 function summarizeWorkItem(wi) {
   const rawJobs = listJobsByWorkItem(wi.id);
-  return projectBridgeWorkItem(wi, activeJobCount(rawJobs));
+  return projectBridgeWorkItemFromJobs(wi, rawJobs);
 }
 
 export function listQueueState({ status = null, limit = DEFAULT_LIMIT } = {}) {
@@ -299,7 +341,7 @@ export function listJobsState({ work_item_id = null, workItemId = null, status =
   if (status && Array.isArray(status) && status.length === 0) rows = [];
   const capped = rows.slice(0, boundedLimit(limit));
   return {
-    jobs: capped.map(projectBridgeJob),
+    jobs: capped.map(projectBridgeJobState),
   };
 }
 
@@ -316,9 +358,9 @@ export function getWorkItemState(workItemId, { eventLimit = 50 } = {}) {
   const wi = getWorkItem(workItemId);
   if (!wi) return null;
   const rawJobs = listJobsByWorkItem(workItemId);
-  const jobs = rawJobs.map(projectBridgeJob);
+  const jobs = rawJobs.map(projectBridgeJobState);
   return {
-    work_item: projectBridgeWorkItem(wi, activeJobCount(rawJobs)),
+    work_item: projectBridgeWorkItemFromJobs(wi, rawJobs),
     jobs,
     open_gates: rawJobs.filter(isOpenGateJob).map(normalizeGate).filter(Boolean),
     events: getEventsByWorkItem(workItemId, boundedLimit(eventLimit, 50)).map(projectBridgeEventRecord),
@@ -328,7 +370,7 @@ export function getWorkItemState(workItemId, { eventLimit = 50 } = {}) {
 
 export function getJobState(jobId) {
   const job = getJob(jobId);
-  return projectBridgeJob(job);
+  return projectBridgeJobState(job);
 }
 
 export function tailEvents({ workItemId = null, sinceId = null, limit = DEFAULT_LIMIT } = {}) {
@@ -407,9 +449,12 @@ export function collectStateSnapshot({
 } = {}) {
   const capped = boundedLimit(limit);
   const workItems = listWorkItems().slice(0, capped).map(summarizeWorkItem);
-  const activeJobs = listJobs().filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status));
-  const jobs = activeJobs.slice(0, capped).map(projectBridgeJob);
-  const openGates = activeJobs.filter(isOpenGateJob).slice(0, capped).map(normalizeGate).filter(Boolean);
+  const durablyActiveJobs = listJobs().filter(isDurablyActiveJob);
+  const jobs = durablyActiveJobs
+    .filter((job) => !isPushOfferJob(job))
+    .slice(0, capped)
+    .map(projectBridgeJobState);
+  const openGates = durablyActiveJobs.filter(isOpenGateJob).slice(0, capped).map(normalizeGate).filter(Boolean);
   let instanceStatus = null;
   try {
     instanceStatus = composeInstanceStatus(getDb());

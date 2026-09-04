@@ -4,7 +4,12 @@ import { Worker as NodeWorker } from "worker_threads";
 import { gitExec, gitExecBuffer } from "../../git/functions/utils.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { UNMERGED_WORK_ITEM_MERGE_STATES } from "../../../catalog/work-item.js";
-import { ACTIVE_LEASE_STATUSES, FAILED_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../queue/functions/common.js";
+import {
+  ACTIVE_LEASE_STATUSES,
+  FAILED_JOB_STATUSES,
+  PARKED_JOB_STATUSES,
+  isPushOfferJob,
+} from "../../queue/functions/common.js";
 import { listWorkItems, listJobs } from "../../queue/functions/index.js";
 import { getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeRoot, normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv.js";
@@ -126,23 +131,61 @@ function _latestRecoverySnapshots(projectDir, limit = 5) {
 }
 
 function _recentHumanAnswers(jobs, limit = 5) {
-  return jobs
+  const candidates = jobs
     .filter((job) => job.job_type === "human_input" && job.status === "succeeded")
-    .sort((a, b) => String(b.updated_at || b.finished_at || "").localeCompare(String(a.updated_at || a.finished_at || "")))
+    .map((job) => ({
+      job,
+      payload: _safeJson(job.payload_json) || {},
+      result: _safeJson(job.result_json),
+    }))
+    .filter(({ payload }) => {
+      if (payload.review_type || ["plan_approval", "push_offer", "oneshot_scope_selection"].includes(payload.subtype)) {
+        return false;
+      }
+      if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) return false;
+      if (Array.isArray(payload.choices) && payload.choices.length > 0) return false;
+      return true;
+    });
+
+  // Older successful gates predate result_json persistence. Fetch their typed
+  // resolutions in one query so startup stays cheap even on a long-lived DB.
+  const missingIds = candidates.filter(({ result }) => !result).map(({ job }) => job.id);
+  const legacyResults = new Map();
+  for (let offset = 0; offset < missingIds.length; offset += 500) {
+    const chunk = missingIds.slice(offset, offset + 500);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = getDb().prepare(`
+      SELECT gate_job_id, resolution_payload_json
+      FROM human_gates
+      WHERE gate_state = 'resolved' AND gate_job_id IN (${placeholders})
+    `).all(...chunk);
+    for (const row of rows) legacyResults.set(row.gate_job_id, _safeJson(row.resolution_payload_json));
+  }
+
+  return candidates
+    .map(({ job, result }) => ({ job, result: result || legacyResults.get(job.id) || {} }))
+    .filter(({ result }) => (
+      result.unattended !== true
+      && !["ab_harness", "non_interactive_policy"].includes(String(result.source || ""))
+    ))
+    .sort((a, b) => String(b.job.updated_at || b.job.finished_at || "").localeCompare(String(a.job.updated_at || a.job.finished_at || "")))
     .slice(0, limit)
-    .map((job) => {
-      const result = _safeJson(job.result_json) || {};
+    .map(({ job, result }) => {
       const answers = Array.isArray(result.answers)
         ? result.answers
         : (result.answer ? [result.answer] : []);
-      const answer = answers[0];
+      const first = answers[0];
+      const answer = first && typeof first === "object" && !Array.isArray(first)
+        ? first.answer
+        : first;
       return {
         jobId: job.id,
         wiId: job.work_item_id,
         title: job.title,
-        answer: typeof answer === "string" ? answer.slice(0, 220) : JSON.stringify(answer || "").slice(0, 220),
+        answer: typeof answer === "string" ? answer.slice(0, 220) : JSON.stringify(answer ?? "").slice(0, 220),
       };
-    });
+    })
+    .filter((entry) => entry.answer.length > 0);
 }
 
 function _recentFailures(jobs, limit = 5) {
@@ -202,8 +245,12 @@ function _buildSummaryLines(items, formatter) {
 export function buildStartupDigest(projectDir) {
   const workItems = listWorkItems();
   const jobs = listJobs();
+  // Publication offers are durable out-of-band actions, not active work or
+  // human guidance. Feeding them into startup context makes a clean run look
+  // blocked and can displace the operator answers agents actually need.
+  const operationalJobs = jobs.filter((job) => !isPushOfferJob(job));
 
-  const blockedJobs = jobs
+  const blockedJobs = operationalJobs
     .filter((job) => PARKED_JOB_STATUSES.includes(job.status))
     .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
     .slice(0, 8);
@@ -212,8 +259,8 @@ export function buildStartupDigest(projectDir) {
     .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
     .slice(0, 8);
   const snapshots = _latestRecoverySnapshots(projectDir, 6);
-  const humanAnswers = _recentHumanAnswers(jobs, 6);
-  const failures = _recentFailures(jobs, 8);
+  const humanAnswers = _recentHumanAnswers(operationalJobs, 6);
+  const failures = _recentFailures(operationalJobs, 8);
   const pendingRecoveries = _pendingRecoveries(8);
   const clientProvenance = resolveClientProvenance();
 
@@ -227,7 +274,7 @@ export function buildStartupDigest(projectDir) {
     "",
     "## Current Status",
     `- Work items: ${workItems.length}`,
-    `- Active jobs: ${jobs.filter((job) => ["queued", ...ACTIVE_LEASE_STATUSES].includes(job.status)).length}`,
+    `- Active jobs: ${operationalJobs.filter((job) => ["queued", ...ACTIVE_LEASE_STATUSES].includes(job.status)).length}`,
     `- Blocked jobs: ${blockedJobs.length}`,
     `- Pending merges: ${pendingMerges.length}`,
     `- Dirty worktree snapshots: ${snapshots.length}`,

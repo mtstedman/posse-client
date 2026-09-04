@@ -33,8 +33,9 @@ import {
   updateJobPayload,
   refreshWorkItemStatus,
   getJob,
+  getHumanGate,
+  claimHeadlessHumanGateTimeout,
   getDependents,
-  removeDependency,
   getWorkItem,
   expireStaleSessionLeases,
   findPeerClaimConflict,
@@ -57,6 +58,7 @@ import {
   clearRuntimeStatus,
   clearPeerClaimDeferralsForJob,
   isBridgePresenceFresh,
+  isPushOfferJob,
   readRuntimeStatus,
   writeRuntimeStatus,
   waitForQueueStateChangeAfter,
@@ -209,12 +211,6 @@ function isAtlasBackgroundJob(job) {
 
 function isWaitingLanePreparationJob(job) {
   return job?.job_type === WAITING_LANE_JOB_TYPE;
-}
-
-function isPushOfferJob(job) {
-  return job?.job_type === "human_input"
-    && typeof job.payload_json === "string"
-    && job.payload_json.includes('"subtype":"push_offer"');
 }
 
 function atlasIndexingPauseEnabledFromEnv() {
@@ -1770,10 +1766,11 @@ export class Scheduler {
               isPushOfferJob,
               parseJobPayload,
               getJob,
+              getHumanGate,
+              claimHeadlessHumanGateTimeout,
               getDependents,
               updateJobStatus,
               supersedeHumanGate,
-              removeDependency,
               refreshWorkItemStatus,
               logEvent,
             },
@@ -1788,11 +1785,16 @@ export class Scheduler {
             eventTypes: EVENT_TYPES,
             eventActors: EVENT_ACTORS,
             deadlockTerminalStatuses: DEADLOCK_TERMINAL_STATUSES,
+            isRemoteOperatorPresent: isBridgePresenceFresh,
             queue: {
               hasJobs,
               listJobs,
               listJobsByWorkItem,
+              getJob,
+              getHumanGate,
+              runInTransaction: (fn) => runImmediateTransaction(getDb(), fn),
               updateJobStatus,
+              updateJobPayload,
               refreshWorkItemStatus,
               logEvent,
             },
@@ -1825,7 +1827,11 @@ export class Scheduler {
 
         const trackedStatusesForCloseout = ["queued", ...LOCK_HOLDING_JOB_STATUSES];
         const trackedJobsForCloseout = listJobs(trackedStatusesForCloseout)
-          .filter((job) => this._isJobInRunScope(job));
+          .filter((job) => this._isJobInRunScope(job))
+          // Publication offers survive run closeout for later Bridge/manual
+          // action, but they are not executable work and must not keep the
+          // scheduler in an idle/waiting loop.
+          .filter((job) => !isPushOfferJob(job));
         const activeBackgroundJobs = [...activeWorkers.values()]
           .map((entry) => entry.job)
           .filter(isRunBackgroundJob);

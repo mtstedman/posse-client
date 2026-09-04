@@ -42,6 +42,7 @@ import { projectWorkItemHistory, projectWorkItemTail } from "./work-item-history
 import { projectWorkItemOverview } from "./work-item-overview.js";
 import { projectWorkItemStats } from "./work-item-stats.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import {
   addBridgeWorkItem,
   nudgeBridgeJob,
@@ -213,6 +214,15 @@ function workItemIdFromGateJob(jobId, expectedSubtype = null) {
   if (expectedSubtype && payload?.subtype !== expectedSubtype) {
     return { ok: false, reason: "wrong_gate_kind" };
   }
+  // An explicit gate id is an authorization identity, not merely a shortcut
+  // to its work item. Resolving a stale id to the WI and then asking the plan
+  // core for "the pending gate" can apply an old phone action to a newer
+  // replacement plan. Preserve legacy contract-less rows, but require their
+  // job to remain parked and require durable contracts to remain open.
+  const contract = getHumanGate(job.id);
+  if (job.status !== "waiting_on_human" || !humanGateStateAllowsAnswer(contract?.gate_state)) {
+    return { ok: false, reason: "gate_closed" };
+  }
   const wiId = Number(job.work_item_id);
   if (!Number.isInteger(wiId) || wiId <= 0) return { ok: false, reason: "invalid_work_item_id" };
   return { ok: true, workItemId: wiId, job, payload };
@@ -332,21 +342,36 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.PLAN_APPROVE: {
       const gateJobId = explicitJobIdArg(args);
-      const resolved = gateJobId ? workItemIdFromGateJob(gateJobId, "plan_approval") : null;
-      if (resolved && !resolved.ok) return resolved;
-      const wiId = resolved?.workItemId || workItemIdArg(args);
-      if (!wiId) return { ok: false, reason: "invalid_work_item_id" };
-      return approvePlan(wiId, { actor: context.actor || "bridge" });
+      if (!gateJobId) return { ok: false, reason: "gate_job_id_required" };
+      if (args.gate_generation == null) {
+        return { ok: false, reason: "gate_generation_required" };
+      }
+      const resolved = workItemIdFromGateJob(gateJobId, "plan_approval");
+      if (!resolved.ok) return resolved;
+      const wiId = resolved.workItemId;
+      return approvePlan(wiId, {
+        actor: context.actor || "bridge",
+        gateJobId,
+        gateGeneration: args.gate_generation ?? null,
+      });
     }
 
     case BRIDGE_COMMANDS.PLAN_REJECT: {
       const gateJobId = explicitJobIdArg(args);
-      const resolved = gateJobId ? workItemIdFromGateJob(gateJobId, "plan_approval") : null;
-      if (resolved && !resolved.ok) return resolved;
-      const wiId = resolved?.workItemId || workItemIdArg(args);
-      if (!wiId) return { ok: false, reason: "invalid_work_item_id" };
+      if (!gateJobId) return { ok: false, reason: "gate_job_id_required" };
+      if (args.gate_generation == null) {
+        return { ok: false, reason: "gate_generation_required" };
+      }
+      const resolved = workItemIdFromGateJob(gateJobId, "plan_approval");
+      if (!resolved.ok) return resolved;
+      const wiId = resolved.workItemId;
       const feedback = args.feedback ?? args.reason ?? null;
-      const rejected = rejectPlan(wiId, { feedback, actor: context.actor || "bridge" });
+      const rejected = rejectPlan(wiId, {
+        feedback,
+        actor: context.actor || "bridge",
+        gateJobId,
+        gateGeneration: args.gate_generation ?? null,
+      });
       if (!rejected.ok) return rejected;
       if (!args.replan) return rejected;
       const replan = respawnAfterRejection(wiId, {

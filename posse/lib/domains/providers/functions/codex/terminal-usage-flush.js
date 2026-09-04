@@ -13,19 +13,28 @@ function reasonCode(reason) {
 export class CodexTerminalUsageFlush {
   constructor(requestAbort, {
     timeoutMs = 250,
+    pollIntervalMs = 25,
+    pollUsage = null,
     now = Date.now,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
+    setPollTimer = setInterval,
+    clearPollTimer = clearInterval,
   } = {}) {
     if (typeof requestAbort !== "function") {
       throw new TypeError("CodexTerminalUsageFlush requires an abort callback");
     }
     this.requestAbort = requestAbort;
     this.timeoutMs = Math.max(1, Number(timeoutMs) || 250);
+    this.pollIntervalMs = Math.max(1, Number(pollIntervalMs) || 25);
+    this.pollUsage = typeof pollUsage === "function" ? pollUsage : null;
     this.now = now;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
+    this.setPollTimer = setPollTimer;
+    this.clearPollTimer = clearPollTimer;
     this.timer = null;
+    this.pollTimer = null;
     this.pendingReason = null;
     this.state = {
       attempted: false,
@@ -53,7 +62,13 @@ export class CodexTerminalUsageFlush {
       this.#finish();
     }, this.timeoutMs);
     this.timer?.unref?.();
+    this.#startUsagePolling();
     return { delayed: true, reason: "terminal_usage_flush" };
+  }
+
+  setUsagePoller(pollUsage) {
+    this.pollUsage = typeof pollUsage === "function" ? pollUsage : null;
+    this.#startUsagePolling();
   }
 
   noteUsage() {
@@ -64,10 +79,7 @@ export class CodexTerminalUsageFlush {
   }
 
   cancel() {
-    if (this.timer) {
-      this.clearTimer(this.timer);
-      this.timer = null;
-    }
+    this.#clearTimers();
     this.pendingReason = null;
   }
 
@@ -86,13 +98,39 @@ export class CodexTerminalUsageFlush {
 
   #finish() {
     if (!this.pendingReason || this.state.finishedAt != null) return;
-    if (this.timer) {
-      this.clearTimer(this.timer);
-      this.timer = null;
-    }
+    this.#clearTimers();
     const reason = this.pendingReason;
     this.pendingReason = null;
     this.state.finishedAt = this.now();
     this.requestAbort(reason);
+  }
+
+  #startUsagePolling() {
+    if (!this.pendingReason || this.state.finishedAt != null || !this.pollUsage || this.pollTimer) return;
+    if (this.#pollForUsage()) return;
+    this.pollTimer = this.setPollTimer(() => this.#pollForUsage(), this.pollIntervalMs);
+    this.pollTimer?.unref?.();
+  }
+
+  #pollForUsage() {
+    if (!this.pendingReason || this.state.finishedAt != null || !this.pollUsage) return false;
+    let foundUsage = false;
+    try {
+      foundUsage = this.pollUsage() === true;
+    } catch {
+      return false;
+    }
+    return foundUsage ? this.noteUsage() : false;
+  }
+
+  #clearTimers() {
+    if (this.timer) {
+      this.clearTimer(this.timer);
+      this.timer = null;
+    }
+    if (this.pollTimer) {
+      this.clearPollTimer(this.pollTimer);
+      this.pollTimer = null;
+    }
   }
 }

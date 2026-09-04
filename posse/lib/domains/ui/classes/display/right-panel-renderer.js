@@ -6,7 +6,10 @@ import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { normalizeAgentActivitySummary } from "../../../../catalog/event.js";
-import { getAgentActivityEvents, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
+import { BRIDGE_OPEN_GATE_STATUSES } from "../../../../catalog/bridge.js";
+import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
+import { humanGateStateAllowsAnswer } from "../../../../catalog/human-input.js";
+import { getAgentActivityEvents, getHumanGate, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
 
@@ -53,6 +56,20 @@ const LIVE_CHANNEL_TOOL_TYPES = new Set([
   "tool.ack_operator_feedback",
 ]);
 const MONITOR_ACTIVE_JOB_STATUSES = new Set(["leased", "running", "awaiting_assessment"]);
+const MONITOR_HUMAN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
+const MONITOR_TERMINAL_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
+
+function monitorHumanGateIsOpen(job) {
+  if (job?.job_type !== "human_input") return false;
+  try {
+    const contract = getHumanGate(job.id);
+    return humanGateStateAllowsAnswer(contract?.gate_state);
+  } catch {
+    // Rendering must stay available during DB churn, but an unverifiable gate
+    // must not present an answer control that may mutate stale work.
+    return false;
+  }
+}
 
 
 
@@ -745,7 +762,9 @@ export class DisplayRightPanelRenderer {
       // still durable (shown in the focus pane), but it must not keep the fleet
       // rail stuck on "nudge" forever after the agent has already consumed it.
       const pendingGuidance = guidance.filter((row) => row.ack_state !== "acknowledged");
-      const state = questionJobIds.has(numericJobId) ? "ask" : (pendingGuidance.length > 0 ? "nudge" : "live");
+      const hasActionableQuestion = questionJobIds.has(numericJobId)
+        && (job.job_type !== "human_input" || monitorHumanGateIsOpen(job));
+      const state = hasActionableQuestion ? "ask" : (pendingGuidance.length > 0 ? "nudge" : "live");
       const activity = _sanitizeDisplayLine(activityRows[0]?.body || worker?.activity || job.title || worker?.role || "running");
       return {
         index: idx + 1,
@@ -777,10 +796,13 @@ export class DisplayRightPanelRenderer {
       const numericJobId = Number(job.id);
       if (!Number.isFinite(numericJobId) || seen.has(numericJobId)) continue;
       const status = String(job.status || "").toLowerCase();
-      const isHumanWait = status === "waiting_on_human"
-        || (job.job_type === "human_input" && status !== "succeeded" && status !== "canceled");
+      const humanGateOpen = monitorHumanGateIsOpen(job);
+      const isHumanWait = humanGateOpen && MONITOR_HUMAN_GATE_STATUSES.has(status);
+      const hasActionableQuestion = questionJobIds.has(numericJobId)
+        && !MONITOR_TERMINAL_JOB_STATUSES.has(status)
+        && (job.job_type !== "human_input" || humanGateOpen);
       const isDurablyActive = MONITOR_ACTIVE_JOB_STATUSES.has(status);
-      if (!isHumanWait && !isDurablyActive) continue;
+      if (!isHumanWait && !hasActionableQuestion && !isDurablyActive) continue;
       let guidance = [];
       let interactionRows = [];
       try {
@@ -804,9 +826,9 @@ export class DisplayRightPanelRenderer {
         wiStatus: wiRow.status || null,
         wiMergeState: wiRow.merge_state || null,
         role: roleLabel(job.job_type || "human"),
-        state: isHumanWait
+        state: isHumanWait || hasActionableQuestion
           ? "ask"
-          : (questionJobIds.has(numericJobId) ? "ask" : (pendingGuidance.length > 0 ? "nudge" : "live")),
+          : (pendingGuidance.length > 0 ? "nudge" : "live"),
         activity: _sanitizeDisplayLine(activityRows[0]?.body || job.title || (isHumanWait ? "waiting on human input" : "running")),
         attempt: job.attempt_count || 1,
         provider: job.provider || null,

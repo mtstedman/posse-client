@@ -124,13 +124,24 @@ export class ToolExecutor {
         message: "No active job context is available for a scope request.",
       }, null, 2);
     }
-    return this.requestScope({
-      path: args.path,
-      access: args.access,
-      operation: args.operation,
-      reason: args.reason || "",
-      jobId: this.jobId,
-    });
+    const entries = Array.isArray(args.requests) && args.requests.length > 0
+      ? args.requests.slice(0, 24)
+      : [args];
+    let result = null;
+    // requestJobScopeExpansion coalesces later entries into the first open
+    // approval. Preserve that single-entry callback contract while honoring
+    // the batch schema exposed to agents; returning the final result mirrors
+    // the deterministic MCP runtime (`scope_approval_batched` when pending).
+    for (const entry of entries) {
+      result = this.requestScope({
+        path: entry.path,
+        access: entry.access,
+        operation: entry.operation,
+        reason: entry.reason || "",
+        jobId: this.jobId,
+      });
+    }
+    return result;
   }
 
   _cleanImage(args, toolkit, ctx) {

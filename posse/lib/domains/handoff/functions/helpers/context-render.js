@@ -7,6 +7,7 @@ import { reissueHashRefHandoffPacket, renderHashRefHandoffPacket } from "./hash-
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
+import { buildScopePlausibilityWarning } from "./scope-preflight.js";
 
 export function packetToContextString(packet) {
   return renderPacketContextString(packet, { includeStable: true, includeDynamic: true });
@@ -277,6 +278,13 @@ function renderPacketContextString(packet, {
 
   if (includeStable && packet.dev_mode_contract && (packet.recipient === "dev" || packet.job_type === "fix")) {
     addSection(packet.dev_mode_contract, { required: true, key: "dev_mode_contract" });
+  }
+
+  if (includeStable) {
+    addSection(buildScopePlausibilityWarning(packet), {
+      required: true,
+      key: "scope_plausibility_warning",
+    });
   }
 
   if (includeStable && Array.isArray(packet.skill_sections) && packet.skill_sections.length > 0) {

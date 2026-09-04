@@ -1225,15 +1225,34 @@ export class AdminSettingsController {
   _buildEditModelNavLines() {
     const editLabel = this._editLabel || getAdminSettingPresentation(this._editKey).label;
     const lines = [` ${C.yellow}Editing ${editLabel}:${C.reset}`];
-    for (let index = 0; index < this._editModelChoices.length; index++) {
+    const choices = Array.isArray(this._editModelChoices) ? this._editModelChoices : [];
+    const selectedIndex = Math.max(0, Math.min(this._editModelIndex || 0, choices.length - 1));
+    // Keep enough of the settings body visible for context while bounding the
+    // picker footer to the terminal. An unbounded model/enum catalog pushes
+    // its first numbered choices above the screen as soon as it grows.
+    const terminalRows = Number.isFinite(Number(this.rows)) ? Math.max(12, Math.floor(Number(this.rows))) : 40;
+    const visibleChoiceCount = Math.max(2, Math.min(choices.length, terminalRows - 10));
+    const start = Math.max(
+      0,
+      Math.min(
+        Math.max(0, choices.length - visibleChoiceCount),
+        selectedIndex - Math.floor(visibleChoiceCount / 2),
+      ),
+    );
+    const end = Math.min(choices.length, start + visibleChoiceCount);
+    for (let index = start; index < end; index++) {
       const choice = this._editModelChoices[index];
       const selected = index === this._editModelIndex;
       const marker = selected ? `${C.green}[x]${C.reset}` : `${C.dim}[ ]${C.reset}`;
-      const label = selected ? `${C.yellow}${choice.label}${C.reset}` : choice.label;
+      const choiceLabel = String(choice?.label || choice?.value || `(option ${index + 1})`);
+      const label = selected ? `${C.yellow}${choiceLabel}${C.reset}` : choiceLabel;
       const prefix = selected ? `${C.yellow}>${C.reset}` : " ";
-      lines.push(` ${prefix} ${marker} ${index + 1}:${label}`);
+      lines.push(` ${prefix} ${marker} ${index + 1}: ${label}`);
     }
-    lines.push(` ${C.dim}[←→/↑↓] Choose  [1-9] Jump  [Enter] Save  [Esc] Cancel${C.reset}`);
+    const range = choices.length > visibleChoiceCount
+      ? `  Showing ${start + 1}–${end} of ${choices.length}`
+      : "";
+    lines.push(` ${C.dim}[←→/↑↓] Choose  [1-9] Jump  [Enter] Save  [Esc] Cancel${range}${C.reset}`);
     return lines;
   }
 

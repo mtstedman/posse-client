@@ -203,11 +203,20 @@ export async function checkPosseUpdateAvailability({
         local_sha: localSha,
       });
     }
-    const available = localSha !== remoteSha;
+    let remoteAlreadyContained = false;
+    if (localSha !== remoteSha) {
+      const ancestor = await callGit(git, ["merge-base", "--is-ancestor", remoteSha, localSha], {
+        cwd: repoRoot,
+        timeoutMs,
+        allowFailure: true,
+      });
+      remoteAlreadyContained = ancestor.ok;
+    }
+    const available = localSha !== remoteSha && !remoteAlreadyContained;
     return {
       ok: true,
       available,
-      status: available ? "available" : "up-to-date",
+      status: available ? "available" : (remoteAlreadyContained ? "ahead" : "up-to-date"),
       repo_root: repoRoot,
       remote,
       branch: targetBranch,
@@ -215,6 +224,7 @@ export async function checkPosseUpdateAvailability({
       remote_url: remoteUrl,
       local_sha: localSha,
       remote_sha: remoteSha,
+      ancestry_checked: true,
     };
   } catch (err) {
     return unavailableUpdateCheck(firstLine(err?.message || err) || "update check failed", {
@@ -272,14 +282,19 @@ export async function checkPosseUpdateAvailabilityCached({
   if (cached && now() - Number(cached.checked_at) < ttlMs) {
     const fromCache = { ...cached.check, cached: true };
     if (!cached.check.available) return fromCache;
-    try {
-      const head = await gitOutput(git, ["rev-parse", "HEAD"], {
-        cwd: cached.check.repo_root,
-        timeoutMs,
-      });
-      if (head === cached.check.local_sha) return fromCache;
-    } catch {
-      // Can't confirm the cached verdict still applies — re-check fresh.
+    // Older availability verdicts treated every SHA mismatch as an update,
+    // including a local checkout that was already ahead of the remote. Only
+    // reuse verdicts that carry evidence from the ancestry-aware contract.
+    if (cached.check.ancestry_checked === true) {
+      try {
+        const head = await gitOutput(git, ["rev-parse", "HEAD"], {
+          cwd: cached.check.repo_root,
+          timeoutMs,
+        });
+        if (head === cached.check.local_sha) return fromCache;
+      } catch {
+        // Can't confirm the cached verdict still applies — re-check fresh.
+      }
     }
   }
   const check = await checkPosseUpdateAvailability({ ...checkOpts, git, timeoutMs });

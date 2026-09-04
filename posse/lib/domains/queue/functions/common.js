@@ -39,8 +39,26 @@ export const PUSH_OFFER_SUBTYPE = "push_offer";
 
 export function isPushOfferJob(job) {
   if (!job || job.job_type !== "human_input") return false;
+  if (
+    job.payload
+    && typeof job.payload === "object"
+    && !Array.isArray(job.payload)
+  ) return job.payload.subtype === PUSH_OFFER_SUBTYPE;
   const raw = job.payload_json;
-  return typeof raw === "string" && raw.includes(`"subtype":"${PUSH_OFFER_SUBTYPE}"`);
+  if (typeof raw !== "string") return false;
+  try {
+    const payload = JSON.parse(raw);
+    return payload?.subtype === PUSH_OFFER_SUBTYPE;
+  } catch {
+    return false;
+  }
+}
+
+// The assessment pipeline parks a successfully committed implementation in
+// this exact state while sibling writer locks drain. It is executable progress,
+// not an unstarted queued child that a replan may safely discard.
+export function isDeferredImplementationAssessmentJob(job) {
+  return job?.status === "queued" && job?.assessment_state === "implementation_complete";
 }
 
 let _nowClockForTests = null;

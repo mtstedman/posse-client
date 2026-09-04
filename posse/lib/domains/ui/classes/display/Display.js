@@ -25,7 +25,7 @@ import {
 } from "../../../queue/functions/common.js";
 import {
   listWorkItems,
-  listJobs,
+  listJobsForDisplay,
 } from "../../../queue/functions/index.js";
 import {
   stripAnsi,
@@ -1489,7 +1489,7 @@ export class Display {
       return this._queueDataCache;
     }
     const workItems = listWorkItems();
-    const jobs = listJobs();
+    const jobs = listJobsForDisplay();
     const dirtyState = this._getQueueDirtyState(now);
     this._queueDataCache = { at: now, workItems, jobs, dirtyState, source: "query" };
     return this._queueDataCache;

@@ -1342,7 +1342,9 @@ export class AdminTUI {
     }
 
     const frameRows = navLines.length + 5; // top border + title + divider + nav divider + bottom border
-    const mainRows = Math.max(this.rows - frameRows, 5);
+    // The footer grows while editing selectors. Preserve at least one body
+    // row without forcing the completed frame below the terminal boundary.
+    const mainRows = Math.max(this.rows - frameRows, 1);
     const requestedScroll = Number(this._scroll);
     const maxScroll = Math.max(0, content.length - mainRows);
     this._scroll = Math.min(
@@ -1383,7 +1385,10 @@ export class AdminTUI {
 
     buf += `\x1b[${row};1H${C.dim}\u2514${"\u2500".repeat(fullW)}\u2518${C.reset}\x1b[K`;
     row++;
-    buf += `\x1b[${row};1H\x1b[J`;
+    // Addressing one row beyond the terminal scrolls the entire frame on
+    // several terminals. A tall enum footer can legitimately end on the last
+    // row, so only clear below it when that row actually exists.
+    if (row <= this.rows) buf += `\x1b[${row};1H\x1b[J`;
 
     if (this._editing === "editValue") {
       const cursor = this._getEditValueCursorPosition(fullW, navStartRow);

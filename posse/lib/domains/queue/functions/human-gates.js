@@ -5,11 +5,22 @@ import {
 } from "../../../catalog/human-input.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES_SQL } from "../../../catalog/job.js";
+import { TERMINAL_WORK_ITEM_STATUSES_SQL } from "../../../catalog/work-item.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { flushEventsNow } from "./events.js";
+import { jobHasLiveLeaseAt } from "./lease-state.js";
 
 const ACTIVE_GATE_STATES = Object.freeze(["open", "resolving"]);
+const WORK_ITEM_SINGLETON_GATE_KINDS = new Set(["oneshot_scope_selection"]);
+let _humanGateReconcileHook = null;
+
+// queue-store owns the authoritative work-item state machine, while it also
+// imports this module for gate registration. Register a callback after that
+// state machine is initialized instead of introducing a circular import.
+export function __registerHumanGateReconcileHook(fn) {
+  _humanGateReconcileHook = typeof fn === "function" ? fn : null;
+}
 
 function asPayload(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
@@ -28,6 +39,17 @@ function jsonArray(value) {
   } catch {
     return [];
   }
+}
+
+function humanGatePromptFingerprint(payload = {}) {
+  const promptPayload = Object.fromEntries(
+    Object.entries(asPayload(payload))
+      .filter(([key]) => !String(key).startsWith("_human_prompt_")),
+  );
+  return createHash("sha256")
+    .update(JSON.stringify(promptPayload))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 function hydrateGate(row) {
@@ -57,19 +79,43 @@ export function humanGateIdempotencyKey({
     .digest("hex");
 }
 
-export function findActiveHumanGateForPayload(payload, { parentJobId = null } = {}) {
+export function findActiveHumanGateForPayload(payload, {
+  parentJobId = null,
+  workItemId = null,
+} = {}) {
   const db = getDb();
   const contract = humanGateContractForPayload(asPayload(payload), { parentJobId });
-  if (!contract.original_job_id) return null;
+  if (contract.original_job_id) {
+    return hydrateGate(db.prepare(`
+      SELECT hg.*
+      FROM human_gates hg
+      JOIN jobs j ON j.id = hg.gate_job_id
+      WHERE hg.original_job_id = ?
+        AND hg.gate_kind = ?
+        AND hg.gate_state IN ('open','resolving')
+        AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+      ORDER BY hg.generation DESC
+      LIMIT 1
+    `).get(contract.original_job_id, contract.gate_kind));
+  }
+  const normalizedWorkItemId = Number(workItemId);
+  if (
+    !WORK_ITEM_SINGLETON_GATE_KINDS.has(contract.gate_kind)
+    || !Number.isInteger(normalizedWorkItemId)
+    || normalizedWorkItemId <= 0
+  ) return null;
   return hydrateGate(db.prepare(`
-    SELECT *
-    FROM human_gates
-    WHERE original_job_id = ?
-      AND gate_kind = ?
-      AND gate_state IN ('open','resolving')
-    ORDER BY generation DESC
+    SELECT hg.*
+    FROM human_gates hg
+    JOIN jobs j ON j.id = hg.gate_job_id
+    WHERE hg.original_job_id IS NULL
+      AND j.work_item_id = ?
+      AND hg.gate_kind = ?
+      AND hg.gate_state IN ('open','resolving')
+      AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+    ORDER BY hg.generation DESC
     LIMIT 1
-  `).get(contract.original_job_id, contract.gate_kind));
+  `).get(normalizedWorkItemId, contract.gate_kind));
 }
 
 export function registerHumanGate({
@@ -84,6 +130,70 @@ export function registerHumanGate({
 
     const normalizedPayload = asPayload(payload);
     const contract = humanGateContractForPayload(normalizedPayload, { parentJobId });
+    const gateJob = db.prepare(`SELECT work_item_id FROM jobs WHERE id = ?`).get(gateJobId);
+    const singletonWorkItemIdCandidate = !contract.original_job_id
+      && WORK_ITEM_SINGLETON_GATE_KINDS.has(contract.gate_kind)
+      ? Number(gateJob?.work_item_id)
+      : null;
+    const singletonWorkItemId = Number.isInteger(singletonWorkItemIdCandidate)
+      && singletonWorkItemIdCandidate > 0
+      ? singletonWorkItemIdCandidate
+      : null;
+    if (contract.original_job_id) {
+      // Gate/job state can drift between maintenance sweeps. A terminal or
+      // missing gate job cannot answer a new request, but its open contract
+      // still occupies the unique active slot unless creation retires it.
+      const ts = now();
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state = 'superseded',
+            resolver_lease_token = NULL,
+            resolution_error = COALESCE(
+              resolution_error,
+              'Superseded by a new gate after the prior gate job became terminal or disappeared'
+            ),
+            resolved_at = COALESCE(resolved_at, ?),
+            updated_at = ?
+        WHERE original_job_id = ?
+          AND gate_kind = ?
+          AND gate_state IN ('open','resolving')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jobs j
+            WHERE j.id = human_gates.gate_job_id
+              AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+          )
+      `).run(ts, ts, contract.original_job_id, contract.gate_kind);
+    } else if (singletonWorkItemId) {
+      const ts = now();
+      db.prepare(`
+        UPDATE human_gates
+        SET gate_state = 'superseded',
+            resolver_lease_token = NULL,
+            resolution_error = COALESCE(
+              resolution_error,
+              'Superseded by a new gate after the prior gate job became terminal or disappeared'
+            ),
+            resolved_at = COALESCE(resolved_at, ?),
+            updated_at = ?
+        WHERE original_job_id IS NULL
+          AND gate_kind = ?
+          AND gate_state IN ('open','resolving')
+          AND EXISTS (
+            SELECT 1
+            FROM jobs stale
+            JOIN jobs owner ON owner.id = ?
+            WHERE stale.id = human_gates.gate_job_id
+              AND stale.work_item_id = owner.work_item_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jobs j
+            WHERE j.id = human_gates.gate_job_id
+              AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+          )
+      `).run(ts, ts, contract.gate_kind, gateJobId);
+    }
     const competing = contract.original_job_id
       ? db.prepare(`
           SELECT *
@@ -94,7 +204,19 @@ export function registerHumanGate({
           ORDER BY generation DESC
           LIMIT 1
         `).get(contract.original_job_id, contract.gate_kind)
-      : null;
+      : singletonWorkItemId
+        ? db.prepare(`
+            SELECT hg.*
+            FROM human_gates hg
+            JOIN jobs j ON j.id = hg.gate_job_id
+            WHERE hg.original_job_id IS NULL
+              AND j.work_item_id = ?
+              AND hg.gate_kind = ?
+              AND hg.gate_state IN ('open','resolving')
+            ORDER BY hg.generation DESC
+            LIMIT 1
+          `).get(singletonWorkItemId, contract.gate_kind)
+        : null;
     if (competing) return hydrateGate(competing);
 
     const previous = contract.original_job_id
@@ -103,7 +225,16 @@ export function registerHumanGate({
           FROM human_gates
           WHERE original_job_id = ? AND gate_kind = ?
         `).get(contract.original_job_id, contract.gate_kind)
-      : null;
+      : singletonWorkItemId
+        ? db.prepare(`
+            SELECT MAX(hg.generation) AS generation
+            FROM human_gates hg
+            JOIN jobs j ON j.id = hg.gate_job_id
+            WHERE hg.original_job_id IS NULL
+              AND j.work_item_id = ?
+              AND hg.gate_kind = ?
+          `).get(singletonWorkItemId, contract.gate_kind)
+        : null;
     const generation = Math.max(1, Number(previous?.generation || 0) + 1);
     const original = contract.original_job_id
       ? db.prepare(`SELECT status FROM jobs WHERE id = ?`).get(contract.original_job_id)
@@ -134,6 +265,84 @@ export function getHumanGate(gateJobId) {
   return hydrateGate(getDb().prepare(
     `SELECT * FROM human_gates WHERE gate_job_id = ?`
   ).get(gateJobId));
+}
+
+/**
+ * Atomically reserve one automatic TUI presentation for the gate's current
+ * durable generation/resurface tuple. Process-local prompt maps prevent
+ * duplicate snapshots within one run; this marker prevents the same parked
+ * plan or push decision from being announced again on every CLI restart.
+ * Explicit operator Answer actions intentionally do not call this helper.
+ */
+export function claimHumanGatePromptPresentation(gateJobId) {
+  const db = getDb();
+  return executeTransaction(db, () => {
+    const row = db.prepare(`
+      SELECT j.id, j.status, j.payload_json, hg.generation, hg.gate_state
+      FROM jobs j
+      JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.id = ?
+    `).get(Number(gateJobId));
+    if (!row || row.status !== "waiting_on_human" || row.gate_state !== "open") {
+      return { claimed: false, reason: "gate_not_presentable" };
+    }
+    const payload = asPayload(row.payload_json);
+    const resurfaceCount = Math.max(
+      0,
+      Number.parseInt(String(payload._human_prompt_resurface_count || 0), 10) || 0,
+    );
+    const signature = [
+      Math.max(1, Number(row.generation) || 1),
+      resurfaceCount,
+      humanGatePromptFingerprint(payload),
+    ].join(":");
+    if (payload._human_prompt_last_presented_signature === signature) {
+      return { claimed: false, reason: "already_presented", signature };
+    }
+    const ts = now();
+    const result = db.prepare(`
+      UPDATE jobs
+      SET payload_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'waiting_on_human'
+    `).run(JSON.stringify({
+      ...payload,
+      _human_prompt_last_presented_signature: signature,
+      _human_prompt_last_presented_at: ts,
+    }), ts, row.id);
+    return result.changes === 1
+      ? { claimed: true, signature }
+      : { claimed: false, reason: "presentation_raced", signature };
+  });
+}
+
+/**
+ * Advance the question generation for a materially revised, still-open gate.
+ * Answers and owner-delivery reservations carry this generation, so bumping it
+ * atomically invalidates any prompt that was rendered from the older payload.
+ */
+export function reviseOpenHumanGateGeneration(gateJobId) {
+  const db = getDb();
+  return executeTransaction(db, () => {
+    const row = db.prepare(`
+      SELECT gate_job_id, generation, gate_state
+      FROM human_gates
+      WHERE gate_job_id = ?
+    `).get(Number(gateJobId));
+    if (!row) return { ok: false, reason: "gate_not_found" };
+    if (row.gate_state !== "open") {
+      return { ok: false, reason: "gate_not_open", gate_state: row.gate_state };
+    }
+    const previousGeneration = Math.max(1, Number(row.generation) || 1);
+    const nextGeneration = previousGeneration + 1;
+    const result = db.prepare(`
+      UPDATE human_gates
+      SET generation = ?, updated_at = ?
+      WHERE gate_job_id = ? AND gate_state = 'open' AND generation = ?
+    `).run(nextGeneration, now(), Number(gateJobId), row.generation);
+    return result.changes === 1
+      ? { ok: true, previous_generation: previousGeneration, generation: nextGeneration }
+      : { ok: false, reason: "gate_revision_raced" };
+  });
 }
 
 export function beginHumanGateResolution({
@@ -181,7 +390,14 @@ export function beginHumanGateResolution({
       `SELECT status, lease_token, lease_expires_at FROM jobs WHERE id = ?`
     ).get(gateJobId);
     if (!gateJob) return { ok: false, reason: "gate_job_missing" };
-    if (requireLease && (!leaseToken || gateJob.lease_token !== leaseToken)) {
+    if (
+      requireLease
+      && (
+        !leaseToken
+        || gateJob.lease_token !== leaseToken
+        || !jobHasLiveLeaseAt(gateJob, now())
+      )
+    ) {
       return { ok: false, reason: "stale_gate_lease" };
     }
     if (row.original_job_id) {
@@ -241,6 +457,14 @@ export function completeHumanGateResolution({
     if (gate.gate_state !== "resolving") return { ok: false, reason: "gate_not_resolving" };
     if (leaseToken != null && gate.resolver_lease_token !== leaseToken) {
       return { ok: false, reason: "stale_gate_lease" };
+    }
+    if (leaseToken != null) {
+      const gateJob = db.prepare(
+        `SELECT lease_token, lease_expires_at FROM jobs WHERE id = ?`
+      ).get(gateJobId);
+      if (gateJob?.lease_token !== leaseToken || !jobHasLiveLeaseAt(gateJob, now())) {
+        return { ok: false, reason: "stale_gate_lease" };
+      }
     }
     const result = db.prepare(`
       UPDATE human_gates
@@ -312,6 +536,50 @@ export function supersedeHumanGate(gateJobId, reason = "superseded") {
   });
 }
 
+/**
+ * Atomically claim an unanswered, unleased gate for headless timeout.
+ * A resolver that acquires the job lease or changes the contract state first
+ * wins; timeout recovery must never supersede an accepted/in-flight answer.
+ */
+export function claimHeadlessHumanGateTimeout(
+  gateJobId,
+  reason = "Human gate timed out in headless mode",
+) {
+  const db = getDb();
+  return executeTransaction(db, () => {
+    const observedAt = now();
+    const result = db.prepare(`
+      UPDATE human_gates
+      SET gate_state = 'superseded',
+          resolution_error = ?,
+          resolver_lease_token = NULL,
+          resolved_at = ?,
+          updated_at = ?
+      WHERE gate_job_id = ?
+        AND gate_state = 'open'
+        AND EXISTS (
+          SELECT 1
+          FROM jobs j
+          WHERE j.id = human_gates.gate_job_id
+            AND j.status = 'waiting_on_human'
+            AND NOT (
+              j.lease_token IS NOT NULL
+              AND j.lease_expires_at IS NOT NULL
+              AND julianday(j.lease_expires_at) IS NOT NULL
+              AND julianday(j.lease_expires_at) > julianday(?)
+            )
+        )
+    `).run(
+      String(reason).slice(0, 500),
+      observedAt,
+      observedAt,
+      gateJobId,
+      observedAt,
+    );
+    return result.changes === 1;
+  });
+}
+
 export function enqueueHumanGateEffect({
   gateJobId,
   operationKey,
@@ -358,17 +626,189 @@ export function reconcileHumanGates() {
   // entering the reconciliation transaction.
   flushEventsNow();
   const db = getDb();
-  return executeTransaction(db, () => {
+  const affectedWorkItemIds = new Set();
+  let mutated = false;
+  const noteGateMutation = (workItemId = null) => {
+    mutated = true;
+    const normalized = Number(workItemId);
+    if (Number.isSafeInteger(normalized) && normalized > 0) {
+      affectedWorkItemIds.add(normalized);
+    }
+  };
+  const result = executeTransaction(db, () => {
     let registered = 0;
     let reopened = 0;
     let retired = 0;
+
+    const gateWorkItem = db.prepare(`SELECT work_item_id FROM jobs WHERE id = ?`);
+
+    const retireGateJob = (gateJobId, reason) => {
+      const ts = now();
+      const normalizedReason = String(reason || "Human gate is no longer answerable").slice(0, 500);
+      const canceled = db.prepare(`
+        UPDATE jobs
+        SET status='canceled', finished_at=COALESCE(finished_at, ?),
+            lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+            last_error=COALESCE(last_error, ?), updated_at=?
+        WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+      `).run(ts, normalizedReason, ts, gateJobId);
+      const superseded = db.prepare(`
+        UPDATE human_gates
+        SET gate_state='superseded', resolver_lease_token=NULL,
+            resolution_error=COALESCE(resolution_error, ?),
+            resolved_at=COALESCE(resolved_at, ?), updated_at=?
+        WHERE gate_job_id=? AND gate_state IN ('open','resolving')
+      `).run(normalizedReason, ts, ts, gateJobId);
+      const changed = canceled.changes > 0 || superseded.changes > 0;
+      if (changed) noteGateMutation(gateWorkItem.get(gateJobId)?.work_item_id);
+      return changed;
+    };
+
+    // A worker records a successful resolution before releasing the gate job
+    // lease. If it crashes in that narrow window, the contract is durable but
+    // the job remains waiting_on_human. Startup revival used to requeue that
+    // row and ask the already-answered question again. Once the old lease is
+    // gone, make the contract authoritative over the stale job state. A
+    // superseded contract is likewise no longer executable and must not keep
+    // its work item active forever.
+    const closedContractJobs = db.prepare(`
+      SELECT hg.gate_job_id, hg.gate_state, hg.resolution_error, j.work_item_id
+      FROM human_gates hg
+      JOIN jobs j ON j.id = hg.gate_job_id
+      WHERE hg.gate_state IN ('resolved','superseded')
+        AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+        AND (
+          j.lease_token IS NULL
+          OR j.lease_expires_at IS NULL
+          OR julianday(j.lease_expires_at) IS NULL
+          OR julianday(j.lease_expires_at) <= julianday(?)
+        )
+    `).all(now());
+    for (const row of closedContractJobs) {
+      const ts = now();
+      const terminalStatus = row.gate_state === "resolved" ? "succeeded" : "canceled";
+      const result = db.prepare(`
+        UPDATE jobs
+        SET status=?, finished_at=COALESCE(finished_at, ?),
+            lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+            last_error=CASE
+              WHEN ? = 'succeeded' THEN NULL
+              ELSE COALESCE(last_error, ?, 'Human gate contract was superseded')
+            END,
+            state_version=state_version + 1, updated_at=?
+        WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+          AND (
+            lease_token IS NULL
+            OR lease_expires_at IS NULL
+            OR julianday(lease_expires_at) IS NULL
+            OR julianday(lease_expires_at) <= julianday(?)
+          )
+      `).run(
+        terminalStatus,
+        ts,
+        terminalStatus,
+        row.resolution_error,
+        ts,
+        row.gate_job_id,
+        ts,
+      );
+      if (result.changes > 0) {
+        retired += 1;
+        noteGateMutation(row.work_item_id);
+      }
+    }
+
+    // A terminal work item has no remaining question to answer. Retire any
+    // stale gate before registration/repair can revive it. Push offers are the
+    // deliberate exception: they attach to a completed WI only as a durable
+    // publication anchor and remain independently answerable.
+    const terminalWorkItemGates = db.prepare(`
+      SELECT j.id, j.work_item_id, j.job_type, j.status, j.payload_json,
+             hg.gate_state
+      FROM jobs j
+      JOIN work_items wi ON wi.id = j.work_item_id
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.job_type = 'human_input'
+        AND wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+        AND (
+          j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+          OR hg.gate_state IN ('open','resolving')
+        )
+    `).all().filter((job) => asPayload(job.payload_json).subtype !== "push_offer");
+    for (const job of terminalWorkItemGates) {
+      if (retireGateJob(job.id, "Owning work item is terminal")) retired += 1;
+    }
+
+    // If the original job left every state permitted by the gate contract,
+    // no advertised action can succeed: beginHumanGateResolution would reject
+    // it as original_state_changed forever. Retire an open prompt before the
+    // TUI/bridge can keep presenting an impossible decision. A resolving gate
+    // is excluded because its accepted action may itself be changing state.
+    const sourceStateDrift = db.prepare(`
+      SELECT hg.gate_job_id, hg.allowed_source_states_json,
+             original.status AS original_status
+      FROM human_gates hg
+      JOIN jobs gate_job ON gate_job.id = hg.gate_job_id
+      JOIN jobs original ON original.id = hg.original_job_id
+      WHERE hg.gate_state = 'open'
+        AND gate_job.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+    `).all().filter((row) => (
+      !jsonArray(row.allowed_source_states_json).includes(row.original_status)
+    ));
+    for (const row of sourceStateDrift) {
+      if (retireGateJob(
+        row.gate_job_id,
+        `Original job state ${row.original_status} is outside the gate contract`,
+      )) retired += 1;
+    }
+
+    // ON DELETE SET NULL preserves a gate after its original job is pruned.
+    // The payload retains the original identity, so distinguish that broken
+    // reference from a legitimate standalone clarification or push offer.
+    const originalJobExists = db.prepare(`SELECT 1 FROM jobs WHERE id = ?`);
+    const missingOriginalGates = db.prepare(`
+      SELECT hg.gate_job_id, gate_job.payload_json
+      FROM human_gates hg
+      JOIN jobs gate_job ON gate_job.id = hg.gate_job_id
+      WHERE hg.gate_state = 'open'
+        AND hg.original_job_id IS NULL
+        AND gate_job.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+    `).all().map((row) => {
+      const payload = asPayload(row.payload_json);
+      const referencedId = Number(payload.original_job_id ?? payload.plan_job_id);
+      return {
+        ...row,
+        referencedId: Number.isSafeInteger(referencedId) && referencedId > 0
+          ? referencedId
+          : null,
+      };
+    }).filter((row) => (
+      row.referencedId != null
+      && !originalJobExists.get(row.referencedId)
+    ));
+    for (const row of missingOriginalGates) {
+      if (retireGateJob(
+        row.gate_job_id,
+        `Original job #${row.referencedId} no longer exists`,
+      )) retired += 1;
+    }
+
     const missing = db.prepare(`
-      SELECT id, parent_job_id, payload_json
+      SELECT id, work_item_id, parent_job_id, payload_json, status
       FROM jobs
       WHERE job_type = 'human_input'
+        -- Terminal history is not answerable and does not need a gate
+        -- contract synthesized during an upgrade. Letting it compete with a
+        -- current gate can make stale history own the unique active contract
+        -- and cancel the actual question. Existing contracts still go through
+        -- the terminal drift repair below, where durable gate intent is known.
+        AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
         AND NOT EXISTS (
           SELECT 1 FROM human_gates hg WHERE hg.gate_job_id = jobs.id
         )
+      -- If legacy data contains duplicates with no contracts, preserve the
+      -- newest question and retire older copies deterministically.
+      ORDER BY id DESC
     `).all();
     for (const job of missing) {
       try {
@@ -379,6 +819,7 @@ export function reconcileHumanGates() {
         });
         if (Number(gate?.gate_job_id) === Number(job.id)) {
           registered += 1;
+          noteGateMutation(job.work_item_id);
         } else {
           db.prepare(`
             UPDATE jobs
@@ -389,9 +830,18 @@ export function reconcileHumanGates() {
             WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
           `).run(now(), now(), job.id);
           retired += 1;
+          noteGateMutation(job.work_item_id);
         }
-      } catch {
-        // A newer active gate for the same original/kind is authoritative.
+      } catch (error) {
+        // An IMMEDIATE transaction excludes a concurrent registration race.
+        // If a legacy row still cannot acquire a durable contract (most often
+        // because its referenced original was already pruned), leaving the job
+        // answerable would make every sweep/prompt repeat the same failure.
+        const detail = error instanceof Error ? error.message : String(error);
+        if (retireGateJob(
+          job.id,
+          `Could not establish durable gate contract: ${detail}`,
+        )) retired += 1;
       }
     }
 
@@ -402,7 +852,7 @@ export function reconcileHumanGates() {
     // Every other sweep in this function inner-joins jobs, so orphans are
     // invisible to them — retire them here.
     const orphaned = db.prepare(`
-      SELECT hg.gate_job_id
+      SELECT hg.gate_job_id, j.work_item_id
       FROM human_gates hg
       LEFT JOIN jobs j ON j.id = hg.gate_job_id
       LEFT JOIN work_items wi ON wi.id = j.work_item_id
@@ -426,6 +876,7 @@ export function reconcileHumanGates() {
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(now(), now(), row.gate_job_id);
       retired += 1;
+      noteGateMutation(row.work_item_id);
     }
 
     // Older workers reopened a gate after a valid answer whenever applying
@@ -434,7 +885,7 @@ export function reconcileHumanGates() {
     // the human already answered; retire those legacy rows instead of
     // resurfacing them again after upgrade.
     const failedResolutions = db.prepare(`
-      SELECT DISTINCT hg.gate_job_id
+      SELECT DISTINCT hg.gate_job_id, j.work_item_id
       FROM human_gates hg
       JOIN jobs j ON j.id = hg.gate_job_id
       JOIN events e ON e.job_id = hg.gate_job_id
@@ -462,6 +913,7 @@ export function reconcileHumanGates() {
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(now(), now(), row.gate_job_id);
       retired += 1;
+      noteGateMutation(row.work_item_id);
     }
 
     // A gate stuck in 'resolving' whose resolver died (crash between
@@ -472,14 +924,44 @@ export function reconcileHumanGates() {
     // lease-free (or lease-expired) resolving gate on a non-terminal job
     // is safe to reopen.
     const abandoned = db.prepare(`
-      SELECT hg.gate_job_id
+      SELECT hg.gate_job_id, hg.original_job_id, j.work_item_id,
+             hg.allowed_source_states_json, j.payload_json
       FROM human_gates hg
       JOIN jobs j ON j.id = hg.gate_job_id
       WHERE hg.gate_state = 'resolving'
         AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
-        AND (j.lease_token IS NULL OR j.lease_expires_at IS NULL OR j.lease_expires_at < ?)
+        AND (
+          j.lease_token IS NULL
+          OR j.lease_expires_at IS NULL
+          OR julianday(j.lease_expires_at) IS NULL
+          OR julianday(j.lease_expires_at) < julianday(?)
+        )
     `).all(now());
     for (const row of abandoned) {
+      const payload = asPayload(row.payload_json);
+      const referencedId = Number(
+        row.original_job_id ?? payload.original_job_id ?? payload.plan_job_id,
+      );
+      const original = Number.isSafeInteger(referencedId) && referencedId > 0
+        ? db.prepare(`SELECT status FROM jobs WHERE id = ?`).get(referencedId)
+        : null;
+      if (Number.isSafeInteger(referencedId) && referencedId > 0 && !original) {
+        if (retireGateJob(
+          row.gate_job_id,
+          `Resolver disappeared after original job #${referencedId} was removed`,
+        )) retired += 1;
+        continue;
+      }
+      if (
+        original
+        && !jsonArray(row.allowed_source_states_json).includes(original.status)
+      ) {
+        if (retireGateJob(
+          row.gate_job_id,
+          `Resolver disappeared after the original job already changed to ${original.status}`,
+        )) retired += 1;
+        continue;
+      }
       db.prepare(`
         UPDATE human_gates
         SET gate_state='open', resolution_action=NULL, idempotency_key=NULL,
@@ -489,10 +971,11 @@ export function reconcileHumanGates() {
         WHERE gate_job_id=? AND gate_state='resolving'
       `).run(now(), row.gate_job_id);
       reopened += 1;
+      noteGateMutation(row.work_item_id);
     }
 
     const inconsistent = db.prepare(`
-      SELECT hg.gate_job_id, hg.gate_state, j.status,
+      SELECT hg.gate_job_id, hg.gate_state, j.status, j.work_item_id,
              EXISTS (
                SELECT 1
                FROM events e
@@ -513,6 +996,7 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), now(), row.gate_job_id);
         retired += 1;
+        noteGateMutation(row.work_item_id);
       } else if (row.status === "canceled" || row.headless_timed_out) {
         db.prepare(`
           UPDATE human_gates
@@ -525,6 +1009,7 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), now(), row.headless_timed_out ? 1 : 0, row.gate_job_id);
         retired += 1;
+        noteGateMutation(row.work_item_id);
       } else {
         db.prepare(`
           UPDATE jobs
@@ -540,10 +1025,15 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), row.gate_job_id);
         reopened += 1;
+        noteGateMutation(row.work_item_id);
       }
     }
     return { registered, reopened, retired };
   });
+  if (mutated) {
+    _humanGateReconcileHook?.([...affectedWorkItemIds]);
+  }
+  return result;
 }
 
 export { ACTIVE_GATE_STATES };

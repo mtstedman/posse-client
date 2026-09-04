@@ -594,6 +594,34 @@ export async function callProvider(promptText, {
     let completedTurnEvents = 0;
     let stdoutLineBuffer = "";
     const LINE_BUF_MAX = 16 * 1024 * 1024;
+    const pollRolloutUsage = () => {
+      rolloutUsageTailer.setSessionHandle(latestSessionHandle);
+      const liveUsages = rolloutUsageTailer.poll();
+      liveProviderRequestCount += liveUsages.length;
+      for (const usage of liveUsages) {
+        if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
+          console.error(`[ctx-debug] rollout tail usage ${JSON.stringify(usage)}`);
+        }
+        emitUsageProgress({ provider: "codex", modelName: modelToUse, ...usage });
+      }
+      const turnBudget = resolveCodexLiveTurnBudget({
+        providerRequestCount: liveProviderRequestCount,
+        maxTurns: turnLimit,
+      });
+      if (turnBudget.exceeded && !turnBudgetWarningEmitted) {
+        // A productive provider session is more valuable than a cold retry.
+        // Codex has no native per-request ceiling, so retain maxTurns as an
+        // observability target and let the independent stall detector bound
+        // genuine non-progress.
+        turnBudgetWarningEmitted = true;
+        emit(`${C.yellow}[budget] Codex passed the ${turnLimit}-turn planning target (${turnBudget.observedTurns}); continuing the same productive session${C.reset}`);
+      }
+      return liveUsages.length > 0;
+    };
+    // Current Codex usage is authoritative in the rollout JSONL, not stdout.
+    // During a terminal handoff, poll that source inside the 250ms flush window
+    // instead of waiting for the slower 500ms provider heartbeat.
+    terminalUsageFlush.setUsagePoller(pollRolloutUsage);
     const handleStdoutLine = (raw) => {
       if (!raw) return;
       try {
@@ -667,32 +695,7 @@ export async function callProvider(promptText, {
       if (now - lastRolloutUsagePollMs >= 2_000) {
         lastRolloutUsagePollMs = now;
         try {
-          rolloutUsageTailer.setSessionHandle(latestSessionHandle);
-          const liveUsages = rolloutUsageTailer.poll();
-          liveProviderRequestCount += liveUsages.length;
-          for (const usage of liveUsages) {
-            if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
-              console.error(`[ctx-debug] rollout tail usage ${JSON.stringify(usage)}`);
-            }
-            emitUsageProgress({ provider: "codex", modelName: modelToUse, ...usage });
-          }
-          const turnBudget = resolveCodexLiveTurnBudget({
-            providerRequestCount: liveProviderRequestCount,
-            maxTurns: turnLimit,
-          });
-          if (
-            turnBudget.exceeded
-            && !turnBudgetWarningEmitted
-          ) {
-            // A productive provider session is more valuable than a cold
-            // retry. Treat maxTurns as an observability target for Codex: the
-            // CLI has no native per-request ceiling, and killing it here
-            // throws away its cache, worktree context, and near-terminal
-            // handoff. Genuine non-progress is still bounded independently by
-            // the byte/semantic stall detector below.
-            turnBudgetWarningEmitted = true;
-            emit(`${C.yellow}[budget] Codex passed the ${turnLimit}-turn planning target (${turnBudget.observedTurns}); continuing the same productive session${C.reset}`);
-          }
+          pollRolloutUsage();
         } catch { /* rollout tailing must not break provider execution */ }
       }
       if (liveScopeWaitPausesProviderStall(jobId)) {

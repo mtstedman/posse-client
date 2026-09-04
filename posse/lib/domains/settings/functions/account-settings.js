@@ -39,6 +39,10 @@ export function getAccountSettingsPathForDisplay() {
   return getDefaultAccountSettings().getPathForDisplay();
 }
 
+export function getAccountSettingsPathOverrideForTests() {
+  return getDefaultAccountSettings().getDbPathOverrideForTests();
+}
+
 export function getAccountSettingsDataVersion() {
   return getDefaultAccountSettings().getDataVersion();
 }

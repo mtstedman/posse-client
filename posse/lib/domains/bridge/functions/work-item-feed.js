@@ -10,6 +10,7 @@ import {
   WORK_ITEM_STATS_PROTOCOL,
 } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
@@ -49,35 +50,18 @@ const AGENT_FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verif
 const TERMINAL_FEEDBACK_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
 const QUESTION_STATES = new Set(["open", "pending", "answered", "rejected", "expired", "superseded", "closed"]);
-const QUESTION_KINDS = new Set([
-  "plan_approval", "file_scope_approval", "assessment_review",
-  "assessment_transport_recovery", "assessment_retry_limit", "blocked_recovery",
-  "partial_work_recovery", "dead_letter_recovery", "pipeline_head_recovery",
-  "one_shot_file_scope", "push_offer", "legacy_unstructured",
-]);
+const QUESTION_KINDS = new Set(Object.keys(WORK_ITEM_QUESTION_CHOICE_IDS));
 const LIVE_OWNER_DELIVERY_QUESTION_KINDS = new Set([
   "file_scope_approval", "assessment_review", "assessment_transport_recovery",
   "assessment_retry_limit", "blocked_recovery", "partial_work_recovery",
-  "dead_letter_recovery", "pipeline_head_recovery", "one_shot_file_scope",
+  "dead_letter_recovery", "pipeline_head_recovery", "unexecuted_replan_recovery",
+  "artifact_routing_admin", "one_shot_file_scope",
 ]);
 const NUDGE_STATES = new Set([
   "queued", "signaled", "retrieved", "accepted", "rejected", "deferred", "superseded", "expired",
 ]);
 const ACKNOWLEDGEMENT_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
-const QUESTION_CHOICE_IDS = Object.freeze({
-  plan_approval: ["approve", "reject"],
-  file_scope_approval: ["approve", "reject"],
-  assessment_review: ["pass", "fail", "skip", "replan"],
-  assessment_transport_recovery: ["retry", "pass", "fail", "skip", "replan"],
-  assessment_retry_limit: ["pass", "fail", "skip", "replan"],
-  blocked_recovery: ["retry", "skip", "replan", "explicit_waiver", "fail"],
-  partial_work_recovery: ["extend", "commit", "revert"],
-  dead_letter_recovery: ["retry", "retry:claude", "retry:openai", "retry:codex", "retry:grok", "skip", "fail"],
-  pipeline_head_recovery: ["pass", "fail", "skip", "replan"],
-  one_shot_file_scope: ["plan", "cancel"],
-  push_offer: ["push", "decline"],
-  legacy_unstructured: [],
-});
+const QUESTION_CHOICE_IDS = WORK_ITEM_QUESTION_CHOICE_IDS;
 const QUESTION_KIND_BY_REVIEW_TYPE = new Map([
   ["needs_review", "assessment_review"],
   ["assessment_parse_error", "assessment_review"],
@@ -86,13 +70,19 @@ const QUESTION_KIND_BY_REVIEW_TYPE = new Map([
   ["replan_limit", "assessment_review"],
   ["assessment_transport_error", "assessment_transport_recovery"],
   ["assessment_retry_limit", "assessment_retry_limit"],
+  ["unexecuted_replan_limit", "unexecuted_replan_recovery"],
   ["blocked_recovery", "blocked_recovery"],
   ["partial_work_recovery", "partial_work_recovery"],
   ["dead_letter_recovery", "dead_letter_recovery"],
   ["stall_exhausted_recovery", "dead_letter_recovery"],
-  ["research_dead_letter_recovery", "pipeline_head_recovery"],
-  ["oneshot_dead_letter_recovery", "pipeline_head_recovery"],
+  ["research_dead_letter_recovery", "dead_letter_recovery"],
+  ["oneshot_dead_letter_recovery", "dead_letter_recovery"],
+  ["artifact_routing_admin", "artifact_routing_admin"],
   ["scope_expansion_request", "file_scope_approval"],
+]);
+const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
+  "research_dead_letter_recovery",
+  "oneshot_dead_letter_recovery",
 ]);
 const QUESTION_CHOICE_COPY = Object.freeze({
   approve: ["Approve", "Allow the exact requested transition."],
@@ -215,6 +205,11 @@ function validStoredChoiceEntries(kind, entries) {
 }
 
 function storedQuestionKind(payload) {
+  const reviewKind = QUESTION_KIND_BY_REVIEW_TYPE.get(String(payload?.review_type || ""));
+  // Project legacy pipeline-head rows through the handler they actually use.
+  // This prevents bridges from offering pass/replan actions that the worker
+  // can only reject or reinterpret as a retry.
+  if (reviewKind === "dead_letter_recovery") return reviewKind;
   const explicit = String(payload?.question_kind || "").trim();
   if (QUESTION_KINDS.has(explicit)) return explicit;
   if (payload?.subtype === "plan_approval") return "plan_approval";
@@ -223,7 +218,7 @@ function storedQuestionKind(payload) {
     return "one_shot_file_scope";
   }
   if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) return "file_scope_approval";
-  return QUESTION_KIND_BY_REVIEW_TYPE.get(String(payload?.review_type || "")) || "legacy_unstructured";
+  return reviewKind || "legacy_unstructured";
 }
 
 function storedQuestionChoices(kind, payload) {
@@ -234,11 +229,26 @@ function storedQuestionChoices(kind, payload) {
   if ((!Array.isArray(entries) || entries.length === 0) && LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(kind)) {
     return (QUESTION_CHOICE_IDS[kind] || []).map(storedChoiceRecord).filter(Boolean);
   }
-  if (!validStoredChoiceEntries(kind, entries)) return [];
+  if (!validStoredChoiceEntries(kind, entries)) {
+    if (
+      kind === "dead_letter_recovery"
+      && payload?.question_kind === "pipeline_head_recovery"
+      && LEGACY_PIPELINE_HEAD_REVIEW_TYPES.has(String(payload?.review_type || ""))
+    ) {
+      return QUESTION_CHOICE_IDS.dead_letter_recovery.map(storedChoiceRecord).filter(Boolean);
+    }
+    return [];
+  }
   return entries.map(storedChoiceRecord).filter(Boolean);
 }
 
 function questionStateForJob(job) {
+  // History replay may observe a gate job before reconciliation has copied a
+  // completed durable contract back onto the job row. Never turn that stale
+  // row into a fresh actionable question.
+  if (job?.human_gate_state === "resolved") return "answered";
+  if (job?.human_gate_state === "superseded") return "rejected";
+  if (job?.human_gate_state === "resolving") return "pending";
   if (["queued", "waiting_on_human", "waiting_on_review"].includes(job?.status)) return "open";
   if (["running", "assessing"].includes(job?.status)) return "pending";
   if (job?.status === "succeeded") return "answered";
@@ -726,7 +736,15 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
   const match = /^gate:([1-9]\d*):(0|[1-9]\d*)$/.exec(questionId);
   if (!match || Number(match[1]) !== Number(row.job_id)) return null;
   let job;
-  try { job = db.prepare("SELECT * FROM jobs WHERE id = ? AND work_item_id = ?").get(Number(match[1]), row.work_item_id); } catch { return null; }
+  try {
+    job = db.prepare(`
+      SELECT jobs.*, hg.gate_state AS human_gate_state,
+             hg.generation AS human_gate_generation
+      FROM jobs
+      LEFT JOIN human_gates hg ON hg.gate_job_id = jobs.id
+      WHERE jobs.id = ? AND jobs.work_item_id = ?
+    `).get(Number(match[1]), row.work_item_id);
+  } catch { return null; }
   if (!job || job.job_type !== "human_input") return null;
   const payload = parseJsonObject(job.payload_json);
   const rawQuestions = Array.isArray(payload.questions) && payload.questions.length > 0
@@ -744,7 +762,9 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
   let state = observedQuestionStateForJob(job, new Date().toISOString(), {
     allowLiveOwnerDelivery: LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(questionKind),
   });
-  if (["reserved", "delivered"].includes(action?.state)) state = "pending";
+  if (["reserved", "delivered"].includes(action?.state) && ["open", "pending"].includes(state)) {
+    state = "pending";
+  }
   if (kind === "answer") state = action?.result?.question_state
     || (event.outcome === "accepted" ? "answered" : "rejected");
   const fallbackEventId = kind === "answer" ? `event:${row.id}` : null;
@@ -772,7 +792,7 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
     expires_at: payload.expires_at || null,
     generation: String(
       action?.descriptor?.question_generation
-      ?? db.prepare("SELECT generation FROM human_gates WHERE gate_job_id = ?").get(job.id)?.generation
+      ?? job.human_gate_generation
       ?? 1
     ),
     choices,

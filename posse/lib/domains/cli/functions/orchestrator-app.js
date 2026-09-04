@@ -168,6 +168,7 @@ import {
   createRunSessionDeps as createRunSessionDepsImpl,
 } from "./session-factories.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
+import { operationalRunJobs } from "./run-session.js";
 import {
   classifyResearchForRouting as classifyResearchForRoutingImpl,
   createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl,
@@ -1816,7 +1817,7 @@ async function cmdGo() {
   clearColdIndexFromCliFlagOnce();
   console.log(`\n  ${C.dim}Client: ${formatClientProvenance(resolveClientProvenance())}${C.reset}`);
   const queued = listWorkItems("queued");
-  const activeJobs = listJobs(["queued", ...ACTIVE_LEASE_STATUSES]);
+  const activeJobs = operationalRunJobs(listJobs(["queued", ...ACTIVE_LEASE_STATUSES]));
 
   if (queued.length === 0 && activeJobs.length === 0) {
     const iterateResult = await processIterativeWrapUp({ reason: "go start" });

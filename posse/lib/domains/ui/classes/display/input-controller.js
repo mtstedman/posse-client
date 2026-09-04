@@ -153,11 +153,17 @@ export class DisplayInputController {
     const targetJobId = Number(jobId);
     if (!Number.isFinite(targetJobId)) return false;
     let qSet = this._questionQueue.find((entry) => Number(entry.jobId) === targetJobId);
+    let requested = false;
     if (!qSet && typeof this.onAnswerJob === "function") {
-      try { this.onAnswerJob(targetJobId); } catch { /* leave the action unavailable */ }
+      try { requested = this.onAnswerJob(targetJobId) === true; } catch { /* leave the action unavailable */ }
       qSet = this._questionQueue.find((entry) => Number(entry.jobId) === targetJobId);
     }
-    if (!qSet) return false;
+    // Durable plan/push prompts are materialized on a promise microtask, while
+    // parked worker-owned gates are first requeued for scheduler dispatch. In
+    // both cases the callback can accept the explicit action before a question
+    // entry exists in memory. Consume the hotkey now; askQuestions will focus
+    // or queue the prompt when it arrives.
+    if (!qSet) return requested;
     this._inputMode = "question";
     this._activeQ = qSet;
     this._inputBuf = "";

@@ -1,6 +1,7 @@
 // lib/domains/worker/functions/helpers/verdicts/fail.js
 
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 import {
   addDependency,
@@ -32,6 +33,7 @@ import {
   looksLikeStructuredDataRepoTransformRecovery as _looksLikeStructuredDataRepoTransformRecovery,
   mergeFixEditableScope as _mergeFixEditableScope,
   mergeUniquePaths as _mergeUniquePaths,
+  measureConsecutiveFixChainDepth,
   normalizeFixTitle as _normalizeFixTitle,
   sanitizeScopedFixPaths as _sanitizeScopedFixPaths,
 } from "../verdict-shared.js";
@@ -64,6 +66,42 @@ function _filterToInheritedScope(paths = [], inherited = []) {
   return (Array.isArray(paths) ? paths : [])
     .map((entry) => String(entry || "").replace(/\\/g, "/"))
     .filter((entry) => entry && allowed.has(entry));
+}
+
+function _canonicalizeInferredFixScope(inferred = {}, inherited = []) {
+  const inheritedPaths = (Array.isArray(inherited) ? inherited : [])
+    .map(_normalizeScopePath)
+    .filter(Boolean);
+  const byBasename = new Map();
+  for (const inheritedPath of inheritedPaths) {
+    const basename = path.posix.basename(inheritedPath);
+    const matches = byBasename.get(basename) || [];
+    matches.push(inheritedPath);
+    byBasename.set(basename, matches);
+  }
+  const canonical = (rawPath) => {
+    const candidate = _normalizeScopePath(rawPath);
+    if (!candidate || candidate.includes("/")) return candidate;
+    const matches = byBasename.get(candidate) || [];
+    return matches.length === 1 ? matches[0] : candidate;
+  };
+
+  const modify = [];
+  const create = [];
+  for (const rawPath of Array.isArray(inferred.files_to_modify) ? inferred.files_to_modify : []) {
+    const candidate = canonical(rawPath);
+    if (candidate) modify.push(candidate);
+  }
+  for (const rawPath of Array.isArray(inferred.files_to_create) ? inferred.files_to_create : []) {
+    const candidate = canonical(rawPath);
+    if (!candidate) continue;
+    if (inheritedPaths.includes(candidate)) modify.push(candidate);
+    else create.push(candidate);
+  }
+  return {
+    files_to_modify: _mergeUniquePaths(modify),
+    files_to_create: _mergeUniquePaths(create),
+  };
 }
 
 function _fixSatisfiabilityFingerprint({
@@ -153,6 +191,8 @@ function _buildArtifactRoutingAdminPayload({
     ],
     context: `Artifact routing admin review for failed job #${job.id}; repo mutation is intentionally blocked for this recovery path.`,
     review_type: "artifact_routing_admin",
+    question_kind: "artifact_routing_admin",
+    choices: WORK_ITEM_QUESTION_CHOICE_IDS.artifact_routing_admin,
     _artifact_routing_admin_review: true,
   };
 }
@@ -318,6 +358,7 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
     model_tier: "cheap",
     payload_json: JSON.stringify({
       original_job_id: job.id,
+      gate_kind: "failure_threshold_exhausted",
       review_type: "blocked_recovery",
       question_kind: "blocked_recovery",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
@@ -341,17 +382,6 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
   });
 }
 
-function _measureFixChainDepth(job) {
-  let depth = 0;
-  let walker = job;
-  while (walker && walker.parent_job_id) {
-    if (walker.job_type === "fix") depth++;
-    walker = getJob(walker.parent_job_id);
-    if (!walker) break;
-  }
-  return depth;
-}
-
 function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth, log, spawnFromAssessor, spawnedJobs }) {
   const chainMsg = `Fix chain depth ${fixChainDepth} reached (max ${maxFixChainDepth})  escalating to human`;
   log(`${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: ${chainMsg}`);
@@ -365,6 +395,7 @@ function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth,
     model_tier: "cheap",
     payload_json: JSON.stringify({
       original_job_id: job.id,
+      gate_kind: "fix_chain_exhausted",
       review_type: "blocked_recovery",
       question_kind: "blocked_recovery",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
@@ -604,14 +635,17 @@ function _spawnRecoveryJobsForVerdict({
     const explicitFixModify = _sanitizeScopedFixPaths(spec.payload?.files_to_modify, "spawn_jobs.files_to_modify");
     const explicitFixCreate = _sanitizeScopedFixPaths(spec.payload?.files_to_create, "spawn_jobs.files_to_create");
     const explicitFixRoots = Array.isArray(spec.payload?.create_roots) ? spec.payload.create_roots : [];
-    const inferredFixScope = _extractScopedPathsFromInstructions(fixInstructions);
+    const inheritedEditableScope = _mergeFixEditableScope(originalFiles, originalCreateFiles);
+    const inferredFixScope = _canonicalizeInferredFixScope(
+      _extractScopedPathsFromInstructions(fixInstructions),
+      inheritedEditableScope,
+    );
     const inferredFixModify = _positiveFixEditTargets(fixInstructions, inferredFixScope.files_to_modify);
     const inferredGeneratedDeletes = _inferGeneratedArtifactDeletionTargets(job, {
       ...currentPayload,
       fix_instructions: fixInstructions,
       assessor_feedback: verdict.reasons,
     });
-    const inheritedEditableScope = _mergeFixEditableScope(originalFiles, originalCreateFiles);
     const inheritedExplicitModify = _filterToInheritedScope(explicitFixModify, inheritedEditableScope);
     const inheritedScopeSet = new Set(inheritedEditableScope.map(_normalizeScopePath));
     const requiredScopeExpansion = _mergeUniquePaths(explicitFixModify, inferredFixModify)
@@ -1079,7 +1113,7 @@ export function handle(job, verdict, ctx) {
 
     // Phase 3: dev→fix→fix→… chain too deep → escalate. Walk parent_job_id
     // to count fix ancestors; escalate when at or above the configured cap.
-    const fixChainDepth = _measureFixChainDepth(job);
+    const fixChainDepth = measureConsecutiveFixChainDepth(job);
     const maxFixChainDepth = getMaxFixChainDepth();
     if (fixChainDepth >= maxFixChainDepth) {
       _escalateFixChainDepth({

@@ -14,6 +14,16 @@ import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
+export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved", "superseded"]);
+
+export function humanGateStateAllowsAnswer(gateState) {
+  return gateState == null || gateState === "open";
+}
+
+export function humanGateStateIsActive(gateState) {
+  return humanGateStateAllowsAnswer(gateState) || gateState === "resolving";
+}
+
 const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
   JOB_STATUSES.filter((status) => !["leased", "awaiting_assessment", "canceled"].includes(status)),
 );
@@ -23,10 +33,10 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   scope_expansion_required: freezeChoices(["approve", "reject"]),
   partial_work_recovery: freezeChoices(["extend", "commit", "revert"]),
   blocked_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery),
-  dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
-  research_dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
-  oneshot_dead_letter_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
-  stall_exhausted_recovery: freezeChoices(["retry_with_changes", "explicit_waiver"]),
+  dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
+  research_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
+  oneshot_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
+  stall_exhausted_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   assessment: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
   needs_review: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
   assessment_parse_error: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
@@ -85,22 +95,22 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
-    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
   research_dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
-    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
   oneshot_dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
-    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
   stall_exhausted_recovery: {
     gate_kind: "failure_threshold_exhausted",
-    allowed_actions: ["retry_with_changes", "explicit_waiver"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "blocked", "waiting_on_human"],
   },
   assessment_transport_error: {
@@ -192,7 +202,12 @@ export function humanGateContractForPayload(payload = {}, {
     ?? parentJobId
   );
   const fallbackActions = explicitChoices.length > 0 ? explicitChoices : ["respond"];
-  const gateKind = registered?.gate_kind || source;
+  // review_type selects the action/source-state contract, while an explicit
+  // gate_kind identifies the concrete recovery condition for deduplication.
+  // Conflating them made fix-chain and failure-threshold gates look like a
+  // generic developer block and could reuse an unrelated open prompt.
+  const explicitGateKind = String(payload?.gate_kind || "").trim();
+  const gateKind = explicitGateKind || registered?.gate_kind || source;
   return {
     gate_kind: gateKind,
     contract_version: 1,
@@ -327,11 +342,15 @@ export function humanInputChoiceFromAnswer(answer, choices = []) {
   const text = String(answer || "").trim().toLowerCase();
   if (!text) return null;
   const normalizedChoices = normalizeHumanInputChoices(choices, { limit: Number.POSITIVE_INFINITY });
+  // Resolve an exact provider-qualified choice before testing decorated
+  // prefixes. Otherwise the earlier `retry` entry captures `retry:claude`
+  // and the durable resolution loses the operator's selected route.
+  const exact = normalizedChoices.find((choice) => choice.toLowerCase() === text);
+  if (exact) return exact;
   for (const choice of normalizedChoices) {
     const normalizedChoice = choice.toLowerCase();
     if (
-      text === normalizedChoice
-      || text.startsWith(`${normalizedChoice}:`)
+      text.startsWith(`${normalizedChoice}:`)
       || text.startsWith(`${normalizedChoice} -`)
       || text.startsWith(`${normalizedChoice} —`)
     ) return choice;

@@ -7,9 +7,11 @@
 
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
+import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import {
+  getHumanGate,
   getJob,
   withMergeLock,
 } from "../../queue/functions/index.js";
@@ -20,6 +22,12 @@ import { redactBridgeValue } from "./redaction.js";
 
 const OPEN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const MAX_OUTPUT_CHARS = 2000;
+
+function isOpenPushGate(job) {
+  if (!job || !OPEN_GATE_STATUSES.has(job.status)) return false;
+  const gate = getHumanGate(job.id);
+  return humanGateStateAllowsAnswer(gate?.gate_state);
+}
 
 function truncatedRedactedOutput(output) {
   const text = String(output || "").slice(0, MAX_OUTPUT_CHARS);
@@ -52,11 +60,15 @@ async function resolveTargetBranchSafe(projectDir, gatePayload = {}) {
 export async function executeGitPushGate(jobId, args = {}, context = {}, deps = {}) {
   const job = getJob(jobId);
   if (!job || !isPushOfferJob(job)) return { ok: false, reason: "no_such_gate" };
-  if (!OPEN_GATE_STATUSES.has(job.status)) return { ok: false, reason: "gate_closed" };
+  if (!isOpenPushGate(job)) return { ok: false, reason: "gate_closed" };
 
   if (args.decline === true) {
     const declineOutcome = await withMergeLock(
-      () => closePushOfferGate(jobId, "canceled", { declined: true }),
+      () => {
+        const liveGate = getJob(jobId);
+        if (!isOpenPushGate(liveGate)) return false;
+        return closePushOfferGate(jobId, "canceled", { declined: true });
+      },
       { ownerId: `merge-${process.pid}-bridge-git-decline-${jobId}` },
     );
     if (!declineOutcome.acquired) {
@@ -81,42 +93,77 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   const collectState = deps.collectState || (() => helpers._collectPushOfferStateAsync(0));
   const runPush = deps.push || ((pushArgs) => helpers._executePushAsync(pushArgs));
 
-  // The offer payload is advisory; the push acts on CURRENT repo state.
-  let state;
-  try {
-    state = await collectState();
-  } catch (err) {
-    return { ok: false, reason: "push_state_failed", message: err?.message || String(err) };
-  }
-  if (!state?.hasRemote) return { ok: false, reason: "no_remote" };
-  if (!state.pushBranch) return { ok: false, reason: "no_push_branch" };
-  if (state.pushBranchWorkItem) {
-    return {
-      ok: false,
-      reason: "work_item_push_target",
-      message: `Refusing to push work-item branch ${state.pushBranch}; merge it into the repository target branch first`,
-    };
-  }
-
-  const aheadCount = Number.isFinite(state.aheadCount) ? state.aheadCount : null;
-  if (aheadCount === 0) {
-    // Someone already pushed (terminal, another device). Close the gate as
-    // satisfied rather than failing the phone.
-    if (!closePushOfferGate(jobId, "succeeded", { pushed: false, already_up_to_date: true })) {
-      return { ok: false, reason: "gate_closed" };
-    }
-    return { ok: true, pushed: false, already_up_to_date: true, job_id: jobId };
-  }
-
-  // Don't push while a merge is rewriting the branch underneath us.
+  // Collect and validate CURRENT repository state only after taking the same
+  // lock used by merges and pushes. Checking before the lock leaves a TOCTOU
+  // window where a merge can change HEAD after authorization validation.
   const lockOwner = `merge-${process.pid}-bridge-git-push-${jobId}`;
   let pushed;
   try {
     const pushOutcome = await withMergeLock(async () => {
       const liveGate = getJob(jobId);
-      if (!liveGate || !OPEN_GATE_STATUSES.has(liveGate.status)) {
+      if (!isOpenPushGate(liveGate)) {
         return { ok: false, gateClosed: true };
       }
+
+      let state;
+      try {
+        state = await collectState();
+      } catch (err) {
+        return { ok: false, reason: "push_state_failed", message: err?.message || String(err) };
+      }
+      if (!state?.hasRemote) return { ok: false, reason: "no_remote" };
+      if (!state.pushBranch) return { ok: false, reason: "no_push_branch" };
+      if (state.pushBranchWorkItem) {
+        return {
+          ok: false,
+          reason: "work_item_push_target",
+          message: `Refusing to push work-item branch ${state.pushBranch}; merge it into the repository target branch first`,
+        };
+      }
+
+      const offeredRemote = String(gatePayload.remote || "").trim();
+      const offeredBranch = String(gatePayload.push_branch || "").trim();
+      const offeredHead = String(gatePayload.push_head_hash || "").trim().toLowerCase();
+      const currentRemote = String(state.effectiveRemote || "").trim();
+      const currentBranch = String(state.pushBranch || "").trim();
+      const currentHead = String(state.pushHeadHash || "").trim().toLowerCase();
+      if (!currentHead) {
+        return {
+          ok: false,
+          reason: "push_state_unverifiable",
+          message: "Current push HEAD could not be verified; the existing offer remains open",
+        };
+      }
+      if (
+        !offeredHead
+        || offeredRemote !== currentRemote
+        || offeredBranch !== currentBranch
+        || offeredHead !== currentHead
+      ) {
+        closePushOfferGate(jobId, "canceled", {
+          declined: false,
+          superseded: true,
+          reason: "publication_state_changed",
+          offered: { remote: offeredRemote, branch: offeredBranch, head: offeredHead || null },
+          current: { remote: currentRemote, branch: currentBranch, head: currentHead },
+        });
+        return {
+          ok: false,
+          reason: "stale_offer",
+          message: "The push target changed after this offer was created; refresh to authorize the current HEAD",
+        };
+      }
+
+      const aheadCount = Number.isFinite(state.aheadCount) ? state.aheadCount : null;
+      if (aheadCount === 0) {
+        const gateResult = { pushed: false, already_up_to_date: true };
+        return {
+          ok: true,
+          gateResult,
+          gateSettled: closePushOfferGate(jobId, "succeeded", gateResult),
+        };
+      }
+
       const pushResult = await runPush({
         effectiveRemote: state.effectiveRemote,
         pushBranch: state.pushBranch,
@@ -160,9 +207,8 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
   return {
     ok: false,
     reason: pushed?.reason || "push_failed",
-    message: truncatedRedactedOutput(
-      pushed?.output
-        || (Array.isArray(pushed?.files) ? `conflict markers in: ${pushed.files.join(", ")}` : ""),
-    ) || undefined,
+    message: truncatedRedactedOutput(pushed?.message
+      || pushed?.output
+      || (Array.isArray(pushed?.files) ? `conflict markers in: ${pushed.files.join(", ")}` : "")) || undefined,
   };
 }

@@ -1,7 +1,10 @@
 // lib/domains/worker/functions/helpers/verdicts/needs_replan.js
 
 import { REPLAN_CANCELABLE_JOB_TYPES, STALE_CANCELABLE_JOB_STATUSES } from "../../../../../catalog/job.js";
-import { TERMINAL_JOB_STATUSES } from "../../../../queue/functions/common.js";
+import {
+  isDeferredImplementationAssessmentJob,
+  TERMINAL_JOB_STATUSES,
+} from "../../../../queue/functions/common.js";
 import {
   getWorkItem,
   getAttempts,
@@ -83,8 +86,10 @@ export function handle(job, verdict, ctx) {
           ],
           context: "Replan depth limit hit. Previous approaches keep failing assessment.",
           review_type: originalNeverExecuted ? "unexecuted_replan_limit" : "replan_limit",
-          question_kind: "assessment_review",
-          choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
+          question_kind: originalNeverExecuted ? "unexecuted_replan_recovery" : "assessment_review",
+          choices: originalNeverExecuted
+            ? WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery
+            : WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
         }),
       });
       spawnedJobs.push(escJob);
@@ -110,7 +115,15 @@ export function handle(job, verdict, ctx) {
     const staleJobIds = new Set();
     let canceledCount = 0;
     for (const sib of allJobs) {
-      if (staleStatuses.has(sib.status) && REPLAN_CANCELABLE_JOB_TYPES.has(sib.job_type) && sib.id !== job.id) {
+      if (
+        staleStatuses.has(sib.status)
+        && REPLAN_CANCELABLE_JOB_TYPES.has(sib.job_type)
+        && sib.id !== job.id
+        // Replanning one sibling must not throw completed, disjoint work away.
+        // Its retained WI lock serializes the pending assessment with any
+        // replacement task that later targets the same path.
+        && !isDeferredImplementationAssessmentJob(sib)
+      ) {
         if (!forceUpdateJobStatus(sib.id, "canceled")) continue;
         staleJobIds.add(sib.id);
         canceledCount++;

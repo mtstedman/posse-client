@@ -154,10 +154,33 @@ export function releaseMergeLock(ownerId) {
   releaseSchedulerLock("merge", ownerId);
 }
 
-// Merge sweeps (ATLAS indexing, retries, multi-WI auto-merge) can run long and
-// nothing renews the lease mid-merge, so it must outlive the slowest sweep.
-const MERGE_LOCK_LEASE_SEC = 600;
+// A single synchronous Git/test command may block Node's event loop for up to
+// ten minutes, preventing the asynchronous renewal timer below from firing.
+// Keep the default lease comfortably beyond that blocking ceiling. Dead local
+// owners are reclaimed immediately by acquireMergeLock's PID liveness check,
+// so the larger crash lease does not make normal local recovery wait an hour.
+export const MERGE_LOCK_LEASE_SEC = 60 * 60;
 const MERGE_LOCK_OWNER = `merge-${process.pid}`;
+
+function mergeLockStillOwned(ownerId) {
+  try {
+    const held = getSchedulerLockInfo("merge");
+    const expiresAtMs = Date.parse(held?.expires_at || "");
+    return held?.owner_id === ownerId
+      && Number.isFinite(expiresAtMs)
+      && expiresAtMs > Date.now();
+  } catch {
+    // A successful merge/push must be able to prove it still owns the
+    // serialization boundary. Treat an unverifiable row as ownership loss.
+    return false;
+  }
+}
+
+function mergeLockLostError(ownerId) {
+  const error = new Error(`Merge lock ownership was lost while ${ownerId} was still running`);
+  error.code = "POSSE_MERGE_LOCK_LOST";
+  return error;
+}
 
 export function withMergeLockSync(fn, {
   ownerId = MERGE_LOCK_OWNER,
@@ -165,7 +188,9 @@ export function withMergeLockSync(fn, {
 } = {}) {
   if (!acquireMergeLock(ownerId, durationSec)) return { acquired: false, result: undefined };
   try {
-    return { acquired: true, result: fn() };
+    const result = fn();
+    if (!mergeLockStillOwned(ownerId)) throw mergeLockLostError(ownerId);
+    return { acquired: true, result };
   } finally {
     releaseMergeLock(ownerId);
   }
@@ -173,10 +198,11 @@ export function withMergeLockSync(fn, {
 
 export async function withMergeLock(fn, { ownerId = MERGE_LOCK_OWNER, durationSec = MERGE_LOCK_LEASE_SEC } = {}) {
   if (!acquireMergeLock(ownerId, durationSec)) return { acquired: false, result: undefined };
+  let lockLost = false;
   const renewEveryMs = Math.max(25, Math.floor(durationSec * 1000 / 3));
   const renewInterval = setInterval(() => {
     try {
-      renewSchedulerLock("merge", ownerId, durationSec);
+      if (!renewSchedulerLock("merge", ownerId, durationSec)) lockLost = true;
     } catch {
       // A transient SQLite contention error should not abort a merge that is
       // already in progress. The next renewal tick gets another chance.
@@ -184,7 +210,12 @@ export async function withMergeLock(fn, { ownerId = MERGE_LOCK_OWNER, durationSe
   }, renewEveryMs);
   renewInterval.unref?.();
   try {
-    return { acquired: true, result: await fn() };
+    const result = await fn();
+    // Do not rely solely on the renewal timer: the callback may finish before
+    // its next tick, or may block the event loop beyond the lease. Re-read the
+    // authoritative row before reporting success.
+    if (lockLost || !mergeLockStillOwned(ownerId)) throw mergeLockLostError(ownerId);
+    return { acquired: true, result };
   } finally {
     clearInterval(renewInterval);
     releaseMergeLock(ownerId);

@@ -1094,6 +1094,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     snapshotRestoreError = snapshotRestoreFailed ? (rollbackStatus?.message || "native index rollback failed") : null;
     return {
       hash: nativeResult.committedHash || headAtScopeStart,
+      createdCommit: nativeResult.createdCommit === true,
       reverted,
       createdViaModifyScope,
       createdOutOfScope,
@@ -1146,7 +1147,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   // the next job's commit.
   if (!staged && !mergeInProgress) {
     const scopeCleanedNoOp = hasScope && reverted.length > 0;
-    return { hash: gitCurrentHash(cwd), reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedIgnoredModifyFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef, mergeCompleted: false, mergeTreeChanged: false };
+    return { hash: gitCurrentHash(cwd), createdCommit: false, reverted, createdViaModifyScope, createdOutOfScope, skippedIgnoredCreateFiles, skippedIgnoredModifyFiles, skippedStaleModifyFiles, discardedGeneratedFiles, outOfScopeDirtySkipped, outOfScopeStagingSkipped, siblingDirtySkipped, siblingUntrackedSkipped, siblingStagingSkipped, gitAddWarnings, scopeCleanedNoOp, snapshotRestoreFailed, snapshotRestoreError, snapshotRestoreRef, mergeCompleted: false, mergeTreeChanged: false };
   }
 
   // When completing a merge, verify the dev actually resolved the conflicts
@@ -1260,6 +1261,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
 
   return {
     hash: gitCurrentHash(cwd),
+    createdCommit: true,
     reverted,
     createdViaModifyScope,
     createdOutOfScope,

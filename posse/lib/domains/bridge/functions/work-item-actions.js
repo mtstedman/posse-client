@@ -105,8 +105,16 @@ export function createWorkItemTransitionExecutor(context = {}, deps = {}) {
     switch (descriptor.handler) {
       case "plan":
         return descriptor.choice_id === "approve"
-          ? executePlanApprove(Number(descriptor.work_item_id), { actor: context.actor || "bridge" })
-          : executePlanReject(Number(descriptor.work_item_id), { actor: context.actor || "bridge" });
+          ? executePlanApprove(Number(descriptor.work_item_id), {
+              actor: context.actor || "bridge",
+              gateJobId: Number(descriptor.job_id),
+              gateGeneration: Number(descriptor.question_generation),
+            })
+          : executePlanReject(Number(descriptor.work_item_id), {
+              actor: context.actor || "bridge",
+              gateJobId: Number(descriptor.job_id),
+              gateGeneration: Number(descriptor.question_generation),
+            });
       case "review":
         return executeHumanInput(Number(descriptor.job_id), {
           job_id: descriptor.job_id,

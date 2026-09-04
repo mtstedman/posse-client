@@ -190,6 +190,10 @@ export class AccountSettings {
     return this.resolvePath();
   }
 
+  getDbPathOverrideForTests() {
+    return this._dbPathOverride;
+  }
+
   getDataVersion() {
     this._openForReadOrWrite();
     return this._dataVersion;

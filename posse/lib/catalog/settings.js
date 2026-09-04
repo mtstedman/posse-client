@@ -84,6 +84,7 @@ export const SETTING_KEYS = Object.freeze({
   HANDOFF_MAX_CONTEXT_CHARS: "handoff_max_context_chars",
   HANDOFF_MAX_PRELOAD_TOTAL_BYTES: "handoff_max_preload_total_bytes",
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES: "handoff_preload_editable_file_bodies",
+  HUMAN_GATE_MAX_RESURFACES: "human_gate_max_resurfaces",
   MODEL_CATALOG_JSON: "model_catalog_json",
   MODEL_CATALOG_FETCHED_AT: "model_catalog_fetched_at",
   MODEL_CATALOG_CACHE_MS: "model_catalog_cache_ms",

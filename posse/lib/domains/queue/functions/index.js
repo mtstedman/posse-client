@@ -6,7 +6,7 @@
 // scheduler can depend on Queue's facade instead of private implementation
 // files during its extraction.
 export { parseJobPayload } from "./payload.js";
-export { runImmediateTransaction } from "./common.js";
+export { isPushOfferJob, runImmediateTransaction } from "./common.js";
 export {
   RUNTIME_STATUS_KEYS,
   BRIDGE_PRESENCE_FRESH_MS,

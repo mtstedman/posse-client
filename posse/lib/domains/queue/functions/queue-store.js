@@ -4,6 +4,7 @@
 // Uses better-sqlite3 (synchronous) for simplicity and atomicity.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import {
   MUTATING_JOB_TYPES,
   NON_COMPLETION_BLOCKING_JOB_TYPES,
@@ -58,6 +59,7 @@ import {
 import { findDeadlockedJobs } from "./dependencies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
+  __registerHumanGateReconcileHook,
   findActiveHumanGateForPayload,
   registerHumanGate,
 } from "./human-gates.js";
@@ -239,6 +241,8 @@ export {
 
 export {
   beginHumanGateResolution,
+  claimHeadlessHumanGateTimeout,
+  claimHumanGatePromptPresentation,
   completeHumanGateEffect,
   completeHumanGateResolution,
   enqueueHumanGateEffect,
@@ -505,6 +509,17 @@ export function updateWorkItemStatus(id, status, {
     const current = getWorkItem(id);
     if (!current) return false;
 
+    // A landed merge is stronger evidence than any stale child-job state.
+    // Only the explicit follow-up reopen path may clear that evidence before
+    // moving the work item away from complete. Keep this guard in the generic
+    // setter as well as refreshWorkItemStatus so an individual scheduler or
+    // recovery caller cannot reintroduce a contradictory failed/merged row.
+    const hasMergedEvidence = effectiveMergedEvidence(db, current);
+    if (hasMergedEvidence && status !== "complete") return false;
+    if (hasMergedEvidence && current.merge_state !== "merged") {
+      setMergeState(id, "merged");
+    }
+
     const isTerminal = TERMINAL_WORK_ITEM_STATUS_SET.has(status);
     const isStarting = status === "running" || status === "planning";
     if (
@@ -522,7 +537,7 @@ export function updateWorkItemStatus(id, status, {
       return false;
     }
 
-    if (status === "complete") {
+    if (status === "complete" && !hasMergedEvidence) {
       const readiness = completionReadinessForWorkItem(id, current, {
         allowTerminalFailureBlockers,
         resolvePendingReviews,
@@ -581,6 +596,10 @@ export function updateWorkItemStatus(id, status, {
       if (readiness.reviewPlan) {
         settleWorkItemReviewPlan(id, readiness.reviewPlan, { resolution: "work_item_approved" });
       }
+    } else if (status === "complete" && hasMergedEvidence) {
+      // Merge settlement is the final approval. Historical failures and review
+      // rows must not prevent queue state from converging on that Git outcome.
+      settleMergedWorkItemReviewJobs(id);
     }
 
     if (status === "canceled") cancelInactiveWorkItemJobs(id);
@@ -595,7 +614,12 @@ export function updateWorkItemStatus(id, status, {
           completed_at = ?
       WHERE id = ?
     `).run(status, ts, isStarting ? ts : null, isTerminal ? ts : null, id);
-    if (status === "complete" && current.branch_name && current.merge_state === null) {
+    if (
+      status === "complete"
+      && !hasMergedEvidence
+      && current.branch_name
+      && current.merge_state === null
+    ) {
       db.prepare(`
         UPDATE work_items
         SET merge_state = 'pending_review', updated_at = ?
@@ -610,7 +634,11 @@ export function updateWorkItemStatus(id, status, {
     });
     if (isTerminal) {
       invalidateSessionLanesForWorkItemInternal(id, `work_item_${status}`);
-      if (status === "failed" || status === "canceled") {
+      // Failed WIs remain reviewable and their branch may still be approved
+      // and merged. Preserve cross-WI ordering metadata until that branch is
+      // merged, explicitly requeued, or canceled so merge-time resync can
+      // remove upstream handoff duplication instead of surfacing a conflict.
+      if (status === "canceled") {
         clearCrossWiMergeDependenciesForWorkItem(id, `work_item_${status}`);
       }
     }
@@ -1247,11 +1275,13 @@ export function countWorkItemJobs(workItemId) {
  * State priority (highest wins):
  *   1. All jobs terminal + all succeeded  → complete
  *   2. All jobs terminal + some failed    → failed
- *   3. Any job waiting_on_human           → waiting_on_human
- *   4. Any job running/leased/assessing   → running
- *   5. Any job waiting_on_review          → waiting_on_review
- *   6. Any job blocked (non-human)        → blocked
- *   7. Only queued jobs remain            → planning (if research/plan) or running
+ *   3. Any answerable human gate          → waiting_on_human
+ *   4. Accepted gate awaiting settlement  → running
+ *   5. Unanswerable waiting job           → blocked
+ *   6. Any job running/leased/assessing   → running
+ *   7. Any job waiting_on_review          → waiting_on_review
+ *   8. Any job blocked (non-human)        → blocked
+ *   9. Only queued jobs remain            → planning (if research/plan) or running
  *
  * Skips work items in "canceled" state (manual override).
  */
@@ -1262,6 +1292,24 @@ export function refreshWorkItemStatus(workItemId) {
   const db = getDb();
   let result = null;
   const execute = () => {
+    const wi = getWorkItem(workItemId);
+    if (!wi || wi.status === "canceled") return;
+
+    // Git publication is the authoritative terminal outcome. Repair legacy or
+    // crash-interrupted rows before inspecting child jobs; a merged work item
+    // may legitimately have only failed historical jobs, or no jobs at all.
+    if (effectiveMergedEvidence(db, wi)) {
+      if (wi.merge_state !== "merged") setMergeState(workItemId, "merged");
+      if (wi.status !== "complete") {
+        const updated = updateWorkItemStatus(workItemId, "complete", {
+          allowTerminalFailureBlockers: true,
+          resolvePendingReviews: true,
+        });
+        if (updated) result = "complete";
+      }
+      return;
+    }
+
     // Push-offer gates are out-of-band deploy prompts — an open one must not
     // drag a completed work item back to waiting_on_human.
     const jobs = listJobsByWorkItem(workItemId)
@@ -1270,9 +1318,30 @@ export function refreshWorkItemStatus(workItemId) {
     if (jobs.length === 0) return;
     const completionJobs = jobs.filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
     const stateJobs = completionJobs.length > 0 ? completionJobs : jobs;
-
-    const wi = getWorkItem(workItemId);
-    if (!wi || wi.status === "canceled") return;
+    const gateContracts = db.prepare(`
+      SELECT hg.gate_job_id, hg.original_job_id, hg.gate_state
+      FROM human_gates hg
+      JOIN jobs gate_job ON gate_job.id = hg.gate_job_id
+      WHERE gate_job.work_item_id = ?
+    `).all(workItemId);
+    const gateStates = new Map(gateContracts.map((row) => [Number(row.gate_job_id), row.gate_state]));
+    const acceptedOriginalJobIds = new Set(gateContracts
+      .filter((row) => ["resolving", "resolved"].includes(row.gate_state))
+      .map((row) => Number(row.original_job_id))
+      .filter((id) => Number.isSafeInteger(id) && id > 0));
+    const hasAnswerableHumanGate = stateJobs.some((job) => (
+      job.job_type === "human_input"
+      && !TERMINAL_JOB_STATUS_SET.has(job.status)
+      && humanGateStateAllowsAnswer(gateStates.get(Number(job.id)))
+    ));
+    const hasAcceptedHumanGate = stateJobs.some((job) => (
+      job.status === "waiting_on_human"
+      && (
+        (job.job_type === "human_input"
+          && ["resolving", "resolved"].includes(gateStates.get(Number(job.id))))
+        || acceptedOriginalJobIds.has(Number(job.id))
+      )
+    ));
 
     const allTerminal = completionJobs.length > 0
       && completionJobs.every(j => TERMINAL_JOB_STATUS_SET.has(j.status));
@@ -1301,7 +1370,9 @@ export function refreshWorkItemStatus(workItemId) {
         ? "canceled"
         : (blockers.length === 0 && !executionReason ? "complete" : "failed");
     } else if (stateJobs.some(j => j.status === "waiting_on_human")) {
-      newStatus = "waiting_on_human";
+      if (hasAnswerableHumanGate) newStatus = "waiting_on_human";
+      else if (hasAcceptedHumanGate) newStatus = "running";
+      else newStatus = "blocked";
     } else if (stateJobs.some(j => ["running", "leased", "awaiting_assessment"].includes(j.status))) {
       newStatus = "running";
     } else if (stateJobs.some(j => j.status === "waiting_on_review")) {
@@ -1410,7 +1481,10 @@ export function createJob({
     : payload_json;
   const execute = () => {
     if (job_type === "human_input") {
-      const active = findActiveHumanGateForPayload(serializedPayload, { parentJobId: parent_job_id });
+      const active = findActiveHumanGateForPayload(serializedPayload, {
+        parentJobId: parent_job_id,
+        workItemId: work_item_id,
+      });
       if (active?.gate_job_id) {
         return getJob(active.gate_job_id);
       }
@@ -1499,11 +1573,21 @@ export function listJobs(statusFilter = null) {
   return db.prepare(`SELECT * FROM jobs ORDER BY created_at`).all();
 }
 
+export function listJobsForDisplay() {
+  const db = getDb();
+  return db.prepare(`
+    SELECT j.*, hg.gate_state AS human_gate_state
+    FROM jobs j
+    LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+    ORDER BY j.created_at
+  `).all();
+}
+
 export function listJobStatusRows() {
   const db = getDb();
   return db.prepare(`
     SELECT id, work_item_id, parent_job_id, job_type, title, status,
-           model_tier, model_name, provider, created_at, updated_at
+           model_tier, model_name, provider, payload_json, created_at, updated_at
     FROM jobs
     ORDER BY created_at
   `).all();
@@ -1885,6 +1969,19 @@ function parseJobPayloadObject(job) {
   }
 }
 
+function jobPayloadAlreadyAuthorizesScopePath(payload, requestedPath, requestedAccess) {
+  const requested = normalizeRequestedScopePath(requestedPath);
+  if (!requested) return false;
+  const createPaths = Array.isArray(payload?.files_to_create) ? payload.files_to_create : [];
+  const authorizedPaths = requestedAccess === "create"
+    ? createPaths
+    : [
+        ...(Array.isArray(payload?.files_to_modify) ? payload.files_to_modify : []),
+        ...createPaths,
+      ];
+  return authorizedPaths.some((value) => normalizeRequestedScopePath(value) === requested);
+}
+
 function scopeGateQuestionText(job, request) {
   const entries = scopeRequestBatchEntries(request);
   const approvalAction = request?.live_wait === true
@@ -1979,6 +2076,24 @@ export function requestJobScopeExpansion({
     const pending = payload._pending_scope_request && typeof payload._pending_scope_request === "object"
       ? payload._pending_scope_request
       : null;
+    // The durable job payload is the authority. A reconnected MCP process or
+    // an overlapping embedded runtime can retain stale local predicates after
+    // a prior approval and ask again for the same exact path. Return a grant
+    // receipt so the caller refreshes its local predicate instead of creating
+    // a duplicate human gate for authority the job already owns.
+    if (jobPayloadAlreadyAuthorizesScopePath(payload, normalizedPath, normalizedAccess)) {
+      return {
+        ok: true,
+        code: "scope_already_authorized",
+        paused: false,
+        approved: true,
+        path: normalizedPath,
+        access: normalizedAccess,
+        operation: normalizedOperation,
+        reason: "durable_job_scope",
+        message: `Writable scope is already authorized for ${normalizedPath}. Retry the ${normalizedOperation} now.`,
+      };
+    }
     if (pending) {
       const pendingEntries = scopeRequestBatchEntries(pending);
       if (pendingEntries.some((entry) =>
@@ -2750,19 +2865,58 @@ export function requeueForShutdown(jobId) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+function effectiveHumanGateMaxResurfaces(value = null) {
+  let configured = value;
+  if (configured == null) {
+    try {
+      configured = getIntSetting(SETTING_KEYS.HUMAN_GATE_MAX_RESURFACES, 2);
+    } catch {
+      configured = 2;
+    }
+  }
+  const numeric = Number(configured);
+  return Math.max(0, Number.isFinite(numeric) ? Math.floor(numeric) : 2);
+}
+
+/**
+ * Requeue parked human-input jobs for a newly available resolver. Automatic
+ * display reminders opt into durable counting; explicit policy/operator
+ * delivery keeps the default uncounted behavior so a real answer is never
+ * rejected merely because the reminder budget was consumed.
+ */
 export function requeueWaitingHumanInputJobs({
   filter = null,
   reason = "interactive display became available",
+  trackResurface = false,
+  maxResurfaces = null,
 } = {}) {
   const db = getDb();
   const execute = () => {
+    const ts = now();
+    const effectiveMax = trackResurface
+      ? effectiveHumanGateMaxResurfaces(maxResurfaces)
+      : 0;
     const parked = db.prepare(`
-      SELECT id, work_item_id, job_type, payload_json
-      FROM jobs
-      WHERE status = 'waiting_on_human' AND job_type = 'human_input'
-    `).all()
+      SELECT j.id, j.work_item_id, j.job_type, j.payload_json
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.status = 'waiting_on_human' AND j.job_type = 'human_input'
+        AND (
+          j.lease_token IS NULL
+          OR j.lease_expires_at IS NULL
+          OR julianday(j.lease_expires_at) IS NULL
+          OR julianday(j.lease_expires_at) < julianday(?)
+        )
+        AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
+    `).all(ts)
       .filter((job) => !isPushOfferJob(job))
       .filter((job) => parseJobPayload(job).subtype !== "plan_approval")
+      .map((job) => {
+        const payload = parseJobPayload(job);
+        const resurfaceCount = Math.max(0, Number.parseInt(String(payload._human_prompt_resurface_count || 0), 10) || 0);
+        return { ...job, payload, resurfaceCount };
+      })
+      .filter((job) => !trackResurface || job.resurfaceCount < effectiveMax)
       .filter((job) => typeof filter !== "function" || filter(job));
 
     if (parked.length === 0) return [];
@@ -2780,9 +2934,23 @@ export function requeueWaitingHumanInputJobs({
       WHERE id IN (${placeholders})
         AND status = 'waiting_on_human'
         AND job_type = 'human_input'
-    `).run(now(), ...parked.map((job) => job.id));
+        AND (
+          lease_token IS NULL
+          OR lease_expires_at IS NULL
+          OR julianday(lease_expires_at) IS NULL
+          OR julianday(lease_expires_at) < julianday(?)
+        )
+    `).run(ts, ...parked.map((job) => job.id), ts);
 
     for (const job of parked) {
+      const nextResurfaceCount = trackResurface ? job.resurfaceCount + 1 : job.resurfaceCount;
+      if (trackResurface) {
+        updateJobPayload(job.id, JSON.stringify({
+          ...job.payload,
+          _human_prompt_resurface_count: nextResurfaceCount,
+          _human_prompt_last_resurfaced_at: ts,
+        }));
+      }
       releaseJobLocksForStatus(job.id, "queued");
       logEvent({
         work_item_id: job.work_item_id,
@@ -2790,7 +2958,14 @@ export function requeueWaitingHumanInputJobs({
         event_type: EVENT_TYPES.JOB_HUMAN_PROMPT_REQUEUED,
         actor_type: EVENT_ACTORS.SYSTEM,
         message: `Requeued parked human_input job after ${reason}`,
-        event_json: JSON.stringify({ reason }),
+        event_json: JSON.stringify({
+          reason,
+          automatic_resurface: trackResurface,
+          ...(trackResurface ? {
+            resurface_count: nextResurfaceCount,
+            max_resurfaces: effectiveMax,
+          } : {}),
+        }),
       });
       notifyQueueStateChanged({
         reason: "job_human_prompt_requeued",
@@ -2810,32 +2985,49 @@ export function requeueWaitingHumanInputJobs({
 }
 
 /**
- * Mid-session revival of parked human gates. A gate parks (waiting_on_human,
- * lease released) when its prompt is skipped, times out, or its answer fails
- * validation — and nothing else requeues it until the next boot, so it would
- * never be prompted again this session. Requeue parked, unleased, still-open
- * gates whose updated_at is older than the snooze window so they resurface
- * without a restart. Live prompts and bridge claims hold a renewed lease and
- * are left alone; push offers are answered out-of-band by design.
+ * Mid-session reminder for parked human gates. A gate parks
+ * (waiting_on_human, lease released) when its prompt is skipped or times out.
+ * Requeue parked, unleased, still-open gates on an exponential snooze, up to
+ * the shared automatic reminder cap. The gate remains parked and remotely
+ * answerable after the cap. Live prompts and bridge claims hold a renewed
+ * lease and are left alone; push offers are answered out-of-band by design.
  */
-export function resurfaceParkedHumanGates({ snoozeSec = 600 } = {}) {
+export function resurfaceParkedHumanGates({ snoozeSec = 600, maxResurfaces = null } = {}) {
   const db = getDb();
   const execute = () => {
     const ts = now();
     const effectiveSnoozeSec = Math.max(30, Number(snoozeSec) || 600);
-    const cutoff = new Date(Date.now() - effectiveSnoozeSec * 1000).toISOString();
+    const effectiveMax = effectiveHumanGateMaxResurfaces(maxResurfaces);
+    if (effectiveMax === 0) return [];
+    const nowMs = Date.now();
     const parked = db.prepare(`
-      SELECT j.id, j.work_item_id, j.job_type, j.payload_json
+      SELECT j.id, j.work_item_id, j.job_type, j.payload_json, j.updated_at
       FROM jobs j
       LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
       WHERE j.status = 'waiting_on_human'
         AND j.job_type = 'human_input'
-        AND (j.lease_token IS NULL OR j.lease_expires_at IS NULL OR j.lease_expires_at < ?)
-        AND j.updated_at < ?
+        AND (
+          j.lease_token IS NULL
+          OR j.lease_expires_at IS NULL
+          OR julianday(j.lease_expires_at) IS NULL
+          OR julianday(j.lease_expires_at) < julianday(?)
+        )
         AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
-    `).all(ts, cutoff)
+    `).all(ts)
       .filter((job) => !isPushOfferJob(job))
-      .filter((job) => parseJobPayload(job).subtype !== "plan_approval");
+      .filter((job) => parseJobPayload(job).subtype !== "plan_approval")
+      .map((job) => {
+        const payload = parseJobPayload(job);
+        const resurfaceCount = Math.max(0, Number.parseInt(String(payload._human_prompt_resurface_count || 0), 10) || 0);
+        return { ...job, payload, resurfaceCount };
+      })
+      .filter((job) => job.resurfaceCount < effectiveMax)
+      .filter((job) => {
+        const updatedAtMs = Date.parse(job.updated_at || "");
+        if (!Number.isFinite(updatedAtMs)) return false;
+        const backoffMultiplier = 2 ** Math.min(job.resurfaceCount, 10);
+        return updatedAtMs < nowMs - (effectiveSnoozeSec * backoffMultiplier * 1000);
+      });
 
     if (parked.length === 0) return [];
 
@@ -2852,17 +3044,34 @@ export function resurfaceParkedHumanGates({ snoozeSec = 600 } = {}) {
       WHERE id IN (${placeholders})
         AND status = 'waiting_on_human'
         AND job_type = 'human_input'
-        AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)
+        AND (
+          lease_token IS NULL
+          OR lease_expires_at IS NULL
+          OR julianday(lease_expires_at) IS NULL
+          OR julianday(lease_expires_at) < julianday(?)
+        )
     `).run(now(), ...parked.map((job) => job.id), now());
 
     for (const job of parked) {
+      const nextResurfaceCount = job.resurfaceCount + 1;
+      updateJobPayload(job.id, JSON.stringify({
+        ...job.payload,
+        _human_prompt_resurface_count: nextResurfaceCount,
+        _human_prompt_last_resurfaced_at: ts,
+      }));
       releaseJobLocksForStatus(job.id, "queued");
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
         event_type: EVENT_TYPES.JOB_HUMAN_PROMPT_REQUEUED,
         actor_type: EVENT_ACTORS.SCHEDULER,
-        message: `Re-surfaced parked human gate after ${effectiveSnoozeSec}s snooze`,
+        message: `Re-surfaced parked human gate after ${effectiveSnoozeSec * (2 ** Math.min(job.resurfaceCount, 10))}s snooze (${nextResurfaceCount}/${effectiveMax})`,
+        event_json: JSON.stringify({
+          automatic_resurface: true,
+          resurface_count: nextResurfaceCount,
+          max_resurfaces: effectiveMax,
+          snooze_sec: effectiveSnoozeSec * (2 ** Math.min(job.resurfaceCount, 10)),
+        }),
       });
       notifyQueueStateChanged({
         reason: "job_human_prompt_requeued",
@@ -2910,7 +3119,11 @@ function clearExpiredParkedLeaseTokens(db, ts, cutoff) {
     SELECT id, status, lease_token FROM jobs
     WHERE status IN (${PARKED_LEASE_STATUSES_SQL})
       AND lease_token IS NOT NULL
-      AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+      AND (
+        lease_expires_at IS NULL
+        OR julianday(lease_expires_at) IS NULL
+        OR julianday(lease_expires_at) < julianday(?)
+      )
   `).all(cutoff);
   if (parkedStale.length === 0) return 0;
 
@@ -3372,16 +3585,21 @@ export { countJobsByStatus } from "./stats.js";
 
 export function listJobsMinimal(statusFilter = null) {
   const db = getDb();
-  const cols = "id, work_item_id, job_type, status, title, payload_json, priority, created_at, updated_at";
+  const cols = `
+    j.id, j.work_item_id, j.parent_job_id, j.job_type, j.status, j.title,
+    j.payload_json, j.priority, j.created_at, j.updated_at,
+    hg.gate_state AS human_gate_state
+  `;
+  const from = "jobs j LEFT JOIN human_gates hg ON hg.gate_job_id = j.id";
   if (statusFilter) {
     if (Array.isArray(statusFilter)) {
       if (statusFilter.length === 0) return [];
       const placeholders = statusFilter.map(() => "?").join(",");
-      return db.prepare(`SELECT ${cols} FROM jobs WHERE status IN (${placeholders}) ORDER BY created_at`).all(...statusFilter);
+      return db.prepare(`SELECT ${cols} FROM ${from} WHERE j.status IN (${placeholders}) ORDER BY j.created_at`).all(...statusFilter);
     }
-    return db.prepare(`SELECT ${cols} FROM jobs WHERE status = ? ORDER BY created_at`).all(statusFilter);
+    return db.prepare(`SELECT ${cols} FROM ${from} WHERE j.status = ? ORDER BY j.created_at`).all(statusFilter);
   }
-  return db.prepare(`SELECT ${cols} FROM jobs ORDER BY created_at`).all();
+  return db.prepare(`SELECT ${cols} FROM ${from} ORDER BY j.created_at`).all();
 }
 
 export function hasOutstandingHumanInputJobs(workItemId) {
@@ -3403,6 +3621,27 @@ export function hasOutstandingHumanInputJobs(workItemId) {
 // factory in ./leases.js so it can be called via the LeaseManager
 // surface without leases.js needing to statically import this index.
 __registerRequeueExpiredLeases(requeueExpiredLeases);
+__registerHumanGateReconcileHook((workItemIds) => {
+  let statusChanged = false;
+  for (const workItemId of workItemIds) {
+    // Reconciliation uses terminal work-item state as the authority for
+    // retiring stale gates. Do not feed that cleanup back through aggregate
+    // derivation: a completed item whose only ordinary child was canceled can
+    // otherwise be demoted and take a valid out-of-band push offer with it.
+    const workItem = getWorkItem(workItemId);
+    if (!workItem || TERMINAL_WORK_ITEM_STATUS_SET.has(workItem.status)) continue;
+    if (refreshWorkItemStatus(workItemId)) statusChanged = true;
+  }
+  // Gate contract changes are externally visible even when their parent was
+  // already in the correct aggregate state, so every mutation needs at least
+  // one scheduler/bridge invalidation.
+  if (!statusChanged) {
+    notifyQueueStateChanged({
+      reason: "human_gates_reconciled",
+      workItemId: workItemIds.length === 1 ? workItemIds[0] : null,
+    });
+  }
+});
 
 export {
   addDependency,

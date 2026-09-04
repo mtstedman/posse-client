@@ -20,10 +20,12 @@ export class DatedRotatingLog {
     this.onOpenError = onOpenError;
     this._fd = null;
     this._currentDate = "";
-    this._lastPruneDate = "";
-    // Date stamp of the last reported open failure: anti-spam within a day,
-    // but re-arms on rollover so a persistent failure isn't silent forever.
-    this._initFailedDate = "";
+    this._currentDir = "";
+    this._lastPruneKey = "";
+    // Date + directory of the last reported open failure: anti-spam for one
+    // destination within a day, while still reporting a failure after a
+    // runtime-path switch or date rollover.
+    this._initFailedKey = "";
   }
 
   _today() {
@@ -39,19 +41,23 @@ export class DatedRotatingLog {
   }
 
   open() {
-    const logDir = this._resolveLogDir();
+    const logDir = path.resolve(this._resolveLogDir());
     const today = this._today();
-    if (this._fd && this._currentDate === today) return { fd: this._fd, logDir };
+    const openKey = `${today}\0${logDir}`;
+    if (this._fd && this._currentDate === today && this._currentDir === logDir) {
+      return { fd: this._fd, logDir };
+    }
     this.close();
     try {
       fs.mkdirSync(logDir, { recursive: true });
       this._fd = fs.openSync(this._filePath(logDir, today), "a");
       this._currentDate = today;
-      this._initFailedDate = "";
+      this._currentDir = logDir;
+      this._initFailedKey = "";
       return { fd: this._fd, logDir };
     } catch (err) {
-      if (this._initFailedDate !== today && typeof this.onOpenError === "function") {
-        this._initFailedDate = today;
+      if (this._initFailedKey !== openKey && typeof this.onOpenError === "function") {
+        this._initFailedKey = openKey;
         this.onOpenError(err, logDir);
       }
       return { fd: null, logDir };
@@ -59,18 +65,20 @@ export class DatedRotatingLog {
   }
 
   pruneOldLogs(logDir = this._resolveLogDir()) {
+    const resolvedLogDir = path.resolve(logDir);
     const today = this._today();
-    if (this._lastPruneDate === today) return;
-    this._lastPruneDate = today;
+    const pruneKey = `${today}\0${resolvedLogDir}`;
+    if (this._lastPruneKey === pruneKey) return;
+    this._lastPruneKey = pruneKey;
     try {
       const cutoff = this.clock();
       cutoff.setUTCDate(cutoff.getUTCDate() - this.retentionDays);
       const cutoffStamp = cutoff.toISOString().slice(0, 10);
-      for (const name of fs.readdirSync(logDir)) {
+      for (const name of fs.readdirSync(resolvedLogDir)) {
         if (!name.startsWith(this.filePrefix) || !name.endsWith(this.fileSuffix)) continue;
         const stamp = name.slice(this.filePrefix.length, this.filePrefix.length + 10);
         if (stamp && stamp < cutoffStamp) {
-          try { fs.rmSync(path.join(logDir, name), { force: true }); } catch { /* ignore */ }
+          try { fs.rmSync(path.join(resolvedLogDir, name), { force: true }); } catch { /* ignore */ }
         }
       }
     } catch {
@@ -131,6 +139,7 @@ export class DatedRotatingLog {
       try { fs.closeSync(this._fd); } catch { /* ignore */ }
       this._fd = null;
       this._currentDate = "";
+      this._currentDir = "";
     }
   }
 }

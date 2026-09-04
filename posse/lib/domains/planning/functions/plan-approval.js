@@ -34,6 +34,9 @@ import {
 import {
   beginHumanGateResolution,
   completeHumanGateResolution,
+  getHumanGate,
+  registerHumanGate,
+  reviseOpenHumanGateGeneration,
 } from "../../queue/functions/human-gates.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -242,6 +245,66 @@ function countSucceededPromoteJobs(gatedJobIds) {
     .length;
 }
 
+function operationalCommandQuestion(operationalCommands = []) {
+  if (operationalCommands.length === 0) return "Approve or reject the current plan?";
+  const commandLines = operationalCommands.map((item) => {
+    const jobId = Number(item?.job_id);
+    const title = String(item?.title || "operational task").trim().slice(0, 120);
+    const command = String(item?.command || "").trim().slice(0, 500);
+    return `Job #${jobId}: ${title}\nCommand: ${command}`;
+  });
+  return [
+    "Approve the following exact operational command(s)?",
+    "They will run by direct spawn after implementation and may modify project or local data.",
+    "Approval permits execution only; it is not test evidence and does not approve correctness.",
+    ...commandLines,
+  ].join("\n\n");
+}
+
+function mergePlanGatePayload(currentPayload, nextPayload) {
+  const current = currentPayload && typeof currentPayload === "object" ? currentPayload : {};
+  const currentSummary = current.summary && typeof current.summary === "object" ? current.summary : {};
+  const nextSummary = nextPayload.summary && typeof nextPayload.summary === "object" ? nextPayload.summary : {};
+  const gatedJobIds = [...new Set([
+    ...(Array.isArray(current.gated_job_ids) ? current.gated_job_ids : []),
+    ...(Array.isArray(nextPayload.gated_job_ids) ? nextPayload.gated_job_ids : []),
+  ].map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+  const criticalRiskJobIds = [...new Set([
+    ...(Array.isArray(currentSummary.critical_risk_job_ids) ? currentSummary.critical_risk_job_ids : []),
+    ...(Array.isArray(nextSummary.critical_risk_job_ids) ? nextSummary.critical_risk_job_ids : []),
+  ].map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+  const commandsByJob = new Map();
+  for (const command of [
+    ...(Array.isArray(currentSummary.operational_commands) ? currentSummary.operational_commands : []),
+    ...(Array.isArray(nextSummary.operational_commands) ? nextSummary.operational_commands : []),
+  ]) {
+    const jobId = Number(command?.job_id);
+    if (!Number.isSafeInteger(jobId) || jobId <= 0) continue;
+    commandsByJob.set(jobId, command);
+  }
+  const operationalCommands = [...commandsByJob.values()];
+  const requiresInteractiveApproval = current.requires_interactive_approval === true
+    || nextPayload.requires_interactive_approval === true
+    || operationalCommands.length > 0;
+  const summary = {
+    ...currentSummary,
+    ...nextSummary,
+    job_count: gatedJobIds.length,
+    ...(criticalRiskJobIds.length > 0 ? { critical_risk_job_ids: criticalRiskJobIds } : {}),
+    operational_commands: operationalCommands,
+    ...(requiresInteractiveApproval ? { approval_reason: "operational_command" } : {}),
+  };
+  return {
+    ...current,
+    ...nextPayload,
+    gated_job_ids: gatedJobIds,
+    summary,
+    requires_interactive_approval: requiresInteractiveApproval,
+    questions: [operationalCommandQuestion(operationalCommands)],
+    created_at: current.created_at || nextPayload.created_at,
+  };
+}
+
 /**
  * Create the approval gate and rewire all newly-created jobs to depend on it.
  * Safe to call even when createdJobIds is empty (returns null without writing).
@@ -265,24 +328,11 @@ export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
       ? summary.operational_commands
       : [];
     const requiresInteractiveApproval = operationalCommands.length > 0;
-    const operationalCommandLines = operationalCommands.map((item) => {
-      const jobId = Number(item?.job_id);
-      const title = String(item?.title || "operational task").trim().slice(0, 120);
-      const command = String(item?.command || "").trim().slice(0, 500);
-      return `Job #${jobId}: ${title}\nCommand: ${command}`;
-    });
     const payload = {
       subtype: "plan_approval",
       question_kind: "plan_approval",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval,
-      questions: [requiresInteractiveApproval
-        ? [
-            "Approve the following exact operational command(s)?",
-            "They will run by direct spawn after implementation and may modify project or local data.",
-            "Approval permits execution only; it is not test evidence and does not approve correctness.",
-            ...operationalCommandLines,
-          ].join("\n\n")
-        : "Approve or reject the current plan?"],
+      questions: [operationalCommandQuestion(operationalCommands)],
       plan_job_id: planJob.id,
       gated_job_ids: targets.slice(),
       summary: summary || null,
@@ -301,6 +351,28 @@ export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
       max_attempts: 1,
       payload_json: JSON.stringify(payload),
     });
+    const reusedGate = gate.status === "waiting_on_human";
+
+    // createJob deduplicates active human gates by original job + gate kind.
+    // A retried/overlapping plan compile can therefore receive the existing
+    // gate. Never let the older payload silently omit newly gated jobs or a
+    // newly discovered operational command: approval policy must only become
+    // stricter while a decision is pending.
+    const gateContract = getHumanGate(gate.id);
+    if (gateContract?.gate_state !== "open") {
+      throw new Error(`plan gate #${gate.id} is already ${gateContract?.gate_state || "unavailable"}; refusing to attach a new batch to an in-flight decision`);
+    }
+    const mergedPayload = mergePlanGatePayload(parseJobPayload(gate), payload);
+    const serializedMergedPayload = JSON.stringify(mergedPayload);
+    if (gate.payload_json !== serializedMergedPayload) {
+      updateJobPayload(gate.id, serializedMergedPayload);
+      if (reusedGate) {
+        const revision = reviseOpenHumanGateGeneration(gate.id);
+        if (!revision.ok) {
+          throw new Error(`plan gate #${gate.id} could not invalidate its stale prompt: ${revision.reason}`);
+        }
+      }
+    }
 
     for (const targetId of targets) {
       addDependency(targetId, gate.id, "hard");
@@ -334,7 +406,21 @@ export function findPendingGate(wiId) {
     if (job.job_type !== "human_input") continue;
     if (job.status !== "waiting_on_human") continue;
     const payload = parseJobPayload(job);
-    if (payload?.subtype === "plan_approval") return job;
+    if (payload?.subtype !== "plan_approval") continue;
+    let contract = getHumanGate(job.id);
+    if (!contract) {
+      try {
+        contract = registerHumanGate({
+          gateJobId: job.id,
+          payload,
+          parentJobId: job.parent_job_id,
+        });
+      } catch {
+        continue;
+      }
+    }
+    if (Number(contract?.gate_job_id) !== Number(job.id) || contract.gate_state !== "open") continue;
+    return job;
   }
   return null;
 }
@@ -348,17 +434,26 @@ export function findPendingGate(wiId) {
 export function approvePlan(wiId, {
   actor = "operator",
   actorType = EVENT_ACTORS.HUMAN,
+  gateJobId = null,
+  gateGeneration = null,
 } = {}) {
-  const wi = getWorkItem(wiId);
-  if (!wi) return { ok: false, reason: "no_such_wi" };
-  const gate = findPendingGate(wiId);
-  if (!gate) return { ok: false, reason: "no_pending_gate" };
-  const gatePayload = parseJobPayload(gate);
-  if (gatePayload?.requires_interactive_approval === true && actorType !== EVENT_ACTORS.HUMAN) {
-    return { ok: false, reason: "interactive_operator_approval_required" };
-  }
   const db = getDb();
   return db.transaction(() => {
+    const wi = getWorkItem(wiId);
+    if (!wi) return { ok: false, reason: "no_such_wi" };
+    const gate = findPendingGate(wiId);
+    if (!gate) return { ok: false, reason: "no_pending_gate" };
+    const gateContract = getHumanGate(gate.id);
+    if (gateJobId != null && Number(gateJobId) !== Number(gate.id)) {
+      return { ok: false, reason: "stale_gate_job" };
+    }
+    if (gateGeneration != null && Number(gateGeneration) !== Number(gateContract?.generation || 1)) {
+      return { ok: false, reason: "stale_gate_generation" };
+    }
+    const gatePayload = parseJobPayload(gate);
+    if (gatePayload?.requires_interactive_approval === true && actorType !== EVENT_ACTORS.HUMAN) {
+      return { ok: false, reason: "interactive_operator_approval_required" };
+    }
     const gatedJobIds = new Set(
       (Array.isArray(gatePayload?.gated_job_ids) ? gatePayload.gated_job_ids : [])
         .map((id) => Number(id))
@@ -446,14 +541,22 @@ export function rejectPlan(wiId, {
   feedback = null,
   actor = "operator",
   actorType = EVENT_ACTORS.HUMAN,
+  gateJobId = null,
+  gateGeneration = null,
 } = {}) {
-  const wi = getWorkItem(wiId);
-  if (!wi) return { ok: false, reason: "no_such_wi" };
-  const gate = findPendingGate(wiId);
-  if (!gate) return { ok: false, reason: "no_pending_gate" };
-
   const db = getDb();
   return db.transaction(() => {
+    const wi = getWorkItem(wiId);
+    if (!wi) return { ok: false, reason: "no_such_wi" };
+    const gate = findPendingGate(wiId);
+    if (!gate) return { ok: false, reason: "no_pending_gate" };
+    const gateContract = getHumanGate(gate.id);
+    if (gateJobId != null && Number(gateJobId) !== Number(gate.id)) {
+      return { ok: false, reason: "stale_gate_job" };
+    }
+    if (gateGeneration != null && Number(gateGeneration) !== Number(gateContract?.generation || 1)) {
+      return { ok: false, reason: "stale_gate_generation" };
+    }
     const claimed = beginPlanGateResolution(gate, "reject");
     if (!claimed.ok) return { ok: false, reason: claimed.reason };
     const payload = parseJobPayload(gate);

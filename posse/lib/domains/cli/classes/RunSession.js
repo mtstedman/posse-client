@@ -4,7 +4,6 @@
 import { ensureRemoteCatalogLoaded, getRemoteCatalog } from "../../providers/functions/model-catalog-store.js";
 import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
-import { cancelOpenPushOfferGates } from "../../queue/functions/push-offer.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
@@ -34,6 +33,7 @@ import {
   closeRuntimeStateForExit,
   firstLine,
   handleWrapUpSignal,
+  operationalRunJobs,
   summarizeRunCompletion,
   bootScipLangPatchFromEvent,
   scopeScipEventToSourceLanguage,
@@ -44,6 +44,7 @@ import {
 } from "../functions/update-command.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
+import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
 
 const OPEN_WORK_ITEM_STATUSES = Object.freeze(
   WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
@@ -206,8 +207,11 @@ export class RunSession {
       RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
+      resurfaceParkedHumanGates,
       prepareNonInteractiveHumanInputGates = null,
       reconcileHumanGates,
+      claimHumanGatePromptPresentation = null,
+      reconcileCanonicalSquashMergeWorkItems,
       reconcileMergedWorkItemReviewStates,
       refreshWorkItemStatus,
       inferWiMode,
@@ -375,6 +379,7 @@ export class RunSession {
       });
     }
   }
+  try { await reconcileCanonicalSquashMergeWorkItems?.(PROJECT_DIR); } catch { /* best-effort repair of landed squash commits */ }
   try { reconcileMergedWorkItemReviewStates?.(); } catch { /* best-effort repair of legacy merged review rows */ }
   refreshRunVisibleWorkItems();
   const seedableRunItems = isScopedRun
@@ -383,9 +388,10 @@ export class RunSession {
   seedInitialJobsForBootWorkItems(seedableRunItems, isScopedRun ? "run_scoped" : "run");
   maybeAnnounceAutoMergeSetting();
   const allCandidateJobs = listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
+  const operationalCandidateJobs = operationalRunJobs(allCandidateJobs);
   const jobs = isScopedRun
-    ? allCandidateJobs.filter((job) => scopedWorkItemIdSet.has(Number(job.work_item_id)))
-    : allCandidateJobs;
+    ? operationalCandidateJobs.filter((job) => scopedWorkItemIdSet.has(Number(job.work_item_id)))
+    : operationalCandidateJobs;
   const needsGit = jobsNeedGitWorktree(jobs);
   const parkedStatusSet = new Set(PARKED_JOB_STATUSES);
   const parkedJobs = jobs.filter((job) => parkedStatusSet.has(job.status));
@@ -443,11 +449,10 @@ export class RunSession {
       return;
     }
     const autoMergedNow = await autoMergeCompletedWorkItems({ reason: "run start" });
-    // Boot superseded any open push-offer gate promising a wrap-up re-offer,
-    // but the offer below only ran when this pass auto-merged something —
-    // otherwise starting a run silently destroyed the phone's deploy gate.
-    // Refresh from real push state first: it recreates the gate whenever
-    // unpushed commits exist and cancels it when there is nothing to push.
+    // Reconcile the persistent deploy offer against current Git state. The
+    // upsert reuses an unchanged HEAD (and remembers an explicit decline),
+    // creates one new gate when HEAD changed, and cancels the offer when there
+    // is nothing left to push.
     try {
       await refreshPushOfferGate?.(autoMergedNow, { createdBy: "run_wrapup" });
     } catch { /* the deploy offer is best-effort; never block wrap-up */ }
@@ -1367,17 +1372,6 @@ export class RunSession {
           return { label, ok: false, fatal, error };
         });
     };
-
-    // A push-offer gate from the previous run is about to go stale (this
-    // run will merge more work and re-offer at wrap-up). Supersede it now —
-    // also prevents the scheduler loop from idling on a waiting_on_human
-    // job nobody at this terminal can answer.
-    try {
-      const canceledPushGates = cancelOpenPushOfferGates("superseded_by_new_run");
-      if (canceledPushGates > 0) {
-        log?.info?.("run", "Superseded stale push-offer gate(s) at boot", { canceled: canceledPushGates });
-      }
-    } catch { /* best-effort */ }
 
     const bootWarmups = [];
     const remotePromptBundleWarmupLabel = "Remote prompt bundle";
@@ -2670,12 +2664,19 @@ export class RunSession {
   }
 
   if (display) {
-    const revivedHumanJobs = requeueWaitingHumanInputJobs();
-    for (const { work_item_id } of revivedHumanJobs) {
-      refreshWorkItemStatus(work_item_id);
+    // Startup follows the same bounded snooze/backoff policy as the live
+    // scheduler. Eagerly requeueing every parked prompt here made a quick CLI
+    // restart replay questions the operator had just dismissed.
+    let revivedHumanJobs = [];
+    try {
+      revivedHumanJobs = typeof resurfaceParkedHumanGates === "function"
+        ? resurfaceParkedHumanGates({ snoozeSec: readHumanGateResnoozeSec() })
+        : [];
+    } catch (resurfaceErr) {
+      display.addEvent(`${C.yellow}Parked human prompts could not be checked: ${resurfaceErr?.message || resurfaceErr}${C.reset}`);
     }
     if (revivedHumanJobs.length > 0) {
-      display.addEvent(`${C.cyan}Requeued ${revivedHumanJobs.length} parked human prompt(s)${C.reset}`);
+      display.addEvent(`${C.cyan}Re-surfaced ${revivedHumanJobs.length} parked human prompt(s) after snooze${C.reset}`);
     }
   }
 
@@ -2709,6 +2710,8 @@ export class RunSession {
     researchBudgetToReasoningEffort,
     researchPayload,
     refreshDisplaySnapshotsForQueue,
+    claimHumanGatePromptPresentation,
+    requeueWaitingHumanInputJobs,
   }).wire();
   if (display) {
     try { displayActions.surfaceActionableHumanGates(listJobs()); } catch { /* scheduler snapshots retry */ }

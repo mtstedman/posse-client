@@ -8,6 +8,7 @@ import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
   applyDelegation,
+  countFailedJobs,
   getAttempts,
   getDependents,
   getEventsByWorkItem,
@@ -34,6 +35,7 @@ import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
+import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
 
 const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard", "strong"];
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
@@ -41,6 +43,69 @@ const ASSESSOR_CONFIDENCE_RANK = Object.freeze({ none: -1, low: 0, medium: 1, hi
 const OUTPUT_CONTRACT_WI_MODES = new Set(["image", "report", "question"]);
 const OUTPUT_CONTRACT_JOB_TYPES = new Set(["dev", "fix", "promote", "artificer"]);
 const VALID_OUTPUT_SOURCES = new Set(["explicit", "inferred"]);
+
+export function measureConsecutiveFixChainDepth(job) {
+  let depth = 0;
+  let current = job;
+  // A research/plan replan is a new repair strategy and therefore a new
+  // consecutive-fix budget. Walking through those boundaries made the first
+  // dev failure after a replan inherit every fix from the abandoned branch.
+  while (current?.job_type === "fix") {
+    depth += 1;
+    if (!current.parent_job_id) break;
+    current = getJob(current.parent_job_id);
+  }
+  return depth;
+}
+
+function replanExhaustedFixChain(job, verdict, payload) {
+  if (verdict?.verdict !== "fail" || payload?.from_suggestion === true) return verdict;
+  const depth = measureConsecutiveFixChainDepth(job);
+  const maximum = getMaxFixChainDepth();
+  if (depth < maximum) return verdict;
+  // The WI-wide terminal safety boundary has precedence. countFailedJobs()
+  // observes the pre-verdict state, so include the current leaf just as the
+  // fail handler does before deciding whether operator intervention is due.
+  if (countFailedJobs(job.work_item_id) + 1 >= getWiFailureThreshold()) return verdict;
+  return {
+    ...verdict,
+    verdict: "needs_replan",
+    _automatic_replan_reason: "fix_chain_exhausted",
+    human_questions: [],
+    spawn_jobs: [],
+    reasons: [
+      `Automatic replan: fix chain depth ${depth} reached the configured maximum ${maximum}; research a different approach before asking for operator intervention.`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
+}
+
+function replanFailedBlockedRecoveryRetry(job, verdict, payload) {
+  if (verdict?.verdict !== "fail") return verdict;
+  const recovery = payload?._blocked_recovery;
+  if (recovery?.action !== "retry") return verdict;
+
+  const recoveryJobId = Number(recovery.recovery_job_id);
+  if (!Number.isSafeInteger(recoveryJobId) || recoveryJobId <= 0) return verdict;
+  const recoveryJob = getJob(recoveryJobId);
+  if (
+    recoveryJob?.job_type !== "human_input"
+    || recoveryJob.status !== "succeeded"
+    || Number(recoveryJob.parent_job_id) !== Number(job.id)
+  ) return verdict;
+
+  return {
+    ...verdict,
+    verdict: "needs_replan",
+    _automatic_replan_reason: "blocked_recovery_retry_failed",
+    human_questions: [],
+    spawn_jobs: [],
+    reasons: [
+      `Automatic replan: the operator-approved retry from recovery job #${recoveryJobId} completed without passing; change strategy instead of asking the same recovery question again.`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
+}
 
 export function normalizeAssessorConfidence(value, { fallback = "medium", allowNone = true } = {}) {
   if (value == null || value === "") return fallback;
@@ -116,6 +181,33 @@ function latestScopedCheckVerification(jobId, assessedCommitHash) {
   return null;
 }
 
+function latestCanonicalVerification(jobId, assessedCommitHash) {
+  const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/i.test(requiredCommit)) return null;
+  try {
+    const rows = getDb().prepare(`
+      SELECT detail_json, created_at
+      FROM job_observations
+      WHERE job_id = ?
+        AND observation_type = 'command.pre_assess'
+      ORDER BY id DESC
+      LIMIT 20
+    `).all(jobId);
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      if (detail?.source !== "setting" || detail?.status !== "passed") continue;
+      if (detail?.verification_eligible !== true) continue;
+      const assessedCommit = String(detail?.assessed_commit_hash || "").trim().toLowerCase();
+      if (assessedCommit !== requiredCommit) continue;
+      return { ...detail, created_at: row.created_at };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function scopedCheckFailureSummary(scopedVerification = null) {
   const failures = Array.isArray(scopedVerification?.failures)
     ? scopedVerification.failures
@@ -138,6 +230,7 @@ export function capVerdictForHighRiskVerificationGap(
   testRun = null,
   scopedVerification = null,
   assessedCommitHash = null,
+  canonicalVerification = null,
 ) {
   if (verdict?.verdict !== "pass") return verdict;
   const policy = payload?._execution_policy && typeof payload._execution_policy === "object"
@@ -149,6 +242,15 @@ export function capVerdictForHighRiskVerificationGap(
   if (!isCodeTask) return verdict;
 
   const scopedStatus = String(scopedVerification?.status || "").toLowerCase();
+  const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
+  const hasAssessedCommit = /^[0-9a-f]{40,64}$/i.test(requiredCommit);
+  const canonicalCommit = String(canonicalVerification?.assessed_commit_hash || "")
+    .trim()
+    .toLowerCase();
+  const canonicalVerificationEligible = hasAssessedCommit
+    && canonicalVerification?.status === "passed"
+    && canonicalVerification?.verification_eligible === true
+    && canonicalCommit === requiredCommit;
   if (scopedStatus === "failed") {
     return {
       ...verdict,
@@ -163,6 +265,14 @@ export function capVerdictForHighRiskVerificationGap(
     };
   }
   if (scopedStatus === "incomplete" || scopedVerification?.coverage_complete === false) {
+    if (canonicalVerificationEligible
+      && canonicalVerification?.setting_key === "canonical_verify_cmd") {
+      return {
+        ...verdict,
+        verification_status: "canonical_verification_passed",
+        verification_commit_hash: requiredCommit,
+      };
+    }
     return {
       ...verdict,
       verdict: "needs_review",
@@ -181,8 +291,6 @@ export function capVerdictForHighRiskVerificationGap(
     ? payload.test_command.trim()
     : "";
   const postChange = testRun?.postChange || testRun?.post_change || null;
-  const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
-  const hasAssessedCommit = /^[0-9a-f]{40,64}$/i.test(requiredCommit);
   const frozenCommit = String(
     postChange?.commit_hash || postChange?.executed_commit_hash || "",
   ).trim().toLowerCase();
@@ -215,14 +323,21 @@ export function capVerdictForHighRiskVerificationGap(
   if (command && postChange && postChange.status !== "passed") {
     const status = postChange.status || "not_run";
     const detail = postChange.validation_error || postChange.reason || null;
-    if (status === "invalid_test_plan") {
+    const testDelta = testRun?.delta || null;
+    if (["invalid_test_plan", "rejected"].includes(status)
+      || ["persistent_failure", "baseline_only", "indeterminate"].includes(testDelta)) {
       return {
         ...verdict,
         verdict: "needs_replan",
-        verification_status: "verification_plan_invalid",
+        verification_status: ["invalid_test_plan", "rejected"].includes(status)
+          ? "verification_plan_invalid"
+          : "verification_plan_non_discriminating",
         _verification_failure_class: "verification_plan_invalid",
+        _disable_internal_retry: true,
         reasons: [
-          `The declared verification recipe is invalid${detail ? ` (${detail})` : ""}; replan verification instead of editing product code.`,
+          ["invalid_test_plan", "rejected"].includes(status)
+            ? `The declared verification recipe is invalid${detail ? ` (${detail})` : ""}; replan verification instead of editing product code.`
+            : `The declared verification failed the same way before and after the change${detail ? ` (${detail})` : ""}; replan verification instead of spawning a product-code repair.`,
           ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
         ],
       };
@@ -252,6 +367,14 @@ export function capVerdictForHighRiskVerificationGap(
       verification_status: payload?._verification_plan_invalid
         ? "scoped_checks_substituted_invalid_plan"
         : "scoped_checks_passed",
+      verification_commit_hash: requiredCommit,
+    };
+  }
+
+  if (canonicalVerificationEligible) {
+    return {
+      ...verdict,
+      verification_status: "canonical_verification_passed",
       verification_commit_hash: requiredCommit,
     };
   }
@@ -573,6 +696,7 @@ export function prepareVerdictForDispatch(job, verdict) {
     .find((attempt) => attempt.commit_hash)?.commit_hash || null;
   const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
   const scopedVerification = latestScopedCheckVerification(job.id, assessedCommitHash);
+  const canonicalVerification = latestCanonicalVerification(job.id, assessedCommitHash);
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
   prepared = capVerdictForHighRiskVerificationGap(
     prepared,
@@ -580,7 +704,10 @@ export function prepareVerdictForDispatch(job, verdict) {
     assessedReceipt,
     scopedVerification,
     assessedCommitHash,
+    canonicalVerification,
   );
+  prepared = replanFailedBlockedRecoveryRetry(job, prepared, payload);
+  prepared = replanExhaustedFixChain(job, prepared, payload);
 
   const normalizedPassConfidence = normalizeAssessorConfidence(prepared.confidence, {
     fallback: "medium",
