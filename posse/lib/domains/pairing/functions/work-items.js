@@ -1,5 +1,5 @@
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
-import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { BACKGROUND_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
 import { getBridgeLabel } from "../../bridge/functions/auth.js";
 import { listJobs, listWorkItems } from "../../queue/functions/index.js";
@@ -42,7 +42,10 @@ export function collectPairingWorkItems({ limit = PAIRING_WORK_ITEM_LIMIT } = {}
 export function collectPairingJobs({ limit = PAIRING_JOB_LIMIT } = {}) {
   const capped = Math.max(1, Math.min(PAIRING_JOB_LIMIT, Number(limit) || PAIRING_JOB_LIMIT));
   return listJobs()
-    .filter((job) => !TERMINAL_JOB_STATUS_SET.has(job.status))
+    .filter((job) => (
+      !TERMINAL_JOB_STATUS_SET.has(job.status)
+      && !BACKGROUND_JOB_TYPES.has(job.job_type)
+    ))
     .slice(-capped)
     .map((job) => ({
       id: Number(job.id),
@@ -72,6 +75,7 @@ function boundedPeer(peer) {
     }))
     .filter((workItem) => Number.isSafeInteger(workItem.id) && workItem.id > 0);
   const jobs = (Array.isArray(peer?.jobs) ? peer.jobs : [])
+    .filter((job) => !BACKGROUND_JOB_TYPES.has(job?.job_type))
     .slice(0, PAIRING_JOB_LIMIT)
     .map((job) => ({
       id: Number(job.id),

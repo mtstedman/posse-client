@@ -120,10 +120,8 @@ function bootIsSettled(steps) {
   return steps.every((step) => !["pending", "running"].includes(step.status));
 }
 
-function bootLooksLikeWarming(steps) {
-  const active = steps.filter((step) => ["pending", "running"].includes(step.status));
-  if (active.length === 0) return false;
-  return active.every((step) => /atlas|warm|onnx|encod/i.test(step.label));
+function bootStepIsBackground(step) {
+  return /atlas|warm|onnx|encod/i.test(String(step?.label || ""));
 }
 
 function schedulerHeartbeatMs(db, schedulerRow) {
@@ -168,7 +166,9 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
 
   const heartbeatMs = schedulerHeartbeatMs(db, scheduler);
   const shutdownMs = shutdown ? (parseMs(shutdown.value?.at) ?? parseMs(shutdown.updatedAt)) : null;
-  const bootSteps = normalizeBootSteps(boot?.value?.steps);
+  // Phone/web clients need Posse readiness, not optional local indexing
+  // telemetry. Keep ATLAS/ONNX/encoder warm details on the local display.
+  const bootSteps = normalizeBootSteps(boot?.value?.steps).filter((step) => !bootStepIsBackground(step));
   const bootSettled = bootSteps.length === 0 || bootIsSettled(bootSteps);
   const bootMs = boot ? parseMs(boot.updatedAt) : null;
   const heartbeatFresh = heartbeatMs != null && nowMs - heartbeatMs <= STALE_HEARTBEAT_MS;
@@ -184,7 +184,7 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
   if (shutdownMs != null && (heartbeatMs == null || shutdownMs >= heartbeatMs) && queuedWorkItems === 0) {
     phase = "offline";
   } else if (boot && !bootSettled && (bootFresh || heartbeatFresh)) {
-    phase = bootLooksLikeWarming(bootSteps) ? "warming" : "booting";
+    phase = "booting";
   } else if (heartbeatFresh) {
     phase = runningJobs > 0 ? "running" : hasQueuedWork ? "ready" : "idle";
   } else if (queuedWorkItems > 0) {
@@ -203,7 +203,7 @@ export function composeInstanceStatus(db, { nowMs = Date.now() } = {}) {
   return {
     phase,
     queued_work_items: queuedWorkItems,
-    boot_steps: phase === "booting" || phase === "warming" ? bootSteps : [],
+    boot_steps: phase === "booting" ? bootSteps : [],
     scheduler: heartbeatMs != null
       ? {
           last_heartbeat_at: new Date(heartbeatMs).toISOString(),

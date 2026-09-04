@@ -20,7 +20,10 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { composeInstanceStatus } from "./instance-status.js";
-import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
+import {
+  BACKGROUND_JOB_TYPES,
+  ONESHOT_SCOPE_SELECTION_SUBTYPE,
+} from "../../../catalog/job.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
 import {
   humanGateStateAllowsAnswer,
@@ -216,8 +219,16 @@ function isDurablyActiveJob(job) {
   return humanGateStateIsActive(humanGateContractState(job));
 }
 
+function isBridgeVisibleJob(job) {
+  return !BACKGROUND_JOB_TYPES.has(job?.job_type);
+}
+
 function activeJobCount(jobs = []) {
-  return jobs.filter((job) => isDurablyActiveJob(job) && !isPushOfferJob(job)).length;
+  return jobs.filter((job) => (
+    isDurablyActiveJob(job)
+    && !isPushOfferJob(job)
+    && isBridgeVisibleJob(job)
+  )).length;
 }
 
 export function projectBridgeWorkItemFromJobs(workItem, jobs = []) {
@@ -339,7 +350,7 @@ export function listJobsState({ work_item_id = null, workItemId = null, status =
   const wiId = work_item_id ?? workItemId ?? null;
   let rows = wiId == null ? listJobs(status) : listJobsByWorkItem(wiId, status);
   if (status && Array.isArray(status) && status.length === 0) rows = [];
-  const capped = rows.slice(0, boundedLimit(limit));
+  const capped = rows.filter(isBridgeVisibleJob).slice(0, boundedLimit(limit));
   return {
     jobs: capped.map(projectBridgeJobState),
   };
@@ -358,7 +369,7 @@ export function getWorkItemState(workItemId, { eventLimit = 50 } = {}) {
   const wi = getWorkItem(workItemId);
   if (!wi) return null;
   const rawJobs = listJobsByWorkItem(workItemId);
-  const jobs = rawJobs.map(projectBridgeJobState);
+  const jobs = rawJobs.filter(isBridgeVisibleJob).map(projectBridgeJobState);
   return {
     work_item: projectBridgeWorkItemFromJobs(wi, rawJobs),
     jobs,
@@ -370,7 +381,7 @@ export function getWorkItemState(workItemId, { eventLimit = 50 } = {}) {
 
 export function getJobState(jobId) {
   const job = getJob(jobId);
-  return projectBridgeJobState(job);
+  return isBridgeVisibleJob(job) ? projectBridgeJobState(job) : null;
 }
 
 export function tailEvents({ workItemId = null, sinceId = null, limit = DEFAULT_LIMIT } = {}) {
@@ -452,6 +463,7 @@ export function collectStateSnapshot({
   const durablyActiveJobs = listJobs().filter(isDurablyActiveJob);
   const jobs = durablyActiveJobs
     .filter((job) => !isPushOfferJob(job))
+    .filter(isBridgeVisibleJob)
     .slice(0, capped)
     .map(projectBridgeJobState);
   const openGates = durablyActiveJobs.filter(isOpenGateJob).slice(0, capped).map(normalizeGate).filter(Boolean);

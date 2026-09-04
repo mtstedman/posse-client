@@ -10,6 +10,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
 } from "../../../catalog/bridge.js";
 import {
+  BACKGROUND_JOB_TYPES,
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
   TERMINAL_JOB_STATUSES,
 } from "../../../catalog/job.js";
@@ -50,6 +51,10 @@ const PLAN_GATE_EVENT_TYPES = new Set([
 ]);
 const AGENT_ACTIVITY_KIND_SET = new Set(AGENT_ACTIVITY_KINDS);
 const AGENT_ACTIVITY_STATUS_SET = new Set(AGENT_ACTIVITY_STATUSES);
+
+function jobIsBridgeVisible(job) {
+  return !BACKGROUND_JOB_TYPES.has(job?.job_type);
+}
 
 function boundedLimit(value, fallback = DEFAULT_TAIL_LIMIT) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -500,6 +505,7 @@ export class ChangeStream extends EventEmitter {
 
     const liveIds = new Set();
     for (const job of jobs) {
+      if (!jobIsBridgeVisible(job)) continue;
       const jobId = Number(job.id);
       liveIds.add(jobId);
       let tokens = { tokens_in: null, tokens_out: null, last_activity_at: null };
@@ -690,6 +696,7 @@ export class ChangeStream extends EventEmitter {
     `).all(this.jobCursor.updatedAt, this.jobCursor.updatedAt, this.jobCursor.id);
     for (const row of rows) {
       this.jobCursor = { updatedAt: row.updated_at || this.jobCursor.updatedAt, id: Number(row.id) };
+      if (!jobIsBridgeVisible(row)) continue;
       const jobPayload = projectBridgeJobState(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);
@@ -708,6 +715,7 @@ export class ChangeStream extends EventEmitter {
     `).all(this.jobCursor.seq);
     for (const row of rows) {
       this.jobCursor = { seq: Math.max(Number(this.jobCursor.seq || 0), Number(row.bridge_change_seq || 0)) };
+      if (!jobIsBridgeVisible(row)) continue;
       const jobPayload = projectBridgeJobState(row);
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.JOB_UPDATED, jobPayload);
       this.emitGateTransition(row);

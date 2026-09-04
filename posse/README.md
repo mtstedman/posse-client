@@ -442,11 +442,12 @@ stop, and resumes the exact leased integration before allowing more mutable work
 Restoration safely pauses if the shared checkout is dirty, so commit or stash the
 work and run Posse again.
 
-While the pairing monitor is connected, `posse dashboard` and the live TUI
-Pipeline pane (`p`) show each peer's active work items and jobs with a
-`read-only` label. Peer work is held in a short-lived local status snapshot; it
-never enters the local queue and cannot be scheduled, claimed, or changed by
-this Posse instance.
+While the pairing monitor is connected, `posse dashboard` and the live TUI's
+default log view show each peer's active work with a `read-only` label. Press
+`p` for the detailed Pipeline pane. Peer work is held in a short-lived local
+status snapshot; it never enters the local queue and cannot be scheduled,
+claimed, or changed by this Posse instance. Background preparation jobs such as
+ATLAS warmup stay local and are not relayed as paired work or app status.
 
 `posse pair` is deliberately separate from `posse serve --pair`: the former
 pairs multiple Posse clones into one shared Git side trunk, while the latter

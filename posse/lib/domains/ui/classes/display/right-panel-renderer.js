@@ -440,6 +440,34 @@ function monitorToolRowParts(row = {}) {
 export class DisplayRightPanelRenderer {
 
 
+  _buildPeerWorkLane(width, maxRows = 4) {
+    if (!this.getPipelineData || maxRows < 2) return [];
+    let data;
+    try { data = this.getPipelineData(); } catch { data = []; }
+    const peerRows = (Array.isArray(data) ? data : []).filter((wi) => wi?.peer_read_only);
+    if (peerRows.length === 0) return [];
+
+    const lines = [
+      ` ${C.magenta}${C.bold}\u2197 Paired work${C.reset} ${C.dim}\u00b7 ${peerRows.length} WI \u00b7 read-only${C.reset}`,
+    ];
+    const detailCapacity = Math.max(1, maxRows - 1);
+    const showOverflow = peerRows.length > detailCapacity && maxRows >= 3;
+    const visible = peerRows.slice(0, showOverflow ? detailCapacity - 1 : detailCapacity);
+    for (const wi of visible) {
+      const job = (Array.isArray(wi.jobs) ? wi.jobs : [])[0];
+      const jobSummary = job
+        ? ` \u2014 ${job.job_type}/${job.status}: ${job.title}`
+        : "";
+      const summary = `${wi.peer_label} WI#${wi.peer_work_item_id} ${wi.status}: ${wi.title}${jobSummary}`;
+      lines.push(` ${C.magenta}\u2502${C.reset} ${fit(_sanitizeDisplayLine(summary), Math.max(8, width - 4))}`);
+    }
+    if (showOverflow) {
+      lines.push(` ${C.magenta}\u2502${C.reset} ${C.dim}+${peerRows.length - visible.length} more paired work item(s) [p] details${C.reset}`);
+    }
+    return lines;
+  }
+
+
   _withPosseMascot(headerLines, width) {
     const laneWidth = Math.max(0, width - POSSE_HEADER_WIDTH - POSSE_HEADER_MASCOT_GAP);
     const mascot = renderPosseMascotFrame({
@@ -485,6 +513,14 @@ export class DisplayRightPanelRenderer {
     if (this._rightMode === "tools" && this.getToolData) {
       return this._buildTools(lines, width, maxLines);
     }
+
+    // Peer work lives outside this clone's queue, so it cannot appear in the
+    // normal worker cards or event stream. Keep a compact live lane visible in
+    // the default view; [p] still opens the complete read-only pipeline.
+    lines.push(...this._buildPeerWorkLane(
+      width,
+      Math.min(4, Math.max(0, maxLines - lines.length - 2)),
+    ));
 
     // ── Event log fills the rest, minus a pinned "system" tail ──
     // Reserve the bottom rows for git / ATLAS chatter so it can never scroll

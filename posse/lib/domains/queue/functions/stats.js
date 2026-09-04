@@ -225,9 +225,20 @@ export function getPipelineHealth(opts = {}) {
   };
 }
 
-export function countJobsByStatus() {
+export function countJobsByStatus({ excludeJobTypes = [] } = {}) {
   const db = getDb();
-  const rows = db.prepare(`SELECT status, COUNT(*) AS cnt FROM jobs GROUP BY status`).all();
+  const excluded = [...new Set(
+    (Array.isArray(excludeJobTypes) ? excludeJobTypes : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  )];
+  const placeholders = excluded.map(() => "?").join(", ");
+  const rows = db.prepare(`
+    SELECT status, COUNT(*) AS cnt
+    FROM jobs
+    ${excluded.length > 0 ? `WHERE job_type NOT IN (${placeholders})` : ""}
+    GROUP BY status
+  `).all(...excluded);
   const counts = Object.create(null);
   for (const row of rows) counts[row.status] = row.cnt;
   return counts;

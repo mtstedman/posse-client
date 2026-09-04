@@ -75,7 +75,10 @@ export class RunDisplaySnapshotController {
     this.trackTimer(setInterval(() => void dirty.refresh(), 5000));
     this.trackTimer(setInterval(() => {
       const currentDisplay = this.getDisplay();
-      if (currentDisplay?._rightMode === "pipeline") void pipeline.refresh();
+      // The default log view includes a compact paired-work lane. Refresh its
+      // source there too; otherwise peer work is captured only at setup and
+      // stays invisible until the operator manually opens the Pipeline pane.
+      if (["log", "pipeline"].includes(currentDisplay?._rightMode)) void pipeline.refresh();
       if (currentDisplay?._rightMode === "tools" || currentDisplay?._rightMode === "monitor") void tools.refresh();
     }, 1000));
   }

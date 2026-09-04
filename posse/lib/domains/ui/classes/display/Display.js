@@ -1718,6 +1718,9 @@ export class Display {
   _withPosseMascot(...args) {
     return this._rightPanelRenderer._withPosseMascot.call(this, ...args);
   }
+  _buildPeerWorkLane(...args) {
+    return this._rightPanelRenderer._buildPeerWorkLane.call(this, ...args);
+  }
   _dirtyReviewIssuesByWi(...args) {
     return this._leftPanelRenderer._dirtyReviewIssuesByWi.call(this, ...args);
   }

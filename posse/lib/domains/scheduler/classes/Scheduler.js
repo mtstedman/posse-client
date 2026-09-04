@@ -1721,7 +1721,11 @@ export class Scheduler {
         if (Date.now() - (this._lastRuntimeStatusWriteAt || 0) > 10_000) {
           this._lastRuntimeStatusWriteAt = Date.now();
           try {
-            const counts = countJobsByStatus();
+            // Remote apps need foreground orchestration state, not the local
+            // ATLAS/waiting-lane accelerator cadence.
+            const counts = countJobsByStatus({
+              excludeJobTypes: [...RUN_BACKGROUND_JOB_TYPES],
+            });
             writeRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER, {
               active_workers: activeWorkers.size,
               running_jobs:
