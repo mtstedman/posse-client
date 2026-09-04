@@ -52,9 +52,15 @@ function _positiveFixEditTargets(instructions = "", paths = []) {
   return (Array.isArray(paths) ? paths : []).filter((filePath) => {
     const candidate = String(filePath || "").replace(/\\/g, "/").toLowerCase();
     if (!candidate) return false;
-    const idx = source.indexOf(candidate);
+    let idx = source.indexOf(candidate);
+    let matchedLength = candidate.length;
+    if (idx < 0 && candidate.includes("/")) {
+      const basename = path.posix.basename(candidate);
+      idx = source.indexOf(basename);
+      matchedLength = basename.length;
+    }
     if (idx < 0) return false;
-    const context = source.slice(Math.max(0, idx - 90), Math.min(source.length, idx + candidate.length + 90));
+    const context = source.slice(Math.max(0, idx - 90), Math.min(source.length, idx + matchedLength + 90));
     return editRe.test(context) && !nonEditScopeRe.test(context);
   });
 }
@@ -68,7 +74,7 @@ function _filterToInheritedScope(paths = [], inherited = []) {
     .filter((entry) => entry && allowed.has(entry));
 }
 
-function _canonicalizeInferredFixScope(inferred = {}, inherited = []) {
+function _canonicalizeInferredFixScope(inferred = {}, inherited = [], instructions = "") {
   const inheritedPaths = (Array.isArray(inherited) ? inherited : [])
     .map(_normalizeScopePath)
     .filter(Boolean);
@@ -79,11 +85,46 @@ function _canonicalizeInferredFixScope(inferred = {}, inherited = []) {
     matches.push(inheritedPath);
     byBasename.set(basename, matches);
   }
+  const inheritedDirs = new Set();
+  for (const inheritedPath of inheritedPaths) {
+    let current = path.posix.dirname(inheritedPath);
+    while (current && current !== ".") {
+      inheritedDirs.add(current);
+      const parent = path.posix.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  const inferredPaths = [
+    ...(Array.isArray(inferred.files_to_modify) ? inferred.files_to_modify : []),
+    ...(Array.isArray(inferred.files_to_create) ? inferred.files_to_create : []),
+  ].map(_normalizeScopePath).filter(Boolean);
+  const source = String(instructions || "").toLowerCase();
+  const contextualDirectoryFor = (candidate) => {
+    const basename = path.posix.basename(candidate).toLowerCase();
+    const candidateIndex = source.indexOf(basename);
+    if (candidateIndex < 0) return null;
+    const dirs = new Set();
+    for (const fullPath of inferredPaths) {
+      if (!fullPath.includes("/")) continue;
+      const dir = path.posix.dirname(fullPath);
+      if (!inheritedDirs.has(dir)) continue;
+      const fullIndex = source.indexOf(fullPath.toLowerCase());
+      if (fullIndex < 0 || fullIndex >= candidateIndex) continue;
+      const between = source.slice(fullIndex + fullPath.length, candidateIndex);
+      if (between.length <= 240 && /\b(?:corresponding|alongside|same directory|sibling)\b/.test(between)) {
+        dirs.add(dir);
+      }
+    }
+    return dirs.size === 1 ? [...dirs][0] : null;
+  };
   const canonical = (rawPath) => {
     const candidate = _normalizeScopePath(rawPath);
     if (!candidate || candidate.includes("/")) return candidate;
     const matches = byBasename.get(candidate) || [];
-    return matches.length === 1 ? matches[0] : candidate;
+    if (matches.length === 1) return matches[0];
+    const contextualDir = contextualDirectoryFor(candidate);
+    return contextualDir ? path.posix.join(contextualDir, candidate) : candidate;
   };
 
   const modify = [];
@@ -639,6 +680,7 @@ function _spawnRecoveryJobsForVerdict({
     const inferredFixScope = _canonicalizeInferredFixScope(
       _extractScopedPathsFromInstructions(fixInstructions),
       inheritedEditableScope,
+      fixInstructions,
     );
     const inferredFixModify = _positiveFixEditTargets(fixInstructions, inferredFixScope.files_to_modify);
     const inferredGeneratedDeletes = _inferGeneratedArtifactDeletionTargets(job, {

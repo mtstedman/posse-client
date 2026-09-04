@@ -1709,7 +1709,10 @@ export class DisplayRightPanelRenderer {
     const VERDICT_ICON = { pass: `${C.green}\u2713`, fail: `${C.red}\u2717`, blocked: `${C.yellow}\u25a0`, needs_review: `${C.yellow}?`, needs_replan: `${C.magenta}\u21bb`, not_assessed: `${C.dim}\u00b7` };
 
     for (const wi of data) {
-      contentLines.push(` ${C.bold}${C.blue}WI#${wi.id}${C.reset} ${_sanitizeDisplayLine(wi.title).slice(0, width - 12)}`);
+      const wiIdentity = wi.peer_read_only
+        ? `${C.magenta}[remote · read-only]${C.reset} ${_sanitizeDisplayLine(wi.peer_label)} ${C.bold}${C.blue}WI#${wi.peer_work_item_id}${C.reset}`
+        : `${C.bold}${C.blue}WI#${wi.id}${C.reset}`;
+      contentLines.push(` ${wiIdentity} ${_sanitizeDisplayLine(wi.title).slice(0, width - 12)}`);
 
       if (!wi.jobs || wi.jobs.length === 0) {
         contentLines.push(`   ${C.dim}(no jobs)${C.reset}`);

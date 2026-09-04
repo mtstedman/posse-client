@@ -9,7 +9,7 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{
 const PAIRING_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}$/u;
 const TOKEN_RE = /^pp[hm]_[0-9a-f]{32}$/u;
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/u;
-const SESSION_STATUSES = new Set(["active", "closed", "expired"]);
+const SESSION_STATUSES = new Set(["active", "draining", "closed", "expired"]);
 const PEER_ROLES = new Set(["host", "member"]);
 const MAX_PEERS = 100;
 const MAX_WORK_ITEMS = 50;
@@ -157,7 +157,7 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
       pattern: TOKEN_RE,
       status,
     });
-  } else if (endpoint === "status" || endpoint === "heartbeat") {
+  } else if (endpoint === "status" || endpoint === "heartbeat" || endpoint === "close") {
     if (!SESSION_STATUSES.has(response.status)) {
       throw invalidResponse(endpoint, "status is invalid", status);
     }
@@ -271,11 +271,16 @@ export function createPairingRemoteClient({
   };
 
   return Object.freeze({
-    start: (metadata) => validatedRequest("sessions", { body: metadata }),
+    start: (metadata) => validatedRequest("sessions", {
+      body: { ...metadata, shutdown_protocol: 2 },
+    }),
     resolve: (code) => validatedRequest("resolve", { body: { code } }),
-    join: (code, instanceId) => validatedRequest("join", { body: { code, instance_id: instanceId } }),
+    join: (code, instanceId) => validatedRequest("join", {
+      body: { code, instance_id: instanceId, shutdown_protocol: 2 },
+    }),
     status: (token) => validatedRequest("status", { method: "GET", token }),
     heartbeat: (token, presence = null) => validatedRequest("heartbeat", { token, body: presence }),
+    close: (token, mode = "graceful") => validatedRequest("close", { token, body: { mode } }),
     leave: (token) => validatedRequest("leave", { token }),
   });
 }

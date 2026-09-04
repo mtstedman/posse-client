@@ -1606,6 +1606,7 @@ export class Scheduler {
     clearRuntimeStatus(RUNTIME_STATUS_KEYS.STOP_REQUEST);
     let lastStopRequestCheck = 0;
     const STOP_REQUEST_CHECK_MS = 2_000;
+    let pairingDrainRequested = false;
 
     try {
       let idleCount = 0;
@@ -1651,6 +1652,19 @@ export class Scheduler {
               } else {
                 this.requestStop();
               }
+            }
+          }
+          const drainRequest = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_DRAIN_REQUEST);
+          if (drainRequest && (!drainRequest.owner_id || drainRequest.owner_id === this.ownerId)) {
+            if (!pairingDrainRequested) {
+              pairingDrainRequested = true;
+              this._log("Pairing graceful close requested - draining active workers", "yellow");
+              logEvent({
+                event_type: EVENT_TYPES.SCHEDULER_STOP_REQUESTED,
+                actor_type: EVENT_ACTORS.SCHEDULER,
+                actor_id: this.ownerId,
+                message: "Pairing graceful close requested; stopping new job dispatch",
+              });
             }
           }
         }
@@ -1714,6 +1728,8 @@ export class Scheduler {
                 (counts.running || 0) + (counts.leased || 0) + (counts.awaiting_assessment || 0),
               queued_jobs: counts.queued || 0,
               owner_id: this.ownerId,
+              process_pid: process.pid,
+              heartbeat_at: new Date().toISOString(),
             });
           } catch { /* status telemetry is best-effort */ }
         }
@@ -1840,6 +1856,21 @@ export class Scheduler {
           .filter((job) => !isRunBackgroundJob(job));
         const foregroundTrackedJobs = trackedJobsForCloseout.filter((job) => !isRunBackgroundJob(job));
         const backgroundTrackedJobs = trackedJobsForCloseout.filter(isRunBackgroundJob);
+        if (pairingDrainRequested) {
+          if (activeWorkers.size === 0) {
+            clearRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_DRAIN_REQUEST);
+            this._log("Pairing drain complete - scheduler stopped before trunk integration", "yellow");
+            this.requestStop();
+            continue;
+          }
+          this._invokeCallback("onSlotStatus", onSlotStatus, {
+            idle: Math.max(0, this.concurrency - activeForegroundJobs.length),
+            blockedByLock: 0,
+            blockedLockDetails: [{ message: "Pairing is closing; active jobs are draining" }],
+          });
+          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          continue;
+        }
         if (
           activeForegroundJobs.length === 0
           && foregroundTrackedJobs.length === 0

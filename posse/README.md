@@ -427,13 +427,26 @@ and only then switches to the shared branch. Repository credentials are never
 shared through the pairing service. A member who cannot read and write the Git
 remote is not enrolled.
 
-The host and member commands remain connected, like `posse serve`. Press Ctrl-C
-or run `posse pair leave` (alias: `posse unpair`) to unpair. The host closes the
-session for everyone; every connected member then restores its own original
-branch and exact prior shared-trunk settings. A hard-killed process leaves a
-durable local recovery journal; `posse pair status` or `posse pair leave`
-finishes restoration. Restoration safely pauses if the shared checkout is dirty,
-so commit or stash the work and run `posse pair leave` again.
+The host and member commands remain connected, like `posse serve`. On the host,
+press `g` for a graceful close: Posse freezes new jobs, lets active jobs finish,
+closes every member, synchronizes the side trunk, and integrates it into the
+repository's default branch. `posse pair leave` (alias: `posse unpair`) performs
+the same graceful close. Press Ctrl-C for a forced close; schedulers receive a
+stop request before integration proceeds. Members restore their own original
+branch and exact prior shared-trunk settings after acknowledging either close.
+
+Hosting must start on the remote's advertised default branch so the integration
+target is unambiguous. A hard-killed process leaves a durable local recovery
+journal. The next non-help Posse command repairs the session, waits for peers to
+stop, and resumes the exact leased integration before allowing more mutable work.
+Restoration safely pauses if the shared checkout is dirty, so commit or stash the
+work and run Posse again.
+
+While the pairing monitor is connected, `posse dashboard` and the live TUI
+Pipeline pane (`p`) show each peer's active work items and jobs with a
+`read-only` label. Peer work is held in a short-lived local status snapshot; it
+never enters the local queue and cannot be scheduled, claimed, or changed by
+this Posse instance.
 
 `posse pair` is deliberately separate from `posse serve --pair`: the former
 pairs multiple Posse clones into one shared Git side trunk, while the latter
@@ -470,8 +483,11 @@ the authoritative exact-OID lease and fast-forward checks.
 Successful WI and iterative merges are published automatically to the exact
 side branch. Posse still runs committed-conflict checks and `pre_push_gate`, but
 does not create a human push-offer gate for that automatic publication.
-Promotion from the side trunk to the repository default branch remains a
-separate, human-reviewed Git workflow.
+When the host closes the session, Posse squash-integrates the frozen side trunk,
+runs the normal push gate, refreshes the default branch, and publishes with an
+exact remote lease. If validation, conflicts, branch protection, or network
+availability blocks publication, the preserved promotion journal prevents a new
+pairing and retries on a later Posse invocation.
 
 The scheduler fetches before dispatch and polls while a run is alive. An
 inactive clone catches up when its next run starts; v1 does not keep an exited

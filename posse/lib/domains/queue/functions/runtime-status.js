@@ -18,6 +18,15 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   // Persisted shared-trunk synchronization health, projected read-only by the
   // bridge. This intentionally survives scheduler shutdown for diagnostics.
   SHARED_TRUNK: "shared_trunk",
+  // Short-lived pairing presence mirrored by the persistent pair monitor for
+  // local dashboards. Peer rows never enter the schedulable queue tables.
+  PAIRING_PEERS: "pairing_peers",
+  // Pairing graceful-close request. The live scheduler stops leasing new jobs
+  // and exits only after its currently active workers settle.
+  PAIRING_DRAIN_REQUEST: "pairing_drain_request",
+  // Durable host-side integration journal. Recovery owns this until the
+  // frozen side trunk is proven published to the original trunk.
+  PAIRING_PROMOTION: "pairing_promotion",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".

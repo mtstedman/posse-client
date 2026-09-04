@@ -19,9 +19,10 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { getArtifacts } = await import("../../queue/functions/artifacts.js");
   const { parseJobPayload } = await import("../../queue/functions/payload.js");
   const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
+  const { pairingPeerPipelineRows } = await import("../../pairing/functions/work-items.js");
 
   const active = listWorkItems(["queued", "planning", "running", "complete", "failed"]);
-  return active.slice(0, 20).map((wi) => {
+  const localRows = active.slice(0, 20).map((wi) => {
     // The pipeline is agent work only — background maintenance (atlas_warm)
     // never appears here even when it is scoped to this work item.
     const jobs = listJobsByWorkItem(wi.id)
@@ -73,6 +74,7 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
 
     return { id: wi.id, title: wi.title, status: wi.status, jobs: enriched };
   });
+  return [...localRows, ...pairingPeerPipelineRows()];
 }
 
 async function buildToolData({ projectDir = null, dbPath = null } = {}) {

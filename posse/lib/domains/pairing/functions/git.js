@@ -139,6 +139,18 @@ export function remoteUrl(projectDir, remoteName) {
   return git(["remote", "get-url", validateRemoteName(remoteName)], projectDir, { timeoutMs: 5_000 }).trim();
 }
 
+export function remoteDefaultBranch(projectDir, remoteName) {
+  const normalizedRemote = validateRemoteName(remoteName);
+  const advertised = git(["ls-remote", "--symref", normalizedRemote, "HEAD"], projectDir);
+  const match = advertised.match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu);
+  if (!match) {
+    throw Object.assign(new Error(`Could not determine the default branch of Git remote ${normalizedRemote}`), {
+      code: "pairing_remote_default_unresolved",
+    });
+  }
+  return validateBranchName(projectDir, match[1]);
+}
+
 function remoteAccessUrls(projectDir, remoteName, { push = false } = {}) {
   const normalizedRemote = validateRemoteName(remoteName);
   const args = ["remote", "get-url", "--all"];

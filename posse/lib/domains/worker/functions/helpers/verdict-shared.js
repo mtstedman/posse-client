@@ -1062,6 +1062,7 @@ const INFERRED_SCOPE_BARE_FILENAMES = new Set([
   "makefile",
   "procfile",
   "readme",
+  "version",
 ]);
 
 function _looksLikeScopedFilePath(value = "") {

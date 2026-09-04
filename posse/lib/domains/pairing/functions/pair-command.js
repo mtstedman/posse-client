@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import readline from "node:readline";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
@@ -6,6 +7,7 @@ import { runSharedTrunkAccessPreflight } from "../../integrations/functions/shar
 import { getLiveSchedulerBlockMessage } from "../../queue/functions/locks.js";
 import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
+import { syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
 import {
   createPairingRemoteClient,
   validatePairingRemoteResponse,
@@ -21,6 +23,7 @@ import {
   pairingTemporaryRemoteName,
   preflightAndCheckoutPairingBranch,
   removeTemporaryRemote,
+  remoteDefaultBranch,
   repositoryFingerprint,
   repositoryRoot,
   restoreOriginalBranch,
@@ -38,9 +41,18 @@ import {
   updatePairingEnrollment,
 } from "./state.js";
 import {
+  clearPairingPeerSnapshot,
   collectPairingPresence,
   diffPairingPeerActivity,
+  writePairingPeerSnapshot,
 } from "./work-items.js";
+import {
+  beginPairingPromotion,
+  markPairingPromotion,
+  promotePairingTrunk,
+  readPairingPromotionJournal,
+} from "./promotion.js";
+import { waitForPairingSchedulerStop } from "./shutdown.js";
 
 // This is both the lease heartbeat and the peer-work sync cadence. Five
 // seconds keeps the terminal feed live without turning queue changes into one
@@ -55,6 +67,25 @@ const PAIRING_SETTING_KEYS = Object.freeze([
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function installHostPairingHotkeys(input, { onGraceful, onForce }) {
+  if (!input?.isTTY || typeof input.setRawMode !== "function") return () => {};
+  const wasRaw = input.isRaw === true;
+  const wasPaused = input.isPaused?.() === true;
+  readline.emitKeypressEvents(input);
+  input.setRawMode(true);
+  input.resume();
+  const onKeypress = (_text, key = {}) => {
+    if (key.ctrl && key.name === "c") onForce();
+    else if (!key.ctrl && !key.meta && key.name === "g") onGraceful();
+  };
+  input.on("keypress", onKeypress);
+  return () => {
+    input.off("keypress", onKeypress);
+    if (!wasRaw) input.setRawMode(false);
+    if (wasPaused) input.pause();
+  };
 }
 
 function safeError(error) {
@@ -245,6 +276,7 @@ async function leaveRemoteBestEffort(remoteClient, state) {
 }
 
 async function unpair(projectDir, remoteClient, state = getLivePairingState()) {
+  clearPairingPeerSnapshot();
   if (!state) return { ok: true, alreadyLeft: true };
   markPairingPhase(state.id, "leaving");
   const remote = await leaveRemoteBestEffort(remoteClient, state);
@@ -277,15 +309,28 @@ function printPeerActivityChanges(C, status, seen, { json = false } = {}) {
   }
 }
 
-async function monitorPairing(remoteClient, stateId, { projectDir = process.cwd(), C, json = false } = {}) {
-  let stoppedBySignal = false;
+async function monitorPairing(remoteClient, stateId, {
+  projectDir = process.cwd(),
+  C,
+  json = false,
+  input = process.stdin,
+} = {}) {
+  let forceRequested = false;
+  let gracefulRequested = false;
   let consecutiveFailures = 0;
   const seenPeerActivity = new Map();
-  const stop = () => { stoppedBySignal = true; };
+  const stop = () => { forceRequested = true; };
+  const stateAtStart = getPairingState(stateId);
+  const removeHotkeys = stateAtStart?.role === "host"
+    ? installHostPairingHotkeys(input, {
+        onGraceful: () => { gracefulRequested = true; },
+        onForce: () => { forceRequested = true; },
+      })
+    : () => {};
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
-    while (!stoppedBySignal && !pairingProcessShouldStop(stateId)) {
+    while (!forceRequested && !gracefulRequested && !pairingProcessShouldStop(stateId)) {
       const state = getPairingState(stateId);
       let status;
       try {
@@ -295,6 +340,7 @@ async function monitorPairing(remoteClient, stateId, { projectDir = process.cwd(
         );
         assertPairingStatusMatches(state, status);
         touchPairingState(stateId);
+        writePairingPeerSnapshot(status);
         printPeerActivityChanges(C, status, seenPeerActivity, { json });
         consecutiveFailures = 0;
       } catch (error) {
@@ -305,12 +351,16 @@ async function monitorPairing(remoteClient, stateId, { projectDir = process.cwd(
       }
       if (status.status !== "active") return { reason: status.status, status };
       for (let elapsed = 0; elapsed < HEARTBEAT_MS; elapsed += 250) {
-        if (stoppedBySignal || pairingProcessShouldStop(stateId)) break;
+        if (forceRequested || gracefulRequested || pairingProcessShouldStop(stateId)) break;
         await sleep(250);
       }
     }
-    return { reason: stoppedBySignal ? "signal" : "local_leave" };
+    return {
+      reason: gracefulRequested ? "graceful_close" : forceRequested ? "force_close" : "local_leave",
+    };
   } finally {
+    removeHotkeys();
+    clearPairingPeerSnapshot();
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }
@@ -346,16 +396,133 @@ function printActive(C, state, status = null) {
   console.log("");
 }
 
+async function waitForRemoteMembersToLeave(remoteClient, state, {
+  graceful,
+  projectDir,
+  C,
+  json,
+} = {}) {
+  let localStopped = false;
+  let localError = null;
+  const localStop = waitForPairingSchedulerStop({
+    state,
+    graceful,
+    onProgress: (message) => {
+      if (!json) console.log(`  ${C.yellow}[pair close]${C.reset} ${message}`);
+    },
+  }).then(() => { localStopped = true; }, (error) => {
+    localError = error;
+    localStopped = true;
+  });
+  const startedAt = Date.now();
+  let status = null;
+  while (true) {
+    status = validatePairingRemoteResponse(
+      graceful ? "heartbeat" : "status",
+      graceful
+        ? await remoteClient.heartbeat(state.relay_token, collectPairingPresence(projectDir))
+        : await remoteClient.status(state.relay_token),
+    );
+    assertPairingStatusMatches(state, status);
+    if (localStopped && status.active_members === 0) break;
+    if (!graceful && Date.now() - startedAt > 120_000) {
+      throw Object.assign(new Error(
+        `${status.active_members} paired client(s) did not acknowledge forced shutdown; promotion remains pending`,
+      ), { code: "pairing_shutdown_clients_not_drained" });
+    }
+    await sleep(1_000);
+  }
+  await localStop;
+  if (localError) throw localError;
+  return status;
+}
+
+async function finishHostShutdown(root, remoteClient, state, {
+  graceful,
+  C,
+  json,
+  reason,
+} = {}) {
+  let journal = beginPairingPromotion(state, { projectDir: root, reason });
+  journal = markPairingPromotion(journal, { phase: graceful ? "draining" : "closing" });
+  if (graceful) {
+    const closing = validatePairingRemoteResponse(
+      "close",
+      await remoteClient.close(state.relay_token, "graceful"),
+    );
+    assertPairingStatusMatches(state, closing);
+    if (!json) {
+      console.log(`\n  ${C.yellow}Graceful close started.${C.reset} New jobs are stopped; active jobs may finish.`);
+    }
+  } else {
+    const remote = await leaveRemoteBestEffort(remoteClient, state);
+    if (remote?.error) throw Object.assign(new Error(remote.error), { code: remote.code });
+    if (!json) console.log(`\n  ${C.yellow}Forced close started.${C.reset} Stopping paired clients.`);
+  }
+
+  await waitForRemoteMembersToLeave(remoteClient, state, {
+    graceful,
+    projectDir: root,
+    C,
+    json,
+  });
+  if (graceful) {
+    const remote = await leaveRemoteBestEffort(remoteClient, state);
+    if (remote?.error) throw Object.assign(new Error(remote.error), { code: remote.code });
+  }
+  journal = markPairingPromotion(journal, { phase: "clients_drained" });
+
+  const synced = await syncSharedTrunkFromOrigin(root);
+  if (!synced.ok) {
+    throw Object.assign(new Error(`Final shared-trunk sync failed: ${synced.reason || "unknown error"}`), {
+      code: "pairing_shutdown_sync_failed",
+      result: synced,
+    });
+  }
+  journal = markPairingPromotion(journal, { phase: "trunk_frozen" });
+  const restored = await restoreLocalPairing(root, getPairingState(state.id));
+  if (!restored.ok) {
+    throw Object.assign(new Error(restored.message), { code: restored.code || "pairing_restore_blocked" });
+  }
+  const promoted = await promotePairingTrunk(root, {
+    journal,
+    onProgress: (message) => {
+      if (!json) console.log(`  ${C.cyan}[pair integrate]${C.reset} ${message}`);
+    },
+  });
+  if (!promoted.ok) {
+    throw Object.assign(new Error(promoted.reason || "Pairing promotion deferred"), {
+      code: promoted.reason || "pairing_promotion_deferred",
+    });
+  }
+  if (!json) {
+    console.log(`  ${C.green}Integrated and published${C.reset} ${promoted.sourceBranch} -> ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
+  }
+  return promoted;
+}
+
 async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
+  const pendingPromotion = readPairingPromotionJournal();
+  if (pendingPromotion) {
+    throw Object.assign(new Error(
+      `Pairing integration ${pendingPromotion.session_id || "(unknown)"} must finish before another session starts`,
+    ), { code: "pairing_promotion_already_pending" });
+  }
   const original = currentCheckout(root);
   const sharedBranch = validateBranchName(
     root,
     branch || `posse/pair-${randomUUID().replaceAll("-", "").slice(0, 10)}`,
   );
   const { url } = assertPairingRemoteTargets(root, remote);
+  const defaultBranch = remoteDefaultBranch(root, remote);
+  if (original.branch !== defaultBranch) {
+    throw Object.assign(new Error(
+      `Host pairing must start on ${remote}/${defaultBranch} so automatic close integrates into the repository trunk; current branch is ${original.branch}`,
+    ), { code: "pairing_host_not_on_default_branch" });
+  }
   const fingerprint = repositoryFingerprint(url);
   const state = createPairingState({
     role: "host",
@@ -412,9 +579,19 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       console.log(`  Pairing code: ${C.cyan}${C.bold}${started.code}${C.reset}`);
       console.log(`  Shared branch: ${sharedBranch}`);
       console.log(`  Others join with: ${C.cyan}posse pair ${started.code}${C.reset}`);
-      console.log(`  ${C.dim}This pairing session stays open until you press Ctrl-C or run \`posse pair leave\`.${C.reset}\n`);
+      console.log(`  ${C.dim}[g] graceful close + integrate   [Ctrl+C] force close + integrate${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
+    if (["graceful_close", "force_close", "draining", "closed", "expired"].includes(outcome.reason)) {
+      const liveState = getPairingState(state.id);
+      const promotion = await finishHostShutdown(root, remoteClient, liveState, {
+        graceful: ["graceful_close", "draining"].includes(outcome.reason),
+        C,
+        json,
+        reason: outcome.reason,
+      });
+      return { ok: true, role: "host", outcome: outcome.reason, promotion };
+    }
     if (outcome.reason !== "local_leave") {
       const result = await unpair(root, remoteClient, getPairingState(state.id));
       if (!result.ok) throw Object.assign(new Error(result.local.message), { code: result.local.code });
@@ -451,6 +628,12 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
+  const pendingPromotion = readPairingPromotionJournal();
+  if (pendingPromotion) {
+    throw Object.assign(new Error(
+      `Pairing integration ${pendingPromotion.session_id || "(unknown)"} must finish before joining another session`,
+    ), { code: "pairing_promotion_already_pending" });
+  }
   const original = currentCheckout(root);
   const resolved = validatePairingRemoteResponse("resolve", await remoteClient.resolve(code));
   const metadata = resolved?.repository || {};
@@ -531,9 +714,16 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
     }
     const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
     if (outcome.reason !== "local_leave") {
+      await waitForPairingSchedulerStop({
+        state: getPairingState(state.id),
+        graceful: outcome.reason === "draining",
+        onProgress: (message) => {
+          if (!json) console.log(`  ${C.yellow}[pair close]${C.reset} ${message}`);
+        },
+      });
       const result = await unpair(root, remoteClient, getPairingState(state.id));
       if (!result.ok) throw Object.assign(new Error(result.local.message), { code: result.local.code });
-      if (!json && ["closed", "expired"].includes(outcome.reason)) {
+      if (!json && ["draining", "closed", "expired"].includes(outcome.reason)) {
         console.log(`  Host pairing ${outcome.reason}; switched back to ${original.branch}.\n`);
       }
     }
@@ -568,12 +758,14 @@ async function runStatus({
 }) {
   const state = getLivePairingState();
   if (!state) {
+    clearPairingPeerSnapshot();
     const result = { ok: true, paired: false };
     if (json) console.log(JSON.stringify(result));
     else console.log("\n  This clone is not paired.\n");
     return result;
   }
   if (state.phase !== "active") {
+    clearPairingPeerSnapshot();
     const restored = await restoreLocalPairing(repositoryRoot(projectDir), state);
     const result = { ok: restored.ok, paired: false, ended: state.phase, restored };
     if (json) console.log(JSON.stringify(result));
@@ -581,6 +773,7 @@ async function runStatus({
     return result;
   }
   if (!pairingProcessIsAlive(state)) {
+    clearPairingPeerSnapshot();
     const recovered = await unpair(
       repositoryRoot(projectDir),
       remoteClientBestEffort(remoteClient, remoteClientFactory),
@@ -609,12 +802,14 @@ async function runStatus({
     }
   }
   if (status && status.status !== "active") {
+    clearPairingPeerSnapshot();
     const restored = await restoreLocalPairing(repositoryRoot(projectDir), state);
     const result = { ok: restored.ok, paired: false, ended: status.status, restored };
     if (json) console.log(JSON.stringify(result));
     else console.log(`\n  Pairing ${status.status}; ${restored.ok ? `switched back to ${state.original_branch}` : restored.message}.\n`);
     return result;
   }
+  if (status) writePairingPeerSnapshot(status);
   const result = { ok: true, paired: true, role: state.role, phase: state.phase, status };
   if (json) console.log(JSON.stringify(result));
   else printActive(C, state, status);
@@ -652,9 +847,31 @@ export async function runPairingCommand(argv = [], {
   }
 
   const state = getLivePairingState();
-  const result = await unpair(repositoryRoot(projectDir), client, state);
+  const root = repositoryRoot(projectDir);
+  let result;
+  if (state?.role === "host" && pairingProcessIsAlive(state) && state.process_pid !== process.pid) {
+    const closing = validatePairingRemoteResponse(
+      "close",
+      await client.close(state.relay_token, "graceful"),
+    );
+    assertPairingStatusMatches(state, closing);
+    result = { ok: true, requested: true, role: "host", status: closing.status };
+    if (!args.json) console.log("\n  Graceful close requested; the host monitor will drain and integrate the session.\n");
+  } else {
+    result = state?.role === "host"
+      ? await finishHostShutdown(root, client, state, {
+        graceful: true,
+        C,
+        json: args.json,
+        reason: "host_leave",
+      })
+      : await unpair(root, client, state);
+  }
   if (args.json) console.log(JSON.stringify(result));
-  else if (result.alreadyLeft) console.log("\n  This clone is not paired.\n");
+  else if (!state || result.alreadyLeft) console.log("\n  This clone is not paired.\n");
+  else if (state.role === "host" && result.ok) {
+    // finishHostShutdown already printed the integration result.
+  }
   else if (result.ok) console.log(`\n  Unpaired; switched back to ${state.original_branch}.\n`);
   else console.error(`\n  ${C.red}Unpair restore blocked:${C.reset} ${result.local.message}\n`);
   if (!result.ok) process.exitCode = 1;
@@ -664,3 +881,74 @@ export async function runPairingCommand(argv = [], {
 export async function runUnpairCommand(argv = [], options = {}) {
   return runPairingCommand(["leave", ...argv], options);
 }
+
+export async function recoverInterruptedPairing(projectDir = process.cwd(), {
+  C = new Proxy({}, { get: () => "" }),
+  remoteClientFactory = createPairingRemoteClient,
+  pairingProcessIsAlive = pairingOwnerProcessIsAlive,
+  json = false,
+} = {}) {
+  const state = getLivePairingState();
+  const journal = readPairingPromotionJournal();
+  if (state && pairingProcessIsAlive(state)) {
+    if (journal) {
+      return {
+        ok: false,
+        attempted: true,
+        pending: true,
+        code: "pairing_shutdown_in_progress",
+        message: "Pairing graceful close is still draining or integrating",
+      };
+    }
+    return { ok: true, attempted: false };
+  }
+  if (!journal && !state) return { ok: true, attempted: false };
+  const root = repositoryRoot(projectDir);
+  try {
+    if (state?.role === "member" && !pairingProcessIsAlive(state)) {
+      await waitForPairingSchedulerStop({ state, graceful: false });
+      const client = remoteClientFactory();
+      const result = await unpair(root, client, state);
+      return {
+        ok: result.ok,
+        attempted: true,
+        recovered: result.ok,
+        member: true,
+        result,
+      };
+    }
+    if (state?.role === "host" && state.phase !== "left") {
+      const client = remoteClientFactory();
+      const promotion = await finishHostShutdown(root, client, state, {
+        graceful: false,
+        C,
+        json,
+        reason: "host_crash_recovery",
+      });
+      return { ok: true, attempted: true, recovered: true, promotion };
+    }
+    const promotion = await promotePairingTrunk(root, {
+      journal,
+      onProgress: (message) => {
+        if (!json) console.log(`  ${C.cyan}[pair recover]${C.reset} ${message}`);
+      },
+    });
+    return { ok: promotion.ok, attempted: true, recovered: promotion.ok, promotion };
+  } catch (error) {
+    const activeJournal = readPairingPromotionJournal();
+    if (activeJournal) {
+      markPairingPromotion(activeJournal, {
+        last_error: safeError(error),
+      });
+    }
+    return {
+      ok: false,
+      attempted: true,
+      pending: true,
+      code: error?.code || "pairing_recovery_failed",
+      message: safeError(error),
+    };
+  }
+}
+
+export const __testPairingCommandInternals = Object.freeze({ installHostPairingHotkeys });

@@ -47,6 +47,22 @@ function execGit(args, cwd, options) {
   return (testOverrides?.gitExec || gitExec)(args, cwd, options);
 }
 
+function sharedTrunkCapabilities(projectDir) {
+  return (testOverrides?.capabilities || getSharedTrunkNativeCapabilities)(projectDir);
+}
+
+function sharedTrunkFetch(args) {
+  return (testOverrides?.fetch || fetchSharedTrunkNative)(args);
+}
+
+function sharedTrunkFastForward(args) {
+  return (testOverrides?.fastForward || ffUpdateSharedTrunkNative)(args);
+}
+
+function sharedTrunkPush(args) {
+  return (testOverrides?.push || pushSharedTrunkNative)(args);
+}
+
 function nativeResult(envelope) {
   return envelope && Object.prototype.hasOwnProperty.call(envelope, "result")
     ? envelope.result
@@ -125,7 +141,7 @@ async function runtimeSharedTrunkConfig(projectDir) {
   const config = await resolveSharedTrunkConfigRuntime(projectDir, {
     nativeCapabilityPreflight: async ({ projectDir: root }) => {
       try {
-        capabilityEnvelope = await getSharedTrunkNativeCapabilities(root);
+        capabilityEnvelope = await sharedTrunkCapabilities(root);
       } catch (err) {
         capabilityError = err;
       }
@@ -382,7 +398,7 @@ export function handleSharedTrunkAdvance(projectDir, {
 async function fetchRemote(projectDir, config, { includeClaims = false, claimAfter = null } = {}) {
   let envelope;
   try {
-    envelope = await fetchSharedTrunkNative({
+    envelope = await sharedTrunkFetch({
       cwd: projectDir,
       remote: config.remote,
       branch: config.branch,
@@ -458,7 +474,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
       // The strict native reset refuses unless the trunk checkout still holds
       // exactly this candidate, so unrelated local state is never destroyed.
       if (operation.candidateSha) {
-        const pendingMarker = ["candidate_gate_reset_pending", "rejection_reset_pending"].includes(operation.lastErrorCode)
+        const pendingMarker = ["candidate_gate_reset_pending", "rejection_reset_pending", "remote_advance_reset_pending"].includes(operation.lastErrorCode)
           ? operation.lastErrorCode
           : null;
         const localHead = refSha(projectDir, operation.targetBranch);
@@ -481,6 +497,8 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
           ? "push_rejected_retry"
           : pendingMarker === "candidate_gate_reset_pending"
             ? "candidate_gate_failed"
+            : pendingMarker === "remote_advance_reset_pending"
+              ? "remote_advanced_before_push"
             : "publication_not_landed";
         operation = transition(operation, {
           phase: "deferred",
@@ -601,7 +619,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   );
   let ffEnvelope;
   try {
-    ffEnvelope = await ffUpdateSharedTrunkNative({
+    ffEnvelope = await sharedTrunkFastForward({
       cwd: projectDir,
       remote: config.remote,
       branch: config.branch,
@@ -791,7 +809,7 @@ export async function mergeToSharedTrunkAsync({
       config,
       allowOperationId: existing?.operationId || null,
     });
-    if (!sync.ok) return { ...sync, message: `Shared trunk is not writable: ${sync.reason || "synchronization failed"}` };
+    if (!sync.ok) return { ...sync, message: `Shared trunk synchronization failed: ${sync.reason || "unknown synchronization error"}` };
     if (existing) {
       existing = getSharedTrunkMergeOperation(existing.operationId);
       if (existing?.phase === "published") {
@@ -950,9 +968,113 @@ export async function mergeToSharedTrunkAsync({
         return { ...validation, ok: false, deferred: reset.ok, publishUnknown: !reset.ok, reset, operation };
       }
 
+      // Candidate validation may be slow enough for another paired clone to
+      // publish meanwhile. Refresh the exact remote head after validation and
+      // rebuild locally on top of it before attempting a leased push. The CAS
+      // rejection path below remains the final guard for the smaller race
+      // between this fetch and the push itself.
+      const prePushFetch = await fetchRemote(projectDir, config);
+      if (!prePushFetch.ok) {
+        recordPublicationHealth(config, [operation]);
+        return { ...prePushFetch, operation, message: "Could not refresh shared trunk before publication" };
+      }
+      if (prePushFetch.remoteSha !== operation.expectedRemoteSha) {
+        let landed = false;
+        try {
+          landed = operation.candidateSha
+            ? isAncestor(projectDir, operation.candidateSha, prePushFetch.remoteSha)
+            : false;
+        } catch (err) {
+          return {
+            ok: false,
+            unavailable: true,
+            operational: true,
+            reason: "ancestry_unresolved",
+            error: err,
+            operation,
+            message: "Could not prove whether the refreshed shared trunk already contains this candidate",
+          };
+        }
+        if (landed) {
+          handleSharedTrunkAdvance(projectDir, {
+            oldSha: operation.baseSha,
+            newSha: prePushFetch.remoteSha,
+            targetBranch: config.branch,
+            source: "shared_trunk_recovery",
+          });
+          operation = finalizePublished(operation, {
+            remoteSha: prePushFetch.remoteSha,
+            recovered: true,
+          });
+          recordPublicationHealth(config, []);
+          return {
+            ok: true,
+            sharedTrunk: true,
+            published: true,
+            recovered: true,
+            mergeHash: operation.candidateSha,
+            targetBranch: config.branch,
+            operation,
+          };
+        }
+
+        const capturedCandidate = operation.candidateSha;
+        operation = transition(operation, {
+          phase: "candidate",
+          baseSha: prePushFetch.remoteSha,
+          expectedRemoteSha: prePushFetch.remoteSha,
+          attempt: attempt + 1,
+          lastErrorCode: "remote_advance_reset_pending",
+        });
+        const reset = await strictResetRejected(projectDir, config, {
+          ...operation,
+          candidateSha: capturedCandidate,
+        }, prePushFetch.remoteSha);
+        if (!reset.ok) {
+          recordPublicationHealth(config, [operation]);
+          return {
+            ok: false,
+            deferred: true,
+            resetPending: true,
+            reason: reset.reason || "pre_push_refresh_reset_failed",
+            reset,
+            operation,
+          };
+        }
+        operation = transition(operation, {
+          phase: "deferred",
+          candidateSha: null,
+          lastErrorCode: "remote_advanced_before_push",
+        });
+        recordPublicationHealth(config, []);
+        if (attempt >= retries) {
+          operation = transition(operation, { phase: "deferred", lastErrorCode: "push_retry_exhausted" });
+          return { ok: false, deferred: true, reason: "push_retry_exhausted", operation };
+        }
+        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId });
+        if (!sync.ok) return { ...sync, operation };
+        baseSha = sync.newSha || refSha(projectDir, config.branch);
+        operation = transition(operation, {
+          phase: "deferred",
+          candidateSha: null,
+          baseSha,
+          expectedRemoteSha: baseSha,
+          attempt: operation.attempt,
+          lastErrorCode: "remote_advanced_before_push",
+        });
+        updateSharedTrunkRuntimeStatus({}, { increments: { push_retry_count: 1 } });
+        sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_PUSH_RETRIED, `Refreshing shared-trunk candidate for WI#${workItemId}`, {
+          operation_id: operation.operationId,
+          attempt: attempt + 1,
+          reason: "remote_advanced_before_push",
+          remote_sha: prePushFetch.remoteSha,
+        }, Number(workItemId));
+        continue;
+      }
+
       let pushedEnvelope;
       try {
-        pushedEnvelope = await pushSharedTrunkNative({
+        pushedEnvelope = await sharedTrunkPush({
           cwd: projectDir,
           remote: config.remote,
           branch: config.branch,

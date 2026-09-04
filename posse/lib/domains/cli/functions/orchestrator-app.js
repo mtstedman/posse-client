@@ -117,6 +117,7 @@ import {
 import { modelTierColor, statusColor, statusIcon } from "../../ui/functions/display/status-palette.js";
 import { computeJobProgressStats } from "../../ui/functions/display/helpers/job-status.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
+import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { configureRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
@@ -1906,8 +1907,12 @@ function cmdDashboard(highlightJobId = null, { workItemIds = [] } = {}) {
   const inScope = (workItemId) => scopedIds.size === 0 || scopedIds.has(Number(workItemId));
   const workItems = listWorkItems().filter((wi) => inScope(wi.id));
   const allJobs = listJobs().filter((job) => inScope(job.work_item_id));
+  const peerSnapshot = scopedIds.size === 0 ? readPairingPeerSnapshot() : null;
+  const peersWithWork = (peerSnapshot?.peers || []).filter((peer) => (
+    peer.work_items.length > 0 || peer.jobs.length > 0
+  ));
 
-  if (allJobs.length === 0) {
+  if (allJobs.length === 0 && peersWithWork.length === 0) {
     console.log(`\n  ${C.dim}No jobs. Use 'plan' or 'go' to create jobs.${C.reset}\n`);
     return;
   }
@@ -1923,8 +1928,10 @@ function cmdDashboard(highlightJobId = null, { workItemIds = [] } = {}) {
   const bar = `${"#".repeat(filled)}${".".repeat(barWidth - filled)}`;
 
   console.log(`\n${C.dim}+${"---".repeat(21)}+${C.reset}`);
-  console.log(`${C.dim}|${C.reset} ${C.bold}Progress${C.reset}  ${C.green}${bar}${C.reset}  ${resolved}/${total} ${C.dim}(${failed} failed, ${blocked} blocked)${C.reset}`);
-  console.log(`${C.dim}+${"---".repeat(21)}+${C.reset}`);
+  if (allJobs.length > 0) {
+    console.log(`${C.dim}|${C.reset} ${C.bold}Progress${C.reset}  ${C.green}${bar}${C.reset}  ${resolved}/${total} ${C.dim}(${failed} failed, ${blocked} blocked)${C.reset}`);
+    console.log(`${C.dim}+${"---".repeat(21)}+${C.reset}`);
+  }
 
   // Group jobs by work item
   const byWi = {};
@@ -1960,6 +1967,19 @@ function cmdDashboard(highlightJobId = null, { workItemIds = [] } = {}) {
     if (unfinished > 0) details.push(`${unfinished} still finishing`);
     if (background.failed > 0) details.push(`${background.failed} failed`);
     console.log(`${C.dim}|${C.reset} ${C.cyan}Context background${C.reset} ${C.dim}${background.resolved}/${background.total} done${details.length > 0 ? `, ${details.join(", ")}` : ""}${C.reset}`);
+  }
+
+  if (peersWithWork.length > 0) {
+    console.log(`${C.dim}|${C.reset} ${C.magenta}${C.bold}Remote paired work · read-only${C.reset} ${C.dim}(never scheduled locally)${C.reset}`);
+    for (const peer of peersWithWork) {
+      for (const wi of peer.work_items) {
+        console.log(`${C.dim}|${C.reset}   ${C.magenta}[${peer.label}]${C.reset} ${C.blue}WI#${wi.id}${C.reset} ${wi.status}: ${wi.title.slice(0, 45)}`);
+      }
+      for (const job of peer.jobs) {
+        const wi = job.work_item_id ? ` WI#${job.work_item_id}` : "";
+        console.log(`${C.dim}|${C.reset}     ${C.dim}job #${job.id}${wi} ${job.job_type}/${job.status}:${C.reset} ${job.title.slice(0, 38)}`);
+      }
+    }
   }
 
   console.log(`${C.dim}+${"---".repeat(21)}+${C.reset}\n`);
@@ -2639,11 +2659,12 @@ const COMMAND_USAGE = {
     console.log(`\n  Opens or joins multi-user collaboration across separate clones on one shared Git side trunk.`);
     console.log(`  Live participants see bounded, read-only peer WI/job summaries outside their local queue.`);
     console.log(`  Each clone keeps its own queue and database; peer activity is never scheduled locally.`);
+    console.log(`  Host hotkeys: ${C.cyan}g${C.reset} gracefully drains and integrates; ${C.cyan}Ctrl+C${C.reset} forces close and integration.`);
     console.log(`  ${C.dim}This does not expose a phone/web control bridge; use \`posse serve --pair\` for that.${C.reset}\n`);
   },
   unpair: () => {
     console.log(`\n  Usage: posse unpair [--json]`);
-    console.log(`  Leave the current pairing and restore the original branch/settings.\n`);
+    console.log(`  Members leave and restore locally; hosts gracefully drain peers and integrate the side trunk.\n`);
   },
   "local-models": () => {
     console.log(`\n  Usage: posse local-models [list [--json] | download [shorthand]]`);
@@ -2720,6 +2741,21 @@ export async function main() {
     // artifact refresh, and maintenance commands never reach one at all.
     refreshNativeGit: commandPolicy.requiresNativeGit,
   });
+  // A killed pairing host cannot integrate through the credential-free relay.
+  // The next invocation in the owning clone resumes its durable close/publish
+  // journal before other commands can start new work on stale branch state.
+  if (!isHelpCommand(command)) {
+    const { recoverInterruptedPairing } = await loadPairCommandModule();
+    const recovery = await recoverInterruptedPairing(PROJECT_DIR, { C });
+    if (recovery.attempted && !recovery.ok) {
+      console.error(`  ${C.yellow}Pairing recovery remains pending:${C.reset} ${recovery.message}`);
+      if (!commandPolicy.readOnly && !["pair", "unpair"].includes(commandPolicy.name)) {
+        throw Object.assign(new Error("Resolve the pending pairing recovery before starting new work"), {
+          code: recovery.code || "pairing_recovery_pending",
+        });
+      }
+    }
+  }
   await maybeWarnPosseUpdateAvailable(commandPolicy);
 
   if (isHelpCommand(command)) {
@@ -2790,8 +2826,8 @@ ${aliasDiagnostic}
     ${C.dim}             pairing-preflight [--json]${C.reset}
     ${C.cyan}pair${C.reset}       Collaborate across clones on a shared Git side trunk
     ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
-    ${C.dim}             Shows read-only peer WIs/jobs outside the local queue; unlike serve, pair does not connect phone/web clients${C.reset}
-    ${C.cyan}unpair${C.reset}     Leave shared-trunk pairing and restore the original branch/settings
+    ${C.dim}             Host: g gracefully drains/integrates; Ctrl+C forces close/integration; unlike serve, pair does not connect phone/web clients${C.reset}
+    ${C.cyan}unpair${C.reset}     Leave pairing; host drains and integrates, members restore locally
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}
     ${C.cyan}atlas-v2${C.reset}     Inspect/manage the ATLAS v2 ledger, views, and warmer queue
