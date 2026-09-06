@@ -16,6 +16,15 @@ const NON_GENERATABLE_IMAGE_FORMATS = new Set([
   ".svg", ".gif", ".avif", ".bmp", ".tif", ".tiff", ".ico",
 ]);
 
+function translateDependenciesForSplit(dependencies, splitIndex, splitTaskCount) {
+  const offset = splitTaskCount - 1;
+  return [...new Set((Array.isArray(dependencies) ? dependencies : [])
+    .filter(Number.isInteger)
+    .map((dependencyIndex) => dependencyIndex > splitIndex
+      ? dependencyIndex + offset
+      : dependencyIndex))];
+}
+
 function generatedRasterPath(value) {
   const normalized = String(value || "").replace(/\\/g, "/").trim();
   const ext = path.posix.extname(normalized).toLowerCase();
@@ -273,15 +282,19 @@ export function routePromoteTaskByOutputDir(task, index, tasks, artifactDirAbs) 
     return null;
   }
 
-  const originalDeps = Array.isArray(task.depends_on_index) ? task.depends_on_index.filter(Number.isInteger) : [];
-  const sourceIndexes = new Set(groups.map((group) => group.sourceIndex).filter(Number.isInteger));
+  const originalDeps = translateDependenciesForSplit(task.depends_on_index, index, groups.length);
+  const translatedSourceIndexes = groups
+    .map((group) => group.sourceIndex)
+    .filter(Number.isInteger)
+    .map((sourceIndex) => sourceIndex > index ? sourceIndex + groups.length - 1 : sourceIndex);
+  const sourceIndexes = new Set(translatedSourceIndexes);
   const sharedDeps = originalDeps.filter((depIdx) => !sourceIndexes.has(depIdx));
   const splitTasks = [];
   for (let offset = 0; offset < groups.length; offset++) {
     const group = groups[offset];
     const depSet = new Set(sharedDeps);
     if (Number.isInteger(group.sourceIndex)) {
-      depSet.add(group.sourceIndex);
+      depSet.add(group.sourceIndex > index ? group.sourceIndex + groups.length - 1 : group.sourceIndex);
     } else {
       for (const depIdx of originalDeps) depSet.add(depIdx);
     }
@@ -459,11 +472,13 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
 
   const { imageTask, promoteTask } = buildImageSplitPieces(routedTask, imageFilesForSplit, artifactDirAbs, index);
   const hasDownstreamCodeSplit = hasCodeOutputs || hasRepoEdits || nonImageCreateFiles.length > 0;
-  if (!hasDownstreamCodeSplit) {
-    imageTask.depends_on_index = Array.isArray(routedTask.depends_on_index)
-      ? routedTask.depends_on_index.filter(Number.isInteger)
-      : [];
-  }
+  const splitTaskCount = 1 + (promoteTask ? 1 : 0) + (hasDownstreamCodeSplit ? 1 : 0);
+  const originalDependencies = translateDependenciesForSplit(
+    routedTask.depends_on_index,
+    index,
+    splitTaskCount,
+  );
+  imageTask.depends_on_index = originalDependencies;
   const splitTasks = [imageTask];
   const imageDependencyIndex = index;
   let finalDependencyIndex = imageDependencyIndex;
@@ -475,7 +490,6 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
 
   if (hasDownstreamCodeSplit) {
     const devCreateFiles = nonImageCreateFiles;
-    const originalDependencies = Array.isArray(routedTask.depends_on_index) ? routedTask.depends_on_index : [];
     const devTask = {
       ...routedTask,
       title: `Code changes for: ${routedTask.title}`.slice(0, 120),

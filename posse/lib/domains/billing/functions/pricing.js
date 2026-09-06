@@ -22,7 +22,7 @@ import { providerLongContextRateMultipliers } from "../../../catalog/provider-ec
 // tokens, so this premium is a no-op for other providers.
 const CACHE_CREATION_MULTIPLIER = 1.25;
 
-// Defaults as of August 2026. Rates in USD per million input/output tokens.
+// Defaults as of September 2026. Rates in USD per million input/output tokens.
 // Operators can override any row via the provider_pricing table (admin CLI).
 // These are best-effort — keep them conservative so we don't under-report.
 const DEFAULT_PRICING = Object.freeze({
@@ -42,6 +42,7 @@ const DEFAULT_PRICING = Object.freeze({
   "claude:claude-opus-4":     { tier: "strong",   input: 15.00, output: 75.00, cachedInput: 1.50 },
 
   // OpenAI
+  "openai:gpt-6-astra":  { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
   "openai:gpt-4.1-mini": { tier: "cheap",    input: 0.40, output: 1.60, cachedInput: 0.10 },
   "openai:gpt-4.1":      { tier: "standard", input: 2.00, output: 8.00, cachedInput: 0.50 },
   "openai:gpt-5-mini":   { tier: "cheap",    input: 0.25, output: 2.00, cachedInput: 0.025 },
@@ -56,6 +57,7 @@ const DEFAULT_PRICING = Object.freeze({
   "openai:gpt-5.6":      { tier: "strong",   input: 5.00, output: 30.00, cachedInput: 0.50 },
 
   // Codex CLI (OpenAI-backed)
+  "codex:gpt-6-astra":   { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
   "codex:gpt-5.3-codex": { tier: "standard", input: 1.75, output: 14.00, cachedInput: 0.175 },
   "codex:gpt-5.4":       { tier: "strong",   input: 2.50, output: 15.00, cachedInput: 0.25 },
   "codex:gpt-5.4-mini":  { tier: "cheap",    input: 0.75, output: 4.50, cachedInput: 0.075 },

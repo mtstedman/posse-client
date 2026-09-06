@@ -28,6 +28,7 @@ import {
   needsWaitingLanePreparationSchema,
   needsSharedTrunkMergeOperationSchema,
   needsPairingSessionSchema,
+  needsPairingSessionPendingPhaseSchema,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
   repairRunInsightsPromotionSchema,
@@ -37,6 +38,7 @@ import {
   repairWaitingLanePreparationSchema,
   installSharedTrunkMergeOperationSchema,
   installPairingSessionSchema,
+  repairPairingSessionPendingPhaseSchema,
   installBridgeCommandResultsSchema,
   repairWorkItemsGovernanceTierSchema,
   runHostMigration,
@@ -54,6 +56,7 @@ export {
   __testRepairWaitingLanePreparationSchema,
   __testInstallSharedTrunkMergeOperationSchema,
   __testInstallPairingSessionSchema,
+  __testRepairPairingSessionPendingPhaseSchema,
   __testRepairWorkItemsGovernanceTierSchema,
   getHostSchemaVersion as __testGetHostSchemaVersion,
   runHostMigration as __testRunHostMigration,
@@ -2832,6 +2835,12 @@ export function getDb() {
     name: "agent_calls_web_research_child_kind",
     needs: needsAgentCallsChildKindsRepair,
     migrate: repairAgentCallsChildKindsSchema,
+  });
+  runHostMigration(_db, {
+    version: 16,
+    name: "pairing_sessions_pending_phase",
+    needs: needsPairingSessionPendingPhaseSchema,
+    migrate: repairPairingSessionPendingPhaseSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

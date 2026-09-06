@@ -405,33 +405,46 @@ through one remote side branch. Each person must use a separate clone and a sepa
 `.posse/` database. Never point two instances at one clone, one worktree, or a
 SQLite database on a network filesystem.
 
-The host opens a persistent Posse-to-Posse pairing session from a clean named
-branch:
+The host opens a persistent shared session from a clean named branch:
 
 ```bash
-posse pair
+posse session host
 ```
 
 Posse creates and pushes a unique side branch, verifies the host's exact remote
 read/write path, switches the shared-trunk settings, and prints a reusable
-10-character code. Any number of members can join from their own clean clone:
+10-character code plus a `posse://session` invite link. Any number of members
+can request admission from their own clean clone:
 
 ```bash
-posse pair ABCDE-FG234
-# equivalent: posse pair join ABCDE-FG234
+posse session join ABCDE-FG234
+# invite links are accepted directly too
+posse session join 'posse://session?token=ABCDE-FG234'
 ```
 
-Each joining Posse resolves the code to repository metadata, matches or adds the
-remote, independently proves noninteractive fetch and leased dry-run push access,
-and only then switches to the shared branch. Repository credentials are never
-shared through the pairing service. A member who cannot read and write the Git
-remote is not enrolled.
+The joiner displays a four-character countersign. The host confirms it from the
+hosting clone (a second terminal is fine):
+
+```bash
+posse session admit AB23
+```
+
+Only after admission does the member match or add the remote and independently
+prove noninteractive fetch and leased dry-run push access. The pending bearer is
+stored by the relay only as a hash and is unusable for session work until the
+host admits it. If Git preflight fails, the now-identifiable member explicitly
+leaves instead of lingering as active. Repository credentials are never shared
+through the pairing service.
+
+`posse pair` remains a compatibility alias for `posse session`; `posse unpair`
+remains an alias for `posse session leave`.
 
 The host and member commands remain connected, like `posse serve`. On the host,
 press `g` for a graceful close: Posse freezes new jobs, lets active jobs finish,
 closes every member, synchronizes the side trunk, and integrates it into the
-repository's default branch. `posse pair leave` (alias: `posse unpair`) performs
-the same graceful close. Press Ctrl-C for a forced close; schedulers receive a
+repository's default branch. `posse session close` (aliases: `posse session
+leave`, `posse pair leave`, and `posse unpair`) performs the same graceful
+close. Press Ctrl-C for a forced close; schedulers receive a
 stop request before integration proceeds. Members restore their own original
 branch and exact prior shared-trunk settings after acknowledging either close.
 
@@ -449,9 +462,9 @@ status snapshot; it never enters the local queue and cannot be scheduled,
 claimed, or changed by this Posse instance. Background preparation jobs such as
 ATLAS warmup stay local and are not relayed as paired work or app status.
 
-`posse pair` is deliberately separate from `posse serve --pair`: the former
-pairs multiple Posse clones into one shared Git side trunk, while the latter
-pairs a phone/client to the Remote bridge.
+During the compatibility rollout, `posse serve --pair` still pairs a
+phone/client to the durable Remote bridge. It does not bypass session admission
+or enroll another Posse clone.
 
 Manual configuration remains available for long-lived administrator-managed
 trunks. Create the branch once, push it, then enable the feature last:

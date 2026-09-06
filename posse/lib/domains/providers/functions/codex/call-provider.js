@@ -519,6 +519,7 @@ export async function callProvider(promptText, {
     };
     let proc;
     try {
+      const processGroup = process.platform !== "win32";
       proc = spawn(launch.command, launch.args, {
         cwd: spawnCwd,
         shell: false,
@@ -526,10 +527,12 @@ export async function callProvider(promptText, {
         env: childEnv,
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
+        detached: processGroup,
       });
       trackSpawnedProcess(proc, launch.command, {
         label: `codex:${role || "provider"}`,
         cwd: spawnCwd,
+        processGroup,
       });
     } catch (err) {
       clearExitCleanup();

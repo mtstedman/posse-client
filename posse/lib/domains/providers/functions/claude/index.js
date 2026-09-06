@@ -928,6 +928,7 @@ export async function callProvider(promptText, {
     let proc;
     try {
       const launch = buildWindowsSpawn(resolvedClaude.command, fullArgs);
+      const processGroup = process.platform !== "win32";
       proc = spawn(launch.command, launch.args, {
         cwd: spawnCwd,
         shell: false,
@@ -935,10 +936,12 @@ export async function callProvider(promptText, {
         env: childEnv,
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
+        detached: processGroup,
       });
       trackSpawnedProcess(proc, launch.command, {
         label: `claude:${role || "provider"}`,
         cwd: spawnCwd,
+        processGroup,
       });
     } catch (spawnErr) {
       cleanupSetupFiles();

@@ -209,6 +209,7 @@ export function cmdCalls({ tierModelName }) {
       `${g.failed_jobs > 0 ? C.red : C.dim}failed:${String(g.failed_jobs).padStart(3)}${C.reset} ` +
       `calls:${String(g.call_count).padStart(3)} ` +
       `turns:${String(g.turns_used).padStart(4)} ` +
+      `target-over:${String(g.turns_over_target).padStart(3)} ` +
       `in:${fmtTok(g.input_tokens).padStart(7)} ` +
       `cached:${fmtTok(g.cached_input_tokens).padStart(7)} (${fmtUsagePct(cachePct)}) ` +
       `cost:$${cost.toFixed(cost >= 10 ? 2 : 4)}`

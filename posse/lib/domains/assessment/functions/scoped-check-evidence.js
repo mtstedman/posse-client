@@ -12,7 +12,7 @@ import {
 } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
 
 const RECEIPT_KIND = "assessment_scoped_checks";
-const RECEIPT_SCHEMA_VERSION = 2;
+const RECEIPT_SCHEMA_VERSION = 3;
 const REQUESTED_CHECKS = Object.freeze(["lint", "typecheck"]);
 const MAX_CHANGED_FILES = 250;
 
@@ -69,12 +69,15 @@ async function restoreGitHead(cwd, { commit, headRef } = {}) {
   await gitExecAsync(["reset", "--hard", commit], cwd);
 }
 
-function unavailableResult({ commit, files, reason }) {
+function unavailableResult({ commit, assessedCommit = null, files, reason }) {
   return {
     ok: false,
     status: "unavailable",
     summary: reason,
     executed_commit_hash: commit,
+    assessed_commit_hash: assessedCommit,
+    verification_commit_relation: "mismatch",
+    verification_eligible: false,
     scoped_files: files,
     checks: REQUESTED_CHECKS.map((name) => ({
       name,
@@ -91,13 +94,32 @@ function unavailableResult({ commit, files, reason }) {
   };
 }
 
-function receiptKey({ commit, files }) {
+function receiptKey({ commit, executionCommit = commit, files }) {
   return crypto.createHash("sha256").update(JSON.stringify({
     schema_version: RECEIPT_SCHEMA_VERSION,
     commit,
+    execution_commit: executionCommit,
     files,
     checks: REQUESTED_CHECKS,
   })).digest("hex");
+}
+
+async function verificationCommitRelation(cwd, expectedCommit, actualCommit, files) {
+  if (!expectedCommit || !actualCommit) return { eligible: false, relation: "mismatch" };
+  if (expectedCommit === actualCommit) return { eligible: true, relation: "exact" };
+  try {
+    await gitExecAsync(["merge-base", "--is-ancestor", expectedCommit, actualCommit], cwd);
+    const changedScopedFiles = String(await gitExecAsync(
+      ["diff", "--name-only", `${expectedCommit}..${actualCommit}`, "--", ...files],
+      cwd,
+    ) || "").trim();
+    if (!changedScopedFiles) {
+      return { eligible: true, relation: "descendant_unchanged_scope" };
+    }
+  } catch {
+    // A divergent/unresolvable commit cannot provide verification coverage.
+  }
+  return { eligible: false, relation: "mismatch" };
 }
 
 function cachedReceipt(jobId, key) {
@@ -129,7 +151,7 @@ export function renderAssessmentScopedCheckEvidence(result = null, {
   const checks = Array.isArray(result.checks) ? result.checks : [];
   const lines = [
     `DETERMINISTIC CHANGED-FILE CHECK RECEIPT:`,
-    `The harness ran these checks before model assessment at commit ${result.executed_commit_hash || "unknown"}. Treat the receipt as ground truth and do not rerun lint, typecheck, syntax checks, or run_scoped_checks for the listed files.`,
+    `The harness ran these checks before model assessment at commit ${result.executed_commit_hash || "unknown"}${result.assessed_commit_hash && result.assessed_commit_hash !== result.executed_commit_hash ? `, covering assessed commit ${result.assessed_commit_hash} (${result.verification_commit_relation || "descendant"})` : ""}. Treat the receipt as ground truth and do not rerun lint, typecheck, syntax checks, or run_scoped_checks for the listed files.`,
     `overall_status: ${result.status || "unknown"}`,
     `summary: ${result.summary || "no summary"}`,
     `receipt_reused: ${reused ? "true" : "false"}`,
@@ -198,19 +220,21 @@ export async function ensureAssessmentScopedCheckEvidence({
   // executable prefix. Otherwise two >250-file changes with the same prefix
   // could reuse a receipt whose omitted-file accounting belongs to another
   // assessed scope.
-  const key = receiptKey({ commit: expectedCommit, files: allFiles });
   const [actualCommit, headRef, before] = await Promise.all([
     currentCommit(cwd),
     currentHeadRef(cwd),
     porcelain(cwd),
   ]);
+  const commitCoverage = await verificationCommitRelation(cwd, expectedCommit, actualCommit, files);
+  const key = receiptKey({ commit: expectedCommit, executionCommit: actualCommit, files: allFiles });
 
   let result;
   let reused = false;
   let persistReceipt = false;
-  if (!actualCommit || actualCommit !== expectedCommit) {
+  if (!commitCoverage.eligible) {
     result = unavailableResult({
       commit: actualCommit,
+      assessedCommit: expectedCommit,
       files,
       reason: `assessed commit mismatch: expected ${expectedCommit}, found ${actualCommit || "unknown"}`,
     });
@@ -241,6 +265,9 @@ export async function ensureAssessmentScopedCheckEvidence({
       });
       result = {
         ...result,
+        assessed_commit_hash: expectedCommit,
+        verification_commit_relation: commitCoverage.relation,
+        verification_eligible: true,
         coverage_complete: omittedFileCount === 0,
         omitted_file_count: omittedFileCount,
         ...(omittedFileCount > 0 && result?.status === "passed"

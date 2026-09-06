@@ -14,7 +14,7 @@ import { leaseNowMs } from "./lease-clock.js";
 import { logAgentActivity, logEvent } from "./events.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
-import { appendRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { appendRunTelemetry, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { discardHashRefTraversalsForAgentCall } from "./hash-refs.js";
 import { isAgentCallChildKind } from "../../../catalog/agent-call.js";
 
@@ -26,6 +26,83 @@ const WEB_TOOL_LOG_FINISH_GRACE_SECONDS = 10;
 // dropping the first/last tool observation because of clock precision.
 const TOOL_LOG_BOUNDARY_GRACE_SECONDS = 2;
 const TOOL_LOG_FINISH_BOUNDARY_GRACE_SECONDS = 0.25;
+const RESEARCH_GUARDRAIL_OBSERVATION_TYPES = new Set([
+  "research.evidence",
+  "research.synthesis_required",
+  "agent_handoff.committed",
+  "hash_ref.fetch_batch",
+  "tool.atlas",
+  "tool.chain_verdict",
+  "tool.list",
+  "tool.search",
+  "tool.git_history",
+  "tool.inspect",
+  "tool.hash",
+]);
+
+function observationDetail(row) {
+  if (row?.detail && typeof row.detail === "object") return row.detail;
+  try { return JSON.parse(row?.detail_json || "{}"); } catch { return {}; }
+}
+
+export function summarizeResearchGuardrailObservations(rows = []) {
+  const stats = {
+    observation_count: 0,
+    evidence_count: 0,
+    novel_relevant_files: 0,
+    synthesis_required_count: 0,
+    fetch_batches: 0,
+    singleton_fetch_batches: 0,
+    multi_fetch_batches: 0,
+    fetched_refs: 0,
+    lookup_calls: 0,
+    lookup_service_ms: 0,
+    lookup_queue_wait_ms: 0,
+  };
+  const seen = new Set();
+  let researchEvidenceEvents = 0;
+  let handoffEvidenceSelectors = 0;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const type = String(row?.observation_type ?? row?.type ?? "");
+    if (!RESEARCH_GUARDRAIL_OBSERVATION_TYPES.has(type)) continue;
+    const key = row?.id != null
+      ? `id:${row.id}`
+      : `${row?.created_at || row?.t || ""}|${type}|${row?.summary || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const detail = observationDetail(row);
+    stats.observation_count += 1;
+    if (type === "research.evidence") {
+      researchEvidenceEvents += 1;
+      if (detail.novel_relevant_file === true || detail.novel_relevant_file === 1) {
+        stats.novel_relevant_files += 1;
+      }
+    }
+    if (type === "agent_handoff.committed" && String(detail.packet_profile || "").startsWith("researcher.")) {
+      handoffEvidenceSelectors = Math.max(
+        handoffEvidenceSelectors,
+        Math.max(0, Number(detail.evidence_selector_count) || 0),
+      );
+    }
+    if (type === "research.synthesis_required") stats.synthesis_required_count += 1;
+    if (type === "hash_ref.fetch_batch") {
+      const refCount = Math.max(0, Number(detail.ref_count) || 0);
+      stats.fetch_batches += 1;
+      if (refCount === 1) stats.singleton_fetch_batches += 1;
+      if (refCount > 1) stats.multi_fetch_batches += 1;
+      stats.fetched_refs += refCount;
+    }
+    if (["tool.atlas", "tool.chain_verdict", "tool.list", "tool.search", "tool.git_history", "tool.inspect", "tool.hash"].includes(type)) {
+      stats.lookup_calls += 1;
+    }
+    if (type === "tool.atlas") {
+      stats.lookup_service_ms += Math.max(0, Number(detail.duration_ms) || 0);
+      stats.lookup_queue_wait_ms += Math.max(0, Number(detail.queue_wait_ms) || 0);
+    }
+  }
+  stats.evidence_count = Math.max(researchEvidenceEvents, handoffEvidenceSelectors);
+  return stats;
+}
 
 export function createAgentCall({
   work_item_id = null,
@@ -299,11 +376,24 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
       SUM(COALESCE(ac.output_tokens, 0)) AS output_tokens,
       SUM(COALESCE(ac.cached_input_tokens, 0)) AS cached_input_tokens,
       SUM(COALESCE(ac.turns_used, 0)) AS turns_used,
+      SUM(COALESCE(ac.max_turns_configured, 0)) AS turn_targets,
+      SUM(CASE
+        WHEN COALESCE(ac.max_turns_configured, 0) > 0
+          AND COALESCE(ac.turns_used, 0) > ac.max_turns_configured
+        THEN 1 ELSE 0 END
+      ) AS turn_target_overage_calls,
+      SUM(CASE
+        WHEN COALESCE(ac.max_turns_configured, 0) > 0
+          AND COALESCE(ac.turns_used, 0) > ac.max_turns_configured
+        THEN ac.turns_used - ac.max_turns_configured ELSE 0 END
+      ) AS turns_over_target,
       SUM(COALESCE(ac.cost_estimate_usd, 0)) AS cost_usd,
       SUM(CASE WHEN ac.billing_precision IN ('exact', 'recovered_exact') THEN 1 ELSE 0 END) AS exact_usage_calls,
       SUM(CASE WHEN ac.billing_precision IN ('aggregate_only', 'incomplete') THEN 1 ELSE 0 END) AS inexact_usage_calls,
       SUM(COALESCE(ac.duration_ms, 0)) AS duration_ms,
+      MIN(COALESCE(ac.started_at, ac.created_at)) AS first_call_at,
       MAX(COALESCE(ac.started_at, ac.created_at)) AS last_call_at,
+      COALESCE(ev.observation_count, 0) AS observation_count,
       COALESCE(ev.evidence_count, 0) AS evidence_count,
       COALESCE(ev.novel_relevant_files, 0) AS novel_relevant_files,
       COALESCE(ev.synthesis_required_count, 0) AS synthesis_required_count,
@@ -319,6 +409,7 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
     LEFT JOIN (
       SELECT
         job_id,
+        COUNT(*) AS observation_count,
         SUM(CASE WHEN observation_type = 'research.evidence' THEN 1 ELSE 0 END) AS evidence_count,
         SUM(CASE
           WHEN observation_type = 'research.evidence'
@@ -372,6 +463,42 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
     LIMIT ?
   `).all(...(sinceIso ? [String(sinceIso), ...params, safeLimit] : [...params, safeLimit]));
 
+  const selectedJobs = new Map(byJob
+    .map((row) => [Number(row.job_id), {
+      workItemId: Number(row.work_item_id),
+      firstCallAt: String(row.first_call_at || ""),
+    }])
+    .filter(([id]) => Number.isInteger(id) && id > 0));
+  if (selectedJobs.size > 0) {
+    const archivedRows = readRunTelemetryEntries("observations", {
+      limit: null,
+      currentEpochOnly: false,
+      predicate: (entry) => {
+        const jobId = Number(entry?.job_id ?? entry?.job);
+        const workItemId = Number(entry?.work_item_id ?? entry?.wi);
+        const type = String(entry?.observation_type ?? entry?.type ?? "");
+        const createdAt = String(entry?.created_at || entry?.t || "");
+        const selected = selectedJobs.get(jobId);
+        return selected != null
+          && selected.workItemId === workItemId
+          && RESEARCH_GUARDRAIL_OBSERVATION_TYPES.has(type)
+          && (!selected.firstCallAt || createdAt >= selected.firstCallAt)
+          && (!sinceIso || createdAt >= String(sinceIso));
+      },
+    });
+    const archivedByJob = new Map();
+    for (const row of archivedRows) {
+      const jobId = Number(row?.job_id ?? row?.job);
+      if (!archivedByJob.has(jobId)) archivedByJob.set(jobId, []);
+      archivedByJob.get(jobId).push(row);
+    }
+    for (const row of byJob) {
+      const archived = summarizeResearchGuardrailObservations(archivedByJob.get(Number(row.job_id)) || []);
+      if (archived.observation_count < Number(row.observation_count || 0)) continue;
+      Object.assign(row, archived);
+    }
+  }
+
   const totals = byJob.reduce((acc, row) => {
     acc.jobs += 1;
     if (row.job_status === "succeeded") acc.succeeded_jobs += 1;
@@ -383,6 +510,9 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
     acc.output_tokens += Number(row.output_tokens || 0);
     acc.cached_input_tokens += Number(row.cached_input_tokens || 0);
     acc.turns_used += Number(row.turns_used || 0);
+    acc.turn_targets += Number(row.turn_targets || 0);
+    acc.turn_target_overage_calls += Number(row.turn_target_overage_calls || 0);
+    acc.turns_over_target += Number(row.turns_over_target || 0);
     acc.cost_usd += Number(row.cost_usd || 0);
     acc.duration_ms += Number(row.duration_ms || 0);
     acc.evidence_count += Number(row.evidence_count || 0);
@@ -407,6 +537,9 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
     output_tokens: 0,
     cached_input_tokens: 0,
     turns_used: 0,
+    turn_targets: 0,
+    turn_target_overage_calls: 0,
+    turns_over_target: 0,
     cost_usd: 0,
     duration_ms: 0,
     evidence_count: 0,

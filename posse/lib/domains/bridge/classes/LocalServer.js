@@ -27,6 +27,7 @@ import {
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_MAX_WS_FRAME_BYTES = 1024 * 1024;
+const MAX_WS_CLIENT_FRAME_OVERHEAD_BYTES = 14;
 const DEFAULT_WS_HELLO_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_WS_BUFFERED_BYTES = 2 * DEFAULT_MAX_WS_FRAME_BYTES;
 const WS_CLOSE_REASON_MAX_BYTES = 123;
@@ -376,11 +377,6 @@ export class LocalServer {
 
   handleWsData(client, chunk) {
     if (client?.closing || client?.socket?.destroyed) return;
-    if (client.buffer.length + chunk.length > this.maxWsFrameBytes + 14) {
-      this.sendWs(client, createErrorAck(null, "ws_frame_too_large"));
-      this.closeWs(client, "ws_frame_too_large");
-      return;
-    }
     client.buffer = Buffer.concat([client.buffer, chunk]);
     let decoded;
     try {
@@ -391,6 +387,11 @@ export class LocalServer {
       return;
     }
     client.buffer = decoded.rest;
+    if (client.buffer.length > this.maxWsFrameBytes + MAX_WS_CLIENT_FRAME_OVERHEAD_BYTES) {
+      this.sendWs(client, createErrorAck(null, "ws_frame_too_large"));
+      this.closeWs(client, "ws_frame_too_large");
+      return;
+    }
     for (const frame of decoded.frames) {
       if (frame.opcode === 0x8) {
         this.closeWs(client, "");

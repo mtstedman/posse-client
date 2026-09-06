@@ -169,6 +169,10 @@ const DML_OP_SCANS = Object.freeze([
   { label: "ALTER", permission: "alter", pattern: /\bALTER\b/i, skipReads: true },
 ]);
 
+// Destructive DDL stays forbidden even when it appears as an ALTER subcommand
+// rather than the statement's leading verb (for example, DROP COLUMN).
+const DESTRUCTIVE_DDL_PATTERN = /\b(?:DROP|TRUNCATE)\b/i;
+
 /**
  * Classify a single statement: its verb, the permission it requires, whether
  * it's a read, and whether it is a recognized/allowed verb at all.
@@ -232,6 +236,10 @@ export function authorizeProjectDbStatement(sql, grantedPermissions = []) {
   // is a data-modifying CTE, and `SELECT ... INTO` writes a table — so the tool
   // itself rejects any operation outside the grant, regardless of leading verb.
   const masked = maskSqlLiterals(statement);
+
+  if (DESTRUCTIVE_DDL_PATTERN.test(masked)) {
+    return { ok: false, error: "DROP, TRUNCATE, and destructive ALTER operations are not permitted." };
+  }
 
   if (verb === "PRAGMA") {
     const pragma = masked.match(/^\s*PRAGMA\s+(?:(?:[A-Za-z_][A-Za-z0-9_]*)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?\s*$/i);

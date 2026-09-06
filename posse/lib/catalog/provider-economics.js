@@ -6,7 +6,7 @@ const OPENAI_LONG_CONTEXT_THRESHOLD = 272_000;
 const MODEL_ECONOMICS = Object.freeze([
   Object.freeze({
     providers: Object.freeze(["openai", "codex"]),
-    model: /^gpt-5\.(4|5)(?:-|$)/,
+    model: /^(?:gpt-5\.(4|5)|gpt-6-astra)(?:-|$)/,
     exclude: /^gpt-5\.(4|5)-(mini|nano)(?:-|$)/,
     longContextThresholdTokens: OPENAI_LONG_CONTEXT_THRESHOLD,
     inputRateMultiplier: 2,

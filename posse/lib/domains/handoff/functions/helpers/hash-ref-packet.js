@@ -541,6 +541,7 @@ export function reissueHashRefHandoffPacket(input, {
 
   for (const lane of HASH_REF_LANES) {
     packet.lanes[lane] = [];
+    const materializedFallbackRefs = new Set();
     for (const laneEntry of normalized.packet.lanes[lane]) {
       let targetFetchResult = null;
       try {
@@ -564,6 +565,15 @@ export function reissueHashRefHandoffPacket(input, {
             packet: normalized.packet,
           });
           if (surfaced) {
+            if (surfaced.lines_dropped && materializedFallbackRefs.has(surfaced.ref)) {
+              dropped.push({
+                lane,
+                ref: laneEntry.ref,
+                reason: "duplicate_materialized_fallback",
+              });
+              continue;
+            }
+            if (surfaced.lines_dropped) materializedFallbackRefs.add(surfaced.ref);
             packet.lanes[lane].push(surfaced);
             reissued += 1;
             continue;
@@ -651,6 +661,7 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
   const refLimit = Math.max(0, Number(maxRefs) || 0);
   let usedChars = 0;
   let missed = 0;
+  const expandedMaterializedRefs = new Set();
 
   for (const lane of ["proof", "support"]) {
     for (const laneEntry of packet.lanes[lane] || []) {
@@ -674,6 +685,10 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
         dropped.push({ lane, ref: laneEntry.ref, reason: fetchResult?.error || "not_found_or_not_visible" });
         continue;
       }
+      if (laneEntry.lines_dropped && expandedMaterializedRefs.has(laneEntry.ref)) {
+        dropped.push({ lane, ref: laneEntry.ref, reason: "duplicate_materialized_fallback" });
+        continue;
+      }
       const expansion = devBriefExpansionForFetch(fetchResult, laneEntry, lane);
       if (!expansion) {
         missed += 1;
@@ -686,6 +701,7 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
         continue;
       }
       packet.dev_brief_expansions.push(expansion);
+      if (laneEntry.lines_dropped) expandedMaterializedRefs.add(laneEntry.ref);
       usedChars += expansionChars;
     }
   }

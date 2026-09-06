@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 15;
+export const HOST_SCHEMA_VERSION = 16;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -548,7 +548,7 @@ export function installPairingSessionSchema(db) {
       original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
       added_remote_name TEXT,
       added_remote_url TEXT,
-      phase TEXT NOT NULL CHECK (phase IN ('enrolling','active','leaving','restore_blocked','left')),
+      phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
       process_pid INTEGER,
       last_error TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -556,11 +556,65 @@ export function installPairingSessionSchema(db) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_sessions_one_live
       ON pairing_sessions((1))
-      WHERE phase IN ('enrolling','active','leaving','restore_blocked');
+      WHERE phase IN ('enrolling','pending','active','leaving','restore_blocked');
     CREATE INDEX IF NOT EXISTS idx_pairing_sessions_updated
       ON pairing_sessions(updated_at DESC);
   `);
   return true;
+}
+
+export function needsPairingSessionPendingPhaseSchema(db) {
+  if (!tableExists(db, "pairing_sessions")) return false;
+  const tableSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='pairing_sessions'",
+  ).get()?.sql || "";
+  const indexSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_pairing_sessions_one_live'",
+  ).get()?.sql || "";
+  return !tableSql.includes("'pending'") || !indexSql.includes("'pending'");
+}
+
+export function repairPairingSessionPendingPhaseSchema(db) {
+  if (!needsPairingSessionPendingPhaseSchema(db)) return false;
+  withForeignKeysDisabled(db, () => db.transaction(() => {
+    db.exec("DROP TABLE IF EXISTS _pairing_sessions_pending_phase");
+    db.exec(`
+      CREATE TABLE _pairing_sessions_pending_phase (
+        id TEXT PRIMARY KEY,
+        role TEXT NOT NULL CHECK (role IN ('host','member')),
+        remote_session_id TEXT,
+        relay_token TEXT,
+        remote_name TEXT NOT NULL,
+        remote_url TEXT NOT NULL,
+        shared_branch TEXT NOT NULL,
+        original_branch TEXT NOT NULL,
+        original_head TEXT NOT NULL,
+        original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
+        added_remote_name TEXT,
+        added_remote_url TEXT,
+        phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
+        process_pid INTEGER,
+        last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      )
+    `);
+    copyCompatibleColumns(db, "pairing_sessions", "_pairing_sessions_pending_phase");
+    db.exec("DROP TABLE pairing_sessions");
+    db.exec("ALTER TABLE _pairing_sessions_pending_phase RENAME TO pairing_sessions");
+    db.exec(`
+      CREATE UNIQUE INDEX idx_pairing_sessions_one_live
+        ON pairing_sessions((1))
+        WHERE phase IN ('enrolling','pending','active','leaving','restore_blocked');
+      CREATE INDEX idx_pairing_sessions_updated
+        ON pairing_sessions(updated_at DESC);
+    `);
+  })());
+  return true;
+}
+
+export function __testRepairPairingSessionPendingPhaseSchema(db) {
+  return repairPairingSessionPendingPhaseSchema(db);
 }
 
 export function __testInstallPairingSessionSchema(db) {

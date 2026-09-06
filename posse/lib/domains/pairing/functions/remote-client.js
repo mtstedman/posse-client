@@ -8,6 +8,7 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const PAIRING_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}$/u;
 const TOKEN_RE = /^pp[hm]_[0-9a-f]{32}$/u;
+const COUNTERSIGN_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/u;
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/u;
 const SESSION_STATUSES = new Set(["active", "draining", "closed", "expired"]);
 const PEER_ROLES = new Set(["host", "member"]);
@@ -70,6 +71,17 @@ function validateRepository(endpoint, payload, status) {
   requiredString(endpoint, repository, "branch", { maxLength: 255, status });
 }
 
+function validatePolicies(endpoint, payload, status) {
+  if (payload.policies == null) return;
+  const policies = recordPayload(endpoint, payload.policies, status);
+  if (!["each-member", "capability-routing", "host-only"].includes(policies.compute)) {
+    throw invalidResponse(endpoint, "policies.compute is invalid", status);
+  }
+  if (!["none", "side-trunk"].includes(policies.integration)) {
+    throw invalidResponse(endpoint, "policies.integration is invalid", status);
+  }
+}
+
 function optionalPeerWorkItems(endpoint, peer, status) {
   if (!Array.isArray(peer.work_items) || peer.work_items.length > MAX_WORK_ITEMS) {
     throw invalidResponse(endpoint, "peer work_items is invalid", status);
@@ -124,6 +136,29 @@ function validatePeers(endpoint, response, status) {
   }
 }
 
+function validateMembers(endpoint, response, status) {
+  if (!Array.isArray(response.members) || response.members.length > MAX_PEERS) {
+    throw invalidResponse(endpoint, "members is invalid", status);
+  }
+  for (const value of response.members) {
+    const member = recordPayload(endpoint, value, status);
+    requiredString(endpoint, member, "id", { maxLength: 128, status });
+    requiredString(endpoint, member, "instance_id", { maxLength: 128, status });
+    requiredString(endpoint, member, "state", { maxLength: 16, status });
+    requiredString(endpoint, member, "role", { maxLength: 16, status });
+    if (member.ssh_public_key != null) {
+      requiredString(endpoint, member, "ssh_public_key", { maxLength: 16_640, status });
+    }
+    if (!member.scope_set || typeof member.scope_set !== "object" || Array.isArray(member.scope_set)) {
+      throw invalidResponse(endpoint, "member scope_set is invalid", status);
+    }
+    const joinedAt = requiredString(endpoint, member, "joined_at", { maxLength: 64, status });
+    if (!Number.isFinite(Date.parse(joinedAt))) {
+      throw invalidResponse(endpoint, "member joined_at is invalid", status);
+    }
+  }
+}
+
 export function validatePairingRemoteResponse(endpoint, payload, status = null) {
   const response = recordPayload(endpoint, payload, status);
   if (endpoint === "leave") {
@@ -139,6 +174,7 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
   });
   validateExpiry(endpoint, response, status);
   validateRepository(endpoint, response, status);
+  validatePolicies(endpoint, response, status);
 
   if (endpoint === "sessions") {
     requiredString(endpoint, response, "code", {
@@ -152,12 +188,35 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
       status,
     });
   } else if (endpoint === "join") {
-    requiredString(endpoint, response, "member_token", {
-      maxLength: 36,
-      pattern: TOKEN_RE,
-      status,
-    });
-  } else if (endpoint === "status" || endpoint === "heartbeat" || endpoint === "close") {
+    const joinStatus = response.status || "admitted";
+    if (joinStatus === "pending") {
+      requiredString(endpoint, response, "pending_token", {
+        maxLength: 36,
+        pattern: TOKEN_RE,
+        status,
+      });
+      requiredString(endpoint, response, "countersign", {
+        maxLength: 4,
+        pattern: COUNTERSIGN_RE,
+        status,
+      });
+    } else if (joinStatus === "admitted") {
+      requiredString(endpoint, response, "member_token", {
+        maxLength: 36,
+        pattern: TOKEN_RE,
+        status,
+      });
+    } else {
+      throw invalidResponse(endpoint, "status is invalid", status);
+    }
+  } else if (endpoint === "pending") {
+    if (!["pending", "admitted", "left", "kicked", "closed", "expired"].includes(response.status)) {
+      throw invalidResponse(endpoint, "status is invalid", status);
+    }
+    requiredString(endpoint, response, "member_role", { maxLength: 32, status });
+  } else if (endpoint === "members") {
+    validateMembers(endpoint, response, status);
+  } else if (endpoint === "status" || endpoint === "heartbeat" || endpoint === "close" || endpoint === "admit") {
     if (!SESSION_STATUSES.has(response.status)) {
       throw invalidResponse(endpoint, "status is invalid", status);
     }
@@ -166,6 +225,17 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
     }
     if (!Number.isSafeInteger(response.active_members) || response.active_members < 0) {
       throw invalidResponse(endpoint, "active_members is invalid", status);
+    }
+    if (response.enrollment_open != null && typeof response.enrollment_open !== "boolean") {
+      throw invalidResponse(endpoint, "enrollment_open is invalid", status);
+    }
+    if (response.compute_policy != null
+      && !["each-member", "capability-routing", "host-only"].includes(response.compute_policy)) {
+      throw invalidResponse(endpoint, "compute_policy is invalid", status);
+    }
+    if (response.integration_policy != null
+      && !["none", "side-trunk"].includes(response.integration_policy)) {
+      throw invalidResponse(endpoint, "integration_policy is invalid", status);
     }
     validatePeers(endpoint, response, status);
   } else if (endpoint !== "resolve") {
@@ -222,8 +292,8 @@ export function createPairingRemoteClient({
     throw error;
   }
 
-  async function request(endpoint, { method = "POST", body = null, token = null } = {}) {
-    const url = new URL(`v1/pairing/${endpoint}`, new URL("/", origin));
+  async function request(endpoint, { method = "POST", body = null, token = null, path = endpoint } = {}) {
+    const url = new URL(`v1/pairing/${path}`, new URL("/", origin));
     pulseTokens.assertTrustedResourceUrl(url, `Posse pairing ${endpoint}`);
     const authorization = token || await pulseTokens.getPulseToken({
       requiredRoute: PAIRING_AUTH_ROUTE,
@@ -277,6 +347,41 @@ export function createPairingRemoteClient({
     resolve: (code) => validatedRequest("resolve", { body: { code } }),
     join: (code, instanceId) => validatedRequest("join", {
       body: { code, instance_id: instanceId, shutdown_protocol: 2 },
+    }),
+    requestJoin: async (code, instanceId, { sshPublicKey = null } = {}) => {
+      const response = await validatedRequest("join", {
+        body: {
+          code,
+          instance_id: instanceId,
+          shutdown_protocol: 2,
+          admission_protocol: 2,
+          ...(sshPublicKey ? { ssh_public_key: sshPublicKey } : {}),
+        },
+      });
+      if (response.status == null) {
+        throw invalidResponse("join", "relay does not support host admission");
+      }
+      return response;
+    },
+    pendingStatus: (token) => validatedRequest("pending", { method: "GET", token }),
+    admit: (token, countersign) => validatedRequest("admit", {
+      token,
+      body: { countersign },
+      path: "members/admit",
+    }),
+    members: (token, { pendingOnly = false } = {}) => validatedRequest("members", {
+      method: "GET",
+      token,
+      path: pendingOnly ? "members/pending" : "members",
+    }),
+    kick: (token, memberId) => validatedRequest("status", {
+      token,
+      body: { member_id: memberId },
+      path: "members/kick",
+    }),
+    setInviteOpen: (token, open) => validatedRequest("status", {
+      token,
+      path: `invite/${open ? "open" : "close"}`,
     }),
     status: (token) => validatedRequest("status", { method: "GET", token }),
     heartbeat: (token, presence = null) => validatedRequest("heartbeat", { token, body: presence }),

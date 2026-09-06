@@ -209,16 +209,19 @@ export async function callProvider(promptText, opts = {}) {
     let child;
     try {
       const launch = buildCopilotSpawn(getCopilotInfo().cmd, argv);
+      const processGroup = process.platform !== "win32";
       child = spawn(launch.command, launch.args, {
         cwd: workingDir,
         env,
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
+        detached: processGroup,
       });
       trackSpawnedProcess(child, launch.command, {
         label: `copilot:${role || "provider"}`,
         cwd: workingDir,
+        processGroup,
       });
     } catch (spawnErr) {
       const err = new Error(`Failed to spawn copilot: ${spawnErr?.message || spawnErr}`);

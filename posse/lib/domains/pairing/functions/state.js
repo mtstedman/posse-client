@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 
-const LIVE_PHASES_SQL = "'enrolling','active','leaving','restore_blocked'";
+const LIVE_PHASES_SQL = "'enrolling','pending','active','leaving','restore_blocked'";
 const PAIRING_OWNER_STALE_MS = 120_000;
 
 function parseState(row) {
@@ -116,12 +116,16 @@ export function pairingProcessShouldStop(id, db = getDb()) {
   return !row || row.phase !== "active";
 }
 
-export function touchPairingState(id, db = getDb()) {
+export function touchPairingState(id, db = getDb(), phases = ["active"]) {
+  const allowed = new Set(["enrolling", "pending", "active", "leaving", "restore_blocked"]);
+  const normalizedPhases = phases.map(String).filter((phase) => allowed.has(phase));
+  if (normalizedPhases.length === 0) return getPairingState(id, db);
+  const placeholders = normalizedPhases.map(() => "?").join(",");
   db.prepare(`
     UPDATE pairing_sessions
     SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-    WHERE id = ? AND phase = 'active'
-  `).run(String(id));
+    WHERE id = ? AND phase IN (${placeholders})
+  `).run(String(id), ...normalizedPhases);
   return getPairingState(id, db);
 }
 

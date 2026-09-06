@@ -298,7 +298,7 @@ function parseEslintFindings(stdout, stderr, cwd) {
   return findings;
 }
 
-function runScopedJsLint(cwd, targets) {
+function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   if (targets.length === 0) {
     return { name: "eslint", status: "skipped", reason: "no JS/TS lintable scoped files", targets: [] };
   }
@@ -309,6 +309,18 @@ function runScopedJsLint(cwd, targets) {
     return group?.package_manager_ready ? group.package_manager : null;
   })();
   if (!eslint && (!lintScript || !packageManager)) {
+    const onlyTypeScript = targets.every((file) => [".ts", ".tsx"].includes(path.extname(file).toLowerCase()));
+    if (onlyTypeScript && typecheckFallback?.status === "passed") {
+      return {
+        name: "typescript-typecheck",
+        status: "passed",
+        reason: "TypeScript syntax covered by the passing project typecheck",
+        targets,
+        command: typecheckFallback.command || null,
+        durationMs: 0,
+        failures: [],
+      };
+    }
     const syntaxTargets = targets.filter((file) => [".js", ".mjs", ".cjs"].includes(path.extname(file).toLowerCase()));
     const unsupportedTargets = targets.filter((file) => !syntaxTargets.includes(file));
     const failures = [];
@@ -755,14 +767,14 @@ function runScopedShellSyntax(cwd, targets) {
   };
 }
 
-function runScopedLint(cwd, files) {
+function runScopedLint(cwd, files, { typecheckFallback = null } = {}) {
   const targets = lintableFiles(cwd, files);
   if (targets.length === 0) {
     return { name: "lint", status: "skipped", reason: "no lintable scoped files", targets: [] };
   }
 
   const subchecks = [
-    runScopedJsLint(cwd, jsLintableFiles(cwd, files)),
+    runScopedJsLint(cwd, jsLintableFiles(cwd, files), { typecheckFallback }),
     runScopedPythonLint(cwd, pythonLintableFiles(cwd, files)),
     runScopedPhpLint(cwd, phpLintableFiles(cwd, files)),
     runScopedGoLint(cwd, goLintableFiles(cwd, files)),
@@ -923,6 +935,15 @@ export function runScopedChecks({
   const scope = args.scope && typeof args.scope === "object" ? args.scope : declaredScope;
   const files = declaredScopeFiles(cwd, scope);
   const groups = groupVerificationFiles(cwd, files);
+  const typechecksByRoot = new Map();
+  if (requested.includes("typecheck")) {
+    for (const group of groups) {
+      typechecksByRoot.set(group.root, runTypecheck(group.root, {
+        packageManager: group.package_manager,
+        packageManagerReady: group.package_manager_ready,
+      }));
+    }
+  }
   const checks = [];
   if (requested.includes("lint")) {
     checks.push(combineRootChecks(
@@ -930,7 +951,9 @@ export function runScopedChecks({
       cwd,
       groups.map((group) => ({
         group,
-        check: runScopedLint(group.root, group.files),
+        check: runScopedLint(group.root, group.files, {
+          typecheckFallback: typechecksByRoot.get(group.root) || null,
+        }),
       })),
     ));
   }
@@ -941,10 +964,10 @@ export function runScopedChecks({
       groups.map((group) => ({
         group,
         check: {
-          ...runTypecheck(group.root, {
+          ...(typechecksByRoot.get(group.root) || runTypecheck(group.root, {
             packageManager: group.package_manager,
             packageManagerReady: group.package_manager_ready,
-          }),
+          })),
           // A configured typecheck runs at package-root scope. Associate every
           // changed file in that root with its result without running the same
           // project-wide command once per file.

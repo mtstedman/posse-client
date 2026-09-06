@@ -4,6 +4,7 @@ import {
   FAILED_JOB_STATUSES,
   PARKED_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
+  isDeferredImplementationAssessmentJob,
   isPushOfferJob,
 } from "../../../../queue/functions/common.js";
 import {
@@ -148,6 +149,7 @@ export function jobReportStatus(job, jobs = []) {
 }
 
 export function jobDisplayStatus(job, jobs = []) {
+  if (isDeferredImplementationAssessmentJob(job)) return "awaiting_assessment";
   return jobReportStatus(job, jobs);
 }
 
@@ -194,13 +196,14 @@ export function workItemDisplayStatus(wi, jobs = []) {
 
 export function computeJobProgressStats(jobs = []) {
   const allJobs = Array.isArray(jobs) ? jobs : [];
+  const displayStates = allJobs.map((job) => jobDisplayStatus(job, allJobs));
   const total = allJobs.length;
   const recovered = allJobs.filter((job) => jobDisplayStatus(job, allJobs) === "recovered").length;
   const succeeded = allJobs.filter((job) => jobIsDisplaySuccess(job, allJobs)).length;
   const failed = allJobs.filter((job) => jobIsDisplayFailure(job, allJobs)).length;
   const canceled = allJobs.filter((job) => job?.status === "canceled").length;
-  const running = allJobs.filter((job) => job?.status === "running").length;
-  const queued = allJobs.filter((job) => job?.status === "queued").length;
+  const running = displayStates.filter((status) => status === "running").length;
+  const queued = displayStates.filter((status) => status === "queued").length;
   const parked = allJobs.filter((job) => PARKED_JOB_STATUS_SET.has(job?.status)).length;
   const waitingOnHuman = allJobs.filter((job) => (
     job?.status === "waiting_on_human"
@@ -211,7 +214,7 @@ export function computeJobProgressStats(jobs = []) {
   )).length;
   const waitingOnReview = allJobs.filter((job) => job?.status === "waiting_on_review").length;
   const blocked = allJobs.filter((job) => job?.status === "blocked").length;
-  const assessing = allJobs.filter((job) => job?.status === "awaiting_assessment").length;
+  const assessing = displayStates.filter((status) => status === "awaiting_assessment").length;
   const resolved = succeeded + failed + canceled;
   return {
     total,

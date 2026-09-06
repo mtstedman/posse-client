@@ -19,6 +19,17 @@ const PACKAGE_MANAGER_LOCKS = Object.freeze([
   ["npm", ["npm-shrinkwrap.json", "package-lock.json"]],
 ]);
 
+const PACKAGE_DISCOVERY_SKIP_DIRS = new Set([
+  ".git",
+  ".posse",
+  ".posse-test-suites",
+  ".posse-worktrees",
+  "node_modules",
+  "vendor",
+]);
+const MAX_DISCOVERED_PACKAGE_ROOTS = 64;
+const JS_PROJECT_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]);
+
 function fileExists(filePath) {
   try { return fs.statSync(filePath).isFile(); } catch { return false; }
 }
@@ -32,6 +43,125 @@ function nearestRoot(projectRoot, file) {
     cursor = path.dirname(cursor);
   }
   return root;
+}
+
+function normalizedRelativePath(from, to) {
+  return path.relative(from, to).replace(/\\/g, "/");
+}
+
+function globPatternRegex(pattern) {
+  const normalized = String(pattern || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  let source = "";
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (char === "*" && normalized[index + 1] === "*") {
+      index += 1;
+      if (normalized[index + 1] === "/") {
+        index += 1;
+        source += "(?:.*/)?";
+      } else {
+        source += ".*";
+      }
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += char.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${source}$`);
+}
+
+function parseJsonConfig(text) {
+  let stripped = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (inString) {
+      stripped += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      stripped += char;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      while (index < text.length && text[index] !== "\n") index += 1;
+      stripped += "\n";
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      index += 2;
+      while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index += 1;
+      index += 1;
+      continue;
+    }
+    if (char === ",") {
+      let lookahead = index + 1;
+      while (/\s/.test(text[lookahead] || "")) lookahead += 1;
+      if (["}", "]"].includes(text[lookahead])) continue;
+    }
+    stripped += char;
+  }
+  return JSON.parse(stripped.replace(/^\uFEFF/, ""));
+}
+
+function projectConfigOwnsFile(packageRoot, absoluteFile) {
+  let config = null;
+  for (const name of ["tsconfig.json", "jsconfig.json"]) {
+    try {
+      config = parseJsonConfig(fs.readFileSync(path.join(packageRoot, name), "utf8"));
+      break;
+    } catch {
+      // Try the other supported project config.
+    }
+  }
+  if (!config) return false;
+  const relative = normalizedRelativePath(packageRoot, absoluteFile);
+  const files = Array.isArray(config?.files) ? config.files : [];
+  if (files.some((file) => normalizedRelativePath(packageRoot, path.resolve(packageRoot, file)) === relative)) {
+    return true;
+  }
+  const includes = Array.isArray(config?.include) ? config.include : [];
+  return includes.some((pattern) => {
+    try { return globPatternRegex(pattern).test(relative); } catch { return false; }
+  });
+}
+
+function discoverPackageRoots(projectRoot) {
+  const roots = [];
+  const stack = [path.resolve(projectRoot)];
+  while (stack.length > 0 && roots.length < MAX_DISCOVERED_PACKAGE_ROOTS) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    if (entries.some((entry) => entry.isFile() && entry.name === "package.json")) roots.push(dir);
+    for (const entry of entries) {
+      if (!entry.isDirectory() || PACKAGE_DISCOVERY_SKIP_DIRS.has(entry.name)) continue;
+      stack.push(path.join(dir, entry.name));
+    }
+  }
+  return roots;
+}
+
+function siblingPackageRoot(projectRoot, file, packageRoots) {
+  if (!JS_PROJECT_EXTENSIONS.has(path.extname(file).toLowerCase())) return null;
+  const absoluteFile = path.resolve(projectRoot, file);
+  const candidates = packageRoots
+    .filter((root) => projectConfigOwnsFile(root, absoluteFile))
+    .map((root) => ({
+      root,
+      distance: normalizedRelativePath(root, absoluteFile).split("/").length,
+    }))
+    .sort((left, right) => left.distance - right.distance || left.root.localeCompare(right.root));
+  return candidates[0]?.root || null;
 }
 
 function packageManagerFromManifest(root) {
@@ -78,8 +208,15 @@ function manifestsAt(root) {
 export function groupVerificationFiles(projectRoot, files = []) {
   const root = path.resolve(projectRoot);
   const grouped = new Map();
+  let packageRoots = null;
   for (const projectFile of files) {
-    const verificationRoot = nearestRoot(root, projectFile);
+    const nearest = nearestRoot(root, projectFile);
+    if (!fileExists(path.join(nearest, "package.json"))) {
+      packageRoots ||= discoverPackageRoots(root);
+    }
+    const verificationRoot = fileExists(path.join(nearest, "package.json"))
+      ? nearest
+      : (siblingPackageRoot(root, projectFile, packageRoots || []) || nearest);
     if (!grouped.has(verificationRoot)) {
       const packageManager = packageManagerFromManifest(verificationRoot);
       grouped.set(verificationRoot, {

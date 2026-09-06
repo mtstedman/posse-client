@@ -59,6 +59,7 @@ function schedulerSignalTarget(expectedOwnerId, nowMs = Date.now()) {
   if (status?.owner_id !== expectedOwnerId
     || !Number.isSafeInteger(pid)
     || pid <= 0
+    || pid === process.pid
     || !Number.isFinite(heartbeatMs)
     || nowMs - heartbeatMs > 30_000
     || heartbeatMs - nowMs > 5_000) return null;

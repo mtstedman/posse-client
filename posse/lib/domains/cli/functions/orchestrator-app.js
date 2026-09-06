@@ -2303,6 +2303,11 @@ async function cmdPair() {
   return runPairingCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
 }
 
+async function cmdSession() {
+  const { runPairingCommand } = await loadPairCommandModule();
+  return runPairingCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
+}
+
 async function cmdUnpair() {
   const { runUnpairCommand } = await loadPairCommandModule();
   return runUnpairCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
@@ -2662,6 +2667,19 @@ const COMMAND_USAGE = {
     console.log(`  Host hotkeys: ${C.cyan}g${C.reset} gracefully drains and integrates; ${C.cyan}Ctrl+C${C.reset} forces close and integration.`);
     console.log(`  ${C.dim}This does not expose a phone/web control bridge; use \`posse serve --pair\` for that.${C.reset}\n`);
   },
+  session: () => {
+    console.log(`\n  Usage:`);
+    console.log(`    posse session host [--remote origin] [--branch posse/pair-name]`);
+    console.log(`    posse session join <CODE|posse://session?...>`);
+    console.log(`    posse session admit <COUNTERSIGN>`);
+    console.log(`    posse session members|pending`);
+    console.log(`    posse session kick <MEMBER-ID>`);
+    console.log(`    posse session invite open|close`);
+    console.log(`    posse session status`);
+    console.log(`    posse session leave|close`);
+    console.log(`\n  Opens or joins a shared Posse collaboration session.`);
+    console.log(`  Joiners wait for the host to confirm their four-character countersign.\n`);
+  },
   unpair: () => {
     console.log(`\n  Usage: posse unpair [--json]`);
     console.log(`  Members leave and restore locally; hosts gracefully drain peers and integrate the side trunk.\n`);
@@ -2700,7 +2718,7 @@ export async function main() {
   if (rejectUnknownFlags()) return;
   const baseCommandPolicy = getCommandBootstrapPolicy(command);
   let pairSubcommand = "";
-  if (command === "pair") {
+  if (["pair", "session"].includes(command)) {
     const pairArgs = process.argv.slice(3);
     for (let index = 0; index < pairArgs.length; index += 1) {
       const arg = String(pairArgs[index] || "");
@@ -2713,7 +2731,8 @@ export async function main() {
       break;
     }
   }
-  const commandPolicy = command === "pair" && ["leave", "status"].includes(pairSubcommand)
+  const commandPolicy = ["pair", "session"].includes(command)
+      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite"].includes(pairSubcommand)
     ? { ...baseCommandPolicy, requiresNativeGit: false }
     : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
@@ -2749,7 +2768,7 @@ export async function main() {
     const recovery = await recoverInterruptedPairing(PROJECT_DIR, { C });
     if (recovery.attempted && !recovery.ok) {
       console.error(`  ${C.yellow}Pairing recovery remains pending:${C.reset} ${recovery.message}`);
-      if (!commandPolicy.readOnly && !["pair", "unpair"].includes(commandPolicy.name)) {
+      if (!commandPolicy.readOnly && !["pair", "session", "unpair"].includes(commandPolicy.name)) {
         throw Object.assign(new Error("Resolve the pending pairing recovery before starting new work"), {
           code: recovery.code || "pairing_recovery_pending",
         });
@@ -2827,6 +2846,8 @@ ${aliasDiagnostic}
     ${C.cyan}pair${C.reset}       Collaborate across clones on a shared Git side trunk
     ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
     ${C.dim}             Host: g gracefully drains/integrates; Ctrl+C forces close/integration; unlike serve, pair does not connect phone/web clients${C.reset}
+    ${C.cyan}session${C.reset}    Host or join the shared session model (preferred; pair is an alias)
+    ${C.dim}             session host | session join <invite> | session admit <COUNTERSIGN> | session status | session leave|close${C.reset}
     ${C.cyan}unpair${C.reset}     Leave pairing; host drains and integrates, members restore locally
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}
@@ -2933,6 +2954,7 @@ async function dispatchResolvedCommand(command) {
     "pairing-preflight": cmdPairingPreflight,
     "shared-trunk-preflight": cmdPairingPreflight,
     pair: cmdPair,
+    session: cmdSession,
     unpair: cmdUnpair,
     atlas: cmdAtlas,
     "atlas-v2": cmdAtlasV2,

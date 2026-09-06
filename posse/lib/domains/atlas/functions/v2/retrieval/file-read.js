@@ -6,6 +6,7 @@
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import { redactSecrets, redactSecretsLines } from "./redaction.js";
+import { Worker } from "node:worker_threads";
 
 /** @typedef {import("../contracts/tool-params.js").FileReadParams} FileReadParams */
 /** @typedef {import("../contracts/tool-results.js").FileReadData} FileReadData */
@@ -123,64 +124,47 @@ async function fileReadWithRedaction({ versionId, params, readFile, view }, reda
           message: compiled.message,
         });
       }
-      const re = compiled.re;
-      try {
-        // Touch once so invalid engines fail before we start scanning.
-        re.test("");
-      } catch (err) {
-        return errorEnvelope({
-          action: "file.read",
-          versionId,
-          code: "invalid_regex",
-          message: `Invalid search regex: ${err.message}`,
-        });
-      }
       const ctxLines = typeof params.searchContext === "number" ? params.searchContext : 2;
-      /** @type {number[]} */
-      const matchLines = [];
-      const searchStartedAt = Date.now();
-      for (let li = 0; li < lines.length; li++) {
-        if (Date.now() - searchStartedAt > SEARCH_TIME_BUDGET_MS) {
+      return searchLinesWithBudget(lines, compiled.source).then((searchResult) => {
+        if (searchResult.error) {
+          return errorEnvelope({
+            action: "file.read",
+            versionId,
+            code: "search_failed",
+            message: `Search worker failed: ${searchResult.error}`,
+          });
+        }
+        const matchLines = searchResult.matchLines;
+        if (searchResult.timedOut) {
           data.searchTimedOut = true;
           truncated = true;
-          data.truncated = true;
-          break;
         }
-        const searchableLine = lines[li].length > MAX_SEARCH_LINE_CHARS
-          ? lines[li].slice(0, MAX_SEARCH_LINE_CHARS)
-          : lines[li];
-        if (re.test(searchableLine)) {
-          matchLines.push(li);
-          if (matchLines.length >= MAX_SEARCH_MATCHES) {
-            truncated = true;
-            break;
-          }
-        }
-      }
-      // One native redaction call for the whole window instead of one per
-      // matched line plus one per context line (each sync call is a spawn).
-      const redactedLines = matchLines.length > 0 ? redaction.redactLines(lines) : lines;
-      return mapMaybePromise(redactedLines, (resolvedLines) => {
-        data.truncated = truncated;
-        data.matches = matchLines
-          .filter((li) => li < returnedLines)
-          .map((li) => ({
-            line: offset + li + 1,
-            text: resolvedLines[li],
-            context: {
-              before: resolvedLines.slice(Math.max(0, li - ctxLines), li),
-              after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
-            },
-          }));
-        return finishFileRead({ params, source, versionId, data, redaction });
+        if (searchResult.matchLimitReached) truncated = true;
+        // One native redaction call for the whole window instead of one per
+        // matched line plus one per context line (each sync call is a spawn).
+        const redactedLines = matchLines.length > 0 ? redaction.redactLines(lines) : lines;
+        return mapMaybePromise(redactedLines, (resolvedLines) => {
+          data.truncated = truncated;
+          data.matches = matchLines
+            .filter((li) => li < returnedLines)
+            .map((li) => ({
+              line: offset + li + 1,
+              text: resolvedLines[li],
+              context: {
+                before: resolvedLines.slice(Math.max(0, li - ctxLines), li),
+                after: resolvedLines.slice(li + 1, Math.min(lines.length, li + 1 + ctxLines)),
+              },
+            }));
+          return finishFileRead({ params, source, versionId, data, redaction, requestedMaxBytes });
+        });
       });
     }
 
-    return finishFileRead({ params, source, versionId, data, redaction });
+    return finishFileRead({ params, source, versionId, data, redaction, requestedMaxBytes });
   });
 }
 
-function finishFileRead({ params, source, versionId, data, redaction }) {
+function finishFileRead({ params, source, versionId, data, redaction, requestedMaxBytes }) {
   if (params.jsonPath) {
     /** @type {unknown} */
     let value;
@@ -198,12 +182,44 @@ function finishFileRead({ params, source, versionId, data, redaction }) {
       // before it reaches the envelope.
       return mapMaybePromise(redactJsonPathValue(value, redaction), (redactedValue) => {
         data.jsonPathValue = redactedValue;
-        return okEnvelope({ action: "file.read", versionId, data });
+        return finishBoundedFileRead({ versionId, data, requestedMaxBytes });
       });
     }
   }
 
+  return finishBoundedFileRead({ versionId, data, requestedMaxBytes });
+}
+
+function finishBoundedFileRead({ versionId, data, requestedMaxBytes }) {
+  const payloadBytes = fileDerivedPayloadBytes(data);
+  if (payloadBytes > requestedMaxBytes) {
+    return errorEnvelope({
+      action: "file.read",
+      versionId,
+      code: "size_exceeded",
+      message: `file.read derived payload is ${payloadBytes} bytes, exceeding maxBytes ${requestedMaxBytes}.`,
+      details: {
+        maxBytes: requestedMaxBytes,
+        payloadBytes,
+        nextBestAction: "Use a smaller search context or a narrower jsonPath value, or increase maxBytes.",
+      },
+    });
+  }
   return okEnvelope({ action: "file.read", versionId, data });
+}
+
+function fileDerivedPayloadBytes(data) {
+  let bytes = Buffer.byteLength(String(data.content || ""), "utf8");
+  if (Array.isArray(data.matches) && data.matches.length > 0) {
+    bytes += Buffer.byteLength(JSON.stringify(data.matches), "utf8");
+  }
+  if (Object.hasOwn(data, "jsonPathValue")) {
+    const serialized = typeof data.jsonPathValue === "string"
+      ? data.jsonPathValue
+      : JSON.stringify(data.jsonPathValue);
+    bytes += Buffer.byteLength(serialized == null ? "" : serialized, "utf8");
+  }
+  return bytes;
 }
 
 /**
@@ -305,7 +321,7 @@ async function isIndexedSourceWholeFileRead({ view, params }) {
 
 /**
  * @param {string} pattern
- * @returns {{ ok: true, re: RegExp } | { ok: false, code: string, message: string }}
+ * @returns {{ ok: true, source: string } | { ok: false, code: string, message: string }}
  */
 function compileSearchPattern(pattern) {
   const raw = String(pattern || "");
@@ -318,7 +334,10 @@ function compileSearchPattern(pattern) {
   }
   const source = looksReDosProne(raw) ? escapeRegExp(raw) : raw;
   try {
-    return { ok: true, re: new RegExp(source, "i") };
+    // Validate in the caller so malformed patterns fail without starting a
+    // worker. Matching itself stays behind the interruptible worker boundary.
+    new RegExp(source, "i");
+    return { ok: true, source };
   } catch (err) {
     return {
       ok: false,
@@ -326,6 +345,64 @@ function compileSearchPattern(pattern) {
       message: `Invalid search regex: ${err?.message || String(err)}`,
     };
   }
+}
+
+/**
+ * Run regex matching outside the request thread. A pathological RegExp.test
+ * cannot observe an in-loop clock, so the owner terminates the worker when the
+ * wall-clock budget expires.
+ *
+ * @param {string[]} lines
+ * @param {string} patternSource
+ * @param {number} [timeBudgetMs]
+ */
+export function searchLinesWithBudget(lines, patternSource, timeBudgetMs = SEARCH_TIME_BUDGET_MS) {
+  const searchableLines = lines.map((line) => line.length > MAX_SEARCH_LINE_CHARS
+    ? line.slice(0, MAX_SEARCH_LINE_CHARS)
+    : line);
+  return new Promise((resolve) => {
+    const worker = new Worker(new URL("./file-read-search-worker.js", import.meta.url), {
+      workerData: {
+        lines: searchableLines,
+        patternSource,
+        maxMatches: MAX_SEARCH_MATCHES,
+        timeBudgetMs,
+      },
+      resourceLimits: { maxOldGenerationSizeMb: 64 },
+      // Search needs no parent runtime flags; some node:test/V8 flags are not
+      // valid Worker execArgv values, and eval probes may carry --input-type.
+      execArgv: [],
+    });
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({
+      matchLines: [],
+      timedOut: true,
+      matchLimitReached: false,
+    }), Math.max(1, Number(timeBudgetMs) || SEARCH_TIME_BUDGET_MS));
+    timer.unref?.();
+    worker.once("message", finish);
+    worker.once("error", (error) => finish({
+      matchLines: [],
+      timedOut: false,
+      matchLimitReached: false,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    worker.once("exit", (code) => {
+      if (!settled && code !== 0) finish({
+        matchLines: [],
+        timedOut: false,
+        matchLimitReached: false,
+        error: `worker exited with code ${code}`,
+      });
+    });
+  });
 }
 
 /**

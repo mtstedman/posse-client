@@ -14,7 +14,7 @@ PRAGMA foreign_keys = ON;
 --  13 = + durable live pairing-session journal.
 --  14 = + canonical parentage for child provider calls.
 --  15 = + web-research child provider-call parentage.
-PRAGMA user_version = 15;
+PRAGMA user_version = 16;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -1250,7 +1250,7 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
   original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
   added_remote_name TEXT,
   added_remote_url TEXT,
-  phase TEXT NOT NULL CHECK (phase IN ('enrolling','active','leaving','restore_blocked','left')),
+  phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
   process_pid INTEGER,
   last_error TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -1258,7 +1258,7 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_sessions_one_live
   ON pairing_sessions((1))
-  WHERE phase IN ('enrolling','active','leaving','restore_blocked');
+  WHERE phase IN ('enrolling','pending','active','leaving','restore_blocked');
 CREATE INDEX IF NOT EXISTS idx_pairing_sessions_updated
   ON pairing_sessions(updated_at DESC);
 

@@ -116,6 +116,7 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "claude-sonnet-4-20250514",
   ]),
   openai: Object.freeze([
+    "gpt-6-astra",
     "gpt-4.1-mini",
     "gpt-4.1",
     "gpt-5-mini",
@@ -137,6 +138,7 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "gpt-5.6-luna",
   ]),
   codex: Object.freeze([
+    "gpt-6-astra",
     "gpt-5.6",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -318,6 +320,7 @@ export const MODEL_SETTING_DEFS = Object.freeze([
 ]);
 
 export const CODEX_OAUTH_SUPPORTED_MODELS = Object.freeze([
+  "gpt-6-astra",
   "gpt-5.6",
   "gpt-5.6-sol",
   "gpt-5.6-terra",

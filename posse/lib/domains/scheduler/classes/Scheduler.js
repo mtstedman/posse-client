@@ -213,6 +213,11 @@ function isWaitingLanePreparationJob(job) {
   return job?.job_type === WAITING_LANE_JOB_TYPE;
 }
 
+function isRequiredRunBackgroundJob(job) {
+  if (job?.job_type !== "atlas_warm") return false;
+  return parseJobPayload(job)?.purpose === "wi-cleanup";
+}
+
 function atlasIndexingPauseEnabledFromEnv() {
   const raw = String(process.env.POSSE_SCHEDULER_PAUSE_ON_ATLAS_INDEXING ?? "").trim().toLowerCase();
   return !(raw && ATLAS_INDEXING_PAUSE_OFF_VALUES.has(raw));
@@ -1860,6 +1865,7 @@ export class Scheduler {
           .filter((job) => !isRunBackgroundJob(job));
         const foregroundTrackedJobs = trackedJobsForCloseout.filter((job) => !isRunBackgroundJob(job));
         const backgroundTrackedJobs = trackedJobsForCloseout.filter(isRunBackgroundJob);
+        const requiredBackgroundTrackedJobs = backgroundTrackedJobs.filter(isRequiredRunBackgroundJob);
         if (pairingDrainRequested) {
           if (activeWorkers.size === 0) {
             clearRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_DRAIN_REQUEST);
@@ -1878,6 +1884,7 @@ export class Scheduler {
         if (
           activeForegroundJobs.length === 0
           && foregroundTrackedJobs.length === 0
+          && requiredBackgroundTrackedJobs.length === 0
           && (activeBackgroundJobs.length > 0 || backgroundTrackedJobs.length > 0)
         ) {
           this._invokeCallback("onBackgroundOnly", onBackgroundOnly, {

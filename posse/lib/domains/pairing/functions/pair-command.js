@@ -99,6 +99,59 @@ function sessionChanged(message) {
   return Object.assign(new Error(message), { code: "pairing_session_changed" });
 }
 
+function inviteToken(value) {
+  const raw = String(value || "").trim();
+  if (!raw.toLowerCase().startsWith("posse://")) return raw;
+  try {
+    const url = new URL(raw);
+    if (url.hostname !== "session") throw new Error("wrong invite host");
+    const token = String(url.searchParams.get("token") || "").trim();
+    if (!token) throw new Error("missing invite token");
+    return token;
+  } catch {
+    throw Object.assign(new Error("The Posse session invite link is invalid"), {
+      code: "pairing_invite_invalid",
+    });
+  }
+}
+
+async function waitForPairingAdmission(remoteClient, stateId, pendingToken, {
+  C,
+  json = false,
+} = {}) {
+  let interrupted = false;
+  const stop = () => { interrupted = true; };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    while (!interrupted) {
+      const state = getPairingState(stateId);
+      if (!state || state.phase !== "pending") {
+        return { status: "left" };
+      }
+      const pending = validatePairingRemoteResponse(
+        "pending",
+        await remoteClient.pendingStatus(pendingToken),
+      );
+      if (pending.session_id !== state.remote_session_id) {
+        throw sessionChanged("Pending credential resolved to a different session");
+      }
+      assertPairingRepositoryUnchanged({
+        url: state.remote_url,
+        branch: state.shared_branch,
+      }, pending.repository);
+      touchPairingState(stateId, undefined, ["pending"]);
+      if (pending.status !== "pending") return pending;
+      await sleep(2_000);
+    }
+    if (!json) console.log(`\n  ${C.yellow}Session join cancelled.${C.reset}\n`);
+    return { status: "left" };
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+}
+
 function assertPairingRepositoryUnchanged(expected, received) {
   let expectedFingerprint;
   let receivedFingerprint;
@@ -186,21 +239,38 @@ export function parsePairArgs(argv = []) {
   const remote = validateRemoteName(remoteValue || "origin");
   const first = positional[0] || "host";
   let parsed;
-  if (["host", "join", "leave", "status"].includes(first)) {
-    const allowedLength = first === "join" ? 2 : 1;
-    if (positional.length > allowedLength) {
-      throw Object.assign(new Error(`Unexpected pairing argument: ${positional[allowedLength]}`), {
+  const actionLengths = new Map([
+    ["host", [1, 1]], ["join", [2, 2]], ["leave", [1, 1]], ["close", [1, 1]],
+    ["status", [1, 1]], ["admit", [2, 2]], ["members", [1, 1]], ["pending", [1, 1]],
+    ["kick", [2, 2]], ["invite", [2, 2]],
+  ]);
+  if (actionLengths.has(first)) {
+    const [minimumLength, maximumLength] = actionLengths.get(first);
+    const actionArgumentLength = positional.length || (first === "host" ? 1 : 0);
+    if (actionArgumentLength < minimumLength) {
+      throw Object.assign(new Error(`Missing argument for session ${first}`), {
+        code: "pairing_argument_required",
+      });
+    }
+    if (actionArgumentLength > maximumLength) {
+      throw Object.assign(new Error(`Unexpected pairing argument: ${positional[maximumLength]}`), {
         code: "pairing_argument_unexpected",
       });
     }
-    parsed = { action: first, code: positional[1] || null, json, remote, branch };
+    parsed = {
+      action: first === "close" ? "leave" : first,
+      code: positional[1] ? inviteToken(positional[1]) : null,
+      json,
+      remote,
+      branch,
+    };
   } else {
     if (positional.length > 1) {
       throw Object.assign(new Error(`Unexpected pairing argument: ${positional[1]}`), {
         code: "pairing_argument_unexpected",
       });
     }
-    parsed = { action: "join", code: first, json, remote, branch };
+    parsed = { action: "join", code: inviteToken(first), json, remote, branch };
   }
   if (parsed.action !== "host" && (hasRemoteFlag || hasBranchFlag)) {
     const option = hasRemoteFlag ? "--remote" : "--branch";
@@ -480,10 +550,6 @@ async function finishHostShutdown(root, remoteClient, state, {
     });
   }
   journal = markPairingPromotion(journal, { phase: "trunk_frozen" });
-  const restored = await restoreLocalPairing(root, getPairingState(state.id));
-  if (!restored.ok) {
-    throw Object.assign(new Error(restored.message), { code: restored.code || "pairing_restore_blocked" });
-  }
   const promoted = await promotePairingTrunk(root, {
     journal,
     onProgress: (message) => {
@@ -494,6 +560,10 @@ async function finishHostShutdown(root, remoteClient, state, {
     throw Object.assign(new Error(promoted.reason || "Pairing promotion deferred"), {
       code: promoted.reason || "pairing_promotion_deferred",
     });
+  }
+  const restored = await restoreLocalPairing(root, getPairingState(state.id));
+  if (!restored.ok) {
+    throw Object.assign(new Error(restored.message), { code: restored.code || "pairing_restore_blocked" });
   }
   if (!json) {
     console.log(`  ${C.green}Integrated and published${C.reset} ${promoted.sourceBranch} -> ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
@@ -575,10 +645,11 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         session_id: started.session_id,
       }));
     } else {
-      console.log(`\n  ${C.bold}Pairing is open${C.reset}`);
+      console.log(`\n  ${C.bold}Session is open${C.reset}`);
       console.log(`  Pairing code: ${C.cyan}${C.bold}${started.code}${C.reset}`);
+      console.log(`  Invite link: ${C.cyan}posse://session?token=${encodeURIComponent(started.code)}${C.reset}`);
       console.log(`  Shared branch: ${sharedBranch}`);
-      console.log(`  Others join with: ${C.cyan}posse pair ${started.code}${C.reset}`);
+      console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
       console.log(`  ${C.dim}[g] graceful close + integrate   [Ctrl+C] force close + integrate${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
@@ -661,6 +732,42 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
   });
   let joined = null;
   try {
+    joined = validatePairingRemoteResponse(
+      "join",
+      await remoteClient.requestJoin(code, ensureBridgeInstanceId(root)),
+    );
+    if (joined.session_id !== resolved.session_id) {
+      throw Object.assign(new Error("Pairing session changed while admission was requested"), {
+        code: "pairing_session_changed",
+      });
+    }
+    assertPairingRepositoryUnchanged(metadata, joined.repository);
+    const memberToken = joined.member_token || joined.pending_token;
+    updatePairingEnrollment(state.id, {
+      remoteSessionId: joined.session_id,
+      relayToken: memberToken,
+      phase: joined.status === "pending" ? "pending" : "enrolling",
+    });
+    if (joined.status === "pending") {
+      if (json) {
+        console.log(JSON.stringify({
+          ok: true,
+          pending: true,
+          session_id: joined.session_id,
+          countersign: joined.countersign,
+        }));
+      } else {
+        console.log(`\n  ${C.bold}Waiting for host admission${C.reset}`);
+        console.log(`  Confirm this countersign with the host: ${C.cyan}${C.bold}${joined.countersign}${C.reset}\n`);
+      }
+      const admission = await waitForPairingAdmission(remoteClient, state.id, memberToken, { C, json });
+      if (admission.status !== "admitted") {
+        throw Object.assign(new Error(`Session admission ended: ${admission.status}`), {
+          code: `pairing_admission_${admission.status}`,
+        });
+      }
+      markPairingPhase(state.id, "enrolling");
+    }
     let pairingRemote = existingRemote;
     await withWorktreeLockAsync(root, root, async () => {
       assertPairingSchedulerStopped();
@@ -673,8 +780,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
         });
         pairingRemote = addPairingRemote(root, chosenRemote, metadata.url);
       }
-      // This fetch + leased dry-run push is the per-user repo-access gate. It
-      // completes before checkout settings or relay membership are changed.
+      // This fetch + leased dry-run push is the per-user repo-access gate.
+      // Admission only activates the relay credential; the member is not
+      // counted live until this preflight succeeds and monitoring begins.
       preflightAndCheckoutPairingBranch(root, {
         remote: pairingRemote.remote,
         branch: sharedBranch,
@@ -686,19 +794,10 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
         throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
       }
     });
-    joined = validatePairingRemoteResponse(
-      "join",
-      await remoteClient.join(code, ensureBridgeInstanceId(root)),
-    );
-    if (joined.session_id !== resolved.session_id) {
-      throw Object.assign(new Error("Pairing session changed while access was being verified"), {
-        code: "pairing_session_changed",
-      });
-    }
-    assertPairingRepositoryUnchanged(metadata, joined.repository);
     updatePairingEnrollment(state.id, {
       remoteSessionId: joined.session_id,
-      relayToken: joined.member_token,
+      relayToken: memberToken,
+      phase: "active",
     });
     if (json) {
       console.log(JSON.stringify({
@@ -729,9 +828,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
     }
     return { ok: true, role: "member", outcome: outcome.reason };
   } catch (error) {
-    if (joined?.member_token) await leaveRemoteBestEffort(remoteClient, {
+    if (joined?.member_token || joined?.pending_token) await leaveRemoteBestEffort(remoteClient, {
       ...getPairingState(state.id),
-      relay_token: joined.member_token,
+      relay_token: joined.member_token || joined.pending_token,
     });
     const restored = await restoreLocalPairing(root, getPairingState(state.id));
     if (!restored.ok) error.message = `${safeError(error)}; automatic restore blocked: ${restored.message}`;
@@ -762,6 +861,40 @@ async function runStatus({
     const result = { ok: true, paired: false };
     if (json) console.log(JSON.stringify(result));
     else console.log("\n  This clone is not paired.\n");
+    return result;
+  }
+  if (state.phase === "pending") {
+    if (!pairingProcessIsAlive(state)) {
+      const recovered = await unpair(
+        repositoryRoot(projectDir),
+        remoteClientBestEffort(remoteClient, remoteClientFactory),
+        state,
+      );
+      const result = {
+        ok: recovered.ok,
+        paired: false,
+        ended: "pending_monitor_exited",
+        restored: recovered.local,
+      };
+      if (json) console.log(JSON.stringify(result));
+      else console.log(`\n  Pending session join ended; ${recovered.ok ? `restored ${state.original_branch}` : recovered.local.message}.\n`);
+      return result;
+    }
+    const client = remoteClient || remoteClientFactory();
+    const pending = validatePairingRemoteResponse(
+      "pending",
+      await client.pendingStatus(state.relay_token),
+    );
+    const result = {
+      ok: true,
+      paired: false,
+      pending: pending.status === "pending",
+      role: state.role,
+      phase: state.phase,
+      status: pending,
+    };
+    if (json) console.log(JSON.stringify(result));
+    else printActive(C, state, pending);
     return result;
   }
   if (state.phase !== "active") {
@@ -816,6 +949,73 @@ async function runStatus({
   return result;
 }
 
+async function runAdmit({ remoteClient, code, C, json }) {
+  const state = getLivePairingState();
+  if (!state || state.role !== "host" || !state.relay_token) {
+    throw Object.assign(new Error("This clone is not hosting a live session"), {
+      code: "pairing_host_session_required",
+    });
+  }
+  if (!code) {
+    throw Object.assign(new Error("A 4-character countersign is required: posse session admit <CODE>"), {
+      code: "pairing_countersign_required",
+    });
+  }
+  const admitted = validatePairingRemoteResponse(
+    "admit",
+    await remoteClient.admit(state.relay_token, code),
+  );
+  assertPairingStatusMatches(state, admitted);
+  const result = { ok: true, admitted: true, countersign: String(code).toUpperCase() };
+  if (json) console.log(JSON.stringify(result));
+  else console.log(`\n  ${C.green}Admitted session member ${result.countersign}.${C.reset}\n`);
+  return result;
+}
+
+function liveHostState() {
+  const state = getLivePairingState();
+  if (!state || state.role !== "host" || state.phase !== "active" || !state.relay_token) {
+    throw Object.assign(new Error("This clone is not hosting a live session"), {
+      code: "pairing_host_session_required",
+    });
+  }
+  return state;
+}
+
+async function runSessionManagement({ remoteClient, action, code, C, json }) {
+  const state = liveHostState();
+  if (["members", "pending"].includes(action)) {
+    const result = await remoteClient.members(state.relay_token, { pendingOnly: action === "pending" });
+    if (json) console.log(JSON.stringify(result));
+    else if (result.members.length === 0) console.log(`\n  No ${action === "pending" ? "pending " : ""}session members.\n`);
+    else {
+      console.log(`\n  ${C.bold}${action === "pending" ? "Pending" : "Session"} members${C.reset}`);
+      for (const member of result.members) {
+        console.log(`  ${member.id}  ${member.state}/${member.role}  ${member.instance_id}`);
+      }
+      console.log("");
+    }
+    return result;
+  }
+  let status;
+  if (action === "kick") {
+    status = await remoteClient.kick(state.relay_token, code);
+  } else if (action === "invite") {
+    if (!["open", "close"].includes(code)) {
+      throw Object.assign(new Error("Session invite action must be open or close"), {
+        code: "pairing_invite_action_invalid",
+      });
+    }
+    status = await remoteClient.setInviteOpen(state.relay_token, code === "open");
+  }
+  status = validatePairingRemoteResponse("status", status);
+  assertPairingStatusMatches(state, status);
+  const result = { ok: true, action, status };
+  if (json) console.log(JSON.stringify(result));
+  else console.log(`\n  ${C.green}Session ${action} updated.${C.reset}\n`);
+  return result;
+}
+
 export async function runPairingCommand(argv = [], {
   projectDir = process.cwd(),
   C = new Proxy({}, { get: () => "" }),
@@ -835,6 +1035,10 @@ export async function runPairingCommand(argv = [], {
   }
   if (args.action === "host") return runHost({ ...args, projectDir, remoteClient: client, C });
   if (args.action === "join") return runJoin({ ...args, projectDir, remoteClient: client, C });
+  if (args.action === "admit") return runAdmit({ ...args, remoteClient: client, C });
+  if (["members", "pending", "kick", "invite"].includes(args.action)) {
+    return runSessionManagement({ ...args, remoteClient: client, C });
+  }
   if (args.action === "status") {
     return runStatus({
       ...args,

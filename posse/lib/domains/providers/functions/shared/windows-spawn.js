@@ -4,10 +4,33 @@
 // providers. These build a cmd.exe command line for non-.exe launchers on
 // Windows and terminate spawned process trees cross-platform.
 
-import { spawn } from "child_process";
-import { trackSpawnedProcess } from "../../../../shared/platform/functions/spawned-process.js";
+import {
+  terminateSpawnedProcessTree,
+  trackSpawnedProcess as trackSpawnedProcessLedger,
+} from "../../../../shared/platform/functions/spawned-process.js";
 
-export { trackSpawnedProcess };
+const ownedProcessGroups = new WeakSet();
+
+export function trackSpawnedProcess(proc, bin, context = {}) {
+  if (context.processGroup === true && proc && typeof proc === "object") {
+    ownedProcessGroups.add(proc);
+    let cleaned = false;
+    const cleanOwnedGroup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      // A provider can exit before an uncooperative descendant. Once the
+      // provider itself is gone, no child in its owned group may outlive it.
+      terminateSpawnedProcessTree(proc, {
+        force: true,
+        platform: process.platform,
+        processGroup: true,
+      });
+    };
+    try { proc.once?.("exit", cleanOwnedGroup); } catch {}
+    try { proc.once?.("close", cleanOwnedGroup); } catch {}
+  }
+  return trackSpawnedProcessLedger(proc, bin, context);
+}
 
 export function quoteWindowsArg(arg) {
   const value = String(arg == null ? "" : arg);
@@ -45,20 +68,9 @@ export function buildWindowsSpawn(command, args) {
 }
 
 export function terminateSpawnedProcess(proc, { force = false, platform = process.platform } = {}) {
-  if (!proc || proc.exitCode != null || (proc.killed && !force)) return;
-  if (platform === "win32") {
-    try {
-      const taskkillArgs = ["/pid", String(proc.pid), "/T"];
-      if (force) taskkillArgs.push("/F");
-      const killer = spawn("taskkill", taskkillArgs, {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      killer.unref?.();
-      return;
-    } catch {
-      // Fall through to proc.kill best-effort.
-    }
-  }
-  try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
+  return terminateSpawnedProcessTree(proc, {
+    force,
+    platform,
+    processGroup: platform !== "win32" && ownedProcessGroups.has(proc),
+  });
 }

@@ -1,8 +1,7 @@
 import { spawn, spawnSync } from "child_process";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { SpawnedProcessTerminator } from "../../../../shared/platform/classes/SpawnedProcessTerminator.js";
-import { trackSpawnedProcess } from "../../../../shared/platform/functions/spawned-process.js";
-import { buildWindowsSpawn } from "../shared/windows-spawn.js";
+import { buildWindowsSpawn, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import { InteractiveCliSession, InteractiveCliUnavailableError } from "../../classes/InteractiveCliSession.js";
 import { getDefaultInteractiveCliBackend, stripTerminalControls } from "../shared/interactive-cli-session.js";
 import { getClaudeConfigDir, hasUsableClaudeOauthToken, readClaudeCredentials } from "./auth-state.js";
@@ -185,6 +184,7 @@ function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
     const forgetTrackedProcess = trackSpawnedProcess(child, launch.command, {
       label: "claude:oauth-warmup",
       cwd: resolvedCwd,
+      processGroup,
     });
     const terminator = new SpawnedProcessTerminator(child, { processGroup });
     const clearActive = () => {

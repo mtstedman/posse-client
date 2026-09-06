@@ -167,7 +167,12 @@ function latestScopedCheckVerification(jobId, assessedCommitHash) {
       const result = detail?.scoped_check_result;
       if (!result || typeof result !== "object") continue;
       const executedCommit = String(result.executed_commit_hash || "").trim().toLowerCase();
-      if (!/^[0-9a-f]{40,64}$/i.test(executedCommit) || executedCommit !== requiredCommit) continue;
+      const resultAssessedCommit = String(result.assessed_commit_hash || "").trim().toLowerCase();
+      const exactCommit = executedCommit === requiredCommit;
+      const coveredByDescendant = resultAssessedCommit === requiredCommit
+        && result.verification_commit_relation === "descendant_unchanged_scope"
+        && result.verification_eligible !== false;
+      if (!/^[0-9a-f]{40,64}$/i.test(executedCommit) || (!exactCommit && !coveredByDescendant)) continue;
       return {
         ...result,
         executed_commit_hash: executedCommit,
@@ -357,10 +362,21 @@ export function capVerdictForHighRiskVerificationGap(
   const scopedCommit = String(scopedVerification?.executed_commit_hash || "")
     .trim()
     .toLowerCase();
+  const scopedAssessedCommit = String(scopedVerification?.assessed_commit_hash || "")
+    .trim()
+    .toLowerCase();
+  const scopedCommitEligible = scopedVerification?.verification_eligible !== false
+    && (
+      scopedCommit === requiredCommit
+      || (
+        scopedAssessedCommit === requiredCommit
+        && scopedVerification?.verification_commit_relation === "descendant_unchanged_scope"
+      )
+    );
   if (
     hasAssessedCommit
     && scopedVerification?.status === "passed"
-    && scopedCommit === requiredCommit
+    && scopedCommitEligible
   ) {
     return {
       ...verdict,

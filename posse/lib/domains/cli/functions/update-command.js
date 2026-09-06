@@ -334,6 +334,41 @@ async function restoreCheckoutAfterFailedUpdate({ git, repoRoot, before }) {
       return { ok: false, status: 1, stdout: "", stderr: "", error: err?.message || String(err), args };
     }
   };
+
+  const inspectedHead = await recoveryGit(["rev-parse", "HEAD"], { cwd: repoRoot });
+  const inspectedDirty = await recoveryGit(["status", "--porcelain", "--untracked-files=no"], {
+    cwd: repoRoot,
+  });
+  const headBeforeRecovery = String(inspectedHead.stdout || "").trim();
+  const dirtyBeforeRecovery = String(inspectedDirty.stdout || "").trim();
+  if (!inspectedHead.ok || !inspectedDirty.ok) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "could not verify checkout state safely",
+      head: headBeforeRecovery || null,
+      dirty: dirtyBeforeRecovery,
+    };
+  }
+  if (dirtyBeforeRecovery) {
+    return {
+      ok: false,
+      skipped: true,
+      preserved_changes: true,
+      reason: "tracked changes appeared during the update",
+      head: headBeforeRecovery || null,
+      dirty: dirtyBeforeRecovery,
+    };
+  }
+  if (headBeforeRecovery === before) {
+    return {
+      ok: true,
+      needed: false,
+      head: headBeforeRecovery,
+      dirty: "",
+    };
+  }
+
   const abort = await recoveryGit(["merge", "--abort"], {
     cwd: repoRoot,
     timeoutMs: GIT_TIMEOUT_MS,
@@ -383,6 +418,7 @@ export async function updatePosseClient({
   let phase = "checkout";
   let before = "";
   let mergeStarted = false;
+  let completedUpdate = null;
   try {
     if (!dryRun) {
       if (typeof getSchedulerBlockMessage !== "function") {
@@ -574,6 +610,25 @@ export async function updatePosseClient({
       }
 
       u.start("apply", `fast-forwarding to ${shortSha(remoteSha)}`);
+      const applyHead = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
+      const applyDirty = await gitOutput(git, ["status", "--porcelain", "--untracked-files=no"], {
+        cwd: repoRoot,
+      });
+      if (applyHead !== before || applyDirty) {
+        const update = blockedUpdate("Posse checkout changed while the update was being prepared; retry after preserving the new work", {
+          repo_root: repoRoot,
+          remote,
+          branch: targetBranch,
+          current_branch: currentBranch,
+          remote_url: remoteUrl,
+          before,
+          current_sha: applyHead,
+          remote_sha: remoteSha,
+          ...(applyDirty ? { dirty: applyDirty } : {}),
+        });
+        u.done("apply", "fail", update.message);
+        return { ok: false, dry_run: dryRun, posse_root: resolvedPosseRoot, repo_root: repoRoot, update, dependencies: null };
+      }
       // Merge the resolved sha, not FETCH_HEAD — a concurrent fetch in the
       // same checkout (live posse runs do this) can repoint FETCH_HEAD
       // between our fetch and the merge.
@@ -610,6 +665,7 @@ export async function updatePosseClient({
       };
     }
 
+    completedUpdate = update;
     phase = "deps";
     u.start("deps", dryRun
       ? "checking the dependency plan (posse doctor --dry-run)"
@@ -654,18 +710,32 @@ export async function updatePosseClient({
     let rollback = null;
     if (mergeStarted && repoRoot && before && !dryRun) {
       rollback = await restoreCheckoutAfterFailedUpdate({ git, repoRoot, before });
-      message += rollback.ok
-        ? `; checkout restored to ${shortSha(before)}`
-        : `; automatic restore failed — run git -C "${repoRoot}" reset --hard ${before}`;
+      if (rollback.ok) {
+        message += rollback.needed === false
+          ? `; checkout remains at ${shortSha(before)}`
+          : `; checkout restored to ${shortSha(before)}`;
+      } else if (rollback.preserved_changes) {
+        message += "; automatic restore skipped to preserve tracked changes made during the update";
+      } else {
+        message += `; automatic restore failed — inspect git -C "${repoRoot}" status before recovering`;
+      }
     }
     u.done(phase, "fail", message);
+    const dependencyFailure = phase === "deps"
+      ? {
+          ok: false,
+          status: "failed",
+          message,
+          error: err?.message || String(err),
+        }
+      : null;
     return {
       ok: false,
       dry_run: dryRun,
       posse_root: resolvedPosseRoot,
       project_dir: resolvedProjectDir,
       ...(repoRoot ? { repo_root: repoRoot } : {}),
-      update: {
+      update: completedUpdate || {
         ok: false,
         status: "failed",
         changed: false,
@@ -673,7 +743,7 @@ export async function updatePosseClient({
         ...(before ? { before } : {}),
         ...(rollback ? { rollback } : {}),
       },
-      dependencies: null,
+      dependencies: dependencyFailure,
     };
   }
 }

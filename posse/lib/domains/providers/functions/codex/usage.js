@@ -7,7 +7,7 @@ import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { CodexUsageState } from "../../classes/codex/CodexUsageState.js";
 import { InteractiveCliSession, InteractiveCliUnavailableError } from "../../classes/InteractiveCliSession.js";
-import { buildWindowsSpawn, terminateSpawnedProcess } from "../shared/windows-spawn.js";
+import { buildWindowsSpawn, terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import { getDefaultInteractiveCliBackend, stripTerminalControls } from "../shared/interactive-cli-session.js";
 import { loadUsageEntries, summarizeUsageEntries } from "../shared/local-usage-summary.js";
 import { ensureCodexResolvedAsync, getCodexLaunchState } from "./cli-discovery.js";
@@ -618,12 +618,19 @@ async function fetchCodexRateLimitsViaAppServer({
     };
 
     try {
+      const processGroup = process.platform !== "win32";
       proc = spawn(launch.command, launch.args, {
         cwd: cwd || process.cwd(),
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
+        detached: processGroup,
+      });
+      trackSpawnedProcess(proc, launch.command, {
+        label: "codex:usage-app-server",
+        cwd: cwd || process.cwd(),
+        processGroup,
       });
     } catch (err) {
       finish(err);

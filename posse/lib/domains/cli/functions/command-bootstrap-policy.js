@@ -35,6 +35,7 @@ const POLICY_ENTRIES = [
   { name: "shared-trunk-smoke", readOnly: true, requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "pairing-preflight", aliases: ["shared-trunk-preflight"], requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "pair", requiresWritableArtifacts: false, requiresNativeGit: true },
+  { name: "session", requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "unpair", requiresWritableArtifacts: false },
   { name: "atlas", readOnly: true, requiresWritableArtifacts: false },
   { name: "atlas-v2", readOnly: true, requiresWritableArtifacts: false },

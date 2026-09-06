@@ -811,11 +811,11 @@ export async function handlePostExecutionForWorker({
               });
             }
 
-            const siblingSkipped = [
+            const siblingSkipped = [...new Map([
               ...(siblingDirtySkipped || []),
               ...(siblingUntrackedSkipped || []),
               ...(siblingStagingSkipped || []),
-            ];
+            ].map((entry) => [`${entry.file}\0${entry.job_id || ""}`, entry])).values()];
             if (siblingSkipped.length > 0) {
               const siblingMsg = `Left ${siblingSkipped.length} sibling-owned dirty path(s) uncommitted: ${siblingSkipped.slice(0, 5).map((entry) => `${entry.file} by #${entry.job_id || "?"}`).join(", ")}`;
               this.emit(job.id, `${C.yellow}[scope-sibling] WI#${job.work_item_id} job #${job.id}: ${siblingMsg}${C.reset}`);

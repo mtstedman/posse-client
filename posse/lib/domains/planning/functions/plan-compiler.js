@@ -533,6 +533,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const recordPromoteDestinationClaim = (job, payload, {
         files = null,
         taskIndex = null,
+        sourceTaskIndex = null,
         preferred = false,
         superseded = [],
       } = {}) => {
@@ -544,6 +545,14 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           setJobError(group.jobId, `${message}; duplicate destinations: ${formatPromoteDestinationList(group.files)}`);
           allCreatedJobIds.delete(group.jobId);
           if (createdCount > 0) createdCount--;
+          if (Number.isInteger(sourceTaskIndex)) {
+            const supersededTaskIndexes = new Set(group.taskIndexes || []);
+            for (const link of pendingDependencyLinks) {
+              if (link.taskIndex !== sourceTaskIndex) continue;
+              link.dependsOnIndexes = link.dependsOnIndexes
+                .filter((depIdx) => !supersededTaskIndexes.has(depIdx));
+            }
+          }
           for (const priorIndex of group.taskIndexes || []) jobMap.set(priorIndex, job.id);
           for (const dep of getDependents(group.jobId)) {
             if (Number(dep.job_id) !== Number(job.id)) {
@@ -2021,6 +2030,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           recordPromoteDestinationClaim(job, normalizedPromotePayload, {
             files: promoteClaim?.files || null,
             taskIndex: i,
+            sourceTaskIndex: Number.isInteger(t._split_promote_source_index)
+              ? t._split_promote_source_index
+              : null,
             preferred: t._file_kind_split_done === true && Number.isInteger(t._split_promote_source_index),
             superseded: promoteClaim?.superseded || [],
           });
@@ -2102,6 +2114,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               recordPromoteDestinationClaim(promoteJob, normalizedPromotePayload, {
                 files: promoteClaim.files,
                 taskIndex: i,
+                sourceTaskIndex: i,
                 preferred: true,
                 superseded: promoteClaim.superseded,
               });
