@@ -289,9 +289,9 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
             cacheCreationInputTokens: accounting.cacheCreationInputTokens || 0,
             outputTokens: accounting.outputTokens,
             billableInputTokens,
-            billableTokens: billableInputTokens == null
-              ? null
-              : billableInputTokens + nonNegativeNumber(accounting.outputTokens),
+            billableTokens: Number.isFinite(accounting.billableTokens)
+              ? Math.max(0, accounting.billableTokens)
+              : null,
             effort: c.reasoning_effort,
             provider: c.provider,
             costUsd: accounting.costUsd,

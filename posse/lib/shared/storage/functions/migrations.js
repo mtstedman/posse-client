@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 16;
+export const HOST_SCHEMA_VERSION = 18;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -548,6 +548,18 @@ export function installPairingSessionSchema(db) {
       original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
       added_remote_name TEXT,
       added_remote_url TEXT,
+      instance_id TEXT,
+      scope_set_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json)),
+      compute_policy TEXT NOT NULL DEFAULT 'each-member',
+      integration_policy TEXT NOT NULL DEFAULT 'side-trunk',
+      enrollment_open INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1)),
+      baseline_oid TEXT,
+      origin_remote_name TEXT,
+      origin_remote_url TEXT,
+      temporary_repository TEXT,
+      close_action TEXT NOT NULL DEFAULT 'integrate',
+      original_ssh_command TEXT,
+      credential_directory TEXT,
       phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
       process_pid INTEGER,
       last_error TEXT,
@@ -592,6 +604,18 @@ export function repairPairingSessionPendingPhaseSchema(db) {
         original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
         added_remote_name TEXT,
         added_remote_url TEXT,
+        instance_id TEXT,
+        scope_set_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json)),
+        compute_policy TEXT NOT NULL DEFAULT 'each-member',
+        integration_policy TEXT NOT NULL DEFAULT 'side-trunk',
+        enrollment_open INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1)),
+        baseline_oid TEXT,
+        origin_remote_name TEXT,
+        origin_remote_url TEXT,
+        temporary_repository TEXT,
+        close_action TEXT NOT NULL DEFAULT 'integrate',
+        original_ssh_command TEXT,
+        credential_directory TEXT,
         phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
         process_pid INTEGER,
         last_error TEXT,
@@ -615,6 +639,94 @@ export function repairPairingSessionPendingPhaseSchema(db) {
 
 export function __testRepairPairingSessionPendingPhaseSchema(db) {
   return repairPairingSessionPendingPhaseSchema(db);
+}
+
+const PAIRING_SESSION_POLICY_COLUMNS = Object.freeze([
+  ["instance_id", "TEXT"],
+  ["scope_set_json", "TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json))"],
+  ["compute_policy", "TEXT NOT NULL DEFAULT 'each-member'"],
+  ["integration_policy", "TEXT NOT NULL DEFAULT 'side-trunk'"],
+  ["enrollment_open", "INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1))"],
+  ["baseline_oid", "TEXT"],
+  ["origin_remote_name", "TEXT"],
+  ["origin_remote_url", "TEXT"],
+  ["temporary_repository", "TEXT"],
+  ["close_action", "TEXT NOT NULL DEFAULT 'integrate'"],
+  ["original_ssh_command", "TEXT"],
+  ["credential_directory", "TEXT"],
+]);
+
+export function needsPairingSessionPolicySchema(db) {
+  if (!tableExists(db, "pairing_sessions")) return false;
+  const columns = new Set(getTableColumnNames(db, "pairing_sessions"));
+  return PAIRING_SESSION_POLICY_COLUMNS.some(([name]) => !columns.has(name));
+}
+
+export function installPairingSessionPolicySchema(db) {
+  if (!tableExists(db, "pairing_sessions")) return false;
+  const columns = new Set(getTableColumnNames(db, "pairing_sessions"));
+  let changed = false;
+  for (const [name, declaration] of PAIRING_SESSION_POLICY_COLUMNS) {
+    if (columns.has(name)) continue;
+    db.exec(`ALTER TABLE pairing_sessions ADD COLUMN ${quoteIdent(name)} ${declaration}`);
+    changed = true;
+  }
+  return changed;
+}
+
+export function __testInstallPairingSessionPolicySchema(db) {
+  return installPairingSessionPolicySchema(db);
+}
+
+export function needsWorkItemDelegationSchema(db) {
+  if (!tableExists(db, "work_item_delegations")) return true;
+  const agentColumns = new Set(getTableColumnNames(db, "agent_calls"));
+  return !agentColumns.has("originator_instance_id") || !agentColumns.has("executor_instance_id");
+}
+
+export function installWorkItemDelegationSchema(db) {
+  if (!needsWorkItemDelegationSchema(db)) return false;
+  if (!tableExists(db, "work_item_delegations")) db.exec(`
+    CREATE TABLE work_item_delegations (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      originator_instance_id TEXT NOT NULL,
+      origin_work_item_id INTEGER NOT NULL,
+      origin_job_id INTEGER NOT NULL,
+      executor_instance_id TEXT,
+      local_work_item_id INTEGER,
+      local_job_id INTEGER,
+      offer_key TEXT NOT NULL UNIQUE CHECK (length(offer_key) = 64),
+      packet_oid TEXT,
+      claim_oid TEXT,
+      job_type TEXT NOT NULL,
+      provider TEXT,
+      state TEXT NOT NULL CHECK (
+        state IN ('offered','claimed','imported','running','merged','failed','recalled')
+      ),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      completed_at TEXT
+    );
+    CREATE INDEX idx_work_item_delegations_session_state
+      ON work_item_delegations(session_id, state, updated_at);
+    CREATE INDEX idx_work_item_delegations_origin
+      ON work_item_delegations(originator_instance_id, origin_work_item_id);
+    CREATE INDEX idx_work_item_delegations_local
+      ON work_item_delegations(local_work_item_id, local_job_id);
+  `);
+  const agentColumns = new Set(getTableColumnNames(db, "agent_calls"));
+  if (!agentColumns.has("originator_instance_id")) {
+    db.exec("ALTER TABLE agent_calls ADD COLUMN originator_instance_id TEXT");
+  }
+  if (!agentColumns.has("executor_instance_id")) {
+    db.exec("ALTER TABLE agent_calls ADD COLUMN executor_instance_id TEXT");
+  }
+  return true;
+}
+
+export function __testInstallWorkItemDelegationSchema(db) {
+  return installWorkItemDelegationSchema(db);
 }
 
 export function __testInstallPairingSessionSchema(db) {

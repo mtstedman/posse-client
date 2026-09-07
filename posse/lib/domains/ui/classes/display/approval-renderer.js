@@ -147,12 +147,15 @@ function callTokenMetrics(call = {}) {
   const billableInputTokens = Number.isFinite(accounting.billableInputTokens)
     ? Math.max(0, accounting.billableInputTokens)
     : null;
+  const billableTokens = Number.isFinite(accounting.billableTokens)
+    ? Math.max(0, accounting.billableTokens)
+    : null;
   return {
     inputTokens,
     outputTokens,
     cachedInputTokens,
     billableInputTokens,
-    billableTokens: billableInputTokens == null ? null : billableInputTokens + outputTokens,
+    billableTokens,
     rawTokens: inputTokens + outputTokens,
   };
 }
@@ -878,7 +881,8 @@ export class DisplayApprovalRenderer {
     const cachedDetail = tokenTotals.cachedInputTokens > 0 ? ` (${_fmtTokens(tokenTotals.cachedInputTokens)} cached)` : "";
     lines.push(`${kv("tokens", `${C.cyan}${_fmtTokens(totalTok)} raw${C.reset}`)}${dot}${C.dim}${_fmtTokens(totalIn)} in${cachedDetail}${C.reset} ${C.dim}+ ${_fmtTokens(totalOut)} out${C.reset}`);
     if (billableDiffers(tokenTotals)) {
-      lines.push(`${kv("billable", `${C.cyan}${_fmtTokens(tokenTotals.billableTokens)} total${C.reset}`)}${dot}${C.dim}${_fmtTokens(tokenTotals.billableInputTokens)} input-equiv${C.reset} ${C.dim}+ ${_fmtTokens(totalOut)} out${C.reset}`);
+      const billableOutputTokens = Math.max(0, tokenTotals.billableTokens - tokenTotals.billableInputTokens);
+      lines.push(`${kv("billable", `${C.cyan}${_fmtTokens(tokenTotals.billableTokens)} total${C.reset}`)}${dot}${C.dim}${_fmtTokens(tokenTotals.billableInputTokens)} input-equiv${C.reset} ${C.dim}+ ${_fmtTokens(billableOutputTokens)} output-equiv${C.reset}`);
     } else if (tokenTotals.billableTokens == null) {
       lines.push(`${kv("billable", `${C.yellow}unavailable${C.reset}`)}${dot}${C.dim}raw token usage retained${C.reset}`);
     }

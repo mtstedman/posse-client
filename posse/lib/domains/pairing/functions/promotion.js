@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { adminGitExec } from "../../git/functions/admin-git.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
@@ -7,14 +9,33 @@ import {
   RUNTIME_STATUS_KEYS,
   writeRuntimeStatus,
 } from "../../queue/functions/runtime-status.js";
-import { assertCleanPairingCheckout, validateBranchName, validateRemoteName } from "./git.js";
+import {
+  assertCleanPairingCheckout,
+  canonicalRepositoryLocator,
+  validateBranchName,
+  validateRemoteName,
+} from "./git.js";
 
-const PROTOCOL = "posse.pairing_promotion.v1";
+const PROTOCOL = "posse.pairing_promotion.v2";
+const LEGACY_PROTOCOL = "posse.pairing_promotion.v1";
 const SHA_RE = /^[0-9a-f]{40,64}$/iu;
 const MAX_REBUILDS = 3;
 
 function git(args, projectDir, options = {}) {
   return adminGitExec(args, projectDir, { timeoutMs: 15 * 60_000, ...options });
+}
+
+function validatePromotionSource(value) {
+  const source = String(value || "").trim();
+  try {
+    canonicalRepositoryLocator(source);
+  } catch (error) {
+    // Local absolute remotes are retained for deterministic/self-hosted Git
+    // workflows. Pairing enrollment itself accepts only network remotes, so
+    // this arm is principally the existing local integration-test seam.
+    if (!path.isAbsolute(source) || /[\u0000-\u001f\u007f]/u.test(source)) throw error;
+  }
+  return source;
 }
 
 function refSha(projectDir, ref, exec = git) {
@@ -43,7 +64,15 @@ function store(journal) {
 
 export function readPairingPromotionJournal() {
   const journal = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_PROMOTION);
-  return journal?.protocol === PROTOCOL ? journal : null;
+  if (journal?.protocol === PROTOCOL) return journal;
+  if (journal?.protocol === LEGACY_PROTOCOL) {
+    return {
+      ...journal,
+      source_url: null,
+      target_remote: journal.remote,
+    };
+  }
+  return null;
 }
 
 export function beginPairingPromotion(state, { projectDir = process.cwd(), reason = "host_shutdown" } = {}) {
@@ -54,12 +83,19 @@ export function beginPairingPromotion(state, { projectDir = process.cwd(), reaso
       `Pairing integration ${existing.session_id || "(unknown)"} is still pending`,
     ), { code: "pairing_promotion_already_pending" });
   }
+  const targetRemote = validateRemoteName(state?.origin_remote_name || state?.remote_name);
+  const sourceRemote = validateRemoteName(state?.remote_name);
+  const sourceUrl = String(state?.remote_url || "").trim()
+    || git(["remote", "get-url", sourceRemote], projectDir, { timeoutMs: 5_000 }).trim();
   const journal = {
     protocol: PROTOCOL,
     session_id: String(state?.remote_session_id || state?.id || ""),
-    remote: validateRemoteName(state?.remote_name),
+    source_url: sourceUrl,
     source_branch: validateBranchName(projectDir, state?.shared_branch),
+    target_remote: targetRemote,
     target_branch: validateBranchName(projectDir, state?.original_branch),
+    target_ssh_command: state?.original_ssh_command || null,
+    temporary_repository: state?.temporary_repository || null,
     phase: "requested",
     reason,
     target_base_sha: null,
@@ -67,6 +103,7 @@ export function beginPairingPromotion(state, { projectDir = process.cwd(), reaso
     updated_at: new Date().toISOString(),
     last_error: null,
   };
+  validatePromotionSource(journal.source_url);
   return store(journal);
 }
 
@@ -85,6 +122,42 @@ export function clearPairingPromotionJournal() {
 function fetchBranch(projectDir, remote, branch, exec = git) {
   const remoteRef = `refs/remotes/${remote}/${branch}`;
   exec(["fetch", "--no-tags", remote, `+refs/heads/${branch}:${remoteRef}`], projectDir);
+  const sha = refSha(projectDir, remoteRef, exec);
+  if (!sha) throw Object.assign(new Error(`Could not resolve ${remote}/${branch} after fetch`), {
+    code: "pairing_promotion_remote_head_unresolved",
+  });
+  return { remoteRef, sha };
+}
+
+function fetchSourceBranch(projectDir, journal, exec = git) {
+  const branch = validateBranchName(projectDir, journal.source_branch);
+  if (!journal.source_url) {
+    return fetchBranch(projectDir, validateRemoteName(journal.remote), branch, exec);
+  }
+  const sourceUrl = validatePromotionSource(journal.source_url);
+  const suffix = String(journal.session_id || "recovery")
+    .replace(/[^a-zA-Z0-9-]/gu, "")
+    .slice(0, 64) || "recovery";
+  const sourceRef = `refs/posse/pairing-sources/${suffix}`;
+  exec(["fetch", "--no-tags", sourceUrl, `+refs/heads/${branch}:${sourceRef}`], projectDir);
+  const sha = refSha(projectDir, sourceRef, exec);
+  if (!sha) {
+    throw Object.assign(new Error(`Could not resolve the session source branch ${branch} after fetch`), {
+      code: "pairing_promotion_source_head_unresolved",
+    });
+  }
+  return { remoteRef: sourceRef, sha };
+}
+
+function targetGitArgs(journal, args) {
+  return ["-c", `core.sshCommand=${journal.target_ssh_command || "ssh"}`, ...args];
+}
+
+function fetchTargetBranch(projectDir, journal, remote, branch, exec = git) {
+  const remoteRef = `refs/remotes/${remote}/${branch}`;
+  exec(targetGitArgs(journal, [
+    "fetch", "--no-tags", remote, `+refs/heads/${branch}:${remoteRef}`,
+  ]), projectDir);
   const sha = refSha(projectDir, remoteRef, exec);
   if (!sha) throw Object.assign(new Error(`Could not resolve ${remote}/${branch} after fetch`), {
     code: "pairing_promotion_remote_head_unresolved",
@@ -117,9 +190,10 @@ async function promoteLocked(projectDir, initialJournal, {
   exec = git,
   workflowFactory = createPromotionWorkflow,
   onProgress = () => {},
+  publish = true,
 } = {}) {
   let journal = initialJournal;
-  const remote = validateRemoteName(journal.remote);
+  const remote = validateRemoteName(journal.target_remote || journal.remote);
   const sourceBranch = validateBranchName(projectDir, journal.source_branch);
   const targetBranch = validateBranchName(projectDir, journal.target_branch);
   if (sourceBranch === targetBranch) {
@@ -131,8 +205,8 @@ async function promoteLocked(projectDir, initialJournal, {
 
   const workflow = workflowFactory(projectDir, targetBranch);
   for (let attempt = 0; attempt < MAX_REBUILDS; attempt += 1) {
-    const source = fetchBranch(projectDir, remote, sourceBranch, exec);
-    const target = fetchBranch(projectDir, remote, targetBranch, exec);
+    const source = fetchSourceBranch(projectDir, journal, exec);
+    const target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     const current = refSha(projectDir, targetBranch, exec);
     const candidate = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;
 
@@ -176,6 +250,18 @@ async function promoteLocked(projectDir, initialJournal, {
       });
     }
 
+    if (!publish) {
+      return {
+        ok: true,
+        pending: true,
+        phase: "candidate",
+        sourceBranch,
+        targetBranch,
+        remote,
+        mergeHash: journal.candidate_sha,
+      };
+    }
+
     const validation = workflow._validatePushCandidate({ pushBranch: targetBranch });
     if (!validation?.ok) {
       throw Object.assign(new Error(`Pairing promotion push gate failed: ${validation?.reason || "unknown"}`), {
@@ -184,7 +270,7 @@ async function promoteLocked(projectDir, initialJournal, {
       });
     }
 
-    const refreshed = fetchBranch(projectDir, remote, targetBranch, exec);
+    const refreshed = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     if (refreshed.sha !== journal.target_base_sha) {
       onProgress(`${remote}/${targetBranch} advanced; rebuilding the promotion`);
       preserveCandidate(projectDir, journal.session_id, journal.candidate_sha, exec);
@@ -200,12 +286,12 @@ async function promoteLocked(projectDir, initialJournal, {
 
     onProgress(`Publishing ${targetBranch} with an exact remote lease`);
     try {
-      exec([
+      exec(targetGitArgs(journal, [
         "push",
         `--force-with-lease=refs/heads/${targetBranch}:${journal.target_base_sha}`,
         remote,
         `${journal.candidate_sha}:refs/heads/${targetBranch}`,
-      ], projectDir);
+      ]), projectDir);
     } catch (error) {
       journal = markPairingPromotion(journal, {
         phase: "candidate",
@@ -214,7 +300,7 @@ async function promoteLocked(projectDir, initialJournal, {
       if (attempt + 1 < MAX_REBUILDS) continue;
       throw error;
     }
-    const published = fetchBranch(projectDir, remote, targetBranch, exec);
+    const published = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     if (published.sha !== journal.candidate_sha) {
       throw Object.assign(new Error("Could not prove pairing promotion publication"), {
         code: "pairing_promotion_publication_unresolved",
@@ -251,6 +337,8 @@ export async function promotePairingTrunk(projectDir, {
 
 export const __testPairingPromotionInternals = Object.freeze({
   fetchBranch,
+  fetchSourceBranch,
+  fetchTargetBranch,
   isAncestor,
   preserveCandidate,
   refSha,

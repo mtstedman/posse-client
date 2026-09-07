@@ -9,14 +9,21 @@ const PAIRING_OWNER_STALE_MS = 120_000;
 function parseState(row) {
   if (!row) return null;
   let originalSettings = {};
+  let scopeSet = {};
   try {
     originalSettings = JSON.parse(row.original_settings_json || "{}");
   } catch {
     originalSettings = {};
   }
+  try {
+    scopeSet = JSON.parse(row.scope_set_json || "{}");
+  } catch {
+    scopeSet = {};
+  }
   return {
     ...row,
     originalSettings,
+    scopeSet,
   };
 }
 
@@ -42,6 +49,8 @@ export function createPairingState({
   originalHead,
   originalSettings,
   processPid = process.pid,
+  instanceId = null,
+  originalSshCommand = null,
 }, db = getDb()) {
   return runImmediateTransaction(db, () => {
     const live = getLivePairingState(db);
@@ -55,8 +64,8 @@ export function createPairingState({
       INSERT INTO pairing_sessions (
         id, role, remote_name, remote_url, shared_branch,
         original_branch, original_head, original_settings_json,
-        phase, process_pid
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'enrolling', ?)
+        phase, process_pid, instance_id, original_ssh_command
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'enrolling', ?, ?, ?)
     `).run(
       id,
       role,
@@ -67,6 +76,8 @@ export function createPairingState({
       originalHead,
       JSON.stringify(originalSettings || {}),
       processPid,
+      instanceId,
+      originalSshCommand,
     );
     return getPairingState(id, db);
   });
@@ -79,6 +90,17 @@ export function updatePairingEnrollment(id, {
   addedRemoteUrl = null,
   remoteName = null,
   phase = "active",
+  instanceId = null,
+  scopeSet = null,
+  computePolicy = null,
+  integrationPolicy = null,
+  enrollmentOpen = null,
+  baselineOid = null,
+  originRemoteName = null,
+  originRemoteUrl = null,
+  temporaryRepository = null,
+  closeAction = null,
+  credentialDirectory = null,
 } = {}, db = getDb()) {
   return runImmediateTransaction(db, () => {
     db.prepare(`
@@ -88,11 +110,29 @@ export function updatePairingEnrollment(id, {
           added_remote_name = COALESCE(?, added_remote_name),
           added_remote_url = COALESCE(?, added_remote_url),
           remote_name = COALESCE(?, remote_name),
+          instance_id = COALESCE(?, instance_id),
+          scope_set_json = COALESCE(?, scope_set_json),
+          compute_policy = COALESCE(?, compute_policy),
+          integration_policy = COALESCE(?, integration_policy),
+          enrollment_open = COALESCE(?, enrollment_open),
+          baseline_oid = COALESCE(?, baseline_oid),
+          origin_remote_name = COALESCE(?, origin_remote_name),
+          origin_remote_url = COALESCE(?, origin_remote_url),
+          temporary_repository = COALESCE(?, temporary_repository),
+          close_action = COALESCE(?, close_action),
+          credential_directory = COALESCE(?, credential_directory),
           phase = ?,
           last_error = NULL,
           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE id = ?
-    `).run(remoteSessionId, relayToken, addedRemoteName, addedRemoteUrl, remoteName, phase, String(id));
+    `).run(
+      remoteSessionId, relayToken, addedRemoteName, addedRemoteUrl, remoteName,
+      instanceId, scopeSet == null ? null : JSON.stringify(scopeSet), computePolicy,
+      integrationPolicy, enrollmentOpen == null ? null : Number(Boolean(enrollmentOpen)),
+      baselineOid, originRemoteName, originRemoteUrl, temporaryRepository, closeAction,
+      credentialDirectory,
+      phase, String(id),
+    );
     return getPairingState(id, db);
   });
 }
@@ -126,6 +166,19 @@ export function touchPairingState(id, db = getDb(), phases = ["active"]) {
     SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE id = ? AND phase IN (${placeholders})
   `).run(String(id), ...normalizedPhases);
+  return getPairingState(id, db);
+}
+
+export function adoptPairingProcess(id, processPid = process.pid, db = getDb()) {
+  const pid = Number(processPid);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new TypeError("pairing process pid must be a positive integer");
+  }
+  db.prepare(`
+    UPDATE pairing_sessions
+    SET process_pid = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE id = ? AND phase = 'active'
+  `).run(pid, String(id));
   return getPairingState(id, db);
 }
 

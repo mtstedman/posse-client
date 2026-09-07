@@ -29,6 +29,8 @@ import {
   needsSharedTrunkMergeOperationSchema,
   needsPairingSessionSchema,
   needsPairingSessionPendingPhaseSchema,
+  needsPairingSessionPolicySchema,
+  needsWorkItemDelegationSchema,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
   repairRunInsightsPromotionSchema,
@@ -39,6 +41,8 @@ import {
   installSharedTrunkMergeOperationSchema,
   installPairingSessionSchema,
   repairPairingSessionPendingPhaseSchema,
+  installPairingSessionPolicySchema,
+  installWorkItemDelegationSchema,
   installBridgeCommandResultsSchema,
   repairWorkItemsGovernanceTierSchema,
   runHostMigration,
@@ -57,6 +61,8 @@ export {
   __testInstallSharedTrunkMergeOperationSchema,
   __testInstallPairingSessionSchema,
   __testRepairPairingSessionPendingPhaseSchema,
+  __testInstallPairingSessionPolicySchema,
+  __testInstallWorkItemDelegationSchema,
   __testRepairWorkItemsGovernanceTierSchema,
   getHostSchemaVersion as __testGetHostSchemaVersion,
   runHostMigration as __testRunHostMigration,
@@ -509,6 +515,8 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           long_context_tier_input_tokens INTEGER,
           provider_request_duration_ms INTEGER,
           usage_segment_count INTEGER,
+          originator_instance_id TEXT,
+          executor_instance_id TEXT,
           reasoning_effort TEXT DEFAULT 'medium',
           extended_thinking INTEGER NOT NULL DEFAULT 0 CHECK (extended_thinking IN (0,1)),
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -2841,6 +2849,18 @@ export function getDb() {
     name: "pairing_sessions_pending_phase",
     needs: needsPairingSessionPendingPhaseSchema,
     migrate: repairPairingSessionPendingPhaseSchema,
+  });
+  runHostMigration(_db, {
+    version: 17,
+    name: "pairing_session_policy",
+    needs: needsPairingSessionPolicySchema,
+    migrate: installPairingSessionPolicySchema,
+  });
+  runHostMigration(_db, {
+    version: 18,
+    name: "work_item_delegations",
+    needs: needsWorkItemDelegationSchema,
+    migrate: installWorkItemDelegationSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

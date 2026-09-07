@@ -82,6 +82,21 @@ function validatePolicies(endpoint, payload, status) {
   }
 }
 
+function validateScopeSet(endpoint, scopeSet, status) {
+  if (scopeSet == null) return;
+  const scope = recordPayload(endpoint, scopeSet, status);
+  const write = recordPayload(endpoint, scope.write || {}, status);
+  for (const field of ["files", "roots"]) {
+    if (!Array.isArray(write[field]) || write[field].length > 256
+      || write[field].some((value) => typeof value !== "string" || !value || value.length > 1024)) {
+      throw invalidResponse(endpoint, `scope_set.write.${field} is invalid`, status);
+    }
+  }
+  if (typeof write.unknown !== "boolean") {
+    throw invalidResponse(endpoint, "scope_set.write.unknown is invalid", status);
+  }
+}
+
 function optionalPeerWorkItems(endpoint, peer, status) {
   if (!Array.isArray(peer.work_items) || peer.work_items.length > MAX_WORK_ITEMS) {
     throw invalidResponse(endpoint, "peer work_items is invalid", status);
@@ -109,6 +124,34 @@ function validatePeers(endpoint, response, status) {
     const peer = recordPayload(endpoint, value, status);
     requiredString(endpoint, peer, "instance_id", { maxLength: 128, status });
     requiredString(endpoint, peer, "label", { maxLength: 160, status });
+    if (peer.git_identities == null) peer.git_identities = [];
+    if (!Array.isArray(peer.git_identities) || peer.git_identities.length > 16
+      || peer.git_identities.some((value) => typeof value !== "string" || !value || value.length > 320)) {
+      throw invalidResponse(endpoint, "peer git_identities is invalid", status);
+    }
+    if (peer.capabilities == null) peer.capabilities = {};
+    const capabilities = recordPayload(endpoint, peer.capabilities, status);
+    if (Object.keys(capabilities).length > 0) {
+      for (const field of ["job_types", "providers", "headroom"]) {
+        if (!Array.isArray(capabilities[field]) || capabilities[field].length > 32) {
+          throw invalidResponse(endpoint, `peer capabilities.${field} is invalid`, status);
+        }
+      }
+      if (capabilities.job_types.some((value) => typeof value !== "string" || !value || value.length > 80)
+        || capabilities.providers.some((value) => typeof value !== "string" || !value || value.length > 80)
+        || typeof capabilities.tier !== "string" || !capabilities.tier || capabilities.tier.length > 40) {
+        throw invalidResponse(endpoint, "peer capabilities names are invalid", status);
+      }
+      for (const entry of capabilities.headroom) {
+        const headroom = recordPayload(endpoint, entry, status);
+        if (typeof headroom.provider !== "string" || !headroom.provider || headroom.provider.length > 80
+          || typeof headroom.available !== "boolean"
+          || !Number.isSafeInteger(headroom.retry_after_sec)
+          || headroom.retry_after_sec < 0 || headroom.retry_after_sec > 86_400) {
+          throw invalidResponse(endpoint, "peer capabilities headroom is invalid", status);
+        }
+      }
+    }
     if (!PEER_ROLES.has(peer.role)) {
       throw invalidResponse(endpoint, "peer role is invalid", status);
     }
@@ -175,6 +218,10 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
   validateExpiry(endpoint, response, status);
   validateRepository(endpoint, response, status);
   validatePolicies(endpoint, response, status);
+  validateScopeSet(endpoint, response.scope_set, status);
+  if (response.admitted_member != null) {
+    validateMembers(endpoint, { members: [response.admitted_member] }, status);
+  }
 
   if (endpoint === "sessions") {
     requiredString(endpoint, response, "code", {
@@ -382,6 +429,16 @@ export function createPairingRemoteClient({
     setInviteOpen: (token, open) => validatedRequest("status", {
       token,
       path: `invite/${open ? "open" : "close"}`,
+    }),
+    setScope: (token, memberId, scopeSet, role = "operator") => validatedRequest("status", {
+      token,
+      body: { member_id: memberId, role, scope_set: scopeSet },
+      path: "members/scope",
+    }),
+    setPolicy: (token, compute) => validatedRequest("status", {
+      token,
+      body: { compute, scheduler_routing_protocol: 1 },
+      path: "policy",
     }),
     status: (token) => validatedRequest("status", { method: "GET", token }),
     heartbeat: (token, presence = null) => validatedRequest("heartbeat", { token, body: presence }),

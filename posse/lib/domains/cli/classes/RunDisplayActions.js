@@ -21,6 +21,30 @@ import {
 } from "../../planning/functions/plan-approval.js";
 import { createWorkItemTransitionExecutor } from "../../bridge/functions/work-item-actions.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
+
+export function parseSessionTuiCommand(command) {
+  const input = String(command || "").trim();
+  if (!input) throw new Error("Enter a session command");
+  const [rawAction] = input.split(/\s+/u);
+  const action = rawAction.toLowerCase();
+  if (action === "inject") return { inject: input.slice(rawAction.length).trim() };
+  if (action === "keep" || input.toLowerCase() === "keep-branch close") {
+    return { argv: ["close", "--keep-branch"] };
+  }
+  if (action === "drain") return { argv: ["close"] };
+  if (action === "scope") {
+    const match = input.match(/^scope\s+(\S+)\s+([\s\S]+)$/iu);
+    if (!match) throw new Error("Use: scope <member-id> <json>");
+    return { argv: ["scope", match[1], match[2].trim()] };
+  }
+  const argv = input.split(/\s+/u);
+  const allowed = new Set(["admit", "kick", "policy", "invite", "members", "pending", "close"]);
+  if (!allowed.has(action)) {
+    throw new Error("Session commands: admit, kick, scope, policy, invite, members, pending, drain, close, keep, inject");
+  }
+  return { argv };
+}
 
 function firstPromptAnswer(answers = []) {
   const first = Array.isArray(answers) ? answers[0] : answers;
@@ -174,7 +198,22 @@ export class RunDisplayActions {
     this.display.onReviewPending = () => this.reviewPending();
     this.display.onAsk = (question) => this.ask(question);
     this.display.onAnswerJob = (jobId) => this.answerJob(jobId);
+    if (getLivePairingState()?.role === "host") {
+      this.display.onSessionCommand = (command) => this.sessionCommand(command);
+    }
     return this;
+  }
+
+  async sessionCommand(command) {
+    const parsed = parseSessionTuiCommand(command);
+    if (Object.hasOwn(parsed, "inject")) {
+      if (!parsed.inject) throw new Error("Use: inject <work item description>");
+      this.inject(parsed.inject);
+      return;
+    }
+    const { runPairingCommand } = await import("../../pairing/functions/pair-command.js");
+    await runPairingCommand(parsed.argv, { projectDir: this.projectDir, C: this.C });
+    this.refreshDisplaySnapshotsForQueue();
   }
 
   getLiveReviewPromise() {

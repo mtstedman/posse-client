@@ -9,22 +9,22 @@
 // polling can never succeed within an attempt — and even if the lock freed,
 // this worktree's base would be stale by exactly the change that mattered.
 //
-// The guard must never break tool execution: any internal error (no DB in
-// this process, schema drift, unexpected path shape) fails open with a
-// warning, because the scope predicates above it remain the primary barrier.
+// The advisory local lock check remains fail-open on internal errors. Session
+// scope is an authorization boundary, however, so an active member fails
+// closed when its durable scope cannot be read or matched.
 
 import path from "path";
 import { getObservationContext } from "../../observability/functions/observations.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { verifyOrAcquireJobWriteLockForPath } from "./file-locks.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
 
 function repoRelativePath(cwd, displayPath) {
   const base = path.resolve(cwd || process.cwd());
   const resolved = path.resolve(base, String(displayPath || ""));
   const rel = path.relative(base, resolved);
-  if (!rel || rel === "." || path.isAbsolute(rel) || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../")) {
-    return null;
-  }
+  if (!rel || rel === ".") return "";
+  if (path.isAbsolute(rel) || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../")) return null;
   return rel.replace(/\\/g, "/");
 }
 
@@ -47,10 +47,31 @@ function holderLabel(conflict) {
  * assess-only).
  */
 export function guardToolWriteLock(toolName, displayPath, cwd) {
+  const ambient = getObservationContext() || {};
+  if (ambient.job_id == null) return null;
+  let rel;
   try {
-    const ambient = getObservationContext() || {};
-    if (ambient.job_id == null) return null;
-    const rel = repoRelativePath(cwd, displayPath);
+    rel = repoRelativePath(cwd, displayPath);
+    const session = getLivePairingState();
+    if (session?.role === "member" && session.phase === "active") {
+      const write = session.scopeSet?.write || {};
+      const files = Array.isArray(write.files) ? write.files : [];
+      const roots = Array.isArray(write.roots) ? write.roots : [];
+      const allowed = rel != null && (roots.includes("*") || (rel !== "" && (
+        files.includes(rel) || roots.some((root) => (
+          rel === root || rel.startsWith(`${String(root).replace(/\/$/u, "")}/`)
+        ))
+      )));
+      if (!allowed) {
+        return `Error: ${toolName} blocked - ${displayPath} is outside this member's session write scope.`;
+      }
+    }
+  } catch (err) {
+    log.warn("write-lock-guard", `session scope check failed closed for ${toolName} ${displayPath}: ${err?.message || err}`);
+    return `Error: ${toolName} blocked - session write scope could not be verified.`;
+  }
+  try {
+    rel ||= repoRelativePath(cwd, displayPath);
     if (!rel) return null;
     const result = verifyOrAcquireJobWriteLockForPath(ambient.job_id, rel, { source: "tool_guard" });
     if (result?.ok !== false) return null;

@@ -134,6 +134,12 @@ import {
   recoverOrphanedReviewJobs,
 } from "../functions/headless-recovery.js";
 import { createSharedTrunkPoller } from "../functions/shared-trunk-poller.js";
+import { createSessionMonitor } from "../functions/session-monitor.js";
+import {
+  createSessionJobRouter,
+  sessionOriginatorConcurrencyBlocked,
+} from "../../queue/functions/session-job-router.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
 import {
   readWaitingLanePreparationConcurrency,
   reconcileWaitingLaneJobCompletion,
@@ -800,7 +806,9 @@ export class Scheduler {
     const repairMs = Math.max(1, Number(this.repairPollMs || this.pollMs || DEFAULT_REPAIR_POLL_MS));
     const readyDelayMs = this._nextQueuedReadyDelayMs();
     const sharedTrunkDelayMs = this._sharedTrunkPoller?.delayUntilDueMs?.();
-    const delays = [repairMs, readyDelayMs, sharedTrunkDelayMs]
+    const sessionDelayMs = this._sessionMonitor?.delayUntilDueMs?.();
+    const sessionJobDelayMs = this._sessionJobRouter?.delayUntilDueMs?.();
+    const delays = [repairMs, readyDelayMs, sharedTrunkDelayMs, sessionDelayMs, sessionJobDelayMs]
       .filter((value) => value != null && Number.isFinite(Number(value)))
       .map((value) => Math.max(0, Number(value)));
     return delays.length > 0 ? Math.min(...delays) : repairMs;
@@ -1569,6 +1577,12 @@ export class Scheduler {
     this._sharedTrunkPoller = createSharedTrunkPoller({
       projectDir: this.projectDir,
     });
+    this._sessionMonitor = createSessionMonitor({
+      projectDir: this.projectDir,
+    });
+    this._sessionJobRouter = createSessionJobRouter({
+      projectDir: this.projectDir,
+    });
     recordRunDiagnostic("scheduler.run_loop_started", {
       owner_id: this.ownerId,
       concurrency: this.concurrency,
@@ -1624,6 +1638,20 @@ export class Scheduler {
         const lapStartQueueGeneration = getQueueWakeGeneration();
         this._refreshRuntimeSettings();
 
+        // Bind pulse minting to the live session before any shared-trunk Git
+        // operation in this process. This ordering closes the restart window
+        // where a scheduler could otherwise fetch/mutate with an unscoped
+        // cached envelope before its first session heartbeat.
+        const sessionPoll = await this._sessionMonitor.poll();
+        if (sessionPoll?.requestsDrain || sessionPoll?.fatal) {
+          pairingDrainRequested = true;
+          this._log(
+            sessionPoll?.requestsDrain
+              ? `Session ${sessionPoll.status?.status || "closed"}; draining active workers`
+              : `Session heartbeat authorization failed; draining active workers`,
+            "yellow",
+          );
+        }
         // Fetch before candidate selection. When due, every mutating job in
         // this lap therefore sees a trunk no older than the configured
         // cadence. Transport failures are explicitly fail-open inside the
@@ -1631,6 +1659,7 @@ export class Scheduler {
         await this._sharedTrunkPoller.poll({
           idle: activeWorkers.size === 0 && idleCount > 0,
         });
+        await this._sessionJobRouter.poll();
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
         // for another scheduler cannot stop this one; consumed either way so
@@ -2051,6 +2080,19 @@ export class Scheduler {
             candidateCount++;
             scanExcludeJobIds.add(job.id);
             if (activeWorkers.has(job.id)) {
+              skipJobIds.add(job.id);
+              continue;
+            }
+            const sessionRoute = await this._sessionJobRouter.offer(job);
+            if (sessionRoute?.delegated) {
+              skipJobIds.add(job.id);
+              continue;
+            }
+            if (sessionOriginatorConcurrencyBlocked(
+              getLivePairingState(),
+              job,
+              [...activeWorkers.values()].map((entry) => entry.job),
+            )) {
               skipJobIds.add(job.id);
               continue;
             }
@@ -2615,6 +2657,9 @@ export class Scheduler {
       this.stop({ activeWorkers, reason: shutdownReason });
       this._activeRunWorkers = null;
       this._sharedTrunkPoller = null;
+      this._sessionMonitor?.stop?.();
+      this._sessionMonitor = null;
+      this._sessionJobRouter = null;
       this._lockLossKillCallback = null;
       this._lockLostKilledJobIds.clear();
     }

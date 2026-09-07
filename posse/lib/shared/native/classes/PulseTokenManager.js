@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { heartbeatAuthManager } from "./HeartbeatAuthManager.js";
 import { isLoopbackHostname } from "../functions/auth.js";
 import { scopeGrantedBy } from "../../permissions/functions/scope-grants.js";
-import { NATIVE_BINARY_PACKAGE_PATTERN } from "../../../catalog/binary.js";
+import { GIT_MUTATE_ROUTE, NATIVE_BINARY_PACKAGE_PATTERN } from "../../../catalog/binary.js";
 
 const DEFAULT_REFRESH_SKEW_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -38,6 +38,7 @@ export class PulseTokenManager {
    *   now?: () => number,
    *   refreshSkewMs?: number,
    *   timeoutMs?: number,
+   *   sessionContext?: { instanceId: string, sessionId: string } | null,
    * }} [opts]
    */
   constructor({
@@ -46,6 +47,7 @@ export class PulseTokenManager {
     now = Date.now,
     refreshSkewMs = DEFAULT_REFRESH_SKEW_MS,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    sessionContext = null,
   } = {}) {
     if (authManager !== null && typeof authManager?.getLaunchKey !== "function") {
       throw new TypeError("PulseTokenManager requires a HeartbeatAuthManager");
@@ -72,6 +74,8 @@ export class PulseTokenManager {
     this._generation = 0;
     this._heartbeatTimer = null;
     this._heartbeatRunning = false;
+    this._sessionContext = normalizeSessionContext(sessionContext);
+    this._sessionScopeEnforcement = this._sessionContext ? false : true;
   }
 
   /**
@@ -86,6 +90,36 @@ export class PulseTokenManager {
 
   hasAuthentication() {
     return this.authManager.hasLaunchKey();
+  }
+
+  setSessionContext(value = null) {
+    const next = normalizeSessionContext(value);
+    if (JSON.stringify(next) === JSON.stringify(this._sessionContext)) return;
+    this._sessionContext = next;
+    this._sessionScopeEnforcement = next ? false : true;
+    this._generation += 1;
+    this._cache.clear();
+    this._refreshes.clear();
+    for (const timer of this._routeHeartbeatTimers.values()) clearTimeout(timer);
+    this._routeHeartbeatTimers.clear();
+  }
+
+  /**
+   * Record the read-only `git.capabilities` proof for the binary that will
+   * receive scoped mutate grants. A session context alone is deliberately not
+   * enough: older binaries ignore the signed scope claim.
+   */
+  confirmNativeScopeEnforcement(supported) {
+    this._sessionScopeEnforcement = supported === true;
+  }
+
+  #assertScopedMutateSupported(route) {
+    if (route !== GIT_MUTATE_ROUTE || !this._sessionContext) return;
+    if (this._sessionScopeEnforcement === true) return;
+    throw pulseError(
+      "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED",
+      "scoped session mutation requires a posse-git binary with scope enforcement",
+    );
   }
 
   /**
@@ -103,7 +137,7 @@ export class PulseTokenManager {
     if (!policy?.envelope?.heartbeatUrl) {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
-    const cacheKey = pulseCacheKey(rawKey, policy);
+    const cacheKey = `${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}`;
     const now = this.now();
     const cached = this._cache.get(cacheKey);
     if (!refresh && cached && now < cached.refreshAt && now < cached.expiresAt) {
@@ -148,7 +182,7 @@ export class PulseTokenManager {
     const rawKey = this.authManager.getLaunchKey();
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!rawKey || !policy) return null;
-    const entry = this._cache.get(pulseCacheKey(rawKey, policy));
+    const entry = this._cache.get(`${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}`);
     if (!entry || this.now() >= entry.expiresAt) return null;
     return Object.freeze({
       token: entry.token,
@@ -185,6 +219,7 @@ export class PulseTokenManager {
   async getPulseEnvelope({ refresh = false, requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) throw pulseError("POSSE_PULSE_ROUTE_REQUIRED", "a native pulse envelope requires an explicit route");
+    this.#assertScopedMutateSupported(route);
     const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey({ refresh });
     if (!rawKey) return null;
@@ -192,7 +227,7 @@ export class PulseTokenManager {
     if (!policy?.envelope?.heartbeatUrl) {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
-    const cacheKey = `${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
+    const cacheKey = `${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
     const specKey = routeHeartbeatSpecKey(route, nativeIdentity);
     this._routeHeartbeatSpecs.set(specKey, {
       cacheKey,
@@ -232,12 +267,17 @@ export class PulseTokenManager {
   getCachedPulseEnvelope({ requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) return null;
+    try {
+      this.#assertScopedMutateSupported(route);
+    } catch {
+      return null;
+    }
     const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey();
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) return null;
-    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`);
+    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`);
     if (!cached?.envelope || this.now() >= cached.expiresAt) return null;
     try {
       assertExactRoute(cached.routes, route);
@@ -433,6 +473,10 @@ export class PulseTokenManager {
       if (nativeIdentity) {
         heartbeatBody.nativePackage = nativeIdentity.package;
         heartbeatBody.nativeVersion = nativeIdentity.version;
+      }
+      if (this._sessionContext) {
+        heartbeatBody.instanceId = this._sessionContext.instanceId;
+        heartbeatBody.sessionId = this._sessionContext.sessionId;
       }
       response = await this.fetchImpl(heartbeatUrl, {
         method: "POST",
@@ -792,6 +836,20 @@ function pulseError(code, message) {
   const err = /** @type {PulseError} */ (new Error(message));
   err.code = code;
   return err;
+}
+
+function normalizeSessionContext(value) {
+  if (value == null) return null;
+  const instanceId = String(value.instanceId || "").trim();
+  const sessionId = String(value.sessionId || "").trim();
+  if (!instanceId || !sessionId || instanceId.length > 128 || sessionId.length > 128) {
+    throw new TypeError("native session context requires bounded instanceId and sessionId");
+  }
+  return Object.freeze({ instanceId, sessionId });
+}
+
+function sessionContextCacheKey(value) {
+  return value ? `:session=${value.sessionId}:instance=${value.instanceId}` : "";
 }
 
 function unsupportedNativeVersionError(rejected) {

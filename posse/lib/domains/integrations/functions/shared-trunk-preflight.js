@@ -119,6 +119,14 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
   if (capabilityUnavailable) {
     return preflightFailure(capabilityUnavailable, "Shared-trunk native capability is unavailable");
   }
+  const capabilityResult = nativeResult(capabilities) || {};
+  if (options.requireScopeEnforcement === true && capabilityResult.scopeEnforcement !== true) {
+    return preflightFailure(
+      "native_scope_enforcement_unavailable",
+      "Scoped sessions require a posse-git binary with native scope enforcement",
+    );
+  }
+  if (typeof options.onCapabilities === "function") options.onCapabilities(capabilityResult);
 
   let config;
   try {

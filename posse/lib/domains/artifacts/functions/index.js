@@ -820,7 +820,10 @@ function _isDirEmpty(dir) {
   try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const e of entries) {
-      if (e.isFile()) return false;
+      // Symlinks and other non-directory entries are still user-owned
+      // directory content. Count them without following them so pruning never
+      // deletes a link-only input scope or traverses its target.
+      if (!e.isDirectory()) return false;
       if (e.isDirectory() && !_isDirEmpty(path.join(dir, e.name))) return false;
     }
     return true;
@@ -835,7 +838,7 @@ async function _isDirEmptyAsync(dir) {
   try {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
     for (const e of entries) {
-      if (e.isFile()) return false;
+      if (!e.isDirectory()) return false;
       if (e.isDirectory() && !(await _isDirEmptyAsync(path.join(dir, e.name)))) return false;
     }
     return true;

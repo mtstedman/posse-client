@@ -411,10 +411,13 @@ The host opens a persistent shared session from a clean named branch:
 posse session host
 ```
 
-Posse creates and pushes a unique side branch, verifies the host's exact remote
-read/write path, switches the shared-trunk settings, and prints a reusable
-10-character code plus a `posse://session` invite link. Any number of members
-can request admission from their own clean clone:
+For a GitHub origin, Posse uses the authenticated `gh` CLI to create a private
+throwaway repository, installs a host deploy key through repo-local SSH
+configuration, pushes a unique side branch, and prints a reusable 10-character
+code plus a `posse://session` invite link. GitHub is the only provisioning
+adapter in v1; other providers are refused instead of exposing the origin
+repository to members. Any number of members can request admission from their
+own clean clone:
 
 ```bash
 posse session join ABCDE-FG234
@@ -429,24 +432,54 @@ hosting clone (a second terminal is fine):
 posse session admit AB23
 ```
 
-Only after admission does the member match or add the remote and independently
-prove noninteractive fetch and leased dry-run push access. The pending bearer is
-stored by the relay only as a hash and is unusable for session work until the
-host admits it. If Git preflight fails, the now-identifiable member explicitly
-leaves instead of lingering as active. Repository credentials are never shared
-through the pairing service.
+The joiner creates its own session SSH key. Only after admission does the host
+install that public key as a named write deploy key and the member independently
+prove noninteractive fetch and leased dry-run push access. The private key never
+leaves the member clone; the host's origin credentials and all Git credentials
+stay out of the relay. The pending bearer is stored by the relay only as a hash
+and is unusable for session work until the host admits it. A failed Git preflight
+uses that bearer to leave rather than lingering as an active member. Kick and
+close remove the corresponding deploy keys; repository cleanup reports a manual
+action when the host lacks delete rights.
+
+Hosts can manage the live policy and roster from another terminal:
+
+```bash
+posse session pending
+posse session kick <member-id>
+posse session invite open       # or: close
+posse session policy each-member  # capability-routing | host-only
+posse session scope <member-id> '{"files":["README.md"],"roots":["lib/"]}'
+```
+
+Scope is deny-by-default for unknown paths and is enforced both by the Node
+write barrier and the native commit/push/CAS boundary. Scope changes and kicks
+invalidate cached native authentication on the next five-second session
+heartbeat. If the member monitor is not running, a previously minted envelope
+can remain usable only until its normal pulse TTL expires.
 
 `posse pair` remains a compatibility alias for `posse session`; `posse unpair`
 remains an alias for `posse session leave`.
 
-The host and member commands remain connected, like `posse serve`. On the host,
-press `g` for a graceful close: Posse freezes new jobs, lets active jobs finish,
-closes every member, synchronizes the side trunk, and integrates it into the
-repository's default branch. `posse session close` (aliases: `posse session
+The host and member commands remain connected, like `posse serve`. A live run
+adopts the session monitor, so the TUI remains the sole raw-input owner. Its
+Pipeline pane shows session phase, roster, invite/policy state, peer work, and
+delegated jobs; press `u` for the host session command line. It accepts `admit`,
+`kick`, `scope`, `policy`, `invite`, `drain`, `close`, `keep`, and `inject`.
+
+On the standalone host monitor, press `g` for a graceful close: Posse freezes
+new jobs, lets active jobs finish, closes every member, synchronizes the side
+trunk, and integrates it into the repository's default branch. `posse session close` (aliases: `posse session
 leave`, `posse pair leave`, and `posse unpair`) performs the same graceful
 close. Press Ctrl-C for a forced close; schedulers receive a
 stop request before integration proceeds. Members restore their own original
 branch and exact prior shared-trunk settings after acknowledging either close.
+
+Use `posse session close --keep-branch` (or `keep` in the TUI) to preserve the
+throwaway trunk without creating an integration journal. If an integration
+crashes, recovery stops at the candidate and requires `posse session integrate`;
+`posse session abandon-integration` preserves the candidate ref and clears the
+journal for manual recovery.
 
 Hosting must start on the remote's advertised default branch so the integration
 target is unambiguous. A hard-killed process leaves a durable local recovery
@@ -455,12 +488,24 @@ stop, and resumes the exact leased integration before allowing more mutable work
 Restoration safely pauses if the shared checkout is dirty, so commit or stash the
 work and run Posse again.
 
-While the pairing monitor is connected, `posse dashboard` and the live TUI's
+While the session monitor is connected, bridge snapshots, `posse dashboard`, and the live TUI's
 default log view show each peer's active work with a `read-only` label. Press
 `p` for the detailed Pipeline pane. Peer work is held in a short-lived local
 status snapshot; it never enters the local queue and cannot be scheduled,
 claimed, or changed by this Posse instance. Background preparation jobs such as
 ATLAS warmup stay local and are not relayed as paired work or app status.
+Unknown shared-trunk commits are not absorbed: Posse compares only the recorded
+session baseline through the fetched tip and accepts an operation trailer or a
+known member committer identity. Anything else creates a typed repository
+recovery gate for accepting that exact tip or rejecting it for manual review.
+
+With `capability-routing`, a throttled or unavailable local provider can offer a
+bounded work packet through `refs/posse/handoff/*`; `host-only` routes member
+work to the host. The winner is selected by CAS in `refs/posse/jobs/*`.
+Unreachable transport runs locally, unclaimed offers are recalled, executor-side
+human gates remain with the executor, and origin work completes only after the
+shared trunk contains its `Posse-Origin-Work-Item` trailer. Model-call cost rows
+retain both originator and executor instance identifiers.
 
 During the compatibility rollout, `posse serve --pair` still pairs a
 phone/client to the durable Remote bridge. It does not bypass session admission

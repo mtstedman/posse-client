@@ -2675,8 +2675,11 @@ const COMMAND_USAGE = {
     console.log(`    posse session members|pending`);
     console.log(`    posse session kick <MEMBER-ID>`);
     console.log(`    posse session invite open|close`);
+    console.log(`    posse session scope <MEMBER-ID> '<JSON>'`);
+    console.log(`    posse session policy each-member|capability-routing|host-only`);
     console.log(`    posse session status`);
-    console.log(`    posse session leave|close`);
+    console.log(`    posse session leave|close [--keep-branch]`);
+    console.log(`    posse session integrate|abandon-integration`);
     console.log(`\n  Opens or joins a shared Posse collaboration session.`);
     console.log(`  Joiners wait for the host to confirm their four-character countersign.\n`);
   },
@@ -2732,7 +2735,7 @@ export async function main() {
     }
   }
   const commandPolicy = ["pair", "session"].includes(command)
-      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite"].includes(pairSubcommand)
+      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy"].includes(pairSubcommand)
     ? { ...baseCommandPolicy, requiresNativeGit: false }
     : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
@@ -2847,7 +2850,7 @@ ${aliasDiagnostic}
     ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
     ${C.dim}             Host: g gracefully drains/integrates; Ctrl+C forces close/integration; unlike serve, pair does not connect phone/web clients${C.reset}
     ${C.cyan}session${C.reset}    Host or join the shared session model (preferred; pair is an alias)
-    ${C.dim}             session host | session join <invite> | session admit <COUNTERSIGN> | session status | session leave|close${C.reset}
+    ${C.dim}             session host|join|admit|status|members|pending|kick|scope|policy|invite|leave|close|integrate|abandon-integration${C.reset}
     ${C.cyan}unpair${C.reset}     Leave pairing; host drains and integrates, members restore locally
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}

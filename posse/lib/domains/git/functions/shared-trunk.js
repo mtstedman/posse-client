@@ -37,6 +37,7 @@ import { withWorktreeLockAsync } from "./worktree.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 
 const SHA_RE = /^[0-9a-f]{40,64}$/iu;
+const MAX_PROVENANCE_COMMITS = 256;
 
 // Test-only seams (set through __testSharedTrunkInternals.setTestOverrides).
 // Production always runs with overrides null; the reconcile arms are otherwise
@@ -252,6 +253,57 @@ function diffPaths(projectDir, oldSha, newSha) {
   } catch {
     return [];
   }
+}
+
+export function verifySharedTrunkProvenance(projectDir, {
+  baselineOid,
+  newSha,
+  gitIdentities = [],
+  exec = execGit,
+} = {}) {
+  if (!SHA_RE.test(String(baselineOid || "")) || !SHA_RE.test(String(newSha || ""))) {
+    return { ok: false, reason: "provenance_range_invalid", commits: [] };
+  }
+  try {
+    exec(["merge-base", "--is-ancestor", baselineOid, newSha], projectDir);
+  } catch {
+    return { ok: false, reason: "provenance_baseline_not_ancestor", commits: [] };
+  }
+  const rawLog = exec([
+    "log", `--max-count=${MAX_PROVENANCE_COMMITS + 1}`,
+    "--format=%H%x00%ce%x00%B%x00", `${baselineOid}..${newSha}`,
+  ], projectDir, { trim: false });
+  const fields = String(rawLog || "").split("\0");
+  while (fields.length > 0 && !fields.at(-1).trim()) fields.pop();
+  const commits = [];
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    commits.push({
+      commit: fields[index].trim(),
+      email: fields[index + 1].trim().toLowerCase(),
+      message: fields[index + 2],
+    });
+  }
+  if (commits.length > MAX_PROVENANCE_COMMITS) {
+    return { ok: false, reason: "provenance_range_too_large", commits: [] };
+  }
+  const identities = new Set(
+    gitIdentities.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
+  );
+  try {
+    const localEmail = exec(["config", "--get", "user.email"], projectDir).trim().toLowerCase();
+    if (localEmail) identities.add(localEmail);
+  } catch { /* identity is optional */ }
+  const unknown = [];
+  for (const commit of commits) {
+    if (!SHA_RE.test(commit.commit)) {
+      return { ok: false, reason: "provenance_range_invalid", commits: [] };
+    }
+    if (/^Posse-Shared-Trunk-Operation:/mu.test(commit.message) || identities.has(commit.email)) continue;
+    unknown.push({ commit: commit.commit, email: commit.email || null });
+  }
+  return unknown.length > 0
+    ? { ok: false, reason: "unknown_commit_provenance", commits: unknown }
+    : { ok: true, reason: null, commits: [] };
 }
 
 function divergenceCounts(projectDir, localSha, remoteSha) {
@@ -564,6 +616,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   includeClaims = false,
   claimAfter = null,
   allowOperationId = null,
+  provenance = null,
 } = {}) {
   recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch) });
   const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter });
@@ -577,6 +630,42 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       });
     }
     return { ...fetched, config, fetchedClaims: fetched.fetchedClaims || [] };
+  }
+  if (provenance?.baselineOid) {
+    const proof = verifySharedTrunkProvenance(projectDir, {
+      baselineOid: provenance.baselineOid,
+      newSha: fetched.remoteSha,
+      gitIdentities: provenance.gitIdentities,
+    });
+    if (!proof.ok) {
+      updateSharedTrunkRuntimeStatus({
+        provenance_blocked: true,
+        provenance_reason: proof.reason,
+        provenance_commits: proof.commits,
+        remote_sha: fetched.remoteSha,
+      });
+      sharedTrunkEvent(
+        EVENT_TYPES.SHARED_TRUNK_PROVENANCE_BLOCKED,
+        "Shared-trunk update requires repository recovery approval",
+        { reason: proof.reason, commits: proof.commits },
+      );
+      return {
+        ok: false,
+        blocked: true,
+        config,
+        fetchCompleted: true,
+        fetchedClaims: fetched.fetchedClaims,
+        ...claimFetchMetadata(fetched),
+        reason: "shared_trunk_provenance_blocked",
+        remoteSha: fetched.remoteSha,
+        provenance: proof,
+      };
+    }
+    updateSharedTrunkRuntimeStatus({
+      provenance_blocked: false,
+      provenance_reason: null,
+      provenance_commits: [],
+    });
   }
   const reconciliation = await reconcileAlreadyLocked(projectDir, config, { fetched });
   const blocking = reconciliation.unresolved.filter((operation) => operation.operationId !== allowOperationId);
@@ -705,7 +794,11 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
 }
 
 /** Public locked fetch/reconcile/fast-forward operation used by polling. */
-export async function syncSharedTrunkFromOrigin(projectDir, { includeClaims = false, claimAfter = null } = {}) {
+export async function syncSharedTrunkFromOrigin(projectDir, {
+  includeClaims = false,
+  claimAfter = null,
+  provenance = null,
+} = {}) {
   const runtime = await runtimeSharedTrunkConfig(projectDir);
   if (!runtime.config.enabled) {
     return {
@@ -732,6 +825,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, { includeClaims = fa
       config: runtime.config,
       includeClaims,
       claimAfter,
+      provenance,
     })),
     "shared-trunk-sync",
   );

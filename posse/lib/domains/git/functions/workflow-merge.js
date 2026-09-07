@@ -170,10 +170,17 @@ export function createMergeWorkflowHelpers(context, {
     return result;
   }
 
-  function squashCommitArgs(subject, sharedTrunkOperationId = null) {
+  function squashCommitArgs(subject, sharedTrunkOperationId = null, wiId = null) {
     const args = ["commit", "-m", subject];
     if (sharedTrunkOperationId) {
       args.push("-m", `Posse-Shared-Trunk-Operation: ${sharedTrunkOperationId}`);
+    }
+    const delegation = workItemMetadata(wiId)?.session_delegation;
+    if (delegation?.originator_instance_id && Number.isSafeInteger(Number(delegation.origin_work_item_id))) {
+      args.push(
+        "-m",
+        `Posse-Origin-Work-Item: ${String(delegation.originator_instance_id).slice(0, 128)}:${Number(delegation.origin_work_item_id)}`,
+      );
     }
     return args;
   }
@@ -492,6 +499,7 @@ export function createMergeWorkflowHelpers(context, {
     targetBranch = currentTargetBranch(),
     preMergeHead = null,
     sharedTrunkOperationId = null,
+    wiId = null,
   } = {}) {
     const canRecover = step === "commit" || step === "postcommit";
     if (!canRecover) return null;
@@ -552,7 +560,7 @@ export function createMergeWorkflowHelpers(context, {
       });
       try {
         emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch, retry: true });
-        gitMergeExec(squashCommitArgs(subject, sharedTrunkOperationId), cwd);
+        gitMergeExec(squashCommitArgs(subject, sharedTrunkOperationId, wiId), cwd);
         const mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
         cleanupSquashMessage(cwd);
         log(`Merge timeout retry succeeded: ${branch} into ${targetBranch} at ${mergeHash}`, {
@@ -1170,7 +1178,7 @@ export function createMergeWorkflowHelpers(context, {
           });
           emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
           mergeStep = "commit";
-          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId), cwd);
+          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId), cwd);
           mergeCreated = true;
           mergeStep = "postcommit";
         } else {
@@ -1272,7 +1280,7 @@ export function createMergeWorkflowHelpers(context, {
               if (stagedFiles.length > 0) runProjectedCandidateGate(stagedFiles);
               emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
               mergeStep = "commit";
-              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId), cwd);
+              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId), cwd);
               mergeCreated = true;
               mergeStep = "postcommit";
               mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
@@ -1313,6 +1321,7 @@ export function createMergeWorkflowHelpers(context, {
             targetBranch,
             preMergeHead,
             sharedTrunkOperationId,
+            wiId,
           });
           if (recovered?.ok) {
             if (!suppressPostMergeEffects) {

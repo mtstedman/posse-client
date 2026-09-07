@@ -22,6 +22,9 @@ import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { logBadInputFailure } from "./bad-input.js";
 import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
+
+export { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
 
 function rootRelativePromoteDestHint(dest) {
   const raw = String(dest || "").replace(/\\/g, "/").trim();
@@ -195,9 +198,6 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
         const hint = rootRelativePromoteDestHint(dest);
         throw new Error(`Destination escapes project scope: ${dest}${hint ? `.${hint}` : ""}`);
       }
-      const destDirAbs = explicitFileDest ? path.dirname(destAbs) : destAbs;
-      fs.mkdirSync(destDirAbs, { recursive: true });
-
       const matchFile = (name) => {
         if (pattern.startsWith("*.")) return name.endsWith(pattern.slice(1));
         return name === pattern;
@@ -239,6 +239,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       }
     }
 
+    assertPromoteCopyPlan(plannedCopies, { cwd: promCwd });
     const conflictPreview = buildPromoteConflictPreview({ copies: plannedCopies, cwd: promCwd });
     if (conflictPreview.existing_count > 0) {
       const previewText = formatPromoteConflictPreview(conflictPreview);
@@ -269,7 +270,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
     const copiedFiles = [];
     for (const copy of plannedCopies) {
       worker._throwIfKilled(job.id);
-      fs.copyFileSync(copy.source, copy.destination);
+      copyPromoteFileSync(copy, { cwd: promCwd });
       copiedFiles.push(copy.destinationRel);
     }
 

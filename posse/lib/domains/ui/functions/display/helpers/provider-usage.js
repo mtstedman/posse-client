@@ -133,6 +133,9 @@ function _aggregateProviderUsageRows(rows = []) {
     const billableInputTokens = Number.isFinite(accounting.billableInputTokens)
       ? Math.max(0, accounting.billableInputTokens)
       : null;
+    const billableTokens = Number.isFinite(accounting.billableTokens)
+      ? Math.max(0, accounting.billableTokens)
+      : null;
     const usedTokens = inputTokens + outputTokens;
     if (usedTokens <= 0) continue;
     const existing = byProvider.get(provider) || {
@@ -158,12 +161,12 @@ function _aggregateProviderUsageRows(rows = []) {
     existing.usedCachedInputTokens += cachedInputTokens;
     existing.usedOutputTokens += outputTokens;
     existing.usedTokens += usedTokens;
-    if (billableInputTokens == null) {
+    if (billableInputTokens == null || billableTokens == null) {
       existing.usedBillableInputTokens = null;
       existing.usedBillableTokens = null;
     } else if (existing.usedBillableInputTokens != null) {
       existing.usedBillableInputTokens += billableInputTokens;
-      existing.usedBillableTokens += billableInputTokens + outputTokens;
+      existing.usedBillableTokens += billableTokens;
     }
     if (Number.isFinite(accounting.costUsd)) existing.knownCostUsd += Math.max(0, accounting.costUsd);
     if (accounting.costPrecision === "exact") existing.exactCostCalls += 1;

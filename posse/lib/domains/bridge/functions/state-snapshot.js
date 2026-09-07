@@ -31,6 +31,7 @@ import {
 } from "../../../catalog/human-input.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "./gate-contract.js";
 import { buildReviewBrief } from "./review-brief.js";
+import { pairingSessionSummary } from "../../pairing/functions/work-items.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -181,6 +182,13 @@ export function projectBridgeGateDetail(payload = {}) {
   const detail = {};
   for (const key of ["subtype", "review_type", "remote", "push_branch", "target_branch"]) {
     if (payload[key] != null) detail[key] = boundedText(payload[key], 240);
+  }
+  if (payload.remote_oid != null) detail.remote_oid = boundedText(payload.remote_oid, 64);
+  if (Array.isArray(payload.commits)) {
+    detail.commits = payload.commits.slice(0, 32).map((entry) => ({
+      commit: boundedText(entry?.commit, 64),
+      email: boundedText(entry?.email, 320),
+    }));
   }
   for (const key of ["ahead_count", "merged_count"]) {
     if (payload[key] != null) detail[key] = finiteNumber(payload[key], null);
@@ -468,11 +476,13 @@ export function collectStateSnapshot({
     .map(projectBridgeJobState);
   const openGates = durablyActiveJobs.filter(isOpenGateJob).slice(0, capped).map(normalizeGate).filter(Boolean);
   let instanceStatus = null;
+  let session = null;
   try {
     instanceStatus = composeInstanceStatus(getDb());
   } catch {
     // Older DB without runtime_status — snapshot simply omits it.
   }
+  try { session = pairingSessionSummary(); } catch { /* older schema/no active session */ }
   return {
     generated_at: new Date().toISOString(),
     head_event_id: Number(headEventId || 0),
@@ -481,5 +491,6 @@ export function collectStateSnapshot({
     jobs,
     open_gates: openGates,
     instance_status: instanceStatus,
+    session,
   };
 }

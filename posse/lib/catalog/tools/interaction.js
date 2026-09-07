@@ -16,6 +16,7 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   artifact_routing_admin: Object.freeze(["acknowledge"]),
   one_shot_file_scope: Object.freeze(["plan", "cancel"]),
   push_offer: Object.freeze(["push", "decline"]),
+  shared_trunk_provenance: Object.freeze(["accept", "reject"]),
   legacy_unstructured: Object.freeze([]),
 });
 

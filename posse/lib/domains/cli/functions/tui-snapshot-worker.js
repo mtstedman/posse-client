@@ -19,7 +19,7 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { getArtifacts } = await import("../../queue/functions/artifacts.js");
   const { parseJobPayload } = await import("../../queue/functions/payload.js");
   const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
-  const { pairingPeerPipelineRows } = await import("../../pairing/functions/work-items.js");
+  const { pairingPeerPipelineRows, pairingSessionSummary } = await import("../../pairing/functions/work-items.js");
 
   const active = listWorkItems(["queued", "planning", "running", "complete", "failed"]);
   const localRows = active.slice(0, 20).map((wi) => {
@@ -74,7 +74,8 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
 
     return { id: wi.id, title: wi.title, status: wi.status, jobs: enriched };
   });
-  return [...localRows, ...pairingPeerPipelineRows()];
+  const session = pairingSessionSummary();
+  return [...(session ? [{ session_summary: true, ...session }] : []), ...localRows, ...pairingPeerPipelineRows()];
 }
 
 async function buildToolData({ projectDir = null, dbPath = null } = {}) {

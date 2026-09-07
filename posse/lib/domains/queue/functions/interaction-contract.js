@@ -67,6 +67,7 @@ const REVIEW_KIND_BY_TYPE = new Map([
   ["research_dead_letter_recovery", "dead_letter_recovery"],
   ["oneshot_dead_letter_recovery", "dead_letter_recovery"],
   ["artifact_routing_admin", "artifact_routing_admin"],
+  ["shared_trunk_provenance", "shared_trunk_provenance"],
   ["scope_expansion_request", "file_scope_approval"],
 ]);
 const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
@@ -88,6 +89,7 @@ const HANDLER_BY_KIND = new Map([
   ["artifact_routing_admin", "human_input"],
   ["one_shot_file_scope", "one_shot"],
   ["push_offer", "git_push"],
+  ["shared_trunk_provenance", "human_input"],
 ]);
 
 const CHOICE_COPY = Object.freeze({

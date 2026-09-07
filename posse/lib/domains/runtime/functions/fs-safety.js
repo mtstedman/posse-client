@@ -1,15 +1,44 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export function realpathExistingPrefix(absPath) {
+export function realpathExistingPrefix(absPath, _seen = new Set()) {
   let current = path.resolve(absPath);
   const missingParts = [];
 
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) return path.resolve(absPath);
-    missingParts.unshift(path.basename(current));
-    current = parent;
+  while (true) {
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (err) {
+      if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") {
+        return path.resolve(absPath);
+      }
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(absPath);
+      missingParts.unshift(path.basename(current));
+      current = parent;
+      continue;
+    }
+
+    // existsSync() returns false for a dangling symlink, which used to make the
+    // link look like an ordinary missing path. Resolve the link target even
+    // when it does not exist so containment checks see where a later write
+    // would actually land.
+    if (stat.isSymbolicLink()) {
+      if (_seen.has(current)) return path.resolve(absPath);
+      _seen.add(current);
+      let target;
+      try {
+        target = path.resolve(path.dirname(current), fs.readlinkSync(current));
+      } catch {
+        return path.resolve(absPath);
+      }
+      const resolvedTarget = realpathExistingPrefix(target, _seen);
+      return missingParts.length > 0
+        ? path.join(resolvedTarget, ...missingParts)
+        : resolvedTarget;
+    }
+    break;
   }
 
   let realCurrent;

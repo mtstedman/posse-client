@@ -315,6 +315,34 @@ export class DisplayInputController {
     this._inputBuf = "";
   }
 
+  _startSessionCommand() {
+    this._inputMode = "session";
+    this._activeQ = null;
+    this._inputBuf = "";
+  }
+
+  _submitSessionCommand() {
+    const command = this._inputBuf.trim();
+    if (!command || !this.onSessionCommand) {
+      this._inputMode = false;
+      this._inputBuf = "";
+      this.addEvent(`${C.dim}Session command canceled${C.reset}`);
+      this._drainQuestions();
+      return;
+    }
+    this._inputMode = false;
+    this._inputBuf = "";
+    this.addEvent(`${C.cyan}Session command started: ${command.slice(0, 80)}${C.reset}`);
+    Promise.resolve(this.onSessionCommand(command)).then(() => {
+      this.addEvent(`${C.green}\u2713 Session command completed${C.reset}`);
+      this.requestRender({ force: true });
+    }, (error) => {
+      this.addEvent(`${C.red}Session command failed: ${error?.message || error}${C.reset}`);
+      this.requestRender({ force: true });
+    });
+    this._drainQuestions();
+  }
+
   _submitAsk() {
     const question = this._inputBuf.trim();
 
@@ -504,6 +532,12 @@ export class DisplayInputController {
         onEscape: () => this._cancelBufferedInput("Ask"),
       });
 
+    } else if (this._inputMode === "session") {
+      this._handleBufferedInputKeypress(str, key, {
+        onReturn: () => this._submitSessionCommand(),
+        onEscape: () => this._cancelBufferedInput("Session command"),
+      });
+
     } else if (this._inputMode === "image") {
       this._handleBufferedInputKeypress(str, key, {
         onReturn: () => this._submitImage(),
@@ -688,6 +722,9 @@ export class DisplayInputController {
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "i") && this.onInject) {
         this._startInject();
+        this.requestRender({ force: true });
+      } else if (matchesHotkey(str, key, "u") && this.onSessionCommand) {
+        this._startSessionCommand();
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "k") && this.onKill && this.workers.size > 0) {
         this._inputMode = "kill";

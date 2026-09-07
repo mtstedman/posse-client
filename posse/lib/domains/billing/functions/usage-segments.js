@@ -1,6 +1,6 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { providerLongContextRateMultipliers } from "../../../catalog/provider-economics.js";
-import { estimateBillableInputTokens, estimateCallCost } from "./pricing.js";
+import { estimateBillableTokens, estimateCallCost } from "./pricing.js";
 
 const SOURCES = new Set(["live", "rollout_recovered", "aggregate_only"]);
 const PRECISIONS = new Set(["exact", "recovered_exact", "aggregate_only", "incomplete"]);
@@ -176,6 +176,7 @@ export function summarizeUsageSegments(agentCallId, {
     longContextTierInputTokens: 0,
     durationMs: 0,
     billableInputTokens: exact ? 0 : null,
+    billableTokens: exact ? 0 : null,
     costUsd: exact ? 0 : null,
   };
   let exactCostAvailable = exact;
@@ -206,15 +207,18 @@ export function summarizeUsageSegments(agentCallId, {
       });
       if (priced.source !== "none" && Number.isFinite(priced.costUsd)) totals.costUsd += priced.costUsd;
       else exactCostAvailable = false;
-      totals.billableInputTokens += estimateBillableInputTokens({
+      const billable = estimateBillableTokens({
         provider: segment.provider,
         modelName: segment.model_name,
         modelTier,
         inputTokens: segment.input_tokens,
+        outputTokens: segment.output_tokens,
         cachedInputTokens: segment.cached_input_tokens,
         cacheCreationInputTokens: segment.cache_creation_input_tokens,
         longContextInputTokens: pricingInput,
-      }).billableInputTokens;
+      });
+      totals.billableInputTokens += billable.billableInputTokens;
+      totals.billableTokens += billable.billableTokens;
     }
   }
   if (!exactCostAvailable) totals.costUsd = null;
@@ -247,6 +251,7 @@ export function summarizeUsageSegments(agentCallId, {
     exact &&= aggregateMatches;
     if (!exact) {
       totals.billableInputTokens = null;
+      totals.billableTokens = null;
       totals.costUsd = null;
     }
   }
@@ -352,7 +357,7 @@ export function resolveCanonicalCallAccounting(call = {}, {
         ? cacheCreationInputTokens
         : segments.cacheCreationInputTokens,
       billableInputTokens: segments.billableInputTokens,
-      billableTokens: segments.exact ? segments.billableInputTokens + segments.outputTokens : null,
+      billableTokens: segments.exact ? segments.billableTokens : null,
       costUsd,
       costSource: segments.exact
         ? `segments:${segments.precision}`

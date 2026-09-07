@@ -226,6 +226,7 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   let totalInput = 0;
   let totalCachedInput = 0;
   let totalBillableInput = 0;
+  let totalBillable = 0;
   let totalOutput = 0;
   let totalTurns = 0;
   let outputTruncatedCalls = 0;
@@ -244,6 +245,7 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     totalInput += call.input_tokens || 0;
     totalCachedInput += call.cached_input_tokens || 0;
     totalBillableInput += call.billable_input_tokens || 0;
+    totalBillable += call.billable_tokens || 0;
     totalOutput += call.output_tokens || 0;
     totalTurns += call.turns_used || 0;
     if (call.output_truncated) outputTruncatedCalls += 1;
@@ -270,7 +272,7 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     cachedInputTokens: totalCachedInput,
     uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
     billableInputTokens: totalBillableInput,
-    billableTokens: inexactUsageCalls > 0 ? null : totalBillableInput + totalOutput,
+    billableTokens: inexactUsageCalls > 0 ? null : totalBillable,
     outputTokens: totalOutput,
     turnsUsed: totalTurns,
     outputTruncatedCalls,
@@ -316,6 +318,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   let totalInput = 0;
   let totalCachedInput = 0;
   let totalBillableInput = 0;
+  let totalBillable = 0;
   let totalOutput = 0;
   const childBreakdowns = new Map();
   for (const raw of rows) {
@@ -330,6 +333,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
         inputTokens: 0,
         cachedInputTokens: 0,
         billableInputTokens: 0,
+        billableTokens: 0,
         outputTokens: 0,
         turnsUsed: 0,
         outputTruncatedCalls: 0,
@@ -346,6 +350,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     entry.inputTokens += call.input_tokens || 0;
     entry.cachedInputTokens += call.cached_input_tokens || 0;
     entry.billableInputTokens += call.billable_input_tokens || 0;
+    entry.billableTokens += call.billable_tokens || 0;
     entry.outputTokens += call.output_tokens || 0;
     entry.turnsUsed += call.turns_used || 0;
     if (call.output_truncated) entry.outputTruncatedCalls += 1;
@@ -359,6 +364,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     totalInput += call.input_tokens || 0;
     totalCachedInput += call.cached_input_tokens || 0;
     totalBillableInput += call.billable_input_tokens || 0;
+    totalBillable += call.billable_tokens || 0;
     totalOutput += call.output_tokens || 0;
   }
 
@@ -369,7 +375,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     entry.costPrecision = costPrecision(entry);
     entry.costUsd = exposedCostUsd(entry.knownCostUsd, entry.costPrecision);
     entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
-    entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableInputTokens + entry.outputTokens;
+    entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableTokens;
     entry.cacheDiscountRatio = entry.inexactUsageCalls > 0
       ? null
       : aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
@@ -404,7 +410,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     billableInputTokens: totalBillableInput,
     billableTokens: out.some((entry) => entry.inexactUsageCalls > 0)
       ? null
-      : totalBillableInput + totalOutput,
+      : totalBillable,
     outputTokens: totalOutput,
     turnsUsed: out.reduce((acc, entry) => acc + (entry.turnsUsed || 0), 0),
     outputTruncatedCalls: out.reduce((acc, entry) => acc + (entry.outputTruncatedCalls || 0), 0),
@@ -462,6 +468,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
         inputTokens: 0,
         cachedInputTokens: 0,
         billableInputTokens: 0,
+        billableTokens: 0,
         outputTokens: 0,
         turnsUsed: 0,
         outputTruncatedCalls: 0,
@@ -478,6 +485,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
     entry.inputTokens += call.input_tokens || 0;
     entry.cachedInputTokens += call.cached_input_tokens || 0;
     entry.billableInputTokens += call.billable_input_tokens || 0;
+    entry.billableTokens += call.billable_tokens || 0;
     entry.outputTokens += call.output_tokens || 0;
     entry.turnsUsed += call.turns_used || 0;
     if (call.output_truncated) entry.outputTruncatedCalls += 1;
@@ -495,7 +503,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
     entry.costPrecision = costPrecision(entry);
     entry.totalCostUsd = exposedCostUsd(entry.knownCostUsd, entry.costPrecision);
     entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
-    entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableInputTokens + entry.outputTokens;
+    entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableTokens;
     entry.cacheDiscountRatio = entry.inexactUsageCalls > 0
       ? null
       : aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
@@ -512,6 +520,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   const totalInput = enriched.reduce((acc, e) => acc + e.inputTokens, 0);
   const totalCachedInput = enriched.reduce((acc, e) => acc + e.cachedInputTokens, 0);
   const totalBillableInput = enriched.reduce((acc, e) => acc + e.billableInputTokens, 0);
+  const totalBillable = enriched.reduce((acc, e) => acc + (e.billableTokens || 0), 0);
   const totalOutput = enriched.reduce((acc, e) => acc + e.outputTokens, 0);
   const totalCallCount = enriched.reduce((acc, entry) => acc + entry.callCount, 0);
   const totalUnknownCostCalls = enriched.reduce((acc, entry) => acc + entry.unknownCostCalls, 0);
@@ -533,7 +542,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
     billableInputTokens: totalBillableInput,
     billableTokens: enriched.some((entry) => entry.inexactUsageCalls > 0)
       ? null
-      : totalBillableInput + totalOutput,
+      : totalBillable,
     outputTokens: totalOutput,
     turnsUsed: enriched.reduce((acc, e) => acc + (e.turnsUsed || 0), 0),
     outputTruncatedCalls: enriched.reduce((acc, e) => acc + (e.outputTruncatedCalls || 0), 0),

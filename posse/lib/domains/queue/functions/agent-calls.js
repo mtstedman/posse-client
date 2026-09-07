@@ -140,14 +140,23 @@ export function createAgentCall({
     throw new Error(`unknown agent call child_kind: ${normalizedChildKind}`);
   }
   const db = getDb();
+  let delegation = null;
+  if (job_id != null) {
+    try {
+      delegation = db.prepare(`
+        SELECT originator_instance_id, executor_instance_id
+        FROM work_item_delegations WHERE local_job_id = ?
+      `).get(job_id);
+    } catch { /* pre-v18/minimal test schema: no delegation tags */ }
+  }
   const info = db.prepare(`
     INSERT INTO agent_calls (
       work_item_id, job_id, attempt_id, parent_agent_call_id, child_kind,
       role, model_tier, model_name, activity,
       prompt_chars, max_turns_configured, max_output_tokens_configured, provider,
       reasoning_effort, extended_thinking, atlas_method, atlas_prefetch_status, skills,
-      prior_session_handle, session_handle, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      prior_session_handle, session_handle, originator_instance_id, executor_instance_id, started_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     work_item_id, job_id, attempt_id, parentAgentCallId, normalizedChildKind,
     role, model_tier, model_name, activity,
@@ -155,6 +164,8 @@ export function createAgentCall({
     reasoning_effort, extended_thinking ? 1 : 0, atlas_method, atlas_prefetch_status, normalizeSkillsColumn(skills),
     prior_session_handle == null ? null : String(prior_session_handle),
     session_handle == null ? null : String(session_handle),
+    delegation?.originator_instance_id || null,
+    delegation?.executor_instance_id || null,
     now(),
   );
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(info.lastInsertRowid);

@@ -8,6 +8,7 @@ import { getLiveSchedulerBlockMessage } from "../../queue/functions/locks.js";
 import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
 import { syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
+import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import {
   createPairingRemoteClient,
   validatePairingRemoteResponse,
@@ -44,15 +45,30 @@ import {
   clearPairingPeerSnapshot,
   collectPairingPresence,
   diffPairingPeerActivity,
+  readPairingPeerSnapshot,
   writePairingPeerSnapshot,
 } from "./work-items.js";
 import {
   beginPairingPromotion,
+  clearPairingPromotionJournal,
   markPairingPromotion,
   promotePairingTrunk,
   readPairingPromotionJournal,
 } from "./promotion.js";
 import { waitForPairingSchedulerStop } from "./shutdown.js";
+import {
+  addGitHubMemberDeployKey,
+  cleanupGitHubSessionRepository,
+  configureRepositorySessionSsh,
+  githubRepositoryName,
+  prepareSessionSshIdentity,
+  provisionGitHubSessionRepository,
+  readLocalSshCommand,
+  removeGitHubMemberDeployKeys,
+  removeSessionCredentialDirectory,
+  restoreRepositorySsh,
+  setGitHubDefaultBranch,
+} from "./github-session.js";
 
 // This is both the lease heartbeat and the peer-work sync cadence. Five
 // seconds keeps the terminal feed live without turning queue changes into one
@@ -185,6 +201,7 @@ export function parsePairArgs(argv = []) {
   let branch = null;
   let hasRemoteFlag = false;
   let hasBranchFlag = false;
+  let keepBranch = false;
   const positional = [];
   const assignFlag = (name, value) => {
     const normalized = String(value || "").trim();
@@ -217,6 +234,15 @@ export function parsePairArgs(argv = []) {
       json = true;
       continue;
     }
+    if (arg === "--keep-branch") {
+      if (keepBranch) {
+        throw Object.assign(new Error("--keep-branch may only be specified once"), {
+          code: "pairing_option_duplicate",
+        });
+      }
+      keepBranch = true;
+      continue;
+    }
     if (arg === "--remote" || arg === "--branch") {
       const value = args[index + 1];
       assignFlag(arg, value != null && !value.startsWith("-") ? value : null);
@@ -242,7 +268,8 @@ export function parsePairArgs(argv = []) {
   const actionLengths = new Map([
     ["host", [1, 1]], ["join", [2, 2]], ["leave", [1, 1]], ["close", [1, 1]],
     ["status", [1, 1]], ["admit", [2, 2]], ["members", [1, 1]], ["pending", [1, 1]],
-    ["kick", [2, 2]], ["invite", [2, 2]],
+    ["kick", [2, 2]], ["invite", [2, 2]], ["scope", [3, 3]], ["policy", [2, 2]],
+    ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
   ]);
   if (actionLengths.has(first)) {
     const [minimumLength, maximumLength] = actionLengths.get(first);
@@ -264,6 +291,8 @@ export function parsePairArgs(argv = []) {
       remote,
       branch,
     };
+    if (keepBranch) parsed.keepBranch = true;
+    if (positional[2]) parsed.value = positional[2];
   } else {
     if (positional.length > 1) {
       throw Object.assign(new Error(`Unexpected pairing argument: ${positional[1]}`), {
@@ -275,6 +304,11 @@ export function parsePairArgs(argv = []) {
   if (parsed.action !== "host" && (hasRemoteFlag || hasBranchFlag)) {
     const option = hasRemoteFlag ? "--remote" : "--branch";
     throw Object.assign(new Error(`${option} is only valid when hosting a pairing`), {
+      code: "pairing_option_not_allowed",
+    });
+  }
+  if (keepBranch && first !== "close") {
+    throw Object.assign(new Error("--keep-branch is only valid with session close"), {
       code: "pairing_option_not_allowed",
     });
   }
@@ -318,6 +352,7 @@ async function restoreLocalPairing(projectDir, state) {
       assertPairingSchedulerStopped();
       // Stop new shared-trunk publications before changing checkout state.
       setSetting(SETTING_KEYS.SHARED_TRUNK_ENABLED, "false", { projectDir });
+      restoreRepositorySsh(projectDir, state.original_ssh_command);
       restoreOriginalBranch(projectDir, state.original_branch);
       restorePairingSettings(projectDir, state.originalSettings);
       if (state.added_remote_name) {
@@ -327,7 +362,9 @@ async function restoreLocalPairing(projectDir, state) {
         });
       }
     });
+    if (state.credential_directory) removeSessionCredentialDirectory(state.credential_directory);
     markPairingPhase(state.id, "left");
+    pulseTokenManager.setSessionContext(null);
     return { ok: true };
   } catch (error) {
     const message = safeError(error);
@@ -348,6 +385,8 @@ async function leaveRemoteBestEffort(remoteClient, state) {
 async function unpair(projectDir, remoteClient, state = getLivePairingState()) {
   clearPairingPeerSnapshot();
   if (!state) return { ok: true, alreadyLeft: true };
+  pulseTokenManager.clearAuthentication();
+  pulseTokenManager.setSessionContext(null);
   markPairingPhase(state.id, "leaving");
   const remote = await leaveRemoteBestEffort(remoteClient, state);
   const local = await restoreLocalPairing(projectDir, getPairingState(state.id));
@@ -402,6 +441,9 @@ async function monitorPairing(remoteClient, stateId, {
   try {
     while (!forceRequested && !gracefulRequested && !pairingProcessShouldStop(stateId)) {
       const state = getPairingState(stateId);
+      if (Number(state?.process_pid) !== process.pid && getLiveSchedulerBlockMessage("main")) {
+        return { reason: "scheduler_handoff" };
+      }
       let status;
       try {
         status = validatePairingRemoteResponse(
@@ -409,11 +451,25 @@ async function monitorPairing(remoteClient, stateId, {
           await remoteClient.heartbeat(state.relay_token, collectPairingPresence(projectDir)),
         );
         assertPairingStatusMatches(state, status);
+        const nextScope = status.scope_set || {};
+        const scopeChanged = JSON.stringify(nextScope) !== JSON.stringify(state.scopeSet || {});
+        updatePairingEnrollment(state.id, {
+          phase: "active",
+          scopeSet: nextScope,
+          computePolicy: status.compute_policy,
+          integrationPolicy: status.integration_policy,
+          enrollmentOpen: status.enrollment_open,
+        });
+        if (scopeChanged) pulseTokenManager.clearAuthentication();
         touchPairingState(stateId);
         writePairingPeerSnapshot(status);
         printPeerActivityChanges(C, status, seenPeerActivity, { json });
         consecutiveFailures = 0;
       } catch (error) {
+        if ([401, 403].includes(Number(error?.status))) {
+          pulseTokenManager.clearAuthentication();
+          throw error;
+        }
         consecutiveFailures += 1;
         if (consecutiveFailures >= 4) throw error;
         await sleep(2_000);
@@ -512,9 +568,11 @@ async function finishHostShutdown(root, remoteClient, state, {
   C,
   json,
   reason,
+  publish = true,
+  keepBranch = false,
 } = {}) {
-  let journal = beginPairingPromotion(state, { projectDir: root, reason });
-  journal = markPairingPromotion(journal, { phase: graceful ? "draining" : "closing" });
+  let journal = keepBranch ? null : beginPairingPromotion(state, { projectDir: root, reason });
+  if (journal) journal = markPairingPromotion(journal, { phase: graceful ? "draining" : "closing" });
   if (graceful) {
     const closing = validatePairingRemoteResponse(
       "close",
@@ -540,18 +598,38 @@ async function finishHostShutdown(root, remoteClient, state, {
     const remote = await leaveRemoteBestEffort(remoteClient, state);
     if (remote?.error) throw Object.assign(new Error(remote.error), { code: remote.code });
   }
-  journal = markPairingPromotion(journal, { phase: "clients_drained" });
+  if (journal) journal = markPairingPromotion(journal, { phase: "clients_drained" });
 
-  const synced = await syncSharedTrunkFromOrigin(root);
+  const peerSnapshot = readPairingPeerSnapshot();
+  const synced = await syncSharedTrunkFromOrigin(root, {
+    provenance: state.baseline_oid ? {
+      baselineOid: state.baseline_oid,
+      gitIdentities: (peerSnapshot?.peers || [])
+        .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []),
+    } : null,
+  });
   if (!synced.ok) {
     throw Object.assign(new Error(`Final shared-trunk sync failed: ${synced.reason || "unknown error"}`), {
       code: "pairing_shutdown_sync_failed",
       result: synced,
     });
   }
-  journal = markPairingPromotion(journal, { phase: "trunk_frozen" });
+  if (journal) journal = markPairingPromotion(journal, { phase: "trunk_frozen" });
+  if (keepBranch) {
+    const restored = await restoreLocalPairing(root, getPairingState(state.id));
+    if (!restored.ok) {
+      throw Object.assign(new Error(restored.message), { code: restored.code || "pairing_restore_blocked" });
+    }
+    return {
+      ok: true,
+      kept: true,
+      sourceBranch: state.shared_branch,
+      sourceUrl: state.remote_url,
+    };
+  }
   const promoted = await promotePairingTrunk(root, {
     journal,
+    publish,
     onProgress: (message) => {
       if (!json) console.log(`  ${C.cyan}[pair integrate]${C.reset} ${message}`);
     },
@@ -561,14 +639,23 @@ async function finishHostShutdown(root, remoteClient, state, {
       code: promoted.reason || "pairing_promotion_deferred",
     });
   }
+  if (!publish) {
+    if (!json) {
+      console.log(`  ${C.yellow}Integration candidate preserved${C.reset}; run \`posse session integrate\` to publish it.\n`);
+    }
+    return promoted;
+  }
   const restored = await restoreLocalPairing(root, getPairingState(state.id));
   if (!restored.ok) {
     throw Object.assign(new Error(restored.message), { code: restored.code || "pairing_restore_blocked" });
   }
-  if (!json) {
+  const cleanup = state.temporary_repository
+    ? cleanupGitHubSessionRepository(state.temporary_repository, { cwd: root })
+    : null;
+  if (!json && publish) {
     console.log(`  ${C.green}Integrated and published${C.reset} ${promoted.sourceBranch} -> ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
   }
-  return promoted;
+  return { ...promoted, cleanup };
 }
 
 async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
@@ -593,7 +680,11 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       `Host pairing must start on ${remote}/${defaultBranch} so automatic close integrates into the repository trunk; current branch is ${original.branch}`,
     ), { code: "pairing_host_not_on_default_branch" });
   }
-  const fingerprint = repositoryFingerprint(url);
+  if (!githubRepositoryName(url)) {
+    throw Object.assign(new Error(
+      "Session hosting currently requires a GitHub origin so Posse can isolate members in a private throwaway repository",
+    ), { code: "pairing_provider_unsupported" });
+  }
   const state = createPairingState({
     role: "host",
     remoteName: remote,
@@ -602,18 +693,46 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
     originalBranch: original.branch,
     originalHead: original.head,
     originalSettings: snapshotPairingSettings(root),
+    instanceId: ensureBridgeInstanceId(root),
+    originalSshCommand: readLocalSshCommand(root),
   });
+  let sessionRemote = remote;
+  let sessionUrl = url;
+  let provisioned = null;
   let publishedOid = null;
   let started = null;
   try {
+    if (githubRepositoryName(url)) {
+      provisioned = provisionGitHubSessionRepository({
+        projectDir: root,
+        sessionId: state.id,
+        originRemoteUrl: url,
+        defaultBranch,
+      });
+      sessionRemote = pairingTemporaryRemoteName(root, state.id);
+      sessionUrl = provisioned.remoteUrl;
+      addPairingRemote(root, sessionRemote, sessionUrl);
+      configureRepositorySessionSsh(root, provisioned.identity.sshCommand);
+      updatePairingEnrollment(state.id, {
+        remoteName: sessionRemote,
+        addedRemoteName: sessionRemote,
+        addedRemoteUrl: sessionUrl,
+        originRemoteName: remote,
+        originRemoteUrl: url,
+        temporaryRepository: provisioned.repository,
+        credentialDirectory: provisioned.identity.directory,
+        phase: "enrolling",
+      });
+    }
     await withWorktreeLockAsync(root, root, async () => {
       assertPairingSchedulerStopped();
       publishedOid = createAndPublishPairingBranch(root, {
-        remote,
+        remote: sessionRemote,
         branch: sharedBranch,
-        expectedUrl: url,
+        expectedUrl: sessionUrl,
       });
-      configurePairingSettings(root, { remote, branch: sharedBranch });
+      if (provisioned) setGitHubDefaultBranch(provisioned.repository, sharedBranch, { cwd: root });
+      configurePairingSettings(root, { remote: sessionRemote, branch: sharedBranch });
       const preflight = await runSharedTrunkAccessPreflight(root);
       if (!preflight.ok) {
         throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
@@ -621,18 +740,19 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
     });
     started = validatePairingRemoteResponse("sessions", await remoteClient.start({
       instance_id: ensureBridgeInstanceId(root),
-      repository_url: url,
-      repository_fingerprint: fingerprint,
+      repository_url: sessionUrl,
+      repository_fingerprint: repositoryFingerprint(sessionUrl),
       branch: sharedBranch,
     }));
     assertPairingRepositoryUnchanged({
-      url,
-      fingerprint,
+      url: sessionUrl,
+      fingerprint: repositoryFingerprint(sessionUrl),
       branch: sharedBranch,
     }, started.repository);
     updatePairingEnrollment(state.id, {
       remoteSessionId: started.session_id,
       relayToken: started.host_token,
+      baselineOid: publishedOid,
     });
 
     if (json) {
@@ -641,7 +761,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         role: "host",
         code: started.code,
         branch: sharedBranch,
-        remote,
+        remote: sessionRemote,
         session_id: started.session_id,
       }));
     } else {
@@ -660,8 +780,12 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         C,
         json,
         reason: outcome.reason,
+        keepBranch: liveState.close_action === "keep-branch",
       });
       return { ok: true, role: "host", outcome: outcome.reason, promotion };
+    }
+    if (outcome.reason === "scheduler_handoff") {
+      return { ok: true, role: "host", outcome: outcome.reason };
     }
     if (outcome.reason !== "local_leave") {
       const result = await unpair(root, remoteClient, getPairingState(state.id));
@@ -672,7 +796,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
     if (!started && publishedOid) {
       try {
         await withWorktreeLockAsync(root, root, () => deletePublishedPairingBranch(root, {
-          remote,
+          remote: sessionRemote,
           branch: sharedBranch,
           expectedOid: publishedOid,
         }));
@@ -685,6 +809,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       relay_token: started.host_token,
     });
     const restored = await restoreLocalPairing(root, getPairingState(state.id));
+    if (provisioned) cleanupGitHubSessionRepository(provisioned.repository, { cwd: root });
     if (!restored.ok) error.message = `${safeError(error)}; automatic restore blocked: ${restored.message}`;
     throw error;
   }
@@ -713,6 +838,11 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       code: "pairing_repository_fingerprint_mismatch",
     });
   }
+  if (!githubRepositoryName(metadata.url)) {
+    throw Object.assign(new Error(
+      "This client only joins sessions backed by an isolated GitHub throwaway repository",
+    ), { code: "pairing_provider_unsupported" });
+  }
   const sharedBranch = validateBranchName(root, metadata.branch);
   if (original.branch === sharedBranch) {
     throw Object.assign(new Error(
@@ -720,6 +850,7 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
     ), { code: "pairing_local_branch_checked_out" });
   }
   const existingRemote = findPairingRemote(root, metadata.url);
+  const instanceId = ensureBridgeInstanceId(root);
   const chosenRemote = existingRemote?.remote || pairingTemporaryRemoteName(root, resolved.session_id);
   const state = createPairingState({
     role: "member",
@@ -729,12 +860,25 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
     originalBranch: original.branch,
     originalHead: original.head,
     originalSettings: snapshotPairingSettings(root),
+    instanceId,
+    originalSshCommand: readLocalSshCommand(root),
   });
+  let sessionIdentity = null;
   let joined = null;
   try {
+    if (githubRepositoryName(metadata.url)) {
+      sessionIdentity = prepareSessionSshIdentity(root, resolved.session_id);
+      configureRepositorySessionSsh(root, sessionIdentity.sshCommand);
+      updatePairingEnrollment(state.id, {
+        credentialDirectory: sessionIdentity.directory,
+        phase: "enrolling",
+      });
+    }
     joined = validatePairingRemoteResponse(
       "join",
-      await remoteClient.requestJoin(code, ensureBridgeInstanceId(root)),
+      await remoteClient.requestJoin(code, instanceId, {
+        sshPublicKey: sessionIdentity?.publicKeyText || null,
+      }),
     );
     if (joined.session_id !== resolved.session_id) {
       throw Object.assign(new Error("Pairing session changed while admission was requested"), {
@@ -768,7 +912,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       }
       markPairingPhase(state.id, "enrolling");
     }
+    pulseTokenManager.setSessionContext({ instanceId, sessionId: joined.session_id });
     let pairingRemote = existingRemote;
+    let baselineOid = null;
     await withWorktreeLockAsync(root, root, async () => {
       assertPairingSchedulerStopped();
       if (!pairingRemote) {
@@ -783,13 +929,18 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       // This fetch + leased dry-run push is the per-user repo-access gate.
       // Admission only activates the relay credential; the member is not
       // counted live until this preflight succeeds and monitoring begins.
-      preflightAndCheckoutPairingBranch(root, {
+      baselineOid = preflightAndCheckoutPairingBranch(root, {
         remote: pairingRemote.remote,
         branch: sharedBranch,
         expectedUrl: metadata.url,
       });
       configurePairingSettings(root, { remote: pairingRemote.remote, branch: sharedBranch });
-      const preflight = await runSharedTrunkAccessPreflight(root);
+      const preflight = await runSharedTrunkAccessPreflight(root, {
+        requireScopeEnforcement: true,
+        onCapabilities: (capabilities) => {
+          pulseTokenManager.confirmNativeScopeEnforcement(capabilities?.scopeEnforcement === true);
+        },
+      });
       if (!preflight.ok) {
         throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
       }
@@ -797,6 +948,7 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
     updatePairingEnrollment(state.id, {
       remoteSessionId: joined.session_id,
       relayToken: memberToken,
+      baselineOid,
       phase: "active",
     });
     if (json) {
@@ -812,6 +964,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       console.log(`  ${C.dim}This pairing session stays connected until the host closes it, Ctrl-C, or \`posse pair leave\`.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
+    if (outcome.reason === "scheduler_handoff") {
+      return { ok: true, role: "member", outcome: outcome.reason };
+    }
     if (outcome.reason !== "local_leave") {
       await waitForPairingSchedulerStop({
         state: getPairingState(state.id),
@@ -949,7 +1104,7 @@ async function runStatus({
   return result;
 }
 
-async function runAdmit({ remoteClient, code, C, json }) {
+async function runAdmit({ projectDir, remoteClient, code, C, json }) {
   const state = getLivePairingState();
   if (!state || state.role !== "host" || !state.relay_token) {
     throw Object.assign(new Error("This clone is not hosting a live session"), {
@@ -966,6 +1121,18 @@ async function runAdmit({ remoteClient, code, C, json }) {
     await remoteClient.admit(state.relay_token, code),
   );
   assertPairingStatusMatches(state, admitted);
+  if (state.temporary_repository) {
+    try {
+      addGitHubMemberDeployKey(state.temporary_repository, admitted.admitted_member, {
+        cwd: repositoryRoot(projectDir),
+      });
+    } catch (error) {
+      if (admitted.admitted_member?.id) {
+        try { await remoteClient.kick(state.relay_token, admitted.admitted_member.id); } catch { /* revoke pulse best effort */ }
+      }
+      throw error;
+    }
+  }
   const result = { ok: true, admitted: true, countersign: String(code).toUpperCase() };
   if (json) console.log(JSON.stringify(result));
   else console.log(`\n  ${C.green}Admitted session member ${result.countersign}.${C.reset}\n`);
@@ -982,7 +1149,7 @@ function liveHostState() {
   return state;
 }
 
-async function runSessionManagement({ remoteClient, action, code, C, json }) {
+async function runSessionManagement({ projectDir, remoteClient, action, code, value, C, json }) {
   const state = liveHostState();
   if (["members", "pending"].includes(action)) {
     const result = await remoteClient.members(state.relay_token, { pendingOnly: action === "pending" });
@@ -999,6 +1166,9 @@ async function runSessionManagement({ remoteClient, action, code, C, json }) {
   }
   let status;
   if (action === "kick") {
+    if (state.temporary_repository) {
+      removeGitHubMemberDeployKeys(state.temporary_repository, code, { cwd: repositoryRoot(projectDir) });
+    }
     status = await remoteClient.kick(state.relay_token, code);
   } else if (action === "invite") {
     if (!["open", "close"].includes(code)) {
@@ -1007,12 +1177,74 @@ async function runSessionManagement({ remoteClient, action, code, C, json }) {
       });
     }
     status = await remoteClient.setInviteOpen(state.relay_token, code === "open");
+  } else if (action === "scope") {
+    let parsed;
+    try {
+      parsed = JSON.parse(String(value || ""));
+    } catch {
+      throw Object.assign(new Error("Session scope must be valid JSON"), { code: "pairing_scope_invalid" });
+    }
+    const role = String(parsed?.role || "operator");
+    const scopeSet = parsed?.write || parsed;
+    status = await remoteClient.setScope(state.relay_token, code, scopeSet, role);
+  } else if (action === "policy") {
+    if (!["each-member", "capability-routing", "host-only"].includes(code)) {
+      throw Object.assign(new Error("Session compute policy must be each-member, capability-routing, or host-only"), {
+        code: "pairing_policy_invalid",
+      });
+    }
+    status = await remoteClient.setPolicy(state.relay_token, code);
   }
   status = validatePairingRemoteResponse("status", status);
   assertPairingStatusMatches(state, status);
   const result = { ok: true, action, status };
   if (json) console.log(JSON.stringify(result));
   else console.log(`\n  ${C.green}Session ${action} updated.${C.reset}\n`);
+  return result;
+}
+
+async function runPendingIntegration({ projectDir, action, C, json }) {
+  const root = repositoryRoot(projectDir);
+  const journal = readPairingPromotionJournal();
+  if (!journal) {
+    const result = { ok: true, skipped: "no_pending_integration" };
+    if (json) console.log(JSON.stringify(result));
+    else console.log("\n  No session integration is pending.\n");
+    return result;
+  }
+  if (action === "abandon-integration") {
+    clearPairingPromotionJournal();
+    const state = getLivePairingState();
+    const restored = state ? await restoreLocalPairing(root, state) : { ok: true, alreadyLeft: true };
+    const suffix = String(journal.session_id || "recovery")
+      .replace(/[^a-zA-Z0-9-]/gu, "")
+      .slice(0, 64) || "recovery";
+    const result = {
+      ok: restored.ok,
+      abandoned: true,
+      candidateRef: journal.candidate_sha ? `refs/posse/pairing-promotions/${suffix}` : null,
+      restored,
+    };
+    if (json) console.log(JSON.stringify(result));
+    else console.log(`\n  Session integration abandoned${result.candidateRef ? `; candidate preserved at ${result.candidateRef}` : ""}.\n`);
+    return result;
+  }
+  const promoted = await promotePairingTrunk(root, {
+    journal,
+    publish: true,
+    onProgress: (message) => {
+      if (!json) console.log(`  ${C.cyan}[session integrate]${C.reset} ${message}`);
+    },
+  });
+  if (!promoted.ok) return promoted;
+  const state = getLivePairingState();
+  const restored = state ? await restoreLocalPairing(root, state) : { ok: true, alreadyLeft: true };
+  const cleanup = journal.temporary_repository
+    ? cleanupGitHubSessionRepository(journal.temporary_repository, { cwd: root })
+    : null;
+  const result = { ...promoted, restored, cleanup };
+  if (json) console.log(JSON.stringify(result));
+  else console.log(`\n  ${C.green}Session integration published${C.reset} ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
   return result;
 }
 
@@ -1025,7 +1257,7 @@ export async function runPairingCommand(argv = [], {
 } = {}) {
   const args = parsePairArgs(argv);
   let client = remoteClient;
-  if (!client && args.action !== "status") {
+  if (!client && !["status", "integrate", "abandon-integration"].includes(args.action)) {
     try {
       client = remoteClientFactory();
     } catch (error) {
@@ -1035,9 +1267,12 @@ export async function runPairingCommand(argv = [], {
   }
   if (args.action === "host") return runHost({ ...args, projectDir, remoteClient: client, C });
   if (args.action === "join") return runJoin({ ...args, projectDir, remoteClient: client, C });
-  if (args.action === "admit") return runAdmit({ ...args, remoteClient: client, C });
-  if (["members", "pending", "kick", "invite"].includes(args.action)) {
-    return runSessionManagement({ ...args, remoteClient: client, C });
+  if (args.action === "admit") return runAdmit({ ...args, projectDir, remoteClient: client, C });
+  if (["integrate", "abandon-integration"].includes(args.action)) {
+    return runPendingIntegration({ ...args, projectDir, C });
+  }
+  if (["members", "pending", "kick", "invite", "scope", "policy"].includes(args.action)) {
+    return runSessionManagement({ ...args, projectDir, remoteClient: client, C });
   }
   if (args.action === "status") {
     return runStatus({
@@ -1054,13 +1289,27 @@ export async function runPairingCommand(argv = [], {
   const root = repositoryRoot(projectDir);
   let result;
   if (state?.role === "host" && pairingProcessIsAlive(state) && state.process_pid !== process.pid) {
+    if (args.keepBranch) updatePairingEnrollment(state.id, { closeAction: "keep-branch" });
     const closing = validatePairingRemoteResponse(
       "close",
       await client.close(state.relay_token, "graceful"),
     );
     assertPairingStatusMatches(state, closing);
-    result = { ok: true, requested: true, role: "host", status: closing.status };
-    if (!args.json) console.log("\n  Graceful close requested; the host monitor will drain and integrate the session.\n");
+    if (!args.json) console.log("\n  Graceful close requested; waiting for the host scheduler to drain.\n");
+    await waitForPairingSchedulerStop({
+      state,
+      graceful: true,
+      onProgress: (message) => {
+        if (!args.json) console.log(`  ${C.cyan}[session drain]${C.reset} ${message}`);
+      },
+    });
+    result = await finishHostShutdown(root, client, getPairingState(state.id), {
+      graceful: true,
+      C,
+      json: args.json,
+      reason: "host_leave",
+      keepBranch: args.keepBranch || state.close_action === "keep-branch",
+    });
   } else {
     result = state?.role === "host"
       ? await finishHostShutdown(root, client, state, {
@@ -1068,6 +1317,7 @@ export async function runPairingCommand(argv = [], {
         C,
         json: args.json,
         reason: "host_leave",
+        keepBranch: args.keepBranch || state.close_action === "keep-branch",
       })
       : await unpair(root, client, state);
   }
@@ -1106,6 +1356,16 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
     }
     return { ok: true, attempted: false };
   }
+  if (journal?.phase === "candidate") {
+    return {
+      ok: false,
+      attempted: true,
+      pending: true,
+      code: "pairing_integration_required",
+      message: "Session integration candidate is ready; run `posse session integrate` or `posse session abandon-integration`",
+      journal,
+    };
+  }
   if (!journal && !state) return { ok: true, attempted: false };
   const root = repositoryRoot(projectDir);
   try {
@@ -1128,16 +1388,27 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
         C,
         json,
         reason: "host_crash_recovery",
+        publish: false,
+        keepBranch: !journal && state.close_action === "keep-branch",
       });
-      return { ok: true, attempted: true, recovered: true, promotion };
+      if (promotion.kept) return { ok: true, attempted: true, recovered: true, promotion };
+      return {
+        ok: false,
+        attempted: true,
+        pending: true,
+        code: "pairing_integration_required",
+        message: "Session integration candidate is ready; run `posse session integrate` or `posse session abandon-integration`",
+        promotion,
+      };
     }
-    const promotion = await promotePairingTrunk(root, {
+    return {
+      ok: false,
+      attempted: true,
+      pending: true,
+      code: "pairing_integration_required",
+      message: "Session integration is pending; run `posse session integrate` or `posse session abandon-integration`",
       journal,
-      onProgress: (message) => {
-        if (!json) console.log(`  ${C.cyan}[pair recover]${C.reset} ${message}`);
-      },
-    });
-    return { ok: promotion.ok, attempted: true, recovered: promotion.ok, promotion };
+    };
   } catch (error) {
     const activeJournal = readPairingPromotionJournal();
     if (activeJournal) {

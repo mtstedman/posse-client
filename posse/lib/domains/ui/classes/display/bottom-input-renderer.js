@@ -148,6 +148,22 @@ export class DisplayBottomInputRenderer {
       return lines;
     }
 
+    // ── Session command mode ──
+    if (this._inputMode === "session") {
+      lines.push("");
+      lines.push(` ${C.cyan}${C.bold}◇ Session Command${C.reset}  ${C.dim}admit, kick, scope, policy, invite, drain, close, keep, inject:${C.reset}`);
+      lines.push("");
+      const cursor = this._spinIdx % 2 === 0 ? "\u2588" : "\u258c";
+      const maxBuf = width - 5;
+      const displayBuf = this._inputBuf.length > maxBuf
+        ? "\u2026" + this._inputBuf.slice(-(maxBuf - 1))
+        : this._inputBuf;
+      lines.push(` ${C.cyan}>${C.reset} ${displayBuf}${cursor}`);
+      lines.push("");
+      lines.push(` ${C.dim}[Enter] run  [Esc] cancel${C.reset}`);
+      return lines;
+    }
+
     // ── Image mode ──
     if (this._inputMode === "image") {
       lines.push("");
@@ -358,6 +374,7 @@ export class DisplayBottomInputRenderer {
     const control = [];
 
     if (this.onInject) input.push(hint("i", "inject", C.cyan));
+    if (this.onSessionCommand) input.push(hint("u", "session", C.cyan));
     if (this.onAsk) input.push(hint("?", "ask", C.cyan));
     if (this.onImage) input.push(hint("g", "image", C.magenta));
 

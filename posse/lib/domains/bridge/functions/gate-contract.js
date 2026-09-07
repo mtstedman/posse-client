@@ -7,6 +7,7 @@ import {
 import { BRIDGE_COMMANDS } from "../../../catalog/bridge.js";
 
 export function bridgeGateKindForJob(job, payload = {}) {
+  if (payload?.subtype === "shared_trunk_provenance") return "repository_recovery";
   if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
   if (

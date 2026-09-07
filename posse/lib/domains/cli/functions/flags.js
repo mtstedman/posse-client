@@ -5,7 +5,10 @@ import {
   defaultOutputModeForMode,
   normalizeRequestKindChoice,
 } from "../../intake/functions/choices.js";
-import { mergeSuspectedDirsWithInputContexts } from "../../intake/functions/input-contexts.js";
+import {
+  assertInputContextSelection,
+  mergeSuspectedDirsWithInputContexts,
+} from "../../intake/functions/input-contexts.js";
 import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
@@ -376,6 +379,7 @@ export function parseIntakeHintsFromArgv(description, fallbackMode = "build") {
     inputSelection,
     process.cwd(),
   );
+  assertInputContextSelection(mergedDirs, inputSelection);
   return normalizeIntakeHints({
     intent_type: intentFlag,
     intent_type_source: (oneshotFlag || hasArgFlag("--intent")) ? "explicit" : "inferred",

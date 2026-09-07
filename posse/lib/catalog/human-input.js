@@ -47,6 +47,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   replan_limit: freezeChoices(["replan", "pass", "fail", "explicit_waiver"]),
   unexecuted_replan_limit: freezeChoices(["replan", "fail", "explicit_waiver"]),
   artifact_routing_admin: freezeChoices(["acknowledge"]),
+  shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
 });
 
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
@@ -158,6 +159,11 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
     allowed_actions: ["acknowledge"],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
+  shared_trunk_provenance: {
+    gate_kind: "repository_recovery",
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance],
+    allowed_source_states: ["waiting_on_human", "succeeded"],
+  },
   assessment: {
     gate_kind: "assessment_review",
     allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
@@ -227,6 +233,7 @@ export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "oneshot_dead_letter_recovery",
   "stall_exhausted_recovery",
   "artifact_routing_admin",
+  "shared_trunk_provenance",
 ]);
 
 const COORDINATION_REVIEW_TYPE_SET = new Set(HUMAN_INPUT_COORDINATION_REVIEW_TYPES);

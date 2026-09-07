@@ -2,7 +2,7 @@
 // from settings and workflow policy: it freezes only the versioned Rust/Node
 // method boundary used for feature detection.
 
-export const SHARED_TRUNK_NATIVE_CONTRACT_VERSION = 2;
+export const SHARED_TRUNK_NATIVE_CONTRACT_VERSION = 3;
 
 export const SHARED_TRUNK_NATIVE_METHODS = Object.freeze({
   CAPABILITIES: "git.capabilities",

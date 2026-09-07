@@ -444,11 +444,14 @@ export class DisplayRightPanelRenderer {
     if (!this.getPipelineData || maxRows < 2) return [];
     let data;
     try { data = this.getPipelineData(); } catch { data = []; }
+    const session = (Array.isArray(data) ? data : []).find((row) => row?.session_summary);
     const peerRows = (Array.isArray(data) ? data : []).filter((wi) => wi?.peer_read_only);
-    if (peerRows.length === 0) return [];
+    if (!session && peerRows.length === 0) return [];
 
     const lines = [
-      ` ${C.magenta}${C.bold}\u2197 Paired work${C.reset} ${C.dim}\u00b7 ${peerRows.length} WI \u00b7 read-only${C.reset}`,
+      session
+        ? ` ${C.magenta}${C.bold}\u2197 Session${C.reset} ${C.dim}\u00b7 ${session.role} \u00b7 ${session.phase} \u00b7 ${session.compute_policy} \u00b7 trunk ${session.trunk_health?.status || "pending"} \u00b7 ${session.peer_count} peer${session.peer_count === 1 ? "" : "s"}${session.pending_count ? ` \u00b7 ${session.pending_count} pending` : ""}${C.reset}`
+        : ` ${C.magenta}${C.bold}\u2197 Paired work${C.reset} ${C.dim}\u00b7 ${peerRows.length} WI \u00b7 read-only${C.reset}`,
     ];
     const detailCapacity = Math.max(1, maxRows - 1);
     const showOverflow = peerRows.length > detailCapacity && maxRows >= 3;
@@ -1744,7 +1747,18 @@ export class DisplayRightPanelRenderer {
     const contentLines = [];
     const VERDICT_ICON = { pass: `${C.green}\u2713`, fail: `${C.red}\u2717`, blocked: `${C.yellow}\u25a0`, needs_review: `${C.yellow}?`, needs_replan: `${C.magenta}\u21bb`, not_assessed: `${C.dim}\u00b7` };
 
-    for (const wi of data) {
+    const session = data.find((row) => row?.session_summary);
+    if (session) {
+      const enrollment = session.enrollment_open ? "invite open" : "invite closed";
+      contentLines.push(` ${C.magenta}${C.bold}Session${C.reset} ${session.role}/${session.phase} \u00b7 ${session.compute_policy} \u00b7 ${enrollment}`);
+      contentLines.push(` ${C.dim}${_sanitizeDisplayLine(session.branch)} \u00b7 trunk ${session.trunk_health?.status || "pending"} \u00b7 ${session.peer_count} peer(s) \u00b7 ${session.pending_count} pending \u00b7 ${session.delegations?.length || 0} delegated${C.reset}`);
+      if (session.trunk_health?.provenance_gate_job_id) {
+        contentLines.push(` ${C.yellow}Provenance review: gate #${session.trunk_health.provenance_gate_job_id}${C.reset}`);
+      }
+      contentLines.push("");
+    }
+
+    for (const wi of data.filter((row) => !row?.session_summary)) {
       const wiIdentity = wi.peer_read_only
         ? `${C.magenta}[remote · read-only]${C.reset} ${_sanitizeDisplayLine(wi.peer_label)} ${C.bold}${C.blue}WI#${wi.peer_work_item_id}${C.reset}`
         : `${C.bold}${C.blue}WI#${wi.id}${C.reset}`;

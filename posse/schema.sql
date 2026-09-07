@@ -14,7 +14,10 @@ PRAGMA foreign_keys = ON;
 --  13 = + durable live pairing-session journal.
 --  14 = + canonical parentage for child provider calls.
 --  15 = + web-research child provider-call parentage.
-PRAGMA user_version = 16;
+--  16 = + pending shared-session enrollment phase.
+--  17 = + session identity, policy, scope, and provenance state.
+--  18 = + authoritative cross-instance work-item delegation journal.
+PRAGMA user_version = 18;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -191,6 +194,35 @@ CREATE INDEX IF NOT EXISTS idx_jobs_lease_owner
 
 CREATE INDEX IF NOT EXISTS idx_jobs_parent_job
   ON jobs(parent_job_id);
+
+CREATE TABLE IF NOT EXISTS work_item_delegations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  originator_instance_id TEXT NOT NULL,
+  origin_work_item_id INTEGER NOT NULL,
+  origin_job_id INTEGER NOT NULL,
+  executor_instance_id TEXT,
+  local_work_item_id INTEGER,
+  local_job_id INTEGER,
+  offer_key TEXT NOT NULL UNIQUE CHECK (length(offer_key) = 64),
+  packet_oid TEXT,
+  claim_oid TEXT,
+  job_type TEXT NOT NULL,
+  provider TEXT,
+  state TEXT NOT NULL CHECK (
+    state IN ('offered','claimed','imported','running','merged','failed','recalled')
+  ),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_delegations_session_state
+  ON work_item_delegations(session_id, state, updated_at);
+CREATE INDEX IF NOT EXISTS idx_work_item_delegations_origin
+  ON work_item_delegations(originator_instance_id, origin_work_item_id);
+CREATE INDEX IF NOT EXISTS idx_work_item_delegations_local
+  ON work_item_delegations(local_work_item_id, local_job_id);
 
 CREATE TABLE IF NOT EXISTS waiting_lane_preparations (
   work_item_id INTEGER PRIMARY KEY,
@@ -710,6 +742,8 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   long_context_tier_input_tokens INTEGER,
   provider_request_duration_ms INTEGER,
   usage_segment_count INTEGER,
+  originator_instance_id TEXT,
+  executor_instance_id TEXT,
   reasoning_effort TEXT DEFAULT 'medium',
   extended_thinking INTEGER NOT NULL DEFAULT 0 CHECK (extended_thinking IN (0,1)),
 
@@ -1250,6 +1284,18 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
   original_settings_json TEXT NOT NULL CHECK (json_valid(original_settings_json)),
   added_remote_name TEXT,
   added_remote_url TEXT,
+  instance_id TEXT,
+  scope_set_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json)),
+  compute_policy TEXT NOT NULL DEFAULT 'each-member',
+  integration_policy TEXT NOT NULL DEFAULT 'side-trunk',
+  enrollment_open INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1)),
+  baseline_oid TEXT,
+  origin_remote_name TEXT,
+  origin_remote_url TEXT,
+  temporary_repository TEXT,
+  close_action TEXT NOT NULL DEFAULT 'integrate',
+  original_ssh_command TEXT,
+  credential_directory TEXT,
   phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
   process_pid INTEGER,
   last_error TEXT,

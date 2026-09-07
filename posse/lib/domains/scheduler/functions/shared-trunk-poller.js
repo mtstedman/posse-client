@@ -3,13 +3,19 @@
 // shared-trunk Git coordinator.
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
+import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
+import { reconcileSessionDelegationCommits } from "../../queue/functions/session-job-router.js";
 import {
   reconcileSharedTrunkOperations,
   syncSharedTrunkFromOrigin,
 } from "../../git/functions/shared-trunk.js";
 import { resolveSharedTrunkConfigRuntime } from "../../git/functions/shared-trunk-config.js";
 import {
+  createJob,
+  listJobs,
   listActiveFileLocks,
   logEvent,
   readRuntimeStatus,
@@ -17,6 +23,83 @@ import {
   syncCrossInstanceClaims,
   updateSharedTrunkRuntimeStatus,
 } from "../../queue/functions/index.js";
+import { updatePairingEnrollment } from "../../pairing/functions/state.js";
+
+function parseJson(value) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function provenanceGateRows() {
+  return listJobs().filter((job) => parseJson(job.payload_json)?.subtype === "shared_trunk_provenance");
+}
+
+function applyProvenanceGateDecision() {
+  const state = getLivePairingState();
+  if (!state) return null;
+  const gate = provenanceGateRows().find((job) => {
+    if (job.status !== "succeeded") return false;
+    return parseJson(job.result_json)?.provenance_applied !== true;
+  });
+  if (!gate) return null;
+  const payload = parseJson(gate.payload_json);
+  const result = parseJson(gate.result_json);
+  const gateContract = getDb().prepare(
+    "SELECT resolution_action FROM human_gates WHERE gate_job_id = ?"
+  ).get(gate.id);
+  const answer = String(
+    result.answer
+    || result.response
+    || result.answers?.[0]?.answer
+    || gateContract?.resolution_action
+    || ""
+  ).trim().toLowerCase();
+  const accepted = answer.startsWith("accept") || answer === "yes" || answer === "approve";
+  if (accepted && /^[0-9a-f]{40}$/iu.test(String(payload.remote_oid || ""))) {
+    updatePairingEnrollment(state.id, { baselineOid: payload.remote_oid, phase: "active" });
+  } else {
+    updateSharedTrunkRuntimeStatus({ provenance_gate_rejected: true });
+  }
+  getDb().prepare("UPDATE jobs SET result_json=? WHERE id=?").run(JSON.stringify({
+    ...result,
+    provenance_applied: true,
+    provenance_accepted: accepted,
+  }), gate.id);
+  return { gateId: gate.id, accepted };
+}
+
+function ensureProvenanceGate(result) {
+  const status = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK) || {};
+  if (status.provenance_gate_rejected === true) return null;
+  const existing = provenanceGateRows().find((job) => (
+    ["queued", "leased", "running", "waiting_on_human", "blocked"].includes(job.status)
+  ));
+  if (existing) return existing;
+  const remoteOid = result?.remoteSha || result?.newSha || status.remote_sha || null;
+  const commits = (result?.provenance?.commits || []).slice(0, 32);
+  const gate = createJob({
+    work_item_id: null,
+    job_type: "human_input",
+    title: "Review unknown shared-trunk commits",
+    priority: "urgent",
+    max_attempts: 1,
+    payload_json: {
+      subtype: "shared_trunk_provenance",
+      review_type: "shared_trunk_provenance",
+      question_kind: "shared_trunk_provenance",
+      questions: ["Unknown commits were found on the session trunk. Accept this exact remote tip, or reject and inspect it manually?"],
+      choices: ["accept", "reject"],
+      remote_oid: remoteOid,
+      commits,
+    },
+  });
+  updateSharedTrunkRuntimeStatus({ provenance_gate_job_id: gate.id });
+  return gate;
+}
 
 function positiveSeconds(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -84,6 +167,7 @@ export class SharedTrunkPoller {
   }
 
   async _pollOnce({ force = false, idle = false } = {}) {
+    applyProvenanceGateDecision();
     // A failed configuration resolve is held for one cadence window: the run
     // loop calls poll() every lap, and re-resolving (and re-logging) a known
     // bad config per lap is the busy-spin this guard exists to prevent.
@@ -175,9 +259,19 @@ export class SharedTrunkPoller {
       const result = await this._sync(this.projectDir, {
         includeClaims: config.claimsEnabled === true,
         ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
+        ...this._provenanceContext(),
       });
       const effectiveConfig = result?.config || config;
+      if (result?.reason === "shared_trunk_provenance_blocked") ensureProvenanceGate(result);
+      if (result?.ok && /^[0-9a-f]{40}$/iu.test(String(result.newSha || ""))) {
+        const live = getLivePairingState();
+        if (live?.phase === "active" && live.baseline_oid !== result.newSha) {
+          updatePairingEnrollment(live.id, { baselineOid: result.newSha, phase: "active" });
+          updateSharedTrunkRuntimeStatus({ provenance_gate_rejected: false, provenance_gate_job_id: null });
+        }
+      }
       await this._reconcileClaims(result, effectiveConfig);
+      await reconcileSessionDelegationCommits(this.projectDir);
       return { ...result, config: effectiveConfig, recovery };
     } catch (err) {
       // Fetch/transport is fail-open for job dispatch. The merge coordinator
@@ -190,6 +284,20 @@ export class SharedTrunkPoller {
       });
       return { attempted: true, unavailable: true, config, error: err };
     }
+  }
+
+  _provenanceContext() {
+    const session = getLivePairingState();
+    if (!session?.baseline_oid || session.phase !== "active") return {};
+    const snapshot = readPairingPeerSnapshot();
+    const gitIdentities = (snapshot?.peers || [])
+      .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []);
+    return {
+      provenance: {
+        baselineOid: session.baseline_oid,
+        gitIdentities,
+      },
+    };
   }
 
   // Claims reconcile only against a fetch that actually completed — the
