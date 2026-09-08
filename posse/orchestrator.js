@@ -3,13 +3,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { loadUserProviderEnv, userProviderEnvPath } from "./lib/shared/platform/functions/user-provider-env.js";
 import { installCliWarningFilter } from "./lib/domains/cli/functions/warnings.js";
-import { scrubSecrets } from "./lib/shared/telemetry/classes/logging/secret-scrub.js";
+import { scrubSecretText as scrubSecrets } from "./lib/shared/telemetry/functions/logging/scrub-secret-text.js";
 
 installCliWarningFilter();
 
 // Node floor. Fail with the remedy before any native-addon import can turn a
 // wrong Node into a raw ABI stack trace (package.json `engines` only warns).
+// Nothing above this line may depend on a Node API newer than the floor.
 const MIN_NODE_MAJOR = 24;
 const nodeMajor = Number(String(process.versions.node).split(".")[0]);
 if (Number.isFinite(nodeMajor) && nodeMajor < MIN_NODE_MAJOR) {
@@ -18,6 +20,22 @@ if (Number.isFinite(nodeMajor) && nodeMajor < MIN_NODE_MAJOR) {
     + "Install a current Node (the Posse installer does this) and re-run, or re-run the installer.\n",
   );
   process.exit(1);
+}
+
+// Load only installer-owned credential names before boot imports read them.
+// Explicit process/container environment values always take precedence. An
+// unreadable private .env is fatal (the user asked for it to be used); an
+// unreadable legacy file only warns so one stale root-owned file cannot
+// disable every command.
+if (!process.env.NODE_TEST_CONTEXT && !process.env.POSSE_TEST_RUN) {
+  try {
+    loadUserProviderEnv({
+      onWarning: (error) => process.stderr.write(`Ignoring unreadable legacy credential file ${error?.path || "(unknown)"}: ${error?.code || error?.message || error}\n`),
+    });
+  } catch (error) {
+    process.stderr.write(`Could not read ${error?.path || userProviderEnvPath()} (${error?.code || error?.message || error}); fix its permissions and retry.\n`);
+    process.exit(1);
+  }
 }
 
 // Fatal crash recorder. The main orchestrator process has no global
@@ -92,12 +110,14 @@ if (process.argv.includes("--bossy")) {
 // Doctor and update may have to replace Posse's own native Node dependencies.
 // Handle them before the main application imports/opens better-sqlite3; Windows
 // will not unlink a loaded .node module from the live process.
-const { runMaintenanceCliIfRequested } = await import("./lib/domains/cli/functions/maintenance-bootstrap.js");
+const { runMaintenanceCliIfRequested, guardRunNodeDependencies } = await import("./lib/domains/cli/functions/maintenance-bootstrap.js");
 if (await runMaintenanceCliIfRequested()) {
   // Maintenance awaited every child and flushed its output. Exit explicitly so
   // a native heartbeat or package-manager handle cannot pin the bootstrap.
   process.exit(process.exitCode ?? 0);
 }
+
+await guardRunNodeDependencies();
 
 const { runOrchestratorCli } = await import("./lib/domains/cli/functions/orchestrator-app.js");
 await runOrchestratorCli();

@@ -34,6 +34,7 @@ import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logg
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
+import { verificationOutcome } from "./verification-outcome.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
 
@@ -175,6 +176,11 @@ function latestScopedCheckVerification(jobId, assessedCommitHash) {
       if (!/^[0-9a-f]{40,64}$/i.test(executedCommit) || (!exactCommit && !coveredByDescendant)) continue;
       return {
         ...result,
+        verification_outcome: result.verification_outcome || verificationOutcome({
+          ...result,
+          phase: "post_change",
+          reason: result.reason || (result.status === "incomplete" ? "scoped_check_coverage_incomplete" : null),
+        }),
         executed_commit_hash: executedCommit,
         created_at: row.created_at,
         agent_call_id: detail.agent_call_id ?? null,
@@ -247,6 +253,8 @@ export function capVerdictForHighRiskVerificationGap(
   if (!isCodeTask) return verdict;
 
   const scopedStatus = String(scopedVerification?.status || "").toLowerCase();
+  const scopedOutcome = scopedVerification?.verification_outcome
+    || (scopedVerification ? verificationOutcome({ ...scopedVerification, phase: "post_change" }) : null);
   const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
   const hasAssessedCommit = /^[0-9a-f]{40,64}$/i.test(requiredCommit);
   const canonicalCommit = String(canonicalVerification?.assessed_commit_hash || "")
@@ -256,7 +264,7 @@ export function capVerdictForHighRiskVerificationGap(
     && canonicalVerification?.status === "passed"
     && canonicalVerification?.verification_eligible === true
     && canonicalCommit === requiredCommit;
-  if (scopedStatus === "failed") {
+  if (scopedOutcome?.type === "product_failed") {
     return {
       ...verdict,
       verdict: "fail",
@@ -375,7 +383,7 @@ export function capVerdictForHighRiskVerificationGap(
     );
   if (
     hasAssessedCommit
-    && scopedVerification?.status === "passed"
+    && scopedOutcome?.type === "passed"
     && scopedCommitEligible
   ) {
     return {

@@ -52,6 +52,8 @@ INSTALL_NODE="true"
 FORCE_REINSTALL="false"
 DRY_RUN="false"
 CONFIGURE_KEYS="false"
+NON_INTERACTIVE="false"
+SETUP_ONLY="false"
 PLAIN="false"
 INSTALL_ROOT="${HOME}/claude-tools"
 POSSE_DIR=""
@@ -60,6 +62,8 @@ REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
 NVM_VERSION="v0.40.3"
+# SHA-256 of nvm's install.sh at that tag. Tags can move; the hash cannot.
+NVM_INSTALL_SHA256="2d8359a64a3cb07c02389ad88ceecd43f2fa469c06104f92f98df5b6f315275f"
 COMMAND_TIMEOUT_SECONDS="1800"
 DOCTOR_TIMEOUT_SECONDS="7500"
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
@@ -94,8 +98,10 @@ Options:
                           Python, and PHP only when PHP SCIP is selected).
                           Missing tools are still reported.
   --no-install-node       Do not auto-install Node via nvm when Node 24+ is missing
+  --non-interactive       Never prompt (use environment variables for keys)
+  --setup-only            Install core files; defer account/runtime setup to first run
   --configure-keys        Interactively prompt for provider API keys (stored in
-                          ~/.config/posse/providers.env, chmod 600)
+                          ~/.config/posse/.env, chmod 600)
   --force                 Re-run npm install even if node_modules looks fresh
   --command-timeout <sec> Maximum ordinary command runtime (default: 1800)
   --doctor-timeout <sec>  Maximum doctor runtime, including Jina (default: 7500)
@@ -134,6 +140,8 @@ while [[ $# -gt 0 ]]; do
     --skip-host-tools) INSTALL_HOST_TOOLS="false"; shift ;;
     --no-install-node) INSTALL_NODE="false"; shift ;;
     --configure-keys) CONFIGURE_KEYS="true"; shift ;;
+    --non-interactive) NON_INTERACTIVE="true"; shift ;;
+    --setup-only) SETUP_ONLY="true"; shift ;;
     --force) FORCE_REINSTALL="true"; shift ;;
     --command-timeout) COMMAND_TIMEOUT_SECONDS="${2:?missing value for --command-timeout}"; shift 2 ;;
     --command-timeout=*) COMMAND_TIMEOUT_SECONDS="${1#*=}"; shift ;;
@@ -269,7 +277,9 @@ fmt_duration() {
 LOG_DIR="${HOME}/.posse/logs"
 mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="$(mktemp -d)"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
-: >"$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
+# The log captures raw child output (doctor, native pulls, npm); keep it
+# private to the installing user regardless of umask.
+if : >"$LOG_FILE" 2>/dev/null; then chmod 600 "$LOG_FILE" 2>/dev/null || true; else LOG_FILE="/dev/null"; fi
 
 log_only() { printf '%s\n' "$*" >>"$LOG_FILE"; }
 
@@ -375,7 +385,7 @@ prompt_scip_languages_if_needed() {
     return 0
   fi
 
-  if ! ( : </dev/tty ) 2>/dev/null; then
+  if [[ "$NON_INTERACTIVE" == "true" || "$DRY_RUN" == "true" || "$SETUP_ONLY" == "true" ]] || ! ( : </dev/tty ) 2>/dev/null; then
     SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default; no interactive terminal)"
     info "no interactive terminal for SCIP language selection; using default: ${POSSE_SCIP_LANGUAGES}"
     return 0
@@ -408,7 +418,7 @@ prompt_scip_languages_if_needed() {
     raw="${answer//,/ }"
     for token in $raw; do
       if [[ "$token" =~ ^[0-9]+$ ]]; then
-        idx=$((token - 1))
+        idx=$((10#$token - 1))
         if ((idx >= 0 && idx < ${#SCIP_LANGUAGE_VALUES[@]})); then
           selection="${selection:+$selection }${SCIP_LANGUAGE_VALUES[idx]}"
         else
@@ -644,6 +654,11 @@ print_summary() {
   echo
   if [[ "$INSTALL_FAILED" == "true" ]]; then
     printf "  %s%sInstall did not complete.%s Fix the failed step above and re-run — completed steps are skipped on re-runs.\n\n" "$RED" "$BOLD" "$R"
+  elif [[ "$SETUP_ONLY" == "true" ]]; then
+    printf '  Core installation complete; runtime readiness has NOT been checked.\n'
+    printf '  At container runtime, supply POSSE_KEY and re-run this installer without --setup-only.\n\n'
+  elif [[ "$DRY_RUN" == "true" ]]; then
+    printf '  Preview complete; no runtime readiness checks were performed.\n\n'
   else
     printf "  %sNext steps:%s\n" "$BOLD" "$R"
     printf "    1. Open a new shell (or: source %s)\n" "${ENV_FILE:-$HOME/.config/posse/atlas.env}"
@@ -693,23 +708,42 @@ kill_process_tree() {
 
 node_major() { node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0; }
 
+directory_writable() {
+  local probe
+  probe="$(mktemp "$1/.posse-write-XXXXXX" 2>/dev/null)" || return 1
+  rm -f -- "$probe"
+}
+
 resolve_full_path() {
   # readlink -f is universal on Linux (GNU coreutils / busybox).
   readlink -f -- "$1" 2>/dev/null || printf "%s" "$1"
 }
 
+# HTTPS only, including across redirects: a downgraded hop must fail, not fetch.
 fetch_to() {
   local url="$1" dest="$2"
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$dest" "$url"
-  elif command -v wget >/dev/null 2>&1; then wget -q --timeout=30 --tries=3 -O "$dest" "$url"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 -o "$dest" "$url"
+  elif command -v wget >/dev/null 2>&1; then wget -q --https-only --timeout=30 --tries=3 -O "$dest" "$url"
   else return 127; fi
 }
 
 fetch_stdout() {
   local url="$1"
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 "$url"
-  elif command -v wget >/dev/null 2>&1; then wget -q --timeout=30 --tries=3 -O- "$url"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 "$url"
+  elif command -v wget >/dev/null 2>&1; then wget -q --https-only --timeout=30 --tries=3 -O- "$url"
   else return 127; fi
+}
+
+# verify_sha256 <file> <expected-hex>; prints the mismatch for the log.
+verify_sha256() {
+  local file="$1" expected="$2" actual=""
+  if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum -- "$file" | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then actual="$(shasum -a 256 -- "$file" | cut -d' ' -f1)"
+  else echo "no sha256sum/shasum available to verify ${file}"; return 1; fi
+  if [[ "${actual,,}" != "${expected,,}" ]]; then
+    echo "checksum mismatch for ${file}: expected ${expected:0:16}…, got ${actual:0:16}…"
+    return 1
+  fi
 }
 
 find_python() {
@@ -756,7 +790,7 @@ ensure_root_access() {
   elif command -v sudo >/dev/null 2>&1; then
     if sudo -n true 2>/dev/null; then
       SUDO_STATE="ok"
-    elif [[ $UI_TTY -eq 1 && "$DRY_RUN" != "true" ]]; then
+    elif [[ "$NON_INTERACTIVE" != "true" && "$DRY_RUN" != "true" ]] && ( : </dev/tty ) 2>/dev/null; then
       printf "    %s%s%s sudo is needed to install system packages (you may be prompted)\n" "$DIM" "$GLYPH_DOT" "$R"
       if sudo -v; then SUDO_STATE="ok"; else SUDO_STATE="none"; fi
     else
@@ -770,7 +804,7 @@ ensure_root_access() {
 as_root() {
   case "$SUDO_STATE" in
     root) "$@" ;;
-    ok) sudo "$@" ;;
+    ok) sudo -n "$@" ;;
     *) return 127 ;;
   esac
 }
@@ -792,7 +826,7 @@ pkg_refresh_index() {
   [[ "$PKG_INDEX_REFRESHED" == "true" ]] && return 0
   PKG_INDEX_REFRESHED="true"
   case "$PKG_MGR" in
-    apt-get) run_logged "refresh package index (apt-get update)" as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true ;;
+    apt-get) run_logged "refresh package index (apt-get update)" as_root env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 update -qq || true ;;
     pacman) run_logged "refresh package index (pacman -Sy)" as_root pacman -Sy --noconfirm || true ;;
   esac
 }
@@ -800,7 +834,7 @@ pkg_refresh_index() {
 pkg_install() {
   # Installs one or more packages; returns non-zero if the manager fails.
   case "$PKG_MGR" in
-    apt-get) as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" ;;
+    apt-get) as_root env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends "$@" ;;
     dnf) as_root dnf install -y -q "$@" ;;
     yum) as_root yum install -y -q "$@" ;;
     pacman) as_root pacman -S --needed --noconfirm "$@" ;;
@@ -813,8 +847,16 @@ pkg_install() {
 # (node-pty, tree-sitter, better-sqlite3 fallback builds) need to compile, plus
 # python3-venv/pip which Posse's managed Python runtimes require.
 core_packages() {
-  echo "git curl ca-certificates"
+  local package
+  for package in "$@"; do
+    case "$PKG_MGR:$package" in
+      apt-get:xz) printf '%s\n' xz-utils ;;
+      dnf:procps|yum:procps) printf '%s\n' procps-ng ;;
+      *) printf '%s\n' "$package" ;;
+    esac
+  done
 }
+
 toolchain_packages() {
   case "$PKG_MGR" in
     apt-get) echo "build-essential pkg-config python3 python3-pip python3-venv unzip" ;;
@@ -901,13 +943,18 @@ step_packages() {
   local missing_core=() missing_toolchain="false" missing_tools=()
   command -v git >/dev/null 2>&1 || missing_core+=("git")
   command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing_core+=("curl")
-  { command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; } && command -v make >/dev/null 2>&1 || missing_toolchain="true"
+  { command -v c++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1; } && command -v make >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 || missing_toolchain="true"
   find_python >/dev/null 2>&1 || missing_toolchain="true"
   # Debian/Ubuntu split venv out of python3 — Posse's managed venvs need it.
   if [[ "$PKG_MGR" == "apt-get" ]] && find_python >/dev/null 2>&1; then
-    "$(find_python)" -m venv --help >/dev/null 2>&1 || missing_toolchain="true"
+    "$(find_python)" -c 'import venv, ensurepip' >/dev/null 2>&1 || missing_toolchain="true"
   fi
 
+  # Slim images can have curl but lack CA roots, tar/xz, or process tools.
+  [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] || missing_core+=("ca-certificates")
+  command -v tar >/dev/null 2>&1 || missing_core+=("tar")
+  command -v xz >/dev/null 2>&1 || missing_core+=("xz")
+  command -v ps >/dev/null 2>&1 || missing_core+=("procps")
   local line name check pkgs
   while IFS='|' read -r name check pkgs; do
     [[ -z "$name" ]] && continue
@@ -949,11 +996,11 @@ step_packages() {
   # package names that exist everywhere; helper CLIs install per-package so a
   # missing name in one repo can't sink the rest.
   if [[ ${#missing_core[@]} -gt 0 ]]; then
-    # shellcheck disable=SC2086
-    run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages) || failures+=("core")
+    # shellcheck disable=SC2046,SC2086
+    run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages "${missing_core[@]}") || failures+=("core")
   fi
   if [[ "$missing_toolchain" == "true" ]]; then
-    # shellcheck disable=SC2086
+    # shellcheck disable=SC2046,SC2086
     run_logged "install build toolchain ($(toolchain_packages | cut -c1-48)…)" pkg_install $(toolchain_packages) || failures+=("toolchain")
   fi
 
@@ -990,7 +1037,7 @@ step_node() {
   local major
   if command -v node >/dev/null 2>&1; then
     major="$(node_major)"
-    if [[ "$major" -ge "$NODE_MIN_MAJOR" ]]; then
+    if [[ "$major" -ge "$NODE_MIN_MAJOR" ]] && npm --version >/dev/null 2>&1; then
       NODE_BIN="$(command -v node)"
       step_end ok "node $(node -v) at ${NODE_BIN}"
       return 0
@@ -1010,7 +1057,13 @@ step_node() {
     return 0
   fi
 
+  # Do not let nvm mutate profiles (or choke on npm prefix settings). The shim
+  # and atlas.env below expose the selected runtime even in non-login shells.
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [[ -n "${NPM_CONFIG_PREFIX:-}${npm_config_prefix:-}" ]]; then
+    warn "ignoring npm prefix override while selecting the installer Node runtime"
+    unset NPM_CONFIG_PREFIX npm_config_prefix
+  fi
   if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
     local nvm_installer
     nvm_installer="$(mktemp)"
@@ -1019,7 +1072,12 @@ step_node() {
       step_fail_critical "could not download nvm; install Node ${NODE_MIN_MAJOR}+ manually and re-run"
       return 1
     fi
-    if ! run_logged "install nvm into ${NVM_DIR}" bash "$nvm_installer"; then
+    if ! run_logged "verify nvm installer checksum" verify_sha256 "$nvm_installer" "$NVM_INSTALL_SHA256"; then
+      rm -f "$nvm_installer"
+      step_fail_critical "nvm installer did not match its pinned SHA-256; refusing to run it. Install Node ${NODE_MIN_MAJOR}+ manually or update this installer"
+      return 1
+    fi
+    if ! run_logged "install nvm into ${NVM_DIR}" env PROFILE=/dev/null bash "$nvm_installer"; then
       rm -f "$nvm_installer"
       step_fail_critical "nvm install failed; see log"
       return 1
@@ -1027,7 +1085,7 @@ step_node() {
     rm -f "$nvm_installer"
   fi
 
-  if ! run_logged "install Node ${NODE_MIN_MAJOR} (nvm install ${NODE_MIN_MAJOR})" bash -c "export NVM_DIR=$(shell_quote "$NVM_DIR"); set +u; . \"\$NVM_DIR/nvm.sh\"; nvm install ${NODE_MIN_MAJOR} && nvm alias default ${NODE_MIN_MAJOR}"; then
+  if ! run_logged "install Node ${NODE_MIN_MAJOR} (nvm install ${NODE_MIN_MAJOR})" bash -c "export NVM_DIR=$(shell_quote "$NVM_DIR"); set +u; . \"\$NVM_DIR/nvm.sh\"; nvm install -b ${NODE_MIN_MAJOR} && nvm alias default ${NODE_MIN_MAJOR}"; then
     step_fail_critical "Node ${NODE_MIN_MAJOR} install via nvm failed; see log"
     return 1
   fi
@@ -1036,10 +1094,10 @@ step_node() {
   set +u
   # shellcheck disable=SC1091
   . "$NVM_DIR/nvm.sh"
-  nvm use --silent "$NODE_MIN_MAJOR" >/dev/null 2>&1
+  nvm use --silent --delete-prefix "$NODE_MIN_MAJOR" >/dev/null 2>&1
   set -u
 
-  if command -v node >/dev/null 2>&1 && [[ "$(node_major)" -ge "$NODE_MIN_MAJOR" ]]; then
+  if command -v node >/dev/null 2>&1 && [[ "$(node_major)" -ge "$NODE_MIN_MAJOR" ]] && npm --version >/dev/null 2>&1; then
     NODE_BIN="$(command -v node)"
     step_end ok "node $(node -v) installed via nvm at ${NODE_BIN}"
   else
@@ -1055,7 +1113,7 @@ step_checkout() {
   if [[ -z "$POSSE_DIR" ]]; then
     local detected
     detected="$(detect_installer_posse_dir || true)"
-    if [[ -n "$detected" ]]; then
+    if [[ -n "$detected" ]] && { [[ "$DRY_RUN" == "true" ]] || directory_writable "$detected"; }; then
       POSSE_DIR="$detected"
       info "using the Posse checkout containing this installer"
     else
@@ -1064,12 +1122,16 @@ step_checkout() {
   fi
   POSSE_DIR="$(resolve_full_path "$POSSE_DIR")"
 
-  if [[ -d "$POSSE_DIR" ]]; then
+  if [[ -e "$POSSE_DIR" ]]; then
     local resolved_root
     resolved_root="$(resolve_posse_root_from_checkout "$POSSE_DIR" || true)"
     if [[ -n "$resolved_root" ]]; then
       POSSE_DIR="$resolved_root"
-      step_end ok "existing checkout: ${POSSE_DIR}"
+      if [[ "$DRY_RUN" != "true" ]] && ! directory_writable "$POSSE_DIR"; then
+        step_fail_critical "checkout is not writable: ${POSSE_DIR}; use a user-owned --posse-dir (read-only container mounts cannot hold npm/runtime state)"
+        return 1
+      fi
+      step_end ok "existing writable checkout: ${POSSE_DIR}"
     else
       step_fail_critical "${POSSE_DIR} exists but has no orchestrator.js at its root or under posse/"
       return 1
@@ -1085,21 +1147,23 @@ step_checkout() {
     step_end dry-run "would shallow-clone ${POSSE_REPO_URL} into ${POSSE_DIR} and auto-detect the Posse root"
     return 0
   fi
-  mkdir -p "$(dirname "$POSSE_DIR")"
-  if run_logged "clone ${POSSE_REPO_URL}" git clone --depth 1 "$POSSE_REPO_URL" "$POSSE_DIR"; then
-    local cloned_root
-    cloned_root="$(resolve_posse_root_from_checkout "$POSSE_DIR" || true)"
+  local clone_dir cloned_root nested="false"
+  mkdir -p "$(dirname "$POSSE_DIR")" || { step_fail_critical "cannot create checkout parent"; return 1; }
+  clone_dir="$(mktemp -d "${POSSE_DIR}.installing-XXXXXX")" || { step_fail_critical "cannot stage checkout"; return 1; }
+  if run_logged "clone ${POSSE_REPO_URL}" env GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$POSSE_REPO_URL" "$clone_dir"; then
+    cloned_root="$(resolve_posse_root_from_checkout "$clone_dir" || true)"
     if [[ -n "$cloned_root" ]]; then
-      POSSE_DIR="$cloned_root"
-      step_end ok "cloned into ${POSSE_DIR}"
-    else
-      step_fail_critical "clone succeeded but orchestrator.js is missing at the checkout root and under posse/"
-      return 1
+      [[ "$cloned_root" == "$clone_dir/posse" ]] && nested="true"
+      if [[ ! -e "$POSSE_DIR" ]] && mv -T "$clone_dir" "$POSSE_DIR"; then
+        [[ "$nested" == "true" ]] && POSSE_DIR="$POSSE_DIR/posse"
+        step_end ok "cloned into ${POSSE_DIR}"
+        return 0
+      fi
     fi
-  else
-    step_fail_critical "git clone failed; see log"
-    return 1
   fi
+  rm -rf -- "$clone_dir"
+  step_fail_critical "checkout failed; destination preserved and temporary clone removed; see log"
+  return 1
 }
 
 do_install_composer_phar() {
@@ -1161,7 +1225,9 @@ deps_fresh() {
   [[ -d "$dir/node_modules" ]] || return 1
   [[ -f "$dir/node_modules/.package-lock.json" ]] || return 1
   [[ "$dir/package.json" -nt "$dir/node_modules/.package-lock.json" ]] && return 1
-  return 0
+  # Timestamps alone cannot detect copied Linux/Windows modules or a changed
+  # Node ABI. Exercise SQLite before deciding a previous install is usable.
+  (cd "$dir" && "$NODE_BIN" --input-type=commonjs -e 'const D = require("better-sqlite3"); const db = new D(":memory:"); db.close();') >/dev/null 2>&1
 }
 
 step_npm() {
@@ -1178,19 +1244,29 @@ step_npm() {
   fi
 
   if run_logged_in_dir "$POSSE_DIR" "npm install (includes native module builds)" \
-    npm install --include=optional --no-fund --no-audit; then
-    step_end ok "npm dependencies installed"
-    return 0
+    npm install --include=dev --include=optional --no-fund --no-audit; then
+    finish_node_install
+    return $?
   fi
 
   info "retrying once (transient network/registry failures are common)"
   if run_logged_in_dir "$POSSE_DIR" "npm install (retry)" \
-    npm install --include=optional --no-fund --no-audit; then
-    step_end ok "npm dependencies installed on retry"
-    return 0
+    npm install --include=dev --include=optional --no-fund --no-audit; then
+    finish_node_install
+    return $?
   fi
 
   step_fail_critical "npm install failed twice — the log usually names the missing system dependency (see above)"
+  return 1
+}
+
+finish_node_install() {
+  if run_logged_in_dir "$POSSE_DIR" "verify and repair Node native addons" \
+    env POSSE_MAINTENANCE_ADOPT_NODE=1 "$NODE_BIN" lib/domains/cli/functions/maintenance-node-repair.js; then
+    step_end ok "npm dependencies and SQLite runtime verified"
+    return 0
+  fi
+  step_fail_critical "Node dependencies remain unusable after repair; check the build toolchain and log"
   return 1
 }
 
@@ -1216,6 +1292,7 @@ step_shell_wiring() {
     echo "# ATLAS runtime configuration lives in ~/.posse/account.db (posse admin),"
     echo "# not environment variables."
     printf 'export POSSE_BIN_DIR=%s\n' "$(shell_quote "$bin_dir")"
+    printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$(dirname "$NODE_BIN")")"
     # shellcheck disable=SC2016
     echo 'case ":$PATH:" in *":$POSSE_BIN_DIR:"*) ;; *) export PATH="$POSSE_BIN_DIR:$PATH";; esac'
   } >"$ENV_FILE"; then
@@ -1227,10 +1304,11 @@ step_shell_wiring() {
     step_fail_critical "could not create ${bin_dir}"
     return 1
   fi
-  if ! cat >"$shim" <<EOF
-#!/usr/bin/env bash
-exec "$(printf "%s" "$NODE_BIN")" "$(printf "%s" "$POSSE_DIR")/orchestrator.js" "\$@"
-EOF
+  if ! {
+    printf '#!/usr/bin/env bash\n'
+    printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$(dirname "$NODE_BIN")")"
+    printf 'exec %s %s "$@"\n' "$(shell_quote "$NODE_BIN")" "$(shell_quote "$POSSE_DIR/orchestrator.js")"
+  } >"$shim"
   then
     step_fail_critical "could not write ${shim}"
     return 1
@@ -1242,12 +1320,10 @@ EOF
 
   if [[ "$PERSIST_ENV" == "true" ]]; then
     if ! append_source_if_missing "${HOME}/.bashrc" "$ENV_FILE"; then
-      step_fail_critical "could not update ${HOME}/.bashrc"
-      return 1
+      warn "could not update ${HOME}/.bashrc; use ${shim} or source ${ENV_FILE}"
     fi
     if [[ -f "${HOME}/.zshrc" ]] && ! append_source_if_missing "${HOME}/.zshrc" "$ENV_FILE"; then
-      step_fail_critical "could not update ${HOME}/.zshrc"
-      return 1
+      warn "could not update ${HOME}/.zshrc; use ${shim} or source ${ENV_FILE}"
     fi
   fi
 
@@ -1259,8 +1335,8 @@ EOF
 }
 
 append_source_if_missing() {
-  local rc_file="$1" env_file="$2"
-  local line="source $(shell_quote "$env_file")"
+  local rc_file="$1" env_file="$2" line
+  line="source $(shell_quote "$env_file")"
   [[ -f "$rc_file" ]] || touch "$rc_file" || return 1
   if ! grep -F "$line" "$rc_file" >/dev/null 2>&1; then
     printf "\n# Posse ATLAS integration\n%s\n" "$line" >>"$rc_file" || return 1
@@ -1389,9 +1465,9 @@ step_validate() {
     step_end dry-run "would run posse status"
     return 0
   fi
-  local -a cmd=("$NODE_BIN" orchestrator.js status)
-  command -v timeout >/dev/null 2>&1 && cmd=(timeout 300 "${cmd[@]}")
-  if run_logged_in_dir "$POSSE_DIR" "boot posse (posse status)" "${cmd[@]}"; then
+  # The step engine's timeout kills the whole process tree; coreutils
+  # `timeout` would signal only the direct node child.
+  if run_logged_in_dir_timeout 300 "$POSSE_DIR" "boot posse (posse status)" "$NODE_BIN" orchestrator.js status; then
     step_end ok "posse boots cleanly"
   else
     warn "posse failed to boot — run 'posse status' in ${POSSE_DIR} to see the error"
@@ -1401,17 +1477,64 @@ step_validate() {
 
 # --- provider keys (interactive; no spinner) ------------------------------------
 CONFIGURED_KEYS=()
+PROVIDER_KEY_NAMES=(POSSE_KEY OPENAI_API_KEY XAI_API_KEY CODEX_API_KEY)
+# Keys the parent shell/container already carried, snapshotted before the
+# saved .env is imported: those are never prompted for, even with
+# --configure-keys (parity with the Windows installer).
+declare -A PARENT_ENV_KEYS=()
+
+snapshot_parent_env_keys() {
+  local name
+  for name in "${PROVIDER_KEY_NAMES[@]}"; do
+    [[ -n "${!name:-}" ]] && PARENT_ENV_KEYS[$name]=1
+  done
+  return 0
+}
+
+# Explicit reconfiguration can replace stored values; Enter keeps them.
+configure_keys_interactively() {
+  local name previous
+  for name in "${PROVIDER_KEY_NAMES[@]}"; do
+    if [[ -n "${PARENT_ENV_KEYS[$name]:-}" ]]; then
+      info "$name already set in this shell — keeping it (unset it to be prompted)"
+      continue
+    fi
+    previous="${!name:-}"
+    unset "$name"
+    if ! prompt_for_key "$name (Enter keeps an existing key)" "$name"; then
+      [[ -z "$previous" ]] || export "$name=$previous"
+    fi
+  done
+}
+
+# Pasted keys often carry a trailing newline/CR or surrounding spaces; strip
+# them. Interior whitespace is never part of a key, so refuse it instead of
+# saving a value that fails later as "invalid posse_key".
+normalize_key_input() {
+  local value="$1"
+  value="${value//$'\r'/}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ "$value" == *[[:space:]]* ]]; then
+    return 1
+  fi
+  printf '%s' "$value"
+}
 
 prompt_for_key() {
   local label="$1" var_name="$2"
   local existing="${!var_name:-}"
   if [[ -n "$existing" ]]; then
-    info "$var_name already set (length ${#existing}) — skipping"
+    info "$var_name already set — skipping"
     return 1
   fi
   local input=""
   read -r -s -p "      Enter $label (press Enter to skip): " input </dev/tty
   echo >/dev/tty
+  if ! input="$(normalize_key_input "$input")"; then
+    warn "$label contained interior whitespace and was not saved; re-run with --configure-keys to try again"
+    return 1
+  fi
   if [[ -z "$input" ]]; then
     info "skipped $label"
     return 1
@@ -1421,70 +1544,59 @@ prompt_for_key() {
   return 0
 }
 
+load_saved_keys() {
+  local entry name
+  local reader="$POSSE_DIR/installers/installer-env.mjs"
+  # Validate separately so a process-substitution failure cannot look successful.
+  "$NODE_BIN" "$reader" read-json >/dev/null || return 1
+  while IFS= read -r -d '' entry; do
+    name="${entry%%=*}"
+    [[ -n "${!name:-}" ]] || export "${entry?}"
+  done < <("$NODE_BIN" "$reader" read-null)
+}
+
 step_keys() {
   step_begin keys
-  local providers_file="${ENV_DIR:-$HOME/.config/posse}/providers.env"
-  if [[ "$CONFIGURE_KEYS" != "true" ]]; then
-    step_end skipped "pass --configure-keys to set provider API keys interactively"
-    return 0
-  fi
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would prompt for POSSE_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
+    step_end dry-run "would load private .env and prompt for a missing Posse key when interactive"
     return 0
   fi
-  if [[ $UI_TTY -ne 1 ]]; then
-    warn "--configure-keys needs an interactive terminal; skipped"
-    step_end skipped "no TTY"
-    return 0
+  # An existing checkout is reused as-is, so a newer installer can meet an
+  # older tree that lacks the credential bridge. Name the real cause.
+  if [[ ! -f "$POSSE_DIR/installers/installer-env.mjs" ]]; then
+    step_fail_critical "checkout ${POSSE_DIR} predates this installer (installers/installer-env.mjs is missing); update it with 'git pull' or 'posse update', then re-run"
+    return 1
   fi
-
-  if [[ -f "$providers_file" ]]; then
-    # shellcheck disable=SC1090
-    set -a; source "$providers_file"; set +a
+  snapshot_parent_env_keys
+  if ! load_saved_keys; then
+    step_fail_critical "cannot read ~/.config/posse/.env; check permissions"
+    return 1
   fi
-
-  info "input is hidden; press Enter to skip any key"
-  prompt_for_key "Posse remote key" "POSSE_KEY" || true
-  prompt_for_key "OpenAI API key" "OPENAI_API_KEY" || true
-  prompt_for_key "xAI (Grok) key" "XAI_API_KEY" || true
-  prompt_for_key "Codex API key (optional — skip if you prefer 'codex login')" "CODEX_API_KEY" || true
-
-  local ans
-  if command -v claude >/dev/null 2>&1; then
-    read -r -p "      Run 'claude' now to log in to Claude? [y/N]: " ans </dev/tty
-    [[ "$ans" =~ ^[Yy]$ ]] && { claude || warn "claude login command did not exit cleanly"; }
+  local interactive="false"
+  if [[ "$NON_INTERACTIVE" != "true" ]] && ( : </dev/tty ) 2>/dev/null; then interactive="true"; fi
+  if [[ "$interactive" == "true" && ( "$CONFIGURE_KEYS" == "true" || -z "${POSSE_KEY:-}" ) ]]; then
+    info "Posse key input is hidden; saved in ~/.config/posse/.env (chmod 600)"
+    if [[ "$CONFIGURE_KEYS" == "true" ]]; then
+      configure_keys_interactively
+    else
+      prompt_for_key "Posse key (POSSE_KEY)" POSSE_KEY || true
+    fi
+  elif [[ "$CONFIGURE_KEYS" == "true" ]]; then
+    info "no interactive input; supply keys through the container/process environment"
   fi
-  if command -v codex >/dev/null 2>&1 && [[ -z "${CODEX_API_KEY:-}" ]]; then
-    read -r -p "      Run 'codex login' now? [y/N]: " ans </dev/tty
-    [[ "$ans" =~ ^[Yy]$ ]] && { codex login || warn "codex login command did not exit cleanly"; }
-  fi
-
-  if [[ ${#CONFIGURED_KEYS[@]} -eq 0 ]]; then
-    step_end ok "no new keys captured"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$providers_file")"
-  local tmp_file k
-  tmp_file="$(mktemp)"
-  if [[ -f "$providers_file" ]]; then
-    local filter_expr=""
-    for k in "${CONFIGURED_KEYS[@]}"; do filter_expr+="/^export ${k}=/d;"; done
-    sed "$filter_expr" "$providers_file" >"$tmp_file"
+  if [[ ${#CONFIGURED_KEYS[@]} -gt 0 ]]; then
+    if ! "$NODE_BIN" "$POSSE_DIR/installers/installer-env.mjs" save "${CONFIGURED_KEYS[@]}"; then
+      step_fail_critical "could not securely save ~/.config/posse/.env; key is only available in this process"
+      return 1
+    fi
+    step_end ok "saved private ~/.config/posse/.env; future Posse launches load it automatically"
+  elif [[ -n "${POSSE_KEY:-}" ]]; then
+    step_end ok "Posse key available (environment values are not copied to disk)"
   else
-    : >"$tmp_file"
+    step_fail_critical "POSSE_KEY is required; re-run interactively to enter it, inject it into the environment, or use --setup-only for an image build"
+    return 1
   fi
-  for k in "${CONFIGURED_KEYS[@]}"; do
-    printf 'export %s=%q\n' "$k" "${!k}" >>"$tmp_file"
-  done
-  mv "$tmp_file" "$providers_file"
-  chmod 600 "$providers_file"
-
-  if [[ "$PERSIST_ENV" == "true" ]]; then
-    append_source_if_missing "${HOME}/.bashrc" "$providers_file"
-    [[ -f "${HOME}/.zshrc" ]] && append_source_if_missing "${HOME}/.zshrc" "$providers_file"
-  fi
-  step_end ok "wrote ${#CONFIGURED_KEYS[@]} key(s) to ${providers_file} (chmod 600)"
 }
 
 step_native_binaries() {
@@ -1495,11 +1607,6 @@ step_native_binaries() {
     return 0
   fi
 
-  local providers_file="${ENV_DIR:-$HOME/.config/posse}/providers.env"
-  if [[ -z "${POSSE_KEY:-}" && -f "$providers_file" ]]; then
-    # shellcheck disable=SC1090
-    set -a; source "$providers_file"; set +a
-  fi
   if [[ -z "${POSSE_KEY:-}" ]]; then
     warn "native binaries need POSSE_KEY; set it or re-run with --configure-keys, then run 'npm run pull:native'"
     step_end partial "POSSE_KEY unavailable; boot readiness will retry the download"
@@ -1538,11 +1645,17 @@ step_smoke() {
 
 # --- soft preflight checks (warnings only) ---------------------------------------
 check_provider_credentials() {
-  local have=0 candidates=()
+  local have=0 candidates=() saved_env="${HOME}/.config/posse/.env"
   command -v claude >/dev/null 2>&1 && { candidates+=("claude-cli"); have=1; }
   [[ -n "${OPENAI_API_KEY:-}" ]] && { candidates+=("OPENAI_API_KEY"); have=1; }
   [[ -n "${XAI_API_KEY:-}" ]] && { candidates+=("XAI_API_KEY"); have=1; }
   { [[ -n "${CODEX_API_KEY:-}" || -f "${HOME}/.codex/auth.json" ]]; } && { candidates+=("codex"); have=1; }
+  # Saved keys are loaded later by the keys step (it needs Node and the
+  # checkout); preflight runs before that, so do not warn about their absence.
+  if [[ -s "$saved_env" ]]; then
+    info "saved credentials found in ${saved_env}; they load in the keys step"
+    return 0
+  fi
   if [[ "$have" -eq 0 ]]; then
     if [[ "$CONFIGURE_KEYS" == "true" ]]; then
       info "no provider credentials detected yet — the keys step below will prompt for them"
@@ -1597,13 +1710,21 @@ step_preflight() {
     info "no --repo-path provided; smoke test will be skipped"
   fi
   check_git_config
-  check_provider_credentials
+  [[ "$SETUP_ONLY" == "true" ]] || check_provider_credentials
   step_end ok "preflight complete"
   return 0
 }
 
 run_installer_step() {
   local key="$1" critical="$2" fn="$3" rc
+  if [[ "$SETUP_ONLY" == "true" ]]; then
+    case "$key" in
+      seed|admin|keys|native|doctor|validate|smoke)
+        step_begin "$key"
+        step_end skipped "--setup-only; complete setup at runtime"
+        return 0 ;;
+    esac
+  fi
   "$fn"
   rc=$?
   if [[ $rc -ne 0 && "${STEP_STATUS[$key]}" == "pending" ]]; then

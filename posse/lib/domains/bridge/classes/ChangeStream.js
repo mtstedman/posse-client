@@ -265,6 +265,8 @@ export class ChangeStream extends EventEmitter {
     instanceStatusMinIntervalMs = 2_000,
     jobProgressScanIntervalMs = 5_000,
     costScanIntervalMs = 30_000,
+    readProviderUsage = null,
+    providerUsageScanIntervalMs = 5_000,
   } = {}) {
     super();
     this.dbPath = dbPath;
@@ -296,6 +298,12 @@ export class ChangeStream extends EventEmitter {
     this.costLastScanAt = 0;
     this.costTotalsByWiId = new Map();
     this.costDirtyWiIds = new Set();
+    this.readProviderUsage = readProviderUsage;
+    this.providerUsageScanIntervalMs = Math.max(1_000, Number(providerUsageScanIntervalMs) || 5_000);
+    this.providerUsageLastScanAt = -Infinity;
+    this.providerUsageInFlight = null;
+    this.latestProviderUsage = null;
+    this.providerUsageLastJson = "";
   }
 
   start() {
@@ -467,10 +475,49 @@ export class ChangeStream extends EventEmitter {
       this.pollInstanceStatus();
       this.pollJobProgress();
       this.pollCosts();
+      void this.pollProviderUsage();
     } catch (err) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.FAILED, {
         summary: err?.message || String(err),
       });
+    }
+  }
+
+  providerUsageSnapshot() {
+    return this.latestProviderUsage;
+  }
+
+  async pollProviderUsage(nowMs = Date.now()) {
+    if (!this.db || typeof this.readProviderUsage !== "function") return;
+    if (this.providerUsageInFlight) return this.providerUsageInFlight;
+    if (nowMs - this.providerUsageLastScanAt < this.providerUsageScanIntervalMs) return;
+    this.providerUsageLastScanAt = nowMs;
+    const db = this.db;
+    const pending = (async () => {
+      let payload;
+      try {
+        payload = await this.readProviderUsage();
+      } catch {
+        // Preserve last-known percentages while marking a failed collector stale.
+        if (!this.latestProviderUsage) return;
+        payload = {
+          ...this.latestProviderUsage,
+          providers: this.latestProviderUsage.providers.map((provider) => ({ ...provider, stale: true })),
+        };
+      }
+      if (this.db !== db || !payload) return;
+      this.latestProviderUsage = payload;
+      // Ignore timestamps; unchanged percentages must not flood the stream.
+      const comparable = JSON.stringify(payload.providers);
+      if (comparable === this.providerUsageLastJson) return;
+      this.providerUsageLastJson = comparable;
+      this.emitBridgeEvent(BRIDGE_EVENT_KINDS.PROVIDER_USAGE, payload);
+    })();
+    this.providerUsageInFlight = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.providerUsageInFlight === pending) this.providerUsageInFlight = null;
     }
   }
 

@@ -28,6 +28,7 @@ import {
   nativeBinaryRequiresIssuedVersion,
 } from "../../../catalog/binary.js";
 import { heartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
+import { ParentPulseTokenManager } from "../../native/classes/ParentPulseTokenManager.js";
 import { PulseTokenManager, pulseTokenManager } from "../../native/classes/PulseTokenManager.js";
 import {
   ensureNativeBinaryArtifact,
@@ -140,7 +141,12 @@ export class BinaryManager {
   get pulseManager() {
     const authManager = this.nativeAuthManager;
     if (!this._pulseManager || (this._pulseManagerAuth && this._pulseManagerAuth !== authManager)) {
+      // Verification children replace HeartbeatAuthManager with a non-secret
+      // envelope before worker-thread boot. Their process-wide pulse manager,
+      // however, is the command-scoped parent broker and must remain the mint
+      // authority for both this thread and nested native worker threads.
       this._pulseManager = authManager === heartbeatAuthManager
+        || pulseTokenManager instanceof ParentPulseTokenManager
         ? pulseTokenManager
         : new PulseTokenManager({ authManager });
     }

@@ -1,182 +1,169 @@
-# Posse Linux Installer
+# Install Posse on Linux
 
-Bootstraps a Linux host from scratch and leaves `posse` runnable: system
-packages, Node.js 24+, npm dependencies, Python/SCIP runtimes, native
-binaries, account settings, and shell wiring.
+Start with [access, keys, requirements, and first-task usage](../README.md).
+Node.js 24+ and npm are installed automatically when missing or unusable.
 
-ATLAS is built into Posse — there is no separate ATLAS checkout, build, or
-server process. ATLAS runtime configuration lives in `~/.posse/account.db`
-(managed through `posse admin`), not environment variables.
+## Install in a normal terminal
 
-## Design
-
-- **Never dies mid-run.** Every step is fenced: failures are recorded, the
-  installer keeps going where it can, steps that depend on a failed step are
-  marked `blocked`, and the summary always prints — even on Ctrl-C.
-- **Idempotent.** Re-running is safe; fresh steps are skipped. `--force`
-  reinstalls npm deps, `--dry-run` previews everything.
-- **Self-sufficient.** Installs its own prerequisites instead of failing on
-  them: the C/C++ build toolchain that Posse's native npm modules (node-pty
-  and friends) compile with, `python3-venv`/`pip`, and Node 24 via `nvm` when
-  the host has no usable Node.
-- **Observable.** A splash, numbered steps (`[ 3/15]`), a spinner with elapsed
-  time on TTYs, and full command output captured to
-  `~/.posse/logs/install-<timestamp>.log` (failures print the output tail
-  inline).
-
-## What It Does (steps)
-
-1. **SCIP language selection** — validates `--scip-languages` or offers the
-   interactive default selection before runtime repair begins.
-2. **Preflight checks** — validates the optional smoke-test repo and reports
-   provider credential / Git identity gaps.
-3. **System packages** — detects `apt`/`dnf`/`yum`/`pacman`/`zypper`
-   and installs what's missing: core (`git`, `curl`), build toolchain
-   (`build-essential`/`gcc`+`make`, `pkg-config`, `python3`, `python3-pip`,
-   `python3-venv`, `unzip`), and helper CLIs (ripgrep, Tesseract OCR,
-   ImageMagick, and FFmpeg). PHP and Composer are installed only when `php` is
-   explicitly selected for SCIP. Helper CLIs install per-package, so one missing
-   package name can't sink the rest. Uses `sudo` (prompted once, up front)
-   unless running as root.
-4. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise installs
-   nvm (pinned version) and `nvm install 24`, then adopts it for the rest of
-   the run. `--no-install-node` opts out.
-5. **Posse checkout** — uses the checkout containing this installer when
-   available; standalone fallback shallow-clones the public client and accepts
-   both a flat Posse root and the public client's `posse/` subdirectory.
-6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
-   selected; then uses a global `composer` when present or otherwise
-   downloads a signature-verified `composer.phar` into Posse's `scip/bin`
-   (skipped when PHP is absent).
-7. **npm dependencies** — `npm install --include=optional` (skipped when
-   `node_modules` is fresh; one automatic retry for transient registry
-   failures).
-8. **Shell wiring** — writes `~/.config/posse/atlas.env`, installs the
-   `posse` shim in `~/.local/bin`, and (unless `--no-persist-env`) sources the
-   env file from `~/.bashrc` / `~/.zshrc`.
-9. **Account settings** — seeds missing ATLAS keys into `~/.posse/account.db`
-   (merge-only; existing values are never overwritten).
-10. **Provider CLI detection** — `posse admin init --non-interactive`.
-11. **Provider API keys** — only with `--configure-keys`: hidden prompts for
-    `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` / `CODEX_API_KEY`, written
-    to `~/.config/posse/providers.env` (chmod 600), plus optional `claude` /
-    `codex login` launches.
-12. **Native binaries** — downloads the current authenticated `posse-atlas`,
-    `posse-git`, `posse-ml`, `posse-remote`, and `posse-atlas-vector` artifacts for the host
-    platform. Existing verified versions are reused. Without `POSSE_KEY`, the
-    step reports a warning and the following doctor step records the install as
-    failed rather than claiming a usable runtime.
-13. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
-    which builds the managed Python venv from `requirements.txt`, installs the
-    SCIP language environments, verifies the issued native binary versions,
-    and downloads/deploys the versioned Jina embeddings package when missing or
-    stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; no system or
-    Node unpacker package is required. This replaces the old `pip install
-    --user` step (which broke on PEP 668 distros like Ubuntu 23.04+/Debian 12+).
-14. **Validation** — boots Posse (`posse status`).
-15. **ATLAS smoke test** — only with `--repo-path`.
-
-## Prereqs
-
-Almost none — that's the point. Bash 4.4+, a supported package manager, and
-`sudo` (or a direct root login) let the installer fetch everything else. Do
-not invoke the installer itself through `sudo`; it requests elevation only for
-system packages. Without root access it still completes whatever doesn't need
-packages and reports the gaps.
-
-Alpine Linux is explicitly unsupported. Its musl userspace is incompatible
-with the installer's nvm/Node binary path, and stock Alpine does not include
-Bash. The preflight rejects Alpine when the script is launched from a Bash
-environment; use a supported glibc-based distribution instead.
-
-## Run
+If you already have the public client checkout:
 
 ```bash
-chmod +x install-posse-atlas.sh
-./install-posse-atlas.sh
+cd posse-client/posse
+bash installers/linux/install-posse-atlas.sh
 ```
 
-With a smoke test against a repo:
+For a new machine, download the standalone installer first. This needs only
+Bash and an HTTPS download tool; the script installs Git and other prerequisites:
 
 ```bash
-./install-posse-atlas.sh --repo-path /opt/repos/your-target-repo
+curl -fL --retry 3 --connect-timeout 15 --max-time 120 \
+  https://raw.githubusercontent.com/mtstedman/posse-client/main/posse/installers/linux/install-posse-atlas.sh \
+  -o install-posse-atlas.sh
+bash install-posse-atlas.sh
 ```
 
-## Flags
-
-| Flag | Purpose |
-|------|---------|
-| `--install-root <path>` | Base directory for installs (default: `~/claude-tools`) |
-| `--posse-dir <path>` | Posse checkout or workspace directory (default: installer checkout, else `<install-root>/posse-client`; the Posse root is auto-detected) |
-| `--posse-repo-url <url>` | Fallback Git URL when no checkout is detected (default: public `mtstedman/posse-client`) |
-| `--repo-id <id>` | ATLAS repo id for the smoke test |
-| `--repo-path <path>` | ATLAS repo path for the smoke test |
-| `--smoke-query <q>` | Query used for atlas-smoke (default: `auth`) |
-| `--smoke-provider <p>` | Provider for atlas-smoke (default: `openai`) |
-| `--scip-languages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Default: `typescript,python`; PHP is opt-in. |
-| `--no-smoke` | Skip the smoke test |
-| `--no-persist-env` | Don't append env sourcing to shell rc files |
-| `--skip-settings` | Don't seed `~/.posse/account.db` |
-| `--skip-host-tools` | Don't install system packages (missing ones are still reported) |
-| `--no-install-node` | Don't auto-install Node via nvm when Node 24+ is missing |
-| `--configure-keys` | Prompt for provider API keys (hidden input, chmod 600 file) |
-| `--force` | Re-run `npm install` even if `node_modules` looks fresh |
-| `--command-timeout <sec>` | Maximum runtime for ordinary external commands (default: 1800; range: 60–86400) |
-| `--doctor-timeout <sec>` | Maximum runtime for first-run doctor, including Jina deployment (default: 7500; range: 60–86400) |
-| `--dry-run` | Print what would happen; do not execute |
-| `--plain` | Disable colors and spinners (also honors `NO_COLOR`; spinners auto-disable when not a TTY) |
-| `--help` | Show help |
-
-## Re-running and troubleshooting
-
-- The summary marks each step `ok`, `skipped`, `partial`, `failed`, `blocked`,
-  or `dry-run`, with warnings listed underneath and the log path at the end.
-- Every command's output lands in `~/.posse/logs/install-<timestamp>.log`; a
-  failing step prints its last lines inline.
-- `npm install` failures almost always name a missing system library in the
-  log — the toolchain step exists to prevent the common ones (node-pty needs
-  `make`/`g++`/`python3`).
-- If the doctor step is `failed`, run `posse doctor` after installing the host
-  tools it names; it repairs incrementally. The installer exits nonzero while a
-  required runtime, current native binary, or Jina deployment remains
-  unresolved.
-- External commands and their process trees are killed after their configured
-  timeout so an unattended package manager, Git, npm, native download, or
-  doctor process cannot hold the installer forever.
-- Re-running the installer after a failure is always safe: completed steps
-  skip themselves.
-- `atlas.env` is rewritten each run. `providers.env` is **only** touched when
-  `--configure-keys` is passed, and only the keys you enter are updated — any
-  other lines are preserved. Account settings are merged, never overwritten.
-
-## Provider API keys
-
-With `--configure-keys`, the installer prompts (hidden input) for:
-
-| Var | Purpose |
-|-----|---------|
-| `POSSE_KEY` | Posse remote prompt/tool catalog and native artifact API key |
-| `OPENAI_API_KEY` | OpenAI provider |
-| `XAI_API_KEY` | Grok (xAI) provider |
-| `CODEX_API_KEY` | Codex API-key auth (optional — the `codex` CLI can also use `~/.codex/auth.json` from `codex login`) |
-
-- Any var already set in your environment is detected and skipped; empty
-  input skips the prompt.
-- Values are stored **plaintext** in `~/.config/posse/providers.env` with
-  `chmod 600`, sourced by your shell rc files alongside `atlas.env`.
-- Claude and Codex CLI logins can't be fully scripted — after the key
-  prompts, the installer offers to launch `claude` and/or `codex login`.
-
-If you prefer to manage keys yourself, omit `--configure-keys` and set the
-env vars however you like (login shell, 1Password CLI, systemd drop-in, etc.).
-The installer only detects and warns in that mode.
-
-## Package As Tarball
-
-From the `posse` directory:
+On a minimal Debian/Ubuntu host without curl, first install the download tools:
 
 ```bash
-bash scripts/package-linux-installer.sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
 ```
 
-This emits a versioned tarball in `posse/dist/`.
+Use a normal user shell for the installer; it requests sudo only for system
+packages. A direct root shell is supported for containers. Do not invoke the
+whole installer through sudo.
+
+Choose your indexing languages when prompted (default: TypeScript/JavaScript
+and Python), then paste your Posse key into the hidden prompt. PHP and Composer
+are installed only when you select PHP. To enter/change provider keys as well:
+
+```bash
+bash install-posse-atlas.sh --configure-keys
+```
+
+Open a new shell, or load the generated PATH configuration:
+
+```bash
+source ~/.config/posse/atlas.env
+cd /path/to/your/git-project
+posse doctor
+posse admin
+posse add "Describe a small first task"
+posse go
+```
+
+The generated launcher also sets the selected Node directory on PATH, so its
+subprocesses can find Node/npm when launched without `.bashrc`.
+Credentials load directly from `~/.config/posse/.env`; shell profile sourcing
+is not required to load the key.
+
+## Containers and unattended installs
+
+Use a glibc image such as `debian:bookworm-slim`. Alpine is unsupported. You
+need a writable home and checkout; use a writable volume or a user-owned clone
+instead of installing into a read-only source mount. No systemd is required by
+the installer. Privileged Docker mode is not required.
+
+For a full unattended install, inject `POSSE_KEY` and provider credentials into
+the process environment and run:
+
+```bash
+bash install-posse-atlas.sh --non-interactive --scip-languages typescript,python
+```
+
+For an image build, defer keys and the authenticated/model setup:
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+RUN curl -fL --retry 3 --connect-timeout 15 --max-time 120 \
+      https://raw.githubusercontent.com/mtstedman/posse-client/main/posse/installers/linux/install-posse-atlas.sh \
+      -o /tmp/install-posse-atlas.sh \
+    && bash /tmp/install-posse-atlas.sh --non-interactive --setup-only --plain
+ENV PATH="/root/.local/bin:${PATH}"
+WORKDIR /workspace
+CMD ["bash"]
+```
+
+This example deliberately uses root for both build and runtime. If your
+container runs as a non-root user, provision OS packages as root first, then
+run the Posse installer as that runtime user with a writable home and checkout.
+`--skip-host-tools` is useful after the image's OS packages are provisioned.
+
+Start the image with runtime secrets, for example using Docker's `--env-file`
+with a private file outside your repository. Inside the running container,
+complete installation without `--setup-only`:
+
+```bash
+bash /tmp/install-posse-atlas.sh --non-interactive --scip-languages typescript,python
+cd /workspace/your-project
+posse doctor
+posse status
+```
+
+The second pass provisions account settings and Python/SCIP/native/model state.
+Persist the runtime user's home and writable checkout, along with your project,
+if you want to reuse downloads and state across container recreation. Do not
+bake production keys into Dockerfile `ARG`, `ENV`, or image layers. The installer
+does not persist injected environment keys. Restrict memory/concurrency through
+your deployment and Posse settings if indexing exhausts the container's limits.
+
+## What setup handles
+
+- Missing Git, CA certificates, download/extraction tools, process tools,
+  C++/make/pkg-config, Python/pip/venv, and helper CLIs through apt/dnf/yum/pacman/zypper.
+- Node 24 through pinned nvm when the current Node/npm pair is unusable. The
+  nvm installer script is verified against a SHA-256 embedded in this script
+  before it runs, and all downloads are HTTPS-only across redirects. nvm's
+  binary-only installation avoids accidentally compiling Node in a slim image.
+- A writable existing checkout, or a staged clone of the public client. Failed
+  clones are removed without leaving the final destination half-installed.
+- npm dependencies, including a SQLite ABI probe before reusing an old install.
+- A `~/.local/bin/posse` launcher and optional shell profile wiring.
+- Hidden key entry into a private `.env`, then native downloads and runtime doctor.
+
+## Options
+
+| Option | Purpose |
+|---|---|
+| `--configure-keys` | Enter or replace keys; Enter keeps an existing value |
+| `--non-interactive` | Disable prompts; use environment variables or saved keys |
+| `--setup-only` | Install core files; defer settings, keys, runtime doctor, and validation |
+| `--scip-languages <csv>` | `typescript,python,php,go,rust,clang`, or `all`; default `typescript,python` |
+| `--posse-dir <path>` | Use/create this writable checkout; nested `posse/` is detected |
+| `--install-root <path>` | Fallback clone base; default `~/claude-tools` |
+| `--posse-repo-url <url>` | Override fallback public Git URL |
+| `--skip-host-tools` | Skip all OS package installation; still provision Node |
+| `--no-install-node` | Require an existing working Node 24+ and npm |
+| `--no-persist-env` | Skip shell profile edits; still write launcher/PATH file |
+| `--skip-settings` | Preserve account settings without seeding defaults |
+| `--force` | Reinstall npm dependencies |
+| `--repo-path <path>` | Run an ATLAS smoke test against this project |
+| `--repo-id <id>` | Optional smoke-test repository identifier |
+| `--smoke-query <text>` | Smoke query; default `auth` |
+| `--smoke-provider <name>` | Smoke provider; default `openai` |
+| `--no-smoke` | Skip smoke testing |
+| `--command-timeout <seconds>` | Command limit, default 1800; range 60–86400 |
+| `--doctor-timeout <seconds>` | Doctor limit, default 7500; range 60–86400 |
+| `--dry-run` | Preview steps without installing; a diagnostic log is still written |
+| `--plain` | Disable colors and spinners |
+| `--help` | Show options |
+
+## Troubleshooting
+
+Logs: `~/.posse/logs/install-<timestamp>.log`. The summary reports `ok`,
+`skipped`, `partial`, `failed`, or `blocked`. Setup-only success means core
+installation completed; it does not mean the runtime is ready.
+
+| Symptom | Action |
+|---|---|
+| `posse: command not found` | Use `~/.local/bin/posse` or source `~/.config/posse/atlas.env`; set PATH explicitly in containers |
+| Node/npm missing after opening a shell | Rerun the installer; use its launcher, which includes the selected Node directory |
+| Python venv/ensurepip failure | On Debian/Ubuntu install `python3-venv`; rerun installer/doctor |
+| Read-only/permission error | Use a writable home and checkout belonging to the runtime user |
+| apt lock/network failure | Wait for other package operations or fix repository/network access; installer retries downloads and waits for apt locks |
+| Missing Posse key | Rerun in a terminal for hidden input, or inject `POSSE_KEY` at runtime |
+| Keys step says the checkout predates this installer | Run `git pull` (or `posse update`) in the checkout, then rerun |
+| `invalid posse_key` with a known valid key | Check host clock synchronization as well as key status; containers share the host clock |
+| Native addon ABI error | Rerun installer with `--force`, or `posse doctor` |
+| Boot reports dependency repair failure | Read the doctor failure, fix the requirement, then retry; work does not start while the dependency guard is failing |

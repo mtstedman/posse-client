@@ -1127,6 +1127,9 @@ async function ensureComposerProject(entry, opts) {
   }
   const composer = composerCommand(opts.posseRoot);
   if (!composer) {
+    if (!toolchainLanguageNeeded("php", opts)) {
+      return { ...before, label: entry.label, ok: true, status: "skipped", action: "none", reason: "composer not on PATH", message: "Composer/PHP is not on PATH; skipped because php indexing is not selected" };
+    }
     return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: "Composer/PHP is not available on PATH" };
   }
   if (opts.dryRun) {
@@ -1171,6 +1174,11 @@ async function ensureComposerProject(entry, opts) {
   };
 }
 
+// Selected-language gate for toolchains Posse cannot provision itself.
+function toolchainLanguageNeeded(language, opts) {
+  return Array.isArray(opts?.neededLanguages) && opts.neededLanguages.includes(language);
+}
+
 async function ensureSimpleCommandProject(entry, opts) {
   if (!fileExists(path.join(entry.root, entry.manifest))) {
     return { present: false, root: entry.root, ok: true, status: "skipped", reason: `no ${entry.manifest}` };
@@ -1182,6 +1190,12 @@ async function ensureSimpleCommandProject(entry, opts) {
     return { present: true, root: entry.root, label: entry.label, ok: true, status: "ok", action: "none", message: `${entry.label} ready` };
   }
   if (!commandOnPath(entry.command)) {
+    // Posse cannot install a language toolchain. A missing one only blocks
+    // work when that language is selected for indexing; otherwise the repo
+    // manifest is advisory and boot must not refuse to start.
+    if (!toolchainLanguageNeeded(entry.language, opts)) {
+      return { present: true, root: entry.root, label: entry.label, ok: true, status: "skipped", action: "none", reason: `${entry.command} not on PATH`, message: `${entry.command} is not on PATH; skipped because ${entry.language} indexing is not selected` };
+    }
     return { present: true, root: entry.root, label: entry.label, ok: false, status: "failed", action: "install", message: `${entry.command} is not available on PATH` };
   }
   if (opts.dryRun) {
@@ -1539,6 +1553,7 @@ function buildDependencyDoctorReport(result, mode) {
  *   includeScip?: boolean,
  *   includeTestTools?: boolean,
  *   includePosseRoot?: boolean,
+ *   includePosseNode?: boolean,
  *   timeoutMs?: number | string | boolean | null,
  *   modelTimeoutMs?: number | string | boolean | null,
  *   forceNodeInstall?: boolean,
@@ -1603,10 +1618,11 @@ export async function ensureBootDependencies(input = {}) {
     ? neededScipLanguages({ projectDir, posseRoot, languages: input.scipLanguages })
     : null;
   const pythonLanguageEnabled = Boolean(neededLanguages?.includes("python"));
+  opts.neededLanguages = neededLanguages;
 
   if (includeNode) {
     const nodeRoots = uniqueByPath([
-      ...(includePosseRoot ? [{ root: posseRoot, label: "posse npm" }] : []),
+      ...(includePosseRoot && input.includePosseNode !== false ? [{ root: posseRoot, label: "posse npm" }] : []),
       { root: projectDir, label: "repo npm" },
       ...discoverLockBackedNodeRoots(projectDir),
     ]).filter((entry) => fileExists(path.join(entry.root, "package.json")));
@@ -1635,6 +1651,7 @@ export async function ensureBootDependencies(input = {}) {
     native.push(await ensureDependencyEntry({
       root: projectDir,
       label: "repo go modules",
+      language: "go",
       manifest: "go.mod",
       stamp: path.join(".posse", "deps", "go-mod-download.stamp"),
       command: "go",
@@ -1646,6 +1663,7 @@ export async function ensureBootDependencies(input = {}) {
     native.push(await ensureDependencyEntry({
       root: projectDir,
       label: "repo cargo",
+      language: "rust",
       manifest: "Cargo.toml",
       stamp: path.join(".posse", "deps", "cargo-fetch.stamp"),
       command: "cargo",

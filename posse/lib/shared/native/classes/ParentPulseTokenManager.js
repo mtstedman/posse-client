@@ -15,12 +15,13 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
  */
 export class ParentPulseTokenManager {
   /**
-   * @param {{ pipePath: string, token: string, timeoutMs?: number }} capability
+   * @param {{ pipePath: string, token: string, timeoutMs?: number, trustedOrigin?: string }} capability
    */
   constructor(capability = /** @type {any} */ ({})) {
     this.pipePath = String(capability.pipePath || "").trim();
     this.token = String(capability.token || "").trim();
     this.timeoutMs = positiveNumber(capability.timeoutMs, DEFAULT_TIMEOUT_MS);
+    this.trustedOrigin = String(capability.trustedOrigin || "").trim();
     if (!this.pipePath || !this.token) {
       throw new TypeError("ParentPulseTokenManager requires a private parent broker capability");
     }
@@ -40,6 +41,23 @@ export class ParentPulseTokenManager {
   }
 
   stopHeartbeat() {}
+
+  assertTrustedResourceUrl(value, operation = "remote resource request") {
+    let url;
+    try { url = new URL(String(value || "")); } catch {
+      throw brokerError("POSSE_REMOTE_INVALID_URL", `${operation} requires an absolute trusted URL`);
+    }
+    if (url.username || url.password) {
+      throw brokerError("POSSE_REMOTE_INVALID_URL", `${operation} refuses URL credentials`);
+    }
+    if (!this.trustedOrigin || url.origin !== this.trustedOrigin) {
+      throw brokerError("POSSE_REMOTE_UNTRUSTED_ORIGIN", `${operation} origin does not match the parent capability`);
+    }
+    if (url.protocol !== "https:") {
+      throw brokerError("POSSE_REMOTE_INSECURE_AUTH", `${operation} requires HTTPS`);
+    }
+    return url;
+  }
 
   async getPulseEnvelope({ refresh = false, requiredRoute } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();

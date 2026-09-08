@@ -98,6 +98,7 @@ scripts/live-prompt-matrix-plan.md
 
 # Local per-file test run-time ledger (scripts/run-tests.mjs + test-timings.mjs)
 .posse-test-timings.json
+.posse-test-runs/
 
 # Windows device sink accidentally appears in untracked scans.
 /nul

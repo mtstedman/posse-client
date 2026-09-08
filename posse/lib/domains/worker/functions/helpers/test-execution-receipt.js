@@ -10,23 +10,42 @@ import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import {
+  getArtifact,
   getArtifacts,
   storeArtifact,
 } from "../../../queue/functions/index.js";
+import { getDb } from "../../../../shared/storage/functions/index.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
 import { isSafeDirectNodeTestScriptArgs } from "../../../../shared/scope/functions/test-command.js";
-import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
+import {
+  TEST_SUBPROCESS_ENV_KEYS,
+  VERIFICATION_PULSE_CAPABILITY_ENV,
+} from "../../../../catalog/process.js";
 import { filterProcessEnv } from "../../../../shared/platform/functions/process-env.js";
+import {
+  describeToolchain,
+  resolveVerificationPolicy,
+  toolchainFingerprint,
+  verificationPolicyFingerprint,
+} from "../../../settings/functions/verification-policy.js";
+import {
+  isVerificationInfrastructureOutcome,
+  verificationOutcome,
+} from "./verification-outcome.js";
+import { resolveRepositoryVerificationPlan } from "../../../verification/functions/verification-plan.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
+const RECEIPT_MIME_TYPE = "application/vnd.posse.test-execution+json";
 const RECEIPT_SCHEMA_VERSION = 1;
 const MAX_STREAM_CHARS = 256 * 1024;
 const MAX_EVIDENCE_OUTPUT_CHARS = 1600;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const TERMINATION_GRACE_MS = 250;
 const TERMINATION_SETTLE_MS = 5_000;
-const REUSABLE_RECEIPT_STATUSES = new Set(["passed", "failed", "rejected", "timed_out"]);
+// A timeout is only an observation about one policy and one toolchain. It is
+// reusable solely while both are unchanged; see isReusableReceipt.
+const REUSABLE_RECEIPT_STATUSES = new Set(["passed", "failed"]);
 const MUTATING_TEST_FLAGS = new Set([
   "-u", "--accept", "--bless", "--coverage", "--cov", "--fix", "--record",
   "--basetemp", "--blockprofile", "--coverprofile", "--cpuprofile", "--html",
@@ -151,13 +170,51 @@ function parseCommandArguments(command) {
 async function runCommand(command, {
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  idleTimeoutMs = null,
   trustedShell = false,
 } = {}) {
   const startedAt = Date.now();
+  const idleLimitMs = Number(idleTimeoutMs) > 0 ? Math.max(1000, Number(idleTimeoutMs)) : null;
+  let pulseBroker = null;
+  try {
+    const { startVerificationPulseBrokerIfAvailable } = await import(
+      "../../../../shared/native/classes/VerificationPulseBroker.js"
+    );
+    pulseBroker = await startVerificationPulseBrokerIfAvailable();
+  } catch (error) {
+    return {
+      status: "infrastructure_error",
+      ok: null,
+      code: error?.code ?? null,
+      signal: null,
+      timed_out: false,
+      duration_ms: Date.now() - startedAt,
+      stdout: "",
+      stderr: error?.message || String(error),
+      stdout_truncated: false,
+      stderr_truncated: false,
+      timeout_kind: null,
+      reason: "verification_capability_broker_unavailable",
+    };
+  }
   return await new Promise((resolve) => {
     let child;
     const env = filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS });
-    const secrets = parentSecretValues(process.env);
+    if (pulseBroker) env[VERIFICATION_PULSE_CAPABILITY_ENV] = JSON.stringify(pulseBroker.capability());
+    const secrets = [
+      ...parentSecretValues(process.env),
+      ...(pulseBroker?.token ? [pulseBroker.token] : []),
+    ];
+    const resolveAfterBrokerClose = (result) => {
+      if (!pulseBroker) {
+        resolve(result);
+        return;
+      }
+      void pulseBroker.close().then(
+        () => resolve(result),
+        () => resolve(result),
+      );
+    };
     try {
       if (trustedShell) {
         child = spawn(command, {
@@ -182,7 +239,7 @@ async function runCommand(command, {
         });
       }
     } catch (error) {
-      resolve({
+      resolveAfterBrokerClose({
         status: "failed",
         ok: false,
         code: error?.code ?? null,
@@ -202,8 +259,10 @@ async function runCommand(command, {
     let stderrTruncated = false;
     let settled = false;
     let timedOut = false;
+    let timeoutKind = null;
     let forceTimer = null;
     let settleTimer = null;
+    let idleTimer = null;
 
     const finish = ({
       code = null,
@@ -216,6 +275,7 @@ async function runCommand(command, {
       clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       if (settleTimer) clearTimeout(settleTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       const status = timedOut
         ? "timed_out"
         : error
@@ -223,7 +283,7 @@ async function runCommand(command, {
           : code === 0 && !error
             ? "passed"
             : "failed";
-      resolve({
+      resolveAfterBrokerClose({
         status,
         ok: status === "passed" ? true : (status === "infrastructure_error" ? null : false),
         code,
@@ -236,12 +296,20 @@ async function runCommand(command, {
           : redactExactValues(stderr, secrets),
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
-        reason: error ? `test_runner_spawn_failed:${error.code || "unknown"}` : null,
+        timeout_kind: timedOut ? timeoutKind : null,
+        reason: error
+          ? `test_runner_spawn_failed:${error.code || "unknown"}`
+          : timedOut && timeoutKind === "idle"
+            ? "test_idle_timeout"
+            : null,
       });
     };
 
-    const timer = setTimeout(() => {
+    const terminate = (kind) => {
+      if (timedOut) return;
       timedOut = true;
+      timeoutKind = kind;
+      if (idleTimer) clearTimeout(idleTimer);
       killProcessTree(child);
       forceTimer = setTimeout(() => killProcessTree(child, { force: true }), TERMINATION_GRACE_MS);
       forceTimer.unref?.();
@@ -256,16 +324,28 @@ async function runCommand(command, {
         });
       }, TERMINATION_SETTLE_MS);
       settleTimer.unref?.();
-    }, Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
+    };
+
+    const timer = setTimeout(() => terminate("wall"), Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
+    // The idle limit restarts on every byte of output. A harness that is
+    // silent while healthy must leave it disabled (see verification-policy.js).
+    const armIdle = () => {
+      if (!idleLimitMs || timedOut) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => terminate("idle"), idleLimitMs);
+    };
+    armIdle();
 
     child.stdout?.setEncoding?.("utf8");
     child.stderr?.setEncoding?.("utf8");
     child.stdout?.on("data", (chunk) => {
+      armIdle();
       const bounded = appendBounded(stdout, chunk);
       stdout = bounded.value;
       stdoutTruncated = stdoutTruncated || bounded.truncated;
     });
     child.stderr?.on("data", (chunk) => {
+      armIdle();
       const bounded = appendBounded(stderr, chunk);
       stderr = bounded.value;
       stderrTruncated = stderrTruncated || bounded.truncated;
@@ -286,7 +366,12 @@ function parseReceiptArtifact(artifact) {
     if (parsed?.kind !== RECEIPT_KIND || parsed?.schema_version !== RECEIPT_SCHEMA_VERSION) {
       return null;
     }
-    return { ...parsed, artifact_id: artifact.id };
+    return {
+      ...parsed,
+      verification_outcome: parsed.verification_outcome || verificationOutcome(parsed),
+      artifact_id: artifact.id,
+      artifact_job_id: artifact.job_id ?? null,
+    };
   } catch {
     return null;
   }
@@ -299,15 +384,19 @@ function storedReceipts(jobId) {
 }
 
 function storeReceipt(job, attemptId, receipt) {
+  const storedReceipt = {
+    ...receipt,
+    verification_outcome: receipt.verification_outcome || verificationOutcome(receipt),
+  };
   const artifact = storeArtifact({
     work_item_id: job.work_item_id,
     job_id: job.id,
     attempt_id: attemptId,
     artifact_type: "log",
-    mime_type: "application/vnd.posse.test-execution+json",
-    content_json: receipt,
+    mime_type: RECEIPT_MIME_TYPE,
+    content_json: storedReceipt,
   });
-  return { ...receipt, artifact_id: artifact.id };
+  return { ...storedReceipt, artifact_id: artifact.id };
 }
 
 function commandExecutable(command) {
@@ -402,6 +491,15 @@ function composerLockedDependencyClassFileMissing(projectRoot, output) {
 }
 
 function classifyNestedRunnerInfrastructureFailure(command, result, { projectRoot = null } = {}) {
+  if (result?.status === "infrastructure_error"
+    && String(result?.code || "").toUpperCase() === "ENOENT") {
+    return {
+      ...result,
+      ok: null,
+      reason: "test_task_dependency_unavailable",
+      missing_executable: commandExecutable(command) || null,
+    };
+  }
   if (result?.status !== "failed") return result;
   const executable = commandExecutable(command);
   const output = [result.stdout, result.stderr]
@@ -982,12 +1080,51 @@ export function operationalCommandApprovalRequest(command) {
   };
 }
 
-export function resolveFrozenTestPlan(job = {}, payload = {}) {
+export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
   if (!["dev", "fix"].includes(String(job?.job_type || ""))) return null;
   if (String(payload?.task_mode || "code") !== "code") return null;
   const command = typeof payload?.test_command === "string"
     ? payload.test_command.trim()
     : "";
+  if (!command && cwd) {
+    const verificationPlan = resolveRepositoryVerificationPlan({
+      projectDir: cwd,
+      selectedCheckIds: payload?.verification_check_ids,
+      validateCommand: (candidate) => validatePlannerTestCommandForRepository(candidate, cwd),
+    });
+    if (!verificationPlan) return null;
+    if (verificationPlan.status !== "ready") {
+      return {
+        schema_version: RECEIPT_SCHEMA_VERSION,
+        command: "repository verification plan",
+        execution_command: "repository verification plan",
+        cwd_relative: null,
+        source: verificationPlan.source,
+        plan_id: verificationPlan.plan_id,
+        check_id: null,
+        intent: "test",
+        verification_plan: verificationPlan,
+        validation_error: verificationPlan.reason || "verification_plan_invalid",
+        verification_eligible: false,
+      };
+    }
+    const selected = [...verificationPlan.checks].reverse().find((check) => check.stage === "canonical")
+      || verificationPlan.checks.at(-1);
+    if (!selected) return null;
+    return {
+      schema_version: RECEIPT_SCHEMA_VERSION,
+      command: selected.command,
+      execution_command: selected.execution_command,
+      cwd_relative: selected.cwd_relative,
+      source: verificationPlan.source,
+      plan_id: verificationPlan.plan_id,
+      check_id: selected.id,
+      intent: selected.intent,
+      verification_plan: verificationPlan,
+      validation_error: null,
+      verification_eligible: true,
+    };
+  }
   if (!command) return null;
   const taskAbAcceptance = payload?._task_ab_test_command === true;
   const approvalRequest = taskAbAcceptance ? null : operationalCommandApprovalRequest(command);
@@ -1021,6 +1158,9 @@ export function resolveFrozenTestPlan(job = {}, payload = {}) {
     cwd_relative: validation.cwd_relative || null,
     source,
     plan_id: sha256(`${source}\0${command}`),
+    check_id: `legacy:${sha256(command).slice(0, 16)}`,
+    intent: "test",
+    verification_plan: null,
     validation_error: validation.ok ? null : validation.reason,
     verification_eligible: source !== "operator_approved_operation",
   };
@@ -1052,15 +1192,55 @@ function frozenTestPlanFromReceipt(receipt = {}) {
     cwd_relative: cwdRelative,
     source,
     plan_id: planId,
+    check_id: receipt.check_id || null,
+    intent: receipt.intent || "test",
+    verification_plan: receipt.verification_plan || null,
     validation_error: receipt.validation_error || null,
     verification_eligible: receipt.verification_eligible !== false,
   };
 }
 
-export function findFrozenTestBaseline(jobId) {
+// Effective policy for one execution: the resolved repository policy, with any
+// caller-supplied override folded in so the fingerprint always describes the
+// limits that actually applied.
+// `timeoutMs` > 0 overrides the wall limit. `idleTimeoutMs` undefined inherits
+// the repository idle limit; null or 0 disables it; > 0 overrides it.
+function effectiveVerificationPolicy({ cwd, policy = null, timeoutMs = null, idleTimeoutMs = undefined } = {}) {
+  const base = policy || resolveVerificationPolicy({ projectDir: cwd, checkClass: "frozen_test" });
+  const callerWall = Number(timeoutMs) > 0;
+  const wall = callerWall ? Math.max(1000, Number(timeoutMs)) : base.wall_timeout_ms;
+  let idle = base.idle_timeout_ms ?? null;
+  if (idleTimeoutMs !== undefined) {
+    idle = Number(idleTimeoutMs) > 0 ? Math.max(1000, Number(idleTimeoutMs)) : null;
+  }
+  if (idle != null) idle = Math.min(idle, wall);
+  const effective = {
+    ...base,
+    wall_timeout_ms: wall,
+    wall_source: callerWall ? "caller" : base.wall_source,
+    idle_timeout_ms: idle,
+  };
+  return { ...effective, fingerprint: verificationPolicyFingerprint(effective) };
+}
+
+export function isReusableReceipt(receipt, policy = null, { projectDir = null } = {}) {
+  if (!receipt) return false;
+  // Every reusable result is an execution claim. Legacy rows without policy
+  // identity, changed toolchains, and transient infrastructure outcomes must
+  // all run again. In particular, a timeout is evidence, never a cache hit.
+  if (!REUSABLE_RECEIPT_STATUSES.has(receipt.status)) return false;
+  if (!policy?.fingerprint
+    || !receipt.policy_fingerprint
+    || !receipt.toolchain_fingerprint
+    || !receipt.tree_fingerprint) return false;
+  return receipt.policy_fingerprint === policy.fingerprint
+    && receipt.toolchain_fingerprint === toolchainFingerprint(describeToolchain({ projectDir }));
+}
+
+export function findFrozenTestBaseline(jobId, { policy = null, projectDir = null } = {}) {
   return storedReceipts(jobId)
     .find((receipt) => receipt.phase === "baseline"
-      && REUSABLE_RECEIPT_STATUSES.has(receipt.status)) || null;
+      && isReusableReceipt(receipt, policy, { projectDir })) || null;
 }
 
 function findLatestFrozenTestBaseline(jobId) {
@@ -1069,13 +1249,13 @@ function findLatestFrozenTestBaseline(jobId) {
     .sort((left, right) => Number(right.artifact_id || 0) - Number(left.artifact_id || 0))[0] || null;
 }
 
-function findPostChangeReceipt(jobId, planId, commitHash) {
+function findPostChangeReceipt(jobId, planId, commitHash, { policy = null, projectDir = null } = {}) {
   return storedReceipts(jobId)
     .find((receipt) => (
       receipt.phase === "post_change"
       && receipt.plan_id === planId
       && receipt.commit_hash === commitHash
-      && REUSABLE_RECEIPT_STATUSES.has(receipt.status)
+      && isReusableReceipt(receipt, policy, { projectDir })
     )) || null;
 }
 
@@ -1115,6 +1295,84 @@ async function currentHeadRef(cwd) {
   }
 }
 
+async function repositoryFingerprint(cwd) {
+  try {
+    const origin = String(await gitExecAsync(["config", "--get", "remote.origin.url"], cwd) || "").trim();
+    if (origin) return sha256(`origin\0${origin}`);
+  } catch {
+    // A local-only repository falls back to its shared Git directory below.
+  }
+  try {
+    const commonDir = String(await gitExecAsync(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd) || "").trim();
+    if (commonDir) return sha256(`git-common-dir\0${fs.realpathSync(commonDir)}`);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function worktreeFingerprint(commitHash, porcelainStatus) {
+  if (!commitHash || porcelainStatus == null) return null;
+  return sha256(`worktree-v1\0${commitHash}\0${porcelainStatus}`);
+}
+
+function repositoryReceiptCandidates(jobId, limit = 512) {
+  const rows = getDb().prepare(`
+    SELECT id
+    FROM artifacts
+    WHERE mime_type = ?
+      AND job_id IS NOT NULL
+      AND job_id <> ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(RECEIPT_MIME_TYPE, jobId, limit);
+  return rows
+    .map((row) => getArtifact(row.id))
+    .map(parseReceiptArtifact)
+    .filter(Boolean);
+}
+
+async function findRepositoryFrozenTestBaseline({
+  jobId,
+  planId,
+  commitHash,
+  policy,
+  projectDir,
+  treeFingerprint,
+} = {}) {
+  if (!jobId || !planId || !commitHash || !projectDir || !treeFingerprint) return null;
+  const repositoryFingerprintValue = await repositoryFingerprint(projectDir);
+  if (!repositoryFingerprintValue) return null;
+  return repositoryReceiptCandidates(jobId).find((receipt) => (
+    receipt.phase === "baseline"
+    && !receipt.reuse_scope
+    && receipt.repository_fingerprint === repositoryFingerprintValue
+    && receipt.plan_id === planId
+    && receipt.commit_hash === commitHash
+    && receipt.tree_fingerprint === treeFingerprint
+    && isReusableReceipt(receipt, policy, { projectDir })
+  )) || null;
+}
+
+function storeRepositoryBaselineReference(job, receipt) {
+  const {
+    artifact_id: sourceArtifactId,
+    artifact_job_id: sourceJobId,
+    created_at: sourceCreatedAt,
+    reused: _reused,
+    ...sourceReceipt
+  } = receipt;
+  return storeReceipt(job, null, {
+    ...sourceReceipt,
+    reuse_scope: "repository_commit",
+    reuse_source_artifact_id: sourceArtifactId || null,
+    reuse_source_job_id: sourceJobId || null,
+    reuse_source_created_at: sourceCreatedAt || null,
+    reused: true,
+    created_at: new Date().toISOString(),
+  });
+}
+
 async function isAncestorCommit(cwd, ancestor, descendant) {
   if (!ancestor || !descendant) return false;
   try {
@@ -1140,11 +1398,47 @@ async function executeReceipt({
   cwd,
   commitHash = null,
   attemptId = null,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
+  policy = null,
   cleanupWorktree = null,
+  baselineReceipt = null,
 } = {}) {
+  const effectivePolicy = policy || effectiveVerificationPolicy({ cwd });
+  const toolchain = describeToolchain({ projectDir: cwd });
+  const executionCommand = plan.execution_command || plan.command;
+  let normalizedArgv = null;
+  try { normalizedArgv = parseCommandArguments(executionCommand); } catch { normalizedArgv = null; }
+  const policyIdentity = {
+    policy_schema_version: effectivePolicy.schema_version,
+    check_class: effectivePolicy.check_class,
+    timeout_ms: effectivePolicy.wall_timeout_ms,
+    idle_timeout_ms: effectivePolicy.idle_timeout_ms ?? null,
+    policy_source: effectivePolicy.wall_source,
+    policy_fingerprint: effectivePolicy.fingerprint,
+    toolchain_fingerprint: toolchainFingerprint(toolchain),
+    platform: toolchain.platform,
+    arch: toolchain.arch,
+    node_version: toolchain.node_version,
+    runtimes: toolchain.runtimes,
+    lockfile_digests: toolchain.identity_files,
+    environment_profile: toolchain.environment_profile,
+    repository_fingerprint: await repositoryFingerprint(cwd),
+  };
   const actualCommit = await currentCommit(cwd);
   const originalHeadRef = await currentHeadRef(cwd);
+  const initialPorcelain = await porcelain(cwd);
+  const receiptIdentity = {
+    ...policyIdentity,
+    check_id: plan.check_id || `frozen_test:${plan.plan_id}`,
+    intent: plan.intent || "test",
+    verification_plan_id: plan.verification_plan?.plan_id || plan.plan_id,
+    verification_plan: plan.verification_plan || null,
+    normalized_argv: normalizedArgv,
+    normalized_cwd: plan.cwd_relative || ".",
+    baseline_commit_hash: phase === "baseline" ? (commitHash || actualCommit) : null,
+    assessed_commit_hash: phase === "post_change" ? (commitHash || actualCommit) : null,
+    tree_fingerprint: worktreeFingerprint(actualCommit, initialPorcelain),
+    tree_state: initialPorcelain === "" ? "clean" : "dirty",
+  };
   const testedIntegratedDescendant = !!(
     commitHash
     && actualCommit
@@ -1162,6 +1456,7 @@ async function executeReceipt({
       verification_eligible: plan.verification_eligible !== false,
       validation_error: plan.validation_error,
       commit_hash: commitHash || actualCommit,
+      ...receiptIdentity,
       status: "rejected",
       ok: null,
       exit_code: null,
@@ -1176,7 +1471,7 @@ async function executeReceipt({
       created_at: new Date().toISOString(),
     });
   }
-  if (plan.source === "planner" && phase === "baseline") {
+  if (!["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline") {
     const repositoryValidation = validatePlannerTestCommandForRepository(plan.command, cwd);
     if (!repositoryValidation.ok) {
       return storeReceipt(job, attemptId, {
@@ -1190,6 +1485,7 @@ async function executeReceipt({
         validation_error: repositoryValidation.reason,
         commit_hash: commitHash || actualCommit,
         executed_commit_hash: null,
+        ...receiptIdentity,
         status: "invalid_test_plan",
         ok: null,
         exit_code: null,
@@ -1216,6 +1512,7 @@ async function executeReceipt({
       verification_eligible: plan.verification_eligible !== false,
       commit_hash: actualCommit,
       expected_commit_hash: commitHash,
+      ...receiptIdentity,
       status: "unavailable",
       ok: null,
       exit_code: null,
@@ -1230,7 +1527,7 @@ async function executeReceipt({
       created_at: new Date().toISOString(),
     });
   }
-  const before = await porcelain(cwd);
+  const before = initialPorcelain;
   if (before) {
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
@@ -1241,6 +1538,7 @@ async function executeReceipt({
       source: plan.source,
       verification_eligible: plan.verification_eligible !== false,
       commit_hash: commitHash || actualCommit,
+      ...receiptIdentity,
       status: "unavailable",
       ok: null,
       exit_code: null,
@@ -1256,16 +1554,16 @@ async function executeReceipt({
     });
   }
 
-  const executionCommand = plan.execution_command || plan.command;
   const executionCwd = plan.cwd_relative
     ? path.resolve(cwd, plan.cwd_relative)
     : cwd;
   const rawResult = await runCommand(executionCommand, {
     cwd: executionCwd,
-    timeoutMs,
+    timeoutMs: effectivePolicy.wall_timeout_ms,
+    idleTimeoutMs: effectivePolicy.idle_timeout_ms,
     trustedShell: plan.source === "task_ab_acceptance",
   });
-  const plannerClassifiedResult = plan.source === "planner" && phase === "baseline"
+  const plannerClassifiedResult = !["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, rawResult)
     : rawResult;
   const result = classifyNestedRunnerInfrastructureFailure(
@@ -1314,7 +1612,7 @@ async function executeReceipt({
     }
   }
 
-  const receipt = storeReceipt(job, attemptId, {
+  const receiptData = {
     kind: RECEIPT_KIND,
     schema_version: RECEIPT_SCHEMA_VERSION,
     phase,
@@ -1336,17 +1634,31 @@ async function executeReceipt({
     exit_code: result.code,
     signal: result.signal,
     timed_out: result.timed_out,
+    timeout_kind: result.timeout_kind || null,
+    ...receiptIdentity,
     duration_ms: result.duration_ms,
     failure_fingerprint: compactFailureFingerprint(result),
     reason: cleanupError || result.reason || null,
+    missing_executable: result.missing_executable || null,
     cleanup_status: cleanupStatus,
     stdout: result.stdout,
     stderr: result.stderr,
     stdout_truncated: result.stdout_truncated,
     stderr_truncated: result.stderr_truncated,
     created_at: new Date().toISOString(),
+  };
+  const delta = baselineReceipt ? testExecutionDelta(baselineReceipt, receiptData) : null;
+  const comparison = delta === "fixed"
+    ? "fixed"
+    : delta === "persistent_failure"
+      ? "persistent"
+      : delta === "regression"
+        ? "regressed"
+        : "not_comparable";
+  return storeReceipt(job, attemptId, {
+    ...receiptData,
+    verification_outcome: verificationOutcome(receiptData, { comparison }),
   });
-  return receipt;
 }
 
 async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
@@ -1384,21 +1696,40 @@ export async function ensurePreDevelopmentTestBaseline({
   job,
   payload,
   cwd,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
+  timeoutMs = null,
+  idleTimeoutMs = undefined,
+  policy = null,
   cleanupWorktree = null,
   repairDependencies = null,
 } = {}) {
-  const existing = findFrozenTestBaseline(job?.id);
+  if (!cwd) {
+    const legacy = findFrozenTestBaseline(job?.id);
+    return legacy ? { ...legacy, reused: true } : null;
+  }
+  const effectivePolicy = effectiveVerificationPolicy({ cwd, policy, timeoutMs, idleTimeoutMs });
+  const existing = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd });
   if (existing) return { ...existing, reused: true };
-  const plan = resolveFrozenTestPlan(job, payload);
-  if (!plan || !cwd) return null;
+  const plan = resolveFrozenTestPlan(job, payload, { cwd });
+  if (!plan) return null;
   // An approved operational command is intentionally single-phase. Running a
   // migration, build, generator, or server-start command against the baseline
   // can mutate state before implementation and still is not test evidence.
   if (plan.source === "operator_approved_operation") return null;
+  const headCommit = await currentCommit(cwd);
+  const headPorcelain = await porcelain(cwd);
+  const repositoryBaseline = headPorcelain === ""
+    ? await findRepositoryFrozenTestBaseline({
+        jobId: job?.id,
+        planId: plan.plan_id,
+        commitHash: headCommit,
+        policy: effectivePolicy,
+        projectDir: cwd,
+        treeFingerprint: worktreeFingerprint(headCommit, headPorcelain),
+      })
+    : null;
+  if (repositoryBaseline) return storeRepositoryBaselineReference(job, repositoryBaseline);
   const prior = findLatestFrozenTestBaseline(job?.id);
   if (prior) {
-    const headCommit = await currentCommit(cwd);
     // A non-reusable baseline may be retried only while the worktree is still
     // at the same pre-development commit. Once implementation has committed,
     // recording a new "baseline" would test the changed tree and can disguise
@@ -1412,7 +1743,7 @@ export async function ensurePreDevelopmentTestBaseline({
     plan,
     phase: "baseline",
     cwd,
-    timeoutMs,
+    policy: effectivePolicy,
     cleanupWorktree,
   });
   // The first receipt remains an honest record of the unavailable toolchain.
@@ -1423,7 +1754,7 @@ export async function ensurePreDevelopmentTestBaseline({
     plan,
     phase: "baseline",
     cwd,
-    timeoutMs,
+    policy: effectivePolicy,
     cleanupWorktree,
   }));
 }
@@ -1434,18 +1765,24 @@ export async function ensurePostChangeTestReceipt({
   cwd,
   commitHash = null,
   attemptId = null,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
+  timeoutMs = null,
+  idleTimeoutMs = undefined,
+  policy = null,
   cleanupWorktree = null,
   repairDependencies = null,
 } = {}) {
   if (!cwd) return null;
-  const baseline = findFrozenTestBaseline(job?.id);
+  const effectivePolicy = effectiveVerificationPolicy({ cwd, policy, timeoutMs, idleTimeoutMs });
+  const baseline = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd });
   const plan = baseline
     ? frozenTestPlanFromReceipt(baseline)
-    : resolveFrozenTestPlan(job, payload);
+    : resolveFrozenTestPlan(job, payload, { cwd });
   if (!plan) return null;
   const assessedCommit = commitHash || await currentCommit(cwd);
-  const existing = findPostChangeReceipt(job.id, plan.plan_id, assessedCommit);
+  const existing = findPostChangeReceipt(job.id, plan.plan_id, assessedCommit, {
+    policy: effectivePolicy,
+    projectDir: cwd,
+  });
   if (existing) {
     return {
       baseline,
@@ -1460,8 +1797,9 @@ export async function ensurePostChangeTestReceipt({
     cwd,
     commitHash: assessedCommit,
     attemptId,
-    timeoutMs,
+    policy: effectivePolicy,
     cleanupWorktree,
+    baselineReceipt: baseline,
   });
   const postChange = await retryAfterDependencyRepair(
     firstPostChange,
@@ -1473,8 +1811,9 @@ export async function ensurePostChangeTestReceipt({
       cwd,
       commitHash: assessedCommit,
       attemptId,
-      timeoutMs,
+      policy: effectivePolicy,
       cleanupWorktree,
+      baselineReceipt: baseline,
     }),
   );
   return {
@@ -1501,7 +1840,9 @@ function compactOutput(receipt) {
 export function testExecutionDelta(baseline, postChange) {
   if (!baseline) return "post_only";
   if (!postChange) return "baseline_only";
-  const failed = (receipt) => ["failed", "timed_out"].includes(receipt?.status);
+  if (isVerificationInfrastructureOutcome(baseline)
+    || isVerificationInfrastructureOutcome(postChange)) return "infrastructure_unavailable";
+  const failed = (receipt) => receipt?.status === "failed";
   if (baseline.status === "passed" && postChange.status === "passed") return "pass_to_pass";
   if (baseline.status === "passed" && failed(postChange)) return "regression";
   if (failed(baseline) && postChange.status === "passed") return "fixed";
@@ -1593,14 +1934,30 @@ export function testReceiptObservationDetail(receipt = {}) {
     validation_error: receipt.validation_error || null,
     exit_code: receipt.exit_code ?? null,
     duration_ms: receipt.duration_ms ?? null,
+    timeout_ms: receipt.timeout_ms ?? null,
+    idle_timeout_ms: receipt.idle_timeout_ms ?? null,
+    timeout_kind: receipt.timeout_kind || null,
+    policy_fingerprint: receipt.policy_fingerprint || null,
+    toolchain_fingerprint: receipt.toolchain_fingerprint || null,
+    tree_fingerprint: receipt.tree_fingerprint || null,
+    repository_fingerprint: receipt.repository_fingerprint || null,
+    verification_outcome: receipt.verification_outcome || verificationOutcome(receipt),
     commit_hash: receipt.commit_hash || null,
     executed_commit_hash: receipt.executed_commit_hash || null,
     tested_integrated_descendant: receipt.tested_integrated_descendant === true,
     plan_id: receipt.plan_id || null,
+    verification_plan_id: receipt.verification_plan_id || receipt.plan_id || null,
+    check_id: receipt.check_id || null,
+    intent: receipt.intent || null,
     cleanup_status: receipt.cleanup_status || null,
     failure_fingerprint: receipt.failure_fingerprint || null,
     artifact_id: receipt.artifact_id || null,
     reused: receipt.reused === true,
+    reuse_scope: receipt.reuse_scope || null,
+    reuse_source_artifact_id: receipt.reuse_source_artifact_id || null,
+    reuse_source_job_id: receipt.reuse_source_job_id || null,
+    reuse_eligible: receipt.phase === "baseline" && REUSABLE_RECEIPT_STATUSES.has(receipt.status),
+    reuse_hit: receipt.reused === true,
     dependency_repair: receipt.dependency_repair || null,
   };
 }

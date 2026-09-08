@@ -871,6 +871,16 @@ export function compactCodeWindowLensResult(toolName, result, {
   const pagingEnabled = enabled ?? resultRefPagingEnabled();
   let compacted = false;
 
+  // Optional syntax navigation must not trigger paging or consume the inline
+  // source budget. Omit it before computing page boundaries when over budget.
+  if (tool === "code.window" && pagingEnabled && result.length > min
+    && (Object.hasOwn(data, "decisionPoints") || Object.hasOwn(data, "decisionPointsTruncated"))) {
+    delete data.decisionPoints;
+    delete data.decisionPointsTruncated;
+    result = JSON.stringify(envelope);
+    compacted = true;
+  }
+
   // A returned anonymous callable is useful as an addressable source scope,
   // but not as a durable indexed symbol. Materialize its exact native range
   // once in the job hash store and expose only a compact line/ref map. This

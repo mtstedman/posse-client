@@ -1,3 +1,5 @@
+import { renderDoctorHelp, renderUpdateHelp } from "./maintenance-help.js";
+import { C } from "../../../shared/format/functions/colors.js";
 // doctor/update bootstrap that runs before orchestrator-app opens SQLite.
 // Windows cannot replace a loaded native addon, so Posse's own npm repair must
 // happen in a process that has never constructed a better-sqlite3 Database.
@@ -14,13 +16,13 @@ function hasArg(argv, flag) {
   return argv.includes(flag);
 }
 
-function maintenanceFailure(entry) {
+function maintenanceFailure(entry, dryRun = false) {
   const message = entry?.message || "Posse npm dependency repair failed";
   return {
     ok: false,
     status: "failed",
     project_dir: process.cwd(),
-    dry_run: false,
+    dry_run: dryRun,
     counts: { checked: 1, installed: 0, dry_run: 0, failed: 1, ready: 0 },
     node: [entry],
     python: [],
@@ -31,7 +33,7 @@ function maintenanceFailure(entry) {
     test_tools: {},
     doctor: {
       ok: false,
-      mode: "repair",
+      mode: dryRun ? "plan" : "repair",
       summary: `1 failed: posse npm: ${message}`,
       checked: 1,
       repaired: [],
@@ -156,9 +158,8 @@ async function repairOwnNodeTree({ argv, dryRun, json }) {
 }
 
 async function runDoctorBootstrap(argv) {
-  const { cmdDoctor } = await import("./doctor-command.js");
   if (hasArg(argv, "--help") || hasArg(argv, "-h")) {
-    await cmdDoctor({ argv });
+    renderDoctorHelp({ log: console.log, colors: C });
     return;
   }
 
@@ -167,14 +168,14 @@ async function runDoctorBootstrap(argv) {
   const ownNode = process.env.POSSE_MAINTENANCE_NODE_REPAIRED === "1"
     ? { ok: true, status: "ok", label: "posse npm", message: "repaired by the maintenance parent" }
     : await repairOwnNodeTree({ argv, dryRun, json });
-  if (ownNode?.ok === false) {
-    await cmdDoctor({
-      argv,
-      runDoctor: async () => maintenanceFailure(ownNode),
-      getAtlasConfig: () => ({ enabled: false, scipMode: "off", scipLanguages: [] }),
-    });
+  if (ownNode?.ok === false || ownNode?.status === "dry-run") {
+    const report = maintenanceFailure(ownNode, dryRun);
+    if (json) console.log(JSON.stringify(report, null, 2));
+    else console.error(`\n  Posse doctor cannot continue: ${ownNode?.message || "npm dependencies unavailable"}. Run doctor without --dry-run to repair, or re-run the installer.\n`);
+    process.exitCode = 1;
     return;
   }
+  const { cmdDoctor } = await import("./doctor-command.js");
 
   const settings = readMaintenanceSettings(process.cwd());
   if (!settings.ok && !json) {
@@ -187,22 +188,22 @@ async function runDoctorBootstrap(argv) {
 }
 
 async function runUpdateBootstrap(argv) {
-  const { cmdUpdate } = await import("./update-command.js");
   if (hasArg(argv, "--help") || hasArg(argv, "-h")) {
-    await cmdUpdate({ argv });
+    renderUpdateHelp({ log: console.log, colors: C });
     return;
   }
 
   const json = hasArg(argv, "--json");
   const dryRun = hasArg(argv, "--dry-run");
   const ownNode = await repairOwnNodeTree({ argv, dryRun, json });
-  if (ownNode?.ok === false) {
-    if (json) console.log(JSON.stringify(maintenanceFailure(ownNode), null, 2));
+  if (ownNode?.ok === false || ownNode?.status === "dry-run") {
+    if (json) console.log(JSON.stringify(maintenanceFailure(ownNode, dryRun), null, 2));
     else console.error(`\n  Posse update cannot start: ${ownNode.message || "npm dependency repair failed"}\n`);
     process.exitCode = 1;
     return;
   }
 
+  const { cmdUpdate } = await import("./update-command.js");
   const settings = readMaintenanceSettings(process.cwd());
   if (!settings.ok && !json) {
     console.warn(`  [bootstrap] settings probe unavailable; SCIP defaults to off: ${settings.error}`);
@@ -238,4 +239,12 @@ export async function runMaintenanceCliIfRequested(argv = process.argv.slice(2))
     return true;
   }
   return false;
+}
+
+// Called while the parent is still addon-free. The repair worker probes the
+// installed ABI and repairs missing/stale npm dependencies before run/go boot.
+export async function guardRunNodeDependencies({ argv = process.argv.slice(2), repair = repairOwnNodeTree } = {}) {
+  if (!["run", "go"].includes(argv[0]) || argv.includes("--help") || argv.includes("-h")) return;
+  const result = await repair({ argv: ["--adopt-node-install"], dryRun: false, json: false });
+  if (!result?.ok) throw new Error(`Boot blocked: ${result?.message || "Posse npm dependencies could not be repaired"}. Run posse doctor or re-run the installer.`);
 }

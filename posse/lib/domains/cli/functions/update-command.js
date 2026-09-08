@@ -1,3 +1,4 @@
+import { renderUpdateHelp } from "./maintenance-help.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -891,23 +892,6 @@ function renderUpdateSummary({ log, colors, result }) {
   log("");
 }
 
-function renderUpdateHelp({ log, colors }) {
-  log(`
-  ${colors.bold}posse update${colors.reset}
-
-  Fast-forward the local Posse client checkout, show what came in, and refresh
-  runtime dependencies, current native binaries, and Jina (posse doctor).
-
-  Usage:
-    posse update
-    posse update --dry-run     check for updates without touching the checkout
-    posse update --json        machine-readable result
-    posse update --branch main
-
-  The update is fast-forward only and refuses local tracked edits.
-  Each dependency command is capped at 30 minutes and Jina deployment at 2 hours.
-`);
-}
 
 export async function cmdUpdate({
   argv = process.argv.slice(3),

@@ -1,4 +1,5 @@
-// Minimal direct system-Git adapter for operator/admin and self-update paths.
+// Minimal direct system-Git adapter for operator/admin, self-update, and
+// synchronous bootstrap trust checks that must run before native pulse auth.
 // Keep this module dependency-free so `posse update` can fast-forward and
 // repair native npm addons before any SQLite-backed application graph loads.
 

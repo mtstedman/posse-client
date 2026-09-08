@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 
-import { BINARY_NAMES } from "../lib/catalog/binary.js";
-import { nativeBinaries } from "../lib/shared/tools/classes/BinaryManager.js";
+import { loadUserProviderEnv } from "../lib/shared/platform/functions/user-provider-env.js";
+
+// Manual `npm run pull:native` runs outside the posse launcher, so load the
+// private .env the same way orchestrator.js does before the binary manager
+// resolves POSSE_KEY. Process environment values still take precedence.
+try { loadUserProviderEnv({ onWarning: () => {} }); }
+catch (error) { console.error(`[pull-native] could not read private .env (${error?.code || error?.message || error}); continuing with the process environment`); }
+
+const { BINARY_NAMES } = await import("../lib/catalog/binary.js");
+const { nativeBinaries } = await import("../lib/shared/tools/classes/BinaryManager.js");
 
 const requested = parseArgs(process.argv.slice(2));
 let failed = false;

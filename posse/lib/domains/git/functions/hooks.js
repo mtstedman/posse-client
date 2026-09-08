@@ -12,12 +12,24 @@ import fs from "fs";
 import path from "path";
 import { execFile, execFileSync } from "child_process";
 import { getSetting } from "../../queue/functions/index.js";
+import { resolveVerificationPolicy } from "../../settings/functions/verification-policy.js";
 import { snapshotPublishingPushConfigs, snapshotPublishingPushConfigsAsync } from "./push-guard.js";
 import { gitExec, gitExecAsync, gitExecBuffer, gitExecBufferAsync, isGitCommandFailure } from "./utils.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
 import { resolvePathWithin } from "../../runtime/functions/fs-safety.js";
 
 const VERIFY_COMMAND_TIMEOUT_MS = 120_000;
+
+// Canonical verification runs under the repository's declared time policy
+// (verification_wall_timeout_ms, clamped by the administrator ceiling); the
+// constant above is only the fallback when no policy can be resolved.
+function verificationHookPolicy(cwd) {
+  try {
+    return resolveVerificationPolicy({ projectDir: cwd, checkClass: "hook_verify" });
+  } catch {
+    return { wall_timeout_ms: VERIFY_COMMAND_TIMEOUT_MS, idle_timeout_ms: null };
+  }
+}
 const VERIFY_COMMAND_HELPER_GRACE_MS = 15_000;
 const VERIFY_COMMAND_MAX_CAPTURE = 1024 * 1024 * 4;
 const VERIFY_COMMAND_HELPER_MAX_BUFFER = (VERIFY_COMMAND_MAX_CAPTURE * 4) + (1024 * 1024);
@@ -27,11 +39,17 @@ const { spawn, spawnSync } = require("node:child_process");
 
 const payload = JSON.parse(process.argv[1] || "{}");
 const timeoutMs = Math.max(1000, Number(payload.timeoutMs) || 120000);
+const idleTimeoutMs = Number(payload.idleTimeoutMs) > 0
+  ? Math.min(timeoutMs, Math.max(1000, Number(payload.idleTimeoutMs)))
+  : null;
 const maxCapture = Math.max(1024, Number(payload.maxCapture) || 4194304);
 let stdout = "";
 let stderr = "";
 let settled = false;
 let timedOut = false;
+let timeoutKind = null;
+let idleTimer = null;
+let forceTimer = null;
 
 function appendBounded(current, chunk) {
   const next = current + String(chunk || "");
@@ -48,13 +66,14 @@ function emit(result) {
     status: result.status,
     signal: result.signal || null,
     timedOut: !!result.timedOut,
+    timeoutKind: result.timeoutKind || timeoutKind,
     stdout,
     stderr,
     error: result.error || null,
   }), () => process.exit(exitCode));
 }
 
-function killTree(child) {
+function killTree(child, force = false) {
   if (process.platform === "win32" && child && child.pid) {
     try {
       const killed = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
@@ -66,7 +85,15 @@ function killTree(child) {
       // Fall back to killing the shell wrapper below.
     }
   }
-  try { return !!child.kill(); } catch { return false; }
+  if (process.platform !== "win32" && child && child.pid) {
+    try {
+      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+      return true;
+    } catch {
+      // Fall back to killing the shell wrapper below.
+    }
+  }
+  try { return !!child.kill(force ? "SIGKILL" : "SIGTERM"); } catch { return false; }
 }
 
 if (!payload.command) {
@@ -74,25 +101,43 @@ if (!payload.command) {
 } else {
   const child = spawn(String(payload.command), {
     cwd: payload.cwd || process.cwd(),
+    detached: process.platform !== "win32",
     shell: true,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout && child.stdout.setEncoding && child.stdout.setEncoding("utf8");
   child.stderr && child.stderr.setEncoding && child.stderr.setEncoding("utf8");
-  child.stdout && child.stdout.on("data", (chunk) => { stdout = appendBounded(stdout, chunk); });
-  child.stderr && child.stderr.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
-  const timer = setTimeout(() => {
+  const terminate = (kind) => {
+    if (timedOut) return;
     timedOut = true;
+    timeoutKind = kind;
     killTree(child);
-  }, timeoutMs);
+    forceTimer = setTimeout(() => killTree(child, true), 250);
+    forceTimer.unref && forceTimer.unref();
+  };
+  const armIdle = () => {
+    if (!idleTimeoutMs || timedOut) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => terminate("idle"), idleTimeoutMs);
+    idleTimer.unref && idleTimer.unref();
+  };
+  child.stdout && child.stdout.on("data", (chunk) => { stdout = appendBounded(stdout, chunk); armIdle(); });
+  child.stderr && child.stderr.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); armIdle(); });
+  const timer = setTimeout(() => terminate("wall"), timeoutMs);
+  armIdle();
   child.on("error", (err) => {
     clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
+    if (forceTimer) clearTimeout(forceTimer);
     emit({ status: 1, error: err && err.message ? err.message : String(err || "spawn failed") });
   });
   child.on("close", (code, signal) => {
     clearTimeout(timer);
-    emit({ status: timedOut ? 124 : (code == null ? 1 : code), signal, timedOut });
+    if (idleTimer) clearTimeout(idleTimer);
+    if (timedOut) killTree(child, true);
+    if (forceTimer) clearTimeout(forceTimer);
+    emit({ status: timedOut ? 124 : (code == null ? 1 : code), signal, timedOut, timeoutKind });
   });
 }
 `;
@@ -216,9 +261,12 @@ function parseHookCommandHelperResult(raw) {
 
 function commandErrorFromHelperResult(command, result, fallback = {}) {
   const timedOut = !!(result.timedOut || fallback.timedOut);
+  const timeoutKind = result.timeoutKind || fallback.timeoutKind || "wall";
   const status = result.status ?? fallback.status ?? (timedOut ? 124 : 1);
   const message = timedOut
-    ? `Command timed out after ${fallback.timeoutMs || VERIFY_COMMAND_TIMEOUT_MS}ms`
+    ? `Command ${timeoutKind === "idle" ? "produced no output" : "timed out"} after ${timeoutKind === "idle"
+      ? fallback.idleTimeoutMs
+      : fallback.timeoutMs || VERIFY_COMMAND_TIMEOUT_MS}ms`
     : (result.error || fallback.error || `Command failed with exit ${status}`);
   const err = new Error(message);
   err.status = status;
@@ -226,15 +274,17 @@ function commandErrorFromHelperResult(command, result, fallback = {}) {
   err.stdout = result.stdout ?? fallback.stdout ?? "";
   err.stderr = result.stderr ?? fallback.stderr ?? "";
   err.timedOut = timedOut;
+  err.timeoutKind = timeoutKind;
   err.command = command;
   return err;
 }
 
-function hookShellCommandPayload(command, cwd, timeoutMs) {
+function hookShellCommandPayload(command, cwd, timeoutMs, idleTimeoutMs) {
   return JSON.stringify({
     command,
     cwd,
     timeoutMs,
+    idleTimeoutMs,
     maxCapture: VERIFY_COMMAND_MAX_CAPTURE,
   });
 }
@@ -247,7 +297,7 @@ function hookShellHelperTimeout(timeoutMs) {
 // timedOut,error}; a past async-only fallback shape used ignored keys, so a
 // helper-process death reported "exit 1" with empty output. (B11) Building the
 // fallback in one place keeps the twins' error fidelity identical.
-function helperDeathError(command, err, timeoutMs) {
+function helperDeathError(command, err, timeoutMs, idleTimeoutMs) {
   const result = parseHookCommandHelperResult(err.stdout);
   return commandErrorFromHelperResult(command, result, {
     status: err.status,
@@ -256,46 +306,56 @@ function helperDeathError(command, err, timeoutMs) {
     stderr: result.stderr ?? err.stderr ?? "",
     timedOut: err.killed || err.code === "ETIMEDOUT" || result.timedOut,
     timeoutMs,
+    idleTimeoutMs,
+    timeoutKind: result.timeoutKind,
     error: err.message,
   });
 }
 
-function finishHookShellCommand(command, raw, timeoutMs) {
+function finishHookShellCommand(command, raw, timeoutMs, idleTimeoutMs) {
   const result = parseHookCommandHelperResult(raw);
   if ((result.status ?? 0) !== 0 || result.timedOut || result.error) {
-    throw commandErrorFromHelperResult(command, result, { timeoutMs });
+    throw commandErrorFromHelperResult(command, result, { timeoutMs, idleTimeoutMs });
   }
   return result;
 }
 
-function runHookShellCommand(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_MS } = {}) {
+function runHookShellCommand(command, {
+  cwd,
+  timeoutMs = VERIFY_COMMAND_TIMEOUT_MS,
+  idleTimeoutMs = null,
+} = {}) {
   let raw = "";
   try {
-    raw = execFileSync(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, hookShellCommandPayload(command, cwd, timeoutMs)], {
+    raw = execFileSync(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, hookShellCommandPayload(command, cwd, timeoutMs, idleTimeoutMs)], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: hookShellHelperTimeout(timeoutMs),
       maxBuffer: VERIFY_COMMAND_HELPER_MAX_BUFFER,
     });
   } catch (err) {
-    throw helperDeathError(command, err, timeoutMs);
+    throw helperDeathError(command, err, timeoutMs, idleTimeoutMs);
   }
-  return finishHookShellCommand(command, raw, timeoutMs);
+  return finishHookShellCommand(command, raw, timeoutMs, idleTimeoutMs);
 }
 
-async function runHookShellCommandAsync(command, { cwd, timeoutMs = VERIFY_COMMAND_TIMEOUT_MS } = {}) {
+async function runHookShellCommandAsync(command, {
+  cwd,
+  timeoutMs = VERIFY_COMMAND_TIMEOUT_MS,
+  idleTimeoutMs = null,
+} = {}) {
   let raw = "";
   try {
-    raw = await execFileText(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, hookShellCommandPayload(command, cwd, timeoutMs)], {
+    raw = await execFileText(process.execPath, ["-e", VERIFY_COMMAND_HELPER_SCRIPT, hookShellCommandPayload(command, cwd, timeoutMs, idleTimeoutMs)], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: hookShellHelperTimeout(timeoutMs),
       maxBuffer: VERIFY_COMMAND_HELPER_MAX_BUFFER,
     });
   } catch (err) {
-    throw helperDeathError(command, err, timeoutMs);
+    throw helperDeathError(command, err, timeoutMs, idleTimeoutMs);
   }
-  return finishHookShellCommand(command, raw, timeoutMs);
+  return finishHookShellCommand(command, raw, timeoutMs, idleTimeoutMs);
 }
 
 export function __testRunHookShellCommand(command, opts = {}) {
@@ -562,9 +622,14 @@ function verifyCommandFailureOutput(heading, cmd, err, tailLines) {
 function postDevVerify({ cwd }) {
   const cmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_assess_cmd");
   if (!cmd) return { ok: true, output: "" };
+  const policy = verificationHookPolicy(cwd);
 
   try {
-    runHookShellCommand(cmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
+    runHookShellCommand(cmd, {
+      cwd,
+      timeoutMs: policy.wall_timeout_ms,
+      idleTimeoutMs: policy.idle_timeout_ms,
+    });
     return { ok: true, output: "" };
   } catch (err) {
     return { ok: false, output: postDevVerifyFailureOutput(cmd, err) };
@@ -574,9 +639,14 @@ function postDevVerify({ cwd }) {
 async function postDevVerifyAsync({ cwd }) {
   const cmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_assess_cmd");
   if (!cmd) return { ok: true, output: "" };
+  const policy = verificationHookPolicy(cwd);
 
   try {
-    await runHookShellCommandAsync(cmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
+    await runHookShellCommandAsync(cmd, {
+      cwd,
+      timeoutMs: policy.wall_timeout_ms,
+      idleTimeoutMs: policy.idle_timeout_ms,
+    });
     return { ok: true, output: "" };
   } catch (err) {
     return { ok: false, output: postDevVerifyFailureOutput(cmd, err) };
@@ -707,8 +777,13 @@ function prePushGate({ cwd, nativeParity = {} }) {
 
   const verifyCmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_push_verify_cmd");
   if (verifyCmd) {
+    const policy = verificationHookPolicy(cwd);
     try {
-      runHookShellCommand(verifyCmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
+      runHookShellCommand(verifyCmd, {
+        cwd,
+        timeoutMs: policy.wall_timeout_ms,
+        idleTimeoutMs: policy.idle_timeout_ms,
+      });
     } catch (err) {
       return prePushVerifyFailure(verifyCmd, err);
     }
@@ -761,8 +836,13 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
 
   const verifyCmd = readSettingText("canonical_verify_cmd", cwd) || readSettingText("pre_push_verify_cmd");
   if (verifyCmd) {
+    const policy = verificationHookPolicy(cwd);
     try {
-      await runHookShellCommandAsync(verifyCmd, { cwd, timeoutMs: VERIFY_COMMAND_TIMEOUT_MS });
+      await runHookShellCommandAsync(verifyCmd, {
+        cwd,
+        timeoutMs: policy.wall_timeout_ms,
+        idleTimeoutMs: policy.idle_timeout_ms,
+      });
     } catch (err) {
       return prePushVerifyFailure(verifyCmd, err);
     }

@@ -1,212 +1,162 @@
-# Posse Windows Installer
+# Install Posse on Windows
 
-PowerShell counterpart of the Linux installer: the same lifecycle, summary
-contract, and idempotent repair behavior.
+Start with [access, keys, requirements, and first-task usage](../README.md).
+Use a normal, **non-Administrator** PowerShell window. PowerShell 5.1 and 7+
+are supported. Node.js 24+ and npm are installed automatically when missing or
+unusable; winget is no longer required for Node installation.
 
-ATLAS is built into Posse — there is no separate ATLAS checkout, build, or
-server process. ATLAS runtime configuration lives in `~\.posse\account.db`
-(managed through `posse admin`), not environment variables.
+## Install
 
-## Design
-
-- **Never dies mid-run.** Every step is fenced: failures are recorded, the
-  installer keeps going where it can, steps that depend on a failed step are
-  marked `blocked`, and the summary always prints.
-- **Idempotent.** Re-running is safe; fresh steps are skipped. `-Force`
-  reinstalls npm deps, `-DryRun` previews everything.
-- **PS 5.1 and 7+ safe.** Native executables run directly with redirected
-  output (batch launchers use a minimal `cmd.exe` wrapper), so stderr cannot surface as a
-  terminating `NativeCommandError` (the classic Windows PowerShell 5.1
-  failure mode of the old installer).
-- **Self-sufficient.** Installs Git, host helper CLIs, and a Node 24+-capable
-  distribution via winget when missing
-  (`-NoInstallNode` opts out) and refreshes `PATH` from the registry after
-  winget installs so new tools are visible without a new terminal.
-- **Observable.** A splash, numbered steps (`[ 3/15]`), a spinner with
-  elapsed time on capable terminals (Windows Terminal / PS 7+), and full
-  command output captured to
-  `%USERPROFILE%\.posse\logs\install-<timestamp>.log` (failures print the
-  output tail inline).
-
-## What It Does (steps)
-
-1. **SCIP language selection** — validates `-ScipLanguages` or offers the
-   interactive default selection when input is available.
-2. **Preflight checks** — validates the optional smoke-test repo and reports
-   provider credential / Git identity gaps.
-3. **System packages** — installs missing Git and helper CLIs via winget in user
-   scope: ripgrep,
-   Tesseract OCR, ImageMagick, FFmpeg, and Python 3. PHP is installed only when
-   `php` is explicitly selected for SCIP. Each tool tries its winget id
-   candidates independently, so one failure can't sink the rest.
-   Tesseract's install dir is probed and added to `PATH` when its installer
-   doesn't do so.
-4. **Node.js runtime** — accepts an existing Node ≥ 24; otherwise tries the
-   winget Node distributions and verifies the installed major before continuing.
-   Node 24 is a minimum, not an exact-version pin; newer majors are accepted.
-5. **Posse checkout** — uses the checkout containing this installer when it is
-   writable by the current user. A read-only bundled checkout triggers a
-   user-owned shallow clone instead. The public client's `posse\` subdirectory
-   is auto-detected.
-6. **Composer (SCIP PHP, opt-in)** — skipped unless `php` was explicitly
-   selected; then uses a global `composer` when present or otherwise
-   configures PHP's bundled OpenSSL, cURL, and ZIP extensions (backing up an
-   existing `php.ini` once), verifies them in a new PHP process, then downloads a
-   signature-verified `composer.phar` into
-   `%LOCALAPPDATA%\Posse\scip\bin` (skipped when PHP is absent). PHP's install
-   directory is write-probed before any `php.ini` edit.
-7. **npm dependencies** — `npm install --include=optional` (skipped when
-   `node_modules` is fresh; one automatic retry).
-8. **Shell wiring** — writes `%USERPROFILE%\.config\posse\atlas.env.ps1`,
-   rewrites the UTF-8 `posse.cmd` shim in `%USERPROFILE%\.local\bin` to target
-   the checkout resolved by the current installer, and puts that directory
-   first on the user `PATH` so an older install cannot win command resolution.
-   Profile sourcing is added only when the effective PowerShell execution
-   policy can run it.
-9. **Account settings** — seeds missing ATLAS keys into `~\.posse\account.db`
-   (merge-only; existing values are never overwritten).
-10. **Provider CLI detection** — `posse admin init --non-interactive`.
-11. **Provider API keys** — only with `-ConfigureKeys`: hidden SecureString
-    prompts for `POSSE_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` /
-    `CODEX_API_KEY`, written to
-    `%USERPROFILE%\.config\posse\providers.env.ps1` with inheritance disabled
-    and access limited to the current user, SYSTEM, and local Administrators,
-    plus optional `claude` / `codex login` launches. Existing files are parsed
-    as data rather than executed as PowerShell.
-12. **Native binaries** — downloads the current authenticated `posse-atlas`,
-    `posse-git`, `posse-ml`, `posse-remote`, and `posse-atlas-vector` artifacts for the host
-    platform. Existing verified versions are reused. Without `POSSE_KEY`, the
-    step reports a warning and the following doctor step records the install as
-    failed rather than claiming a usable runtime.
-13. **Runtime doctor** — runs `posse doctor`, Posse's own dependency engine,
-    which builds the managed Python venv from `requirements.txt`, installs the
-    SCIP language environments, verifies the issued native binary versions,
-    and downloads/deploys the versioned Jina embeddings package when missing or
-    stale. Jina `tar+zstd` extraction is embedded in `posse-ml`; Windows does
-    not need a system `tar`, `zstd`, or Node unpacker package. This replaces the
-    old standalone `pip install --user` and inline SCIP steps. On Windows,
-    generated Python, SCIP, Composer, dependency-lock, and native artifact state
-    lives beneath `%LOCALAPPDATA%\Posse`, not in the code checkout. Doctor/update
-    repair Posse npm dependencies before loading SQLite, so a loaded
-    `better_sqlite3.node` cannot pin the file being replaced.
-14. **Validation** — boots Posse (`posse status`) with a
-    five-minute timeout.
-15. **ATLAS smoke test** — only with `-RepoPath`.
-
-## Prereqs
-
-- PowerShell 5.1 (ships with Windows) or PowerShell 7+.
-- `winget` (App Installer from the Microsoft Store) so the installer can
-  fetch Git, Node, and host tools automatically. Without it, missing tools are
-  reported and everything else still runs.
-- `git` for the clone fallback; the packages step installs it through winget
-  when possible.
-
-## Run
+From an existing public client checkout:
 
 ```powershell
-cd <posse-dir>\installers\windows
-powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1
+cd posse-client\posse
+powershell -NoProfile -ExecutionPolicy Bypass -File .\installers\windows\install-posse-atlas.ps1
 ```
 
-With a smoke test against a repo:
+On a new machine, download the standalone installer:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 `
-  -RepoPath C:\repos\your-target-repo
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -UseBasicParsing `
+  -Uri 'https://raw.githubusercontent.com/mtstedman/posse-client/main/posse/installers/windows/install-posse-atlas.ps1' `
+  -OutFile .\install-posse-atlas.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1
 ```
 
-> **Execution policy.** If PowerShell blocks the script, either set
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or invoke with
-> `-ExecutionPolicy Bypass` as shown above.
+> **Scripts are disabled?** Run the `powershell -NoProfile -ExecutionPolicy Bypass
+> -File ...` command above from PowerShell or Command Prompt. Its policy option
+> applies to that new PowerShell process; it does not permanently relax your
+> account or machine policy. A company Group Policy can override it.
+>
+> **Downloaded file blocked?** After checking that you downloaded the trusted
+> installer, run `Unblock-File .\install-posse-atlas.ps1` in PowerShell and retry.
+> This removes the downloaded-file marker; it does not override execution policy.
+>
+> **Still blocked by your organization?** Run `Get-ExecutionPolicy -List` and
+> share the policy/error with your administrator. Do not change machine-wide
+> policy just to install Posse. `RemoteSigned` also permits local unsigned
+> scripts; a downloaded unsigned installer may still need `Unblock-File`.
+>
+> **Command not found after install?** Open a new terminal. Existing terminals
+> and VS Code processes may retain their old PATH. You can always invoke the
+> generated `posse.cmd` by its full path below.
 
-## Flags
+See [Microsoft’s execution-policy reference](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies) for policy precedence.
 
-| Flag | Purpose |
-|------|---------|
-| `-InstallRoot <path>` | Base directory for installs (default: `$env:USERPROFILE\claude-tools`) |
-| `-PosseDir <path>` | Posse checkout or workspace directory (default: installer checkout, else `<InstallRoot>\posse-client`; the Posse root is auto-detected) |
-| `-PosseRepoUrl <url>` | Fallback Git URL when no checkout is detected (default: public `mtstedman/posse-client`) |
-| `-RepoId <id>` | ATLAS repo id for the smoke test |
-| `-RepoPath <path>` | ATLAS repo path for the smoke test |
-| `-SmokeQuery <q>` | Query used for atlas-smoke (default: `auth`) |
-| `-SmokeProvider <p>` | Provider for atlas-smoke (default: `openai`) |
-| `-ScipLanguages <csv>` | Initial SCIP languages to install/index: `typescript`, `python`, `php`, `go`, `rust`, `clang`, or `all`. Default: `typescript,python`; PHP is opt-in. |
-| `-NoSmoke` | Skip the smoke test |
-| `-NoPersistEnv` | Don't write user `PATH` / `$PROFILE` wiring |
-| `-SkipSettings` | Don't seed `~\.posse\account.db` |
-| `-SkipHostTools` | Don't install helper CLIs (missing tools are still reported) |
-| `-NoInstallNode` | Don't auto-install Node via winget when Node 24+ is missing |
-| `-ConfigureKeys` | Prompt for provider API keys (SecureString input, restricted ACL file) |
-| `-Force` | Re-run `npm install` even when `node_modules` looks fresh |
-| `-CommandTimeoutSeconds <sec>` | Maximum runtime for ordinary external commands (default: 1800; range: 60–86400) |
-| `-DoctorTimeoutSeconds <sec>` | Maximum runtime for first-run doctor, including Jina deployment (default: 7500; range: 60–86400) |
-| `-DryRun` | Print what would happen; make no changes |
-| `-Plain` | Disable colors, splash gradient, and spinners (also honors `NO_COLOR`) |
+Choose indexing languages (default: TypeScript/JavaScript and Python). When
+prompted, paste your **POSSE_KEY** and press Enter. Input is hidden. The key is
+saved to `%USERPROFILE%\.config\posse\.env` with a restricted NTFS ACL. Posse
+loads it directly on future launches, including launches from Command Prompt,
+VS Code, and scheduled processes running as the same user.
 
-## Re-running and troubleshooting
+To enter or change provider keys too:
 
-- The summary marks each step `ok`, `skipped`, `partial`, `failed`,
-  `blocked`, or `dry-run`, with warnings listed underneath and the log path
-  at the end.
-- Every command's output lands in
-  `%USERPROFILE%\.posse\logs\install-<timestamp>.log`; a failing step prints
-  its last lines inline.
-- Tools installed by winget sometimes need a new terminal before they're
-  visible; the installer refreshes `PATH` from the registry to minimize this
-  and says so when a tool still isn't visible.
-- If the doctor step is `failed`, run `posse doctor` after fixing the tools it
-  names; it repairs incrementally. The installer exits nonzero while a required
-  runtime, current native binary, or Jina deployment remains unresolved.
-- External commands are killed after their configured timeout so an unattended
-  package manager, Git, npm, native download, or doctor process cannot hold the
-  installer forever.
-- `atlas.env.ps1` is rewritten each run. An existing `providers.env.ps1` ACL is
-  validated/repaired on every run. With `-ConfigureKeys`, only the four known
-  provider assignments are parsed and rewritten; comments or arbitrary
-  PowerShell are intentionally ignored. Account settings are merged, never
-  overwritten.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-posse-atlas.ps1 -ConfigureKeys
+```
 
-## Provider API keys
+New installs store keys only in `.env`. If an older installer left a
+`providers.env.ps1` (dot-sourced by your PowerShell profile) or a `POSSE_KEY`
+user-environment entry, the installer updates those on rotation so they cannot
+shadow the new key, but it no longer creates them. Parent process environment
+values take precedence over the private `.env`, so restart old terminals after
+rotating a key if they still hold an older value. Rerunning the installer
+against an older checkout that lacks `installers\installer-env.mjs` stops at
+the keys step with an update instruction.
 
-With `-ConfigureKeys`, the installer prompts (hidden via
-`Read-Host -AsSecureString`) for:
+Open a new terminal after installation:
 
-| Var | Purpose |
-|-----|---------|
-| `POSSE_KEY` | Posse remote prompt/tool catalog and native artifact API key |
-| `OPENAI_API_KEY` | OpenAI provider |
-| `XAI_API_KEY` | Grok (xAI) provider |
-| `CODEX_API_KEY` | Codex API-key auth (optional — the `codex` CLI can also use `~\.codex\auth.json` from `codex login`) |
+```powershell
+cd C:\repos\your-project
+posse doctor
+posse admin
+posse add "Describe a small first task"
+posse go
+```
 
-- Any var already set in your environment is detected and skipped; empty
-  input skips the prompt.
-- Values are stored **plaintext** in
-  `%USERPROFILE%\.config\posse\providers.env.ps1`. The installer applies an
-  NTFS ACL granting the current Windows user, SYSTEM, and local Administrators
-  access (inheritance disabled). The replacement file is created with that ACL
-  before secret bytes are written.
-- Claude and Codex CLI logins can't be fully scripted — after the key
-  prompts, the installer offers to launch `claude` and/or `codex login`.
+If PATH has not refreshed, invoke
+`& "$env:USERPROFILE\.local\bin\posse.cmd" help` directly.
 
-If you prefer to manage keys yourself, omit `-ConfigureKeys` and set them
-with `setx`, 1Password CLI, or however you already manage secrets. The
-installer only detects and warns in that mode.
+## Node and other prerequisites
 
-### Native heartbeat clock skew
+The installer first accepts a working Node 24+ installation with npm. If
+needed, it tries winget's Node distributions, then falls back to an official
+Node ZIP in `%LOCALAPPDATA%\Posse\runtimes`. The ZIP is checked against Node's
+published SHA-256 checksum before extraction and use. The fallback does not
+require administrator privileges and is reused on later installer runs.
+The generated launcher puts its Node directory on PATH for subprocesses.
 
-Native binaries verify short-lived heartbeat tokens offline. If the Windows
-clock differs from the Posse server by more than 30 seconds, a native command
-can report `invalid posse_key` even though the configured `POSSE_KEY` is valid.
-Synchronize **Settings > Time & language > Date & time > Sync now**, or run
-`w32tm /resync /rediscover` from an Administrator PowerShell session, then
-retry the command. This error is not by itself proof that the raw key was
-revoked or entered incorrectly.
+Git, Python, ripgrep, Tesseract, ImageMagick, and FFmpeg still use winget when
+missing. Install **App Installer** to provide winget, or provision these tools
+manually if your Windows edition/environment does not include it. Node
+fallback alone does not install Git or Python. PHP/Composer are opt-in through
+`-ScipLanguages php` (or `all`).
 
-## Parity with the Linux script
+A writable checkout is required. The installer uses its own checkout when
+writable, otherwise clones into a user-owned directory. An explicit read-only
+`-PosseDir` fails with a remedy. Native binaries, managed Python/SCIP tools,
+and generated state live under `%LOCALAPPDATA%\Posse`.
 
-Both installers expose the same lifecycle and failure-summary contract. Windows
-uses winget instead of distro package managers + nvm,
-`atlas.env.ps1` / conditional `$PROFILE` wiring instead of `atlas.env` /
-`.bashrc`, a policy-independent `posse.cmd` shim instead of a bash shim, and
-NTFS ACLs instead of `chmod 600`.
+## Unattended setup
+
+Inject `POSSE_KEY` and provider keys through the process environment, then run:
+
+```powershell
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\install-posse-atlas.ps1 -NonInteractive -ScipLanguages typescript,python
+```
+
+Injected environment keys are not copied into `.env`. Use `-SetupOnly` to
+install the core checkout, npm dependencies, and command while deferring
+account settings, keys, authenticated downloads, doctor, and validation.
+Rerun without `-SetupOnly` as the intended runtime user when credentials are
+available. Windows containers are not covered by the Linux container recipe;
+they also need compatible Windows images and host prerequisites.
+
+## Options
+
+| Option | Purpose |
+|---|---|
+| `-ConfigureKeys` | Enter/change provider keys; Enter keeps stored values |
+| `-NonInteractive` | Disable prompts; supply environment variables or saved keys |
+| `-SetupOnly` | Install core files, defer account/runtime setup and validation |
+| `-ScipLanguages <csv>` | `typescript,python,php,go,rust,clang`, or `all` |
+| `-PosseDir <path>` | Use/create this writable checkout; nested `posse\` detected |
+| `-InstallRoot <path>` | Fallback clone base; default `%USERPROFILE%\claude-tools` |
+| `-PosseRepoUrl <url>` | Override fallback public Git URL |
+| `-SkipHostTools` | Skip missing host-tool installation; still provision Node |
+| `-NoInstallNode` | Require working Node 24+ with npm |
+| `-NoPersistEnv` | Skip persistent PATH/profile edits; still write the command shim |
+| `-SkipSettings` | Skip seeding account settings |
+| `-Force` | Reinstall npm dependencies |
+| `-RepoPath <path>` | Run ATLAS smoke testing against this project |
+| `-RepoId <id>` | Optional smoke-test repository identifier |
+| `-SmokeQuery <text>` | Smoke query; default `auth` |
+| `-SmokeProvider <name>` | Smoke provider; default `openai` |
+| `-NoSmoke` | Skip smoke testing |
+| `-CommandTimeoutSeconds <seconds>` | Command limit, default 1800; range 60–86400 |
+| `-DoctorTimeoutSeconds <seconds>` | Doctor limit, default 7500; range 60–86400 |
+| `-DryRun` | Preview without installing; a diagnostic log is still written |
+| `-Plain` | Disable colors and spinners |
+
+## Troubleshooting
+
+Logs: `%USERPROFILE%\.posse\logs\install-<timestamp>.log`. Failed commands
+print their last output and the full log path. Rerun after correcting the
+reported issue; existing usable installations are reused.
+
+| Symptom | Action |
+|---|---|
+| winget absent | Node uses the ZIP fallback; provision Git/Python/helper tools manually or install App Installer |
+| Node checksum/download failure | Fix HTTPS/proxy access to nodejs.org; rerun. Failed archives are not installed |
+| Administrator-profile error | Rerun in a normal PowerShell window under the account that will use Posse |
+| PowerShell blocks the script | Use the invocation above; organization-enforced policies may require your administrator's help |
+| SQLite `.node` sharing violation | Close other Posse processes using this installation, then rerun installer or doctor |
+| Known valid key reports `invalid posse_key` | Check key status and synchronize Windows time; native heartbeat tokens tolerate only a small clock difference |
+| Missing native binaries/model | Confirm POSSE_KEY/network/disk access and run `posse doctor` |
+| Dependency boot guard fails | Doctor attempted repair; resolve its reported requirement and retry before running jobs |
+
+Keys are plaintext with restricted access, not encrypted. Keep `.env` and the
+legacy provider files private. Installer reconfiguration repairs file ACLs;
+secrets are written to a restricted temporary file before replacing the old file.

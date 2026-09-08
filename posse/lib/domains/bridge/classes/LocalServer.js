@@ -168,6 +168,7 @@ export class LocalServer {
     dispatch = dispatchBridgeCommandFrame,
     getHeadEventId = () => 0,
     getBridgeEpoch = () => null,
+    getProviderUsage = () => null,
     tailBridgeEvents = null,
     getRelayStatus = null,
     startPosse = null,
@@ -185,6 +186,7 @@ export class LocalServer {
     this.dispatch = dispatch;
     this.getHeadEventId = getHeadEventId;
     this.getBridgeEpoch = getBridgeEpoch;
+    this.getProviderUsage = getProviderUsage;
     this.tailBridgeEvents = tailBridgeEvents;
     this.getRelayStatus = getRelayStatus;
     this.startPosse = startPosse;
@@ -289,6 +291,7 @@ export class LocalServer {
         ...queryObject(url),
         headEventId: this.getHeadEventId?.() || 0,
         bridgeEpoch: this.getBridgeEpoch?.() || null,
+        providerUsage: this.getProviderUsage?.() || null,
       }));
       return;
     }
@@ -459,6 +462,7 @@ export class LocalServer {
       tailBridgeEvents: typeof this.tailBridgeEvents === "function" ? this.tailBridgeEvents : null,
       getHeadEventId: typeof this.getHeadEventId === "function" ? this.getHeadEventId : null,
       getBridgeEpoch: typeof this.getBridgeEpoch === "function" ? this.getBridgeEpoch : null,
+      getProviderUsage: this.getProviderUsage,
       startPosse: typeof this.startPosse === "function" ? this.startPosse : null,
     };
   }
@@ -539,7 +543,7 @@ export class LocalServer {
   sendSnapshot(client) {
     const headEventId = Number(this.getHeadEventId?.() || 0);
     const bridgeEpoch = this.getBridgeEpoch?.() || null;
-    const payload = collectStateSnapshot({ headEventId, bridgeEpoch });
+    const payload = collectStateSnapshot({ headEventId, bridgeEpoch, providerUsage: this.getProviderUsage?.() || null });
     const frame = createBridgeEventFrame(BRIDGE_EVENT_KINDS.SNAPSHOT, payload, {
       instanceId: this.instanceId,
       eventId: 0,

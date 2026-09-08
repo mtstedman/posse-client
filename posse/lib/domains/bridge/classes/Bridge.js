@@ -1,3 +1,4 @@
+import { readBridgeProviderUsage } from "../functions/provider-usage.js";
 import { ChangeStream } from "./ChangeStream.js";
 import { LocalServer } from "./LocalServer.js";
 import { PosseRunLauncher } from "./PosseRunLauncher.js";
@@ -89,6 +90,7 @@ export class Bridge {
       this.changeStream = new ChangeStream({
         dbPath: getRuntimeDbPath(this.projectDir),
         pollMs: this.pollMs,
+        readProviderUsage: () => readBridgeProviderUsage({ cwd: this.projectDir }),
         instanceId: this.config.instanceId,
       });
       this.changeStream.start();
@@ -103,6 +105,7 @@ export class Bridge {
           tailBridgeEvents: (args) => this.changeStream?.tailFrames(args) || { events: [], head_event_id: 0 },
           getHeadEventId: () => this.changeStream?.headEventId() || 0,
           getBridgeEpoch: () => this.changeStream?.bridgeEpoch() || null,
+          getProviderUsage: () => this.changeStream?.providerUsageSnapshot() || null,
           startPosse: () => this.runLauncher.start(),
         });
         this.relayClient.on("operator_activity", () => this.noteOperatorActivity());
@@ -153,6 +156,7 @@ export class Bridge {
         projectDir: this.projectDir,
         getHeadEventId: () => this.changeStream?.headEventId() || 0,
         getBridgeEpoch: () => this.changeStream?.bridgeEpoch() || null,
+        getProviderUsage: () => this.changeStream?.providerUsageSnapshot() || null,
         tailBridgeEvents: (args) => this.changeStream?.tailFrames(args) || { events: [], head_event_id: 0 },
         getRelayStatus: () => this.relayClient?.status() || {
           state: this.config.relayToken ? "connecting" : "disabled",

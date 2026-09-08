@@ -9,6 +9,8 @@ The npm package name is still `claude-org`, but the current system name is
 `Posse`. The package exposes both `posse` and the legacy `claude-org` command
 names.
 
+For first-time setup, start with the [installation walkthrough](installers/README.md).
+
 ## Architecture
 
 ```text
@@ -118,40 +120,34 @@ Important defaults:
 Older slugged worktree directories are detected and migrated to the canonical
 `wi-{id}` path when possible.
 
-## Requirements
+## Install, sign up, and start
 
-- Node.js with npm.
-- Git.
-- ripgrep (`rg`) for deterministic MCP `search_files`.
-- Tesseract OCR (`tesseract`) for image text extraction.
-- ImageMagick (`magick`) and FFmpeg (`ffmpeg`) for image/video conversion
-  fallbacks.
-- Python 3.9+ plus `requirements.txt` packages for file and image helper tools.
+Follow the [installation walkthrough](installers/README.md) for obtaining a
+Posse key, requirements, key storage, and your first task. Platform guides:
 
-The Posse + ATLAS installers attempt to install first-run host tools
-automatically. On Linux they use the detected package manager (`apt-get`,
-`dnf`, `yum`, `pacman`, or `zypper`). On Windows they use `winget` packages
-for ripgrep, Tesseract OCR, ImageMagick Q16, and FFmpeg. If `rg` is installed
-outside `PATH`, set `POSSE_RIPGREP_PATH` or `POSSE_RG_PATH`.
+- [Windows](installers/windows/README.md): hidden key input, automatic Node/npm,
+  winget host tools, and a verified Node ZIP fallback.
+- [Linux and containers](installers/linux/README.md): automatic Node/npm,
+  unattended installs, and setup-only image builds.
 
-## Quick Start
+> **Windows scripts disabled?** The [Windows guide](installers/windows/README.md)
+> includes notes for execution policy, `Unblock-File`, and refreshing PATH.
 
-From the Posse package directory:
+Node **24+ with npm** is required and automatically installed by the scripts.
+You need a Posse access key and a configured model provider to run work.
+
+After installation, run commands in the Git project you want Posse to work on:
 
 ```bash
-npm install
-npm link
-posse add "Build user auth"
-posse plan
-posse run
-```
-
-Or run planning and execution together:
-
-```bash
+cd /path/to/your/git-project
+posse doctor
+posse admin
+posse add "Describe the change you want"
 posse go
 ```
 
+`posse go` plans and runs queued work. Boot checks required dependencies,
+attempts doctor repair when unhealthy, and stops if verification still fails.
 Use `posse help` for the full CLI reference.
 
 ## Upgrade Notes
@@ -327,6 +323,20 @@ npm run test:ui
 npm run test:slow
 ```
 
+Test discovery, serial/resource classification, nested core membership, and
+the `ci_portable` / `ci_windows` workflow partitions share
+`test/test-catalog.json`. Run `npm run test:catalog:check` after adding or
+moving a test. The check fails for missing, duplicate, unclassified, or
+catalogued-but-deleted files; it also verifies every nested core suite is
+actually imported by `test/core.test.js`.
+
+Each `scripts/run-tests.mjs` invocation also writes a unique run directory
+under `.posse-test-runs/`. Its atomic lane fragments and final `run.json`
+record the commit/tree identity, OS and Node version, lane configuration,
+catalog hash, per-file durations, categorized skips, stable failure
+fingerprints, and directly runnable reproduction commands. The timing ledger
+remains only a derived scheduling cache.
+
 Estimated runtimes from recent local Windows runs are below. Use the
 allocation column for CI and automation timeouts; add more buffer on colder or
 slower hosts. Focused suites do not run `pretest`, so run `npm run test:clean`
@@ -347,6 +357,77 @@ first when stale artifacts matter.
 | `npm run test:git` | Git, worktree, pre-push, dirty-worktree, and merge-safety coverage | ~5m 15s | 7m |
 | `npm run test:ui` | Queue rendering, admin TUI, and timeline UI-adjacent suites | ~25s | 1m |
 | `npm run test:slow` | Slow-tagged core suites | ~5m | 7m |
+
+### Verification time policy
+
+Posse runs a repository's frozen test command and its canonical verification
+command under a declared time policy instead of a fixed 120-second cap:
+
+| Setting | Scope | Default | Meaning |
+|---------|-------|---------|---------|
+| `verification_wall_timeout_ms` | repository | 120000 | Wall-clock limit for a frozen test or canonical verify run. Set it to the window this table documents for the repository's own harness (for Posse itself, 900000). |
+| `verification_idle_timeout_ms` | repository | disabled | Kill a run that produces no output for this long. Enable only for harnesses that print progress while healthy; `npm test` here prints a heartbeat every 30s when headless, so it qualifies. |
+| `verification_wall_timeout_max_ms` | account | 1800000 | Administrator ceiling. Repository values above it are clamped, so a repository cannot pin a worker indefinitely. |
+| `verification_dependency_network_policy` | repository | cache_only | Dependency repair may use only existing caches, may use the network (`allow`), or is disabled. Repairs always require a repository lock and frozen/no-script flags. |
+
+Every receipt records normalized argv/cwd, the limits that applied, clean-tree
+identity, the policy fingerprint, runtime versions, lockfile digests, and the
+environment profile. Timeout and infrastructure receipts are diagnostic
+history and are never executable cache hits. Passing and known-baseline-debt
+receipts may be reused across jobs only for the same repository, commit, plan,
+tree, policy, and toolchain; the new receipt points back to its source artifact.
+
+Without a legacy planner `test_command`, Posse derives a versioned ordered plan
+from known `package.json` test/lint/typecheck scripts. Repositories can instead
+commit `posse.verification.json`:
+
+```json
+{
+  "schema_version": 1,
+  "checks": [
+    { "id": "lint", "command": "npm run lint", "intent": "lint", "stage": "required" },
+    { "id": "test", "command": "npm test", "intent": "test", "stage": "canonical", "depends_on": ["lint"] }
+  ]
+}
+```
+
+Check stages are `fast`, `required`, and `canonical`; intents are `test`,
+`lint`, `typecheck`, and `contract`. Commands and working directories pass the
+same direct-spawn safety validation as legacy frozen tests. Planner input may
+select optional check IDs but cannot remove required checks or invent commands.
+
+The same policy applies to the git verify hooks and the configured
+`canonical_verify_cmd` / `pre_assess_cmd` path. Every verification result is
+also projected onto one typed outcome (`passed`, `product_failed`,
+`baseline_debt`, `no_applicable_suite`, `invalid_plan`, `unsafe_command`,
+`dependency_unavailable`, `runner_unavailable`, `timed_out`,
+`side_effect_detected`, `cancelled`) with an actionability class. An
+infrastructure outcome on the pre-development baseline requeues the job with
+backoff up to twice without consuming an implementation attempt, then fails
+closed with a `verification_blocked` diagnostic and rerun command. It never
+opens a human gate.
+
+Child test processes do not receive `POSSE_KEY`. The verifier instead starts
+a per-command local capability broker and passes its locator in
+`POSSE_VERIFICATION_PULSE_CAPABILITY`, so key-gated native routes still work
+inside a verification run while the secret stays with the parent.
+
+### Skips are named and classified
+
+The default reporter lists every skipped test with its reason at the end of
+each pass, and `scripts/run-tests.mjs` classifies each skip against
+`test/support/skip-expectations.json` as `platform`, `capability`, or
+`retired`. A skip no rule explains is `unexpected` and fails the run; add a
+rule (with a category) or restore the missing capability. Set
+`POSSE_TEST_STRICT_SKIPS=0` to report without failing. The rules are keyed by
+reason text and platform rather than a frozen count, because the same suite
+legitimately skips different tests on a laptop, in CI, and inside Posse's own
+worker, which strips `POSSE_KEY` from the child environment.
+
+Headless runs (no TTY) print a heartbeat on stderr every 30 seconds naming the
+files still running and how long each has been going
+(`POSSE_TEST_HEARTBEAT_MS` adjusts it; `0` disables). The heartbeat public-key
+fetch at startup is bounded to 10 seconds (`POSSE_TEST_KEY_FETCH_TIMEOUT_MS`).
 
 ## Runtime Prompts And Local Docs
 

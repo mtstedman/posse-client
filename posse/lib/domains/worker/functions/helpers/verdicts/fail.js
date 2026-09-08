@@ -208,36 +208,6 @@ function _looksLikeArtifactRoutingAdminIssue({ fixInstructions = "", assessorFee
   return mentionsArtifactRouting && asksForRoutingRepair;
 }
 
-function _buildArtifactRoutingAdminPayload({
-  job,
-  fixInstructions,
-  assessorFeedback,
-  originalTaskMode,
-  originalTaskSpec,
-}) {
-  const safeFeedback = Array.isArray(assessorFeedback) ? assessorFeedback : [];
-  const modeLabel = String(originalTaskMode || "artifact");
-  const safeInstructions = String(fixInstructions || safeFeedback.join("\n") || `Review Posse artifact routing for ${modeLabel} outputs.`);
-  return {
-    questions: [
-      [
-        `Job #${job.id} ("${job.title}") failed because Posse artifact routing for task_mode "${modeLabel}" appears unavailable or inconsistent.`,
-        "",
-        originalTaskSpec ? `Original task:\n${originalTaskSpec}` : null,
-        `Assessor/routing feedback:\n${safeInstructions}`,
-        safeFeedback.length > 0 ? `Additional assessor reasons:\n${safeFeedback.join("\n")}` : null,
-        "",
-        "This is Posse runtime/admin state, not a target-repo file. Adjust Posse artifact routing or choose a different task mode, then rerun the work item.",
-      ].filter(Boolean).join("\n"),
-    ],
-    context: `Artifact routing admin review for failed job #${job.id}; repo mutation is intentionally blocked for this recovery path.`,
-    review_type: "artifact_routing_admin",
-    question_kind: "artifact_routing_admin",
-    choices: WORK_ITEM_QUESTION_CHOICE_IDS.artifact_routing_admin,
-    _artifact_routing_admin_review: true,
-  };
-}
-
 function _isGenericArtifactRecovery({
   jobType = "",
   taskMode = "code",
@@ -765,30 +735,23 @@ function _spawnRecoveryJobsForVerdict({
       assessorFeedback: verdict.reasons,
       specPayload: spec.payload || {},
     })) {
-      const routingPayload = _buildArtifactRoutingAdminPayload({
-        job,
-        fixInstructions,
-        assessorFeedback: verdict.reasons,
-        originalTaskMode: origTaskMode,
-        originalTaskSpec,
-      });
-      const routingJob = spawnFromAssessor("failed", "human_input", {
+      const diagnostic = {
+        failure_class: "artifact_routing_unavailable",
+        actionability: "infrastructure",
+        task_mode: origTaskMode,
+        command: "posse admin",
+        remediation: "Configure artifact routing for the task mode, then rerun the work item.",
+        assessor_feedback: verdict.reasons,
+      };
+      logEvent({
         work_item_id: job.work_item_id,
-        title: `Artifact routing review: ${job.title.slice(0, 70)}`,
-        parent_job_id: job.id,
-        priority: "high",
-        model_tier: "cheap",
-        payload_json: JSON.stringify(routingPayload),
+        job_id: job.id,
+        event_type: EVENT_TYPES.ARTIFACT_ROUTING_DIAGNOSTIC,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Artifact routing unavailable; run ${diagnostic.command}, configure ${origTaskMode} routing, then rerun`,
+        event_json: JSON.stringify(diagnostic),
       });
-      spawnedJobs.push(routingJob);
-      dependencyReplacementJobs.push({ job: routingJob, label: "artifact routing review" });
-
-      log(`${C.yellow}[assessor]${C.reset} spawned artifact routing human review #${routingJob.id}: ${routingJob.title.slice(0, 60)}`);
-      jobLog("FIX_SPAWNED", {
-        wi: job.work_item_id,
-        job: routingJob.id,
-        detail: `artifact routing admin review for failed #${job.id}`,
-      });
+      log(`${C.yellow}[assessor]${C.reset} artifact routing unavailable; recorded actionable diagnostic instead of acknowledgement-only human gate`);
       continue;
     }
 

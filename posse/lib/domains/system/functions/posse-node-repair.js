@@ -210,6 +210,26 @@ function failureSummary(value) {
   return (useful.length > 0 ? useful.slice(0, 6) : lines.slice(-3)).join(" | ").slice(0, 1200) || "npm failed";
 }
 
+// Probe in a short-lived child: loading SQLite in the repair owner would pin
+// the very addon we may need to replace on Windows.
+export async function ensurePosseSqlite({ root, dryRun = false, timeoutMs = DEFAULT_TIMEOUT_MS, onProgress = null, runNpmImpl = runNpm }) {
+  const pkg = readJson(path.join(root, "package.json"));
+  if (!pkg?.dependencies?.["better-sqlite3"]) return { ok: true };
+  const probe = () => spawnSync(process.execPath, ["--input-type=commonjs", "-e",
+    'const D = require("better-sqlite3"); const db = new D(":memory:"); db.close();'], {
+    cwd: root, env: installEnvironment(), encoding: "utf8", timeout: 15000, windowsHide: true,
+  }).status === 0;
+  if (probe()) return { ok: true };
+  if (dryRun) return { ok: true, status: "dry-run", action: "rebuild", message: "would rebuild incompatible SQLite addon" };
+  onProgress?.("posse npm: rebuilding incompatible SQLite addon");
+  const rebuilt = await runNpmImpl(["rebuild", "better-sqlite3", "--no-fund", "--no-audit"], { cwd: root, timeoutMs, onProgress });
+  if (!rebuilt.ok || !probe()) return {
+    ok: false, status: "failed", action: "rebuild",
+    message: "SQLite addon remains unusable after npm rebuild; check the build toolchain, Node version, and other running Posse processes",
+  };
+  return { ok: true, status: "installed", action: "rebuild", message: "rebuilt SQLite addon for this Node runtime" };
+}
+
 /**
  * @param {{ posseRoot: string, dryRun?: boolean, adoptNodeInstall?: boolean, timeoutMs?: number, onProgress?: ((message: string) => void) | null }} input
  */
@@ -224,7 +244,10 @@ export async function repairPosseNodeTree({
   return await withDependencyInstallLock(root, async () => {
     const before = inspectPosseNodeTree(root);
     if (!before.present) return { ...before, label: "posse npm" };
-    if (!before.needsInstall) return { ...before, label: "posse npm", action: "none", message: "node packages ready" };
+    if (!before.needsInstall) {
+      const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
+      return { ...before, label: "posse npm", action: "none", message: "node packages ready", ...native };
+    }
     const canAdopt = adoptNodeInstall
       && before.needsStamp
       && !before.missingNodeModules
@@ -232,6 +255,8 @@ export async function repairPosseNodeTree({
       && before.missingLocked.length === 0
       && !before.stale;
     if (canAdopt && !dryRun) {
+      const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
+      if (!native.ok) return { ...before, label: "posse npm", ...native };
       try {
         fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${before.manifestHash}\n`, "utf8");
       } catch (error) {
@@ -243,7 +268,7 @@ export async function repairPosseNodeTree({
 
     const cacheKeySource = process.platform === "win32" ? root.toLowerCase() : root;
     const cacheDir = path.join(managedInstallStateRoot(root), "deps", "npm-cache", hashText(cacheKeySource).slice(0, 12));
-    const args = ["install", "--include=optional", "--no-save", "--cache", cacheDir, "--no-fund", "--no-audit"];
+    const args = ["install", "--include=dev", "--include=optional", "--no-save", "--cache", cacheDir, "--no-fund", "--no-audit"];
     onProgress?.("posse npm: npm install");
     let run = await runNpm(args, { cwd: root, timeoutMs, onProgress });
     if (!run.ok && /\bERESOLVE\b|unable to resolve dependency tree|conflicting peer dependency/iu.test(run.message)) {
@@ -252,6 +277,8 @@ export async function repairPosseNodeTree({
     }
     if (!run.ok) return { ...before, label: "posse npm", ok: false, status: "failed", action: "install", message: `npm install failed: ${failureSummary(run.message)}` };
 
+    const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
+    if (!native.ok) return { ...before, label: "posse npm", ...native };
     const after = inspectPosseNodeTree(root);
     if (!after.ok) {
       return { ...after, label: "posse npm", ok: false, status: "failed", action: "install", message: `missing packages after npm install: ${[...after.missingRequired, ...after.missingLocked].join(", ")}` };

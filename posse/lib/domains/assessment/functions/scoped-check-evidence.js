@@ -10,6 +10,7 @@ import {
   declaredScopeFiles,
   runScopedChecks,
 } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
+import { verificationOutcome } from "../../worker/functions/helpers/verification-outcome.js";
 
 const RECEIPT_KIND = "assessment_scoped_checks";
 const RECEIPT_SCHEMA_VERSION = 3;
@@ -70,7 +71,7 @@ async function restoreGitHead(cwd, { commit, headRef } = {}) {
 }
 
 function unavailableResult({ commit, assessedCommit = null, files, reason }) {
-  return {
+  const result = {
     ok: false,
     status: "unavailable",
     summary: reason,
@@ -91,6 +92,21 @@ function unavailableResult({ commit, assessedCommit = null, files, reason }) {
       subchecks: null,
     })),
     failures: [],
+  };
+  return {
+    ...result,
+    verification_outcome: verificationOutcome({ ...result, phase: "post_change", reason }),
+  };
+}
+
+function withVerificationOutcome(result = {}) {
+  return {
+    ...result,
+    verification_outcome: result.verification_outcome || verificationOutcome({
+      ...result,
+      phase: "post_change",
+      reason: result.reason || (result.status === "incomplete" ? "scoped_check_coverage_incomplete" : null),
+    }),
   };
 }
 
@@ -132,7 +148,7 @@ function cachedReceipt(jobId, key) {
   });
   if (!artifact) return null;
   const metadata = artifactJson(artifact);
-  return { result: metadata.result };
+  return { result: withVerificationOutcome(metadata.result) };
 }
 
 function checkStatusForFile(check, file) {
@@ -153,6 +169,7 @@ export function renderAssessmentScopedCheckEvidence(result = null, {
     `DETERMINISTIC CHANGED-FILE CHECK RECEIPT:`,
     `The harness ran these checks before model assessment at commit ${result.executed_commit_hash || "unknown"}${result.assessed_commit_hash && result.assessed_commit_hash !== result.executed_commit_hash ? `, covering assessed commit ${result.assessed_commit_hash} (${result.verification_commit_relation || "descendant"})` : ""}. Treat the receipt as ground truth and do not rerun lint, typecheck, syntax checks, or run_scoped_checks for the listed files.`,
     `overall_status: ${result.status || "unknown"}`,
+    `outcome: ${result.verification_outcome?.type || withVerificationOutcome(result).verification_outcome.type}`,
     `summary: ${result.summary || "no summary"}`,
     `receipt_reused: ${reused ? "true" : "false"}`,
     `coverage_complete: ${result.coverage_complete === false ? "false" : "true"}`,
@@ -308,6 +325,7 @@ export async function ensureAssessmentScopedCheckEvidence({
     }
   }
 
+  result = withVerificationOutcome(result);
   const evidence = renderAssessmentScopedCheckEvidence(result, { omittedFileCount, reused });
   if (!reused) {
     if (persistReceipt) {
@@ -336,6 +354,7 @@ export async function ensureAssessmentScopedCheckEvidence({
         source: "assessment_harness",
         outcome: result.status === "passed" ? "succeeded" : result.status,
         ok: result.ok === true && result.status === "passed",
+        verification_outcome: result.verification_outcome,
         receipt_key: key,
         scoped_check_result: result,
       },

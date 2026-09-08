@@ -1,3 +1,4 @@
+import { renderDoctorHelp } from "./maintenance-help.js";
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
@@ -148,23 +149,6 @@ function createDoctorProgressRenderer({ log, colors, json }) {
   };
 }
 
-function renderDoctorHelp({ log, colors }) {
-  log(`
-  ${colors.bold}posse doctor${colors.reset}
-
-  Repair dependency/runtime requirements for the current repo.
-
-  Usage:
-    posse doctor
-    posse doctor --dry-run
-    posse doctor --json
-    posse doctor --adopt-node-install
-
-  Each package-manager command is capped at 30 minutes and Jina download/deploy
-  at 2 hours, so an unhealthy child process cannot hang doctor indefinitely.
-  --adopt-node-install reuses a complete existing Posse node_modules tree.
-`);
-}
 
 export async function cmdDoctor({
   projectDir = process.cwd(),

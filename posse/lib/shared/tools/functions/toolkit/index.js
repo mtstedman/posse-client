@@ -782,7 +782,7 @@ export function createDeterministicToolkit({
       }
       const hiddenErr = agentHiddenPathError(cwd, searchPath, args.path || ".");
       if (hiddenErr) return `Error: ${hiddenErr}`;
-      if (!fs.existsSync(searchPath)) return "No matches found.";
+      if (!fs.existsSync(searchPath)) return `Error: Directory not found: ${toDisplayPath(cwd, searchPath)}`;
       const isDir = fs.existsSync(searchPath) && fs.statSync(searchPath).isDirectory();
       if (!isDir && isSensitiveEnvFileOrTargetPath(searchPath)) {
         return "Error: Access to .env files is blocked. Use documented config examples or code paths instead.";

@@ -110,8 +110,12 @@ import {
   assessmentWorktreeDirtySummary,
   inspectAssessmentWorktreeReadiness,
 } from "./assessment-worktree-readiness.js";
-import { ensureConfiguredVerification } from "./configured-verification.js";
+import {
+  ensureConfiguredVerification,
+  renderConfiguredVerificationEvidence,
+} from "./configured-verification.js";
 import { repairTestDependencies } from "./test-dependency-repair.js";
+import { isVerificationInfrastructureOutcome } from "./verification-outcome.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -2592,9 +2596,10 @@ export async function runPostExecutionAssessment(worker, {
             })
           : null,
         repairDependencies: wtPath
-          ? () => repairTestDependencies(worker, job, wtPath, {
+          ? (receipt) => repairTestDependencies(worker, job, wtPath, {
               signal: worker._abortControllers?.get(job.id)?.signal || null,
               phase: "assessor",
+              receipt,
             })
           : null,
       });
@@ -2630,7 +2635,7 @@ export async function runPostExecutionAssessment(worker, {
         },
       });
       taskAbAssessmentEvidence = renderTestExecutionEvidence(deterministicTestRun);
-      if (["infrastructure_error", "unavailable"].includes(postReceipt.status)) {
+      if (isVerificationInfrastructureOutcome(postReceipt)) {
         const testInfraMsg = `Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`;
         completeAttempt(attempt.id, {
           status: "succeeded",
@@ -2652,7 +2657,7 @@ export async function runPostExecutionAssessment(worker, {
       wtPath,
       preAssessAlreadyVerified,
     });
-    if (configuredVerification.status === "failed") {
+    if (isVerificationInfrastructureOutcome(configuredVerification)) {
       const failureMessage = configuredVerification.message
         || configuredVerification.error?.message
         || "Pre-assessment hook failed";
@@ -2670,6 +2675,12 @@ export async function runPostExecutionAssessment(worker, {
         { pendingFileRequests },
       );
       return;
+    }
+    if (configuredVerification.status === "failed") {
+      taskAbAssessmentEvidence = [
+        taskAbAssessmentEvidence,
+        renderConfiguredVerificationEvidence(configuredVerification),
+      ].filter(Boolean).join("\n\n");
     }
 
     try {

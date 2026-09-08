@@ -1,10 +1,10 @@
-import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
+import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 
 const WARNING_FILTER_INSTALLED = Symbol.for("posse.cli.warningFilterInstalled");
 
 function formatWarningForLog(warning) {
   const text = String(warning?.stack || warning?.message || warning || "");
-  return scrubSecrets(text);
+  return scrubSecretText(text);
 }
 
 export function installCliWarningFilter({

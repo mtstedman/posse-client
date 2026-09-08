@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import {
   canonicalHumanGateAction,
   humanGateContractForPayload,
+  validateHumanGateActionabilityContract,
 } from "../../../catalog/human-input.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES_SQL } from "../../../catalog/job.js";
@@ -130,6 +131,10 @@ export function registerHumanGate({
 
     const normalizedPayload = asPayload(payload);
     const contract = humanGateContractForPayload(normalizedPayload, { parentJobId });
+    const actionability = validateHumanGateActionabilityContract(contract);
+    if (!actionability.ok) {
+      throw new Error(`Human gate actionability contract invalid: ${actionability.reason}`);
+    }
     const gateJob = db.prepare(`SELECT work_item_id FROM jobs WHERE id = ?`).get(gateJobId);
     const singletonWorkItemIdCandidate = !contract.original_job_id
       && WORK_ITEM_SINGLETON_GATE_KINDS.has(contract.gate_kind)

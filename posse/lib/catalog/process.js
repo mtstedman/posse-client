@@ -4,6 +4,11 @@ export const UNBOUNDED_COMMAND_TIMEOUT_VALUES = Object.freeze([
   "", "0", "false", "none", "off", "unbounded", "unlimited", "infinite",
 ]);
 
+// Ephemeral, non-secret-by-itself locator for the verifier's local native
+// capability broker. The JSON value contains an expiring command-lifetime
+// bearer and is injected only after the ordinary test env allowlist runs.
+export const VERIFICATION_PULSE_CAPABILITY_ENV = "POSSE_VERIFICATION_PULSE_CAPABILITY";
+
 export const COMMON_DEPENDENCY_INSTALL_ENV_KEYS = Object.freeze([
   "all_proxy",
   "appdata",

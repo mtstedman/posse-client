@@ -6,6 +6,8 @@ import { heartbeatAuthManager } from "./HeartbeatAuthManager.js";
 import { isLoopbackHostname } from "../functions/auth.js";
 import { scopeGrantedBy } from "../../permissions/functions/scope-grants.js";
 import { GIT_MUTATE_ROUTE, NATIVE_BINARY_PACKAGE_PATTERN } from "../../../catalog/binary.js";
+import { VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../catalog/process.js";
+import { ParentPulseTokenManager } from "./ParentPulseTokenManager.js";
 
 const DEFAULT_REFRESH_SKEW_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -862,4 +864,16 @@ function unsupportedNativeVersionError(rejected) {
   return err;
 }
 
-export const pulseTokenManager = new PulseTokenManager();
+function verificationParentPulseManager(env = process.env) {
+  const encoded = String(env?.[VERIFICATION_PULSE_CAPABILITY_ENV] || "").trim();
+  if (!encoded) return null;
+  try {
+    const capability = JSON.parse(encoded);
+    if (capability?.version !== 1) return null;
+    return new ParentPulseTokenManager(capability);
+  } catch {
+    return null;
+  }
+}
+
+export const pulseTokenManager = verificationParentPulseManager() || new PulseTokenManager();

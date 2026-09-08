@@ -9,6 +9,7 @@ import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/function
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
+import { ensureBootDependencyGuard } from "../functions/boot-dependency-guard.js";
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
 import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
@@ -810,72 +811,52 @@ export class RunSession {
   // orphan recovery must requeue onto validated worktree state.
   updateBootStep("repo setup", { section: "scheduler", status: "ok", force: true });
 
-  // The dependency CHECK is advisory and must NOT gate boot. It is check-only
-  // (dryRun) and nothing downstream consumes its result — it only paints the
-  // "dependencies" chip. Awaiting it here used to block the whole boot; starting
-  // it before git/worktree probes can also starve short native git budgets on
-  // Windows. Launch it in the background after the git-critical DAG below.
-  const startBootDependencyCheck = () => {
+  // Required gate: inspect, run the doctor repair engine when unhealthy, then
+  // verify. Await after Git cleanup and before scheduler/ATLAS startup.
+  const guardBootDependencies = async () => {
     updateBootStep("dependencies", { section: "workspace", status: "running", detail: "checking packages", force: true });
-    void (async () => {
     try {
-      const dependencyConfig = typeof getAtlasIntegrationConfig === "function"
-        ? getAtlasIntegrationConfig()
-        : null;
-      // CHECK-ONLY at boot (dryRun): probe for managed indexer + package presence
-      // but NEVER install on the critical path. Installs — especially `rustup
-      // component add rust-analyzer`, a multi-minute network download — previously
-      // ran here before the lock and ATLAS, freezing the whole boot for minutes.
-      // Anything missing is now a non-fatal warning that points at `posse doctor`
-      // (which runs the same checks in install mode); SCIP generation already
-      // degrades gracefully when an indexer is absent (the language is skipped
-      // this warm and caught up once the indexer is installed).
-      const dependencyResult = await runBootDependencySync({
+      const dependencyConfig = typeof getAtlasIntegrationConfig === "function" ? getAtlasIntegrationConfig() : null;
+      const input = {
         projectDir: PROJECT_DIR,
-        dryRun: true,
-        scipMode: dependencyConfig?.enabled === false
-          ? "off"
-          : (dependencyConfig?.scipMode ?? dependencyConfig?.atlas_scip_mode ?? null),
+        // Own npm repair runs before the CLI loads SQLite. Replacing its
+        // native addon here would fail on Windows; retain the Python checks.
+        includePosseNode: false,
+        // Check and repair must cover the same requirements, or a failure the
+        // check never asks about (model download, native pull) blocks boot
+        // only when something unrelated needed repair. Native binaries are
+        // reconciled by the boot DAG below; the model is provisioned by
+        // `posse doctor`, not by the run gate.
+        includeNativeBinaries: false,
+        includeJinaModel: false,
+        scipMode: dependencyConfig?.enabled === false ? "off" : (dependencyConfig?.scipMode ?? dependencyConfig?.atlas_scip_mode ?? null),
         scipLanguages: dependencyConfig?.scipLanguages ?? dependencyConfig?.atlas_scip_languages ?? null,
-      }, {
+      };
+      const workerOptions = {
         signal: bootAbortController.signal,
+        // Doctor bounds each package command at 30 minutes; a repair that
+        // touches npm, Python, and SCIP environments can exceed the old
+        // 20-minute worker cap, so bound the whole gate generously instead.
+        timeoutMs: 3 * 60 * 60 * 1000,
         onProgress: (event = {}) => {
-          const msg = firstLine(event.message || "");
-          if (!msg) return;
-          updateBootStep("dependencies", {
-            section: "workspace",
-            status: "running",
-            detail: msg,
-            showDetail: true,
-            force: true,
-          });
+          const detail = firstLine(event.message || "");
+          if (detail) updateBootStep("dependencies", { section: "workspace", status: "running", detail, showDetail: true, force: true });
         },
+      };
+      const result = await ensureBootDependencyGuard({
+        check: () => runBootDependencySync({ ...input, dryRun: true }, workerOptions),
+        repair: () => runBootDependencySync({ ...input, doctor: true, dryRun: false }, workerOptions),
+        onRepair: () => updateBootStep("dependencies", {
+          section: "workspace", status: "running", detail: "running posse doctor repair; waiting for a healthy environment", showDetail: true, force: true,
+        }),
       });
-      const depCounts = dependencyResult?.counts || {};
-      const depNeedsInstall = (depCounts.dry_run || 0) + (depCounts.failed || 0);
-      updateBootStep("dependencies", {
-        section: "workspace",
-        status: depNeedsInstall > 0 ? "warning" : "ok",
-        detail: depNeedsInstall > 0
-          ? `${formatBootDependencySyncForRun(dependencyResult)} — run "posse doctor" to install`
-          : formatBootDependencySyncForRun(dependencyResult),
-        showDetail: depNeedsInstall > 0,
-        force: true,
-      });
+      updateBootStep("dependencies", { section: "workspace", status: "ok", detail: formatBootDependencySyncForRun(result), force: true });
     } catch (err) {
-      // The boot dependency CHECK never blocks the run: a probe error degrades to
-      // a warning row rather than aborting boot. Deterministic indexing and the
-      // rest of boot do not depend on these installs, so the run proceeds and the
-      // operator can repair with `posse doctor`.
-      updateBootStep("dependencies", {
-        section: "workspace",
-        status: "warning",
-        detail: `dependency check skipped: ${firstLine(err?.message || String(err))} — run "posse doctor"`,
-        showDetail: true,
-        force: true,
-      });
+      updateBootStep("dependencies", { section: "workspace", status: "failed", detail: firstLine(err?.message || String(err)), showDetail: true, force: true });
+      bootAbortController.abort();
+      try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+      throw err;
     }
-    })();
   };
 
   // Native refresh, Git readiness, and the cached client update check can run
@@ -1145,7 +1126,7 @@ export class RunSession {
     }
   }
 
-  startBootDependencyCheck();
+  await guardBootDependencies();
 
   for (const wiId of wiIds) {
     const wi = getWorkItem(wiId);
@@ -2613,7 +2594,7 @@ export class RunSession {
   }
 
   // Freeze the final frame into terminal states before the TUI takes over.
-  // Required gates are complete at this boundary; detached dependency/provider
+  // Required gates are complete at this boundary; detached provider
   // probes and deliberately-backgrounded ATLAS work render as deferred instead
   // of leaving permanent spinners in the preserved boot card.
   boot.finalizeForHandoff();

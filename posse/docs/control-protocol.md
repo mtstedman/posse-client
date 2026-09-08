@@ -733,6 +733,47 @@ than inferring meaning from `events.message`. `phase` frames describe job
 lifecycle; `model` frames describe bounded provider-call lifecycle; `progress`
 is a semantic checkpoint; `result` and `error` are terminal summaries.
 
+### `provider_usage`
+
+Account quota telemetry from Posse's existing Claude/Codex collectors. This is
+account usage, not per-repository spend; consumers MUST NOT sum it across
+instances. The bridge checks cached collectors every 5 seconds, respecting
+provider cache TTL/backoff, and emits only when the normalized provider values
+change (percentages rounded to one decimal, reset, availability, or staleness).
+Timestamp-only changes do not emit events. Usage events never trigger pushes.
+
+```jsonc
+{
+  "protocol": "posse.provider_usage_stream.v1",
+  "updated_at": "2026-09-08T12:00:00Z",           // observation timestamp
+  "providers": [{                              // at most 2, unique IDs
+    "id": "claude",                             // claude | codex
+    "label": "Claude",                          // nonempty, <=120 characters
+    "origin": "claude-usage-api",                // <=120 ASCII alphanumeric or ._:-
+    "stale": false,
+    "windows": [{                              // at most 16 per provider
+      "kind": "session",                        // session | week | provider-specific
+      "label": "Session",                       // nonempty, <=120 characters
+      "utilization_pct": 42.1,                  // finite 0..100, or null if unavailable
+      "reset_at": "2026-09-08T15:00:00Z",        // timestamp or null
+      "unlimited": false                        // true requires null percentage/reset
+    }]
+  }]
+}
+```
+
+Snapshots optionally include the same object as `provider_usage`, or null if
+not collected. Replay uses the normal event cursor and bridge epoch. Clients
+show missing readings as unavailable, retain stale readings as last known,
+and wait for a new reading after reset instead of inventing zero usage.
+Only bounded quota fields are forwarded; credentials, raw provider responses,
+and diagnostic text remain local. `origin` is used because `source` is a
+relay-prohibited payload key.
+
+Deploy the relay's event support before enabling the updated bridge producer.
+Older bridges remain usable; updated clients tolerate absent usage and discard
+malformed advisory snapshot usage without blocking queue/gate reconciliation.
+
 ### `cost_updated`
 
 Best-effort, batched. Bridge SHOULD coalesce these to no more than 1/sec per
@@ -819,7 +860,8 @@ event 1).
   "open_gates": [ /* GatePayload[] */ ],
   "head_event_id": 12345,                       // latest real event id at snapshot time
   "bridge_epoch": "bridge-boot-uuid",
-  "instance_status": { /* InstanceStatusPayload */ }  // optional, nullable
+  "instance_status": { /* InstanceStatusPayload */ }, // optional, nullable
+  "provider_usage": { /* ProviderUsagePayload */ }    // optional, nullable
 }
 ```
 

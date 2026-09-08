@@ -47,6 +47,10 @@ import {
 } from "../../../git/functions/worktree.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import {
+  isVerificationInfrastructureOutcome,
+  verificationInfrastructureError,
+} from "../../functions/helpers/verification-outcome.js";
+import {
   handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
   handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
   handlePendingScopeApprovalPause as handlePendingScopeApprovalPauseFromModule,
@@ -231,9 +235,10 @@ export class WorkerExecutionCoordinator {
             })
           : null,
         repairDependencies: wtPath
-          ? () => repairTestDependencies(worker, job, wtPath, {
+          ? (receipt) => repairTestDependencies(worker, job, wtPath, {
               signal: executeAbortController?.signal || null,
               phase: "intake",
+              receipt,
             })
           : null,
       });
@@ -273,8 +278,11 @@ export class WorkerExecutionCoordinator {
             `${C.yellow}[test-intake] WI#${job.work_item_id} job #${job.id}: planner verification recipe is invalid (${invalidPayload._verification_plan_invalid.reason}); continuing without treating it as a product failure${C.reset}`,
           );
         }
-        if (baselineReceipt.status === "infrastructure_error") {
-          throw new Error(`Pre-development test infrastructure unavailable: ${baselineReceipt.reason || "unknown infrastructure failure"}`);
+        if (isVerificationInfrastructureOutcome(baselineReceipt)) {
+          throw verificationInfrastructureError(
+            baselineReceipt,
+            "Pre-development test infrastructure unavailable",
+          );
         }
       }
 

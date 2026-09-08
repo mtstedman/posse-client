@@ -79,8 +79,12 @@ import {
   assessmentWorktreeDirtySummary,
   inspectAssessmentWorktreeReadiness,
 } from "../../functions/helpers/assessment-worktree-readiness.js";
-import { ensureConfiguredVerification } from "../../functions/helpers/configured-verification.js";
+import {
+  ensureConfiguredVerification,
+  renderConfiguredVerificationEvidence,
+} from "../../functions/helpers/configured-verification.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
+import { isVerificationInfrastructureOutcome } from "../../functions/helpers/verification-outcome.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -376,9 +380,10 @@ export class AssessmentHandoffAdapter {
             })
           : null,
         repairDependencies: wtPath
-          ? () => repairTestDependencies(worker, job, wtPath, {
+          ? (receipt) => repairTestDependencies(worker, job, wtPath, {
               signal: assessAc?.signal || null,
               phase: "assessor",
+              receipt,
             })
           : null,
       });
@@ -399,7 +404,7 @@ export class AssessmentHandoffAdapter {
             cwd: assessmentCwd,
           },
         });
-        if (["infrastructure_error", "unavailable"].includes(postReceipt.status)) {
+        if (isVerificationInfrastructureOutcome(postReceipt)) {
           throw new Error(`Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`);
         }
       }
@@ -412,7 +417,7 @@ export class AssessmentHandoffAdapter {
         // inspection may use output_root, but the verifier must not.
         wtPath: wtPath || worker.projectDir,
       });
-      if (configuredVerification.status === "failed") {
+      if (isVerificationInfrastructureOutcome(configuredVerification)) {
         throw configuredVerification.error
           || new Error(configuredVerification.message || "Pre-assessment hook failed");
       }
@@ -467,6 +472,13 @@ export class AssessmentHandoffAdapter {
       const deterministicTestEvidence = renderTestExecutionEvidence(deterministicTestRun || {});
       if (deterministicTestEvidence) {
         assessmentContext.task_ab_test_evidence = deterministicTestEvidence;
+      }
+      const configuredEvidence = renderConfiguredVerificationEvidence(configuredVerification);
+      if (configuredEvidence) {
+        assessmentContext.task_ab_test_evidence = [
+          assessmentContext.task_ab_test_evidence,
+          configuredEvidence,
+        ].filter(Boolean).join("\n\n");
       }
       const scopedCheckReceipt = await ensureAssessmentScopedCheckEvidence({
         job,

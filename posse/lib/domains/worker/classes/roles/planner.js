@@ -708,6 +708,7 @@ export class PlannerRole extends BaseRole {
     }
     const prompt = await composePromptRemoteAware(ctx.plannerPacket, remoteInstructions, {
       providerName: ctx.providerName,
+      ...(this.deps?.remoteComposer ? { composer: this.deps.remoteComposer } : {}),
     });
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {
       storeArtifact({

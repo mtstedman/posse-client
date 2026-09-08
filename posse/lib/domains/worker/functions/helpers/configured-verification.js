@@ -10,6 +10,12 @@ import { recordObservation } from "../../../observability/functions/observations
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { runShellCommandAsync } from "./assessment-runner.js";
+import {
+  describeToolchain,
+  resolveVerificationPolicy,
+  toolchainFingerprint,
+} from "../../../settings/functions/verification-policy.js";
+import { verificationOutcome } from "./verification-outcome.js";
 
 function readSettingText(key, projectDir = null) {
   try {
@@ -36,9 +42,16 @@ export function configuredVerificationPlan(projectDir, {
   const settingKey = canonicalVerifyCmd ? "canonical_verify_cmd" : "pre_assess_cmd";
   const hooksSkipped = readSettingBool("skip_hooks", false)
     || readSettingBool("skip_hook_post_dev_verify", false);
+  const policy = resolveVerificationPolicy({ projectDir, checkClass: "canonical_verify" });
+  const toolchain = describeToolchain({ projectDir });
   return {
     command,
     setting_key: settingKey,
+    timeout_ms: policy.wall_timeout_ms,
+    idle_timeout_ms: policy.idle_timeout_ms,
+    timeout_source: policy.wall_source,
+    policy_fingerprint: policy.fingerprint,
+    toolchain_fingerprint: toolchainFingerprint(toolchain),
     enabled: !!command && !preAssessAlreadyVerified && !hooksSkipped,
     skip_reason: !command
       ? "not_configured"
@@ -174,6 +187,8 @@ function reusableVerification(jobId, plan, assessedCommitHash, currentBinding) {
       try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
       if (detail?.status !== "passed" || detail?.source !== "setting") continue;
       if (detail?.verification_eligible !== true) continue;
+      if (String(detail?.policy_fingerprint || "") !== plan.policy_fingerprint) continue;
+      if (String(detail?.toolchain_fingerprint || "") !== plan.toolchain_fingerprint) continue;
       if (String(detail?.command || "").trim() !== plan.command) continue;
       if (detail?.setting_key !== plan.setting_key) continue;
       if (String(detail?.assessed_commit_hash || "").trim().toLowerCase() !== assessed) continue;
@@ -197,6 +212,23 @@ function recordCommandObservation(job, attemptId, summary, detail) {
   });
 }
 
+export function renderConfiguredVerificationEvidence(result = {}) {
+  if (!result?.command || result.status === "skipped") return "";
+  const output = [result?.error?.stdout, result?.error?.stderr]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(-1600);
+  return [
+    "CONFIGURED REPOSITORY VERIFICATION:",
+    `command: ${result.command}`,
+    `status: ${String(result.status || "unknown").toUpperCase()}`,
+    `outcome: ${result.verification_outcome?.type || verificationOutcome({ ...result, phase: "post_change" }).type}`,
+    `timeout: wall=${result.timeout_ms ?? "unknown"}ms idle=${result.idle_timeout_ms ?? "disabled"}`,
+    output ? `output_tail:\n${output}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 export async function ensureConfiguredVerification(worker, {
   job,
   attemptId = null,
@@ -207,11 +239,12 @@ export async function ensureConfiguredVerification(worker, {
 } = {}) {
   const plan = configuredVerificationPlan(worker?.projectDir, { preAssessAlreadyVerified });
   if (!plan.enabled || !wtPath) {
-    return {
+    const skipped = {
       status: "skipped",
       reason: !wtPath ? "worktree_unavailable" : plan.skip_reason,
       ...plan,
     };
+    return { ...skipped, verification_outcome: verificationOutcome(skipped) };
   }
   const currentBinding = await commitBinding(wtPath, assessedCommitHash);
   const reused = allowReuse
@@ -219,7 +252,13 @@ export async function ensureConfiguredVerification(worker, {
     : null;
   if (reused) {
     worker.emit(job.id, `${C.dim}[pre-assess] Reused passing ${plan.setting_key} receipt for the assessed commit${C.reset}`);
-    return { status: "passed", reused: true, receipt: reused, ...plan };
+    return {
+      status: "passed",
+      reused: true,
+      receipt: reused,
+      verification_outcome: reused.verification_outcome || verificationOutcome({ ...reused, phase: "post_change" }),
+      ...plan,
+    };
   }
 
   worker.emit(job.id, `${C.dim}[pre-assess] Running: ${plan.command}${C.reset}`);
@@ -228,12 +267,21 @@ export async function ensureConfiguredVerification(worker, {
     cwd: wtPath,
     source: "setting",
     setting_key: plan.setting_key,
+    timeout_ms: plan.timeout_ms,
+    idle_timeout_ms: plan.idle_timeout_ms,
+    timeout_source: plan.timeout_source,
+    policy_fingerprint: plan.policy_fingerprint,
+    toolchain_fingerprint: plan.toolchain_fingerprint,
   });
 
   try {
     const executionStateBefore = await gitExecutionState(wtPath);
     const before = await gitPorcelainZ(wtPath);
-    await runShellCommandAsync(plan.command, { cwd: wtPath, timeoutMs: 120000 });
+    await runShellCommandAsync(plan.command, {
+      cwd: wtPath,
+      timeoutMs: plan.timeout_ms,
+      idleTimeoutMs: plan.idle_timeout_ms,
+    });
     const after = await gitPorcelainZ(wtPath);
     const dirtyEntries = diffPorcelainEntries(before, after);
     if (dirtyEntries.length > 0 || after !== before) {
@@ -305,7 +353,13 @@ export async function ensureConfiguredVerification(worker, {
         const message = snapshotError
           ? `${sideEffectMessage}; cleanup failed: ${snapshotError}`
           : `${sideEffectMessage}; cleanup could not restore the pre-verification tree`;
-        return { status: "failed", error: new Error(message), message, ...plan };
+        return {
+          status: "failed",
+          error: new Error(message),
+          message,
+          verification_outcome: verificationOutcome({ status: "side_effect_detected", reason: message }),
+          ...plan,
+        };
       }
       worker.emit(
         job.id,
@@ -331,24 +385,66 @@ export async function ensureConfiguredVerification(worker, {
       status: "passed",
       source: "setting",
       setting_key: plan.setting_key,
+      timeout_ms: plan.timeout_ms,
+      idle_timeout_ms: plan.idle_timeout_ms,
+      policy_fingerprint: plan.policy_fingerprint,
+      toolchain_fingerprint: plan.toolchain_fingerprint,
       ...binding,
     };
+    receipt.verification_outcome = verificationOutcome({ ...receipt, phase: "post_change" });
     worker.emit(job.id, `${C.green}[pre-assess] Passed${C.reset}`);
     recordCommandObservation(job, attemptId, "Pre-assess command passed", receipt);
-    return { status: "passed", reused: false, receipt, ...plan };
+    return {
+      status: "passed",
+      reused: false,
+      receipt,
+      verification_outcome: receipt.verification_outcome,
+      ...plan,
+    };
   } catch (error) {
-    const message = `Pre-assessment hook failed: ${String(error?.message || error).split("\n")[0]}`;
+    // A policy timeout is infrastructure evidence, not a product failure.
+    // Preserve its kind so retry policy and operators can distinguish a hard
+    // wall limit from an explicitly configured idle watchdog.
+    const timedOut = ["ETIMEDOUT", "EIDLETIMEOUT"].includes(String(error?.code || ""));
+    const timeoutKind = error?.timeout_kind || "wall";
+    const timeoutLimit = timeoutKind === "idle" ? plan.idle_timeout_ms : plan.timeout_ms;
+    const message = timedOut
+      ? `Pre-assessment hook ${timeoutKind === "idle" ? "produced no output" : "timed out"} after ${timeoutLimit}ms (${timeoutKind} policy): ${plan.command}`
+      : `Pre-assessment hook failed: ${String(error?.message || error).split("\n")[0]}`;
     worker.emit(job.id, `${C.red}[pre-assess] ${message}${C.reset}`);
     recordCommandObservation(job, attemptId, message, {
       command: plan.command,
       cwd: wtPath,
-      status: "failed",
+      status: timedOut ? "timed_out" : "failed",
+      reason: timedOut ? `verification_${timeoutKind}_timeout` : null,
+      timeout_ms: plan.timeout_ms,
+      idle_timeout_ms: plan.idle_timeout_ms,
+      timeout_kind: timedOut ? timeoutKind : null,
+      timeout_source: plan.timeout_source,
+      policy_fingerprint: plan.policy_fingerprint,
+      toolchain_fingerprint: plan.toolchain_fingerprint,
+      verification_outcome: verificationOutcome({
+        status: timedOut ? "timed_out" : "failed",
+        reason: timedOut ? `verification_${timeoutKind}_timeout` : null,
+        phase: "post_change",
+        code: error?.code ?? null,
+      }),
       source: "setting",
       setting_key: plan.setting_key,
       ...(error?.verification_git_state
         ? { verification_git_state: error.verification_git_state }
         : {}),
     });
-    return { status: "failed", error, message, ...plan };
+    const result = {
+      status: timedOut ? "timed_out" : "failed",
+      timed_out: timedOut,
+      reason: timedOut ? "verification_wall_timeout" : null,
+      error,
+      message,
+      ...plan,
+    };
+    result.reason = timedOut ? `verification_${timeoutKind}_timeout` : null;
+    result.verification_outcome = verificationOutcome({ ...result, phase: "post_change", code: error?.code ?? null });
+    return result;
   }
 }

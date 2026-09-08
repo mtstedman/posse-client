@@ -61,11 +61,20 @@
   PHP when PHP SCIP is selected). Missing tools are still reported.
 
 .PARAMETER NoInstallNode
-  Don't auto-install Node via winget when Node 24+ is missing.
+  Don't auto-install Node through winget or the verified ZIP fallback.
+
+.PARAMETER NonInteractive
+  Never prompt; use saved credentials or the process environment.
+
+.PARAMETER SetupOnly
+  Install core files and launcher; defer account/runtime setup to first run.
 
 .PARAMETER ConfigureKeys
-  Interactively prompt for provider API keys (stored in providers.env.ps1 with
-  an ACL limited to the current user, SYSTEM, and local Administrators).
+  Interactively prompt for provider API keys (stored in the private
+  %USERPROFILE%\.config\posse\.env with an ACL limited to the current user,
+  SYSTEM, and local Administrators). Legacy providers.env.ps1 files and
+  user-environment entries left by older installers are kept in sync only
+  when they already exist; new installs write only .env.
 
 .PARAMETER Force
   Re-run npm install even when node_modules looks fresh.
@@ -105,6 +114,8 @@ param(
   [switch]$SkipHostTools,
   [switch]$NoInstallNode,
   [switch]$ConfigureKeys,
+  [switch]$NonInteractive,
+  [switch]$SetupOnly,
   [switch]$Force,
   [ValidateRange(60, 86400)][int]$CommandTimeoutSeconds = 1800,
   [ValidateRange(60, 86400)][int]$DoctorTimeoutSeconds = 7500,
@@ -665,6 +676,10 @@ function Print-Summary {
     Write-Host ("  {0}{1}Install did not complete.{2} Fix the failed step above and re-run - completed steps are skipped on re-runs." -f $script:RED, $script:BOLD, $script:R)
   }
   else {
+    if ($SetupOnly) {
+      Write-Host "Core installation complete; runtime readiness has NOT been checked. Supply POSSE_KEY and re-run without -SetupOnly."
+      return
+    }
     Write-Host ("  {0}Next steps:{1}" -f $script:BOLD, $script:R)
     Write-Host "    1. Open a new terminal (PATH changes need a fresh shell)"
     Write-Host ("    2. cd <your project>; posse add     {0}# describe a task{1}" -f $script:DIM, $script:R)
@@ -680,6 +695,7 @@ function Print-Summary {
 function Test-Cmd { param([string]$Name) return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue) }
 
 function Test-InteractiveInput {
+  if ($NonInteractive -or $SetupOnly -or $DryRun) { return $false }
   if ([Environment]::GetCommandLineArgs() -contains "-NonInteractive") { return $false }
   try { return -not [Console]::IsInputRedirected } catch { return $false }
 }
@@ -837,7 +853,12 @@ function Test-DepsFresh {
   $lock = Join-Path $nm ".package-lock.json"
   $pkg = Join-Path $Dir "package.json"
   if (-not ((Test-Path $nm) -and (Test-Path $lock) -and (Test-Path $pkg))) { return $false }
-  return ((Get-Item $pkg).LastWriteTime -le (Get-Item $lock).LastWriteTime)
+  if ((Get-Item $pkg).LastWriteTime -gt (Get-Item $lock).LastWriteTime) { return $false }
+  Push-Location -LiteralPath $Dir
+  try {
+    & $script:NodeBin --input-type=commonjs -e 'const D = require("better-sqlite3"); const db = new D(":memory:"); db.close();' *> $null
+    return $LASTEXITCODE -eq 0
+  } catch { return $false } finally { Pop-Location }
 }
 
 function Test-ImageMagick {
@@ -1050,52 +1071,89 @@ function Step-Packages {
   }
 }
 
+function Test-NodeRuntime {
+  if ((Get-NodeMajor) -lt $NodeMinMajor) { return $false }
+  $nodePath = (Get-Command node).Source
+  $npmCli = Join-Path (Split-Path $nodePath -Parent) "node_modules\npm\bin\npm-cli.js"
+  if (-not (Test-Path -LiteralPath $npmCli)) { return $false }
+  try { & $nodePath $npmCli --version *> $null; return $LASTEXITCODE -eq 0 } catch { return $false }
+}
+
+function Install-PortableNode {
+  # No winget or administrator required. Stage a checksum-verified official
+  # distribution beside its final destination; never overwrite a working tree.
+  $archName = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+  $arch = switch ($archName) { "ARM64" { "arm64" } "AMD64" { "x64" } default { throw "Node requires x64 or ARM64 Windows" } }
+  $runtimeRoot = Join-Path $script:ManagedStateRoot "runtimes"
+  New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+  $stage = Join-Path $runtimeRoot (".node-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $stage | Out-Null
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $baseUrl = "https://nodejs.org/dist/latest-v$NodeMinMajor.x"
+    $checksums = (Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/SHASUMS256.txt" -TimeoutSec 60).Content
+    $pattern = '(?m)^([a-fA-F0-9]{64})\s+(node-v' + $NodeMinMajor + '\.\d+\.\d+-win-' + $arch + '\.zip)\r?$'
+    $match = [regex]::Match([string]$checksums, $pattern)
+    if (-not $match.Success) { throw "No supported Node archive in official checksum manifest" }
+    $filename = $match.Groups[2].Value
+    $archive = Join-Path $stage $filename
+    # Use the immutable version URL after resolving latest, avoiding release races.
+    $version = ($filename -split '-')[1]
+    Invoke-WebRequest -UseBasicParsing -Uri "https://nodejs.org/dist/$version/$filename" -OutFile $archive -TimeoutSec 300
+    if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $match.Groups[1].Value) { throw "Node archive checksum mismatch" }
+    Expand-Archive -LiteralPath $archive -DestinationPath $stage
+    $directoryName = [IO.Path]::GetFileNameWithoutExtension($filename)
+    $extracted = Join-Path $stage $directoryName
+    $candidate = Join-Path $extracted "node.exe"
+    & $candidate --version *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Downloaded Node cannot run on this Windows host" }
+    $destination = Join-Path $runtimeRoot ($directoryName + "-" + [Guid]::NewGuid().ToString("N"))
+    Move-Item -LiteralPath $extracted -Destination $destination
+    $env:Path = "$destination;$env:Path"
+    if (-not (Test-NodeRuntime)) { throw "Downloaded Node/npm failed verification" }
+  }
+  finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 function Step-Node {
   Step-Begin "node"
-  $major = Get-NodeMajor
-  if ($major -ge $NodeMinMajor) {
+  if (Test-NodeRuntime) {
     $script:NodeBin = (Get-Command node).Source
-    Step-End "ok" ("node v{0}.x at {1}" -f $major, $script:NodeBin)
+    Step-End "ok" ("Node + npm ready at {0}" -f $script:NodeBin)
     return
   }
-  if ($major -gt 0) { Write-Info ("found node v{0}.x, but {1}+ is required" -f $major, $NodeMinMajor) }
-  else { Write-Info "node is not installed" }
-
-  if ($NoInstallNode) {
-    Step-FailCritical "Node $NodeMinMajor+ required (-NoInstallNode was passed). Install it and re-run."
-    return
+  # Reuse a previously installed portable runtime in shells without its PATH.
+  $runtimeRoot = Join-Path $script:ManagedStateRoot "runtimes"
+  if (Test-Path -LiteralPath $runtimeRoot) {
+    foreach ($directory in @(Get-ChildItem -LiteralPath $runtimeRoot -Directory -Filter "node-v$NodeMinMajor.*" | Sort-Object LastWriteTime -Descending)) {
+      $previousPath = $env:Path
+      $env:Path = "$($directory.FullName);$env:Path"
+      if (Test-NodeRuntime) {
+        $script:NodeBin = (Get-Command node).Source
+        Step-End "ok" "reused managed Node + npm"
+        return
+      }
+      $env:Path = $previousPath
+    }
   }
-  if (-not (Test-Cmd "winget")) {
-    Step-FailCritical "Node $NodeMinMajor+ required and winget is unavailable to install it. Install Node from https://nodejs.org and re-run."
-    return
+  if ($NoInstallNode) { Step-FailCritical "Node $NodeMinMajor+ with npm required (-NoInstallNode was passed)."; return }
+  if ($DryRun) { Step-End "dry-run" "would install Node + npm via winget or verified per-user ZIP"; return }
+  if (Test-Cmd "winget") {
+    foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
+      [void](Invoke-Logged -Description "install Node.js ($id)" -Command @(
+        "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
+        "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
+      ))
+      Update-SessionPath
+      if (Test-NodeRuntime) { break }
+    }
   }
-  if ($DryRun) {
-    Step-End "dry-run" "would install Node via winget (OpenJS.NodeJS.LTS)"
-    return
+  if (-not (Test-NodeRuntime)) {
+    Write-Info "installing official Node ZIP in user-owned storage (winget unavailable or unsuccessful)"
+    Install-PortableNode
   }
-
-  $installed = $false
-  foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
-    $rc = Invoke-Logged -Description ("install Node.js ({0})" -f $id) -Command @(
-      "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
-      "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
-    )
-    if ($rc -eq 0) { $installed = $true; break }
-  }
-  if (-not $installed) {
-    Step-FailCritical "Node install via winget failed; install Node $NodeMinMajor+ from https://nodejs.org and re-run"
-    return
-  }
-
-  Update-SessionPath
-  $major = Get-NodeMajor
-  if ($major -ge $NodeMinMajor) {
-    $script:NodeBin = (Get-Command node).Source
-    Step-End "ok" ("node v{0}.x installed at {1}" -f $major, $script:NodeBin)
-  }
-  else {
-    Step-FailCritical "node still not usable in this session after install (found major: $major); open a new terminal and re-run"
-  }
+  $script:NodeBin = (Get-Command node).Source
+  Step-End "ok" ("Node + npm ready at {0}" -f $script:NodeBin)
 }
 
 function Step-Checkout {
@@ -1243,15 +1301,28 @@ function Step-Npm {
     Step-End "dry-run" ("would run npm install --include=optional in {0}" -f $script:PosseDirResolved)
     return
   }
-  $npmArgs = @("npm", "install", "--include=optional", "--no-fund", "--no-audit")
+  $npmArgs = @("npm", "install", "--include=dev", "--include=optional", "--no-fund", "--no-audit")
   $rc = Invoke-Logged -Description "npm install" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
-  if ($rc -eq 0) { Step-End "ok" "npm dependencies installed"; return }
+  if ($rc -eq 0) { Complete-NodeInstall; return }
 
   Write-Info "retrying once (transient network/registry failures are common)"
   $rc = Invoke-Logged -Description "npm install (retry)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
-  if ($rc -eq 0) { Step-End "ok" "npm dependencies installed on retry"; return }
+  if ($rc -eq 0) { Complete-NodeInstall; return }
 
   Step-FailCritical "npm install failed twice; see the installer log for details"
+}
+
+function Complete-NodeInstall {
+  $previousAdopt = $env:POSSE_MAINTENANCE_ADOPT_NODE
+  try {
+    $env:POSSE_MAINTENANCE_ADOPT_NODE = "1"
+    $rc = Invoke-Logged -Description "verify and repair Node native addons" -WorkingDirectory $script:PosseDirResolved -Command @(
+      $script:NodeBin, "lib/domains/cli/functions/maintenance-node-repair.js"
+    )
+    if ($rc -eq 0) { Step-End "ok" "npm dependencies and SQLite runtime verified" }
+    else { Step-FailCritical "Node dependencies remain unusable after repair; check the build toolchain and log" }
+  }
+  finally { $env:POSSE_MAINTENANCE_ADOPT_NODE = $previousAdopt }
 }
 
 function Step-ShellWiring {
@@ -1285,7 +1356,8 @@ function Step-ShellWiring {
   # a checkout path containing % cannot corrupt the shim.
   $cmdNodeBin = $script:NodeBin -replace "%", "%%"
   $cmdOrchestrator = $orchestrator -replace "%", "%%"
-  $cmdContents = ("@echo off`r`n""{0}"" ""{1}"" %*`r`n" -f $cmdNodeBin, $cmdOrchestrator)
+  $cmdNodeDir = (Split-Path $script:NodeBin -Parent) -replace "%", "%%"
+  $cmdContents = ("@echo off`r`nset ""PATH={2};%PATH%""`r`n""{0}"" ""{1}"" %*`r`n" -f $cmdNodeBin, $cmdOrchestrator, $cmdNodeDir)
   [System.IO.File]::WriteAllText($cmdShim, $cmdContents, (New-Object System.Text.UTF8Encoding($false)))
   # A same-name .ps1 takes precedence over posse.cmd in PowerShell and is
   # unusable under the default Restricted execution policy. Remove the old
@@ -1576,18 +1648,25 @@ function Write-RestrictedProviderFile {
 
 function Persist-UserEnvironmentKey {
   param([string]$VarName, [string]$Value)
-  # The runtime resolves keys from process env, then the HKCU/HKLM Environment
-  # registry (shared/native/functions/key.js) -- never from providers.env.ps1.
-  # User-scope persistence is what makes posse.cmd from cmd.exe / VS Code /
-  # schedulers work; SetEnvironmentVariable(User) also broadcasts the change.
+  # The launcher loads the private .env itself, so user-scope environment
+  # persistence is no longer created for new installs: HKCU values are
+  # inherited by every process in the session and would shadow a rotated
+  # .env key. Existing entries from older installers are only kept in sync.
   try {
     [Environment]::SetEnvironmentVariable($VarName, $Value, "User")
     return $true
   }
   catch {
-    Write-Warn2 ("could not persist {0} to the user environment: {1}" -f $VarName, $_.Exception.Message)
+    Write-Warn2 ("could not update {0} in the user environment: {1}" -f $VarName, $_.Exception.Message)
     return $false
   }
+}
+
+function Sync-LegacyUserEnvironmentKey {
+  param([string]$VarName, [string]$Value)
+  $existing = [Environment]::GetEnvironmentVariable($VarName, "User")
+  if (-not $existing -or $existing -ceq $Value) { return $false }
+  return (Persist-UserEnvironmentKey $VarName $Value)
 }
 
 function Prompt-ForKey {
@@ -1606,7 +1685,14 @@ function Prompt-ForKey {
   $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
   try { $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
   finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  # Pasted keys often carry surrounding whitespace; interior whitespace is
+  # never part of a key, so refuse it rather than save a value that fails later.
+  $plain = if ($plain) { $plain.Trim() } else { "" }
   if (-not $plain) { Write-Info "skipped $Label"; return $false }
+  if ($plain -match '\s') {
+    Write-Warn2 "$Label contained interior whitespace and was not saved; re-run with -ConfigureKeys to try again"
+    return $false
+  }
   [Environment]::SetEnvironmentVariable($VarName, $plain, "Process")
   $script:ConfiguredKeys += [PSCustomObject]@{ Name = $VarName; Value = $plain }
   return $true
@@ -1623,11 +1709,35 @@ function Step-Keys {
   foreach ($name in $script:ProviderKeyNames) {
     if ([Environment]::GetEnvironmentVariable($name, "Process")) { $parentEnvKeys[$name] = $true }
   }
-  $storedKeys = @{}
+  $privateEnvFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") ".env"
+  $envBridge = Join-Path $script:PosseDirResolved "installers\installer-env.mjs"
+  $dotenvKeys = @{}
+  # An existing checkout is reused as-is, so a newer installer can meet an
+  # older tree that lacks the credential bridge. Name the real cause.
+  if (-not (Test-Path -LiteralPath $envBridge)) {
+    Step-FailCritical ("checkout {0} predates this installer (installers\installer-env.mjs is missing); update it with 'git pull' or 'posse update', then re-run" -f $script:PosseDirResolved)
+    return
+  }
+  if (-not $DryRun) {
+    $json = & $script:NodeBin $envBridge read-json
+    if ($LASTEXITCODE -ne 0) { Step-FailCritical "cannot read private .env file"; return }
+    $saved = ConvertFrom-Json -InputObject ([string]$json)
+    foreach ($property in $saved.PSObject.Properties) {
+      $dotenvKeys[$property.Name] = [string]$property.Value
+      if (-not [Environment]::GetEnvironmentVariable($property.Name, "Process")) {
+        [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
+      }
+    }
+    if (Test-Path -LiteralPath $privateEnvFile) { Set-ProviderFileAcl $privateEnvFile }
+  }
+  $storedKeys = $dotenvKeys.Clone()
   $aclReady = $true
   if (Test-Path -LiteralPath $providersFile) {
     try {
-      $storedKeys = Import-ProviderKeysFile $providersFile
+      $legacyKeys = Import-ProviderKeysFile $providersFile
+      foreach ($name in $legacyKeys.Keys) {
+        if (-not $storedKeys.ContainsKey($name)) { $storedKeys[$name] = $legacyKeys[$name] }
+      }
       if (-not $DryRun) {
         # The file is dot-sourced by $PROFILE, so it must only ever contain the
         # known assignments -- but never destroy user content silently: keep a
@@ -1650,14 +1760,8 @@ function Step-Keys {
           }
         }
         Write-RestrictedProviderFile $providersFile (($safeLines -join "`r`n") + "`r`n")
-        # Promote stored keys into the HKCU Environment the runtime actually
-        # reads, so installs done before this fix start working from cmd.exe,
-        # VS Code, and schedulers without a PowerShell profile.
-        foreach ($name in $script:ProviderKeyNames) {
-          if ($storedKeys.ContainsKey($name) -and $storedKeys[$name] -and -not [Environment]::GetEnvironmentVariable($name, "User")) {
-            [void](Persist-UserEnvironmentKey $name ([string]$storedKeys[$name]))
-          }
-        }
+        # Legacy keys are read as data by the runtime's .env loader; they are
+        # deliberately not copied into the user environment any more.
       }
     }
     catch {
@@ -1665,13 +1769,18 @@ function Step-Keys {
       Write-Warn2 ("could not validate or restrict provider key file {0}: {1}" -f $providersFile, $_.Exception.Message)
     }
   }
-  if (-not $ConfigureKeys) {
+  $promptPosseKey = -not $env:POSSE_KEY -and (Test-InteractiveInput)
+  if (-not $ConfigureKeys -and -not $promptPosseKey) {
+    if (-not $DryRun -and -not $env:POSSE_KEY) {
+      Step-FailCritical "POSSE_KEY is required; re-run interactively, inject it into the environment, or use -SetupOnly for an image build"
+      return
+    }
     if (Test-Path -LiteralPath $providersFile) {
       if ($DryRun) { Step-End "dry-run" "would sanitize known provider assignments and repair the existing ACL" }
       elseif ($aclReady) { Step-End "ok" "existing provider key file sanitized and ACL repaired" }
       else { Step-End "partial" "existing provider key file ACL could not be secured" }
     }
-    else { Step-End "skipped" "pass -ConfigureKeys to set provider API keys interactively" }
+    else { Step-End "ok" "Posse key available from .env or process environment" }
     return
   }
   if ($DryRun) {
@@ -1691,23 +1800,25 @@ function Step-Keys {
     @{ Label = "xAI (Grok) key"; Name = "XAI_API_KEY" },
     @{ Label = "Codex API key (optional - skip if you prefer 'codex login')"; Name = "CODEX_API_KEY" }
   )) {
+    if (-not $ConfigureKeys -and $prompt.Name -ne "POSSE_KEY") { continue }
     $stored = if ($storedKeys.ContainsKey($prompt.Name)) { [string]$storedKeys[$prompt.Name] } else { "" }
     [void](Prompt-ForKey $prompt.Label $prompt.Name -FromParentEnv:($parentEnvKeys.ContainsKey($prompt.Name)) -StoredValue $stored)
   }
 
-  if (Test-Cmd "claude") {
+  if ($ConfigureKeys -and (Test-Cmd "claude")) {
     $ans = Read-Host "      Run 'claude' now to log in to Claude? [y/N]"
     if ($ans -match '^[Yy]$') {
       try { & claude } catch { Write-Warn2 "claude login command did not exit cleanly: $_" }
     }
   }
-  if ((Test-Cmd "codex") -and -not $env:CODEX_API_KEY) {
+  if ($ConfigureKeys -and (Test-Cmd "codex") -and -not $env:CODEX_API_KEY) {
     $ans = Read-Host "      Run 'codex login' now? [y/N]"
     if ($ans -match '^[Yy]$') {
       try { & codex login } catch { Write-Warn2 "codex login command did not exit cleanly: $_" }
     }
   }
 
+  if (-not $env:POSSE_KEY) { Step-FailCritical "POSSE_KEY was not provided; runtime setup requires it"; return }
   if ($script:ConfiguredKeys.Count -eq 0) {
     if ($aclReady) { Step-End "ok" "no new keys captured; existing ACL verified" }
     else { Step-End "partial" "no new keys captured; existing ACL could not be secured" }
@@ -1724,41 +1835,35 @@ function Step-Keys {
     }
   }
   try {
-    Write-RestrictedProviderFile $providersFile (($lines -join "`r`n") + "`r`n")
+    $configuredNames = @($script:ConfiguredKeys | ForEach-Object { $_.Name })
+    $envContents = & $script:NodeBin $envBridge format @configuredNames
+    if ($LASTEXITCODE -ne 0) { throw "could not format private .env file" }
+    Write-RestrictedProviderFile $privateEnvFile (($envContents -join "`n") + "`n")
     $aclReady = $true
+    # The private .env is the only store new installs create. Older stores
+    # (profile-sourced providers.env.ps1, HKCU user environment) shadow .env
+    # in every new shell, so when they already exist they must follow a
+    # rotation; they are never created here.
+    $syncedStores = @()
+    if (Test-Path -LiteralPath $providersFile) {
+      Write-RestrictedProviderFile $providersFile (($lines -join "`r`n") + "`r`n")
+      $syncedStores += "providers.env.ps1"
+    }
     foreach ($name in $script:ProviderKeyNames) {
       if ($storedKeys.ContainsKey($name) -and $storedKeys[$name]) {
-        [void](Persist-UserEnvironmentKey $name ([string]$storedKeys[$name]))
+        if (Sync-LegacyUserEnvironmentKey $name ([string]$storedKeys[$name])) { $syncedStores += "user environment ($name)" }
       }
     }
   }
   catch {
     Write-Warn2 ("could not write provider keys with a restrictive ACL; the previous file was preserved: {0}" -f $_.Exception.Message)
-    Step-End "partial" "new keys are available only in this process; secure persistence failed"
+    Step-FailCritical "could not securely persist credentials; fix file permissions and re-run"
     return
   }
 
-  $executionPolicy = Get-PersistentExecutionPolicy
-  $profileAllowed = $executionPolicy -notin @("Restricted", "AllSigned")
-  if (-not $NoPersistEnv -and $PROFILE -and $profileAllowed) {
-    try {
-      $profileDir = Split-Path $PROFILE -Parent
-      if (-not (Test-Path -LiteralPath $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
-      if (-not (Test-Path -LiteralPath $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-      $profileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-      if ($null -eq $profileContent -or -not $profileContent.Contains($providersFile)) {
-        Add-Content -Path $PROFILE -Value ("`n# Posse provider keys`n. '" + ($providersFile -replace "'", "''") + "'")
-        Write-Info "updated $PROFILE"
-      }
-    }
-    catch {
-      Write-Warn2 ("could not update the PowerShell profile with provider keys; load the file manually when needed: {0}" -f $_.Exception.Message)
-    }
-  }
-  elseif (-not $NoPersistEnv -and -not $profileAllowed) {
-    Write-Warn2 ("PowerShell execution policy is {0}; skipped provider-key profile wiring." -f $executionPolicy)
-  }
-  Step-End "ok" ("wrote {0} key(s) to {1} (restricted ACL) and the user environment" -f $script:ConfiguredKeys.Count, $providersFile)
+  $note = "wrote {0} key(s) to {1} (restricted ACL)" -f $script:ConfiguredKeys.Count, $privateEnvFile
+  if ($syncedStores.Count -gt 0) { $note += "; updated existing legacy stores: " + ($syncedStores -join ", ") }
+  Step-End "ok" $note
 }
 
 function Step-NativeBinaries {
@@ -1815,6 +1920,13 @@ function Step-Smoke {
 
 # --- soft preflight checks (warnings only) ------------------------------------------
 function Test-ProviderCredentials {
+  # Saved keys are loaded later by the keys step (it needs Node and the
+  # checkout); preflight runs before that, so do not warn about their absence.
+  $savedEnv = Join-Path (Join-Path $env:USERPROFILE ".config\posse") ".env"
+  if ((Test-Path -LiteralPath $savedEnv) -and (Get-Item -LiteralPath $savedEnv).Length -gt 0) {
+    Write-Info ("saved credentials found in {0}; they load in the keys step" -f $savedEnv)
+    return
+  }
   $found = @()
   if (Test-Cmd "claude") { $found += "claude-cli" }
   if ($env:OPENAI_API_KEY) { $found += "OPENAI_API_KEY" }
@@ -1886,7 +1998,7 @@ function Step-Preflight {
     Write-Info ("managed Windows runtimes: {0}" -f $script:ManagedStateRoot)
   }
   Test-GitConfig
-  Test-ProviderCredentials
+  if (-not $SetupOnly) { Test-ProviderCredentials }
   Step-End "ok" "preflight complete"
   return $true
 }
@@ -1928,13 +2040,21 @@ try {
     Invoke-InstallerStep "composer" { Step-Composer }
     Invoke-InstallerStep "npm" { Step-Npm } -Critical
     Invoke-InstallerStep "shell" { Step-ShellWiring } -Critical
-    Invoke-InstallerStep "seed" { Step-SeedSettings }
-    Invoke-InstallerStep "admin" { Step-AdminInit }
-    Invoke-InstallerStep "keys" { Step-Keys }
-    Invoke-InstallerStep "native" { Step-NativeBinaries }
-    Invoke-InstallerStep "doctor" { Step-Doctor }
-    Invoke-InstallerStep "validate" { Step-Validate }
-    Invoke-InstallerStep "smoke" { Step-Smoke }
+    if ($SetupOnly) {
+      foreach ($key in @("seed", "admin", "keys", "native", "doctor", "validate", "smoke")) {
+        Step-Begin $key
+        Step-End "skipped" "-SetupOnly; complete setup at runtime"
+      }
+    }
+    else {
+      Invoke-InstallerStep "seed" { Step-SeedSettings }
+      Invoke-InstallerStep "admin" { Step-AdminInit }
+      Invoke-InstallerStep "keys" { Step-Keys }
+      Invoke-InstallerStep "native" { Step-NativeBinaries }
+      Invoke-InstallerStep "doctor" { Step-Doctor }
+      Invoke-InstallerStep "validate" { Step-Validate }
+      Invoke-InstallerStep "smoke" { Step-Smoke }
+    }
   }
 }
 catch {

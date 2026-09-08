@@ -462,6 +462,7 @@ export function tailEventsEnvelope({
 }
 
 export function collectStateSnapshot({
+  providerUsage = null,
   limit = DEFAULT_LIMIT,
   headEventId = 0,
   bridgeEpoch = null,
@@ -491,6 +492,7 @@ export function collectStateSnapshot({
     jobs,
     open_gates: openGates,
     instance_status: instanceStatus,
+    provider_usage: providerUsage,
     session,
   };
 }

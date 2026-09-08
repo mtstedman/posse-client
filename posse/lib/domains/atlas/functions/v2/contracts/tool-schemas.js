@@ -21,6 +21,7 @@ const CODE_GRANULARITIES = Object.freeze(["symbol", "block", "fileWindow"]);
 const TREE_REF_TYPES = Object.freeze(["cluster", "process"]);
 const PATTERN_CACHE = new Map();
 const DELETE_NORMALIZED_FIELD = Symbol("delete-atlas-normalized-field");
+export const ATLAS_RECOVERY_CALL_MAX_BYTES = 8 * 1024;
 const ENUM_VALUE_ALIASES = Object.freeze({
   "$.cardDetail": Object.freeze({
     brief: "minimal",
@@ -775,6 +776,29 @@ export function validateAtlasToolCall(call) {
   const errors = [];
   validateValue(params, schema, "$", errors);
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+/**
+ * Admit a replayable recovery call only when it is a canonical, schema-valid,
+ * JSON-safe Atlas call within the bounded model-visible recovery envelope.
+ * Invalid candidates are omitted rather than exposed as plausible instructions.
+ *
+ * @param {unknown} candidate
+ * @returns {import("./tool-params.js").ToolCall | null}
+ */
+export function admitAtlasRecoveryCall(candidate) {
+  try {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    const action = String(/** @type {any} */ (candidate).action || "");
+    if (!ATLAS_TOOL_ACTIONS.includes(/** @type {any} */ (action))) return null;
+    if (!Object.prototype.hasOwnProperty.call(ATLAS_TOOL_PARAM_SCHEMAS, action)) return null;
+    if (!validateAtlasToolCall(/** @type {any} */ (candidate)).ok) return null;
+    const serialized = JSON.stringify(candidate);
+    if (Buffer.byteLength(serialized, "utf8") > ATLAS_RECOVERY_CALL_MAX_BYTES) return null;
+    return /** @type {import("./tool-params.js").ToolCall} */ (JSON.parse(serialized));
+  } catch {
+    return null;
+  }
 }
 
 function looksLikeAtlasIdentifierName(value) {

@@ -257,7 +257,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
       const bridgeEpoch = typeof context.getBridgeEpoch === "function"
         ? context.getBridgeEpoch()
         : args.bridge_epoch ?? args.bridgeEpoch ?? null;
-      return collectStateSnapshot({ ...args, headEventId, bridgeEpoch });
+      return collectStateSnapshot({ ...args, headEventId, bridgeEpoch, providerUsage: context.getProviderUsage?.() || null });
     }
 
     case BRIDGE_COMMANDS.QUEUE_LIST:

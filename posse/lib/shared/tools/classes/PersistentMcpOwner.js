@@ -76,6 +76,7 @@ import {
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
 import { evidenceRefSurface } from "../functions/ref-surface.js";
 import { sourceLineDisplay } from "../functions/source-line-display.js";
+import { refreshSourceDecisionNavigation } from "../functions/source-decision-points.js";
 import {
   subAgentDispatchIdentities,
   subAgentEvidenceCallIdentities,
@@ -1618,7 +1619,7 @@ function finalizeSourceTransport(result, context = null) {
       nextContent.push(part);
       continue;
     }
-    const removedFields = stripInternalSourceCoverageFields(parsed);
+    const removedFields = stripInternalSourceCoverageFields(parsed) + refreshSourceDecisionNavigation(parsed);
     const suffix = structured.remainder;
     const numbered = sourceLineDisplay(parsed, 0, context ? (ref) => {
       const visible = materializeHashRefEvidenceForContext(context, ref);

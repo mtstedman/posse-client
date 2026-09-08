@@ -32,6 +32,7 @@ const SCOPED_CONTRACT_ELIGIBILITY_REASONS = new Set([
 const SCOPED_CONTRACT_SIGNAL_RE = /\b(?:allows?|converts?|discards?|emits?|exactly|must|preserves?|rejects?|renders?|requires?|resolves?|returns?|throws?|when|while|without)\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
+const LOCAL_REPOSITORY_SCOPE_RE = /\b(?:this|current|local)\s+(?:(?:[a-z0-9_.-]+)\s+){0,2}(?:codebase|project|repo(?:sitory)?)\b|\b(?:codebase|project|repo(?:sitory)?)\s+(?:implementation|source)\b/i;
 
 const WEB_VENDOR_HINTS = {
   anthropic: ["docs.anthropic.com", "anthropic.com"],
@@ -582,6 +583,7 @@ export function classifyResearchTask({
   const dirMentions = extractDirMentions(intakeHints);
   const mentionedModules = extractMentionedModules(text, projectMap, fileMentions, dirMentions);
   const webBranches = extractWebBranches(text, intakeHints);
+  const localRepositoryScope = LOCAL_REPOSITORY_SCOPE_RE.test(text);
   const listItems = extractListItems(taskDescription || taskTitle);
   const noResearchText = taskDescription || taskTitle;
   const protectedFileMention = hasProtectedFileMention(fileMentions);
@@ -661,7 +663,7 @@ export function classifyResearchTask({
       reason: "question compares clear external web branches",
       branches: webBranches.slice(0, 3),
     };
-  } else if (lowerMode === "question" && webBranches.length > 0 && mentionedModules.length === 0 && fileMentions.length === 0) {
+  } else if (lowerMode === "question" && webBranches.length > 0 && mentionedModules.length === 0 && fileMentions.length === 0 && !localRepositoryScope) {
     result = {
       bucket: "web_only_answer",
       reason: "question mode has external web signal and no repo scope",

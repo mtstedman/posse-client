@@ -99,6 +99,18 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
     allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
+  failure_threshold_exhausted: {
+    unresolved_fact: "Which authorized disposition should follow repeated pipeline failure.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Automatic retry and replan limits are exhausted.",
+  },
+  blocked_cycle_exhausted: {
+    unresolved_fact: "Whether partial blocked work should receive more budget, be preserved, or be discarded.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "preserve_and_fail_closed",
+    diagnostic_insufficient_reason: "The available actions intentionally produce different durable outcomes.",
+  },
   research_dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
     allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
@@ -176,6 +188,137 @@ const HUMAN_GATE_ACTION_ALIASES = Object.freeze({
   skip: "explicit_waiver",
 });
 
+const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
+  scope_expansion_request: {
+    unresolved_fact: "Whether the work item may mutate files outside its current scope.",
+    human_contribution: "authority",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Only the operator can grant additional mutation authority.",
+  },
+  scope_expansion_required: {
+    unresolved_fact: "Whether the required out-of-scope files may be added to mutation authority.",
+    human_contribution: "authority",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Repository evidence cannot expand the operator-approved scope.",
+  },
+  partial_work_recovery: {
+    unresolved_fact: "Whether partial work should receive more budget, be preserved, or be discarded.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "preserve_and_fail_closed",
+    diagnostic_insufficient_reason: "Each action intentionally changes ownership or preservation state.",
+  },
+  blocked_recovery: {
+    unresolved_fact: "Which authorized recovery path should own an exhausted blocked job.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Retry, replan, waiver, and failure have materially different state transitions.",
+  },
+  dead_letter_recovery: {
+    unresolved_fact: "Whether terminal work should be retried through a selected provider, waived, or failed.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Recovering terminal work spends authority and execution budget.",
+  },
+  assessment_review: {
+    unresolved_fact: "Whether available evidence justifies acceptance, rejection, waiver, or another assessment.",
+    human_contribution: "semantic_judgment",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "The bounded automatic assessment path has already exhausted its evidence or judgment budget.",
+  },
+  assessor_evidence_unavailable: {
+    unresolved_fact: "Whether to retry evidence acquisition, reject, replan, or explicitly waive missing evidence.",
+    human_contribution: "authority",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Only an explicit waiver may substitute for required evidence.",
+  },
+  assessment_transport_unavailable: {
+    unresolved_fact: "Whether to authorize another assessment attempt or choose a terminal disposition.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Automatic assessment transport retries are exhausted.",
+  },
+  assessment_retry_exhausted: {
+    unresolved_fact: "Whether to spend more assessment budget, replan, reject, or explicitly waive verification.",
+    human_contribution: "authority",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "The configured automatic assessment budget is exhausted.",
+  },
+  fix_chain_exhausted: {
+    unresolved_fact: "Whether to authorize a new strategy, reject the work, or waive the remaining defect.",
+    human_contribution: "authority",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "The configured automatic repair strategy budget is exhausted.",
+  },
+  developer_blocked: {
+    unresolved_fact: "Which authorized recovery path should follow the developer block.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "The available recovery choices spend different authority and budget.",
+  },
+  clarification: {
+    unresolved_fact: "A task requirement cannot be derived from repository and work-item evidence.",
+    human_contribution: "ambiguity_resolution",
+    headless_behavior: "continue_with_best_judgment",
+    diagnostic_insufficient_reason: "Continuing without an answer requires an explicit best-judgment assumption.",
+  },
+  plan_approval: {
+    unresolved_fact: "Whether the proposed implementation plan is authorized to execute.",
+    human_contribution: "authority",
+    headless_behavior: "use_configured_plan_approval_policy",
+    diagnostic_insufficient_reason: "Plan approval grants execution authority rather than supplying a discoverable fact.",
+  },
+  push_offer: {
+    unresolved_fact: "Whether committed work may be pushed to the configured remote.",
+    human_contribution: "merge_push_choice",
+    headless_behavior: "do_not_push",
+    diagnostic_insufficient_reason: "Remote publication requires an explicit operator choice.",
+  },
+  oneshot_scope_selection: {
+    unresolved_fact: "Which candidate file or scope the one-shot request intends to modify.",
+    human_contribution: "ambiguity_resolution",
+    headless_behavior: "use_deterministic_best_scope_or_fail_closed",
+    diagnostic_insufficient_reason: "Multiple plausible mutation scopes remain after automatic inference.",
+  },
+});
+
+function actionTransition(action) {
+  const canonical = canonicalHumanGateAction(action);
+  const transitions = {
+    approve: "grant_scope_and_resume",
+    deny: "deny_scope_and_fail_request",
+    reject: "reject_request",
+    extend: "increase_budget_and_resume",
+    commit: "preserve_partial_work_and_assess",
+    revert: "discard_partial_work_and_dead_letter",
+    retry_assessment: "queue_new_assessment_attempt",
+    retry_with_changes: "queue_recovery_attempt",
+    replan: "queue_new_research_and_plan",
+    pass: "record_human_acceptance",
+    fail: "record_terminal_rejection",
+    explicit_waiver: "record_authority_backed_waiver",
+    respond: "resume_with_human_answer",
+    plan: "resume_with_selected_scope",
+  };
+  if (String(action || "").startsWith("retry:")) return "queue_provider_specific_recovery";
+  return transitions[canonical] || `resolve_gate_with_${canonical || "response"}`;
+}
+
+export function validateHumanGateActionabilityContract(contract = {}) {
+  const actionability = contract.actionability;
+  if (actionability?.schema_version !== 1) return { ok: false, reason: "actionability_schema_missing" };
+  for (const field of ["unresolved_fact", "human_contribution", "headless_behavior", "diagnostic_insufficient_reason"]) {
+    if (!String(actionability[field] || "").trim()) return { ok: false, reason: `actionability_${field}_missing` };
+  }
+  const transitions = actionability.action_transitions;
+  if (!transitions || typeof transitions !== "object" || Array.isArray(transitions)) {
+    return { ok: false, reason: "actionability_transitions_missing" };
+  }
+  for (const action of contract.allowed_actions || []) {
+    if (!String(transitions[action] || "").trim()) return { ok: false, reason: `actionability_transition_missing:${action}` };
+  }
+  return { ok: true, reason: null };
+}
+
 function gateSource(payload = {}) {
   if (payload?.subtype === "plan_approval") return "plan_approval";
   if (payload?.subtype === "push_offer") return "push_offer";
@@ -214,12 +357,21 @@ export function humanGateContractForPayload(payload = {}, {
   // generic developer block and could reuse an unrelated open prompt.
   const explicitGateKind = String(payload?.gate_kind || "").trim();
   const gateKind = explicitGateKind || registered?.gate_kind || source;
+  const allowedActions = [...new Set(registered?.allowed_actions || fallbackActions)];
+  const profile = HUMAN_GATE_ACTIONABILITY_PROFILES[gateKind]
+    || HUMAN_GATE_ACTIONABILITY_PROFILES[source]
+    || HUMAN_GATE_ACTIONABILITY_PROFILES.clarification;
   return {
     gate_kind: gateKind,
-    contract_version: 1,
+    contract_version: 2,
     original_job_id: Number.isInteger(originalJobId) && originalJobId > 0 ? originalJobId : null,
     allowed_source_states: [...(registered?.allowed_source_states || DEFAULT_HUMAN_GATE_SOURCE_STATES)],
-    allowed_actions: [...new Set(registered?.allowed_actions || fallbackActions)],
+    allowed_actions: allowedActions,
+    actionability: {
+      schema_version: 1,
+      ...profile,
+      action_transitions: Object.fromEntries(allowedActions.map((action) => [action, actionTransition(action)])),
+    },
   };
 }
 

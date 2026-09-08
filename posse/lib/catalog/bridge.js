@@ -1,5 +1,7 @@
 export const BRIDGE_PROTOCOL_VERSION = 1;
 export const BRIDGE_HEALTH_PROOF_CONTEXT = `posse-bridge-health-v${BRIDGE_PROTOCOL_VERSION}`;
+export const PROVIDER_USAGE_STREAM_PROTOCOL = "posse.provider_usage_stream.v1";
+
 export const BOSSY_LOCAL_STREAM_PROTOCOL = "posse.local_stream.v1";
 
 export const BRIDGE_PORT_SCAN_START = 7531;
@@ -68,6 +70,7 @@ export const BRIDGE_EVENT_KINDS = Object.freeze({
   INSTANCE_STATUS: "instance_status",
   JOB_PROGRESS: "job_progress",
   AGENT_ACTIVITY: "agent_activity",
+  PROVIDER_USAGE: "provider_usage",
   FEED_EVENT: "feed_event",
 });
 

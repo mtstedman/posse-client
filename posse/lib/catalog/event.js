@@ -78,6 +78,7 @@ export const EVENT_ACTORS = Object.freeze(
 export const EVENT_TYPES = Object.freeze({
   // ── artifacts ───────────────────────────────────────────────────────────
   ARTIFACTS_TRANSIENT_DIRS_CLEANED: "artifacts.transient_dirs_cleaned",
+  ARTIFACT_ROUTING_DIAGNOSTIC: "artifacts.routing_diagnostic",
 
   // ── bridge ──────────────────────────────────────────────────────────────
   BRIDGE_COMMAND_MUTATION: "bridge.command_mutation",

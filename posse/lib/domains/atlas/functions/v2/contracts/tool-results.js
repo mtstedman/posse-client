@@ -853,6 +853,8 @@
  * @property {Array<{content:string,startLine:number,endLine:number,rangeStart:number,rangeEnd:number,signature:string,callableKind:string,owner?:string,anchor:string}>} [_returnedFunctionAnchors] Private owner transport; replaced with returnedFunctionAnchors before model delivery.
  * @property {Array<{anchor:string,owner?:string,signature:string,callableKind:string,startLine:number,endLine:number,ref?:string}>} [returnedFunctionAnchors] Temporary fetchable anchors for directly returned anonymous functions visible in this result.
  * @property {number} [returnedFunctionAnchorsOmitted]
+ * @property {Array<{kind:string,lines:[number,number]}>} [decisionPoints] Bounded syntax navigation into exact inline source; not complete behavioral coverage or additional evidence authority.
+ * @property {boolean} [decisionPointsTruncated] More syntax navigation may exist; source delivery limits remain independently reported.
  */
 
 /**
