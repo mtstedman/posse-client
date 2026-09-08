@@ -95,7 +95,8 @@ async function fileReadWithRedaction({ versionId, params, readFile, view }, reda
       : Math.min(totalLines - offset, DEFAULT_MAX_LINES);
   const lines = allLines.slice(offset, offset + limit);
 
-  return mapMaybePromise(redaction.redactText(lines.join("\n")), (redactedContent) => {
+  const sourceContext = { repoRelPath: params.filePath, source, startLine: offset + 1 };
+  return mapMaybePromise(redaction.redactText(lines.join("\n"), sourceContext), (redactedContent) => {
     let content = redactedContent;
     let truncated = offset + lines.length < totalLines;
     const capped = truncateUtf8AtLineBoundary(content, requestedMaxBytes);
@@ -140,9 +141,14 @@ async function fileReadWithRedaction({ versionId, params, readFile, view }, reda
           truncated = true;
         }
         if (searchResult.matchLimitReached) truncated = true;
-        // One native redaction call for the whole window instead of one per
-        // matched line plus one per context line (each sync call is a spawn).
-        const redactedLines = matchLines.length > 0 ? redaction.redactLines(lines) : lines;
+        // Reuse the full projected window before byte capping. Matching text
+        // and context share its original coordinates without another native parse.
+        const projectedLines = String(redactedContent).split("\n");
+        const redactedLines = matchLines.length > 0
+          ? (projectedLines.length === lines.length
+            ? projectedLines
+            : redaction.redactLines(lines, sourceContext))
+          : lines;
         return mapMaybePromise(redactedLines, (resolvedLines) => {
           data.truncated = truncated;
           data.matches = matchLines

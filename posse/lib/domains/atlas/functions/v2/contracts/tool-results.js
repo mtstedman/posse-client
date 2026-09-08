@@ -761,6 +761,7 @@
  * @property {SymbolId} [symbolId]
  * @property {string} repo_rel_path
  * @property {string} content                 The deterministic skeleton text.
+ * @property {string} [contentKind]           Source, summary, indexed signatures, or unknown legacy provenance. Only source permits original-source line interpretation.
  * @property {number} startLine
  * @property {number} endLine
  * @property {boolean} truncated

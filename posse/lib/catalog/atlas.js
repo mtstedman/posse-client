@@ -4,6 +4,17 @@
 // and the provider→transport map. Set forms are derived so the value list
 // cannot drift from the validator.
 
+// Preserve the established bound on qualified-identifier ambiguity details.
+export const ATLAS_IDENTIFIER_BEARER_LIMIT = 12;
+
+export const ATLAS_PATH_RECOVERY_POLICY = Object.freeze({
+  indexedPathLimit: 5000,
+  candidateLimit: 3,
+  maxSuggestionDistance: 0.55,
+  maxFilenameCorrectionDistance: 0.2,
+  minCorrectionMargin: 0.2,
+});
+
 // ATLAS v2 has labeled options for the admin UI; the value-only Set is derived.
 //
 // `v2` is a deprecated alias for `on` — kept in the validator (and visible

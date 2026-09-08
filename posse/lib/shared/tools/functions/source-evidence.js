@@ -44,3 +44,38 @@ export function normalizedEvidenceSourceWindows(value) {
     .map(normalizedEvidenceSourceWindow)
     .filter(Boolean);
 }
+
+// The entry must be the exact visible capability, not its backing stored ref.
+// Structured source can occupy one JSON line while citing many source lines.
+export function sourceEvidenceCitationSurface(entry, { maxChars } = {}) {
+  if (entry?.metadata?.line_semantics !== "source" || entry.metadata.citable === false) return null;
+  const windows = normalizedEvidenceSourceWindows(entry.metadata.source_windows);
+  if (windows.length === 0) return null;
+  const textLines = String(entry.payload_text ?? "").replace(/\r\n?/g, "\n").split("\n");
+  if (textLines.length > 1 && textLines.at(-1) === "") textLines.pop();
+  const ranges = windows.map((window) => ({
+    path: window.path, start: window.source_start_line, end: window.source_end_line,
+  }));
+  const surface = {
+    line_semantics: "source",
+    lines: ranges.reduce((count, range) => count + range.end - range.start + 1, 0),
+    text_lines: textLines.length,
+    source_ranges: [],
+  };
+  const cap = Math.max(0, Number(maxChars) || 0);
+  for (const range of ranges) {
+    const selected = [...surface.source_ranges, range];
+    const omitted = ranges.length - selected.length;
+    const candidate = {
+      ...surface, source_ranges: selected,
+      ...(omitted > 0 ? { source_ranges_omitted: omitted } : {}),
+    };
+    if (JSON.stringify(candidate).length <= cap) surface.source_ranges = selected;
+  }
+  return {
+    ...surface,
+    ...(surface.source_ranges.length < ranges.length
+      ? { source_ranges_omitted: ranges.length - surface.source_ranges.length }
+      : {}),
+  };
+}

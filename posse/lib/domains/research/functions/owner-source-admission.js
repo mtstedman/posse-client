@@ -1,4 +1,5 @@
 import { SourceCoverageOwner, completeSymbolSelectorFingerprint } from "../classes/SourceCoverageOwner.js";
+import { CODE_CONTENT_KINDS } from "../../../catalog/source-display.js";
 
 export function sourceCoverageOwnerForSession(session, bootConfig = session?.bootConfig || {}) {
   return new SourceCoverageOwner({
@@ -117,7 +118,15 @@ function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } =
   const envelope = parsed.value;
   const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : envelope;
   if (data && typeof data === "object" && data.status !== "covered") {
-    if (toolName === "symbol.card") {
+    if (toolName === "code.skeleton") {
+      // A skeleton can contain summaries or exact source. Only its explicitly
+      // source-kind primary window is eligible; prepareData still verifies
+      // the bytes against current source before custody is granted.
+      if (result.isError !== true && envelope?.ok !== false
+        && data.contentKind === CODE_CONTENT_KINDS.SOURCE) {
+        visit(data, toolArgs, "primary", toolName);
+      }
+    } else if (toolName === "symbol.card") {
       const cards = Array.isArray(data.cards) ? data.cards : [data];
       for (const card of cards) {
         const source = card?.sourceExcerpt || (typeof card?.source === "object" ? card.source : null);
@@ -135,7 +144,7 @@ function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } =
 }
 
 export function prepareSourceCoverage(result, coverageOwner, toolArgs = {}, options = {}) {
-  return visitSourceData(result, toolArgs, (data, args) => coverageOwner.prepareData(data, args), options);
+  return visitSourceData(result, toolArgs, (data, args, _origin, tool) => coverageOwner.prepareData(data, args, { tool }), options);
 }
 
 function lowered(value) {
@@ -185,7 +194,7 @@ export function materializeSourceCoverage(result, coverageOwner, toolArgs = {}, 
   return visitSourceData(result, toolArgs, (data, args, origin, tool) => (
     coverageOwner.materializeData(data, args, {
       origin,
-      completeSymbolSelector: liveCompleteSymbolSelector(data, args, origin),
+      completeSymbolSelector: tool === "code.skeleton" ? null : liveCompleteSymbolSelector(data, args, origin),
       tool,
     })
   ), options);

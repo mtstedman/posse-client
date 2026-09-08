@@ -89,7 +89,7 @@ function rawPayloadLineSpans(value) {
   return spans;
 }
 
-function sourceMetadataForPartialHashRefView(source, view) {
+export function sourceMetadataForPartialHashRefView(source, view) {
   const materialized = {
     line_semantics: "materialized",
     source_windows: [],
@@ -154,7 +154,7 @@ function sourceMetadataForPartialHashRefView(source, view) {
       || sourceEnd - sourceStart !== materializedEnd - materializedStart) continue;
     for (let line = materializedStart; line <= materializedEnd; line += 1) {
       const span = lineSpans[line - 1];
-      if (!span || span.start < viewStart || span.end > viewEnd) continue;
+      if (!span || span.start < viewStart || span.start >= viewEnd || span.end > viewEnd) continue;
       const sourceLine = sourceStart + line - materializedStart;
       const physicalLine = sourceText.slice(span.start, span.end);
       const gutter = /^\s*(\d+)\t/.exec(physicalLine);
@@ -793,16 +793,30 @@ function visibleHashRefSourceMetadataForContext(context = {}, opts = {}) {
     }
   }
 
+  let evidenceRefs = new Set();
+  try {
+    evidenceRefs = new Set(capabilityStoreForResolvedContext(resolved, db)?.evidenceRefs() || []);
+    refs.push(...evidenceRefs);
+  } catch {
+    // Compatibility databases may not have the evidence capability table yet.
+  }
+
   const metadata = [];
   const seen = new Set();
   for (const ref of refs) {
     if (seen.has(ref)) continue;
     seen.add(ref);
-    const fetched = fetchHashRefForContext(context, ref, { db });
+    const evidence = evidenceRefs.has(ref)
+      ? materializeHashRefEvidenceForContext(context, ref, { db })
+      : null;
+    const fetched = evidence?.found ? evidence : fetchHashRefForContext(context, ref, { db });
     const entry = fetched?.found ? fetched.entry : null;
     if (!entry || !hashRefModelVisibleScope(entry, resolved).fully_visible) continue;
     if (excludedSurfaces.has(String(entry.metadata?.surfaced_by || ""))) continue;
-    metadata.push(entry.metadata || {});
+    if (excludedSurfaces.has(String(evidence?.source?.metadata?.surfaced_by || ""))) continue;
+    metadata.push(opts.includeRefs
+      ? { ...entry.metadata, evidence_ref: entry.ref }
+      : (entry.metadata || {}));
   }
   return metadata;
 }
@@ -850,13 +864,15 @@ export function findVisibleHashRefSourceWindowsForContext(context = {}, opts = {
       const end = Number(window?.source_end_line ?? window?.end_line);
       if (!sourcePath || !Number.isInteger(start) || !Number.isInteger(end)
         || start < 1 || end < start) continue;
-      const key = `${sourcePath}:${start}-${end}`;
+      const ref = opts.includeRefs ? metadata.evidence_ref : null;
+      const key = `${sourcePath}:${start}-${end}${ref ? `:${ref}` : ""}`;
       windows.set(key, {
         path: sourcePath,
         start,
         end,
         repository_identity: window?.repository_identity ?? metadata.repository_identity ?? null,
         source_version: window?.source_version ?? metadata.source_version ?? null,
+        ...(ref ? { ref } : {}),
       });
     }
   }

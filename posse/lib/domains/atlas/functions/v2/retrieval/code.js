@@ -7,6 +7,7 @@
 // `readFile` function so this module stays pure — the dispatcher decides
 // where to read from (worktree fs, in-memory fixture, etc.).
 
+import { CODE_CONTENT_KINDS } from "../../../../../catalog/source-display.js";
 import { parseSymbolId, symbolHit } from "./cards.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
@@ -21,6 +22,20 @@ import {
 import { calledFromBreadcrumbs } from "./usages.js";
 import { readRepoFileResult } from "./repo-read.js";
 import { redactSecrets } from "./redaction.js";
+import { recoverIndexedPath } from "./path-recovery.js";
+
+import {
+  normalizedQualifiedIdentifier,
+  resolveRequestedIdentifierSymbols,
+  resolveSourceIdentifierFallbacks,
+  uniqueResolutionSymbols,
+} from "./identifier-resolution.js";
+export {
+  normalizedQualifiedIdentifier,
+  requestedIdentifierCandidates,
+  resolveRequestedIdentifierSymbols,
+  symbolMatchesRequestedIdentifier,
+} from "./identifier-resolution.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -149,120 +164,12 @@ function boundedCodeMapText(value) {
   return String(value || "").trim().slice(0, CODE_WINDOW_MAP_TEXT_MAX_CHARS);
 }
 
-export function normalizedQualifiedIdentifier(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\?\./gu, ".")
-    .replace(/\[\s*["']?([a-z_$][\w$-]*)["']?\s*\]/giu, ".$1")
-    .replace(/\([^)]*\)/gu, "")
-    .replace(/::/gu, ".")
-    .replace(/[\\/#]/gu, ".")
-    .replace(/(^|\.)prototype(?=\.|$)/gu, ".")
-    .replace(/^(?:this|self|super)\./gu, "")
-    .replace(/\.+/gu, ".")
-    .replace(/^\.|\.$/gu, "");
-}
-
-export function requestedIdentifierCandidates(value) {
-  const normalized = normalizedQualifiedIdentifier(value);
-  if (!normalized) return [];
-  const segments = normalized.split(".").filter(Boolean);
-  return [...new Set([
-    normalized,
-    ...(segments.length > 1 ? [segments.at(-1)] : []),
-  ].filter(Boolean))];
-}
-
-function symbolResolutionKey(symbol) {
-  if (symbol?.global_id != null) return `global:${symbol.global_id}`;
-  if (symbol?.content_hash && symbol?.local_id != null) {
-    return `local:${symbol.content_hash}:${symbol.local_id}`;
-  }
-  return [
-    normalizedQualifiedIdentifier(symbol?.qualified_name || symbol?.name),
-    String(symbol?.repo_rel_path || ""),
-    Number(symbol?.range_start_line || 0),
-    String(symbol?.kind || ""),
-  ].join(":");
-}
-
-function uniqueResolutionSymbols(symbols) {
-  const seen = new Set();
-  return (Array.isArray(symbols) ? symbols : []).filter((symbol) => {
-    const key = symbolResolutionKey(symbol);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function strictIdentifierMatches(symbol, requested) {
-  const name = normalizedQualifiedIdentifier(symbol?.name);
-  const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
-  const qualifiedRequest = requested.includes(".");
-  if (!qualifiedRequest) {
-    return name === requested
-      || qualifiedName === requested
-      || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
-  }
-  return name === requested
-    || qualifiedName === requested
-    || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
-}
-
-/**
- * Resolve a requested qualified identifier without silently binding its bare
- * tail to an unrelated bearer. A tail fallback is allowed only when every
- * matching row names the same qualified bearer (overload rows may repeat it).
- */
-export function resolveRequestedIdentifierSymbols(symbols, identifier) {
-  const requested = normalizedQualifiedIdentifier(identifier);
-  if (!requested) return { matches: [], ambiguousBearers: [], matchKind: "none" };
-  const candidates = uniqueResolutionSymbols(symbols);
-  const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested));
-  if (exact.length > 0) {
-    return { matches: exact, ambiguousBearers: [], matchKind: "qualified" };
-  }
-  const segments = requested.split(".").filter(Boolean);
-  if (segments.length < 2) return { matches: [], ambiguousBearers: [], matchKind: "none" };
-  const tail = segments.at(-1);
-  const tailMatches = candidates.filter((symbol) => {
-    const name = normalizedQualifiedIdentifier(symbol?.name);
-    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
-    return name === tail
-      || qualifiedName === tail
-      || Boolean(qualifiedName && qualifiedName.endsWith(`.${tail}`));
-  });
-  const bearers = new Map();
-  for (const symbol of tailMatches) {
-    const display = String(symbol?.qualified_name || symbol?.name || tail).trim();
-    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
-    const key = qualifiedName || `${normalizedQualifiedIdentifier(symbol?.name)}@${String(symbol?.repo_rel_path || "")}`;
-    if (!bearers.has(key)) bearers.set(key, display);
-  }
-  if (bearers.size === 1) {
-    return { matches: tailMatches, ambiguousBearers: [], matchKind: "unique_tail" };
-  }
-  return {
-    matches: [],
-    ambiguousBearers: [...bearers.values()].sort().slice(0, 12),
-    matchKind: bearers.size > 1 ? "ambiguous_tail" : "none",
-  };
-}
-
-export function symbolMatchesRequestedIdentifier(symbol, identifier) {
-  const requested = normalizedQualifiedIdentifier(identifier);
-  if (!requested) return false;
-  return strictIdentifierMatches(symbol, requested);
-}
-
 function ambiguousIdentifierEnvelope(action, versionId, ambiguity) {
   return errorEnvelope({
     action,
     versionId,
     code: "ambiguous_identifier",
-    message: `Qualified identifier ${ambiguity.identifier} did not resolve exactly; its bare tail matches multiple bearers: ${ambiguity.bearers.join(", ")}. Use one of those fully qualified names.`,
+    message: `Qualified identifier ${ambiguity.identifier} could not be resolved to an unambiguous declaration. Candidates: ${ambiguity.bearers.join(", ")}. Use an exact qualified name or symbol ID.`,
     details: {
       identifier: ambiguity.identifier,
       bearers: ambiguity.bearers,
@@ -551,6 +458,7 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     exportedOnly: params.exportedOnly === true,
     maxLines: params.maxLines,
     maxTokens: params.maxTokens,
+    fileScope: explicitFileRequest && normalizeIdentifiers(params.identifiersToFind).length === 0,
   });
   const etag = String(result.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
@@ -560,6 +468,9 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
   const data = {
     repo_rel_path: targetPath,
     content: String(result.content || ""),
+    contentKind: Object.values(CODE_CONTENT_KINDS).includes(result.contentKind)
+      ? result.contentKind
+      : CODE_CONTENT_KINDS.UNKNOWN,
     startLine: Number(result.startLine || 1),
     endLine: Number(result.endLine || 1),
     truncated: result.truncated === true,
@@ -616,7 +527,8 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
   const lensTargets = new Map();
   if (resolved.target?.global_id != null) lensTargets.set(resolved.target.global_id, resolved.target);
   const fileSymbols = await view.query.symbolsInFile(targetPath);
-  const nativeSelection = nativeIdentifierSelection(idents, fileSymbols);
+  const sourceFallbacks = await resolveSourceIdentifierFallbacks(idents, fileSymbols, source, targetPath);
+  const nativeSelection = nativeIdentifierSelection(idents, fileSymbols, { sourceFallbacks });
   if (nativeSelection.ambiguities.length > 0) {
     return ambiguousIdentifierEnvelope("code.lens", versionId, nativeSelection.ambiguities[0]);
   }
@@ -811,7 +723,8 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     && typeof view.query.symbolsInFile === "function"
     ? await view.query.symbolsInFile(targetPath)
     : [];
-  const nativeSelection = nativeIdentifierSelection(identifiers, fileSymbols);
+  const sourceFallbacks = await resolveSourceIdentifierFallbacks(identifiers, fileSymbols, source, targetPath);
+  const nativeSelection = nativeIdentifierSelection(identifiers, fileSymbols, { preserveWindowTargets: true, sourceFallbacks });
   if (nativeSelection.ambiguities.length > 0) {
     return ambiguousIdentifierEnvelope("code.window", versionId, nativeSelection.ambiguities[0]);
   }
@@ -821,6 +734,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     target,
     symbolId,
     identifiersToFind: nativeSelection.identifiers,
+    identifierTargets: nativeSelection.identifierTargets,
     expectedLines: positiveInteger(params.expectedLines),
     granularity: params.granularity || "symbol",
     maxWindowLines: codeWindowPolicy.maxWindowLines,
@@ -849,15 +763,9 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   );
   const identifiersFound = remapNativeIdentifiers(result.identifiersFound, nativeSelection.aliases);
   const identifiersReturned = remapNativeIdentifiers(result.identifiersReturned, nativeSelection.aliases);
-  const indexedIdentifiers = new Set(nativeSelection.indexed.map((entry) => entry.toLowerCase()));
-  for (const identifier of nativeSelection.indexed) {
-    if (![...identifiersFound, ...identifiersReturned]
-      .some((entry) => entry.toLowerCase() === identifier.toLowerCase())) {
-      identifiersFound.push(identifier);
-    }
-  }
-  const identifiersMissing = remapNativeIdentifiers(result.identifiersMissing, nativeSelection.aliases)
-    .filter((entry) => !indexedIdentifiers.has(entry.toLowerCase()));
+  // Index membership alone does not prove that native found the requested
+  // declaration in this source version, or delivered any of its code.
+  const identifiersMissing = remapNativeIdentifiers(result.identifiersMissing, nativeSelection.aliases);
   const identifiersOmitted = remapNativeIdentifiers(result.identifiersOmitted, nativeSelection.aliases);
   let identifierRedirects = [];
   /** @type {CodeWindowData["redirect"] | null} */
@@ -871,6 +779,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   const wholeFileDelivered = sameWholeFileSource(content, source);
   const allRequestedAnchorsMissed = Boolean(
     result._sizeCapFallback !== true
+    && result.degradedReason !== "index_drift"
     && fileMode
     && identifiers.length > 0
     && !wholeFileDelivered
@@ -1024,13 +933,14 @@ function isCodeWindowSizeLimitError(error) {
     || /response exceeds 2097152 serialized bytes/iu.test(message);
 }
 
-function nativeIdentifierSelection(requestedIdentifiers, symbols) {
+function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWindowTargets = false, sourceFallbacks = new Map() } = {}) {
   const identifiers = [];
   const indexed = [];
   const aliases = new Map();
   const unresolved = [];
   const ambiguities = [];
   const matchedSymbols = [];
+  const identifierTargets = [];
   const seenNative = new Set();
   const seenIndexed = new Set();
 
@@ -1051,7 +961,7 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols) {
   };
 
   for (const requested of stringArray(requestedIdentifiers)) {
-    const resolution = resolveRequestedIdentifierSymbols(symbols, requested);
+    const resolution = sourceFallbacks.get(requested) || resolveRequestedIdentifierSymbols(symbols, requested);
     const matches = resolution.matches;
     if (resolution.ambiguousBearers.length > 0) {
       ambiguities.push({ identifier: requested, bearers: resolution.ambiguousBearers });
@@ -1066,6 +976,12 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols) {
     if (!seenIndexed.has(requested.toLowerCase())) {
       seenIndexed.add(requested.toLowerCase());
       indexed.push(requested);
+    }
+    if (preserveWindowTargets && resolution.matchKind === "qualified"
+      && normalizedQualifiedIdentifier(requested).includes(".")) {
+      addNative(requested, requested);
+      identifierTargets.push(...matches.map((target) => ({ identifier: requested, target })));
+      continue;
     }
     const declaredNames = [...new Set(matches
       .map((symbol) => String(symbol?.name || "").trim())
@@ -1082,6 +998,7 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols) {
     unresolved,
     ambiguities,
     matchedSymbols: uniqueResolutionSymbols(matchedSymbols),
+    identifierTargets,
   };
 }
 
@@ -1290,18 +1207,17 @@ async function repoReadFailureWithSuggestions({ view, repoRoot, repoRelPath, tar
 async function pathCorrectionDetails(view, requestedPath, action, params = {}) {
   const requested = String(requestedPath || "");
   const normalized = requested.replace(/\\/g, "/").replace(/^\.\/+/, "");
-  const candidates = await nearestIndexedPaths(view, normalized);
-  const unique = unambiguousPathCandidate(normalized, candidates);
+  const { candidates, correctedPath } = await recoverIndexedPath(view, normalized);
   return {
     invalidField: "file",
     requestedValue: requested,
     expected: "canonical repository-relative indexed path",
     candidates,
-    ...(unique ? {
+    ...(correctedPath ? {
       correctedRequest: {
         action,
         ...codeRequestFields(params),
-        file: unique.path,
+        file: correctedPath,
       },
     } : {}),
   };
@@ -1339,64 +1255,6 @@ function codeRequestFields(params = {}) {
   return Object.fromEntries(allowed
     .filter((key) => params[key] !== undefined)
     .map((key) => [key, params[key]]));
-}
-
-async function nearestIndexedPaths(view, requestedPath, limit = 3) {
-  if (typeof view?.query?.indexedPaths !== "function") return [];
-  let indexed = [];
-  try {
-    indexed = await view.query.indexedPaths({ limit: 5000 });
-  } catch {
-    return [];
-  }
-  const requested = String(requestedPath || "").toLowerCase();
-  const requestedBase = requested.split("/").pop() || requested;
-  return [...new Set(indexed.map((entry) => String(entry || "")).filter(Boolean))]
-    .map((candidate) => {
-      const lowered = candidate.toLowerCase();
-      const base = lowered.split("/").pop() || lowered;
-      const editRatio = levenshteinDistance(requested, lowered) / Math.max(1, requested.length, lowered.length);
-      const basenameRatio = levenshteinDistance(requestedBase, base) / Math.max(1, requestedBase.length, base.length);
-      const score = Math.min(editRatio, basenameRatio + (requestedBase === base ? 0 : 0.15));
-      return { path: candidate, score: Number(score.toFixed(3)) };
-    })
-    .filter((candidate) => candidate.score <= 0.55)
-    .sort((left, right) => left.score - right.score || left.path.localeCompare(right.path))
-    .slice(0, Math.max(1, limit));
-}
-
-function unambiguousPathCandidate(normalizedRequested, candidates) {
-  if (!Array.isArray(candidates) || candidates.length === 0) return null;
-  const exact = candidates.find((candidate) => candidate.path.toLowerCase() === normalizedRequested.toLowerCase());
-  if (exact) return exact;
-  const requestedBase = normalizedRequested.toLowerCase().split("/").pop();
-  const sameBase = candidates.filter((candidate) => candidate.path.toLowerCase().split("/").pop() === requestedBase);
-  if (sameBase.length === 1) return sameBase[0];
-  if (candidates[0].score <= 0.2 && (!candidates[1] || candidates[1].score - candidates[0].score >= 0.2)) {
-    return candidates[0];
-  }
-  return null;
-}
-
-function levenshteinDistance(left, right) {
-  const a = String(left || "");
-  const b = String(right || "");
-  if (a === b) return 0;
-  if (!a) return b.length;
-  if (!b) return a.length;
-  let prior = Array.from({ length: b.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= a.length; i++) {
-    const current = [i];
-    for (let j = 1; j <= b.length; j++) {
-      current[j] = Math.min(
-        current[j - 1] + 1,
-        prior[j] + 1,
-        prior[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-      );
-    }
-    prior = current;
-  }
-  return prior[b.length];
 }
 
 function repoReadFailure(repoRoot, repoRelPath, targetSource) {

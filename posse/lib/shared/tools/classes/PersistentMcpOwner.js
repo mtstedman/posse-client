@@ -75,6 +75,7 @@ import {
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
 import { evidenceRefSurface } from "../functions/ref-surface.js";
+import { sourceLineDisplay } from "../functions/source-line-display.js";
 import {
   subAgentDispatchIdentities,
   subAgentEvidenceCallIdentities,
@@ -91,6 +92,7 @@ import {
 } from "../../../domains/observability/functions/observations.js";
 import {
   fetchHashRefEvidenceForContext,
+  materializeHashRefEvidenceForContext,
   issueHashRefTraversalForContext,
   listHashRefTraversalsForContext,
 } from "../../../domains/queue/functions/hash-refs.js";
@@ -1600,7 +1602,7 @@ function stripInternalSourceCoverageFields(value) {
   return removed;
 }
 
-function finalizeSourceTransport(result) {
+function finalizeSourceTransport(result, context = null) {
   const content = result?.content;
   if (!Array.isArray(content) || content.length === 0) return result;
   let mutated = false;
@@ -1618,6 +1620,18 @@ function finalizeSourceTransport(result) {
     }
     const removedFields = stripInternalSourceCoverageFields(parsed);
     const suffix = structured.remainder;
+    const numbered = sourceLineDisplay(parsed, 0, context ? (ref) => {
+      const visible = materializeHashRefEvidenceForContext(context, ref);
+      return visible?.ok ? visible.entry : null;
+    } : null);
+    if (numbered) {
+      nextContent.push({
+        ...part,
+        text: [JSON.stringify(numbered.header), suffix].filter(Boolean).join("\n\n"),
+      }, ...numbered.blocks);
+      mutated = true;
+      continue;
+    }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
       || typeof parsed.content !== "string" || parsed.content.length < DEESCAPE_MIN_CONTENT_CHARS
       || typeof parsed.repo_rel_path !== "string") {
@@ -5389,6 +5403,7 @@ export class PersistentMcpOwner {
           ? createRefMcpPayload(createHashRefResult(toolArgs || {}, hashContext))
           : fetchRefMcpPayload(traversalText);
         noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);
+        if (!createRef) result = finalizeSourceTransport(result, hashContext.context);
         for (const transform of providerTransforms) {
           result = annotateOwnerResultTransform(result, transform);
         }
@@ -5435,7 +5450,7 @@ export class PersistentMcpOwner {
         return mcpToolResultMessage(message, result);
       }
       const sourceAdmissionOwner = requested.name === "code.window";
-      const coverageOwner = sourceAdmissionOwner || requested.name === "symbol.card"
+      const coverageOwner = sourceAdmissionOwner || requested.name === "symbol.card" || requested.name === "code.skeleton"
         ? sourceCoverageOwnerForSession(session, binding?.bootConfig)
         : null;
       activeCoverageOwner = coverageOwner;
@@ -5652,7 +5667,7 @@ export class PersistentMcpOwner {
         result = composed("coverage_materialize", materializeSourceCoverage(result, coverageOwner, toolArgs || {}, { toolName: requested.name }));
       }
       result = composed("compaction", compactResearcherTypedAtlasResult(result, session, toolName, toolArgs));
-      result = composed("source_transport_finalize", finalizeSourceTransport(result));
+      result = composed("source_transport_finalize", finalizeSourceTransport(result, hashRefToolContext(session)));
       for (const transform of providerTransforms) {
         result = composed("transform_annotations", annotateOwnerResultTransform(result, transform));
       }

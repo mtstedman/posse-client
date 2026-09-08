@@ -1164,12 +1164,14 @@ export class ParseEngine {
               documentIntake: embeddingIntake?.documents || null,
               stageScipPaths,
             });
-            await this.#finishDocumentEmbeddingIntake(embeddingIntake, base);
             const hintPaths = /** @type {any} */ (base)._incrementalHintPaths || null;
-            return finalize(
-              await this.#updateBranchViewIncremental({ payload, branch, base, hintPaths }),
-              start,
-            );
+            const result = await this.#updateBranchViewIncremental({
+              payload, branch, base, hintPaths,
+              beforeEmbeddingReconcile: () => this.#finishDocumentEmbeddingIntake(embeddingIntake, base),
+            });
+            // A failed/absent view still needs to close its streaming intake.
+            await this.#finishDocumentEmbeddingIntake(embeddingIntake, base);
+            return finalize(result, start);
           } catch (err) {
             await this.#abortDocumentEmbeddingIntake(embeddingIntake, err);
             throw err;
@@ -1210,8 +1212,12 @@ export class ParseEngine {
               documentIntake: embeddingIntake?.documents || null,
               stageScipPaths,
             });
+            const result = await this.#rebuildBranchView({
+              payload, branch, base,
+              beforeEmbeddingReconcile: () => this.#finishDocumentEmbeddingIntake(embeddingIntake, base),
+            });
             await this.#finishDocumentEmbeddingIntake(embeddingIntake, base);
-            return finalize(await this.#rebuildBranchView({ payload, branch, base }), start);
+            return finalize(result, start);
           } catch (err) {
             await this.#abortDocumentEmbeddingIntake(embeddingIntake, err);
             throw err;
@@ -1833,10 +1839,11 @@ export class ParseEngine {
    *   branch: string,
    *   base: AtlasWarmJobResult,
    *   hintPaths?: string[] | null,
+   *   beforeEmbeddingReconcile?: (() => Promise<void>) | null,
    * }} args
    * @returns {Promise<AtlasWarmJobResult>}
    */
-  async #rebuildBranchView({ payload, branch, base, hintPaths = null }) {
+  async #rebuildBranchView({ payload, branch, base, hintPaths = null, beforeEmbeddingReconcile = null }) {
     const outPath = payload.out_view_path || (branch === this.#defaultBranch ? mainViewPath(this.#repoRoot) : null);
     if (!outPath) return base;
     return await withAtlasViewWriteLock(outPath, async () => {
@@ -1907,6 +1914,10 @@ export class ParseEngine {
         base.view_written = outPath;
         base.view_etag = meta.built_at;
         if (carriedMlSnapshot) this.#importMlCompressionSnapshot(outPath, carriedMlSnapshot);
+        // Source intake is complete and the current view has been published.
+        // Close the streaming writer before final embedding reconciliation
+        // opens the same index, without holding source availability behind it.
+        await beforeEmbeddingReconcile?.();
         await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
         await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose });
         await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
@@ -2157,17 +2168,18 @@ export class ParseEngine {
    *   branch: string,
    *   base: AtlasWarmJobResult,
    *   hintPaths?: string[] | null,
+   *   beforeEmbeddingReconcile?: (() => Promise<void>) | null,
    * }} args
    * @returns {Promise<AtlasWarmJobResult>}
    */
-  async #updateBranchViewIncremental({ payload, branch, base, hintPaths = null }) {
+  async #updateBranchViewIncremental({ payload, branch, base, hintPaths = null, beforeEmbeddingReconcile = null }) {
     const outPath = payload.out_view_path || (branch === this.#defaultBranch ? mainViewPath(this.#repoRoot) : null);
     if (!outPath) return base;
     if (!fs.existsSync(outPath)) {
       // No existing view — caller still wants a view built, so fall through
       // to the full rebuild path. main-incremental on a cold cache pays the
       // full cost once; subsequent incrementals get the fast path.
-      return this.#rebuildBranchView({ payload, branch, base, hintPaths });
+      return this.#rebuildBranchView({ payload, branch, base, hintPaths, beforeEmbeddingReconcile });
     }
     const incremental = await withAtlasViewWriteLock(outPath, async () => {
       /** @type {View | null} */
@@ -2265,6 +2277,7 @@ export class ParseEngine {
           progress_current: 1,
           progress_total: 1,
         });
+        await beforeEmbeddingReconcile?.();
         await this.#emitStage("embeddings", `checking embeddings for ${path.basename(outPath)}`);
         await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose, embeddingScope });
         await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
@@ -2276,7 +2289,7 @@ export class ParseEngine {
       }
     });
     if (incremental.fallback) {
-      return this.#rebuildBranchView({ payload, branch, base, hintPaths });
+      return this.#rebuildBranchView({ payload, branch, base, hintPaths, beforeEmbeddingReconcile });
     }
     return incremental.result;
   }
@@ -3274,7 +3287,10 @@ export class ParseEngine {
         ?? /** @type {any} */ (this.#runtimeConfig).atlas_embedding_document_window,
       8,
     );
-    const documents = new OrderedDocumentIntake({ readAhead: documentWindow });
+    const documents = new OrderedDocumentIntake({
+      readAhead: documentWindow,
+      producerBackpressure: false,
+    });
     const encoder = /** @type {any} */ (resources.encoder);
     const index = /** @type {any} */ (resources.index);
     const supportsStructuredSymbols = typeof encoder.encodeSymbols === "function";

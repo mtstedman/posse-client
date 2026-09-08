@@ -1004,7 +1004,8 @@ function needsAgentCallsChildKindsRepair(db) {
   ).get();
   if (!row?.sql) return false;
   return needsAgentCallsParentageRepair(db)
-    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'web_research'/iu.test(row.sql);
+    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'web_research'/iu.test(row.sql)
+    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'research_claim_review'/iu.test(row.sql);
 }
 
 function repairAgentCallsChildKindsSchema(db) {

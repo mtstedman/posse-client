@@ -27,6 +27,7 @@ import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/hel
 import { isWebToolName, recordToolUseObservations } from "../../../observability/functions/observations.js";
 import {
   buildCodexWebToolsOverrides,
+  buildCodexNestedMcpGuidance,
 } from "./prompt-blocks.js";
 import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth.js";
 import { buildCodexWindowsLaunchEnv, formatSpawnLaunchForError, getCodexLaunchState, isReadyAsync } from "./cli-discovery.js";
@@ -43,10 +44,13 @@ import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
   nativeSystemToolsEnabled = false,
+  codexNestedMcp = false,
 } = {}) {
-  const contractBlock = renderExecutionContractBlock(executionContract, {
+  const renderedContract = renderExecutionContractBlock(executionContract, {
     remoteComposed: skipRolePrompt,
   });
+  const contractBlock = [renderedContract, codexNestedMcp ? buildCodexNestedMcpGuidance() : null]
+    .filter(Boolean).join("\n");
   if (!skipRolePrompt) return contractBlock;
 
   // Remote-composed prompts already carry the provider-independent contract,
@@ -262,20 +266,23 @@ export async function callProvider(promptText, {
       ? buildMcpAtlasSurfaceToolDescriptors(remoteAtlasToolNames, {
         providerName: "codex",
         serverName: atlasServerName,
+        codexNestedMcp: deterministicReadMcp.codexNestedMcp === true,
       })
       : [];
     // Disable AGENTS.md auto-discovery (parent-walk + fallback filenames).
     // Agents access the real repo via the deterministic MCP, not via auto-loaded project docs.
     const memorySuppressionOverrides = ["project_doc_max_bytes=0"];
-    const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({
-      disableSystemTools,
-      disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
-      disableResearcherUtilities: deterministicReadMcp.atlasResearcherDispatcher === true,
-    });
     const webTools = buildCodexWebToolsOverrides({
       role,
       roleMode,
       webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
+    });
+    const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({
+      disableSystemTools,
+      disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
+      disableResearcherUtilities: deterministicReadMcp.atlasResearcherDispatcher === true,
+      codexNestedMcp: deterministicReadMcp.codexNestedMcp === true,
+      webToolsActive: webTools.active,
     });
     // The Posse MCP gateway exposes deterministic and atlas.* suites from a
     // single process, so do not attach a second ATLAS MCP server when the
@@ -320,6 +327,7 @@ export async function callProvider(promptText, {
     const contractBlock = buildCodexRuntimeContractBlock(executionContract, {
       skipRolePrompt,
       nativeSystemToolsEnabled: !disableSystemTools && !deterministicReadMcp.active,
+      codexNestedMcp: deterministicReadMcp.codexNestedMcp === true,
     });
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,

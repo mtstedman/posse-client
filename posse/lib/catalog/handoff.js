@@ -2,6 +2,15 @@
 
 export const AGENT_HANDOFF_RECEIPT_NOTIFICATION = "notifications/posse/agent_handoff_receipt";
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
+
+// Terminal prose may name an auth scheme or use a placeholder noun. This
+// vocabulary never changes credential detection for bridge payloads or logs.
+export const AGENT_HANDOFF_BEARER_PROSE_TERMS = Object.freeze([
+  "access token", "access-token", "auth token", "auth-token",
+  "token", "tokens", "credential", "credentials", "header",
+  "authorization", "authentication",
+]);
+
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxCallBytes: 256 * 1024,
   maxEntryBytes: 32 * 1024,

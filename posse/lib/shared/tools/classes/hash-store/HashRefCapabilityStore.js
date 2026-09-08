@@ -125,6 +125,16 @@ export class HashRefCapabilityStore {
     return deserialize(this._row(TABLES.evidence, ref));
   }
 
+  evidenceRefs() {
+    // Evidence discovery has the same exact scope as evidence(ref), without
+    // the same-attempt fallback allowed for traversal custody.
+    return this.db.prepare(`
+      SELECT ref FROM ${TABLES.evidence}
+      WHERE scope_key = ?
+      ORDER BY created_at, ref
+    `).all(this.scopeKey).map((row) => row.ref);
+  }
+
   _insert(table, {
     ref,
     sourceRef,

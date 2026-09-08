@@ -921,7 +921,7 @@ function existingFilePath(value) {
   try { return fs.existsSync(value) ? value : null; } catch { return null; }
 }
 
-function candidateEmbeddedV2ViewPaths({ cwd, repoRoot }) {
+function candidateEmbeddedV2ViewPaths({ cwd, repoRoot, includeMissing = false }) {
   const candidates = [
     cwd ? worktreeViewPath(cwd) : null,
     repoRoot ? worktreeViewPath(repoRoot) : null,
@@ -930,7 +930,8 @@ function candidateEmbeddedV2ViewPaths({ cwd, repoRoot }) {
   const paths = [];
   const seen = new Set();
   for (const candidate of candidates) {
-    const found = existingFilePath(candidate);
+    // A view being published must remain a candidate for the readiness wait.
+    const found = includeMissing ? candidate : existingFilePath(candidate);
     if (found && !seen.has(found)) {
       seen.add(found);
       paths.push(found);
@@ -1115,7 +1116,7 @@ async function resolveEmbeddedAtlasV2ReadContext({
   const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
   const viewCandidates = preferredViewPath
     ? [preferredViewPath]
-    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot });
+    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot, includeMissing: !optionalView });
   if (viewCandidates.length === 0 && !optionalView) return null;
 
   let view = null;
@@ -1124,6 +1125,7 @@ async function resolveEmbeddedAtlasV2ReadContext({
   let viewPath = null;
   try {
     let meta = null;
+    let readinessError = null;
     const expectedLayerMerge = config?.viewLayerMerge === true;
     const configuredLedgerPath = existingFilePath(config?.atlasV2LedgerDbPath || config?.ledgerDbPath || null);
     if (configuredLedgerPath) {
@@ -1144,9 +1146,19 @@ async function resolveEmbeddedAtlasV2ReadContext({
         view = probe.view;
         meta = probe.meta;
         viewPath = probe.dbPath;
+      } else if (!probe.exists) {
+        readinessError = atlasV2EnvelopeError({ error: { code: "not_indexed", message: "ATLAS v2 view is not ready" } });
+      } else if (probe.freshness) {
+        readinessError = new Error(`ATLAS v2 view is not current: ${probe.error?.message || "view is stale"}`);
+      } else {
+        // Preserve corrupt/schema/unreadable diagnostics; missing publication
+        // is retryable, but an arbitrary database-open error need not be.
+        readinessError = probe.error;
       }
     }
-    if ((!view || !meta) && !optionalView) return null;
+    if ((!view || !meta) && !optionalView) {
+      throw readinessError || new Error("ATLAS v2 view is not available");
+    }
     if (ledger && meta && !embeddedLedgerSupportsViewMeta(ledger, meta)) {
       try { releaseEmbeddedResourceLease(ledgerLease); } catch { /* ignore */ }
       ledger = null;
@@ -1179,7 +1191,18 @@ async function resolveEmbeddedAtlasV2ReadContext({
           timeoutMs: waitMs,
           layerMerge: expectedLayerMerge,
         });
-        if (!secondProbe.ok) return null;
+        if (!secondProbe.ok) {
+          // A ledger discovered after the first probe can reveal publication
+          // lag. Preserve its cause so the existing bounded retry policy can
+          // wait for a current view without dispatching rejected source.
+          if (!secondProbe.exists) {
+            throw atlasV2EnvelopeError({ error: { code: "not_indexed", message: "ATLAS v2 view is not ready" } });
+          }
+          if (secondProbe.freshness) {
+            throw new Error(`ATLAS v2 view is not current: ${secondProbe.error?.message || "view is stale"}`);
+          }
+          throw secondProbe.error || new Error("ATLAS v2 view is not available");
+        }
         view = secondProbe.view;
         meta = secondProbe.meta;
         viewPath = secondProbe.dbPath;
@@ -1222,8 +1245,25 @@ async function executeEmbeddedAtlasViaExecutor({
   const scope = atlasExecutorReadScope(workItemId, repoRoot);
   const expectedReadRoot = cwd || repoRoot;
   if (!executor.hasReadContext(scope, { readRoot: expectedReadRoot })) {
-    const context = await resolveEmbeddedAtlasV2ReadContext({ action, payload, cwd, config, repo });
-    if (context) executor.setReadContext(scope, context);
+    try {
+      const context = await resolveEmbeddedAtlasV2ReadContext({ action, payload, cwd, config, repo });
+      // The executor can derive paths of its own. Do not let that bypass a
+      // failed readiness probe and mount an absent or rejected source view.
+      if (!context) throw new Error("ATLAS v2 read context is not available");
+      executor.setReadContext(scope, context);
+    } catch (err) {
+      recordAtlasToolObservation({
+        action,
+        invocation: { source: "atlas-tool-executor", command: null },
+        args: payload,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: err?.message || String(err),
+        origin,
+        queueInfo,
+      });
+      return formatAtlasV2EmbeddedError(action, err);
+    }
   }
   const executed = await executor.executeTool({
     toolName: action,
@@ -1300,7 +1340,7 @@ async function executeEmbeddedAtlasV2Tool({
   const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
   const viewCandidates = preferredViewPath
     ? [preferredViewPath]
-    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot });
+    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot, includeMissing: !optionalView });
   if (viewCandidates.length === 0 && !optionalView) {
     const message = "ATLAS v2 view is not available";
     recordAtlasToolObservation({

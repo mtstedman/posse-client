@@ -67,14 +67,6 @@ const TYPED_DIRECT_SYMBOL_CARD =
 // question, answer, or grader feedback. Marker priority selects the primary
 // language for telemetry; all detected languages contribute enabled booleans.
 export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
-  typeorm: Object.freeze({
-    markers: Object.freeze(["ormconfig.sample.json"]),
-    purposeGuidance: false,
-    symbolCardGuidance: false,
-    readyCallBatching: false,
-    anchoredFileWindowMaxTokens: null,
-    resultCompaction: true,
-  }),
   php: Object.freeze({
     markers: Object.freeze(["composer.json"]),
     purposeGuidance: true,

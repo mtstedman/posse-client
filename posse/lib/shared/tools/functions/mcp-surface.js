@@ -138,7 +138,7 @@ export function renderMcpToolNameForProvider(toolName, { providerName = "generic
     .replace(/^_+|_+$/g, "");
 }
 
-export function renderMcpSurfaceName({ providerName = "generic", serverName, toolName } = {}) {
+export function renderMcpSurfaceName({ providerName = "generic", serverName, toolName, codexNestedMcp = false } = {}) {
   const server = String(serverName || "").trim();
   const renderedTool = renderMcpToolNameForProvider(toolName, { providerName });
   if (!server || !renderedTool) return "";
@@ -147,7 +147,7 @@ export function renderMcpSurfaceName({ providerName = "generic", serverName, too
   // prefix is the configuration namespace, not the callable name exposed to
   // the model. Advertising that configuration name caused writable dev jobs
   // to fall back to native apply_patch inside Posse's read-only sandbox.
-  if (normalizeProviderName(providerName) === "codex") return renderedTool;
+  if (normalizeProviderName(providerName) === "codex" && !codexNestedMcp) return renderedTool;
   return `mcp__${server}__${renderedTool}`;
 }
 
@@ -157,10 +157,11 @@ function buildMcpSurfaceDescriptor({
   providerName = "generic",
   serverName,
   suite,
+  codexNestedMcp = false,
 } = {}) {
   const canonical = String(canonicalName || "").trim();
   const mcp = String(mcpName || "").trim();
-  const providerSurfaceName = renderMcpSurfaceName({ providerName, serverName, toolName: mcp });
+  const providerSurfaceName = renderMcpSurfaceName({ providerName, serverName, toolName: mcp, codexNestedMcp });
   if (!canonical || !mcp || !providerSurfaceName) return null;
   return {
     // Compatibility fields used by existing ToolContract callers.
@@ -188,7 +189,7 @@ function renderToolsMcpToolName(toolName = "") {
   return name.startsWith("tools.") ? name : `tools.${name}`;
 }
 
-export function buildMcpSurfaceToolDescriptors(toolNames = [], { providerName = "generic", serverName } = {}) {
+export function buildMcpSurfaceToolDescriptors(toolNames = [], { providerName = "generic", serverName, codexNestedMcp = false } = {}) {
   return (Array.isArray(toolNames) ? toolNames : [])
     .map((toolName) => {
       const canonicalName = stripToolsPrefix(toolName);
@@ -199,6 +200,7 @@ export function buildMcpSurfaceToolDescriptors(toolNames = [], { providerName = 
         providerName,
         serverName,
         suite: "tools",
+        codexNestedMcp,
       });
     })
     .filter(Boolean);
@@ -215,7 +217,7 @@ function renderAtlasMcpToolName(toolName = "") {
   return name.startsWith("atlas.") ? name : `atlas.${name}`;
 }
 
-export function buildMcpAtlasSurfaceToolDescriptors(toolNames = [], { providerName = "generic", serverName } = {}) {
+export function buildMcpAtlasSurfaceToolDescriptors(toolNames = [], { providerName = "generic", serverName, codexNestedMcp = false } = {}) {
   return (Array.isArray(toolNames) ? toolNames : [])
     .map((toolName) => {
       const canonicalName = stripAtlasPrefix(toolName);
@@ -226,6 +228,7 @@ export function buildMcpAtlasSurfaceToolDescriptors(toolNames = [], { providerNa
         providerName,
         serverName,
         suite: "atlas",
+        codexNestedMcp,
       });
     })
     .filter(Boolean);

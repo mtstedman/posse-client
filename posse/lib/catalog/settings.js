@@ -95,6 +95,7 @@ export const SETTING_KEYS = Object.freeze({
   RESEARCH_TRAVERSAL_COMPLETION_CHECK: "research_traversal_completion_check",
   RESEARCH_TRAVERSAL_COMPLETION_MAX_CHARS: "research_traversal_completion_max_chars",
   RESEARCH_EVIDENCE_REUSE: "research_evidence_reuse",
+  RESEARCH_CLAIM_REVIEW: "research_claim_review",
   POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",
   POSSE_REMOTE_TIMEOUT_MS: "posse_remote_timeout_ms",
   POSSE_LOCAL_GENERATION_ENABLED: "posse_local_generation_enabled",

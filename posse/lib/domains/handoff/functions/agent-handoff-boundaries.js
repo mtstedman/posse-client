@@ -1,5 +1,6 @@
 import { redactString } from "../../bridge/functions/redaction.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
+import { AGENT_HANDOFF_BEARER_PROSE_TERMS } from "../../../catalog/handoff.js";
 
 export const AGENT_HANDOFF_COPIED_EVIDENCE_MIN_CHARS = 200;
 
@@ -7,9 +8,17 @@ export const AGENT_HANDOFF_COPIED_EVIDENCE_MIN_CHARS = 200;
 // credential because it protects logs and bridge payloads where false
 // positives are cheap. Terminal handoff prose has a different tradeoff:
 // ordinary security design language such as "Bearer token" must not force a
-// model retry. Strip only a small allowlist of unmistakable placeholder nouns
-// before using the transport redactor as the final generic-token detector.
-const BEARER_PLACEHOLDER_RE = /\bBearer\s+(?:access[ -]token|auth[ -]token|token|tokens|credential|credentials|header)\b/gi;
+// model retry. Only complete cataloged terms are eligible: a word boundary
+// alone would also accept credential prefixes such as "token-opaque". Keep
+// bearer-value punctuation and Unicode word continuations outside the prose
+// exception. A single sentence-ending period may precede whitespace, closing
+// punctuation or EOF; prefixes of longer credential-shaped values are ineligible.
+const BEARER_PLACEHOLDER_RE = new RegExp(
+  String.raw`\bBearer\s+(?:${AGENT_HANDOFF_BEARER_PROSE_TERMS
+    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})(?:\.(?=$|[\s"'\x60)\]}]))?(?![\p{L}\p{N}\p{M}\p{Pc}\p{Cf}._~+/=-])`,
+  "giu",
+);
 
 function statelessRegex(pattern) {
   return new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ""));

@@ -45,6 +45,7 @@ import {
 } from "../../../../shared/policies/functions/role-utils.js";
 import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
 import { ResearchSession } from "../../../research/classes/ResearchSession.js";
+import { researchReturnsFinalReport } from "../../../research/functions/output-routing.js";
 import {
   createRedTeamPlanChain,
   isRedTeamPlanningPayload,
@@ -712,9 +713,6 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
   if (wi?.research_skipped) {
     updateWorkItemResearchSkip(researchJob.work_item_id, { skipped: false, reason: null });
   }
-  let metadata = {};
-  try { metadata = wi?.metadata_json ? JSON.parse(wi.metadata_json) : {}; } catch { /* ignore */ }
-
   const researchPayload = worker.parsePayload(researchJob);
   const planningPayload = redTeamPlanningPayload(isRedTeamPlanningPayload(researchPayload));
   const roleMode = String(researchPayload.role_mode || "solo").trim().toLowerCase();
@@ -749,11 +747,6 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
   const clarificationRound = researchPayload._clarification_round || 0;
   const MAX_CLARIFICATION_ROUNDS = 3;
 
-  const intakeOutputMode = String(metadata?.intake_hints?.output_mode || "").trim().toLowerCase();
-  const isReportResearch = wi?.mode === "report"
-    || researchPayload.task_mode === "report"
-    || intakeOutputMode === "question_only";
-
   if (clarificationAlreadyHandled && extractedQuestions.length > 0) {
     worker?.emit?.(
       researchJob.id,
@@ -764,7 +757,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
   // -- Question/report mode: research is the final step --
   // Persist the plain researcher text deterministically as the visible report;
   // do not route it through the planner or require a structured brief appendix.
-  if (metadata.mode === "question" || isReportResearch) {
+  if (researchReturnsFinalReport(wi, researchPayload)) {
     // Even in question mode, if the researcher has questions, we need
     // human answers before we can call this "answered".
     if (hasQuestions) {

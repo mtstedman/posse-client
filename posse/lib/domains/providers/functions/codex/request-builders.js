@@ -2,6 +2,7 @@
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
+import { CODEX_NESTED_MCP_ROLES, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp } from "../../../integrations/functions/deterministic-mcp.js";
 import {
@@ -64,6 +65,7 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
 
 function buildCodexDeterministicMcpAttachment(serverConfig, {
   role = "",
+  disableSystemTools = false,
   atlasResearcherDispatcher = String(role || "").trim().toLowerCase() === "researcher"
     && (resolveAtlasResearcherDispatcher()
       || resolveAtlasResearcherTypedDispatcher()
@@ -72,8 +74,11 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
   const atlasTools = Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [];
+  const codexNestedMcp = disableSystemTools === true
+    && CODEX_NESTED_MCP_ROLES.includes(String(role || "").trim().toLowerCase());
   const lazyTools = toolNames.filter((name) => CODEX_LAZY_TOOL_NAMES.has(name));
-  const directTools = toolNames.filter((name) => !CODEX_LAZY_TOOL_NAMES.has(name));
+  const eagerTools = toolNames.filter((name) => !CODEX_LAZY_TOOL_NAMES.has(name));
+  const directTools = codexNestedMcp ? [] : eagerTools;
   const lazyServerKey = lazyTools.length > 0
     ? _toCodexConfigKey(`${serverKey}_${CODEX_LAZY_MCP_SERVER_SUFFIX}`)
     : null;
@@ -120,7 +125,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   // ATLAS action. Those are prerequisites for the execution contract and the
   // ATLAS-first gate, so they must never depend on model-initiated discovery.
   configOverrides.push(`mcp_servers.${serverKey}.required=true`);
-  if (directTools.length > 0 || atlasTools.length > 0) {
+  if (!codexNestedMcp && (directTools.length > 0 || atlasTools.length > 0)) {
     directServerKeys.push(serverKey);
   }
   if (lazyServerKey) {
@@ -133,7 +138,8 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
       `mcp_servers.${lazyServerKey}.required=true`,
     );
   }
-  if (directServerKeys.length > 0) {
+  if (codexNestedMcp) configOverrides.push("features.code_mode.enabled=true");
+  if (codexNestedMcp || directServerKeys.length > 0) {
     configOverrides.push(
       `features.code_mode.direct_only_tool_namespaces=${_toTomlLiteral(
         directServerKeys.map((key) => `mcp__${key}`),
@@ -145,6 +151,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
     [toolName],
     {
       providerName: "codex",
+      codexNestedMcp,
       serverName: CODEX_LAZY_TOOL_NAMES.has(toolName) && lazyServerKey
         ? lazyServerKey
         : serverKey,
@@ -155,6 +162,8 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
     active: true,
     tools: toolNames,
     directTools,
+    nestedTools: codexNestedMcp ? eagerTools : [],
+    codexNestedMcp,
     lazyTools,
     // Codex creates its deferred tool-search surface only when this catalog
     // contains at least one tool. Keep the state explicit for launch audits:
@@ -364,7 +373,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     };
   }
 
-  return buildCodexDeterministicMcpAttachment(serverConfig, { role });
+  return buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools });
 }
 
 export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, options = {}) {
@@ -450,7 +459,7 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     };
   }
 
-  return buildCodexDeterministicMcpAttachment(serverConfig, { role });
+  return buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools });
 }
 
 export function __testBuildCodexDeterministicMcpAttachment(serverConfig, options = {}) {
@@ -461,8 +470,19 @@ export function buildCodexSystemToolLockdownOverrides({
   disableSystemTools = false,
   disableNativeImageGeneration = false,
   disableResearcherUtilities = false,
+  codexNestedMcp = false,
+  webToolsActive = false,
 } = {}) {
   const overrides = [];
+  if (codexNestedMcp) {
+    const excluded = [...CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES];
+    if (!webToolsActive) excluded.push("web");
+    overrides.push(
+      "features.apps=false",
+      `tool_output_token_limit=${CODEX_RESEARCHER_TRANSPORT_LIMITS.outputTokens}`,
+      `features.code_mode.excluded_tool_namespaces=${_toTomlLiteral(excluded)}`,
+    );
+  }
   if (disableSystemTools) {
     overrides.push(
       "features.shell_tool=false",

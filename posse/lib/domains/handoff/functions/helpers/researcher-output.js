@@ -5,6 +5,7 @@
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { sanitizeAtlasSymbolIdList } from "../../../atlas/functions/v2/symbol-id.js";
 import { normalizeResearchSymbolSeeds } from "./research-symbols.js";
+import { projectResearchClaimEvidence } from "../../../research/functions/claim-evidence.js";
 import {
   formatHashRefSelector,
   HASH_REF_LANES,
@@ -128,6 +129,7 @@ export function researcherPacketToStructuredOutput(packet) {
     claims: (Array.isArray(report.claims) ? report.claims : [])
       .map((claim) => claim?.[0])
       .filter(Boolean),
+    claim_evidence: projectResearchClaimEvidence(report),
     key_files: files,
     related_files: relatedFiles,
     key_symbols: Array.isArray(research.key_symbols) ? research.key_symbols : [],

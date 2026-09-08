@@ -61,6 +61,8 @@ import {
   requestWaitingLaneResearchDemand,
 } from "../../../research/functions/waiting-lane-demand.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
+import { runResearchClaimReview } from "../../../research/functions/run-claim-review.js";
+import { researchReturnsFinalReport } from "../../../research/functions/output-routing.js";
 
 const CHILD_BRIEF_SYNTH_CHAR_LIMIT = 12000;
 const CHILD_BRIEF_EXCERPT_CHAR_LIMIT = 3000;
@@ -191,22 +193,6 @@ function tightAnswerContractEnabled() {
   } catch {
     return false;
   }
-}
-
-function isResearchReportMode(workItem, payload, intakeHints) {
-  // Research jobs normally feed spawnPlanAfterResearch, including work items
-  // whose eventual deliverable is a report or answer. Select the report
-  // terminal schema only when workflow state explicitly says this researcher
-  // is itself terminal; report-like wording and intake classification are not
-  // sufficient because planners require researcher.pipeline.v1.
-  const terminalResearch = payload?.spawn_planner === false
-    || payload?.terminal_research_output === true;
-  if (!terminalResearch) return false;
-  const mode = String(payload?.task_mode || workItem?.mode || "").trim().toLowerCase();
-  return mode === "report"
-    || mode === "question"
-    || intakeHints?.output_mode === "question_only"
-    || intakeHints?.deliverable_type === "answer";
 }
 
 function truncateForPrompt(value, maxChars, label) {
@@ -563,7 +549,7 @@ export class ResearcherRole extends BaseRole {
       : getResearchBudget(workItem, payload);
     const deepthink = isResearchBudgetDeep(researchBudget);
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
-    const reportMode = roleMode === "solo" && isResearchReportMode(workItem, payload, intakeHints);
+    const reportMode = roleMode === "solo" && researchReturnsFinalReport(workItem, payload);
     const promptProfile = researchPromptProfile(roleMode, { reportMode });
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), this.getRole());
     const webFetchCachePreload = buildWebFetchCachePreload(job.work_item_id);
@@ -859,6 +845,11 @@ export class ResearcherRole extends BaseRole {
   }
 
   async processOutput(output, _stats, job, ctx) {
+    try {
+      await runResearchClaimReview({ providerClient: this.providerClient, job, ctx, stats: _stats || {} });
+    } catch (error) {
+      this.context?.emit?.(job.id, `Research claim review unavailable: ${error?.message || String(error)}`);
+    }
     output = sanitizeResearcherStructuredOutput(output);
     storeArtifact({
       work_item_id: job.work_item_id,

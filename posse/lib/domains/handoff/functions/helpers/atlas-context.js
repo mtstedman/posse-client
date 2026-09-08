@@ -30,6 +30,7 @@ import {
   stageRenderedLifecycleCoverage,
 } from "./lifecycle-prefetch.js";
 import { detectUnavailableDependencySources } from "./dependency-source-preflight.js";
+import { collectNearbyGuides, renderNearbyGuides } from "./nearby-guides.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { isIndexableSourcePath } from "../../../integrations/functions/deterministic-mcp/source-file-gate.js";
 import { resolvePathWithin } from "../../../runtime/functions/fs-safety.js";
@@ -2042,6 +2043,10 @@ export async function attachAtlasPlannerSlice(packet) {
       areaMap = await _prefetchAtlasAreaMap(packet);
     }
 
+    if (isResearcher) {
+      packet.atlas_nearby_guides = collectNearbyGuides(packet.cwd, treeScope?.candidateFiles || plan.seedFiles);
+    }
+
     if (treeScope?.ok && treeScope.candidateFiles.length > 0) {
       await _attachAtlasTreePrefetchContext(packet, {
         tools,
@@ -3467,6 +3472,9 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   }
 
   const treeScope = slice.treeScope;
+  if (packet.recipient === "researcher") {
+    lines.push(...renderNearbyGuides(packet.atlas_nearby_guides, { trim }));
+  }
   if (treeScope?.ok) {
     const meta = [];
     if (treeScope.scopeRisk) meta.push(`risk=${treeScope.scopeRisk}`);

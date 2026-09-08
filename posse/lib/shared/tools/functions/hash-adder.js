@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { CODE_CONTENT_KINDS, RAW_SOURCE_LINES_ENCODING } from "../../../catalog/source-display.js";
 
 import {
   getObservationContext,
@@ -13,6 +14,7 @@ import {
   issueHashRefTraversalForContext,
   materializeHashRefEvidenceForContext,
   promoteHashRefTraversalForContext,
+  sourceMetadataForPartialHashRefView,
   surfaceHashRefForContext,
 } from "../../../domains/queue/functions/hash-refs.js";
 import {
@@ -55,7 +57,11 @@ import {
 import {
   canonicalEvidenceSourcePath,
   normalizedEvidenceSourceWindows,
+  sourceEvidenceCitationSurface,
 } from "./source-evidence.js";
+
+import { alignSourceContinuationPage, sourceContinuationPayload, sourceRows } from "./source-continuation.js";
+import { sourceLineDisplay } from "./source-line-display.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -495,12 +501,11 @@ function ambientStampingEnabled() {
 }
 
 function surfaceMinCharsFor(toolName, { ambient = null } = {}) {
-  // code.lens exposes exact source lines. Leaving a small lens result below
-  // the ordinary hash-ref floor makes those lines visible to the model but
-  // absent from exact-call evidence custody, so a planner cannot hand them
-  // off without copying the code into untracked prose. Always stamp lens
-  // output so every surfaced source window retains its agent-call identity.
-  if (String(toolName || "").replace(/^atlas[.:]/, "") === "code.lens") {
+  // Exact source remains citable even when a read is smaller than the ambient
+  // hash threshold. In particular, chain_read has its own observation type;
+  // its wrapper-inclusive log count cannot substitute for source custody.
+  const sourceTool = String(toolName || "").toLowerCase().replace(/^(?:atlas|tools)[.:]/, "");
+  if (["code.lens", "read_file", "chain_read", "inspect_file"].includes(sourceTool)) {
     return EVIDENCE_REF_SURFACE_MIN_CHARS;
   }
   if (!(ambient ?? ambientStampingEnabled())) return DEFAULT_SURFACE_MIN_CHARS;
@@ -731,8 +736,8 @@ function dedupeCodeWindowContinuationWindows(entries) {
   const byContentRange = new Map();
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || typeof entry !== "object" || typeof entry.content !== "string" || !entry.content) continue;
-    const startLine = Math.max(1, Number(entry.startLine) || 1);
-    const endLine = Math.max(startLine, Number(entry.endLine) || startLine);
+    const startLine = Number(entry.startLine);
+    const endLine = Number(entry.endLine);
     const identifiers = Array.isArray(entry.identifiers)
       ? [...new Set(entry.identifiers.map(String).filter(Boolean))]
       : [];
@@ -777,8 +782,19 @@ function mergedCodeWindowInlineRanges(data) {
 }
 
 function codeWindowTargetCoverage(target, ranges) {
-  const startLine = Math.max(1, Number(target?.location?.startLine) || 1);
-  const endLine = Math.max(startLine, Number(target?.location?.endLine) || startLine);
+  // Current map targets use inclusive line tuples; legacy maps use locations.
+  // An invalid/missing address cannot establish coverage at an invented line 1.
+  const lines = target?.lines !== undefined
+    ? target.lines
+    : [target?.location?.startLine, target?.location?.endLine];
+  if (!Array.isArray(lines) || lines.length !== 2
+    || !Number.isSafeInteger(lines[0]) || !Number.isSafeInteger(lines[1])
+    || lines[0] < 1 || lines[1] < lines[0]) {
+    target.coverage = "none";
+    target.inlineRanges = [];
+    return;
+  }
+  const [startLine, endLine] = lines;
   const intersections = ranges
     .map((range) => ({
       startLine: Math.max(startLine, range.startLine),
@@ -1018,11 +1034,11 @@ export function compactCodeWindowLensResult(toolName, result, {
       && typeof data.content === "string"
       && data.content.length > inlineContentBudget
     ) {
-      const lines = data.content.split("\n");
+      const lines = sourceRows(data.content);
       let headChars = 0;
       let splitAt = 0;
       for (let index = 0; index < lines.length; index++) {
-        const nextChars = lines[index].length + (index > 0 ? 1 : 0);
+        const nextChars = lines[index].length;
         if (splitAt > 0 && headChars + nextChars > inlineContentBudget) break;
         headChars += nextChars;
         splitAt = index + 1;
@@ -1030,19 +1046,19 @@ export function compactCodeWindowLensResult(toolName, result, {
       if (splitAt < lines.length) {
         const startLine = Number(data.startLine) || 1;
         const contentEndLine = startLine + lines.length - 1;
-        const originalEndLine = Math.max(contentEndLine, Number(data.endLine) || contentEndLine);
+        const originalEndLine = contentEndLine;
         displayOriginal = {
           endLine: originalEndLine,
           outputTruncated: data.outputTruncated === true,
           truncated: data.truncated === true,
         };
         displayTail = {
-          content: lines.slice(splitAt).join("\n"),
+          content: lines.slice(splitAt).join(""),
           startLine: startLine + splitAt,
           endLine: originalEndLine,
           identifiers: [],
         };
-        data.content = lines.slice(0, splitAt).join("\n");
+        data.content = lines.slice(0, splitAt).join("");
         data.endLine = displayTail.startLine - 1;
         data.outputTruncated = true;
         data.truncated = true;
@@ -1067,11 +1083,17 @@ export function compactCodeWindowLensResult(toolName, result, {
         requestedWindows: continuation,
         ...(lensTail.length > 0 ? { tailMatches: lensTail } : {}),
       };
-      // Compact encoding makes every complete window's payload span exact and
-      // stable. Ref traversal can therefore promote only fully delivered windows.
-      const continuationPayload = JSON.stringify(continuationEnvelope);
+      // Source-only continuations keep physical line mappings through paging.
+      // Lens retains its structured encoding for non-source tail-match metadata.
+      const rawContinuation = tool === "code.window" ? sourceContinuationPayload(continuation, {
+        path: data.repo_rel_path,
+        repositoryIdentity: data.repositoryIdentity,
+        sourceVersion: data.sourceVersion,
+        selectorFingerprint: sourceSelectorFingerprint(args),
+      }) : null;
+      const continuationPayload = rawContinuation?.payload ?? JSON.stringify(continuationEnvelope);
       let continuationSearchOffset = 0;
-      const continuationSourceWindows = continuation.map((entry) => {
+      const continuationSourceWindows = rawContinuation?.sourceWindows ?? continuation.map((entry) => {
         const encoded = JSON.stringify(entry);
         const payloadStart = continuationPayload.indexOf(encoded, continuationSearchOffset);
         const payloadEnd = payloadStart >= 0 ? payloadStart + encoded.length : -1;
@@ -1110,7 +1132,8 @@ export function compactCodeWindowLensResult(toolName, result, {
             ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
             tool: continuationTool,
             windows: continuation.length,
-            line_semantics: "source",
+            line_semantics: continuationSourceWindows.length > 0 ? "source" : "materialized",
+            ...(rawContinuation ? { source_payload_encoding: RAW_SOURCE_LINES_ENCODING } : {}),
             ...(data.repo_rel_path ? { path: data.repo_rel_path } : {}),
             ...(data.repositoryIdentity ? { repository_identity: data.repositoryIdentity } : {}),
             ...(data.sourceVersion ? { source_version: data.sourceVersion } : {}),
@@ -1156,7 +1179,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         // Restore the display tail to the primary content and expose native
         // slices inline.
         if (displayTail) {
-          data.content = `${data.content}\n${displayTail.content}`;
+          data.content = `${data.content}${displayTail.content}`;
           data.endLine = displayOriginal.endLine;
           data.outputTruncated = displayOriginal.outputTruncated;
           data.truncated = displayOriginal.truncated;
@@ -1294,7 +1317,7 @@ function shouldSurfaceHashRef(toolName, result, {
   if (typeof result !== "string") return false;
   const effectiveMin = minChars ?? surfaceMinCharsFor(toolName, { ambient });
   if (result.length < effectiveMin) return false;
-  if (/^Error:/i.test(result.trimStart())) return false;
+  if (/^(?:Error:|AUDIT ERROR:)/i.test(result.trimStart())) return false;
   return true;
 }
 
@@ -1574,11 +1597,19 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
   const isRead = ["read_file", "chain_read", "inspect_file"].includes(normalizedTool);
   const isWindow = normalizedTool.endsWith("code.window");
   const isLens = normalizedTool.endsWith("code.lens");
-  if (!isRead && !isWindow && !isLens) return null;
+  const isSkeleton = normalizedTool.endsWith("code.skeleton");
+  if (!isRead && !isWindow && !isLens && !isSkeleton) return null;
 
   let parsed;
   try { parsed = JSON.parse(payload); } catch { parsed = null; }
   const envelope = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  if (isSkeleton && envelope?.contentKind !== CODE_CONTENT_KINDS.SOURCE) {
+    return {
+      line_semantics: "materialized",
+      citable: false,
+      content_kind: envelope?.contentKind || CODE_CONTENT_KINDS.UNKNOWN,
+    };
+  }
   const fallbackPath = canonicalEvidenceSourcePath(
     envelope?.repo_rel_path
       || envelope?.repoRelPath
@@ -1588,7 +1619,7 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
   );
   const windows = [];
 
-  if ((isRead || isWindow) && envelope && typeof envelope === "object") {
+  if ((isRead || isWindow || isSkeleton) && envelope && typeof envelope === "object") {
     const candidates = [
       envelope,
       ...(Array.isArray(envelope.additionalWindows) ? envelope.additionalWindows : []),
@@ -1738,6 +1769,11 @@ export function appendHashRefIfMajor(toolName, result, {
     : structuredSourceMetadata(toolName, text, args);
 
   if (boundedIngress) {
+    // A clipped skeleton envelope cannot establish complete source lines,
+    // even when its original, uncut payload carried source provenance.
+    const skeletonMetadata = String(toolName || "").toLowerCase().endsWith("code.skeleton")
+      ? { line_semantics: "materialized", citable: false, content_kind: CODE_CONTENT_KINDS.UNKNOWN }
+      : {};
     const slices = boundedResultSlices(text, boundPolicy, sizeChars);
     const boundedAnchor = renderBoundedResult(text, {
       policy: boundPolicy,
@@ -1791,6 +1827,7 @@ export function appendHashRefIfMajor(toolName, result, {
             original_size_chars: sizeChars,
             original_char_start: slices.omittedStart,
             original_char_end: slices.omittedEnd,
+            ...skeletonMetadata,
             ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
           },
         }, { ownerScope: resolvedOwnerScope });
@@ -1824,6 +1861,7 @@ export function appendHashRefIfMajor(toolName, result, {
           bounded_ingress: true,
           bounded_anchor: true,
           continuation_ref: continuationAvailable ? continuation.entry.ref : null,
+          ...skeletonMetadata,
           ...hashRefModelVisibility(hashContext, {
             visibility: "full",
             ranges: [{ start: 0, end: boundedAnchor.length }],
@@ -2084,6 +2122,24 @@ function attachFetchedCapabilityRefs(renderedText, {
     rendered.evidence_ref.non_citable_reason = "search_result_view";
     if (sourceEntry?.ref) rendered.evidence_ref.parent_ref = sourceEntry.ref;
     rendered.evidence_ref.next_action = "Use a validated coordinate or slice from parent_ref; numbered search-result rows are navigation, not citable source.";
+  } else {
+    const visible = materializeHashRefEvidenceForContext(hashContext, evidenceRef);
+    if (visible?.ok && visible.entry?.metadata?.citable === false) {
+      rendered.evidence_ref.usage = "inspect_only";
+      rendered.evidence_ref.citable = false;
+      rendered.evidence_ref.parent_ref = visible.entry.metadata.parent_ref || sourceEntry?.ref;
+      if (visible.entry.metadata.non_citable_reason) {
+        rendered.evidence_ref.non_citable_reason = visible.entry.metadata.non_citable_reason;
+      }
+    }
+    const citation = visible?.ok && visible?.found
+      ? sourceEvidenceCitationSurface(visible.entry, { maxChars: RESEARCH_FETCH_REF_NESTED_METADATA_CHARS })
+      : null;
+    if (citation) {
+      Object.assign(rendered.evidence_ref, citation);
+      rendered.handoff_line_count = citation.lines;
+      rendered.handoff_requires_slice = citation.lines > 40 || viewText.length > 4000;
+    }
   }
   // The traversal identity itself is now the evidence identity. Do not leave
   // the backing source alias in the primary ref field, especially for opaque
@@ -2103,9 +2159,9 @@ function attachFetchedCapabilityRefs(renderedText, {
   return JSON.stringify(rendered);
 }
 
-function shrinkFetchPayloadToSerializedChars(renderedText, maxChars) {
+function shrinkFetchPayloadToSerializedChars(renderedText, maxChars, measure = (text) => text.length) {
   const cap = Number(maxChars);
-  if (!Number.isFinite(cap) || String(renderedText || "").length <= cap) return renderedText;
+  if (!Number.isFinite(cap) || measure(String(renderedText || "")) <= cap) return renderedText;
   let payload;
   try { payload = JSON.parse(String(renderedText || "{}")); } catch { return renderedText; }
   if (payload?.ok !== true || typeof payload.text !== "string" || payload.text.length === 0) {
@@ -2142,7 +2198,7 @@ function shrinkFetchPayloadToSerializedChars(renderedText, maxChars) {
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const candidate = render(middle);
-    if (candidate.length <= cap) {
+    if (measure(candidate) <= cap) {
       best = candidate;
       low = middle + 1;
     } else {
@@ -2625,8 +2681,21 @@ export function fetchHashRefTool(args = {}, {
         const perRefSerializedCap = refs.length === 1
           ? deliveryBudget.max_serialized_chars - 2048
           : Math.floor((deliveryBudget.max_serialized_chars - 4096) / refs.length);
-        rendered = shrinkFetchPayloadToSerializedChars(rendered, perRefSerializedCap);
+        // Reserve source presentation inside the same serialized allocation,
+        // before capability promotion. The finalizer resolves this exact view.
+        const measure = result?.entry?.metadata?.source_payload_encoding === RAW_SOURCE_LINES_ENCODING
+          ? (text) => {
+            const page = JSON.parse(alignSourceContinuationPage(text, result.entry));
+            const entry = { ...result.entry, payload_text: page.text,
+              metadata: sourceMetadataForPartialHashRefView(result.entry, page) };
+            const display = sourceLineDisplay({ ...page, evidence_ref: { line_semantics: "source" } }, 0, () => entry);
+            return Math.max(text.length, display ? JSON.stringify({ content: [
+              { type: "text", text: JSON.stringify(display.header) }, ...display.blocks,
+            ] }).length : 0);
+          } : undefined;
+        rendered = shrinkFetchPayloadToSerializedChars(rendered, perRefSerializedCap, measure);
       }
+      rendered = alignSourceContinuationPage(rendered, result?.entry);
       rendered = attachFetchedCapabilityRefs(rendered, {
         hashContext,
         requestedRef: ref,

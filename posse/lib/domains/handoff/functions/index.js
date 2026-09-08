@@ -227,6 +227,7 @@ function copyAtlasPrefetchFields(target, source) {
   for (const key of [
     "atlas_assessment_baseline",
     "atlas_db_context",
+    "atlas_nearby_guides",
     "atlas_research_context",
     "atlas_slice_candidates",
     "atlas_slice_context",

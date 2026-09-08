@@ -40,8 +40,11 @@ export function normalizedSelectorMaxTokens(value) {
   return Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : null;
 }
 
-export function sourceSelectorFingerprint(args = {}) {
+export function sourceSelectorFingerprint(args = {}, { tool = "code.window" } = {}) {
   return sha256(stable({
+    // Preserve existing coverage identities. A skeleton may return only part
+    // of what an otherwise identical window selector would request.
+    ...(tool === "code.skeleton" ? { tool } : {}),
     symbolId: args.symbolId || null,
     file: args.file ? String(args.file).replace(/\\/g, "/") : null,
     identifiersToFind: Array.isArray(args.identifiersToFind)
@@ -499,7 +502,7 @@ export class SourceCoverageOwner {
     releaseReservation(reservation, outcome);
   }
 
-  prepareData(data, args = {}) {
+  prepareData(data, args = {}, { tool = "code.window" } = {}) {
     if (!this.attemptId || !data || typeof data !== "object" || typeof data.content !== "string" || !data.content) {
       return null;
     }
@@ -517,7 +520,7 @@ export class SourceCoverageOwner {
       ? `${sourceSlice}\n`
       : null;
     if (sourceSlice !== content && sourceSliceWithFinalEol !== content) return null;
-    const selectorFingerprint = sourceSelectorFingerprint(args);
+    const selectorFingerprint = sourceSelectorFingerprint(args, { tool });
     const completeFile = !args.symbolId
       && normalizePath(args.file) === fresh.relative
       && startLine === 1
@@ -537,7 +540,7 @@ export class SourceCoverageOwner {
     completeSymbolSelector = null,
     tool = "code.window",
   } = {}) {
-    const prepared = this.prepareData(data, args);
+    const prepared = this.prepareData(data, args, { tool });
     if (!prepared) return null;
     const { fresh, startLine, endLine, content, contentSha256, selectorFingerprint } = prepared;
     const completeFile = origin === "primary" && prepared.completeFile;

@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { RAW_SOURCE_LINES_ENCODING } from "../../../catalog/source-display.js";
 
 import {
   AGENT_HANDOFF_ALIAS_POLICY,
@@ -133,17 +134,14 @@ function recordEvidenceCleanup(context, {
   if (records.length < 24) records.push({ key, ...record });
 }
 
-function isCleanableEvidenceRangeError(error) {
-  return String(error?.code || "") === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID";
-}
-
 // Pipeline handoffs feed the next role, not a human-facing report. A
 // reject-and-retry loop on them buys nothing the consumer cannot do itself:
 // the planner (or dev) can surface an imperfect citation on its own, so prose
 // is redacted rather than rejected and unverifiable selectors demote to
 // recorded annotations. Standalone research reports (researcher.report.v1)
-// keep report-grade output by moving unsupported claims into a marked summary
-// note instead of retrying. Dev results keep strict rejection. Assessor prose
+// move wholly unsupported claims into a marked summary note. Mixed valid and
+// invalid report support requires repair: one citation cannot establish the
+// rest of a compound claim. Dev results keep strict rejection. Assessor prose
 // is redacted, while its defect-evidence selectors retain strict validation.
 const LENIENT_PIPELINE_HANDOFF_PROFILES = new Set([
   "researcher.pipeline.v1",
@@ -159,26 +157,9 @@ function isLenientHandoffProseProfile(profile) {
   return LENIENT_HANDOFF_PROSE_PROFILES.has(String(profile || ""));
 }
 
-function alternateEvidenceCleanupAction(error, { lenient = false } = {}) {
-  const code = String(error?.code || "");
-  if (code === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") return "drop_invalid_range";
-  if (code === "AGENT_HANDOFF_EVIDENCE_EMPTY") {
-    return "drop_whitespace_only_selector_with_alternate_evidence";
-  }
-  if (code === "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED") {
-    return "drop_unsurfaced_path_with_alternate_evidence";
-  }
-  if (code === "AGENT_HANDOFF_EVIDENCE_NOT_FOUND") {
-    return "drop_invisible_ref_with_alternate_evidence";
-  }
-  if (lenient && code === "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE") {
-    return "defer_unseen_ref_to_downstream_surface";
-  }
-  return null;
-}
-
 const ADVISORY_RESEARCH_EVIDENCE_ERRORS = new Set([
-  "AGENT_HANDOFF_EVIDENCE_CHANGED",
+  // Changed source requires a fresh read. Dropping that selector while keeping
+  // another citation would leave the compound claim supported only in part.
   "AGENT_HANDOFF_EVIDENCE_EMPTY",
   "AGENT_HANDOFF_EVIDENCE_NOT_CITABLE",
   "AGENT_HANDOFF_EVIDENCE_NOT_FOUND",
@@ -214,12 +195,13 @@ function strictClaimEvidenceCleanupAction(error) {
 
 function evidenceRecoveryAction(error, mode) {
   if (mode === "annotate") return advisoryResearchEvidenceCleanupAction(error);
-  if (mode === "demote") return strictClaimEvidenceCleanupAction(error);
+  if (mode === "demote" || mode === "repair") return strictClaimEvidenceCleanupAction(error);
   return null;
 }
 
 function evidenceFailureModeForProfile(profile) {
   if (profile === "researcher.pipeline.v1") return "annotate";
+  if (profile === "researcher.report.v1") return "repair";
   if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) return "demote";
   return null;
 }
@@ -555,6 +537,16 @@ function payloadSourceContentWindows(entry, lineage) {
     ? payload.replace(/\r\n?/g, "\n").split("\n")
     : normalizedLines(payload);
   const authoritative = lineage.source_windows;
+  if (entry?.metadata?.source_payload_encoding === RAW_SOURCE_LINES_ENCODING) {
+    return authoritative.map((window) => {
+      const start = window.materialized_start_line;
+      const end = window.materialized_end_line;
+      const selected = Number.isSafeInteger(start) && start > 0 && Number.isSafeInteger(end)
+        ? payloadLines.slice(start - 1, end) : [];
+      return { ...window, content_lines: selected.length === window.source_end_line - window.source_start_line + 1
+        ? selected : null };
+    });
+  }
   let parsed;
   try { parsed = JSON.parse(payload); } catch { parsed = null; }
   const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
@@ -564,6 +556,11 @@ function payloadSourceContentWindows(entry, lineage) {
     const lines = Number.isInteger(expectedLineCount) && expectedLineCount > 0
       ? String(content ?? "").replace(/\r\n?/g, "\n").split("\n")
       : normalizedLines(content);
+    // Raw window bytes may terminate the last source line with a newline.
+    // Remove only that split sentinel when the declared count proves it is
+    // extra; a final blank line already included in the count is source.
+    if (Number.isInteger(expectedLineCount)
+      && lines.length === expectedLineCount + 1 && lines.at(-1) === "") lines.pop();
     if (!canonicalPath || !Number.isInteger(sourceStart) || sourceStart < 1 || lines.length === 0) return;
     if (Number.isInteger(expectedLineCount) && lines.length !== expectedLineCount) return;
     records.push({
@@ -1235,6 +1232,7 @@ function surfacedPathCandidates(context) {
   for (const window of findVisibleHashRefSourceWindowsForContext(context, {
     db: context?.db || getDb(),
     excludeSurfacedBy: ["agent_handoff_path_selector"],
+    includeRefs: true,
   })) {
     const canonical = canonicalSourcePath(window.path);
     if (!canonical) continue;
@@ -1243,6 +1241,7 @@ function surfacedPathCandidates(context) {
       if (existing.restrict_to_opened_ranges) {
         existing.opened_ranges.push({ start: window.start, end: window.end });
       }
+      if (window.ref) (existing.source_refs ||= []).push(window.ref);
       continue;
     }
     byPath.set(canonical, {
@@ -1250,6 +1249,7 @@ function surfacedPathCandidates(context) {
       path: canonical,
       restrict_to_opened_ranges: true,
       opened_ranges: [{ start: window.start, end: window.end }],
+      source_refs: window.ref ? [window.ref] : [],
     });
   }
   return [...byPath.values()]
@@ -1393,12 +1393,46 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   }
   if (resolved.restrict_to_opened_ranges
     && !resolved.opened_ranges.some((range) => selector.start >= range.start && endLine <= range.end)) {
+    const delivered = resolved.opened_ranges
+      .filter((range) => range.end >= selector.start && range.start <= endLine)
+      .slice(0, 8)
+      .map((range) => `${resolved.path}:${Math.max(selector.start, range.start)}-${Math.min(endLine, range.end)}`);
     fail(
       "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
-      `Evidence ${resolved.path}:${selector.start}-${endLine} was not opened by read_file in the current agent call`,
+      `Evidence ${resolved.path}:${selector.start}-${endLine} was not opened by read_file in the current agent call`
+        + (delivered.length > 0
+          ? `; delivered ranges within the request: ${delivered.join(", ")}. Cite them separately if they support the claim, or read the missing source.`
+          : "; read the requested source before citing it."),
     );
   }
   const excerpt = lines.slice(selector.start - 1, endLine).join("\n");
+  if (resolved.source_refs?.length > 0) {
+    const matchingRanges = [];
+    for (const ref of new Set(resolved.source_refs)) {
+      const opts = { db: context?.db || getDb() };
+      const evidence = materializeHashRefEvidenceForContext(context, ref, opts);
+      const fetched = evidence?.found ? evidence : fetchHashRefForContext(context, ref, opts);
+      if (!fetched?.found || !fetched.entry) continue;
+      const entry = fetched.entry;
+      const lineage = sourceLineage(entry, context);
+      for (const window of lineage.source_windows) {
+        if (canonicalSourcePath(window.path) !== resolved.path) continue;
+        const start = Math.max(selector.start, window.source_start_line);
+        const end = Math.min(endLine, window.source_end_line);
+        if (end < start) continue;
+        const delivered = sourceLineSlice(entry, lineage, start, end, { sourcePath: resolved.path });
+        if (delivered.matched && delivered.excerpt === lines.slice(start - 1, end).join("\n")) {
+          matchingRanges.push({ start, end });
+        }
+      }
+    }
+    if (!mergedLineRanges(matchingRanges).some((range) => selector.start >= range.start && endLine <= range.end)) {
+      fail(
+        "AGENT_HANDOFF_EVIDENCE_CHANGED",
+        `Evidence ${resolved.path}:${selector.start}-${endLine} does not match the delivered source; read this range again`,
+      );
+    }
+  }
   if (!excerpt.trim()) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_EMPTY",
@@ -1956,6 +1990,7 @@ function materializeClaim(
   const detail = normalizeClaimDetail(normalized[1], `claims[${claimIndex}][1]`);
   const out = {};
   const selectors = new Set();
+  let hasUnverifiedSupport = false;
   if (detail.evidence != null) {
     const materialized = new Map();
     const cleanableFailures = [];
@@ -1964,10 +1999,7 @@ function materializeClaim(
       try {
         evidence = materializeAgentHandoffEvidenceSelector(selector, context);
       } catch (error) {
-        const action = evidenceRecoveryAction(error, evidenceFailureMode)
-          || alternateEvidenceCleanupAction(error, {
-            lenient: evidenceFailureMode === "annotate",
-          });
+        const action = evidenceRecoveryAction(error, evidenceFailureMode);
         if (!action) throw error;
         cleanableFailures.push({ selector, error, action });
         continue;
@@ -1978,15 +2010,13 @@ function materializeClaim(
         counters.evidence += evidence.excerpt.length;
       }
     }
-    if (materialized.size === 0 && cleanableFailures.length > 0 && !evidenceFailureMode) {
+    hasUnverifiedSupport = cleanableFailures.length > 0;
+    if (evidenceFailureMode === "repair" && materialized.size > 0 && hasUnverifiedSupport) {
       throw cleanableFailures[0].error;
     }
     for (const { selector, error, action } of cleanableFailures) {
-      const recordedAction = evidenceFailureMode === "demote" && materialized.size > 0
-        ? (alternateEvidenceCleanupAction(error) || action)
-        : action;
       recordEvidenceCleanup(context, {
-        action: recordedAction,
+        action,
         selector,
         code: error.code,
         message: error.message,
@@ -2045,7 +2075,7 @@ function materializeClaim(
   const materializedClaim = [claim, out];
   if (evidenceFailureMode === "demote"
     && detail.evidence != null
-    && !Array.isArray(out.evidence)) {
+    && (hasUnverifiedSupport || !Array.isArray(out.evidence))) {
     Object.defineProperty(materializedClaim, CLAIM_EVIDENCE_DEMOTION, { value: true });
   }
   return materializedClaim;
@@ -2703,6 +2733,7 @@ function researcherEvidenceSelector(value, context) {
     const whole = materializeAgentHandoffEvidenceSelector(candidate, context);
     return whole.selector;
   } catch (error) {
+    if (ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(String(error?.code || ""))) return candidate;
     if (error?.code !== "AGENT_HANDOFF_EVIDENCE_TOO_LARGE") throw error;
     const parsed = parseAgentHandoffEvidenceSelector(candidate);
     const evidence = materializeHashRefEvidenceForContext(context, parsed.ref);
@@ -2733,26 +2764,7 @@ function researcherEvidenceSelector(value, context) {
 function researcherEvidenceSelectors(value, context) {
   if (!Array.isArray(value)) return [];
   return value
-    .flatMap((entry) => {
-      try {
-        const selector = researcherEvidenceSelector(entry, context);
-        return selector == null ? [] : [selector];
-      } catch (error) {
-        const action = isCleanableEvidenceRangeError(error)
-          ? "drop_invalid_range"
-          : String(error?.code || "") === "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED"
-            ? "drop_advisory_research_selector"
-            : null;
-        if (!action) throw error;
-        recordEvidenceCleanup(context, {
-          action,
-          selector: entry,
-          code: error.code,
-          message: error.message,
-        });
-        return [];
-      }
-    })
+    .map((entry) => researcherEvidenceSelector(entry, context))
     .filter(Boolean)
     .slice(0, AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim);
 }
@@ -3578,14 +3590,10 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           if (evidence?.selector) selectors.add(evidence.selector);
         }
         for (const { selector, error } of selectorFailures) {
-          const action = (evidenceFailureMode === "demote" && selectors.size > 0
-            ? alternateEvidenceCleanupAction(error)
-            : null)
-            || evidenceRecoveryAction(error, evidenceFailureMode)
-            || alternateEvidenceCleanupAction(error, {
-              lenient: evidenceFailureMode === "annotate",
-            });
-          if ((selectors.size > 0 || evidenceFailureMode != null) && action) {
+          const action = evidenceFailureMode === "repair" && selectors.size > 0
+            ? null
+            : evidenceRecoveryAction(error, evidenceFailureMode);
+          if (action) {
             recordEvidenceCleanup(context, {
               action,
               selector,
@@ -3639,7 +3647,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
 
 function handoffSelectorFailureHint(code) {
   if (code === "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") {
-    return "Choose a range wholly inside one recorded source window; continuation views accept source or page coordinates.";
+    return "Cite only recorded source ranges; split disjoint windows into separate selectors or read the missing source.";
   }
   if (["AGENT_HANDOFF_EVIDENCE_NOT_FOUND", "AGENT_HANDOFF_EVIDENCE_NOT_VISIBLE"].includes(code)) {
     return "Fetch the traversal ref first or cite an evidence ref already visible to this agent call.";
@@ -3807,6 +3815,11 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
           0,
         );
         entryCounters.narrative += summary.length - previousSummary.length;
+        entryCounters.evidence -= unverifiedClaims.reduce((total, claim) => (
+          total
+          + (claim?.[1]?.evidence || []).reduce((sum, evidence) => sum + evidence.excerpt.length, 0)
+          + (claim?.[1]?.decoy || []).reduce((sum, [evidence]) => sum + evidence.excerpt.length, 0)
+        ), 0);
         for (const [claimIndex, claim] of unverifiedClaims.entries()) {
           recordEvidenceCleanup(materializationContext, {
             action: "demote_unverified_claim_to_summary",

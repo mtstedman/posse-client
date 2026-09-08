@@ -3536,11 +3536,8 @@ async function handleRequest(msg) {
       && languageLevers.symbolCardGuidance;
     const nativeToolSchemas = [...TOOL_SCHEMA_MAP.values()]
       .filter((schema) => !nativeAllowedToolNames || nativeAllowedToolNames.has(schema.name))
-      // Frozen Atlas192 issued read_file 19 times and every call failed the
-      // Atlas-first/source-access policy. Keep fallback execution available to
-      // every other role and mode, but do not advertise that always-invalid
-      // route beside the typed Atlas read facade.
-      .filter((schema) => !researcherTypedDispatcher || schema.name !== "read_file")
+      // Keep the authorized reader discoverable for documentation/manifests.
+      // The normal source gate and bounded evidence forwarding still apply.
       // These repository utilities were issued but never called in all 333
       // qualified Atlas192 turns. Preserve the successfully used list/search
       // routes and operator feedback, and keep every utility available outside

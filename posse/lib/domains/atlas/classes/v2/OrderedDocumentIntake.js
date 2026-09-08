@@ -27,6 +27,7 @@ export class OrderedDocumentIntake {
   #cursor = 0;
   #processed = 0;
   #readAhead;
+  #producerBackpressure;
   /** @type {Array<() => void>} */
   #windowWaiters = [];
   /** @type {Array<{ documents: Array<{ repo_rel_path: string, content_hash: string }>, source_languages: string[], scope_paths: string[] }>} */
@@ -41,9 +42,13 @@ export class OrderedDocumentIntake {
   /** @type {(error: unknown) => void} */
   #rejectDone;
 
-  /** @param {{ readAhead?: number }} [opts] */
-  constructor({ readAhead = 8 } = {}) {
+  /** @param {{ readAhead?: number, producerBackpressure?: boolean }} [opts] */
+  constructor({ readAhead = 8, producerBackpressure = true } = {}) {
     this.#readAhead = Math.max(1, Math.floor(Number(readAhead) || 8));
+    // Durable source producers may finish the already-registered path/hash
+    // receipts independently. Layer rows stay in the ledger; the consumer's
+    // document window still bounds merged symbols and embedding payloads.
+    this.#producerBackpressure = producerBackpressure !== false;
     let resolveDone;
     let rejectDone;
     this.#done = new Promise((resolve, reject) => {
@@ -106,6 +111,7 @@ export class OrderedDocumentIntake {
    * @param {string} repoRelPath
    */
   async waitForReadAhead(repoRelPath) {
+    if (!this.#producerBackpressure) return;
     const record = this.#byPath.get(String(repoRelPath || ""));
     if (!record || record.ordinal < this.#processed + this.#readAhead || this.#closed) return;
     await new Promise((resolve) => this.#windowWaiters.push(() => resolve()));
@@ -122,12 +128,18 @@ export class OrderedDocumentIntake {
     const contentHash = String(source?.content_hash || "");
     if (!contentHash) throw new Error(`tree-sitter completion for '${record.repo_rel_path}' is missing content_hash`);
     record.treeSitter = documentSource(record.repo_rel_path, contentHash);
+    // SCIP may finish before this source receipt arrives. Apply the same
+    // mismatch exclusion as finishScip instead of treating completion as a
+    // matching layer and pairing old SCIP rows with new source.
+    if (this.#scipFinished && record.scipByHash.size > 0 && !record.scipByHash.has(contentHash)) {
+      record.skipped = true;
+    }
     const wasHead = record.ordinal === this.#cursor;
     this.#pump();
     // Only the ordered head applies producer backpressure. Awaiting a later
     // record behind an unfinished earlier SCIP document can deadlock the SCIP
     // phase that is needed to close that gap.
-    if (wasHead && this.#recordReady(record)) await record.delivered.promise;
+    if (this.#producerBackpressure && wasHead && this.#recordReady(record)) await record.delivered.promise;
   }
 
   /**
@@ -152,7 +164,7 @@ export class OrderedDocumentIntake {
     record.scipByHash.set(contentHash, documentSource(repoRelPath, contentHash));
     const wasHead = record.ordinal === this.#cursor;
     this.#pump();
-    if (wasHead && this.#recordReady(record)) await record.delivered.promise;
+    if (this.#producerBackpressure && wasHead && this.#recordReady(record)) await record.delivered.promise;
   }
 
   /**
