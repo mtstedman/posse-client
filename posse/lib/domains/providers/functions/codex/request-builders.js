@@ -20,6 +20,7 @@ const INTENTIONALLY_TOOLLESS_ROLES = new Set(["preflight", "delegator"]);
 // operator policy. Keep that issued surface direct by default: a tool belongs
 // here only when it is intentionally safe to require tool_search before use.
 const CODEX_LAZY_TOOL_NAMES = new Set([
+  "custom_tools",
   "project_db_query",
 ]);
 

@@ -107,6 +107,20 @@ if (process.argv.includes("--bossy")) {
   process.exit(await launchBossy());
 }
 
+// The machine automation owner has its own private database and lifecycle. It
+// must be callable without opening a repository queue so Bossy and service
+// managers can use the same operator protocol from any working directory.
+if (process.argv[2] === "automation") {
+  const { runAutomationCli } = await import("./lib/domains/automation/functions/automation-cli.js");
+  try {
+    await runAutomationCli();
+    process.exit(0);
+  } catch (error) {
+    process.stderr.write(`${error?.code || "automation_error"}: ${error?.message || error}\n`);
+    process.exit(1);
+  }
+}
+
 // Doctor and update may have to replace Posse's own native Node dependencies.
 // Handle them before the main application imports/opens better-sqlite3; Windows
 // will not unlink a loaded .node module from the live process.

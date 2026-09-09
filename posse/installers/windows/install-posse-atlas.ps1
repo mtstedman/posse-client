@@ -398,7 +398,7 @@ function Step-ScipLanguages {
 }
 
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "shell", "seed", "admin", "keys", "native", "doctor", "validate", "smoke")
+$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "automation", "shell", "seed", "admin", "keys", "native", "doctor", "validate", "smoke")
 $script:StepTitles = @{
   languages = "SCIP language selection"
   preflight = "Preflight checks"
@@ -407,6 +407,7 @@ $script:StepTitles = @{
   checkout = "Posse checkout"
   composer = "Composer (SCIP PHP)"
   npm      = "npm dependencies"
+  automation = "Automation owner startup"
   shell    = "Shell wiring"
   seed     = "Account settings"
   doctor   = "Runtime doctor (Python + SCIP + Jina)"
@@ -1325,6 +1326,25 @@ function Complete-NodeInstall {
   finally { $env:POSSE_MAINTENANCE_ADOPT_NODE = $previousAdopt }
 }
 
+function Step-Automation {
+  Step-Begin "automation"
+  if ($script:CriticalFailed) { Step-End "blocked"; return }
+  if ($DryRun) {
+    Step-End "dry-run" "would install the per-user Posse automation scheduled task"
+    return
+  }
+  $rc = Invoke-Logged -Description "install supervised automation owner" -WorkingDirectory $script:PosseDirResolved -Command @(
+    $script:NodeBin, "orchestrator.js", "automation", "service", "install"
+  )
+  if ($rc -eq 0) {
+    Step-End "ok" "automation owner enabled for login/reboot startup"
+  }
+  else {
+    Write-Warn2 "could not enable the automation owner; run 'posse automation service install' after installation"
+    Step-End "partial" "automation starts on first use but scheduled work needs the user service"
+  }
+}
+
 function Step-ShellWiring {
   Step-Begin "shell"
   $envDir = Join-Path $env:USERPROFILE ".config\posse"
@@ -2039,6 +2059,7 @@ try {
     Invoke-InstallerStep "checkout" { Step-Checkout } -Critical
     Invoke-InstallerStep "composer" { Step-Composer }
     Invoke-InstallerStep "npm" { Step-Npm } -Critical
+    Invoke-InstallerStep "automation" { Step-Automation }
     Invoke-InstallerStep "shell" { Step-ShellWiring } -Critical
     if ($SetupOnly) {
       foreach ($key in @("seed", "admin", "keys", "native", "doctor", "validate", "smoke")) {

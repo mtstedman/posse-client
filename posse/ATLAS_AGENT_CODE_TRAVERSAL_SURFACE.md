@@ -31,31 +31,31 @@ agent call. Prefetch support does not remove its callable definition.
 
 ### `artificer`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
 
 Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 ### `assessor`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -382,6 +382,32 @@ Citation storage. Store inline text, a materialized ref slice, or a batch of chu
 | `owner_scope` | `string` | Optional | values "work_item", "job" | Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item. |
 | `source_ref` | `string` | Conditional | max length 512 | Existing materialized ref alias such as #a3f9 for a server-side slice. Combine with lines or offset and limit. |
 | `text` | `string` | Conditional | min length 1; max length 60000 | Inline authored or assembled content to store, up to 60000 characters. Existing stored material can be selected with source_ref. |
+
+### `tools.custom_tools`
+
+Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `custom_tools` |
+| Tool reference token | `tools.custom_tools` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `read` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Lazyload > Custom Tools: search approved Bossy skills and connector tools, describe one contract, invoke it, or inspect/cancel your run. Repository, role and permissions come from the gate.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `grant_id` | `string` | Optional | max length 120 |  |
+| `idempotency_key` | `string` | Optional | max length 120 |  |
+| `input` | `object` | Optional |  |  |
+| `operation` | `string` | Required | values "search", "describe", "invoke", "status", "cancel" |  |
+| `query` | `string` | Optional | max length 200 |  |
+| `run_id` | `string` | Optional | max length 120 |  |
+| `tool` | `string` | Optional | max length 240 |  |
 
 ### `tools.dispatch_agent`
 

@@ -57,6 +57,11 @@ subprocesses can find Node/npm when launched without `.bashrc`.
 Credentials load directly from `~/.config/posse/.env`; shell profile sourcing
 is not required to load the key.
 
+The installer also enables the per-user automation owner through systemd when
+a user manager is available. Check it with `posse automation service status`.
+On hosts without a user manager, ordinary Custom Tools start on demand; enable
+a service before relying on unattended schedules.
+
 ## Containers and unattended installs
 
 Use a glibc image such as `debian:bookworm-slim`. Alpine is unsupported. You

@@ -588,6 +588,9 @@ export function narrowBootConfigToRemoteSurface(bootConfig = {}, remoteSurface =
   if (projectDbCapability === "none") {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "project_db_query");
   }
+  if (bootConfig.customTools !== true) {
+    toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "custom_tools");
+  }
   const imageIssued = toolAllowlist.tools.includes("generate_image")
     && issued.webAccess.image_generation_eligible;
   return {
@@ -601,6 +604,7 @@ export function narrowBootConfigToRemoteSurface(bootConfig = {}, remoteSurface =
     allowImageGeneration: bootConfig.allowImageGeneration === true && imageIssued,
     atlasAvailable: bootConfig.atlasAvailable === true && toolAllowlist.atlas.length > 0,
     allowTests: bootConfig.allowTests === true && issued.toolPolicy.allow_tests,
+    customTools: bootConfig.customTools === true && toolAllowlist.tools.includes("custom_tools"),
     issuedToolPolicy: { ...issued.toolPolicy },
     issuedWebAccess: { ...issued.webAccess },
     toolAllowlist,

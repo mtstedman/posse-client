@@ -75,6 +75,10 @@ posse add "Describe a small first task"
 posse go
 ```
 
+The installer creates a per-user Scheduled Task for the automation owner, so
+approved schedules resume after sign-in. Check it with
+`posse automation service status`.
+
 If PATH has not refreshed, invoke
 `& "$env:USERPROFILE\.local\bin\posse.cmd" help` directly.
 

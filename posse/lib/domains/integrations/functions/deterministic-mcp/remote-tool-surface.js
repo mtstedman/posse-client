@@ -180,6 +180,8 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
         tests: bootConfig.allowTests === true,
         image_generation: bootConfig.allowImageGeneration === true,
         project_db: bootConfig.projectDbCapability || (bootConfig.projectDbWrite === true ? "write" : "none"),
+        custom_tools_v1: bootConfig.customTools === true,
+        custom_tools_available: bootConfig.customTools === true,
       },
       atlas: atlasCapabilities,
       coordination: {

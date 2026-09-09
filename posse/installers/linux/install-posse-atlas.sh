@@ -465,7 +465,7 @@ format_command() {
 # --- step engine ---------------------------------------------------------------
 # Steps are declared up-front so numbering and the summary are stable no matter
 # where the run stops. Each step records ok/skipped/partial/failed/blocked.
-STEP_KEYS=(languages preflight packages node checkout composer npm shell seed admin keys native doctor validate smoke)
+STEP_KEYS=(languages preflight packages node checkout composer npm automation shell seed admin keys native doctor validate smoke)
 declare -A STEP_TITLES=(
   [languages]="SCIP language selection"
   [preflight]="Preflight checks"
@@ -474,6 +474,7 @@ declare -A STEP_TITLES=(
   [checkout]="Posse checkout"
   [composer]="Composer (SCIP PHP)"
   [npm]="npm dependencies"
+  [automation]="Automation owner startup"
   [shell]="Shell wiring"
   [seed]="Account settings"
   [doctor]="Runtime doctor (Python + SCIP + Jina)"
@@ -1270,6 +1271,26 @@ finish_node_install() {
   return 1
 }
 
+step_automation() {
+  step_begin automation
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    step_end dry-run "would install the per-user Posse automation service"
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+    step_end skipped "no active systemd user manager; automation still starts on first use"
+    return 0
+  fi
+  if run_logged_in_dir "$POSSE_DIR" "install supervised automation owner" \
+    "$NODE_BIN" orchestrator.js automation service install; then
+    step_end ok "automation owner enabled for login/reboot startup"
+    return 0
+  fi
+  warn "could not enable the automation owner; run 'posse automation service install' after installation"
+  step_end partial "automation starts on first use but scheduled work needs the user service"
+}
+
 step_shell_wiring() {
   step_begin shell
   ENV_DIR="${HOME}/.config/posse"
@@ -1771,6 +1792,7 @@ run_installer_step node true step_node
 run_installer_step checkout true step_checkout
 run_installer_step composer false step_composer
 run_installer_step npm true step_npm
+run_installer_step automation false step_automation
 run_installer_step shell true step_shell_wiring
 run_installer_step seed false step_seed_settings
 run_installer_step admin false step_admin_init

@@ -14,6 +14,7 @@
     "run": "node orchestrator.js run",
     "status": "node orchestrator.js status",
     "health": "node orchestrator.js health",
+    "automation": "node orchestrator.js automation",
     "dashboard": "node orchestrator.js dashboard",
     "update": "node orchestrator.js update",
     "review": "node orchestrator.js review",

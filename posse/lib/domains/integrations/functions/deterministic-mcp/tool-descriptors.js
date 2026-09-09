@@ -4,6 +4,7 @@ import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
 import { atlasBackendLabel } from "../atlas-label.js";
 import { atlasDescriptorSchemaForAction } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../../catalog/registered-tests.js";
+import { TOOL_CUSTOM_TOOLS } from "../../../../catalog/custom-tools.js";
 import { TOOL_ATTACHMENT_BY_PROVIDER } from "../../../../catalog/tool-surface/provider-attachments.js";
 import {
   getToolBatchingClass,
@@ -245,6 +246,12 @@ function cloneJson(value) {
 // observations, lazy Atlas discovery, and inventories all project from this
 // catalog; do not add parallel schema or summary dictionaries.
 export const TOOL_CATALOG = {
+  custom_tools: {
+    schema: TOOL_CUSTOM_TOOLS,
+    access: "read",
+    summary: "Search, describe, invoke, inspect, or cancel an explicitly granted Custom Tools entry.",
+    observation: { type: "tool.custom_tools", label: "CustomTools", format: "generic", targetKeys: ["operation", "tool", "run_id"] },
+  },
   agent_handoff: {
     schema: TOOL_AGENT_HANDOFF,
     access: "coordination",
@@ -705,6 +712,7 @@ export const TOOL_OBSERVATION_ALIASES = Object.freeze({
 });
 
 function roleAllowlistForTool(toolName) {
+  if (toolName === "custom_tools") return new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
   if (toolName === "sub_agent_next_input") return new Set(["subagent"]);
   if (toolName === "web_research_handoff") return new Set(["researcher"]);
   if (toolName === "dispatch_agent") return new Set(["researcher", "planner"]);
@@ -880,11 +888,13 @@ export function getDeterministicMcpToolNames(role, {
   dispatchAgent = false,
   webResearchHandoff = false,
   atlasAvailable = false,
+  customTools = false,
 } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   if (!roleUsesDeterministicReadMcp(role)) return [];
   if (role === "preflight" || role === "delegator") return [];
   const tools = [...DETERMINISTIC_READ_TOOLS];
+  if (customTools) tools.unshift("custom_tools");
   if (roleUsesDeterministicWriteMcp(role)) {
     tools.push(...DETERMINISTIC_WRITE_TOOLS.filter((name) => (
       (role !== "dev" || name !== "write_file")

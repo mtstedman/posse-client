@@ -21,6 +21,7 @@ import { ToolRegistry } from "../classes/ToolRegistry.js";
 import { assertMutationRoleSafety } from "./tool-parity.js";
 
 const TOOLS_SUITE = [
+  { name: "custom_tools", mutatesWorktree: false, advertise: ["mcp"] },
   // Shared by both runtimes (function + mcp transports).
   { name: "agent_handoff", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "sub_agent", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },

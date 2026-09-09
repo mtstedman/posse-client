@@ -48,6 +48,7 @@ import {
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../catalog/native-tools.js";
+import { TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
@@ -78,6 +79,7 @@ import {
 } from "../../web-research/classes/WebResearchRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
+import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
 import { createChainLedger } from "../../../shared/tools/functions/chain-ledger.js";
@@ -1343,6 +1345,7 @@ const TEST_TOOL_NAMES = new Set([
 ]);
 
 const ALL_NATIVE_TOOL_NAMES = Object.freeze([
+  "custom_tools",
   "sub_agent",
   "sub_agent_next_input",
   "agent_handoff",
@@ -1408,6 +1411,7 @@ function legacyToolNamesForUnscopedRole() {
 }
 
 function runtimeToolAvailable(toolName) {
+  if (toolName === "custom_tools") return ownerHotGateway || bootConfig.customTools === true;
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
   if (TEST_TOOL_NAMES.has(toolName)) {
     const legacyRoleAllowsTests = bootConfig?.mcpOAuth?.verified !== true
@@ -1520,6 +1524,7 @@ addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_GET_BRIEF);
 addToolSchema(TOOL_PROJECT_DB_QUERY);
+addToolSchema(TOOL_CUSTOM_TOOLS);
 if (writeEnabled) {
   for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
     addToolSchema(schema);
@@ -2556,11 +2561,29 @@ function executeWebResearchHandoffTool(args = {}) {
   return JSON.stringify(submitWebResearchHandoff(mcpAgentCallId, args));
 }
 
+async function executeCustomToolsTool(args = {}) {
+  const token = String(
+    bootConfig.mcpOAuthToken
+    || bootConfig.mcpOauthToken
+    || bootConfig.mcpAuth?.accessToken
+    || bootConfig.mcpAuth?.token
+    || "",
+  ).trim();
+  if (!token) {
+    throw Object.assign(new Error("Custom Tools requires a bound MCP agent token"), {
+      code: "custom_tools_auth_required",
+    });
+  }
+  const result = await new AutomationOwnerClient({ token, timeoutMs: 10_000 }).request("tool", args);
+  return JSON.stringify(result);
+}
+
 // Attach this server's executors to a ToolRegistry seeded with the shared suite
 // metadata, so the MCP runtime's handler set flows through the same registry the
 // embedded OpenAI/Grok runtime builds from. Executors and role gating are
 // unchanged; the registry is the single declaration both runtimes share.
 let mcpToolRegistry = declareToolSuites(new ToolRegistry());
+mcpToolRegistry.attach("custom_tools", (args) => executeCustomToolsTool(args || {}));
 mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
 mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
 mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
@@ -2747,6 +2770,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
   addToolSchema(TOOL_GET_BRIEF);
   addToolSchema(TOOL_PROJECT_DB_QUERY);
+  addToolSchema(TOOL_CUSTOM_TOOLS);
   if (writeEnabled) {
     for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
       addToolSchema(schema);
@@ -2773,6 +2797,7 @@ function rebuildNativeToolSchemas() {
 
 function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
+  mcpToolRegistry.attach("custom_tools", (args) => executeCustomToolsTool(args || {}));
   mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
   mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
   mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));

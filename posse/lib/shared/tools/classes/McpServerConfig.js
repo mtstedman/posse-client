@@ -28,6 +28,8 @@ import {
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integrations/functions/deterministic-mcp/remote-tool-surface.js";
+import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
+import { repositoryID } from "../../../domains/automation/functions/paths.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import {
   issuedToolNamesForSuite,
@@ -346,6 +348,7 @@ function expectedMcpToolNames(role, bootPayload = {}) {
       dispatchAgent: bootPayload.dispatchAgent === true,
       webResearchHandoff: bootPayload.webResearchHandoff === true,
       atlasAvailable: bootPayload.atlasAvailable === true,
+      customTools: bootPayload.customTools === true,
     });
   } catch {
     return [];
@@ -645,6 +648,7 @@ function buildDeterministicMcpBootPayload(role, {
   dispatchAgent = false,
   webResearchHandoff = false,
   coordinationChild = false,
+  customTools = false,
 } = {}) {
   const resolvedProjectRoot = path.resolve(projectRoot || cwd || process.cwd());
   const resolvedAtlasConfig = atlasConfig || getAtlasIntegrationConfig();
@@ -659,6 +663,7 @@ function buildDeterministicMcpBootPayload(role, {
     dispatchAgent: dispatchAgent === true,
     webResearchHandoff: webResearchHandoff === true,
     atlasAvailable: atlasEnabled,
+    customTools,
   });
   const allowShell = expectedTools.includes("bash");
   const requestedProjectDbCapability = normalizeProjectDbCapability(
@@ -698,6 +703,7 @@ function buildDeterministicMcpBootPayload(role, {
       dispatchAgent: dispatchAgent === true,
       webResearchHandoff: webResearchHandoff === true,
       coordinationChild: coordinationChild === true,
+      customTools: customTools === true,
       role,
       providerName: providerName || null,
       disableSystemTools,
@@ -1067,20 +1073,26 @@ export class McpServerConfig {
     }
     const agentId = String(opts.agentId || opts.key || crypto.randomUUID());
     const agentRuntimeCwd = path.resolve(opts.agentRuntimeCwd || opts.projectDir || process.cwd());
+    const customTools = await new AutomationOwnerClient({ timeoutMs: 250 }).hasAvailableTools({
+      scope: "repository", repo_id: repositoryID(agentRuntimeCwd), role,
+    });
     const { bootPayload, resolvedAtlasConfig } = buildDeterministicMcpBootPayload(role, {
       ...opts,
       agentId,
       scopeBindingMode: "dispatcher",
       projectRoot: agentRuntimeCwd,
+      customTools,
     });
     let remoteResolution = null;
     let remoteResolutionError = null;
     try {
+      const suppliedPolicy = normalizeRemoteIssuedPolicy(opts.remoteToolSurface, {
+        expectedRole: role,
+        expectedProvider: opts.providerName || null,
+      });
       const suppliedSurfaceMatchesAgent = isRegisteredRemoteToolSurface(opts.remoteToolSurface)
-        && normalizeRemoteIssuedPolicy(opts.remoteToolSurface, {
-          expectedRole: role,
-          expectedProvider: opts.providerName || null,
-        }).valid;
+        && suppliedPolicy.valid
+        && (customTools || !suppliedPolicy.toolAllowlist.tools.includes("custom_tools"));
       remoteResolution = opts.coordinationChild === true || suppliedSurfaceMatchesAgent
         ? {
             surface: opts.remoteToolSurface,
@@ -1314,6 +1326,7 @@ export class McpServerConfig {
     }
     const { bootPayload, resolvedAtlasConfig, allowImageGeneration } = buildDeterministicMcpBootPayload(role, {
       ...opts,
+      customTools: opts.mcpGate?.contractBootConfig?.customTools === true,
       // The immutable Agent gate is the authority for this capability. Keep
       // provider-side projection and telemetry aligned with the signed role
       // contract instead of requiring every adapter to copy this flag.
