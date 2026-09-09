@@ -24,8 +24,10 @@ import Database from "better-sqlite3";
 import { View } from "./View.js";
 import { VIEW_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
-import { resolveEdges } from "../../functions/v2/resolver/index.js";
 import { ATLAS_RESOLVER_VERSION } from "../../functions/v2/resolver/version.js";
+import { runAtlasNativeMethodAsync } from "../../functions/v2/native/invoke.js";
+import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
+import { ATLAS_NATIVE_RESOLVE_EDGES_METHOD } from "../../../../catalog/binary.js";
 import { graphDerivedInputSignature, refreshGraphDerivedState } from "../../functions/v2/graph-derived.js";
 import { refreshTreeDerivedState, treeDerivedInputSignature } from "../../functions/v2/tree-derived.js";
 import {
@@ -170,7 +172,7 @@ export class ViewBuilder {
       // so each phase wraps its own work; populateSymbolsAndEdges chunks
       // internally (its own per-batch transactions).
       db.transaction(() => populatePathToBlob(db, pathToBlob))();
-      populateSymbolsAndEdges(db, ledger._unsafeDb(), pathToBlob, options.layerMerge === true, {
+      await populateSymbolsAndEdges(db, ledger._unsafeDb(), pathToBlob, options.layerMerge === true, {
         onProgress: emitPhase,
       });
       db.transaction(() => refreshGraphDerivedStateIfChanged(db, { force: true }))();
@@ -330,12 +332,13 @@ export class ViewBuilder {
     // blob in the ledger), ledger_seq must NOT advance past it — otherwise
     // queries would see stale symbols at the new claimed seq.
     let lastAppliedSeq = current.ledger_seq;
-    // Entries + resolver commit in one transaction; the tree refreshes await
-    // the native worker so they run after that commit (each in its own
-    // savepoint), and writeMeta commits strictly last. A crash between the
-    // commits leaves the view's meta at the OLD ledger_seq, so the next
+    // Entries commit in one transaction; the resolver and tree refreshes
+    // await the native worker so they run after that commit (each guarding
+    // its own writes), and writeMeta commits strictly last. A crash between
+    // the commits leaves the view's meta at the OLD ledger_seq, so the next
     // incremental re-applies the same entries — applyEntry is idempotent
-    // (delete-then-repopulate per path).
+    // (delete-then-repopulate per path) and the resolver pass only binds
+    // edges that are still unresolved.
     db.transaction(() => {
       const ledgerDb = ledger._unsafeDb();
       let applied = 0;
@@ -351,14 +354,14 @@ export class ViewBuilder {
           emitPhase("entries", applied, entries.length);
         }
       }
-      // New symbols may now satisfy references that were previously
-      // unresolved (e.g. a fresh class makes earlier `new Foo()` edges
-      // bindable). Re-run the resolver over current state.
-      const pathToBlob = readPathToBlobMap(db);
-      emitPhase("resolve", 0, 1);
-      runResolverPass(db, pathToBlob);
-      refreshGraphDerivedStateIfChanged(db);
     })();
+    // New symbols may now satisfy references that were previously
+    // unresolved (e.g. a fresh class makes earlier `new Foo()` edges
+    // bindable). Re-run the resolver over current state.
+    const pathToBlob = readPathToBlobMap(db);
+    emitPhase("resolve", 0, 1);
+    await runResolverPass(db, pathToBlob);
+    db.transaction(() => refreshGraphDerivedStateIfChanged(db))();
     emitPhase({ phase: "tree", current: 0, total: 2, detail: "building tree" });
     const treeDerived = await refreshTreeDerivedStateIfChanged(db);
     emitPhase({ phase: "tree", current: 1, total: 2, detail: "compressing seeds" });
@@ -581,7 +584,7 @@ const VIEW_BUILD_CHUNK = 64;
  * @param {boolean} useLayerMerge
  * @param {{ onProgress?: ((e: { phase: string, current: number, total: number }) => void) | null }} [opts]
  */
-function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = false, opts = {}) {
+async function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = false, opts = {}) {
   const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
   const emit = (phase, current, total) => {
     if (!onProgress) return;
@@ -726,7 +729,7 @@ function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMerge = f
   // their target IDs. runResolverPass wraps its own transaction, so call it
   // directly — do NOT wrap it here (better-sqlite3 can't nest transactions).
   emit("resolve", 0, 1);
-  runResolverPass(viewDb, pathToBlob);
+  await runResolverPass(viewDb, pathToBlob);
   emit("resolve", 1, 1);
 }
 
@@ -1492,9 +1495,9 @@ function readPathToBlobMap(viewDb) {
 
 /**
  * Resolver pass — runs after edge materialization. Reads every
- * unresolved edge (to_global_id IS NULL), resolves via
- * `resolveEdges()`, and writes back the resulting to_global_id +
- * confidence updates inside a single transaction.
+ * unresolved edge (to_global_id IS NULL), resolves through the native
+ * resolver, and writes back the resulting to_global_id + confidence updates inside a
+ * single transaction.
  *
  * Idempotent: re-running on a view that's already been resolved is a
  * no-op (no unresolved edges remain to bind).
@@ -1502,7 +1505,7 @@ function readPathToBlobMap(viewDb) {
  * @param {import("better-sqlite3").Database} viewDb
  * @param {Map<string, string>} pathToBlob
  */
-function runResolverPass(viewDb, pathToBlob) {
+async function runResolverPass(viewDb, pathToBlob) {
   // Pull every symbol — feeds the global name index.
   const allSymbols = /** @type {any[]} */ (
     viewDb.prepare(
@@ -1510,14 +1513,15 @@ function runResolverPass(viewDb, pathToBlob) {
     ).all()
   );
 
-  // Pull import edges (they carry to_module). The resolver builds the
-  // per-file ImportContext from these.
+  // Pull every import edge. The resolver builds the per-file ImportContext
+  // from those with a module; module-less bindings (PHP `use` without a
+  // composer map, bare Rust paths) still name an owner it treats as evidence.
   const importEdges = /** @type {any[]} */ (
     viewDb.prepare(
       `SELECT e.repo_rel_path, e.to_name, e.to_module, e.kind, e.confidence, s.lang
        FROM edges e
        JOIN symbols s ON s.global_id = e.from_global_id
-       WHERE e.kind = 'imports' AND e.to_module IS NOT NULL`,
+       WHERE e.kind = 'imports'`,
     ).all()
   );
 
@@ -1543,7 +1547,7 @@ function runResolverPass(viewDb, pathToBlob) {
   );
   if (unresolvedRows.length === 0) return;
 
-  const resolutions = resolveEdges({
+  const resolutions = await resolveEdgesForView({
     allSymbols,
     importEdges,
     pathToBlob,
@@ -1565,4 +1569,33 @@ function runResolverPass(viewDb, pathToBlob) {
     }
   });
   txn();
+}
+
+/**
+ * Resolve edges in the native Atlas resolver. Resolution is native-only:
+ * the same binary already owns parsing, so an unusable binary fails the
+ * build instead of degrading to a second implementation. Native results
+ * arrive camelCase; the write-back reads snake_case rows.
+ *
+ * @param {{ allSymbols: any[], importEdges: any[], pathToBlob: Map<string, string>, unresolved: any[] }} input
+ * @returns {Promise<Array<{ edge_rowid: number, to_global_id: number | null, confidence: number }>>}
+ */
+async function resolveEdgesForView(input) {
+  if (!nativeBinaries.shouldUse("atlas")) {
+    throw new Error("ATLAS native resolver unavailable: the Atlas binary is required to build views");
+  }
+  const result = await runAtlasNativeMethodAsync(ATLAS_NATIVE_RESOLVE_EDGES_METHOD, {
+    allSymbols: input.allSymbols,
+    importEdges: input.importEdges,
+    pathToBlob: Object.fromEntries(input.pathToBlob),
+    unresolved: input.unresolved,
+  });
+  if (!Array.isArray(result)) {
+    throw new Error("ATLAS native resolve-edges returned a non-array result");
+  }
+  return result.map((r) => ({
+    edge_rowid: Number(r.edgeRowid ?? r.edge_rowid),
+    to_global_id: r.toGlobalId ?? r.to_global_id ?? null,
+    confidence: Number(r.confidence ?? 0),
+  }));
 }

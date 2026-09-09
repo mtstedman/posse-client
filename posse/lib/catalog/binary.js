@@ -26,6 +26,9 @@ export const NATIVE_UPDATE_PROTOCOL = "posse.native_update.v1";
 export const ATLAS_NATIVE_PROTOCOL = "posse.atlas.native.v1";
 export const ATLAS_EXECUTE_TOOL_CONTRACT_VERSION = 1;
 export const ATLAS_NATIVE_PARSE_BUFFER_METHOD = "parser.parseBuffer";
+// Edge resolution runs in the native resolver; the JS resolver is only a
+// fallback for hosts where the Atlas binary is unusable.
+export const ATLAS_NATIVE_RESOLVE_EDGES_METHOD = "resolve-edges";
 export const ATLAS_VECTOR_NATIVE_PROTOCOL = "posse.atlas.vector.native.v1";
 export const ATLAS_VECTOR_NATIVE_ROUTE = "atlas:vector";
 export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";

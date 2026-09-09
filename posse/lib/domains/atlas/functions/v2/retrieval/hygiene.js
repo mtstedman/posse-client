@@ -29,11 +29,27 @@ export function isLiteralSymbolName(name) {
  * @param {ViewSymbol} symbol
  * @returns {boolean}
  */
+/**
+ * The parser's synthetic per-file module anchor (`module <stem>`). It spans
+ * the whole file, so its body identifiers match almost any query, and its
+ * name collides with the declaration the file is named after. Hidden from
+ * discovery unless the query names it exactly; still a valid edge owner.
+ *
+ * @param {ViewSymbol | { name?: string, kind?: string, qualified_name?: string | null, signature_text?: string | null }} symbol
+ * @returns {boolean}
+ */
+export function isModuleAnchor(symbol) {
+  if (!symbol || symbol.kind !== "module" || symbol.qualified_name) return false;
+  const name = String(symbol.name || "").trim();
+  return !!name && String(symbol.signature_text || "") === `module ${name}`;
+}
+
 export function isNoisyLocalSymbol(symbol) {
   const name = String(symbol?.name || "").trim();
   if (!name) return true;
   if (LOCAL_NAME_RE.test(name)) return true;
   if (ANONYMOUS_CALLBACK_RE.test(name)) return true;
+  if (isModuleAnchor(symbol)) return true;
   if (isLiteralSymbolName(name)) return true;
   return symbol.lang === "ts" && symbol.kind === "var" && TEMP_PROP_RE.test(name);
 }
@@ -60,7 +76,7 @@ export function isDefaultVisibleSymbol(symbol) {
 export function isExplicitLiteralSymbolQuery(query, symbol) {
   const q = normalizeLiteralName(String(query || ""));
   const name = normalizeLiteralName(String(symbol?.name || ""));
-  return q.length > 0 && q === name && isLiteralSymbolName(String(symbol?.name || ""));
+  return q.length > 0 && q === name && (isLiteralSymbolName(String(symbol?.name || "")) || isModuleAnchor(symbol));
 }
 
 /**
