@@ -14,7 +14,7 @@
 //
 //   3. HEURISTIC — global simple-name match: if exactly one symbol in
 //      the entire view bears this name, bind to it. Multiple matches
-//      → bind to first with ambiguity penalty applied.
+//      → remain unresolved unless exactly one is in the calling file.
 //
 //   4. UNRESOLVED — otherwise leave `to_global_id = NULL`. Confidence
 //      drops to ~0.2.
@@ -28,6 +28,7 @@ import { calibrateResolutionConfidence, toEdgeConfidence } from "./confidence.js
 import { buildFileContexts } from "./call-context.js";
 import { adapterFor } from "./adapters/registry.js";
 import { isBuiltinCall } from "./builtins.js";
+import { buildCallScopeCheck } from "./call-scope.js";
 
 /** @typedef {import("./name-index.js").NameCandidate} NameCandidate */
 /** @typedef {import("./name-index.js").NameIndexes} NameIndexes */
@@ -85,6 +86,8 @@ export function resolveEdges(args) {
   // importEdges twice (once for name index, once for per-file contexts).
   const symbols = Array.from(args.allSymbols);
   const imports = Array.from(args.importEdges);
+  const callIsVisible = buildCallScopeCheck(symbols);
+  const symbolsById = new Map(symbols.map(symbol => [symbol.global_id, symbol]));
   const nameIdx = buildNameIndexes(symbols);
   const importCtxs = buildImportContexts(imports);
   const fileCtxs = buildFileContexts({
@@ -101,6 +104,8 @@ export function resolveEdges(args) {
       importCtxs,
       pathToBlob: args.pathToBlob,
       fileCtxs,
+      callIsVisible,
+      symbolsById,
     }));
   }
   return out;
@@ -109,6 +114,8 @@ export function resolveEdges(args) {
 /**
  * @param {EdgeToResolve} edge
  * @param {{
+ *   callIsVisible: (target: NameCandidate, edge: EdgeToResolve) => boolean,
+ *   symbolsById: Map<number, NameCandidate>,
  *   nameIdx: NameIndexes,
  *   importCtxs: Map<string, FileImportContext>,
  *   pathToBlob: Map<string, string>,
@@ -140,17 +147,24 @@ function resolveOne(edge, ctx) {
           namespaceImports: fileCtx.namespaceImports,
           nameToSymbolIds: fileCtx.nameToSymbolIds,
         });
-        if (decision) return finalizeAdapterDecision(edge, decision);
+        if (decision) {
+          const target = decision.symbolId == null ? null : ctx.symbolsById.get(decision.symbolId);
+          if (target && !ctx.callIsVisible(target, edge)) return unresolved(edge);
+          return finalizeAdapterDecision(edge, decision);
+        }
       }
     }
   }
 
   // 1. Qualified-name shortcut. The parser sometimes emits `to_name`
   // in qualified form ("Greeter::hello", "Box.greet"). If we get a
-  // single qualified-name hit, that's the strongest possible bind.
+  // single qualified-name hit, still require a visible type/namespace owner.
+  // Text such as `reply.send` alone does not establish object identity.
   for (const name of lookup.qualifiedNames) {
     if (name.includes(".") || name.includes("::")) {
-      const hits = lookupByQualifiedName(ctx.nameIdx, name);
+      const hits = lookupByQualifiedName(ctx.nameIdx, name).filter((target) =>
+        ctx.callIsVisible(target, edge)
+          && (edge.kind !== "calls" || qualifiedCallHasOwner(target, ctx.fileCtxs.get(edge.repo_rel_path))));
       if (hits.length === 1) {
         return finalize(edge, hits[0], "name-resolved", 1);
       }
@@ -159,6 +173,11 @@ function resolveOne(edge, ctx) {
       }
     }
   }
+
+  // A receiver the adapter/owner lookup could not bind must stay unresolved.
+  // Matching its final member name globally fabricates callers of unrelated
+  // functions, including same-file overrides of a different local object.
+  if (edge.kind === "calls" && /\.|::|->/.test(edge.to_name)) return unresolved(edge);
 
   // 2. Import-aware exact: if this file imports `to_name` from
   // a known module that resolves to a file in path_to_blob, find
@@ -175,7 +194,7 @@ function resolveOne(edge, ctx) {
         );
         if (targetPath) {
           const candidates = lookupByName(ctx.nameIdx, binding.originalName)
-            .filter((c) => c.repo_rel_path === targetPath);
+            .filter((c) => c.repo_rel_path === targetPath && ctx.callIsVisible(c, edge));
           if (candidates.length >= 1) {
             return finalize(edge, candidates[0], "import-direct", candidates.length);
           }
@@ -185,7 +204,9 @@ function resolveOne(edge, ctx) {
   }
 
   // 3. Heuristic global name match.
-  const candidates = firstCandidateSet(ctx.nameIdx, lookup.simpleNames);
+  const candidates = firstCandidateSet(ctx.nameIdx, lookup.simpleNames)
+    .filter((candidate) => (edge.kind !== "calls" || candidate.kind !== "method")
+      && ctx.callIsVisible(candidate, edge));
   if (candidates.length === 0) {
     if (lookup.builtinNames.some((name) => isBuiltinCall(name))) {
       return finalizeAdapterDecision(edge, {
@@ -200,12 +221,27 @@ function resolveOne(edge, ctx) {
   }
   // Prefer same-file candidate when one exists — fewer false positives
   // for common names like "hello" or "init".
-  const sameFile = candidates.find((c) => c.repo_rel_path === edge.repo_rel_path);
-  if (sameFile) {
-    return finalize(edge, sameFile, "name-resolved", candidates.length);
+  const sameFile = candidates.filter((c) => c.repo_rel_path === edge.repo_rel_path);
+  if (sameFile.length === 1 || (sameFile.length > 0 && edge.kind !== "calls")) {
+    return finalize(edge, sameFile[0], "name-resolved", candidates.length);
   }
-  // Take the first cross-file candidate; ambiguity penalty kicks in.
+  if (edge.kind === "calls" && (sameFile.length > 1 || candidates.length > 1)) return unresolved(edge);
+  // A unique remaining global candidate is still only a heuristic.
   return finalize(edge, candidates[0], "heuristic", candidates.length);
+}
+
+/**
+ * @param {NameCandidate} target
+ * @param {import("./call-context.js").PerFileContext | undefined} ctx
+ */
+function qualifiedCallHasOwner(target, ctx) {
+  const qualified = target.qualified_name || "";
+  const split = Math.max(qualified.lastIndexOf("."), qualified.lastIndexOf("::"));
+  if (!ctx || split < 1) return false;
+  const owner = qualified.slice(0, split);
+  const visible = ctx.nameToSymbolIds.get(owner) || ctx.importedNameToSymbolIds.get(owner);
+  return visible?.length === 1 && visible[0].repo_rel_path === target.repo_rel_path
+    && ["class", "struct", "enum", "namespace", "module"].includes(visible[0].kind);
 }
 
 /**

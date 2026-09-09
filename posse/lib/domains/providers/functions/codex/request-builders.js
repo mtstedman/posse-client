@@ -2,15 +2,17 @@
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
-import { CODEX_NESTED_MCP_ROLES, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
+import { CODEX_CODE_MODE_ROLES, CODEX_TERMINAL_MCP_SERVER_SUFFIX, CODEX_DIRECT_RESEARCH_TOOLS, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
-import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp } from "../../../integrations/functions/deterministic-mcp.js";
+import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp, releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import {
   resolveAtlasResearcherDispatcher,
   resolveAtlasResearcherTypedDispatcher,
   resolveAtlasResearcherWorkflow,
 } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
+
+import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
 const CODEX_LAZY_MCP_SERVER_SUFFIX = "lazy";
@@ -67,6 +69,7 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
 function buildCodexDeterministicMcpAttachment(serverConfig, {
   role = "",
   disableSystemTools = false,
+  nativeBatchingCatalog = process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || null,
   atlasResearcherDispatcher = String(role || "").trim().toLowerCase() === "researcher"
     && (resolveAtlasResearcherDispatcher()
       || resolveAtlasResearcherTypedDispatcher()
@@ -75,11 +78,18 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
   const atlasTools = Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [];
-  const codexNestedMcp = disableSystemTools === true
-    && CODEX_NESTED_MCP_ROLES.includes(String(role || "").trim().toLowerCase());
+  const codexNativeBatching = disableSystemTools === true && String(role).toLowerCase() === "researcher" && !!nativeBatchingCatalog;
+  const codexCodeMode = !codexNativeBatching && disableSystemTools === true
+    && CODEX_CODE_MODE_ROLES.includes(String(role || "").trim().toLowerCase());
   const lazyTools = toolNames.filter((name) => CODEX_LAZY_TOOL_NAMES.has(name));
   const eagerTools = toolNames.filter((name) => !CODEX_LAZY_TOOL_NAMES.has(name));
-  const directTools = codexNestedMcp ? [] : eagerTools;
+  const directTools = codexCodeMode || codexNativeBatching
+    ? eagerTools.filter((name) => CODEX_DIRECT_RESEARCH_TOOLS.includes(name))
+    : eagerTools;
+  const nestedTools = codexCodeMode ? eagerTools.filter((name) => !directTools.includes(name)) : [];
+  const terminalServerKey = (codexCodeMode || codexNativeBatching) && directTools.length > 0
+    ? _toCodexConfigKey(`${serverKey}_${CODEX_TERMINAL_MCP_SERVER_SUFFIX}`)
+    : null;
   const lazyServerKey = lazyTools.length > 0
     ? _toCodexConfigKey(`${serverKey}_${CODEX_LAZY_MCP_SERVER_SUFFIX}`)
     : null;
@@ -116,7 +126,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   }
 
   appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, { toolNames });
-  const baseDisabledTools = lazyTools.map(rawToolsMcpName);
+  const baseDisabledTools = [...lazyTools, ...(terminalServerKey ? directTools : [])].map(rawToolsMcpName);
   if (baseDisabledTools.length > 0) {
     configOverrides.push(
       `mcp_servers.${serverKey}.disabled_tools=${_toTomlLiteral(baseDisabledTools)}`,
@@ -126,8 +136,17 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   // ATLAS action. Those are prerequisites for the execution contract and the
   // ATLAS-first gate, so they must never depend on model-initiated discovery.
   configOverrides.push(`mcp_servers.${serverKey}.required=true`);
-  if (!codexNestedMcp && (directTools.length > 0 || atlasTools.length > 0)) {
+  if (!codexCodeMode && (directTools.length > 0 || atlasTools.length > 0)) {
     directServerKeys.push(serverKey);
+  }
+  if (terminalServerKey) {
+    // Reuse the same shim credentials/owner session, preserving source custody.
+    appendCodexMcpServerLaunchOverrides(configOverrides, terminalServerKey, serverConfig, { toolNames: directTools });
+    configOverrides.push(
+      `mcp_servers.${terminalServerKey}.enabled_tools=${_toTomlLiteral(directTools.map(rawToolsMcpName))}`,
+      `mcp_servers.${terminalServerKey}.required=true`,
+    );
+    directServerKeys.push(terminalServerKey);
   }
   if (lazyServerKey) {
     const rawLazyTools = lazyTools.map(rawToolsMcpName);
@@ -139,8 +158,14 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
       `mcp_servers.${lazyServerKey}.required=true`,
     );
   }
-  if (codexNestedMcp) configOverrides.push("features.code_mode.enabled=true");
-  if (codexNestedMcp || directServerKeys.length > 0) {
+  if (codexCodeMode) configOverrides.push("features.code_mode.enabled=true");
+  if (codexNativeBatching) configOverrides.push(
+    "features.code_mode.enabled=false",
+    "features.code_mode_host=false",
+    `model_catalog_json=${_toTomlLiteral(nativeBatchingCatalog)}`,
+    `mcp_servers.${serverKey}.supports_parallel_tool_calls=true`,
+  );
+  if (codexCodeMode || directServerKeys.length > 0) {
     configOverrides.push(
       `features.code_mode.direct_only_tool_namespaces=${_toTomlLiteral(
         directServerKeys.map((key) => `mcp__${key}`),
@@ -152,10 +177,10 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
     [toolName],
     {
       providerName: "codex",
-      codexNestedMcp,
+      codexNestedMcp: codexCodeMode && !directTools.includes(toolName),
       serverName: CODEX_LAZY_TOOL_NAMES.has(toolName) && lazyServerKey
         ? lazyServerKey
-        : serverKey,
+        : terminalServerKey && directTools.includes(toolName) ? terminalServerKey : serverKey,
     },
   ));
 
@@ -163,8 +188,11 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
     active: true,
     tools: toolNames,
     directTools,
-    nestedTools: codexNestedMcp ? eagerTools : [],
-    codexNestedMcp,
+    nestedTools,
+    terminalServerKey,
+    codexCodeMode,
+    codexNativeBatching,
+    nativeBatchingCatalog: codexNativeBatching ? nativeBatchingCatalog : null,
     lazyTools,
     // Codex creates its deferred tool-search surface only when this catalog
     // contains at least one tool. Keep the state explicit for launch audits:
@@ -460,7 +488,17 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     };
   }
 
-  return buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools });
+  const attachment = buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools });
+  try {
+    const surface = await prepareCodexResearchMcpSurface(attachment, { mcpGate });
+    attachment.coreDeclarations = surface.declarations;
+    attachment.atlasTools = surface.atlasTools;
+    attachment.atlasContractTools = surface.atlasContractTools;
+    return attachment;
+  } catch (error) {
+    releaseDeterministicMcpServerSession(serverConfig, { reason: "core_declarations_failed" });
+    throw error;
+  }
 }
 
 export function __testBuildCodexDeterministicMcpAttachment(serverConfig, options = {}) {
@@ -471,11 +509,12 @@ export function buildCodexSystemToolLockdownOverrides({
   disableSystemTools = false,
   disableNativeImageGeneration = false,
   disableResearcherUtilities = false,
-  codexNestedMcp = false,
+  codexCodeMode = false,
+  codexNativeBatching = false,
   webToolsActive = false,
 } = {}) {
   const overrides = [];
-  if (codexNestedMcp) {
+  if (codexCodeMode || codexNativeBatching) {
     const excluded = [...CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES];
     if (!webToolsActive) excluded.push("web");
     overrides.push(

@@ -151,7 +151,7 @@ const CODE_SHARED_ACTIONS = Object.freeze(
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "tree.branch",
   "tree.expand",
   ...QUERY_SHARED_ACTIONS,
@@ -404,6 +404,12 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     includeResolutionMetadata: b(),
     sessionId: s({ maxLength: 256 }),
   }),
+  "symbol.callers": o({
+    symbolId: symbolId(),
+    limit: i({ minimum: 1, maximum: 100 }),
+    offset: i({ minimum: 0, maximum: 100_000 }),
+    minConfidence: n({ minimum: 0, maximum: 100 }),
+  }, ["symbolId"]),
   "symbol.overview": o({
     symbolId: symbolId(),
     kind: a(s({ enum: ["calls", "references", "reads", "writes", "uses_type", "imports", "extends", "implements"] }), { maxItems: 20 }),

@@ -115,7 +115,7 @@ const ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS = new Set([
   "code.lens",
   "code.structure",
   "code.survey",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
 ]);
 
 const DISPATCH_CACHE_POLICIES = Object.freeze({

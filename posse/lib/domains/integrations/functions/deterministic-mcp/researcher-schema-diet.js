@@ -13,6 +13,7 @@ const RESEARCHER_SCHEMA_DIET_DESCRIPTIONS = Object.freeze({
   "atlas.create_ref": "Create a bounded stored ref from visible text or source slices.",
   "atlas.symbol.search": "Find ranked symbol addresses by exact or semantic query; use returned IDs or locations for focused reads.",
   "atlas.symbol.card": "Inspect one known symbol's compact signature and relationships.",
+  "atlas.symbol.callers": "List distinct indexed callers of a known symbol with call-site locations.",
   "atlas.symbol.overview": "Inspect a known symbol's bounded relationship overview.",
   "atlas.code.skeleton": "Inspect a body-free outline for one known file or symbol.",
   "atlas.code.lens": "Locate all named identifiers within one known file or symbol before an exact source read.",

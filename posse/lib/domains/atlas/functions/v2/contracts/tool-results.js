@@ -480,6 +480,25 @@
  */
 
 /**
+ * @typedef {Object} SymbolCallersData
+ * @property {SymbolId} symbolId
+ * @property {string} name
+ * @property {string | null} qualifiedName
+ * @property {string} repoRelPath
+ * @property {Array<{symbolId: string, name: string, qualifiedName: string | null, kind: string, repoRelPath: string, startLine: number, endLine: number, callSiteCount: number, callSites: Array<{repoRelPath: string, startLine: number, endLine: number, startByte: number, endByte: number, confidence: number}>, callSitesTruncated: boolean}>} callers
+ * @property {number} observedCallerCount
+ * @property {number} observedCallSiteCount
+ * @property {number} offset
+ * @property {number} limit
+ * @property {boolean} hasMore
+ * @property {number | null} nextOffset
+ * @property {boolean} indexTruncated
+ * @property {number} missingCallerSymbols
+ * @property {boolean} truncated
+ * @property {string} coverage
+ */
+
+/**
  * @typedef {Object} SymbolUsagesData
  * @property {SymbolId} symbolId
  * @property {string} name
@@ -1428,6 +1447,7 @@
  *   | ToolResultEnvelope<SymbolSearchData>     & { action: "symbol.search" }
  *   | ToolResultEnvelope<SymbolGetCardData | SymbolCardsData> & { action: "symbol.card" }
  *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.overview" }
+ *   | ToolResultEnvelope<SymbolCallersData>    & { action: "symbol.callers" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.branch" }
  *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.scope" }

@@ -272,6 +272,14 @@
  */
 
 /**
+ * @typedef {Object} SymbolCallersParams
+ * @property {string} symbolId
+ * @property {number} [limit]
+ * @property {number} [offset]
+ * @property {number} [minConfidence] 0..1 or 0..100
+ */
+
+/**
  * @typedef {Object} SymbolUsagesParams
  * @property {string} symbolId
  * @property {("calls" | "references" | "reads" | "writes" | "uses_type" | "imports" | "extends" | "implements")[]} [kind]
@@ -693,6 +701,7 @@
  *   | { action: "symbol.search" } & SymbolSearchParams
  *   | { action: "symbol.card" } & SymbolGetCardParams
  *   | { action: "symbol.overview" } & SymbolUsagesParams
+ *   | { action: "symbol.callers" } & SymbolCallersParams
  *   | { action: "tree.overview" } & TreeOverviewParams
  *   | { action: "tree.branch" } & TreeOverviewParams
  *   | { action: "tree.scope" } & TreeScopeParams
@@ -752,7 +761,7 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "buffer.status",
   "symbol.search",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "tree.overview",
   "tree.branch",
   "tree.scope",

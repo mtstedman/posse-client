@@ -4,7 +4,9 @@
 // persisted row. It participates in the currency test: a blob or layer written
 // by a different producer (for example a SCIP indexer) is not a tree-sitter
 // parse of the current contract.
-export const ATLAS_PARSER_VERSION = "atlas-v2-parser";
+// Call ownership changes persisted row meaning. An additive schema upgrade
+// can retain blobs, so the currency predicate also needs a new parser contract.
+export const ATLAS_PARSER_VERSION = "atlas-v2-parser-call-ownership-v2";
 
 // `ATLAS_PARSER_SPEC_VERSION` is the PRODUCING BUILD REVISION, recorded on
 // blobs and layers for provenance and telemetry ("which build wrote this
@@ -34,4 +36,6 @@ export const ATLAS_PARSER_VERSION = "atlas-v2-parser";
 // edge-coverage-v3/v4: native parser coverage revisions.
 // edge-coverage-v5: TypeScript ambient signatures and BOM-aware UTF-16 source
 // decoding.
-export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v5";
+// edge-coverage-v6: module-level and anonymous JS callback source ownership.
+// Schema generation 4 changes persisted edge meaning and forces a cold rebuild.
+export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v6";

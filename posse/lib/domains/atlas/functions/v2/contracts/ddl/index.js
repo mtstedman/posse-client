@@ -27,7 +27,7 @@ export const VIEW_DDL = load("view.sql");
  * uses a ledger mismatch as the generation marker and recreates every
  * rebuildable store together; memory.db is intentionally outside this boundary.
  */
-export const ATLAS_DATA_SCHEMA_VERSION = 3;
+export const ATLAS_DATA_SCHEMA_VERSION = 4;
 export const LEDGER_SCHEMA_VERSION = ATLAS_DATA_SCHEMA_VERSION;
 export const VIEW_SCHEMA_VERSION = ATLAS_DATA_SCHEMA_VERSION;
 export const USAGE_SCHEMA_VERSION = 1;

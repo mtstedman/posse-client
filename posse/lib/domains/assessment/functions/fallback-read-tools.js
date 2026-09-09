@@ -9,7 +9,7 @@ const ASSESSOR_FALLBACK_READ_TOOL_KEYS = new Set([
   "tools.hash_file",
   "atlas.symbol.search",
   "atlas.symbol.card",
-  "atlas.symbol.overview",
+  "atlas.symbol.overview", "atlas.symbol.callers",
   "atlas.tree.branch",
   "atlas.tree.expand",
   "atlas.code.skeleton",

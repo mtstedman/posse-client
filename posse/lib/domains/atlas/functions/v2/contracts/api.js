@@ -245,6 +245,7 @@
  * @property {(global_id: number) => Promise<ViewEdge[]>} callees
  *   Resolved edges where `from_global_id === global_id`.
  *
+ * @property {(global_id: number, minConfidence?: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, truncated: boolean }>} symbolCallers
  * @property {(global_id: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, callees: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }> }>} symbolNeighborhood
  *   Both edge directions with their relevant endpoint symbols bulk-resolved
  *   by the native daemon under one storage read.

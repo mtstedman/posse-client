@@ -67,12 +67,15 @@ export function renderAtlasGuidance(contract = {}) {
       || String(tool?.access || "").trim() === "atlas");
   if (!hasAtlas) return [];
   const lines = [
-    "Atlas symbol tracing: To get new information about a symbol, choose a different Atlas tool suited to the unresolved fact.",
+    "Atlas symbol tracing: Choose retrieval by the unresolved fact and the location already known, not by a need to switch tools. Use search or survey to locate unknown targets; use lens for scattered details and overview/structure only for a needed relationship, selecting the relevant relation kinds instead of all kinds.",
     "Atlas evidence refs: evidence_ref identifies content already visible in this context. Use it directly for citation, slicing, or handoff; do not call it for the same content.",
-    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref or next_traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different next_traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.",
+    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref or next_traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Omit limit for normal source traversal: limit measures characters per ref, not source lines. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different next_traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.",
   ];
   const hasCodeWindow = tools.some((tool) => canonicalToolName(tool) === "code.window");
   const policy = contract?.atlasCodeWindowPolicy;
+  if (hasCodeWindow) {
+    lines[0] += " Read a known file and identifier directly with code.window; a symbolId lookup is not a prerequisite. Prefer granularity: symbol for known definitions; use fileWindow when surrounding file context is needed. Group known identifiers in that file into one anchored body read. Do not map or preview a target before a body read whose location is already known.";
+  }
   if (hasCodeWindow && policy) {
     lines.push(
       `Atlas code window limit: code.window is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit maxTokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,

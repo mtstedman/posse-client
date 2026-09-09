@@ -1,9 +1,22 @@
-import { WEB_TOOL_ROLES } from "../../../../shared/tools/functions/contract.js";
 import { CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
+import { WEB_TOOL_ROLES } from "../../../../shared/tools/functions/contract.js";
+import { TOOL_REFS, formatToolReference } from "../../../../catalog/tool-references.js";
+import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
 
-export function buildCodexNestedMcpGuidance() {
-  const { maxReadBatch, outputTokens } = CODEX_RESEARCHER_TRANSPORT_LIMITS;
-  return `CODEX MCP TRANSPORT: Call the issued mcp__ tools through code mode. Use Promise.all for at most ${maxReadBatch} independent ready reads per execution, then inspect the results before choosing another batch. Begin every execution that emits repository text with this literal first line:\n// @exec: {"max_output_tokens": ${outputTokens}}\nStore the unchanged returned text blocks before emission so a clipped result can be recovered without another repository read. Emit every returned text content block verbatim with text(block.text), including source and evidence/continuation headers. Do not JSON-stringify the enclosing MCP result, discard blocks, or mix terminal agent_handoff with other work in one execution. Preserve truncation and error notices. If an emission clips, load the stored blocks and re-emit smaller portions before another read or handoff; never treat a successful JavaScript tool return as proof that its text reached the model.`;
+export function buildCodexResearchMcpGuidance(executionContract, coreDeclarations = [], { nativeBatching = false } = {}) {
+  const renderer = new ProviderToolRenderer({ providerName: "codex", issuedSurface: executionContract });
+  const queryAction = executionContract?.tools?.find(tool => tool.mcpName === formatToolReference(TOOL_REFS.atlas.query));
+  const atlas = renderer.tryRender(TOOL_REFS.atlas.query) || (queryAction && renderer.tryRenderIssued(queryAction));
+  const handoff = renderer.tryRender(TOOL_REFS.tools.agentHandoff);
+  return [
+    nativeBatching
+      ? `CODEX MCP TRANSPORT: Core retrieval tools are declared upfront. Call them directly with structured arguments; no registry lookup is needed. Use native parallel tool calls for at most ${CODEX_RESEARCHER_TRANSPORT_LIMITS.maxReadBatch} independent ready reads per turn, then inspect results before choosing dependent reads. Tool results deliver source and evidence/continuation headers directly. Preserve truncation and error notices; recover missing source before citing it.`
+      : `CODEX MCP TRANSPORT: Core retrieval declarations are provided below before research begins. Call their exact names as tools.<name> inside functions.exec; no registry lookup is needed. Use Promise.all for at most ${CODEX_RESEARCHER_TRANSPORT_LIMITS.maxReadBatch} independent ready reads per execution, then inspect results before choosing dependent reads. Emit every returned text content block verbatim, including source and evidence/continuation headers. Do not JSON-stringify the enclosing MCP result or discard blocks. Preserve truncation and error notices; recover missing source before citing it. Use this executor output ceiling for source batches:`,
+    nativeBatching ? null : `// @exec: ${JSON.stringify({ max_output_tokens: CODEX_RESEARCHER_TRANSPORT_LIMITS.outputTokens })}`,
+    atlas ? `Atlas actions such as code.window are action values passed to ${atlas}; put the selected action's fields in args. They are not separate callable tools.` : null,
+    handoff ? `Submit the completed report directly through ${handoff} with structured arguments, without preparation acknowledgements or an executor wrapper. Keep terminal submission separate from other tool calls. If validation rejects it, repair the reported fields using delivered evidence and preserve unchanged claims.` : null,
+    nativeBatching ? null : `CORE MCP RETRIEVAL DECLARATIONS (name, description, parameters):\n${JSON.stringify(coreDeclarations)}`,
+  ].filter(Boolean).join("\n");
 }
 
 export function buildCodexWebToolsOverrides({ role, roleMode = null, webToolsEnabled } = {}) {

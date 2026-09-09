@@ -27,7 +27,7 @@ import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/hel
 import { isWebToolName, recordToolUseObservations } from "../../../observability/functions/observations.js";
 import {
   buildCodexWebToolsOverrides,
-  buildCodexNestedMcpGuidance,
+  buildCodexResearchMcpGuidance,
 } from "./prompt-blocks.js";
 import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth.js";
 import { buildCodexWindowsLaunchEnv, formatSpawnLaunchForError, getCodexLaunchState, isReadyAsync } from "./cli-discovery.js";
@@ -44,12 +44,14 @@ import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
   nativeSystemToolsEnabled = false,
-  codexNestedMcp = false,
+  codexCodeMode = false,
+  codexNativeBatching = false,
+  coreDeclarations = [],
 } = {}) {
   const renderedContract = renderExecutionContractBlock(executionContract, {
     remoteComposed: skipRolePrompt,
   });
-  const contractBlock = [renderedContract, codexNestedMcp ? buildCodexNestedMcpGuidance() : null]
+  const contractBlock = [renderedContract, codexCodeMode || codexNativeBatching ? buildCodexResearchMcpGuidance(executionContract, coreDeclarations, { nativeBatching: codexNativeBatching }) : null]
     .filter(Boolean).join("\n");
   if (!skipRolePrompt) return contractBlock;
 
@@ -259,14 +261,23 @@ export async function callProvider(promptText, {
     const atlasServerName = deterministicReadMcp.active
       ? deterministicReadMcp.serverKey
       : atlasMcpServerKey;
+    if (deterministicReadMcp.codexNativeBatching) {
+      const catalog = JSON.parse(fs.readFileSync(deterministicReadMcp.nativeBatchingCatalog, "utf8"));
+      const profile = catalog.models?.find(model => model.slug === modelToUse);
+      if (!profile || profile.tool_mode !== "direct" || profile.use_responses_lite !== false
+        || profile.multi_agent_version !== "v1" || profile.apply_patch_tool_type !== null) {
+        cleanupDeterministicMcpSession();
+        throw new Error("Native researcher batching requires an explicit matching direct-tool model catalog with Responses Lite, delegation and patch tools disabled");
+      }
+    }
     const remoteAtlasToolNames = Array.isArray(deterministicReadMcp.atlasTools)
       ? deterministicReadMcp.atlasTools
       : [];
     const atlasContractTools = atlasReadyForMcp && remoteAtlasToolNames.length > 0
-      ? buildMcpAtlasSurfaceToolDescriptors(remoteAtlasToolNames, {
+      ? deterministicReadMcp.atlasContractTools ?? buildMcpAtlasSurfaceToolDescriptors(remoteAtlasToolNames, {
         providerName: "codex",
         serverName: atlasServerName,
-        codexNestedMcp: deterministicReadMcp.codexNestedMcp === true,
+        codexNestedMcp: deterministicReadMcp.codexCodeMode === true,
       })
       : [];
     // Disable AGENTS.md auto-discovery (parent-walk + fallback filenames).
@@ -281,7 +292,8 @@ export async function callProvider(promptText, {
       disableSystemTools,
       disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
       disableResearcherUtilities: deterministicReadMcp.atlasResearcherDispatcher === true,
-      codexNestedMcp: deterministicReadMcp.codexNestedMcp === true,
+      codexCodeMode: deterministicReadMcp.codexCodeMode === true,
+      codexNativeBatching: deterministicReadMcp.codexNativeBatching === true,
       webToolsActive: webTools.active,
     });
     // The Posse MCP gateway exposes deterministic and atlas.* suites from a
@@ -327,7 +339,9 @@ export async function callProvider(promptText, {
     const contractBlock = buildCodexRuntimeContractBlock(executionContract, {
       skipRolePrompt,
       nativeSystemToolsEnabled: !disableSystemTools && !deterministicReadMcp.active,
-      codexNestedMcp: deterministicReadMcp.codexNestedMcp === true,
+      codexCodeMode: deterministicReadMcp.codexCodeMode === true,
+      codexNativeBatching: deterministicReadMcp.codexNativeBatching === true,
+      coreDeclarations: deterministicReadMcp.coreDeclarations || [],
     });
     const developerInstructionRoute = buildCodexDeveloperInstructionRoute({
       promptPrelude,

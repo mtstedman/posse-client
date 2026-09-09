@@ -46,6 +46,13 @@ export function parseResearcherStructuredOutput(output) {
 
 function researcherEvidenceRefs(report = {}) {
   const lanes = { proof: [], support: [], decoy: [] };
+  const seen = { proof: new Set(), support: new Set(), decoy: new Set() };
+  const add = (lane, entry) => {
+    const key = JSON.stringify(entry);
+    if (seen[lane].has(key)) return;
+    seen[lane].add(key);
+    lanes[lane].push(entry);
+  };
   const selector = (item = {}) => ({
     ref: item.ref,
     ...(item.lines && item.selector !== item.ref ? {
@@ -64,12 +71,12 @@ function researcherEvidenceRefs(report = {}) {
       const lane = item?.selector_kind === "path" || item?.path || !grounded
         ? "support"
         : "proof";
-      lanes[lane].push(selector(item));
+      add(lane, selector(item));
     }
     for (const entry of Array.isArray(detail.decoy) ? detail.decoy : []) {
       const [item, reason] = Array.isArray(entry) ? entry : [];
       if (!item) continue;
-      lanes.decoy.push({ ...selector(item), why: reason });
+      add("decoy", { ...selector(item), why: reason });
     }
   }
   return lanes;

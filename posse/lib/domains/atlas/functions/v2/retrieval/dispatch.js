@@ -1,3 +1,4 @@
+import { symbolCallers } from "./callers.js";
 // @ts-check
 //
 // Central dispatcher for ATLAS v2 tool actions.
@@ -254,6 +255,9 @@ function dispatchImpl(call, ctx) {
     case "symbol.card":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolGetCard({ view: ctx.view, versionId: ctx.versionId, params: call, repoRoot: ctx.repoRoot, ledger: ctx.ledger, repoId: ctx.repoId }));
+    case "symbol.callers":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (symbolCallers({ view: ctx.view, versionId: ctx.versionId, params: call }));
     case "symbol.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolUsages({ view: ctx.view, versionId: ctx.versionId, params: call }));

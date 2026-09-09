@@ -80,7 +80,7 @@ const EVIDENCE_REF_TOOLS = new Set([
   "slice.refresh",
   "slice.spillover.get",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "tree.branch",
   "tree.expand",
   "file.read",
@@ -838,6 +838,21 @@ function refreshCodeWindowMapCoverage(data) {
   }
 }
 
+function isDirectSymbolWindow(args, data) {
+  const selection = args?.action === "code.window" && args.args && typeof args.args === "object"
+    ? args.args : args;
+  if (String(selection?.granularity || "symbol") !== "symbol"
+    || selection?.sliceContext != null || data.redirect || data.degradedReason) return false;
+  if (selection?.symbolId) return Boolean(data.symbolId);
+  const identifiers = Array.isArray(selection?.identifiersToFind) ? selection.identifiersToFind : [];
+  const found = new Set([
+    ...(Array.isArray(data.identifiersFound) ? data.identifiersFound : []),
+    ...(Array.isArray(data.identifiersReturned) ? data.identifiersReturned : []),
+  ].map((identifier) => String(identifier).toLowerCase()));
+  return Boolean(selection?.file && identifiers.length > 0
+    && identifiers.every((identifier) => found.has(String(identifier).toLowerCase())));
+}
+
 export function compactCodeWindowLensResult(toolName, result, {
   args = {},
   context = {},
@@ -869,6 +884,10 @@ export function compactCodeWindowLensResult(toolName, result, {
   if (!data) return { result, compacted: false };
   const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
   const pagingEnabled = enabled ?? resultRefPagingEnabled();
+  // Native retrieval already enforces the token/line ceiling. A requested
+  // definition takes precedence over the softer display threshold; preserve
+  // any native budget continuation without splitting the admitted body again.
+  const windowDisplayPaging = pagingEnabled && !isDirectSymbolWindow(args, data);
   let compacted = false;
 
   // Optional syntax navigation must not trigger paging or consume the inline
@@ -1004,7 +1023,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     let displayTail = null;
     let displayOriginal = null;
     if (
-      tool === "code.window" && pagingEnabled
+      tool === "code.window" && windowDisplayPaging
       && result.length > min
       && hasHashRefScope(hashContext)
       && Array.isArray(data.additionalWindows)
@@ -1038,7 +1057,7 @@ export function compactCodeWindowLensResult(toolName, result, {
       inlineContentBudget = Math.max(1000, min - structuralChars - 1200);
     }
     if (
-      tool === "code.window" && pagingEnabled
+      tool === "code.window" && windowDisplayPaging
       && result.length > min
       && hasHashRefScope(hashContext)
       && typeof data.content === "string"

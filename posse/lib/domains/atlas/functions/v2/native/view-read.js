@@ -18,6 +18,7 @@ const RESULT_BY_QUERY = Object.freeze({
   callers: "edges",
   callees: "edges",
   symbol_neighborhood: "symbol_neighborhood",
+  symbol_callers: "symbol_neighborhood",
   unresolved_references_to: "edges",
   slice: "slice",
   blast_radius: "ranked_symbols",

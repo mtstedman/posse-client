@@ -12,6 +12,7 @@ export const AGENT_HANDOFF_BEARER_PROSE_TERMS = Object.freeze([
 ]);
 
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
+  maxShorthandGapLines: 5,
   maxCallBytes: 256 * 1024,
   maxEntryBytes: 32 * 1024,
   maxClaims: 12,
@@ -45,12 +46,16 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
 // pipeline limits to terminal reports.
 export const AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY = Object.freeze({
   "researcher.pipeline.v1": Object.freeze({
+    maxSelectorsPerClaim: null,
+    maxEvidenceChars: null,
     maxSummaryChars: AGENT_HANDOFF_LIMITS.maxSummaryChars,
     maxClaims: AGENT_HANDOFF_LIMITS.maxClaims,
     maxClaimChars: AGENT_HANDOFF_LIMITS.maxClaimChars,
     maxClaimSummaryChars: AGENT_HANDOFF_LIMITS.maxSummaryChars,
   }),
   "researcher.report.v1": Object.freeze({
+    maxSelectorsPerClaim: null,
+    maxEvidenceChars: null,
     maxCallBytes: AGENT_HANDOFF_LIMITS.maxCallBytes,
     unboundedWithinCall: Object.freeze([
       "summary",

@@ -7,9 +7,11 @@ export function toolReference(suite, canonicalName) {
 
 export const TOOL_REFS = Object.freeze({
   atlas: Object.freeze({
+    query: toolReference("atlas", "query"),
     codeWindow: toolReference("atlas", "code.window"),
   }),
   tools: Object.freeze({
+    agentHandoff: toolReference("tools", "agent_handoff"),
     bash: toolReference("tools", "bash"),
     chainRead: toolReference("tools", "chain_read"),
     chainVerdict: toolReference("tools", "chain_verdict"),

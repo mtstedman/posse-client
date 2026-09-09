@@ -204,10 +204,17 @@ export function buildResearchFinalFetchBatchText() {
 export function buildResearchCurtainCallText({
   explorationSteps = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
+  callSteps = 0,
 } = {}) {
+  // Logical exploration units and physical calls have independent ceilings.
+  // Passing a physical count as explorationSteps can announce zero remaining
+  // while admission still permits targeted reads (for example, 7/18 and 28/30).
   const remainingCalls = Math.max(
     0,
-    RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - Number(explorationSteps || 0),
+    Math.min(
+      RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - Number(explorationSteps || 0),
+      RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS - Number(callSteps || 0),
+    ),
   );
   return [
     `RESEARCH TOOL WINDOW: ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} remain before required closeout.`,

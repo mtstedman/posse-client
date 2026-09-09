@@ -52,7 +52,7 @@ function boundedInteger(value, minimum, maximum, fallback) {
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "tree.branch",
   "tree.expand",
   "edit.plan",
@@ -642,6 +642,22 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         pageSize: { type: "integer", description: "Page size from 1 to 100." },
       },
       required: ["spilloverHandle"],
+      additionalProperties: false,
+    },
+  },
+  "symbol.callers": {
+    type: "function",
+    name: "atlas_symbol_callers",
+    description: "Distinct indexed caller symbols of an identified symbol, with definition locations, call counts and up to five call-site locations each. Use when who calls this is the missing fact, then read the relevant caller by symbolId. Resolved call edges only; dynamic or unresolved callers may be absent. Reports storage and page truncation.",
+    parameters: {
+      type: "object",
+      properties: {
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact target symbol ID." },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum distinct callers; default 20." },
+        offset: { type: "integer", minimum: 0, maximum: 100000, description: "Caller page offset; use nextOffset with the same target, confidence and index version." },
+        minConfidence: { type: "number", minimum: 0, maximum: 100, description: "Minimum resolved edge confidence, 0..1 or 0..100." },
+      },
+      required: ["symbolId"],
       additionalProperties: false,
     },
   },

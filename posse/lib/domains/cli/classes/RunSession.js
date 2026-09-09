@@ -2268,21 +2268,17 @@ export class RunSession {
         !(atlasBoot?.attempted && atlasBoot.ok === false) &&
         !(atlasRuntime?.attempted && atlasRuntime.ok === false)
       ),
-      // Keep a soft-timeout so the rest of boot can settle. Once it expires,
-      // release the pre-loop gate automatically and let the real warm continue
-      // behind the run loop. A soft timeout must not become a hidden human gate.
+      // The soft timeout settles the boot panel, not source readiness. Workers
+      // must wait for the real warm or its existing post-view background signal;
+      // elapsed time alone cannot make an unpublished source view usable.
       softTimeoutMs: Number.isFinite(Number(atlasWarmupBootConfig?.bootSoftTimeoutMs))
         ? Math.max(0, Number(atlasWarmupBootConfig.bootSoftTimeoutMs))
         : 33 * 60 * 1000,
-      softTimeoutDetail: "indexing continues in background",
+      softTimeoutDetail: "waiting for source index readiness",
       // Keep the chip running until the pre-TUI gate consumes the background
       // request and marks it deferred. The late completion watcher can still
       // promote it to the real terminal outcome.
       softTimeoutStatus: "running",
-      onSoftTimeout: () => {
-        if (atlasBootBackgroundRequested) return;
-        requestAtlasBootBackground("atlas-soft-timeout");
-      },
     });
     };
 
@@ -2489,13 +2485,12 @@ export class RunSession {
   // The entire upper boot section has settled (warmups + providers + scheduler
   // lock/orphan/pre-loop). Kick the ATLAS/SCIP warm now so the top of the panel
   // finishes independently before the ATLAS×SCIP matrix + zip take over. This
-  // returns at the warm's soft-timeout; the real work continues while the
-  // background request releases the gate just below.
+  // returns at the warm's soft-timeout; the readiness gate below still waits
+  // for actual completion or a post-view background signal.
   //
   // Race the phase against any earlier views-ready/Enter background request.
-  // If neither arrived first, the phase's own soft-timeout now creates the
-  // request and releases this wait without requiring human input. The gate
-  // below consumes the request and attaches the late-completion watcher.
+  // The phase's soft-timeout does not release source readiness. The gate below
+  // consumes only an actual post-view request and watches its remaining tail.
   if (startAtlasWarmupPhase) {
     await Promise.race([startAtlasWarmupPhase(), atlasBootBackgroundRequest, bootAborted]);
     if (await bailIfBootInterrupted()) return;

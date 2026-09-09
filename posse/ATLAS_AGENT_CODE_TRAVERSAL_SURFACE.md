@@ -39,25 +39,25 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `subagent`
 
@@ -1052,6 +1052,29 @@ Advance an isolated citation child through its backend-owned ordered inputs. Sta
 |---|---|---|---|---|
 | `count` | `integer` | Optional | min 1; max 3 |  |
 | `position` | `integer` | Required | min 0; max 2 |  |
+
+### `atlas.symbol.callers`
+
+Remote roles: `assessor`, `dev`, `planner`, `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `symbol.callers` |
+| Tool reference token | `atlas.symbol.callers` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `atlas` |
+| Batchable input | No |
+| Parallel calls | Yes |
+| System-prefetch capable | No |
+
+Distinct indexed caller symbols of an identified symbol, with definition locations, call counts and up to five call-site locations each. Use when who calls this is the missing fact, then read the relevant caller by symbolId. Resolved call edges only; dynamic or unresolved callers may be absent. Reports storage and page truncation.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `limit` | `integer` | Optional | min 1; max 100 | Maximum distinct callers; default 20. |
+| `minConfidence` | `number` | Optional | min 0; max 100 | Minimum resolved edge confidence, 0..1 or 0..100. |
+| `offset` | `integer` | Optional | min 0; max 100000 | Caller page offset; use nextOffset with the same target, confidence and index version. |
+| `symbolId` | `string` | Required |  | Exact target symbol ID. |
 
 ### `atlas.symbol.card`
 

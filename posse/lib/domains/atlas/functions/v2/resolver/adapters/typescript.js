@@ -9,14 +9,14 @@
 // Cases handled (vs the generic 3-strategy ladder):
 //   - `new Foo()` — strip the `new`, then treat as `Foo()`.
 //   - `super()` — never resolvable; `super.x()` best-effort binds to
-//     the same-file method name when unambiguous.
+//     inheritance requires explicit evidence and stays unresolved here.
 //   - `Math.floor`, `JSON.stringify` etc. — dotted call into a
 //     builtin global; never bind.
 //   - `fs.readFile`, `path.join` etc. — dotted call into a Node
 //     builtin module; never bind.
 //   - `X.member()` where X is a namespace import — bind via
 //     namespaceImports map (placeholder until import_kind is wired).
-//   - `this.method()` — bind to a same-file method with this name.
+//   - `this.method()` — bind to an unambiguous enclosing-owner sibling.
 //   - `foo()` where foo is a direct import — bind to the imported
 //     symbol exactly when there's a single candidate.
 
@@ -104,18 +104,20 @@ function resolveCall(ctx) {
       }
     }
 
-    // `this.method` / `super.method` — look up member in same-file
-    // symbols. This is deliberately a heuristic: without type info we
-    // cannot prove which base class owns `super.method`.
-    if (prefix === "this" || prefix === "super") {
-      const local = ctx.nameToSymbolIds.get(member);
-      if (local && local.length === 1) {
-        return {
-          symbolId: local[0].global_id,
-          isResolved: true,
-          strategy: "heuristic",
-          confidence: 0.78,
-        };
+    // A same-file name alone says nothing about the `this` owner. Bind only
+    // a sibling of the actual enclosing symbol; base-class lookup needs
+    // inheritance evidence we do not have here.
+    if (prefix === "this" && parts.length === 2) {
+      const symbols = [...ctx.nameToSymbolIds.values()].flat();
+      const caller = symbols.find((symbol) => symbol.global_id === ctx.call.from_global_id);
+      const qualified = caller?.qualified_name || "";
+      const owner = qualified.slice(0, qualified.lastIndexOf("."));
+      const local = (ctx.nameToSymbolIds.get(member) || []).filter((symbol) =>
+        owner && symbol.qualified_name === `${owner}.${member}`
+          && symbol.repo_rel_path === ctx.call.repo_rel_path);
+      if (local.length === 1) {
+        return { symbolId: local[0].global_id, isResolved: true,
+          strategy: "exact", confidence: 0.92 };
       }
     }
 

@@ -11,9 +11,12 @@ export const TOOL_ATTACHMENT_BY_PROVIDER = Object.freeze({
   "posse-local": "function",
 });
 
-// Read-only research can compose issued MCP reads in the provider executor.
-// Mutation roles retain the direct transport and its established stop path.
-export const CODEX_NESTED_MCP_ROLES = Object.freeze(["researcher"]);
+// Research reads compose inside the executor; terminal submission stays direct.
+// Core declarations are delivered during setup, independently of this routing.
+export const CODEX_TERMINAL_MCP_SERVER_SUFFIX = "terminal";
+export const CODEX_DIRECT_RESEARCH_TOOLS = Object.freeze(["agent_handoff"]);
+
+export const CODEX_CODE_MODE_ROLES = Object.freeze(["researcher"]);
 
 // Composed reads need matching executor and history ceilings. The ceiling does
 // not change the gateway's physical read or source-window budgets.

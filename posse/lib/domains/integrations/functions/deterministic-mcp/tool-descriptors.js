@@ -523,7 +523,7 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "tree.expand",
   "symbol.search",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "slice.build",
   "slice.refresh",
   "context",
@@ -664,7 +664,7 @@ export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"])
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "symbol.search",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "edit.plan",
   "code.skeleton",
   "code.lens",

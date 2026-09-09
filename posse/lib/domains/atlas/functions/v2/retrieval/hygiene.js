@@ -9,6 +9,7 @@
 import { isGeneratedPath } from "../path-hygiene.js";
 
 const LOCAL_NAME_RE = /^local(?:[- ]\d+|\d+)$/i;
+const ANONYMOUS_CALLBACK_RE = /^<anonymous@[1-9][0-9]*:[1-9][0-9]*>$/;
 const QUOTED_LITERAL_RE = /^(['"`]).*\1$/;
 const ROUTE_LITERAL_RE = /^['"`]\/.*['"`]$/;
 const TEMP_PROP_RE = /^(?:className|children|value|checked|disabled|href|id|name|path|params|queryClient|search|style|title|to)\d+$/;
@@ -32,6 +33,7 @@ export function isNoisyLocalSymbol(symbol) {
   const name = String(symbol?.name || "").trim();
   if (!name) return true;
   if (LOCAL_NAME_RE.test(name)) return true;
+  if (ANONYMOUS_CALLBACK_RE.test(name)) return true;
   if (isLiteralSymbolName(name)) return true;
   return symbol.lang === "ts" && symbol.kind === "var" && TEMP_PROP_RE.test(name);
 }

@@ -58,6 +58,8 @@ import {
 } from "./helpers/field-diagnostics.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
+import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
+import { renderClaimEvidenceReferences } from "./helpers/evidence-references.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -139,9 +141,9 @@ function recordEvidenceCleanup(context, {
 // the planner (or dev) can surface an imperfect citation on its own, so prose
 // is redacted rather than rejected and unverifiable selectors demote to
 // recorded annotations. Standalone research reports (researcher.report.v1)
-// move wholly unsupported claims into a marked summary note. Mixed valid and
-// invalid report support requires repair: one citation cannot establish the
-// rest of a compound claim. Dev results keep strict rejection. Assessor prose
+// move wholly unsupported claims into a marked summary note. When valid report
+// evidence remains, retain the claim and drop unverifiable selectors, recording
+// the cleanup without requiring a report rewrite. Dev results keep strict rejection. Assessor prose
 // is redacted, while its defect-evidence selectors retain strict validation.
 const LENIENT_PIPELINE_HANDOFF_PROFILES = new Set([
   "researcher.pipeline.v1",
@@ -158,8 +160,8 @@ function isLenientHandoffProseProfile(profile) {
 }
 
 const ADVISORY_RESEARCH_EVIDENCE_ERRORS = new Set([
-  // Changed source requires a fresh read. Dropping that selector while keeping
-  // another citation would leave the compound claim supported only in part.
+  // Changed source still requires a fresh read; these are selector/visibility
+  // failures that can be omitted without treating their bytes as evidence.
   "AGENT_HANDOFF_EVIDENCE_EMPTY",
   "AGENT_HANDOFF_EVIDENCE_NOT_CITABLE",
   "AGENT_HANDOFF_EVIDENCE_NOT_FOUND",
@@ -195,13 +197,13 @@ function strictClaimEvidenceCleanupAction(error) {
 
 function evidenceRecoveryAction(error, mode) {
   if (mode === "annotate") return advisoryResearchEvidenceCleanupAction(error);
-  if (mode === "demote" || mode === "repair") return strictClaimEvidenceCleanupAction(error);
+  if (mode === "demote" || mode === "retain") return strictClaimEvidenceCleanupAction(error);
   return null;
 }
 
 function evidenceFailureModeForProfile(profile) {
   if (profile === "researcher.pipeline.v1") return "annotate";
-  if (profile === "researcher.report.v1") return "repair";
+  if (profile === "researcher.report.v1") return "retain";
   if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) return "demote";
   return null;
 }
@@ -529,11 +531,11 @@ function mergeSourceContentRecords(records) {
 
 function payloadSourceContentWindows(entry, lineage) {
   const payload = String(entry?.payload_text || "");
-  // Citation-child delegated excerpts are canonical joins of the source-line
+  // Delegated excerpts and raw source windows are joins of the source-line
   // array, not raw file bytes. A trailing LF can therefore be the declared
   // final blank source line rather than an ignorable file terminator. Keep it
   // here and let the authoritative materialized window count validate it.
-  const payloadLines = entry?.metadata?.source_payload_encoding === "delegated_excerpt"
+  const payloadLines = ["delegated_excerpt", RAW_SOURCE_LINES_ENCODING].includes(entry?.metadata?.source_payload_encoding)
     ? payload.replace(/\r\n?/g, "\n").split("\n")
     : normalizedLines(payload);
   const authoritative = lineage.source_windows;
@@ -1963,6 +1965,45 @@ function isCompatibilityProofProvenance(evidence) {
   return isGroundedClaimEvidence(evidence);
 }
 
+function materializeClaimEvidenceSelectors(value, context) {
+  try {
+    return [materializeAgentHandoffEvidenceSelector(value, context)];
+  } catch (error) {
+    if (error.code !== "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") throw error;
+    const selector = parseAgentHandoffEvidenceSelector(value);
+    let ranges;
+    let sourcePath = selector.path;
+    if (selector.ref == null) {
+      ranges = resolveSurfacedEvidencePath(selector.path, context).opened_ranges;
+    } else {
+      const promoted = materializeHashRefEvidenceForContext(context, selector.ref);
+      const fetched = promoted?.found ? promoted : fetchHashRefForContext(context, selector.ref);
+      const entry = fetched?.entry;
+      if (!entry || entry.metadata?.citable === false
+        || !hashRefModelVisibleScope(entry, context).fully_visible) throw error;
+      const lineage = sourceLineage(entry, context);
+      if (lineage.line_semantics !== "source") throw error;
+      const windows = coalescedSourceContentWindows(entry, lineage).filter((window) => (
+        (!sourcePath || window.path === canonicalSourcePath(sourcePath))
+        && window.source_end_line >= selector.start && window.source_start_line <= selector.end
+      ));
+      if (new Set(windows.map((window) => window.path)).size !== 1
+        || new Set(windows.map((window) => JSON.stringify([
+          window.repository_identity, window.source_version,
+        ]))).size !== 1) throw error;
+      sourcePath = windows[0].path;
+      ranges = windows.map((window) => ({ start: window.source_start_line, end: window.source_end_line }));
+    }
+    const segments = narrowCitationSegments(ranges, selector.start, selector.end);
+    if (!segments) throw error;
+    // All segments must pass the ordinary custody and byte checks atomically.
+    // Report consumers receive separate exact citations, never the broad span.
+    return segments.map((lines) => materializeAgentHandoffEvidenceSelector({
+      ...(selector.ref ? { ref: selector.ref } : {}), path: sourcePath, lines,
+    }, context));
+  }
+}
+
 function materializeClaim(
   value,
   claimIndex,
@@ -1971,6 +2012,7 @@ function materializeClaim(
   {
     maxClaimChars = AGENT_HANDOFF_LIMITS.maxClaimChars,
     maxProseChars = AGENT_HANDOFF_LIMITS.maxSummaryChars,
+    maxSelectorsPerClaim = AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim,
     lenientProse = false,
     evidenceFailureMode = null,
   } = {},
@@ -1995,25 +2037,24 @@ function materializeClaim(
     const materialized = new Map();
     const cleanableFailures = [];
     for (const selector of detail.evidence) {
-      let evidence;
+      let evidenceEntries;
       try {
-        evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+        evidenceEntries = materializeClaimEvidenceSelectors(selector, context);
       } catch (error) {
         const action = evidenceRecoveryAction(error, evidenceFailureMode);
         if (!action) throw error;
         cleanableFailures.push({ selector, error, action });
         continue;
       }
-      selectors.add(evidence.selector);
-      if (!materialized.has(evidence.selector)) {
-        materialized.set(evidence.selector, evidence);
-        counters.evidence += evidence.excerpt.length;
+      for (const evidence of evidenceEntries) {
+        selectors.add(evidence.selector);
+        if (!materialized.has(evidence.selector)) {
+          materialized.set(evidence.selector, evidence);
+          counters.evidence += evidence.excerpt.length;
+        }
       }
     }
     hasUnverifiedSupport = cleanableFailures.length > 0;
-    if (evidenceFailureMode === "repair" && materialized.size > 0 && hasUnverifiedSupport) {
-      throw cleanableFailures[0].error;
-    }
     for (const { selector, error, action } of cleanableFailures) {
       recordEvidenceCleanup(context, {
         action,
@@ -2060,8 +2101,8 @@ function materializeClaim(
     });
     if (out.decoy.length === 0) delete out.decoy;
   }
-  if (selectors.size > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
-    fail("AGENT_HANDOFF_TOO_LARGE", `claims[${claimIndex}] exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`);
+  if (maxSelectorsPerClaim != null && selectors.size > maxSelectorsPerClaim) {
+    fail("AGENT_HANDOFF_TOO_LARGE", `claims[${claimIndex}] exceeds ${maxSelectorsPerClaim} selectors`);
   }
   if (detail.prose != null) {
     out.prose = boundedString(
@@ -3581,18 +3622,16 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       if (detail.evidence != null) {
         const selectorFailures = [];
         for (const selector of detail.evidence) {
-          let evidence = null;
           try {
-            evidence = materializeAgentHandoffEvidenceSelector(selector, context);
+            for (const evidence of materializeClaimEvidenceSelectors(selector, context)) {
+              selectors.add(evidence.selector);
+            }
           } catch (error) {
             selectorFailures.push({ selector, error });
           }
-          if (evidence?.selector) selectors.add(evidence.selector);
         }
         for (const { selector, error } of selectorFailures) {
-          const action = evidenceFailureMode === "repair" && selectors.size > 0
-            ? null
-            : evidenceRecoveryAction(error, evidenceFailureMode);
+          const action = evidenceRecoveryAction(error, evidenceFailureMode);
           if (action) {
             recordEvidenceCleanup(context, {
               action,
@@ -3634,10 +3673,12 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           }
         }
       }
-      if (selectors.size > AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim) {
+      const selectorLimit = researcherLimits
+        ? researcherLimits.maxSelectorsPerClaim : AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim;
+      if (selectorLimit != null && selectors.size > selectorLimit) {
         issues.push({
           code: "AGENT_HANDOFF_TOO_LARGE",
-          message: `${claimLabel} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim} selectors`,
+          message: `${claimLabel} exceeds ${selectorLimit} selectors`,
         });
       }
     }
@@ -3790,6 +3831,8 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       {
         maxClaimChars: claimLengthLimit,
         maxProseChars: claimSummaryLimit,
+        maxSelectorsPerClaim: researcherLimits
+          ? researcherLimits.maxSelectorsPerClaim : AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim,
         lenientProse,
         evidenceFailureMode,
       },
@@ -3932,8 +3975,8 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   );
   const evidenceLimit = normalizedRole === "subagent"
     ? AGENT_HANDOFF_LIMITS.maxCitationChildEvidenceChars
-    : AGENT_HANDOFF_LIMITS.maxEvidenceChars;
-  if (evidenceChars > evidenceLimit) {
+    : researcherLimits ? researcherLimits.maxEvidenceChars : AGENT_HANDOFF_LIMITS.maxEvidenceChars;
+  if (evidenceLimit != null && evidenceChars > evidenceLimit) {
     fail("AGENT_HANDOFF_EVIDENCE_TOO_LARGE", `Materialized evidence exceeds ${evidenceLimit} characters for role ${normalizedRole || "unknown"}`);
   }
   const packet = {
@@ -4629,6 +4672,7 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
 
 function renderEvidenceAppendix(report) {
   const rows = [];
+  const claimReferences = renderClaimEvidenceReferences(report, renderedEvidenceSelector);
   for (const [index, claim] of (report.claims || []).entries()) {
     const detail = claim[1] || {};
     const marker = `[E${index + 1}]`;
@@ -4639,11 +4683,7 @@ function renderEvidenceAppendix(report) {
         ? rawClaimLabel.slice(marker.length + 1)
         : rawClaimLabel;
     const claimPrefix = claimLabel ? `${claimLabel} — ` : "";
-    const selectors = [...new Set(
-      ["evidence", "proof", "support"].flatMap((lane) => (
-        (detail[lane] || []).map(renderedEvidenceSelector)
-      )).filter(Boolean),
-    )];
+    const selectors = claimReferences[index];
     const lanes = selectors.length > 0 ? [`Evidence: ${selectors.join(", ")}`] : [];
     for (const [evidence, reason] of detail.decoy || []) {
       lanes.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);

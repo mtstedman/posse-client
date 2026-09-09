@@ -25,6 +25,7 @@ import { View } from "./View.js";
 import { VIEW_SCHEMA_VERSION } from "../../functions/v2/contracts/index.js";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { resolveEdges } from "../../functions/v2/resolver/index.js";
+import { ATLAS_RESOLVER_VERSION } from "../../functions/v2/resolver/version.js";
 import { graphDerivedInputSignature, refreshGraphDerivedState } from "../../functions/v2/graph-derived.js";
 import { refreshTreeDerivedState, treeDerivedInputSignature } from "../../functions/v2/tree-derived.js";
 import {
@@ -37,6 +38,7 @@ import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-
 import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { languageForPath } from "../../functions/v2/parse/language-buckets.js";
+import { ATLAS_PARSER_VERSION } from "../../functions/v2/parser/version.js";
 import { ATLAS_SOURCE_INDEX_POLICY_VERSION } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
 import { inspectViewMaterialization, removeSqliteFile } from "../../functions/v2/view-health.js";
@@ -82,6 +84,8 @@ export function viewFingerprintForOptions(options = {}) {
     : (positiveIntOrNull(options.treeCompressionMaxSeeds) ?? null);
   return sha256Hex(JSON.stringify({
     schema_version: VIEW_SCHEMA_VERSION,
+    parser_contract: ATLAS_PARSER_VERSION,
+    resolver_contract: ATLAS_RESOLVER_VERSION,
     source_index_policy: ATLAS_SOURCE_INDEX_POLICY_VERSION,
     scip_rows_spec: ATLAS_SCIP_ROWS_SPEC_VERSION,
     layer_merge: options.layerMerge === true,
@@ -1502,7 +1506,7 @@ function runResolverPass(viewDb, pathToBlob) {
   // Pull every symbol — feeds the global name index.
   const allSymbols = /** @type {any[]} */ (
     viewDb.prepare(
-      "SELECT global_id, content_hash, local_id, repo_rel_path, kind, name, qualified_name FROM symbols",
+      "SELECT global_id, content_hash, local_id, repo_rel_path, kind, name, qualified_name, signature_text FROM symbols",
     ).all()
   );
 

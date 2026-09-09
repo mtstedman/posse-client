@@ -392,6 +392,10 @@ export class View {
       callees: (global_id) => read("callees", { global_id }),
 
       symbolNeighborhood: (global_id) => read("symbol_neighborhood", { global_id }),
+      symbolCallers: async (global_id, min_confidence = 0) => {
+        const response = await readResponse("symbol_callers", { global_id, min_confidence });
+        return { ...response.value, truncated: response.truncated };
+      },
 
       unresolvedReferencesTo: (name) => read("unresolved_references_to", { name: String(name) }),
 

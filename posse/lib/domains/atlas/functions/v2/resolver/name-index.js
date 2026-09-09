@@ -19,6 +19,7 @@
  * @property {number} local_id
  * @property {string} repo_rel_path
  * @property {string} kind
+ * @property {string | null} [signature_text]
  * @property {string | null} qualified_name
  */
 
@@ -54,6 +55,7 @@ export function buildNameIndexes(rows) {
       repo_rel_path: row.repo_rel_path,
       kind: row.kind,
       qualified_name: row.qualified_name ?? null,
+      signature_text: row.signature_text ?? null,
     };
     const existing = byName.get(row.name);
     if (existing) existing.push(candidate);

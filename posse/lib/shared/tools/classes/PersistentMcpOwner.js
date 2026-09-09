@@ -167,7 +167,7 @@ const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set([
   "buffer.status",
   "symbol.search",
   "symbol.card",
-  "symbol.overview",
+  "symbol.overview", "symbol.callers",
   "tree.overview",
   "tree.branch",
   "tree.scope",
@@ -2189,7 +2189,8 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     flags.midpoint = true;
     flags.curtain = true;
     notice = buildResearchCurtainCallText({
-      explorationSteps: callSteps >= physicalCurtainStart ? callSteps : explorationSteps,
+      explorationSteps,
+      callSteps,
     });
     noticeKind = "research_curtain";
   }

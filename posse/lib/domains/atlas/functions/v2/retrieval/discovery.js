@@ -206,7 +206,7 @@ function namespaceOf(action) {
 function actionTags(action) {
   const ns = namespaceOf(action);
   const tags = new Set([ns]);
-  if (["symbol.search", "symbol.card", "symbol.overview", "tree.overview", "tree.branch", "tree.scope", "tree.expand", "slice.build", "edit.plan", "context", "code.survey", "code.structure", "code.db"].includes(action)) tags.add("query");
+  if (["symbol.search", "symbol.card", "symbol.overview", "symbol.callers", "tree.overview", "tree.branch", "tree.scope", "tree.expand", "slice.build", "edit.plan", "context", "code.survey", "code.structure", "code.db"].includes(action)) tags.add("query");
   if (["buffer.push", "buffer.checkpoint", "memory.store", "policy.set", "agent.feedback", "index.refresh", "scip.ingest"].includes(action)) tags.add("mutates");
   if (action === "workflow" || action.startsWith("runtime.")) tags.add("orchestration");
   return [...tags].filter(Boolean);
@@ -216,6 +216,7 @@ function examplesFor(action) {
   const examples = {
     "symbol.search": [{ action, query: "auth middleware", limit: 5 }],
     "symbol.card": [{ action, symbolId: "<symbolId>", includeResolutionMetadata: true }],
+    "symbol.callers": [{ action, symbolId: "<symbolId>", limit: 20 }],
     "symbol.overview": [{ action, symbolId: "<symbolId>", kind: ["calls", "references"], limit: 25 }],
     "tree.overview": [{ action, maxDepth: 2, limit: 50 }],
     "tree.branch": [{ action, path: "lib/domains/atlas", maxDepth: 2, limit: 50 }],
@@ -237,7 +238,7 @@ function examplesFor(action) {
 function prerequisitesFor(action) {
   if (action === "repo.register") return ["A repoRoot must be available in params or dispatch context."];
   if (action === "index.refresh") return ["The repo should be registered or have a writable ATLAS ledger path."];
-  if (action === "symbol.card" || action === "symbol.overview") return ["Use symbol.search first when you do not already have a symbolId."];
+  if (action === "symbol.card" || action === "symbol.overview" || action === "symbol.callers") return ["Use symbol.search first when you do not already have a symbolId."];
   if (action === "tree.overview" || action === "tree.branch") return ["Run index.refresh first if tree-derived state is missing or stale."];
   if (action === "tree.scope") return ["Internal task-conditioned prefetch; preserve the full task text and current planner configuration."];
   if (action === "tree.expand") return ["Internal seed expansion; provide validated paths, symbolIds, nodeIds, or refs."];
@@ -255,6 +256,7 @@ function nextActionsFor(action) {
   const next = {
     "symbol.search": ["symbol.card", "symbol.overview", "code.skeleton"],
     "symbol.card": ["symbol.overview", "code.window"],
+    "symbol.callers": ["code.window"],
     "symbol.overview": ["symbol.card", "code.window"],
     "tree.overview": [],
     "tree.branch": [],
