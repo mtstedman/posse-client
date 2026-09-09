@@ -44,6 +44,16 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
       message: "code.survey requires `paths`: a directory prefix or file path, or an array of them.",
     });
   }
+  const unusable = requested.find((entry) =>
+    entry.startsWith("/") || entry.split("/").some((segment) => segment === "." || segment === ".."));
+  if (unusable) {
+    return errorEnvelope({
+      action,
+      versionId,
+      code: "invalid_params",
+      message: `code.survey paths must be repo-relative prefixes without "." or ".." segments (got ${JSON.stringify(unusable)}); use repo.overview for the whole repository.`,
+    });
+  }
 
   const digTerms = (Array.isArray(params.symbols) ? params.symbols : [])
     .map((t) => String(t || "").trim())

@@ -40,6 +40,14 @@ export async function symbolUsages({ view, versionId, params }) {
     });
   }
 
+  if (params.kind != null && !Array.isArray(params.kind)) {
+    return errorEnvelope({
+      action: "symbol.overview",
+      versionId,
+      code: "invalid_params",
+      message: "symbol.overview `kind` must be an array of edge kinds (e.g. [\"calls\"]); it is not a callers/callees selector.",
+    });
+  }
   const limit = clampInt(params.limit, 50, 1, 500);
   const minConfidence = normalizeConfidence(params.minConfidence);
   const kindFilter = Array.isArray(params.kind) && params.kind.length > 0

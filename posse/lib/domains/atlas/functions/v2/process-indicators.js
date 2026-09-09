@@ -13,6 +13,7 @@ import { formatDuration, formatTokens } from "../../../../shared/format/function
 import { parseJsonObject } from "../../../queue/functions/payload.js";
 import { FAILED_JOB_STATUSES, FAILED_JOB_STATUSES_SQL } from "../../../../catalog/job.js";
 import { ATLAS_WARM_JOB_TYPE } from "./contracts/jobs.js";
+import { VIEW_SCHEMA_VERSION } from "./contracts/index.js";
 import {
   ledgerDbPath,
   mainViewPath,
@@ -230,6 +231,9 @@ function viewStats(dbPath, ledger) {
     return openReadonly(dbPath, (db) => {
       const meta = metaMap(db);
       const ledgerSeq = Number(meta.ledger_seq || 0) || 0;
+      const schemaVersion = meta.schema_version == null || meta.schema_version === ""
+        ? null
+        : Number(meta.schema_version);
       const branch = String(meta.branch || "main");
       const headSeq = Number(ledger?.branch_heads?.[branch] ?? ledger?.main_head_seq ?? 0) || 0;
       return {
@@ -240,6 +244,10 @@ function viewStats(dbPath, ledger) {
         ledger_seq: ledgerSeq,
         head_seq: headSeq,
         built_at: meta.built_at || null,
+        schema_version: schemaVersion,
+        // A view written by an older schema is unreadable to every tool
+        // until it is rebuilt; freshness against the ledger is moot.
+        schema_mismatch: schemaVersion !== VIEW_SCHEMA_VERSION,
         stale: !!ledger?.ok && headSeq > ledgerSeq,
         files: count(db, "SELECT COUNT(*) AS cnt FROM path_to_blob"),
         symbols: count(db, "SELECT COUNT(*) AS cnt FROM symbols"),
@@ -584,9 +592,11 @@ export function renderAtlasV2ProcessIndicators(indicators, options = {}) {
   const edgeUnresolved = Number(view.unresolved_edges || ledger.unresolved_blob_edges || 0);
   const edgePct = edgeTotal > 0 ? Math.round((100 * edgeResolved) / edgeTotal) : 100;
   const viewFresh = view.exists
-    ? view.stale
-      ? `${C.yellow}stale${C.reset}`
-      : `${C.green}fresh${C.reset}`
+    ? view.schema_mismatch
+      ? `${C.red}schema ${view.schema_version ?? "?"} (code ${VIEW_SCHEMA_VERSION}; rebuild required)${C.reset}`
+      : view.stale
+        ? `${C.yellow}stale${C.reset}`
+        : `${C.green}fresh${C.reset}`
     : `${C.yellow}missing${C.reset}`;
 
   lines.push(
