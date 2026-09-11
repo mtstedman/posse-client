@@ -37,6 +37,7 @@ import {
   sanitizeExecutionHintsForRole,
 } from "../../providers/functions/execution-routing.js";
 import { getMaxOutputTokensForProvider } from "../../providers/functions/shared/turns.js";
+import { resolveDisableSystemTools } from "../../providers/functions/shared/tool-policy-settings.js";
 import { ProviderTurnBudget } from "../../providers/classes/ProviderTurnBudget.js";
 import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
 import { buildResumeHandoff, composePromptRemoteAware } from "../../handoff/functions/index.js";
@@ -62,6 +63,7 @@ import {
 import {
   finalizeAgentHandoffForProvider,
   getLatestAgentHandoffRejection,
+  getTraversalCompletionSnapshotForCall,
 } from "../../handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
 import {
@@ -93,11 +95,13 @@ function agentHandoffToolSchemaTelemetry(
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
+  requireResearcherCoverage = false,
 ) {
   const schema = getAgentHandoffToolSchemaForRole(role, {
     compactCompletion,
     compactV3,
     compactV4,
+    requireResearcherCoverage,
   });
   return toolSchemaTelemetry(schema);
 }
@@ -192,6 +196,15 @@ export function sessionContractFingerprint(options = {}, providerName = "") {
   );
   return crypto.createHash("sha256").update(JSON.stringify({
     provider: String(providerName || "").trim().toLowerCase(),
+    ...(String(providerName || "").trim().toLowerCase() === "codex"
+      ? {
+          codexNativeBatchingRequested: effective.nativeBatching !== false,
+          codexNativeBatchingCatalog: String(effective.nativeBatchingCatalog ?? (
+            String(effective.role || "").trim().toLowerCase() === "researcher"
+              ? process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || "" : ""
+          )),
+        }
+      : {}),
     role: String(effective.role || "").trim().toLowerCase(),
     promptVersion,
     remoteSystemPromptSha256: remoteSystemPrompt
@@ -471,7 +484,9 @@ const DEFAULT_DEPS = {
   agentHandoffTerminator,
   finalizeAgentHandoffForProvider,
   getLatestAgentHandoffRejection,
+  getTraversalCompletionSnapshotForCall,
   composePromptRemoteAware,
+  resolveDisableSystemTools,
   publishContextBudgetCheckpoint,
   markUsageSegmentsIncomplete,
   recordUsageSegment,
@@ -1323,6 +1338,14 @@ export class TrackedProviderClient {
     const attachedSourceEvidence = normalizeAttachedSourceEvidence(opts._attachedSourceEvidence);
     const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
     delete effectiveCapabilityOpts._attachedSourceEvidence;
+    // Resolve the account-backed lockdown once, before minting/attaching the
+    // Agent gate, and pass that same boolean to the Provider. Previously only
+    // the Codex adapter resolved the setting, after the MCP attachment had
+    // already defaulted it to false. That split issued generic file tools on
+    // otherwise locked Atlas researcher calls.
+    effectiveCapabilityOpts.disableSystemTools = typeof effectiveCapabilityOpts.disableSystemTools === "boolean"
+      ? effectiveCapabilityOpts.disableSystemTools
+      : this.deps.resolveDisableSystemTools();
     const localHandoffCapability = effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.agent_handoff_v1 === true;
     const remoteHandoffCapability = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffV1 === true;
     assertExpectedCoordination(effectiveCapabilityOpts, {
@@ -1443,6 +1466,10 @@ export class TrackedProviderClient {
             && (resolveAtlasResearcherDispatcher()
               || resolveAtlasResearcherTypedDispatcher()
               || resolveAtlasResearcherWorkflow()))),
+      this.deps.getTraversalCompletionSnapshotForCall({
+        jobId: job_id,
+        attemptId: observationContext?.attempt_id ?? null,
+      })?.active === true,
     );
     const terminalAbortController = terminalReceiptRequired ? new AbortController() : null;
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);

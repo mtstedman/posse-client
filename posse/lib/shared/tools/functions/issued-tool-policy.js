@@ -39,6 +39,13 @@ const WRITE_TOOL_NAMES = new Set([
   "generate_image",
 ]);
 const INTERNAL_DETERMINISTIC_TOOL_NAMES = new Set(["copy_file"]);
+const RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS = new Set([
+  "read_file",
+  "chain_read",
+  "chain_verdict",
+  "list_files",
+  "search_files",
+]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
 const TRUSTED_REMOTE_SURFACE_OBJECTS = new WeakSet();
 
@@ -77,6 +84,20 @@ function stringArray(value) {
   return Array.isArray(value)
     ? value.map((entry) => String(entry || "").trim()).filter(Boolean)
     : [];
+}
+
+function narrowResearcherAtlasLockedAllowlist(toolAllowlist, {
+  role = "",
+  atlasAvailable = false,
+  disableSystemTools = false,
+} = {}) {
+  if (String(role || "").trim().toLowerCase() !== "researcher"
+    || atlasAvailable !== true
+    || disableSystemTools !== true) return toolAllowlist;
+  toolAllowlist.tools = toolAllowlist.tools.filter(
+    (name) => !RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS.has(name),
+  );
+  return toolAllowlist;
 }
 
 function uniqueStrings(values = []) {
@@ -658,6 +679,7 @@ export function narrowBootConfigToSignedClaims(signedBootConfig = {}, callerBoot
   if (result.projectDbCapability === "none") {
     result.toolAllowlist.tools = result.toolAllowlist.tools.filter((name) => name !== "project_db_query");
   }
+  narrowResearcherAtlasLockedAllowlist(result.toolAllowlist, result);
   return result;
 }
 
@@ -685,6 +707,13 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     signed.toolAllowlist,
     attachmentHasAllowlist ? attachment.toolAllowlist : null,
   );
+  const disableSystemTools = signed.disableSystemTools === true || attachment.disableSystemTools === true;
+  const atlasAvailable = signed.atlasAvailable === true && attachment.atlasAvailable !== false;
+  narrowResearcherAtlasLockedAllowlist(toolAllowlist, {
+    role: runtimeRole,
+    atlasAvailable,
+    disableSystemTools,
+  });
   if (attachment.agentHandoff !== true) {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "agent_handoff");
   }
@@ -746,7 +775,7 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     deleteFiles: [],
     createRoots: [],
     readRoots: [],
-    disableSystemTools: signed.disableSystemTools === true || attachment.disableSystemTools === true,
+    disableSystemTools,
     allowWrite: signed.allowWrite === true && attachment.allowWrite === true,
     allowShell: signed.allowShell === true && attachment.allowShell !== false,
     allowTests: signed.allowTests === true
@@ -758,7 +787,7 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
       && projectDbCapability === "write",
     allowImageHelpers: signed.allowImageHelpers === true && attachment.allowImageHelpers !== false,
     allowImageGeneration: signed.allowImageGeneration === true && attachment.allowImageGeneration === true,
-    atlasAvailable: signed.atlasAvailable === true && attachment.atlasAvailable !== false,
+    atlasAvailable,
     atlasGateEnabled: signed.atlasGateEnabled === true && attachment.atlasGateEnabled !== false,
     atlasPrefetchStatus: String(attachment.atlasPrefetchStatus || ""),
     atlas: { ...(plainObject(attachment.atlas) || {}) },

@@ -54,6 +54,7 @@ const ATLAS_DISPLAY_ACTIONS = Object.freeze({
   "symbol.search": "symbol.search",
   "symbol.overview": "symbol.overview",
   "symbol.callers": "symbol.callers",
+  "symbol.get": "symbol.get",
   "tree.overview": "tree.overview",
   "tree.branch": "tree.branch",
   "tree.scope": "tree.scope",

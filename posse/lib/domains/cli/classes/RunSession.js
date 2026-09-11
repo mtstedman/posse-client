@@ -205,11 +205,13 @@ export class RunSession {
       AUTO_APPROVE,
       DRY_RUN,
       nonInteractive = false,
+      scopeMode,
       RUN_WORK_ITEM_IDS = [],
       requeueForShutdown,
       requeueWaitingHumanInputJobs,
       resurfaceParkedHumanGates,
       prepareNonInteractiveHumanInputGates = null,
+      prepareScopeModeHumanInputGates = null,
       reconcileHumanGates,
       claimHumanGatePromptPresentation = null,
       reconcileCanonicalSquashMergeWorkItems,
@@ -378,6 +380,12 @@ export class RunSession {
         approved_plan_gates: approvedPlans,
         requeued_human_gates: requeuedGates,
       });
+    }
+  }
+  if (typeof prepareScopeModeHumanInputGates === "function") {
+    const requeued = prepareScopeModeHumanInputGates({ workItemIds: scopedWorkItemIds, scopeMode });
+    if (requeued.length > 0) {
+      log?.info?.("run", "Prepared file-scope gates for automatic approval", { requeued_scope_gates: requeued.length });
     }
   }
   try { await reconcileCanonicalSquashMergeWorkItems?.(PROJECT_DIR); } catch { /* best-effort repair of landed squash commits */ }
@@ -2624,7 +2632,7 @@ export class RunSession {
     display.addEvent(`${C.green}Boot complete — entering main loop${C.reset}`);
   }
 
-  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
+  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, scopeMode, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
   this._activeWorker = worker;
 
   // Heal gate/job drift before reviving prompts: without this, a gate left

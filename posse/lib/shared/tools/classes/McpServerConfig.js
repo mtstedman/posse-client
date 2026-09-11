@@ -348,6 +348,7 @@ function expectedMcpToolNames(role, bootPayload = {}) {
       dispatchAgent: bootPayload.dispatchAgent === true,
       webResearchHandoff: bootPayload.webResearchHandoff === true,
       atlasAvailable: bootPayload.atlasAvailable === true,
+      disableSystemTools: bootPayload.disableSystemTools === true,
       customTools: bootPayload.customTools === true,
     });
   } catch {
@@ -663,6 +664,7 @@ function buildDeterministicMcpBootPayload(role, {
     dispatchAgent: dispatchAgent === true,
     webResearchHandoff: webResearchHandoff === true,
     atlasAvailable: atlasEnabled,
+    disableSystemTools: disableSystemTools === true,
     customTools,
   });
   const allowShell = expectedTools.includes("bash");

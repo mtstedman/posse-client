@@ -1,6 +1,8 @@
 // @ts-check
 import { parseSymbolId, symbolIdOf } from "./cards.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
+import { projectCompactSymbolRelationships } from "./compact-presentation.js";
+import { selectIncomingRelationshipEntries } from "./relationship-selection.js";
 
 /**
  * @param {{view: import("../contracts/api.js").View, versionId: string, params: import("../contracts/tool-params.js").SymbolCallersParams}} request
@@ -9,10 +11,57 @@ export async function symbolCallers({ view, versionId, params }) {
   const action = "symbol.callers";
   const parsed = parseSymbolId(params.symbolId);
   if (!parsed) return errorEnvelope({ action, versionId, code: "invalid_symbol_id", message: "symbol.callers requires a valid symbolId" });
+  if (params.projection === "compact-v1"
+    && Number(params.offset || 0) > 0
+    && params.indexVersion
+    && params.indexVersion !== versionId) {
+    return errorEnvelope({
+      action,
+      versionId,
+      code: "index_version_changed",
+      message: "The Atlas index changed before this relationship page could continue",
+    });
+  }
   const target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
   if (!target) return errorEnvelope({ action, versionId, code: "symbol_not_found", message: `No symbol found for ${params.symbolId}` });
   const confidence = Number(params.minConfidence || 0);
   const minimum = Math.ceil(Math.max(0, Math.min(100, confidence <= 1 ? confidence * 100 : confidence)));
+  if (params.projection === "compact-v1") {
+    const mode = params.mode || "caller";
+    const kinds = /** @type {("calls" | "references")[]} */ (mode === "all"
+      ? ["calls", "references"]
+      : mode === "reference" ? ["references"] : ["calls"]);
+    try {
+      const selected = await view.query.symbolRelationships(target.global_id, kinds, minimum);
+      const page = selectIncomingRelationshipEntries(selected.relationships, {
+        relationships: mode === "all" ? ["caller", "reference"] : [mode],
+        offset: params.offset,
+        limit: params.limit,
+        indexVersion: versionId,
+        indexIncomplete: selected.truncated,
+      });
+      const projected = projectCompactSymbolRelationships(page, {
+        mode,
+        limit: params.limit,
+        offset: params.offset,
+        indexVersion: versionId,
+        indexIncomplete: selected.truncated,
+      });
+      return okEnvelope({
+        action,
+        versionId,
+        data: projected.data,
+        meta: /** @type {any} */ (projected.meta),
+      });
+    } catch (error) {
+      return errorEnvelope({
+        action,
+        versionId,
+        code: String(error?.code || "symbol_relationships_failed"),
+        message: String(error?.message || "Could not select compact symbol relationships"),
+      });
+    }
+  }
   const neighborhood = await view.query.symbolCallers(target.global_id, minimum);
   const groups = new Map();
   let missingCallerSymbols = 0;

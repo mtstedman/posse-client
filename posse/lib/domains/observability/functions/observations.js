@@ -12,7 +12,10 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
 import { appendRunTelemetry, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
-import { isResearchAtlasExplorationAction } from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
+import {
+  isResearchAtlasCitationFetchAction,
+  isResearchAtlasExplorationAction,
+} from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
 import {
   INTERNAL_BACKGROUND_OBSERVATION_TYPES,
   isInternalBackgroundObservationType,
@@ -36,6 +39,7 @@ const TOOL_REPLAY_MAX_BUCKETS = 512;
 const _recentToolReplay = new Map(); // jobId -> Map<fingerprint, atMs>
 const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
   "tool.atlas",
+  "tool.read",
   "tool.chain_verdict",
   "tool.list",
   "tool.search",
@@ -690,6 +694,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       if (row.observation_type !== "tool.atlas") continue;
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
+        if (detail?.executed === false) continue;
         if (isRefundedInfrastructureFailure(row, detail)) continue;
         const unitId = Number(detail?.research_exploration_unit_version) === 1
           ? String(detail?.research_exploration_unit_id || "").trim().slice(0, 300)
@@ -759,6 +764,9 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         }
       }
       if (row.observation_type !== "tool.atlas") {
+        let detail = {};
+        try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { /* count conservatively */ }
+        if (detail?.executed === false) continue;
         physicalCallCount += 1;
         explorationCount += 1;
         // Historic native observations do not carry evidence identities.
@@ -769,9 +777,13 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       }
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
-        if (!isResearchAtlasExplorationAction(detail?.action)) continue;
+        if (detail?.executed === false) continue;
+        const atlasExploration = isResearchAtlasExplorationAction(detail?.action);
+        const atlasCitationFetch = isResearchAtlasCitationFetchAction(detail?.action);
+        if (!atlasExploration && !atlasCitationFetch) continue;
         if (isRefundedInfrastructureFailure(row, detail)) continue;
         physicalCallCount += 1;
+        if (atlasCitationFetch) continue;
         if (detail?.symbol_followup_discounted === true) symbolFollowupsDiscounted += 1;
         const explorationStep = explorationStepForDetail(detail);
         if (detail?.outcome === "succeeded" || detail?.ok === true) {
@@ -1339,12 +1351,24 @@ function _summarizeAtlasArgs(input = {}) {
   if (!input || typeof input !== "object") return {};
   const redactedInput = redactBridgeValue(input);
   const out = {};
+  const symbolRef = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const summarized = {};
+    if (typeof value.name === "string") summarized.name = _truncate(value.name, 160);
+    if (typeof value.file === "string") summarized.file = _truncate(value.file, 160);
+    if (typeof value.kind === "string") summarized.kind = _truncate(value.kind, 80);
+    if (typeof value.exportedOnly === "boolean") summarized.exportedOnly = value.exportedOnly;
+    return Object.keys(summarized).length > 0 ? summarized : null;
+  };
   const keys = Object.keys(redactedInput || {}).slice(0, 8);
   for (const key of keys) {
     const value = redactedInput[key];
     if (value == null) out[key] = null;
     else if (typeof value === "string") out[key] = _truncate(value, 160);
     else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
+    else if (Array.isArray(value) && key === "symbolRefs") {
+      out[key] = value.slice(0, 8).map((item) => symbolRef(item) || "[object]");
+    }
     else if (Array.isArray(value) && key === "items") {
       out[key] = value.slice(0, 4).map((item) => (
         item && typeof item === "object"
@@ -1356,10 +1380,17 @@ function _summarizeAtlasArgs(input = {}) {
       ));
     }
     else if (Array.isArray(value)) out[key] = value.slice(0, 8).map((item) => _truncate(item, 80));
+    else if (typeof value === "object" && key === "symbolRef") {
+      out[key] = symbolRef(value) || "[object]";
+    }
     else if (typeof value === "object") out[key] = "[object]";
     else out[key] = _truncate(value, 80);
   }
   return out;
+}
+
+export function __testSummarizeAtlasArgs(input = {}) {
+  return _summarizeAtlasArgs(input);
 }
 
 // Per-action hint extractor. The raw args include a lot of metadata; we want
@@ -1899,12 +1930,13 @@ export function reconcileProviderToolUseReplay({
   if (!Number.isInteger(callId) || callId <= 0 || !Number.isInteger(normalizedJobId) || normalizedJobId <= 0) {
     // Without the durable call identity there is no safe way to prove toolkit
     // coverage. Replay all provider-reported calls rather than lose telemetry.
-    return tool_uses.map((toolUse) => replayObjects.has(toolUse) ? toolUse : ({
+    return tool_uses.map((toolUse, index) => replayObjects.has(toolUse) ? toolUse : ({
       ...toolUse,
       observation_detail: {
         ...(toolUse?.observation_detail || {}),
         recovered_from_provider_rollout: true,
         recovery_reason: "toolkit_observation_identity_unavailable",
+        ...recoveredToolUseIdentity(toolUse, index, null),
       },
     }));
   }
@@ -1926,6 +1958,7 @@ export function reconcileProviderToolUseReplay({
   }
   const persisted = persistedRows.flatMap((row) => {
     if (!String(row?.observation_type || "").startsWith("tool.")) return [];
+    if (isToolSurfaceRecordObservationType(row?.observation_type)) return [];
     try {
       const detail = JSON.parse(String(row.detail_json || "{}"));
       if (Number(detail?.agent_call_id) !== callId) return [];
@@ -1942,7 +1975,7 @@ export function reconcileProviderToolUseReplay({
   });
 
   const output = [];
-  for (const toolUse of tool_uses) {
+  for (const [index, toolUse] of tool_uses.entries()) {
     if (replayObjects.has(toolUse)) {
       output.push(toolUse);
       continue;
@@ -1981,10 +2014,37 @@ export function reconcileProviderToolUseReplay({
         recovered_from_provider_rollout: true,
         recovery_reason: "toolkit_observation_missing",
         provider_tool_use_id: toolUse?.id || null,
+        ...recoveredToolUseIdentity(toolUse, index, callId),
       },
     });
   }
   return output;
+}
+
+// Atlas325 P0.1: `agent_call_id + action` cannot identify one physical
+// request because one provider call issues several same-action requests.
+// Every recovered row therefore carries the provider's own call id, its
+// sequence inside the provider tool-use list, and the resolved Atlas action,
+// so a collector can match it against owner rows (or report it unmatched)
+// instead of silently summing or deduplicating.
+function recoveredToolUseIdentity(toolUse, sequence, agentCallId) {
+  const providerCallId = typeof toolUse?.id === "string" && toolUse.id.trim() ? toolUse.id.trim() : null;
+  const action = _resolveAtlasAction(String(toolUse?.tool || ""), toolUse?.input || {}) || null;
+  return {
+    provider_call_id: providerCallId,
+    provider_tool_sequence: Number.isInteger(sequence) ? sequence : null,
+    ...(agentCallId != null ? { agent_call_id: agentCallId } : {}),
+    ...(action ? { recovered_action: action } : {}),
+  };
+}
+
+export const TOOL_SURFACE_ISSUED_OBSERVATION_TYPE = "tool.surface.issued";
+
+// The issued tool-surface record shares the "tool." prefix so it lives beside
+// the tool ledger, but it describes what was advertised, not a call. Every
+// tool-mix, invocation-count, and reconciliation consumer must skip it.
+export function isToolSurfaceRecordObservationType(value) {
+  return String(value || "") === TOOL_SURFACE_ISSUED_OBSERVATION_TYPE;
 }
 
 export function recordProviderToolBatchObservations({
@@ -2263,6 +2323,7 @@ export function summarizeJobToolMix(jobId) {
       if (type.endsWith(".started")) continue;          // completion half only
       if (type === "tool.chain_read") continue;         // paired with chain_verdict
       if (isInternalBackgroundObservationType(type)) continue;
+      if (isToolSurfaceRecordObservationType(type)) continue; // advertised surface, not a call
       const isSystemLane = type.endsWith(".prefetch") || type.endsWith(".autofeedback");
       byType[type] = (byType[type] || 0) + 1;
       if (!isSystemLane) toolCalls += 1;                 // agent-lane calls only
@@ -2365,7 +2426,8 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
   return enrichToolInvocationRows(
     db,
     _collapseToolInvocationRows(mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)
-      .filter((row) => !isInternalBackgroundObservationType(row.observation_type))),
+      .filter((row) => !isInternalBackgroundObservationType(row.observation_type)
+        && !isToolSurfaceRecordObservationType(row.observation_type))),
     { includeUnscoped },
   ).slice(0, cappedLimit);
 }
@@ -2394,6 +2456,7 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
       && !String(row.observation_type || "").endsWith(".started")
       && !HARNESS_SYSTEM_TYPE_SUFFIXES.some((suffix) => String(row.observation_type || "").endsWith(suffix))
       && !isInternalBackgroundObservationType(row.observation_type)
+      && !isToolSurfaceRecordObservationType(row.observation_type)
       && String(row.observation_type || "").startsWith("tool."));
 
   const groups = new Map();

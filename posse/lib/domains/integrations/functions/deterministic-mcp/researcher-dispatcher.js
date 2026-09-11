@@ -16,38 +16,40 @@ const EXCLUDED_ACTIONS = new Set([
 ]);
 
 const ACTION_CARDS = Object.freeze({
-  traverse_ref: "requires traversal_ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
+  traverse_ref: "requires traversal_ref; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,searchMode,reaccessAuthorization",
   create_ref: "fields text or source_ref+lines/offset/limit or chunks, plus object_type,note,owner_scope",
-  "symbol.search": "requires query; fields query,scope,limit,semantic",
+  "symbol.search": "requires query; for a known exact name call symbol.get with symbolRef{name,file?,kind?} directly; search only an unknown, ambiguous, or missed target, using scope=name, semantic=false, and limit at most 10 for an exact name; never repeat case or scope variants after a usable hit; a hit is an address, not a source body; batch independent searches and reuse returned IDs; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
-  "symbol.callers": "requires symbolId; list distinct indexed caller symbols when who calls this is the missing fact; fields symbolId,minConfidence,limit,offset",
+  "symbol.callers": "requires symbolId; list compact incoming caller or reference symbols grouped by file; fields symbolId,mode,limit,offset",
+  "symbol.get": "requires symbolId or symbolRef; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; fields symbolId,kind,minConfidence,limit,includeUnresolved",
-  "code.skeleton": "fields file or symbolId,identifiersToFind,exportedOnly,maxLines,maxTokens,surveyGap",
-  "code.survey": "requires paths; fields paths,symbols,maxFiles",
-  "code.structure": "requires paths; fields paths,edgeKinds,includeEdges,includeSymbols,maxFiles",
+  "code.skeleton": "fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
+  "code.survey": "requires paths; fields paths,identifiersToFind,limit",
+  "code.structure": "requires paths; exact inventory of one small directory or file set (default 12 files) with stable symbol handles, or an explicit relationship query when edgeKinds such as implements, extends, calls, or imports are supplied; imports is the default edge kind; use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
   "code.lens": "requires identifiersToFind and either symbolId or file; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires reason+symbolId or reason+file+identifiersToFind; fields symbolId,file,reason,identifiersToFind,granularity,maxTokens",
+  "code.window": "requires reason+symbolId or reason+file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; fields symbolId,file,reason,identifiersToFind,granularity,maxTokens",
   "memory.feedback": "requires memoryId,verdict; fields memoryId,verdict,detail",
-  "memory.surface": "fields domains,fileRelPaths,symbolIds",
-  "memory.get": "fields domains,fileRelPaths,symbolIds",
+  "memory.surface": "fields domains,paths,symbolIds",
+  "memory.get": "fields domains,paths,symbolIds",
 });
 
 // The typed dispatcher removes each direct tool's purpose description as well
 // as its name. Restore that task-blind selection signal while keeping the one-
 // tool, closed-argument surface and canonical execution path unchanged.
 const TYPED_ACTION_CARDS = Object.freeze({
-  traverse_ref: "requires traversal_ref; retrieve only content omitted behind an explicit traversal_ref or next_traversal_ref, batching every independently needed ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
-  "symbol.search": "requires query; discover an unresolved symbol or location, then reuse returned IDs instead of repeating discovery after the target is known; fields query,scope,limit,semantic",
+  traverse_ref: "requires traversal_ref; retrieve only content omitted behind an explicit traversal_ref or nextTraversalRef, batching every independently needed ref; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,searchMode,reaccessAuthorization",
+  "symbol.search": "requires query; for a known exact name call symbol.get with symbolRef{name,file?,kind?} directly; search only an unknown, ambiguous, or missed target, using scope=name, semantic=false, and limit at most 10 for an exact name; never repeat case or scope variants after a usable hit; a hit is an address, not a source body; batch independent searches, then reuse returned IDs; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; get a compact relationship summary for one or several identified symbols; fields symbolId,symbolRef",
-  "symbol.callers": "requires symbolId; list distinct indexed caller symbols when who calls this is the missing fact; fields symbolId,minConfidence,limit,offset",
+  "symbol.callers": "requires symbolId; list compact incoming resolved callers, references, or both by file, then use symbol.get on a returned ID; fields symbolId,mode,limit,offset",
+  "symbol.get": "requires symbolId or symbolRef; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; inspect concrete call and reference sites when relationships are the missing fact; fields symbolId,kind,minConfidence,limit,includeUnresolved",
-  "code.skeleton": "orient within one known file or symbol using a compact body-free outline before exact source; fields file or symbolId,identifiersToFind,exportedOnly,maxLines,maxTokens,surveyGap",
-  "code.survey": "requires paths; use when the exact target is unknown or behavior spans files, returning a ranked multi-file symbol preview and call map; fields paths,symbols,maxFiles",
-  "code.structure": "requires paths; inventory files, symbols, imports, and selected edges when relationships matter more than bodies; fields paths,edgeKinds,includeEdges,includeSymbols,maxFiles",
+  "code.skeleton": "orient within one known file or symbol using a compact body-free outline before exact source; fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
+  "code.survey": "requires paths; use when the exact target is unknown or behavior spans files, returning a ranked multi-file symbol preview and call map; fields paths,identifiersToFind,limit",
+  "code.structure": "requires paths; read the exact inventory of one small directory or file set (default 12 files, paged beyond that) with stable symbol handles, or answer who-implements, who-extends, who-calls, or who-imports inside it in one call by naming edgeKinds explicitly (imports is the default; without edges it is a symbol list, not a relationship proof); use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
   "code.lens": "requires identifiersToFind and either symbolId or file; use when relevant identifiers or branches are scattered in one known target, batching all known same-target identifiers; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires symbolId or file+identifiersToFind; read exact source only for a known symbol or named anchored region, batching known same-file anchors rather than using windows for discovery or orientation; the facade supplies the invariant proof-of-need reason; fields symbolId,file,identifiersToFind,granularity,maxTokens",
-  "memory.surface": "probe memory presence for exact file or symbol anchors without returning bodies; fields domains,fileRelPaths,symbolIds",
-  "memory.get": "retrieve memory bodies for exact file or symbol anchors; fields domains,fileRelPaths,symbolIds",
+  "code.window": "requires file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; the facade supplies reason; fields file,identifiersToFind,granularity,maxTokens",
+  "memory.surface": "probe memory presence for exact file or symbol anchors without returning bodies; fields domains,paths,symbolIds",
+  "memory.get": "retrieve memory bodies for exact file or symbol anchors; fields domains,paths,symbolIds",
 });
 
 // Keep the terse language arm terse, but state the one action boundary that
@@ -55,7 +57,8 @@ const TYPED_ACTION_CARDS = Object.freeze({
 // prompt pressure: native validation still rejects every malformed window.
 const TYPED_TERSE_ACTION_CARDS = Object.freeze({
   ...ACTION_CARDS,
-  "code.window": "file alone is invalid; use code.skeleton for orientation; exact source requires symbolId or file+identifiersToFind; the facade supplies the invariant proof-of-need reason; fields symbolId,file,identifiersToFind,granularity,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "code.window": "requires file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; fields file,identifiersToFind,granularity,maxTokens",
 });
 
 const TYPED_READY_CALL_BATCHING =
@@ -68,6 +71,8 @@ const TYPED_DIRECT_SYMBOL_CARD =
 // one table so a treatment can be tuned by ecosystem rather than repository,
 // question, answer, or grader feedback. Marker priority selects the primary
 // language for telemetry; all detected languages contribute enabled booleans.
+// Result compaction is transport-only and preserves source, symbol handles,
+// warnings, pagination, and non-default diagnostics, so it is language-neutral.
 export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
   php: Object.freeze({
     markers: Object.freeze(["composer.json"]),
@@ -75,7 +80,7 @@ export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,
-    resultCompaction: false,
+    resultCompaction: true,
   }),
   typescript: Object.freeze({
     markers: Object.freeze(["tsconfig.json"]),
@@ -83,7 +88,7 @@ export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,
-    resultCompaction: false,
+    resultCompaction: true,
   }),
   javascript: Object.freeze({
     markers: Object.freeze(["package.json"]),
@@ -91,7 +96,7 @@ export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,
-    resultCompaction: false,
+    resultCompaction: true,
   }),
   python: Object.freeze({
     markers: Object.freeze(["pyproject.toml", "setup.py", "requirements.txt"]),
@@ -99,7 +104,7 @@ export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,
-    resultCompaction: false,
+    resultCompaction: true,
   }),
   rust: Object.freeze({
     markers: Object.freeze(["cargo.toml"]),
@@ -107,7 +112,7 @@ export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,
-    resultCompaction: false,
+    resultCompaction: true,
   }),
   go: Object.freeze({
     markers: Object.freeze(["go.mod"]),
@@ -115,7 +120,7 @@ export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,
-    resultCompaction: false,
+    resultCompaction: true,
   }),
 });
 
@@ -156,7 +161,9 @@ const WORKFLOW_ACTIONS = Object.freeze([
   "traverse_ref",
   "symbol.search",
   "symbol.card",
-  "symbol.overview", "symbol.callers",
+  "symbol.overview",
+  "symbol.callers",
+  "symbol.get",
   "code.skeleton",
   "code.survey",
   "code.structure",
@@ -165,6 +172,78 @@ const WORKFLOW_ACTIONS = Object.freeze([
   "memory.surface",
   "memory.get",
 ]);
+
+// Keep the compact union of all typed fields for provider ergonomics, then
+// discriminate required selectors at the top level. The owner still performs
+// canonical per-action validation, but these branches prevent empty,
+// reason-only, and cross-action argument objects from being generated as
+// schema-valid atlas.query calls.
+const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
+  traverse_ref: Object.freeze({ required: Object.freeze(["traversal_ref"]) }),
+  "symbol.search": Object.freeze({ required: Object.freeze(["query"]) }),
+  "symbol.card": Object.freeze({
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["symbolId"]) }),
+      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+      Object.freeze({ required: Object.freeze(["symbolRef"]) }),
+    ]),
+  }),
+  "symbol.overview": Object.freeze({
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["symbolId"]) }),
+      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+    ]),
+  }),
+  "symbol.callers": Object.freeze({
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["symbolId"]) }),
+      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+    ]),
+  }),
+  "symbol.get": Object.freeze({
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["symbolId"]) }),
+      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+      Object.freeze({ required: Object.freeze(["symbolRef"]) }),
+    ]),
+  }),
+  "code.skeleton": Object.freeze({
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 5000 }) }),
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["symbolId"]) }),
+      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+      Object.freeze({ required: Object.freeze(["file"]) }),
+    ]),
+  }),
+  "code.survey": Object.freeze({
+    required: Object.freeze(["paths"]),
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 128 }) }),
+  }),
+  "code.structure": Object.freeze({
+    required: Object.freeze(["paths"]),
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 128 }) }),
+  }),
+  "code.lens": Object.freeze({
+    required: Object.freeze(["identifiersToFind"]),
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["symbolId"]) }),
+      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+      Object.freeze({ required: Object.freeze(["file"]) }),
+    ]),
+  }),
+  "code.window": Object.freeze({ required: Object.freeze(["file", "identifiersToFind"]) }),
+  "memory.surface": Object.freeze({}),
+  "memory.get": Object.freeze({}),
+});
+
+function researcherTypedActionRequirementSchema(action) {
+  return {
+    properties: {
+      action: { type: "string", enum: [action] },
+      args: TYPED_ACTION_ARG_REQUIREMENTS[action] || {},
+    },
+  };
+}
 
 const WORKFLOW_ARG_FIELDS = new Set([
   "contextLines",
@@ -184,6 +263,7 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "maxLines",
   "maxTokens",
   "minConfidence",
+  "mode",
   "offset",
   "paths",
   "query",
@@ -191,10 +271,12 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "reason",
   "scope",
   "search",
+  "searchMode",
   "search_mode",
   "semantic",
   "surveyGap",
   "symbolId",
+  "symbolHandle",
   "symbolIds",
   "symbolRef",
   "symbols",
@@ -227,22 +309,35 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     offset: { type: "integer", minimum: 0 },
     semantic: { type: "boolean" },
     symbolId,
+    symbolHandle: {
+      type: "string",
+      pattern: "^s[1-9][0-9]{0,5}$",
+      description: "Compatibility alias for a returned short symbolId; prefer symbolId.",
+    },
     symbolIds: { ...stringArray, items: symbolId },
     symbolRef: symbolRefItem,
     kind: { type: "array", items: { type: "string", enum: ["calls", "references", "reads", "writes", "uses_type", "imports", "extends", "implements"] }, maxItems: 20 },
     minConfidence: { type: "number", minimum: 0, maximum: 100 },
+    mode: { type: "string", enum: ["caller", "reference", "all"] },
     minCallConfidence: { type: "number", minimum: 0, maximum: 1 },
     includeUnresolved: { type: "boolean" },
     includeResolutionMetadata: { type: "boolean" },
-    file: { type: "string", minLength: 1 },
+    file: { type: "string", minLength: 1, description: "Existing repository-relative path already surfaced by Atlas; never guess a dependency file." },
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 128 },
-    identifiersToFind: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 50 },
-    symbols: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 16 },
+    identifiersToFind: {
+      type: "array",
+      minItems: 1,
+      items: { type: "string", minLength: 1 },
+      maxItems: 50,
+      description: "One or more non-empty exact identifiers in the selected file. Omit an unanchored read instead of inserting an empty string.",
+    },
     reason: { type: "string", minLength: 1 },
-    granularity: { type: "string", enum: ["symbol", "block", "fileWindow"] },
-    contextLines: { type: "integer", minimum: 0, maximum: 8 },
-    maxFiles: { type: "integer", minimum: 1, maximum: 128 },
-    maxLines: { type: "integer", minimum: 1, maximum: 5000 },
+    granularity: {
+      type: "string",
+      enum: ["symbol", "block", "fileWindow"],
+      description: "Prefer symbol for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; block selects the enclosing control-flow block.",
+    },
+    contextLines: { type: "integer", minimum: 0, maximum: 200000, description: "Requested surrounding lines; values above 8 are clamped to 8." },
     maxTokens: { type: "integer", minimum: 1, maximum: 200000 },
     exportedOnly: { type: "boolean" },
     surveyGap: { type: "string", minLength: 3 },
@@ -255,10 +350,9 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     refs: stringArray,
     hashes: stringArray,
     search: { type: "string" },
-    search_mode: { type: "string", enum: ["auto", "literal", "regex"] },
+    searchMode: { type: "string", enum: ["auto", "literal", "regex"] },
     reaccessAuthorization: { type: "string", minLength: 16 },
     domains: { type: "array", items: { type: "string", enum: ["general", "ux", "schema", "security", "performance"] }, maxItems: 5 },
-    fileRelPaths: stringArray,
     memoryId: { type: "string", minLength: 1 },
     verdict: { type: "string", enum: ["used", "stale", "wrong", "duplicate"] },
     detail: { type: "string" },
@@ -277,15 +371,19 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
 }
 
 /**
- * @param {{ allowSymbolHandles?: boolean, includeWindowReason?: boolean }} [options]
+ * @param {{ allowSymbolHandles?: boolean, includeWindowReason?: boolean, actions?: string[] }} [options]
  */
 function researcherReadActionArgsSchema(options = {}) {
   const includeWindowReason = options.includeWindowReason !== false;
+  const includeLegacyRelationshipConfidence = Array.isArray(options.actions)
+    && options.actions.includes("symbol.overview");
   const actionArgs = researcherActionArgsSchema({
     allowSymbolHandles: options.allowSymbolHandles === true,
   });
   const readProperties = Object.fromEntries(Object.entries(actionArgs.properties)
-    .filter(([name]) => WORKFLOW_ARG_FIELDS.has(name) && (includeWindowReason || name !== "reason")));
+    .filter(([name]) => WORKFLOW_ARG_FIELDS.has(name)
+      && (includeWindowReason || name !== "reason")
+      && (includeLegacyRelationshipConfidence || name !== "minConfidence")));
   return {
     type: "object",
     properties: readProperties,
@@ -293,8 +391,49 @@ function researcherReadActionArgsSchema(options = {}) {
   };
 }
 
+/**
+ * Translate the typed facade's canonical field names to the version-coupled
+ * native action contract. Legacy facade names remain accepted for one release,
+ * but only canonical names are advertised by the typed schema and cards.
+ *
+ * @param {string} action
+ * @param {Record<string, any>} args
+ * @returns {{ args: Record<string, any>, aliases: Array<{from: string, to: string, requested?: number, applied?: number, normalization?: string}>, error?: string }}
+ */
+export function normalizeResearcherTypedActionArgs(action, args = {}) {
+  const normalized = { ...args };
+  const aliases = [];
+  const move = (from, to) => {
+    if (!Object.prototype.hasOwnProperty.call(normalized, from)) return null;
+    if (Object.prototype.hasOwnProperty.call(normalized, to)) {
+      if (JSON.stringify(normalized[from]) !== JSON.stringify(normalized[to])) {
+        return `Typed Atlas fields ${from} and ${to} conflict`;
+      }
+      delete normalized[from];
+      aliases.push({ from, to });
+      return null;
+    }
+    normalized[to] = normalized[from];
+    delete normalized[from];
+    aliases.push({ from, to });
+    return null;
+  };
+  let error = move("symbolHandle", "symbolId");
+  if (!error && action === "traverse_ref") error = move("searchMode", "search_mode");
+  if (!error && action === "code.survey") error = move("identifiersToFind", "symbols");
+  if (!error && ["code.survey", "code.structure"].includes(action)) error = move("limit", "maxFiles");
+  if (!error && action === "code.skeleton") error = move("limit", "maxLines");
+  if (!error && ["memory.surface", "memory.get"].includes(action)) error = move("paths", "fileRelPaths");
+  if (!error && action === "code.lens" && Number.isInteger(normalized.contextLines) && normalized.contextLines > 8) {
+    const requested = normalized.contextLines;
+    normalized.contextLines = 8;
+    aliases.push({ from: "contextLines", to: "contextLines", requested, applied: 8, normalization: "clamp" });
+  }
+  return { args: normalized, aliases, ...(error ? { error } : {}) };
+}
+
 function researcherWorkflowStepSchema(workflowActions = []) {
-  const actionArgs = researcherReadActionArgsSchema();
+  const actionArgs = researcherReadActionArgsSchema({ actions: workflowActions });
   return {
     type: "object",
     properties: {
@@ -314,7 +453,7 @@ function researcherWorkflowStepSchema(workflowActions = []) {
  * slots keep every step argument typed in the actual provider request.
  *
  * @param {Record<string, any>} toolArgs
- * @returns {{ ok: true, args: { steps: Array<{ id?: string, action: string, args: Record<string, any> }>, onError?: "stop" } } | { ok: false, error: string }}
+ * @returns {{ ok: true, args: { steps: Array<{ id?: string, action: string, args: Record<string, any> }>, onError?: "stop" }, aliases: Array<{step: number, from: string, to: string}> } | { ok: false, error: string }}
  */
 export function normalizeResearcherWorkflowFacadeArgs(toolArgs = {}) {
   if (!toolArgs || typeof toolArgs !== "object" || Array.isArray(toolArgs)) {
@@ -333,6 +472,7 @@ export function normalizeResearcherWorkflowFacadeArgs(toolArgs = {}) {
     return { ok: false, error: "workflow onError must be stop" };
   }
   const steps = [];
+  const aliases = [];
   for (let index = 1; index <= WORKFLOW_MAX_STEPS; index += 1) {
     const key = `step${index}`;
     const step = toolArgs[key];
@@ -350,10 +490,13 @@ export function normalizeResearcherWorkflowFacadeArgs(toolArgs = {}) {
     const action = String(step.action || "").trim();
     if (!action) return { ok: false, error: `workflow ${key} action is required` };
     const { id, action: _action, ...args } = step;
+    const normalized = normalizeResearcherTypedActionArgs(action, args);
+    if (normalized.error) return { ok: false, error: `workflow ${key}: ${normalized.error}` };
+    aliases.push(...normalized.aliases.map((alias) => ({ step: index, ...alias })));
     steps.push({
       ...(id != null ? { id } : {}),
       action,
-      args,
+      args: normalized.args,
     });
   }
   return {
@@ -362,6 +505,7 @@ export function normalizeResearcherWorkflowFacadeArgs(toolArgs = {}) {
       steps,
       ...(toolArgs.onError != null ? { onError: toolArgs.onError } : {}),
     },
+    aliases,
   };
 }
 
@@ -413,7 +557,7 @@ export function buildResearcherTypedDispatcherTool(atlasTools = [], {
   const cards = actions.map((action) => `${action}: ${actionCards[action]}.`).join(" ");
   return {
     name: DISPATCHER_TOOL_NAME,
-    description: `Run one canonical Atlas repository read. Put only the selected action's fields in args. Batch independent atlas.query calls; reuse exact returned values for dependent reads. symbolId accepts an exact returned symbolHandle. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
+    description: `Run one canonical Atlas repository read. Put only the selected action's fields in args. Batch independent atlas.query calls; reuse returned symbolId values for dependent reads. symbolHandle is a compatibility input alias. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -421,10 +565,12 @@ export function buildResearcherTypedDispatcherTool(atlasTools = [], {
         args: researcherReadActionArgsSchema({
           allowSymbolHandles: true,
           includeWindowReason: false,
+          actions,
         }),
       },
       required: ["action", "args"],
       additionalProperties: false,
+      oneOf: actions.map(researcherTypedActionRequirementSchema),
     },
   };
 }
@@ -453,6 +599,22 @@ export function buildResearcherWorkflowTool(atlasTools = []) {
       additionalProperties: false,
     },
   };
+}
+
+/**
+ * The action enum the dispatcher tool advertises for a given allowlist, using
+ * the same filters as the tool builders. Used by the owner's nested-action
+ * error boundary so a rejection only ever suggests actions the model was
+ * actually issued.
+ *
+ * @param {Iterable<string>} actionNames
+ * @param {{ typed?: boolean }} [options]
+ */
+export function researcherDispatcherIssuedActions(actionNames, { typed = false } = {}) {
+  const surfaced = dispatcherActions([...actionNames].map((name) => ({ name: `atlas.${String(name || "")}` })));
+  return typed
+    ? WORKFLOW_ACTIONS.filter((action) => surfaced.includes(action))
+    : surfaced;
 }
 
 export function researcherWorkflowMaxSteps() {

@@ -24,6 +24,7 @@ import {
   resolveLifecycleSurveyTargetSymbolIds,
 } from "./lifecycle-survey.js";
 import {
+  exactPrefetchFileRenderBudget,
   lifecycleBodyInlineDecision,
   lifecycleBodyRenderBudget,
   normalizeLifecyclePrefetchBody,
@@ -60,6 +61,8 @@ import {
 const ATLAS_EXACT_PREFETCH_MAX_FILES = 6;
 const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
 const ATLAS_EXACT_PREFETCH_MAX_LINES = 1200;
+const ATLAS_PARALLEL_ENTRY_LITERAL_MAX_FILES = 8;
+const ATLAS_PARALLEL_ENTRY_LITERAL_MAX_BYTES = 3200;
 const ATLAS_SLICE_FILE_DISPLAY_MAX = 8;
 const ATLAS_REFERENCE_PREFETCH_MAX_FILES = 8;
 const ATLAS_DB_PREFETCH_MAX_FILES = 64;
@@ -1636,10 +1639,12 @@ async function _prefetchExactScopedFiles(filePaths, {
   toolsAvailable,
   maxFiles = ATLAS_EXACT_PREFETCH_MAX_FILES,
   perFileTimeoutMs = 8000,
+  literalSourceFiles = [],
 }) {
   const targets = _uniqueAtlasPaths(filePaths, maxFiles);
   if (targets.length === 0) return [];
   const tools = new Set(Array.isArray(toolsAvailable) ? toolsAvailable : []);
+  const literalSources = _pathSet(literalSourceFiles);
 
   const readFile = async (file) => {
     try {
@@ -1659,6 +1664,9 @@ async function _prefetchExactScopedFiles(filePaths, {
       const source = await fs.promises.readFile(absolute, "utf8");
       const totalBytes = Buffer.byteLength(source, "utf8");
       const allLines = source.split(/\r?\n/);
+      const sourceLines = source.length === 0
+        ? 0
+        : (source.endsWith("\n") ? Math.max(0, allLines.length - 1) : allLines.length);
       const limitedLines = allLines.slice(0, ATLAS_EXACT_PREFETCH_MAX_LINES);
       let content = limitedLines.join("\n");
       let truncated = limitedLines.length < allLines.length;
@@ -1675,6 +1683,7 @@ async function _prefetchExactScopedFiles(filePaths, {
         bytes,
         totalBytes,
         totalLines: allLines.length,
+        sourceLines,
         returnedLines,
         truncated,
       };
@@ -1714,6 +1723,7 @@ async function _prefetchExactScopedFiles(filePaths, {
   );
 
   return Promise.all(targets.map((file) => {
+    if (literalSources.has(file.toLowerCase())) return readFile(file);
     if (!_isIndexedSourcePath(file)) return readFile(file);
     if (tools.has("code.skeleton")) return readSkeleton(file);
     return {
@@ -1739,6 +1749,7 @@ export function atlasSliceSkeletonPrefetchLimit(recipient) {
 
 const ATLAS_TREE_SCOPE_MAX_FILES = 24;
 const ATLAS_TREE_SCOPE_RANK_POOL_FILES = 40;
+const ATLAS_PARALLEL_ENTRY_SIBLING_LIMIT = 4;
 
 function _atlasConfidenceBand(value) {
   const n = Number(value);
@@ -1775,6 +1786,111 @@ function _atlasPrefetchCandidateScore(entry, versionFamilies, taskText) {
   return mentioned ? score : score * 0.65;
 }
 
+function _atlasPrefetchCandidateClass(entry, taskText) {
+  const candidatePath = String(entry?.path || "").replace(/\\/g, "/");
+  const parts = candidatePath.split("/").filter(Boolean);
+  const basename = parts.at(-1)?.toLowerCase() || "";
+  const nonProduction = !!(entry?.test || entry?.example || entry?.config);
+  if (nonProduction) return 5;
+  // Public type surfaces are useful for API-shape claims, but they must not
+  // displace the runtime owner or terminal implementation from a bounded
+  // survey. Keep them in the candidate set, behind production source.
+  if (basename.endsWith(".d.ts") || parts.some((part) => part.toLowerCase() === "types")) return 4;
+  const entryLike = parts.length <= 1
+    || /^(?:index|main|__init__|__main__)\.[a-z0-9]+$/iu.test(basename);
+  // Root and conventional source-root entry files are architectural signals,
+  // independent of task wording. Nested package entries stay in the ordinary
+  // production pool unless the tree itself ranks or discovers them.
+  if (entryLike && parts.length <= 2) return 0;
+  const normalizeTerm = (term) => term.length > 4 && term.endsWith("s") ? term.slice(0, -1) : term;
+  const taskTerms = new Set(String(taskText || "").toLowerCase().split(/[^a-z0-9]+/u)
+    .map(normalizeTerm)
+    .filter((term) => term.length >= 4));
+  const basenameTerms = basename.replace(/(?:\.[^.]+)+$/u, "").split(/[^a-z0-9]+/u)
+    .map(normalizeTerm)
+    .filter((term) => term.length >= 4 && !["index", "main"].includes(term));
+  // This is a bounded path-level relevance signal, not answer-key routing:
+  // task-named operations/focuses lift their production owners inside the
+  // native candidate pool, while the native score still orders ties.
+  const taskMatchedImplementation = basenameTerms.some((term) => taskTerms.has(term));
+  return taskMatchedImplementation ? 1 : 2;
+}
+
+// A conventional entry file beside a selected implementation owner is useful
+// architecture context even when native ranking does not independently put
+// that tiny export-only file in its top pool. Derive candidates only from
+// already-ranked repository paths and on-disk siblings; task wording never
+// controls this expansion.
+export function expandAtlasParallelEntrySiblings(cwd, rankedFiles, taskText, {
+  maxAdditional = ATLAS_PARALLEL_ENTRY_SIBLING_LIMIT,
+  maxFiles = MAX_SURVEY_FILES,
+} = {}) {
+  void taskText;
+  const files = _uniqueAtlasPaths(rankedFiles, maxFiles);
+  if (!_isPrefetchCwdUsable(cwd)) return files;
+  const existing = new Set(files.map((file) => file.toLowerCase()));
+  const discoveredByOwner = new Map();
+  let discovered = 0;
+  for (const file of files) {
+    if (discovered >= maxAdditional) break;
+    const extension = path.posix.extname(file);
+    if (!extension) continue;
+    const dirname = path.posix.dirname(file);
+    const basenames = extension.toLowerCase() === ".py"
+      ? ["__init__.py", "__main__.py"]
+      : [`index${extension}`, `main${extension}`];
+    for (const basename of basenames) {
+      if (discovered >= maxAdditional) break;
+      const candidate = dirname === "." ? basename : path.posix.join(dirname, basename);
+      const key = candidate.toLowerCase();
+      if (existing.has(key) || !_isIndexedSourcePath(candidate)) continue;
+      const absolute = resolvePathWithin(cwd, candidate);
+      let regularFile = false;
+      try { regularFile = !!absolute && fs.statSync(absolute).isFile(); } catch { /* absent sibling */ }
+      if (!regularFile) continue;
+      existing.add(key);
+      discovered += 1;
+      const siblings = discoveredByOwner.get(file) || [];
+      siblings.push(candidate);
+      discoveredByOwner.set(file, siblings);
+    }
+  }
+  return _uniqueAtlasPaths(files.flatMap((file) => [
+    ...(discoveredByOwner.get(file) || []),
+    file,
+  ]), maxFiles);
+}
+
+function _parallelPublicEntryPaths(candidates, taskText, maxFiles = 12) {
+  void taskText;
+  return _uniqueAtlasPaths(candidates, 64).filter((candidatePath) => {
+    const basename = path.posix.basename(candidatePath);
+    return /^(?:index|main|__init__|__main__)\.[a-z0-9]+$/iu.test(basename);
+  }).slice(0, maxFiles);
+}
+
+function _boundedParallelEntryLiteralFiles(cwd, candidates, taskText) {
+  if (!_isPrefetchCwdUsable(cwd)) return [];
+  return _parallelPublicEntryPaths(
+    candidates,
+    taskText,
+    ATLAS_PARALLEL_ENTRY_LITERAL_MAX_FILES,
+  ).filter((file) => {
+    const absolute = resolvePathWithin(cwd, file);
+    try {
+      const stat = absolute ? fs.statSync(absolute) : null;
+      return !!stat?.isFile() && stat.size > 0 && stat.size <= ATLAS_PARALLEL_ENTRY_LITERAL_MAX_BYTES;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function __testBoundedParallelEntryLiteralFiles(cwd, candidates, taskText) {
+  assertTestContext("__testBoundedParallelEntryLiteralFiles");
+  return _boundedParallelEntryLiteralFiles(cwd, candidates, taskText);
+}
+
 
 export function rankAtlasTreeScopeCandidates(candidates, {
   prefetchMode = null,
@@ -1793,9 +1909,9 @@ export function rankAtlasTreeScopeCandidates(candidates, {
   return rows
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => {
-      const aNonProduction = !!(a.entry.test || a.entry.example || a.entry.config);
-      const bNonProduction = !!(b.entry.test || b.entry.example || b.entry.config);
-      if (aNonProduction !== bNonProduction) return aNonProduction ? 1 : -1;
+      const classDelta = _atlasPrefetchCandidateClass(a.entry, taskText)
+        - _atlasPrefetchCandidateClass(b.entry, taskText);
+      if (classDelta !== 0) return classDelta;
       const scoreDelta = _atlasPrefetchCandidateScore(b.entry, versionFamilies, taskText)
         - _atlasPrefetchCandidateScore(a.entry, versionFamilies, taskText);
       return scoreDelta || a.index - b.index;
@@ -2104,12 +2220,6 @@ async function _attachAtlasTreePrefetchContext(packet, {
     cards: [],
   };
 
-  const exactFiles = await _prefetchExactScopedFiles(prefetchTargets.exactFiles, {
-    packet,
-    toolsAvailable: [...tools],
-    maxFiles: ATLAS_EXACT_PREFETCH_MAX_FILES,
-  });
-
   // Area handoffs: pre-surface a compact code.survey summary plus a job-visible
   // hash and ten-file continuation pages. The agent can expand the exact
   // prefetched result without executing the survey again. Any miss falls back
@@ -2126,10 +2236,21 @@ async function _attachAtlasTreePrefetchContext(packet, {
   const wideningCallerPaths = Array.isArray(treeScope.scopeWidening)
     ? treeScope.scopeWidening.map((c) => (c && typeof c === "object" ? c.path : c)).filter(Boolean)
     : [];
-  const surveyRankedFiles = _uniqueAtlasPaths(
+  const surveyRankedFiles = expandAtlasParallelEntrySiblings(packet.cwd, _uniqueAtlasPaths(
     [...(Array.isArray(prefetchTargets.rankedFiles) ? prefetchTargets.rankedFiles : []), ...wideningCallerPaths],
     MAX_SURVEY_FILES,
-  );
+  ), taskText);
+  const publicEntryLiteralFiles = _boundedParallelEntryLiteralFiles(packet.cwd, surveyRankedFiles, taskText);
+  const exactPrefetchPaths = _uniqueAtlasPaths([
+    ...prefetchTargets.exactFiles,
+    ...publicEntryLiteralFiles,
+  ], ATLAS_EXACT_PREFETCH_MAX_FILES + ATLAS_PARALLEL_ENTRY_LITERAL_MAX_FILES);
+  const exactFiles = await _prefetchExactScopedFiles(exactPrefetchPaths, {
+    packet,
+    toolsAvailable: [...tools],
+    maxFiles: ATLAS_EXACT_PREFETCH_MAX_FILES + ATLAS_PARALLEL_ENTRY_LITERAL_MAX_FILES,
+    literalSourceFiles: publicEntryLiteralFiles,
+  });
   const contextAllowed = packet.recipient === "researcher"
     && _researcherGeneratedContextAllowed(packet, tools);
   const decision = packet.recipient === "researcher" && focusState
@@ -2258,7 +2379,7 @@ async function _prefetchAtlasSurvey(packet, {
     const args = { paths: scope.paths, maxFiles: MAX_SURVEY_FILES };
     if (scope.symbols) args.symbols = scope.symbols;
     const surveyClass = scope.source === "seeds" || scope.source === "explicit-path" ? "seeded" : "broad";
-    const { raw, retries } = await _executeAtlasSurveyWithRetry(packet, args, {
+    const { raw, retries, retryReason } = await _executeAtlasSurveyWithRetry(packet, args, {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
@@ -2266,8 +2387,18 @@ async function _prefetchAtlasSurvey(packet, {
       retrievalClass: surveyClass,
       gapReason: surveyClass === "broad" ? "area_discovery" : "ranked_file_survey",
     });
+    const effectiveScope = retryReason === "empty_symbol_filter"
+      ? { ...scope, symbols: null, reason: "empty_symbol_filter_retry" }
+      : scope;
     if (String(raw || "").startsWith("Error:")) {
-      return _finishAtlasSurveyPrefetch(packet, { ok: false, attempted: true, scope, error: String(raw).slice(0, 200), retries }, startedAt);
+      return _finishAtlasSurveyPrefetch(packet, {
+        ok: false,
+        attempted: true,
+        scope: effectiveScope,
+        error: String(raw).slice(0, 200),
+        retries,
+        retryReason,
+      }, startedAt);
     }
     const parsed = extractAtlasJsonPayload(raw);
     const data = parsed?.result ?? parsed?.data ?? parsed;
@@ -2281,11 +2412,12 @@ async function _prefetchAtlasSurvey(packet, {
       return _finishAtlasSurveyPrefetch(packet, {
         ok: false,
         attempted: true,
-        scope,
+        scope: effectiveScope,
         error: "survey returned no files",
         warnings,
         metrics: data?.metrics || null,
         retries,
+        retryReason,
       }, startedAt);
     }
     const traversalRef = _surfaceAtlasSurveyRef(packet, data);
@@ -2301,8 +2433,8 @@ async function _prefetchAtlasSurvey(packet, {
     return _finishAtlasSurveyPrefetch(packet, {
       ok: true,
       attempted: true,
-      scope,
-      symbols: scope.symbols || null,
+      scope: effectiveScope,
+      symbols: effectiveScope.symbols || null,
       files: data.files,
       callMap: data.callMap || null,
       metrics: data.metrics || null,
@@ -2312,6 +2444,7 @@ async function _prefetchAtlasSurvey(packet, {
       lifecycleExpansion,
       dependencyBoundaries,
       retries,
+      retryReason,
       warnings,
     }, startedAt);
   } catch (err) {
@@ -2423,19 +2556,51 @@ async function _prefetchLifecycleSurveyBodies(packet, { taskText, files, focusAd
 
 async function _executeAtlasSurveyWithRetry(packet, args, opts, telemetry = {}) {
   let raw = await _executeAtlasPrefetchForReuse(packet, "code.survey", args, opts, telemetry);
-  if (!_isTransientAtlasSurveyError(raw)) return { raw, retries: 0 };
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  raw = await _executeAtlasPrefetchForReuse(packet, "code.survey", args, opts, {
+  const retry = atlasSurveyRetryDecision(raw, args);
+  if (!retry) return { raw, retries: 0, retryReason: null };
+  if (retry.reason === "transient_error") {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  raw = await _executeAtlasPrefetchForReuse(packet, "code.survey", retry.args, opts, {
     ...telemetry,
-    gapReason: `${telemetry.gapReason || "survey"}_retry`,
+    gapReason: `${telemetry.gapReason || "survey"}_${retry.reason}`,
   });
-  return { raw, retries: 1 };
+  return { raw, retries: 1, retryReason: retry.reason };
 }
 
 function _isTransientAtlasSurveyError(raw) {
   const text = String(raw || "");
   if (!text.startsWith("Error:")) return false;
   return /\b(timeout|timed out|busy|locked|sqlite_busy|gate|temporarily disabled|transport|econnreset|epipe)\b/i.test(text);
+}
+
+function _atlasSurveyReturnedNoFiles(raw) {
+  if (String(raw || "").startsWith("Error:")) return false;
+  const parsed = extractAtlasJsonPayload(raw);
+  const data = parsed?.result ?? parsed?.data ?? parsed;
+  return !!data && Array.isArray(data.files) && data.files.length === 0;
+}
+
+// A symbol-filtered survey is an optimization, not an authority that the
+// ranked files are irrelevant. Atlas338 observed a successful empty result
+// from an over-specific symbol list and then paid for a lower-signal context
+// fallback. Retry once over the same bounded paths without the filter; keep
+// transient failures on their existing same-arguments retry path, so one
+// prefetch attempt can never fan out into a third survey call.
+export function atlasSurveyRetryDecision(raw, args = {}) {
+  if (_isTransientAtlasSurveyError(raw)) {
+    return { reason: "transient_error", args };
+  }
+  if (_atlasSurveyReturnedNoFiles(raw)
+    && Array.isArray(args?.symbols)
+    && args.symbols.length > 0
+    && Array.isArray(args?.paths)
+    && args.paths.length > 0) {
+    const retryArgs = { ...args };
+    delete retryArgs.symbols;
+    return { reason: "empty_symbol_filter", args: retryArgs };
+  }
+  return null;
 }
 
 function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
@@ -2494,6 +2659,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     granularity: result.granularity || null,
     truncated: !!result.truncated,
     retries: Number(result.retries || 0),
+    retryReason: result.retryReason || null,
     warnings: (Array.isArray(result.warnings) ? result.warnings : []).slice(0, 16),
     durationMs: result.durationMs,
     fileCount,
@@ -2630,6 +2796,7 @@ function _recordAtlasSurveyPrefetchDiagnostic(packet, result) {
         attempted: !!result?.attempted,
         duration_ms: Number(result?.durationMs || 0),
         retries: Number(result?.retries || 0),
+        retry_reason: result?.retryReason || null,
         warnings: (Array.isArray(result?.warnings) ? result.warnings : [])
           .slice(0, 16)
           .map((warning) => String(warning).slice(0, 500)),
@@ -3269,8 +3436,9 @@ function _renderExactFileBlock(item, trim) {
   if (_sliceShouldDropExactFileBodies(trim)) return lines;
 
   if (item.kind === "read_file") {
+    const budget = exactPrefetchFileRenderBudget(trim);
     lines.push(..._renderIndentedPrefetchContent(item.content, {
-      maxChars: trim >= 2 ? 1000 : trim >= 1 ? 1800 : 3200,
+      maxChars: budget.maxChars,
     }));
   } else if (item.kind === "code.skeleton") {
     lines.push(..._renderIndentedPrefetchContent(item.skeleton, {
@@ -3300,6 +3468,15 @@ function _surveyFileSummaries(sc) {
     truncated: file?.truncated,
     symbols: file?.symbols,
   }));
+}
+
+function _surveyParallelPublicEntryPaths(sc, packet) {
+  void packet;
+  const candidates = _uniqueAtlasPaths([
+    ..._surveyFileSummaries(sc).map((file) => file?.path),
+    ...(Array.isArray(sc?.topFiles) ? sc.topFiles : []),
+  ], 64);
+  return _parallelPublicEntryPaths(candidates, "", 12);
 }
 
 // Render the compact inline part of an already-prefetched code.survey. The
@@ -3334,6 +3511,17 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
   if (fileCount > 0) {
     lines.push("  structure already visible: do not call code.skeleton for surveyed files unless a named omitted/bounded fact requires surveyGap; go directly to code.window for exact code and issue independent exact-code calls together.");
+  }
+  const publicEntryPaths = _surveyParallelPublicEntryPaths(sc, packet);
+  if (publicEntryPaths.length > 0) {
+    lines.push(`  conventional entry files in this survey: ${publicEntryPaths.join(", ")}`);
+    const deliveredExactPaths = _pathSet((packet?.atlas_slice_context?.exactFiles || [])
+      .filter((item) => item?.ok && item.kind === "read_file")
+      .map((item) => item.file));
+    const deliveredCount = publicEntryPaths.filter((file) => deliveredExactPaths.has(file.toLowerCase())).length;
+    if (deliveredCount > 0) {
+      lines.push(`  literal source for ${deliveredCount}/${publicEntryPaths.length} listed entries is included below.`);
+    }
   }
   const lifecycleExpansion = sc?.lifecycleExpansion;
   if (lifecycleExpansion?.active) {

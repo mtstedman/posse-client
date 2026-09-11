@@ -549,6 +549,61 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     };
   }
 
+  if (normalizedAction === "symbol.callers") {
+    const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.callers symbolId");
+    const mode = sanitizeString(payload.mode || "caller", 16).toLowerCase();
+    if (!symbolId) throw new Error("ATLAS symbol.callers requires symbolId.");
+    if (!["caller", "reference", "all"].includes(mode)) {
+      throw new Error("ATLAS symbol.callers mode must be caller, reference, or all.");
+    }
+    return {
+      action: normalizedAction,
+      cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
+      payload: {
+        symbolId,
+        mode,
+        limit: clampInt(payload.limit, 1, 100, 20),
+        offset: clampInt(payload.offset, 0, 100_000, 0),
+        ...(payload.minConfidence == null ? {} : { minConfidence: Number(payload.minConfidence) }),
+        projection: "compact-v1",
+      },
+    };
+  }
+
+  if (normalizedAction === "symbol.get") {
+    const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.get symbolId");
+    const symbolRef = sanitizeSymbolRef(payload.symbolRef);
+    if (!symbolId && !symbolRef?.name) {
+      throw new Error("ATLAS symbol.get requires symbolId or symbolRef.");
+    }
+    if (payload.file != null && !isSafeRelativePath(payload.file)) {
+      throw new Error("ATLAS symbol.get file must be a safe relative path.");
+    }
+    if (payload.symbolRef?.file != null && !isSafeRelativePath(payload.symbolRef.file)) {
+      throw new Error("ATLAS symbol.get symbolRef.file must be a safe relative path.");
+    }
+    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, ATLAS_MAX_IDENTIFIERS);
+    return {
+      action: normalizedAction,
+      cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
+      payload: {
+        ...(symbolId ? { symbolId } : { symbolRef }),
+        ...(payload.file ? { file: sanitizeString(payload.file, 4000) } : {}),
+        ...(identifiersToFind.length > 0 ? { identifiersToFind } : {}),
+        ...(payload.maxTokens == null ? {} : {
+          maxTokens: clampInt(
+            payload.maxTokens,
+            1,
+            codeWindowPolicy
+              ? normalizeAtlasCodeWindowPolicy(codeWindowPolicy).maxWindowTokens
+              : ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens,
+            1200,
+          ),
+        }),
+      },
+    };
+  }
+
   if (normalizedAction === "code.skeleton") {
     if (payload.file != null && !isSafeRelativePath(payload.file)) {
       throw new Error("ATLAS code.skeleton file must be a safe relative path.");

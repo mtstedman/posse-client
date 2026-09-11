@@ -1,4 +1,5 @@
 import { symbolCallers } from "./callers.js";
+import { symbolGet } from "./symbol-get.js";
 // @ts-check
 //
 // Central dispatcher for ATLAS v2 tool actions.
@@ -258,6 +259,24 @@ function dispatchImpl(call, ctx) {
     case "symbol.callers":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolCallers({ view: ctx.view, versionId: ctx.versionId, params: call }));
+    case "symbol.get":
+      if (!ctx.view) return notIndexed(action, ctx.versionId);
+      return /** @type {any} */ (symbolGet({
+        view: ctx.view,
+        versionId: ctx.versionId,
+        params: call,
+        readFile,
+        repoRoot: ctx.repoRoot,
+        ledger: ctx.ledger,
+        repoId: ctx.repoId,
+        config: ctx.config,
+        hashRefContext: {
+          ...(ctx.hashRefContext || {}),
+          ...(ctx.config?.hashRefContext && typeof ctx.config.hashRefContext === "object"
+            ? ctx.config.hashRefContext
+            : {}),
+        },
+      }));
     case "symbol.overview":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolUsages({ view: ctx.view, versionId: ctx.versionId, params: call }));
@@ -438,7 +457,14 @@ function validationErrorCodeForAction(action, errors = []) {
   return "invalid_params";
 }
 
-function validationFailureForAction(action, call, errors = []) {
+export function validationFailureForAction(action, call, errors = []) {
+  const invalidOpaqueId = errors.some((error) => error?.path === "$.symbolId" && error?.code === "pattern");
+  if (["symbol.get", "symbol.card", "symbol.callers"].includes(action) && invalidOpaqueId) {
+    return {
+      message: `Invalid ATLAS parameters for ${action}: symbolId is truncated or is not an opaque Atlas ID. Do not add, remove, or guess ID characters. Reuse the exact job-bound symbolHandle (s1, s2, ...) returned with the search result, or rerun one exact-name symbol.search and use its returned handle.`,
+      details: { errors, repair: "reuse_symbol_handle_or_exact_name_search" },
+    };
+  }
   if (action !== "code.window") {
     return {
       message: `Invalid ATLAS parameters for ${action}: ${errors[0]?.message || "request failed schema validation"}`,
@@ -461,7 +487,6 @@ function validationFailureForAction(action, call, errors = []) {
           "file",
           "identifiersToFind",
         ]);
-  const invalidOpaqueId = errors.some((error) => error?.path === "$.symbolId" && error?.code === "pattern");
   const acceptedShapes = [
     "{ reason, symbolId: '<64 lowercase hex>:<local id>' }",
     "{ reason, file, identifiersToFind: ['identifier'] }",

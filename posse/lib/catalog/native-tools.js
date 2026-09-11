@@ -9,6 +9,7 @@
 // lib/domains/integrations/functions/deterministic-mcp/tool-descriptors.js.
 
 import {
+  AGENT_HANDOFF_LIMITS,
   AGENT_HANDOFF_PROTOCOL,
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
 } from "./handoff.js";
@@ -495,6 +496,43 @@ const COMPACT_HANDOFF_SELECTOR = evidenceSelector({
     "Visible evidence selected by a stored ref such as #abcd:23-40, a surfaced path such as src/x.js:23-40, or the equivalent {path,lines} object. Use bare range numbers in canonical output.",
 });
 
+const RESEARCHER_COMPLETION_COVERAGE = {
+  type: "array",
+  maxItems: AGENT_HANDOFF_LIMITS.maxCompletionRequirements,
+  description: "When the prompt supplies a terminal coverage ledger, report every requirement ID exactly once. The requirement_id value is the exact RNN ID shown by the ledger (for example R01); names and labels are invalid. supported entries cite one or more one-based claim indexes; unresolved entries explain the remaining evidence gap.",
+  items: {
+    oneOf: [
+      {
+        type: "object",
+        description: "A supported requirement. claim_indexes is required and reason is not accepted.",
+        properties: {
+          requirement_id: { type: "string", pattern: "^R[0-9]{2}$" },
+          status: { type: "string", const: "supported" },
+          claim_indexes: {
+            type: "array",
+            minItems: 1,
+            maxItems: AGENT_HANDOFF_LIMITS.maxClaims,
+            items: { type: "integer", minimum: 1 },
+          },
+        },
+        required: ["requirement_id", "status", "claim_indexes"],
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        description: "An unresolved requirement. reason is required and claim_indexes is not accepted.",
+        properties: {
+          requirement_id: { type: "string", pattern: "^R[0-9]{2}$" },
+          status: { type: "string", const: "unresolved" },
+          reason: { type: "string", minLength: 1, maxLength: 400 },
+        },
+        required: ["requirement_id", "status", "reason"],
+        additionalProperties: false,
+      },
+    ],
+  },
+};
+
 export const TOOL_AGENT_HANDOFF = {
   type: "function",
   name: "agent_handoff",
@@ -535,6 +573,7 @@ export const TOOL_AGENT_HANDOFF = {
         description:
           "Assessor-only confidence in the terminal verdict. Required for assessor.verdict.v1 and invalid for every other profile.",
       },
+      coverage: RESEARCHER_COMPLETION_COVERAGE,
       handoffs: {
         type: "array",
         minItems: 1,
@@ -1244,6 +1283,12 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
   maxHandoffs: 1,
 });
 
+// The canonical compatibility surface retains the optional ledger field.
+// Compact role projections expose it only when the current attempt's gate is
+// active; advertising an irrelevant optional field in off/shadow mode caused
+// providers to invent labels and pay a rejected terminal retry.
+TOOL_AGENT_HANDOFF_RESEARCHER.parameters.properties.coverage = RESEARCHER_COMPLETION_COVERAGE;
+
 export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
@@ -1337,6 +1382,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         maxItems: 5,
         items: { type: "string", minLength: 1, maxLength: 240 },
       },
+      coverage: RESEARCHER_COMPLETION_COVERAGE,
     },
     required: ["profile", "outcome", "summary"],
     allOf: [
@@ -1418,6 +1464,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
           additionalProperties: false,
         },
       },
+      coverage: RESEARCHER_COMPLETION_COVERAGE,
     },
     required: ["profile", "outcome", "summary", "claims"],
     additionalProperties: false,
@@ -1528,6 +1575,7 @@ export function getAgentHandoffToolSchemaForRole(role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
+  requireResearcherCoverage = false,
 } = {}) {
   if (!compactCompletion) return TOOL_AGENT_HANDOFF;
   const normalizedRole = String(role || "").trim().toLowerCase();
@@ -1537,8 +1585,37 @@ export function getAgentHandoffToolSchemaForRole(role, {
     return compactV3 ? TOOL_AGENT_HANDOFF_ASSESSOR_V3 : TOOL_AGENT_HANDOFF_ASSESSOR;
   }
   if (normalizedRole === "researcher") {
-    if (compactV3 && compactV4) return TOOL_AGENT_HANDOFF_RESEARCHER_V4;
-    return compactV3 ? TOOL_AGENT_HANDOFF_RESEARCHER_V3 : TOOL_AGENT_HANDOFF_RESEARCHER;
+    const schema = compactV3 && compactV4
+      ? TOOL_AGENT_HANDOFF_RESEARCHER_V4
+      : (compactV3 ? TOOL_AGENT_HANDOFF_RESEARCHER_V3 : TOOL_AGENT_HANDOFF_RESEARCHER);
+    if (!schema.parameters?.properties?.coverage) return schema;
+    if (!requireResearcherCoverage) {
+      const properties = { ...schema.parameters.properties };
+      delete properties.coverage;
+      return {
+        ...schema,
+        parameters: {
+          ...schema.parameters,
+          properties,
+          required: (schema.parameters.required || []).filter((field) => field !== "coverage"),
+        },
+      };
+    }
+    return {
+      ...schema,
+      description: `${schema.description} The active terminal coverage ledger is mandatory: include coverage in the first submission and report every supplied requirement ID exactly once.`,
+      parameters: {
+        ...schema.parameters,
+        properties: {
+          ...schema.parameters.properties,
+          coverage: {
+            ...schema.parameters.properties.coverage,
+            minItems: 1,
+          },
+        },
+        required: [...new Set([...(schema.parameters.required || []), "coverage"])],
+      },
+    };
   }
   if (normalizedRole === "planner") {
     return compactV3 ? TOOL_AGENT_HANDOFF_PLANNER_V3 : TOOL_AGENT_HANDOFF_PLANNER;

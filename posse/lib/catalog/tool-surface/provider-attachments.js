@@ -17,6 +17,7 @@ export const CODEX_TERMINAL_MCP_SERVER_SUFFIX = "terminal";
 export const CODEX_DIRECT_RESEARCH_TOOLS = Object.freeze(["agent_handoff"]);
 
 export const CODEX_CODE_MODE_ROLES = Object.freeze(["researcher"]);
+export const CODEX_NATIVE_BATCHING_ROLES = Object.freeze(["researcher", "planner", "assessor", "dev"]);
 
 // Composed reads need matching executor and history ceilings. The ceiling does
 // not change the gateway's physical read or source-window budgets.

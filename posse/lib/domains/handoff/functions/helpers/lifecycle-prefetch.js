@@ -119,6 +119,26 @@ export function lifecycleBodyRenderBudget(trim = 0) {
   };
 }
 
+export function exactPrefetchFileRenderBudget(trim = 0) {
+  if (trim >= 3) return { maxChars: 0, maxLines: MAX_INLINE_BODY_LINES };
+  return {
+    maxChars: trim >= 2 ? 1000 : trim >= 1 ? 1800 : 3200,
+    maxLines: MAX_INLINE_BODY_LINES,
+  };
+}
+
+export function exactPrefetchFileInlineDecision(item, { trim = 0 } = {}) {
+  if (!item?.ok || item.kind !== "read_file" || typeof item.content !== "string" || !item.content) {
+    return { inline: false, reason: "unavailable" };
+  }
+  if (item.truncated === true) return { inline: false, reason: "truncated" };
+  const budget = exactPrefetchFileRenderBudget(trim);
+  const lineCount = item.content.split(/\r?\n/u).length;
+  if (lineCount > budget.maxLines) return { inline: false, reason: "line_budget", lineCount };
+  if (item.content.length > budget.maxChars) return { inline: false, reason: "character_budget", lineCount };
+  return { inline: true, reason: "complete_exact_file", lineCount };
+}
+
 export function stageRenderedLifecycleCoverage(packet, { text, trim = 0 } = {}) {
   if (!packet || typeof packet !== "object") return false;
   const renderedText = String(text || "").trim();
@@ -145,7 +165,11 @@ export function materializeRenderedLifecycleCoverage(packet, { deliveredPrompt =
     return { materialized: 0, skipped: "missing_scope" };
   }
   const bodies = packet?.atlas_slice_context?.surveyContext?.lifecycleExpansion?.bodies;
-  if (!Array.isArray(bodies) || bodies.length === 0) return { materialized: 0, skipped: "no_bodies" };
+  const exactFiles = packet?.atlas_slice_context?.exactFiles;
+  if ((!Array.isArray(bodies) || bodies.length === 0)
+    && (!Array.isArray(exactFiles) || exactFiles.length === 0)) {
+    return { materialized: 0, skipped: "no_bodies" };
+  }
   const budget = lifecycleBodyRenderBudget(rendered.trim);
   const owner = coverageOwner || new SourceCoverageOwner({
     cwd: packet.cwd,
@@ -156,7 +180,7 @@ export function materializeRenderedLifecycleCoverage(packet, { deliveredPrompt =
     repositoryIdentity: packet?.atlas?.repo?.repoId || packet?.atlas?.repo?.repoPath || packet.cwd,
   });
   let materialized = 0;
-  for (const body of bodies) {
+  for (const body of (Array.isArray(bodies) ? bodies : [])) {
     if (!lifecycleBodyInlineDecision(body, budget).inline || !body.requestArgs) continue;
     const result = owner.materializeData({
       repo_rel_path: body.file,
@@ -167,6 +191,28 @@ export function materializeRenderedLifecycleCoverage(packet, { deliveredPrompt =
       origin: "prefetch",
       deliveryState: "delivered",
       completeSymbolSelector: body.coverageSelector,
+    });
+    if (result) materialized += 1;
+  }
+  // Complete bounded source files injected into the final prompt are evidence,
+  // too. Register only literal read_file payloads whose entire body survives
+  // the selected render trim. Skeletons and clipped files remain navigation,
+  // never line-level custody.
+  for (const item of (Array.isArray(exactFiles) ? exactFiles : [])) {
+    if (!exactPrefetchFileInlineDecision(item, { trim: rendered.trim }).inline) continue;
+    const endLine = Math.max(1, Number(item.sourceLines ?? item.totalLines ?? item.returnedLines) || 1);
+    const result = owner.materializeData({
+      repo_rel_path: item.file,
+      startLine: 1,
+      endLine,
+      content: item.content,
+      truncated: false,
+      outputTruncated: false,
+    }, { file: item.file }, {
+      origin: "prefetch",
+      deliveryState: "delivered",
+      completeSymbolSelector: null,
+      tool: "code.window",
     });
     if (result) materialized += 1;
   }

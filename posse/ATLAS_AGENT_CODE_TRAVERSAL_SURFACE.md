@@ -109,6 +109,7 @@ Finish the current agent turn with a terminal handoff. Dev/fix and artificer use
 |---|---|---|---|---|
 | `blocker` | `string` | Optional | min length 1; max length 1000 |  |
 | `confidence` | `string` | Conditional | values "low", "medium", "high" | Assessor-only confidence in the terminal verdict. Required for assessor.verdict.v1 and invalid for every other profile. |
+| `coverage` | `array<object>` | Optional | max items 24 | When the prompt supplies a terminal coverage ledger, report every requirement ID exactly once. The requirement_id value is the exact RNN ID shown by the ledger (for example R01); names and labels are invalid. supported entries cite one or more one-based claim indexes; unresolved entries explain the remaining evidence gap. |
 | `evidence_gap` | `string` | Optional | min length 1; max length 1000 |  |
 | `file_requests` | `array<object>` | Optional | min items 1; max items 16 |  |
 | `handoffs` | `any | array<object>` | Conditional | min items 1; max items 50 |  |
@@ -124,12 +125,12 @@ Runtime handoff projection by role:
 
 | Role | Full fields | Compact v1 fields | Compact v3 fields |
 |---|---|---|---|
-| `artificer` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `evidence_gap`, `remaining_work`, `status` | `blocker`, `evidence_gap`, `remaining_work`, `status` |
-| `assessor` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome`, `profile`, `protocol` | `confidence`, `evidence`, `proof`, `questions`, `repair`, `verdict` |
-| `dev` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` |
-| `planner` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `tasks` | `tasks` |
-| `researcher` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `profile`, `questions`, `related_files`, `summary`, `verification_targets` |
-| `subagent` | `blocker`, `confidence`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `handoffs`, `outcome`, `profile`, `protocol` |
+| `artificer` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `evidence_gap`, `remaining_work`, `status` | `blocker`, `evidence_gap`, `remaining_work`, `status` |
+| `assessor` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome`, `profile`, `protocol` | `confidence`, `evidence`, `proof`, `questions`, `repair`, `verdict` |
+| `dev` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` |
+| `planner` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `tasks` | `tasks` |
+| `researcher` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `profile`, `questions`, `related_files`, `summary`, `verification_targets` |
+| `subagent` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `handoffs`, `outcome`, `profile`, `protocol` |
 
 The exact role-specific handoff schemas are retained in the JSON contract pin.
 
@@ -348,9 +349,9 @@ Use only when exact source is needed for a known symbol or anchored file region.
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Approximate total line count as an integer for a file-mode slice, for example 220. |
-| `file` | `string` | Conditional | min length 1 | Repository-relative file path when no symbolId is available. |
-| `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Symbol, enclosing block, or containing-file selection. |
-| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. |
+| `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. |
+| `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Region shape: exact indexed symbol, enclosing block, or bounded file window. |
+| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice, each a non-empty exact name. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. Submit anchored reads with at least one exact name. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped. |
 | `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
@@ -501,7 +502,7 @@ Compatibility traversal for unseen stored #ref content. Batch every independentl
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
 | `offset` | `integer` | Optional | min 0 | Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0. |
-| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. It permits one stored ref to be delivered once more. |
+| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. Valid only when ref is one scalar string; arrays require separate calls because the authorization permits exactly one stored ref to be delivered once more. |
 | `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or every independently needed alias as one array batch. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax). |
@@ -1067,59 +1068,14 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Distinct indexed caller symbols of an identified symbol, with definition locations, call counts and up to five call-site locations each. Use when who calls this is the missing fact, then read the relevant caller by symbolId. Resolved call edges only; dynamic or unresolved callers may be absent. Reports storage and page truncation.
+List incoming resolved callers, references, or both for one exact symbol ID as compact file-to-symbol maps with IDs suitable for exact body retrieval.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `limit` | `integer` | Optional | min 1; max 100 | Maximum distinct callers; default 20. |
-| `minConfidence` | `number` | Optional | min 0; max 100 | Minimum resolved edge confidence, 0..1 or 0..100. |
-| `offset` | `integer` | Optional | min 0; max 100000 | Caller page offset; use nextOffset with the same target, confidence and index version. |
+| `limit` | `integer` | Optional | min 1; max 100 | Maximum returned type/file/symbol entries; default 20. |
+| `mode` | `string` | Optional | default "caller"; values "caller", "reference", "all" | Incoming relationship type; defaults to caller. |
+| `offset` | `integer` | Optional | min 0; max 100000 | Entry offset within the current index generation. |
 | `symbolId` | `string` | Required |  | Exact target symbol ID. |
-
-### `atlas.symbol.card`
-
-Remote roles: `assessor`, `dev`, `planner`, `researcher`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `symbol.card` |
-| Tool reference token | `atlas.symbol.card` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `atlas` |
-| Batchable input | Yes |
-| Parallel calls | No |
-| System-prefetch capable | No |
-
-Compact relationship summary for an identified symbol or batch. Bounded output includes the target signature/source excerpt, source location, true caller/callee counts, and capped neighbour addresses. Submit every symbol needed for the same decision as one batch.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `symbolId` | `string | array` | Optional | max items 100 | One exact opaque ATLAS symbol ID or an array of IDs for a batch. |
-| `symbolRef` | `object | array` | Optional | max items 100 | One concrete symbol-name lookup or an array of lookups for a batch, each with optional file and kind constraints. |
-
-### `atlas.symbol.overview`
-
-Remote roles: `assessor`, `dev`, `planner`, `researcher`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `symbol.overview` |
-| Tool reference token | `atlas.symbol.overview` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `atlas` |
-| Batchable input | No |
-| Parallel calls | Yes |
-| System-prefetch capable | No |
-
-Concrete call and reference sites for an identified symbol when its relationships are the missing fact, with relationship kinds, confidence, and locations.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `includeUnresolved` | `boolean` | Optional |  | Also include unresolved references with the same target name. |
-| `kind` | `array<string>` | Optional | max items 20 | Optional edge kinds to include. |
-| `limit` | `integer` | Optional | min 1; max 500 | Maximum usage sites to return. |
-| `minConfidence` | `number` | Optional | min 0; max 100 | Minimum edge confidence, either 0..1 or 0..100. |
-| `symbolId` | `string` | Required |  | Opaque ATLAS symbol ID whose usages should be listed. |
 
 ### `atlas.symbol.search`
 
@@ -1164,7 +1120,7 @@ Stored-result traversal for content not present in the current context. Call onl
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
 | `offset` | `integer` | Optional | min 0 | Compatibility selector for an initial or legacy traversal. Opaque next_traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent. |
-| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
+| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. Valid only when traversal_ref is one scalar string; arrays require separate calls because the authorization applies to exactly one ref. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto. |
 | `traversal_ref` | `string | array` | Required | max length 512; max items 100 | One explicitly issued traversal ref such as #a3f9, or every independently needed traversal ref as one array batch. |
@@ -1251,6 +1207,7 @@ posse-remote role ceiling, so remote agents do not currently receive them:
 - `atlas.manual`
 - `atlas.query`
 - `atlas.repo`
+- `atlas.symbol.get`
 
 ## Agent-hidden execution parameters
 
@@ -1263,6 +1220,6 @@ compatibility. The agent projection removes them.
 - `atlas.code.window`: `sessionId`, `sliceContext`
 - `atlas.fetch_ref`: `hashes`, `refs`
 - `tools.search_files`: `offset`
-- `atlas.symbol.card`: `ifNoneMatch`, `includeResolutionMetadata`, `minCallConfidence`, `sessionId`, `symbolIds`, `symbolRefs`
+- `atlas.symbol.callers`: `indexVersion`, `minConfidence`, `projection`
 - `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
 - `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`

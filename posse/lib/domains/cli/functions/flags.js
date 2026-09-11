@@ -1,4 +1,5 @@
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { SCOPE_APPROVAL_MODES, SCOPE_APPROVAL_MODE_VALUES } from "../../../catalog/human-input.js";
 import { WORK_ITEM_GOVERNANCE_TIERS } from "../../../catalog/work-item.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
@@ -21,6 +22,25 @@ import {
 
 export function settingEnabled(value) {
   return /^(1|true|yes|on)$/i.test(String(value || ""));
+}
+
+export function parseScopeMode(argv = process.argv) {
+  let mode = SCOPE_APPROVAL_MODES.DEFAULT;
+  let supplied = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index] || "");
+    if (arg === "--") break;
+    if (arg !== "--scope-mode" && !arg.startsWith("--scope-mode=")) continue;
+    const raw = arg === "--scope-mode" ? argv[++index] : arg.slice("--scope-mode=".length);
+    const value = String(raw || "").trim().toLowerCase();
+    if (!SCOPE_APPROVAL_MODE_VALUES.includes(value)) {
+      throw new Error(`--scope-mode requires ${SCOPE_APPROVAL_MODE_VALUES.join(" or ")}`);
+    }
+    if (supplied && mode !== value) throw new Error("--scope-mode received conflicting values");
+    mode = value;
+    supplied = true;
+  }
+  return mode;
 }
 
 export function parseAutoMerge() {
@@ -194,6 +214,7 @@ export function parseWorkItemIdsFlagFromArgv(argv = process.argv) {
 export const FLAG_DESCRIPTORS = Object.freeze([
   // Global value flags (affect work-item creation, mode, scope).
   { name: "--mode", takesValue: true, category: "value" },
+  { name: "--scope-mode", takesValue: true, category: "value" },
   { name: "--tier", takesValue: true, category: "value" },
   { name: "--deepthink-budget", takesValue: true, category: "value" },
   { name: "--research-budget", takesValue: true, category: "value" },

@@ -139,6 +139,7 @@ import {
   hasIntakeHintFlags,
   parseAutoMerge,
   parseConcurrency,
+  parseScopeMode,
   parseFlagValue,
   parseIntakeHintsFromArgv,
   parseModeFlagFromArgv,
@@ -1741,6 +1742,7 @@ function sessionBootDeps() {
     NO_TUI,
     nonInteractive: NON_INTERACTIVE,
     AUTO_APPROVE,
+    scopeMode: parseScopeMode(),
     DRY_RUN,
     RUN_WORK_ITEM_IDS: parseWorkItemIdsFlagFromArgv(),
     ask,
@@ -2630,6 +2632,7 @@ const COMMAND_USAGE = {
     console.log(`  Execute all pending jobs (scheduler + worker loop).\n`);
     console.log(`    ${C.cyan}--concurrency N${C.reset}     Run N workers in parallel`);
     console.log(`    ${C.cyan}--auto-approve${C.reset}      Dev won't pause for tool permission prompts`);
+    console.log(`    ${C.cyan}--scope-mode MODE${C.reset}   File-scope approvals: default or auto (this run only)`);
     console.log(`    ${C.cyan}--auto-merge${C.reset} / ${C.cyan}--no-auto-merge${C.reset}  Merge (or don't) completed WI branches during wrap-up`);
     console.log(`    ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run`);
     console.log(`    ${C.cyan}--no-tui${C.reset}            Disable split-screen display (classic output)`);
@@ -2719,6 +2722,13 @@ async function printCommandHelp(command) {
 export async function main() {
   const command = normalizeCommandName((!COMMAND && ITERATE_FLAG) ? "add" : COMMAND);
   if (rejectUnknownFlags()) return;
+  try {
+    parseScopeMode();
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 2;
+    return;
+  }
   const baseCommandPolicy = getCommandBootstrapPolicy(command);
   let pairSubcommand = "";
   if (["pair", "session"].includes(command)) {
@@ -2883,6 +2893,7 @@ ${aliasDiagnostic}
 
   ${C.bold}Flags:${C.reset}
       ${C.cyan}--auto-approve${C.reset}   Dev won't pause for tool permission prompts
+      ${C.cyan}--scope-mode MODE${C.reset} File-scope approvals: default or auto (this run only)
       ${C.cyan}--auto-merge${C.reset}     Merge completed WI branches during wrap-up
       ${C.cyan}--no-auto-merge${C.reset}  Disable auto-merge for this run
       ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run

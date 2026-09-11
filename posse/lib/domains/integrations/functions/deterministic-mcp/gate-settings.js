@@ -1,4 +1,9 @@
 import { getAccountSetting } from "../../../settings/functions/account-settings.js";
+import {
+  RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
+  researchSynthesisPolicySnapshot,
+  validateResearchSynthesisPhysicalCallCeiling,
+} from "./research-synthesis.js";
 
 export const ATLAS_TOOL_GATE_SETTING = "atlas_tool_gate_enabled";
 export const ATLAS_TOOL_GATE_DEFAULT = true;
@@ -32,6 +37,8 @@ export const ATLAS_RESEARCHER_TYPED_DISPATCHER_SETTING = "atlas_researcher_typed
 export const ATLAS_RESEARCHER_TYPED_DISPATCHER_DEFAULT = false;
 export const ATLAS_RESEARCHER_WORKFLOW_SETTING = "atlas_researcher_workflow";
 export const ATLAS_RESEARCHER_WORKFLOW_DEFAULT = false;
+export const ATLAS_RESEARCH_RUNTIME_GUIDANCE_SETTING = "atlas_research_runtime_guidance";
+export const ATLAS_RESEARCH_RUNTIME_GUIDANCE_DEFAULT = true;
 
 export function resolveAtlasResearcherSchemaDiet() {
   try {
@@ -74,6 +81,17 @@ export function resolveAtlasResearcherWorkflow() {
     );
   } catch {
     return ATLAS_RESEARCHER_WORKFLOW_DEFAULT;
+  }
+}
+
+export function resolveAtlasResearchRuntimeGuidance() {
+  try {
+    return parseBoolean(
+      getAccountSetting(ATLAS_RESEARCH_RUNTIME_GUIDANCE_SETTING),
+      ATLAS_RESEARCH_RUNTIME_GUIDANCE_DEFAULT,
+    );
+  } catch {
+    return ATLAS_RESEARCH_RUNTIME_GUIDANCE_DEFAULT;
   }
 }
 
@@ -131,4 +149,28 @@ export function resolveAtlasCodeLensCallable() {
   } catch {
     return ATLAS_CODE_LENS_CALLABLE_DEFAULT;
   }
+}
+
+export const RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS_SETTING = "research_synthesis_max_physical_calls";
+
+// Effective physical ceiling for a NEW research session: the account setting
+// wins when it validates, then the process environment, then the built-in
+// default. Invalid values never widen or collapse the rail; they fall through.
+export function resolveResearchSynthesisMaxPhysicalCalls() {
+  let stored = null;
+  try {
+    stored = getAccountSetting(RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS_SETTING);
+  } catch {
+    stored = null;
+  }
+  return validateResearchSynthesisPhysicalCallCeiling(stored) ?? RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
+}
+
+// Frozen policy for one session. Callers store the result on the session and
+// never re-resolve it, so a setting change mid-attempt cannot move the rail
+// between reservation, admission, closing warnings, and telemetry.
+export function resolveResearchSynthesisPolicySnapshot() {
+  return researchSynthesisPolicySnapshot({
+    maxPhysicalCalls: resolveResearchSynthesisMaxPhysicalCalls(),
+  });
 }

@@ -40,16 +40,60 @@ export function normalizedSelectorMaxTokens(value) {
   return Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : null;
 }
 
+export function normalizedSelectorSymbolRef(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const name = String(value.name || "").trim();
+  if (!name) return null;
+  const file = normalizePath(value.file);
+  const kind = String(value.kind || "").trim().toLowerCase();
+  return {
+    name,
+    ...(file ? { file } : {}),
+    ...(kind ? { kind } : {}),
+    ...(value.exportedOnly === true ? { exportedOnly: true } : {}),
+  };
+}
+
+function normalizedSelectorIdentifiers(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((entry) => String(entry || "").trim()).filter(Boolean))].sort()
+    : [];
+}
+
+function selectorHasAnchor(args = {}) {
+  return Boolean(
+    String(args.symbolId || "").trim()
+    || normalizePath(args.file)
+    || normalizedSelectorSymbolRef(args.symbolRef)
+    || normalizedSelectorIdentifiers(args.identifiersToFind).length > 0
+  );
+}
+
+function coverageMatchesRequestedSelector(coverage = {}, args = {}, reason = "exact_selector") {
+  const symbolRef = normalizedSelectorSymbolRef(args.symbolRef);
+  if (symbolRef && coverage.selector_symbol_ref != null
+    && stable(coverage.selector_symbol_ref) !== stable(symbolRef)) return false;
+  const identifiers = normalizedSelectorIdentifiers(args.identifiersToFind);
+  const recordedIdentifiers = reason === "complete_symbol"
+    ? coverage.complete_symbol_selector_identifiers
+    : coverage.selector_identifiers;
+  if (identifiers.length > 0 && Array.isArray(recordedIdentifiers)) {
+    const recorded = normalizedSelectorIdentifiers(recordedIdentifiers);
+    if (stable(recorded) !== stable(identifiers)) return false;
+  }
+  return true;
+}
+
 export function sourceSelectorFingerprint(args = {}, { tool = "code.window" } = {}) {
+  const symbolRef = normalizedSelectorSymbolRef(args.symbolRef);
   return sha256(stable({
     // Preserve existing coverage identities. A skeleton may return only part
     // of what an otherwise identical window selector would request.
     ...(tool === "code.skeleton" ? { tool } : {}),
     symbolId: args.symbolId || null,
+    ...(symbolRef ? { symbolRef } : {}),
     file: args.file ? String(args.file).replace(/\\/g, "/") : null,
-    identifiersToFind: Array.isArray(args.identifiersToFind)
-      ? [...new Set(args.identifiersToFind.map(String))].sort()
-      : [],
+    identifiersToFind: normalizedSelectorIdentifiers(args.identifiersToFind),
     expectedLines: Number(args.expectedLines) || null,
     // code.window's public default is symbol granularity. Canonicalize the
     // omitted form so a model does not miss delivered coverage merely because
@@ -215,7 +259,13 @@ export class SourceCoverageOwner {
     return token;
   }
 
-  #coveredResult(row, coverage, reason, { fresh = null, requestedStartLine = null, requestedEndLine = null } = {}) {
+  #coveredResult(row, coverage, reason, {
+    fresh = null,
+    requestedStartLine = null,
+    requestedEndLine = null,
+    selectorArgs = null,
+  } = {}) {
+    if (selectorArgs && !coverageMatchesRequestedSelector(coverage, selectorArgs, reason)) return null;
     const stored = fetchHashRefForContext(
       contextFor(this),
       coverage.evidence_ref,
@@ -247,6 +297,7 @@ export class SourceCoverageOwner {
       reason,
       coverageScope,
       coverageOrigin,
+      coverageRecord: coverage,
       result: {
         status: "covered",
         executed: false,
@@ -268,6 +319,7 @@ export class SourceCoverageOwner {
 
   admit(args = {}) {
     if (!this.attemptId) return { covered: false, reason: "missing_attempt" };
+    if (!selectorHasAnchor(args)) return { covered: false, reason: "missing_selector_anchor" };
     const requestedFile = args.symbolId ? "" : normalizePath(args.file);
     if (requestedFile) {
       for (const row of this.#rows()) {
@@ -338,6 +390,7 @@ export class SourceCoverageOwner {
         fresh,
         requestedStartLine: coverage.start_line,
         requestedEndLine: coverage.end_line,
+        selectorArgs: args,
       });
       if (result) return result;
     }
@@ -385,6 +438,150 @@ export class SourceCoverageOwner {
       }
     }
     return { covered: false, reason: "uncovered" };
+  }
+
+  #resolvedIntervalPlan({ repoRelativePath, startLine, endLine, additionalCoveredRanges = [] } = {}) {
+    const relative = normalizePath(repoRelativePath);
+    const requestedStart = Number(startLine);
+    const requestedEnd = Number(endLine);
+    if (
+      !this.attemptId
+      || !relative
+      || !Number.isInteger(requestedStart)
+      || requestedStart < 1
+      || !Number.isInteger(requestedEnd)
+      || requestedEnd < requestedStart
+    ) return { covered: false, partial: false, reason: "invalid_interval" };
+    const fresh = this.#freshSource(relative);
+    if (!fresh) return { covered: false, partial: false, reason: "source_unavailable" };
+
+    // Only current-attempt delivery is already visible to this model context.
+    // Prior-attempt and ancestor coverage requires explicit reaccess and cannot
+    // safely be subtracted from a response that is otherwise being delivered.
+    const fragments = this.#rows().flatMap((row) => {
+      if (Number(row.job_id) !== this.jobId || Number(row.attempt_id) !== this.attemptId) return [];
+      const coverage = rowDetail(row);
+      if (!coverage || !isReusableCoverageState(coverage.delivery_state)) return [];
+      if (coverage.repository_identity !== this.repositoryIdentity) return [];
+      if (coverage.source_version !== fresh.sourceVersion) return [];
+      if (normalizePath(coverage.repo_rel_path) !== relative) return [];
+      const coveredStart = Math.max(requestedStart, Number(coverage.start_line));
+      const coveredEnd = Math.min(requestedEnd, Number(coverage.end_line));
+      if (!Number.isInteger(coveredStart) || !Number.isInteger(coveredEnd) || coveredEnd < coveredStart) return [];
+      const surfacedRef = coverage.evidence_ref ? evidenceRefSurface(coverage.evidence_ref) : null;
+      return [{
+        startLine: coveredStart,
+        endLine: coveredEnd,
+        evidence_ref: surfacedRef,
+      }];
+    });
+    for (const range of Array.isArray(additionalCoveredRanges) ? additionalCoveredRanges : []) {
+      const coveredStart = Math.max(requestedStart, Number(range?.startLine));
+      const coveredEnd = Math.min(requestedEnd, Number(range?.endLine));
+      if (!Number.isInteger(coveredStart) || !Number.isInteger(coveredEnd) || coveredEnd < coveredStart) continue;
+      fragments.push({ startLine: coveredStart, endLine: coveredEnd, evidence_ref: null });
+    }
+    fragments.sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine);
+
+    const coveredRanges = [];
+    for (const fragment of fragments) {
+      const previous = coveredRanges.at(-1);
+      if (previous && fragment.startLine <= previous.endLine + 1) {
+        previous.endLine = Math.max(previous.endLine, fragment.endLine);
+        if (fragment.evidence_ref && !previous.evidence_refs.some((entry) => entry.ref === fragment.evidence_ref.ref)) {
+          previous.evidence_refs.push(fragment.evidence_ref);
+        }
+      } else {
+        coveredRanges.push({
+          startLine: fragment.startLine,
+          endLine: fragment.endLine,
+          evidence_refs: fragment.evidence_ref ? [fragment.evidence_ref] : [],
+        });
+      }
+    }
+    const uncoveredRanges = [];
+    let cursor = requestedStart;
+    for (const range of coveredRanges) {
+      if (cursor < range.startLine) uncoveredRanges.push({ startLine: cursor, endLine: range.startLine - 1 });
+      cursor = Math.max(cursor, range.endLine + 1);
+    }
+    if (cursor <= requestedEnd) uncoveredRanges.push({ startLine: cursor, endLine: requestedEnd });
+    const coveredLines = coveredRanges.reduce((total, range) => total + range.endLine - range.startLine + 1, 0);
+    const covered = coveredLines > 0 && uncoveredRanges.length === 0;
+    return {
+      covered,
+      partial: coveredLines > 0 && uncoveredRanges.length > 0,
+      reason: coveredLines > 0
+        ? (uncoveredRanges.length === 0 ? "covered_interval_union" : "overlapping_interval")
+        : "uncovered",
+      repoRelativePath: relative,
+      requestedStartLine: requestedStart,
+      requestedEndLine: requestedEnd,
+      coveredLines,
+      coveredRanges,
+      uncoveredRanges,
+      fresh,
+      ...(covered ? {
+        coverageScope: "current_attempt",
+        coverageOrigin: { scope: "current_attempt", job_id: this.jobId, attempt_id: this.attemptId },
+        result: {
+          status: "covered",
+          executed: false,
+          coverage_scope: "current_attempt",
+          coverage_origin: { scope: "current_attempt", job_id: this.jobId, attempt_id: this.attemptId },
+          repo_rel_path: relative,
+          startLine: requestedStart,
+          endLine: requestedEnd,
+          coverage_ranges: coveredRanges,
+        },
+      } : {}),
+    };
+  }
+
+  resolvedIntervalPlan(args = {}) {
+    return this.#resolvedIntervalPlan(args);
+  }
+
+  async admitResolvedIntervalOrReserve({ repoRelativePath, startLine, endLine } = {}) {
+    const admitted = this.admitResolvedInterval({ repoRelativePath, startLine, endLine });
+    if (admitted.covered || !this.attemptId) return admitted;
+    const relative = normalizePath(repoRelativePath);
+    if (!relative) return admitted;
+    // Serialize resolved windows per file, not merely per selector. Different
+    // selectors in one provider batch can resolve to the same source interval;
+    // a selector-keyed reservation allowed both native results to enter the
+    // model context before either coverage row became visible.
+    const key = `resolved:${this.jobId}:${this.attemptId}:${this.repositoryIdentity}:${relative}`;
+    let active = activeReservations.get(key);
+    if (active && active.expiresAt <= Date.now()) {
+      releaseReservation(active, "lease_expired");
+      active = null;
+    }
+    if (active) {
+      let timedOut = false;
+      await Promise.race([
+        active.promise,
+        new Promise((resolve) => setTimeout(() => { timedOut = true; resolve(); }, RESERVATION_WAIT_MS)),
+      ]);
+      if (timedOut) return { ...admitted, reason: "resolved_reservation_timeout_fail_open" };
+      // Re-enter admission after the prior delivery settles. This lets one
+      // waiter claim the file while later same-batch waiters continue to
+      // serialize, rather than all observing and returning the same remainder.
+      return this.admitResolvedIntervalOrReserve({ repoRelativePath, startLine, endLine });
+    }
+    let settle;
+    const promise = new Promise((resolve) => { settle = resolve; });
+    const reservation = {
+      key,
+      promise,
+      settle,
+      expiresAt: Date.now() + RESERVATION_LEASE_MS,
+      expiryTimer: null,
+    };
+    activeReservations.set(key, reservation);
+    reservation.expiryTimer = setTimeout(() => releaseReservation(reservation, "lease_expired"), RESERVATION_LEASE_MS);
+    reservation.expiryTimer.unref?.();
+    return { ...this.#resolvedIntervalPlan({ repoRelativePath, startLine, endLine }), reservation };
   }
 
   recordResolvedIntervalReuse(args = {}, admission = {}) {
@@ -464,7 +661,7 @@ export class SourceCoverageOwner {
 
   async admitOrReserve(args = {}) {
     const admitted = this.admit(args);
-    if (admitted.covered || !this.attemptId) return admitted;
+    if (admitted.covered || !this.attemptId || admitted.reason === "missing_selector_anchor") return admitted;
     const key = `${this.jobId}:${this.attemptId}:${this.repositoryIdentity}:${sourceSelectorFingerprint(args)}`;
     let active = activeReservations.get(key);
     if (active && active.expiresAt <= Date.now()) {
@@ -667,6 +864,11 @@ export class SourceCoverageOwner {
         selector_fingerprint: selectorFingerprint,
         complete_file: completeFile,
         complete_symbol_selector_fingerprint: completeSymbolFingerprint,
+        complete_symbol_selector_identifiers: completeSymbolFingerprint
+          ? normalizedSelectorIdentifiers(completeSymbolSelector?.identifiersToFind)
+          : null,
+        selector_symbol_ref: normalizedSelectorSymbolRef(args.symbolRef),
+        selector_identifiers: normalizedSelectorIdentifiers(args.identifiersToFind),
         evidence_ref: surfaced.entry.ref,
         delivery_state: deliveryState,
         tool,

@@ -688,6 +688,14 @@ export class ResearcherRole extends BaseRole {
       // injected when the researcher may need fresh code discovery.
       atlasHandoffBlock = renderAtlasHandoffSections(researcherPacket);
     }
+    // The traversal-completion ledger is attempt-specific local state. The
+    // remote prompt compiler receives the packet, but does not currently
+    // render this dynamic field into the compiled researcher prompt. Keep the
+    // bounded directive adjacent to the ATLAS context so the requirement IDs
+    // enforced by agent_handoff are visible before the first submission.
+    const traversalCompletionBlock = researcherPacket?.traversal_completion_check?.attach === true
+      ? String(researcherPacket.traversal_completion_check.text || "").trim()
+      : "";
     // Built after the ATLAS handoff state resolves so hinted files the ATLAS
     // prefetch already covered render as pointers instead of body previews.
     const includeResearchPreload = roleMode !== "synth" && !focusedFanoutChild;
@@ -750,6 +758,7 @@ export class ResearcherRole extends BaseRole {
       roleMode === "synth" ? buildFanoutSynthBlock(payload, childBriefs) : "",
       assessmentReplanEvidenceBlock,
       atlasHandoffBlock || null,
+      traversalCompletionBlock || null,
       retrySynthesisMode ? buildResearchRetryShapeBlock({ atlasActive: !!researcherPacket?.atlas?.active }) : "",
       payloadRetrySynthesisMode
         ? reportMode

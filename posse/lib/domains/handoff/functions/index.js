@@ -1873,8 +1873,6 @@ function _applyTraversalCompletionCheck(packet) {
   const check = buildTraversalCompletionCheckFromModule(packet, { mode, maxChars });
   packet.traversal_completion_check = check;
 
-  if (check.mode === "off") return check;
-
   try {
     const ctx = getObservationContext() || {};
     const status = check.attach ? "attached" : (check.shadow ? "shadowed" : "skipped");
@@ -1893,6 +1891,22 @@ function _applyTraversalCompletionCheck(packet) {
         triggered: check.triggered,
         matched_terms: check.matched_terms,
         matched_lanes: check.matched_lanes,
+        requirement_ids: check.requirements.map((entry) => entry.id),
+        requirement_digests: check.requirements.map((entry) => entry.digest),
+        // Preserve the task-authored obligation text for the owner-side final
+        // window. IDs alone are not actionable after the provider has carried
+        // a large source context for several turns, and the text already lives
+        // in the durable job description and compiled prompt.
+        requirements: check.requirements.map((entry) => ({
+          id: entry.id,
+          text: entry.text,
+          digest: entry.digest,
+        })),
+        requirement_facets: check.requirements
+          .filter((entry) => Array.isArray(entry.facets) && entry.facets.length > 0)
+          .map((entry) => ({ id: entry.id, facets: entry.facets })),
+        requirements_digest: check.requirements_digest,
+        misconfigured: check.misconfigured,
         rendered_chars: check.rendered_chars,
         max_chars: check.max_chars,
         task_text_chars: check.task_text_chars,

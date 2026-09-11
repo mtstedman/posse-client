@@ -499,6 +499,30 @@
  */
 
 /**
+ * @typedef {Object} CompactSymbolRelationshipEntry
+ * @property {"caller" | "reference"} relationship
+ * @property {string} file
+ * @property {SymbolId} symbolId
+ * @property {string} name
+ */
+
+/** @typedef {Record<string, Record<string, string>>} CompactSymbolRelationshipMap */
+
+/**
+ * @typedef {Object} CompactSymbolCallersData
+ * @property {CompactSymbolRelationshipEntry[]} entries Native/internal neutral entry projection.
+ * @property {{pagination:{offset:number,limit:number,returned:number,hasMore:boolean,nextOffset:number|null,indexVersion:string},indexIncomplete:boolean}} meta
+ */
+
+/**
+ * @typedef {Object} SymbolGetChoice
+ * @property {string} file
+ * @property {string} ref
+ */
+
+/** @typedef {CodeWindowData | SymbolGetChoice[]} SymbolGetData */
+
+/**
  * @typedef {Object} SymbolUsagesData
  * @property {SymbolId} symbolId
  * @property {string} name
@@ -847,6 +871,9 @@
 /**
  * @typedef {Object} CodeWindowData
  * @property {SymbolId} [symbolId]
+ * @property {"declaration" | "implementation"} [bodyKind] Symbol-body classification returned by symbol.get.
+ * @property {{kind:"same_file_typescript_overload"|"same_file_python_overload"|"same_file_unique_implementation",requestedSymbolId:SymbolId,implementationSymbolId:SymbolId,name:string}} [implementationResolution] Exact receipt when symbol.get resolves a declaration address to one same-file implementation.
+ * @property {Array<{symbolId:SymbolId,name:string,file:string,startLine:number,endLine:number}>} [implementationCandidates] Same-file executable candidates returned when a declaration cannot be resolved uniquely.
  * @property {string} repo_rel_path
  * @property {string} content
  * @property {number} startLine
@@ -859,6 +886,7 @@
  * @property {string[]} identifiersReturned
  * @property {string[]} identifiersMissing
  * @property {string[]} identifiersOmitted
+ * @property {Array<{identifier:string,bearers:string[]}>} [identifierAmbiguities] Qualified selectors excluded from a mixed batch because multiple declarations share their bare tail. A batch containing only ambiguous selectors remains an error.
  * @property {string} [degradedReason] Stable auto-narrowing or map-only degradation reason.
  * @property {{reason:"identifiers_not_in_requested_file",requestedFile:string,searchedRepository:true,nextAction:"code.window"}} [redirect] Repository-wide recovery metadata for an all-anchor file miss.
  * @property {Array<{identifier:string,matches:SymbolHit[]}>} [identifierRedirects] Lexical symbol locations found outside the requested file; task text is never used for this recovery search.
@@ -1448,6 +1476,7 @@
  *   | ToolResultEnvelope<SymbolGetCardData | SymbolCardsData> & { action: "symbol.card" }
  *   | ToolResultEnvelope<SymbolUsagesData>     & { action: "symbol.overview" }
  *   | ToolResultEnvelope<SymbolCallersData>    & { action: "symbol.callers" }
+ *   | ToolResultEnvelope<SymbolGetData>        & { action: "symbol.get" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.overview" }
  *   | ToolResultEnvelope<TreeOverviewData>      & { action: "tree.branch" }
  *   | ToolResultEnvelope<TreeScopeData>         & { action: "tree.scope" }

@@ -246,6 +246,7 @@
  *   Resolved edges where `from_global_id === global_id`.
  *
  * @property {(global_id: number, minConfidence?: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, truncated: boolean }>} symbolCallers
+ * @property {(global_id: number, kinds: ("calls" | "references")[], minConfidence?: number) => Promise<{ relationships: Array<{ relationship: "calls" | "references", symbol: ViewSymbol }>, truncated: boolean }>} symbolRelationships
  * @property {(global_id: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, callees: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }> }>} symbolNeighborhood
  *   Both edge directions with their relevant endpoint symbols bulk-resolved
  *   by the native daemon under one storage read.
@@ -270,6 +271,9 @@
  *   so retrieval handlers that receive a SymbolId — encoded as
  *   `"<content_hash>:<local_id>"` — use this to resolve back to a
  *   ViewSymbol regardless of which view was queried last.
+ * @property {(content_hash: string, local_id: number) => Promise<ViewSymbol[]>} getAllByContentLocal
+ *   Look up every path-qualified symbol with the stable content/local ID.
+ *   Identical blobs mounted at multiple repository paths remain separate.
  *
  * @property {(content_hash: string) => Promise<boolean>} [hasContentHash]
  *   Fast liveness check for a source blob represented in the current view.

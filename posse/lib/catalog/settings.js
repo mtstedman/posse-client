@@ -94,6 +94,8 @@ export const SETTING_KEYS = Object.freeze({
   PLANNER_UNDER_SCOPED_BROAD_GATE: "planner_under_scoped_broad_gate",
   RESEARCH_TRAVERSAL_COMPLETION_CHECK: "research_traversal_completion_check",
   RESEARCH_TRAVERSAL_COMPLETION_MAX_CHARS: "research_traversal_completion_max_chars",
+  RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS: "research_synthesis_max_physical_calls",
+  ATLAS_RESEARCH_RUNTIME_GUIDANCE: "atlas_research_runtime_guidance",
   RESEARCH_EVIDENCE_REUSE: "research_evidence_reuse",
   RESEARCH_CLAIM_REVIEW: "research_claim_review",
   POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",

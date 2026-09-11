@@ -1239,6 +1239,7 @@ async function executeEmbeddedAtlasViaExecutor({
   origin,
   queueInfo = null,
   workItemId = null,
+  hashRefContext = null,
 }) {
   const repoRoot = repo?.repoPath || config?.requestedRepoPath || cwd || process.cwd();
   const executor = getSharedAtlasToolExecutor();
@@ -1275,6 +1276,7 @@ async function executeEmbeddedAtlasViaExecutor({
       repoRoot,
       repoId: repo?.repoId || config?.requestedRepoId || null,
       workItemId,
+      ...(hashRefContext ? { hashRefContext } : {}),
     },
     session: {
       bootConfig: {

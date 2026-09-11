@@ -178,6 +178,7 @@ const STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES = new Set([
 ]);
 
 const CLAIM_EVIDENCE_DEMOTION = Symbol("claimEvidenceDemotion");
+const CLAIM_SUBMITTED_INDEX = Symbol("claimSubmittedIndex");
 
 function advisoryResearchEvidenceCleanupAction(error) {
   return ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(String(error?.code || ""))
@@ -405,6 +406,32 @@ function normalizedLines(payload) {
   const lines = text.split("\n");
   if (lines.length > 1 && lines.at(-1) === "") lines.pop();
   return lines;
+}
+
+function deliveredRedactedLineMatches(sourceLine, deliveredLine) {
+  const source = String(sourceLine ?? "");
+  const delivered = String(deliveredLine ?? "");
+  if (source === delivered) return true;
+  const marker = "<redacted>";
+  if (!delivered.includes(marker)) return false;
+  const segments = delivered.split(marker);
+  if (!source.startsWith(segments[0]) || !source.endsWith(segments.at(-1))) return false;
+  let cursor = segments[0].length;
+  const suffixStart = source.length - segments.at(-1).length;
+  for (const segment of segments.slice(1, -1)) {
+    if (!segment) continue;
+    const next = source.indexOf(segment, cursor);
+    if (next < cursor || next > suffixStart) return false;
+    cursor = next + segment.length;
+  }
+  return cursor <= suffixStart;
+}
+
+function deliveredSourceExcerptMatches(sourceExcerpt, deliveredExcerpt) {
+  const sourceLines = String(sourceExcerpt ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const deliveredLines = String(deliveredExcerpt ?? "").replace(/\r\n?/g, "\n").split("\n");
+  return sourceLines.length === deliveredLines.length
+    && sourceLines.every((line, index) => deliveredRedactedLineMatches(line, deliveredLines[index]));
 }
 
 function canonicalSourcePath(value) {
@@ -1407,9 +1434,10 @@ function materializeWorktreeEvidenceSelector(selector, context) {
           : "; read the requested source before citing it."),
     );
   }
-  const excerpt = lines.slice(selector.start - 1, endLine).join("\n");
+  let excerpt = lines.slice(selector.start - 1, endLine).join("\n");
   if (resolved.source_refs?.length > 0) {
     const matchingRanges = [];
+    const safeExcerptLines = excerpt.split("\n");
     for (const ref of new Set(resolved.source_refs)) {
       const opts = { db: context?.db || getDb() };
       const evidence = materializeHashRefEvidenceForContext(context, ref, opts);
@@ -1423,8 +1451,18 @@ function materializeWorktreeEvidenceSelector(selector, context) {
         const end = Math.min(endLine, window.source_end_line);
         if (end < start) continue;
         const delivered = sourceLineSlice(entry, lineage, start, end, { sourcePath: resolved.path });
-        if (delivered.matched && delivered.excerpt === lines.slice(start - 1, end).join("\n")) {
+        const sourceSlice = lines.slice(start - 1, end).join("\n");
+        if (delivered.matched && deliveredSourceExcerptMatches(sourceSlice, delivered.excerpt)) {
           matchingRanges.push({ start, end });
+          // A path selector may refer to source that Atlas deliberately
+          // redacted before delivery. Validate the unredacted bytes against
+          // that template, but retain the already-delivered redacted text in
+          // the terminal packet so path shorthand cannot reveal it again.
+          if (delivered.excerpt !== sourceSlice) {
+            for (const [index, line] of delivered.excerpt.split("\n").entries()) {
+              safeExcerptLines[start - selector.start + index] = line;
+            }
+          }
         }
       }
     }
@@ -1434,6 +1472,7 @@ function materializeWorktreeEvidenceSelector(selector, context) {
         `Evidence ${resolved.path}:${selector.start}-${endLine} does not match the delivered source; read this range again`,
       );
     }
+    excerpt = safeExcerptLines.join("\n");
   }
   if (!excerpt.trim()) {
     fail(
@@ -3160,6 +3199,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
     "absence_checks",
     "verification_targets",
     "questions",
+    "coverage",
   ];
   if (normalizedRole === "researcher"
     && !Array.isArray(source.handoffs)
@@ -3823,20 +3863,27 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {
       fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${claimCountLimit} claims`);
     }
-    let claims = report.claims.map((claim, claimIndex) => materializeClaim(
-      claim,
-      claimIndex,
-      materializationContext,
-      entryCounters,
-      {
-        maxClaimChars: claimLengthLimit,
-        maxProseChars: claimSummaryLimit,
-        maxSelectorsPerClaim: researcherLimits
-          ? researcherLimits.maxSelectorsPerClaim : AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim,
-        lenientProse,
-        evidenceFailureMode,
-      },
-    ));
+    let claims = report.claims.map((claim, claimIndex) => {
+      const materialized = materializeClaim(
+        claim,
+        claimIndex,
+        materializationContext,
+        entryCounters,
+        {
+          maxClaimChars: claimLengthLimit,
+          maxProseChars: claimSummaryLimit,
+          maxSelectorsPerClaim: researcherLimits
+            ? researcherLimits.maxSelectorsPerClaim : AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim,
+          lenientProse,
+          evidenceFailureMode,
+        },
+      );
+      Object.defineProperty(materialized, CLAIM_SUBMITTED_INDEX, {
+        value: claimIndex + 1,
+        enumerable: false,
+      });
+      return materialized;
+    });
     if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) {
       const unverifiedClaims = claims.filter((claim) => (
         profile === "researcher.report.v1"
@@ -3863,10 +3910,11 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
           + (claim?.[1]?.evidence || []).reduce((sum, evidence) => sum + evidence.excerpt.length, 0)
           + (claim?.[1]?.decoy || []).reduce((sum, [evidence]) => sum + evidence.excerpt.length, 0)
         ), 0);
-        for (const [claimIndex, claim] of unverifiedClaims.entries()) {
+        for (const claim of unverifiedClaims) {
+          const claimIndex = Number(claim?.[CLAIM_SUBMITTED_INDEX] || 0);
           recordEvidenceCleanup(materializationContext, {
             action: "demote_unverified_claim_to_summary",
-            selector: `<claim:${claimIndex + 1}>`,
+            selector: `<claim:${claimIndex || "unknown"}>`,
             code: "AGENT_HANDOFF_CLAIM_EVIDENCE_UNAVAILABLE",
             message: String(claim?.[0] || ""),
           });
@@ -4364,6 +4412,459 @@ function parseStoredAgentHandoffPacket(materializedJson) {
   return packet;
 }
 
+function compactResearcherCoverageInput(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { args, coverage: null };
+  }
+  if (!Object.prototype.hasOwnProperty.call(args, "coverage")) return { args, coverage: null };
+  const { coverage, ...withoutCoverage } = args;
+  if (!Array.isArray(coverage)) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", "coverage must be an array");
+  }
+  if (coverage.length > AGENT_HANDOFF_LIMITS.maxCompletionRequirements) {
+    fail(
+      "AGENT_HANDOFF_TOO_LARGE",
+      `coverage exceeds ${AGENT_HANDOFF_LIMITS.maxCompletionRequirements} items`,
+    );
+  }
+  const normalized = coverage.map((raw, index) => {
+    const entry = plainObject(raw);
+    if (!entry) fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}] must be an object`);
+    const allowed = ["requirement_id", "status", "claim_indexes", "reason"];
+    const unknown = Object.keys(entry).find((field) => !allowed.includes(field));
+    if (unknown) fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].${unknown} is not allowed`);
+    const requirementId = boundedString(entry.requirement_id, `coverage[${index}].requirement_id`, 3);
+    if (!/^R[0-9]{2}$/.test(requirementId)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].requirement_id must match RNN`);
+    }
+    const status = boundedString(entry.status, `coverage[${index}].status`, 10);
+    if (!new Set(["supported", "unresolved"]).has(status)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].status must be supported or unresolved`);
+    }
+    if (status === "supported") {
+      if (entry.reason != null) {
+        fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].reason is allowed only for unresolved status`);
+      }
+      if (!Array.isArray(entry.claim_indexes) || entry.claim_indexes.length === 0) {
+        fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].claim_indexes is required for supported status`);
+      }
+      if (entry.claim_indexes.length > AGENT_HANDOFF_LIMITS.maxClaims) {
+        fail(
+          "AGENT_HANDOFF_TOO_LARGE",
+          `coverage[${index}].claim_indexes exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} items`,
+        );
+      }
+      const claimIndexes = entry.claim_indexes.map((value, claimIndex) => {
+        if (!Number.isInteger(value) || value < 1) {
+          fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].claim_indexes[${claimIndex}] must be a positive integer`);
+        }
+        return value;
+      });
+      if (new Set(claimIndexes).size !== claimIndexes.length) {
+        fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].claim_indexes must be unique`);
+      }
+      return { requirement_id: requirementId, status, claim_indexes: claimIndexes };
+    }
+    if (entry.claim_indexes != null) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].claim_indexes is allowed only for supported status`);
+    }
+    const reason = boundedString(entry.reason, `coverage[${index}].reason`, 400);
+    return { requirement_id: requirementId, status, reason };
+  });
+  return { args: withoutCoverage, coverage: normalized };
+}
+
+const RESEARCH_FAILURE_MECHANISM_PATTERNS = Object.freeze({
+  recovery: /\brecover(?:y|ies|able|ed|ing)?\b/iu,
+  retry: /\bretr(?:y|ies|ied|ying)\b/iu,
+  fallback: /\bfallbacks?\b|\bfall(?:s|ing)? back\b/iu,
+  "short-circuit": /\bshort[- ]circuit(?:s|ed|ing)?\b/iu,
+  terminal: /\bterminal(?:ly)?\b/iu,
+});
+
+const RESEARCH_UNCLOSED_EVIDENCE_GAP_PATTERNS = Object.freeze([
+  /\b(?:required|relevant|final|terminal|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\b(?:was|were|is|are|has|have|had)?\s*not\s+(?:retrieved|read|inspected|verified)\b/iu,
+  /\b(?:evidence|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\b(?:was|were|is|are|has|have|had)?\s*not\s+established\b/iu,
+  /\b(?:was|were|is|are)\s+not\s+(?:in|among)\s+(?:the\s+)?(?:retrieved|read|inspected|delivered)\s+(?:body|source|evidence|results?)\b/iu,
+  /\b(?:could not|couldn't|was unable to|were unable to|unable to)\s+(?:retrieve|read|inspect|verify|establish|find)\b/iu,
+  /\b(?:evidence|implementation|source|path|boundary|sink)\s+(?:remains?|is|was)\s+(?:unresolved|unverified|unestablished)\b/iu,
+]);
+
+function declaresUnclosedResearchEvidenceGap(value) {
+  const text = String(value || "");
+  return RESEARCH_UNCLOSED_EVIDENCE_GAP_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function missingResearchFailureMechanisms(value) {
+  const text = String(value || "");
+  return Object.entries(RESEARCH_FAILURE_MECHANISM_PATTERNS)
+    .filter(([, pattern]) => !pattern.test(text))
+    .map(([name]) => name);
+}
+
+export function getTraversalCompletionSnapshotForCall(context = {}) {
+  try {
+    const db = context.db || getDb();
+    const row = context.attemptId == null
+      ? db.prepare(`
+          SELECT detail_json
+          FROM job_observations
+          WHERE job_id = ? AND observation_type = 'handoff.traversal_completion_check'
+          ORDER BY id DESC LIMIT 1
+        `).get(context.jobId)
+      : db.prepare(`
+          SELECT detail_json
+          FROM job_observations
+          WHERE job_id = ? AND attempt_id = ?
+            AND observation_type = 'handoff.traversal_completion_check'
+          ORDER BY id DESC LIMIT 1
+        `).get(context.jobId, context.attemptId);
+    if (!row) return null;
+    const detail = JSON.parse(String(row.detail_json || "{}"));
+    const mode = ["off", "shadow", "on"].includes(String(detail.mode)) ? String(detail.mode) : "off";
+    const ids = Array.isArray(detail.requirement_ids)
+      ? detail.requirement_ids.map((id) => String(id || "")).filter((id) => /^R[0-9]{2}$/.test(id))
+      : [];
+    if (new Set(ids).size !== ids.length
+      || ids.length > AGENT_HANDOFF_LIMITS.maxCompletionRequirements) return null;
+    const digest = typeof detail.requirements_digest === "string"
+      && /^[a-f0-9]{64}$/.test(detail.requirements_digest)
+      ? detail.requirements_digest
+      : null;
+    const facetsById = new Map(
+      (Array.isArray(detail.requirement_facets) ? detail.requirement_facets : [])
+        .map((entry) => {
+          const id = String(entry?.id || "");
+          const facets = [...new Set((Array.isArray(entry?.facets) ? entry.facets : [])
+            .map((facet) => String(facet || ""))
+            .filter((facet) => facet === "failure_mechanisms"))];
+          return /^R[0-9]{2}$/.test(id) && facets.length > 0 ? [id, facets] : null;
+        })
+        .filter(Boolean),
+    );
+    const textById = new Map(
+      (Array.isArray(detail.requirements) ? detail.requirements : [])
+        .map((entry) => {
+          const id = String(entry?.id || "");
+          const text = String(entry?.text || "").replace(/\s+/gu, " ").trim().slice(0, 480);
+          const requirementDigest = String(entry?.digest || "");
+          return /^R[0-9]{2}$/.test(id) && text
+            && /^[a-f0-9]{64}$/.test(requirementDigest)
+            ? [id, { text, digest: requirementDigest }]
+            : null;
+        })
+        .filter(Boolean),
+    );
+    return {
+      mode,
+      triggered: detail.triggered === true,
+      active: mode === "on" && detail.status === "attached" && detail.misconfigured !== true
+        && ids.length > 0 && digest != null,
+      shadow: mode === "shadow" && detail.status === "shadowed" && detail.misconfigured !== true
+        && ids.length > 0 && digest != null,
+      requirements: ids.map((id) => ({
+        id,
+        facets: facetsById.get(id) || [],
+        ...(textById.has(id) ? textById.get(id) : {}),
+      })),
+      requirements_digest: digest,
+      status: String(detail.status || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function recordTraversalCompletionGate(context, check, detail = {}) {
+  try {
+    recordObservation({
+      db: context.db,
+      work_item_id: context.workItemId,
+      job_id: context.jobId,
+      attempt_id: context.attemptId,
+      observation_type: "agent_handoff.traversal_completion_gate",
+      summary: `Traversal completion gate ${detail.status || "checked"}`,
+      detail: {
+        mode: check.mode,
+        status: detail.status || "checked",
+        requirements_digest: check.requirements_digest,
+        requirement_ids: check.requirements.map((entry) => entry.id),
+        ...detail,
+      },
+    });
+  } catch { /* enforcement must not depend on telemetry */ }
+}
+
+const RESEARCH_COMPLETION_REPAIR_SOURCE_ACTIONS = new Set([
+  "code.lens",
+  "code.window",
+  "symbol.get",
+]);
+
+function latestRejectedTraversalCompletionRepair(context, check) {
+  try {
+    const row = context.db.prepare(`
+      SELECT id, detail_json
+      FROM job_observations
+      WHERE job_id = ? AND attempt_id = ?
+        AND observation_type = 'agent_handoff.traversal_completion_gate'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(context.jobId, context.attemptId);
+    if (!row?.detail_json) return null;
+    const detail = JSON.parse(String(row.detail_json || "{}"));
+    if (detail.status !== "rejected" || detail.requirements_digest !== check.requirements_digest) {
+      return null;
+    }
+    const requirementIds = [...new Set(
+      (Array.isArray(detail.evidence_refresh_requirement_ids)
+        ? detail.evidence_refresh_requirement_ids
+        : [])
+        .map((id) => String(id || ""))
+        .filter((id) => /^R[0-9]{2}$/.test(id)),
+    )];
+    const rawClaimIndexes = detail.evidence_refresh_claim_indexes_by_requirement;
+    const claimIndexesByRequirement = new Map(
+      rawClaimIndexes && typeof rawClaimIndexes === "object" && !Array.isArray(rawClaimIndexes)
+        ? Object.entries(rawClaimIndexes).flatMap(([id, indexes]) => {
+          if (!/^R[0-9]{2}$/.test(id) || !Array.isArray(indexes)) return [];
+          const normalized = [...new Set(indexes
+            .map((value) => Number(value))
+            .filter((value) => Number.isSafeInteger(value) && value > 0))];
+          return normalized.length > 0 ? [[id, normalized]] : [];
+        })
+        : [],
+    );
+    return requirementIds.length > 0
+      ? { observationId: Number(row.id), requirementIds, claimIndexesByRequirement }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasNovelResearchSourceAfter(context, observationId) {
+  try {
+    const rows = context.db.prepare(`
+      SELECT id, detail_json
+      FROM job_observations
+      WHERE job_id = ? AND attempt_id = ?
+        AND observation_type = 'tool.atlas'
+      ORDER BY id ASC
+    `).all(context.jobId, context.attemptId);
+    const priorEvidence = new Set();
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      const evidenceIdentities = (Array.isArray(detail.evidence_identities)
+        ? detail.evidence_identities
+        : [])
+        .map((identity) => String(identity || "").trim())
+        .filter(Boolean);
+      if (Number(row.id) <= observationId) {
+        for (const identity of evidenceIdentities) priorEvidence.add(identity);
+        continue;
+      }
+      if (!RESEARCH_COMPLETION_REPAIR_SOURCE_ACTIONS.has(String(detail.action || ""))) continue;
+      if (detail.executed === false) continue;
+      if (detail.outcome !== "succeeded" && detail.ok !== true) continue;
+      const evidenceIdentityVersion = Number(detail.evidence_identity_version);
+      if (!Number.isSafeInteger(evidenceIdentityVersion) || evidenceIdentityVersion < 1) return true;
+      if (evidenceIdentities.some((identity) => !priorEvidence.has(identity))) return true;
+      for (const identity of evidenceIdentities) priorEvidence.add(identity);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function enforceResearcherTraversalCompletion(packet, coverage, check, context) {
+  if (packet?.profile !== "researcher.report.v1") return;
+  if (!check) {
+    recordTraversalCompletionGate(context, {
+      mode: "unavailable",
+      requirements: [],
+      requirements_digest: null,
+    }, { status: "snapshot_missing", fail_open: true });
+    return;
+  }
+  if (!check.triggered || check.mode === "off") return;
+  const expected = new Map(check.requirements.map((entry) => [entry.id, entry]));
+  const supplied = Array.isArray(coverage) ? coverage : [];
+  if (check.shadow) {
+    const suppliedIds = new Set(supplied.map((entry) => String(entry?.requirement_id || "")));
+    recordTraversalCompletionGate(context, check, {
+      status: "shadowed",
+      supplied_count: suppliedIds.size,
+      missing_count: [...expected.keys()].filter((id) => !suppliedIds.has(id)).length,
+    });
+    return;
+  }
+  if (!check.active) {
+    recordTraversalCompletionGate(context, check, {
+      status: "snapshot_inactive",
+      fail_open: true,
+      snapshot_status: check.status,
+    });
+    return;
+  }
+
+  const problems = [];
+  const evidenceRefreshRequirementIds = new Set();
+  const evidenceRefreshClaimIndexesByRequirement = new Map();
+  const failureMechanismWarnings = [];
+  const seen = new Set();
+  const normalized = [];
+  const claims = packet?.handoffs?.[0]?.report?.claims || [];
+  const claimsBySubmittedIndex = new Map(claims.map((claim, index) => [
+    Number(claim?.[CLAIM_SUBMITTED_INDEX] || index + 1),
+    claim,
+  ]));
+  const demotedSubmittedIndexes = new Set(
+    (packet?.evidence_cleanup?.items || []).flatMap((item) => {
+      if (item?.action !== "demote_unverified_claim_to_summary") return [];
+      const match = String(item?.selector || "").match(/^<claim:([1-9][0-9]*)>$/);
+      return match ? [Number(match[1])] : [];
+    }),
+  );
+  let coverageAdjustedAfterEvidenceCleanup = 0;
+  for (const [index, entry] of supplied.entries()) {
+    const id = String(entry.requirement_id || "");
+    if (!expected.has(id)) problems.push(`coverage[${index}] has unknown requirement_id ${id || "(missing)"}`);
+    if (seen.has(id)) problems.push(`coverage contains duplicate requirement_id ${id}`);
+    seen.add(id);
+    const status = String(entry.status || "");
+    if (status === "supported") {
+      const claimIndexes = entry.claim_indexes;
+      const unknown = claimIndexes.filter((claimIndex) => (
+        !claimsBySubmittedIndex.has(claimIndex) && !demotedSubmittedIndexes.has(claimIndex)
+      ));
+      if (unknown.length > 0) {
+        problems.push(`coverage ${id} references unknown submitted claims ${unknown.join(", ")}`);
+      }
+      const gapClaimIndexes = claimIndexes.filter((claimIndex) => (
+        declaresUnclosedResearchEvidenceGap(claimsBySubmittedIndex.get(claimIndex)?.[0])
+      ));
+      // A claim that explicitly says its implementation evidence is missing
+      // cannot support terminal coverage. Repair that evidence-state mismatch
+      // deterministically: retain any other grounded claims, otherwise close
+      // the requirement as unresolved. Rejecting the packet only makes the
+      // provider restate the same honest gap in a second handoff turn.
+      const eligibleClaimIndexes = claimIndexes.filter((claimIndex) => !gapClaimIndexes.includes(claimIndex));
+      const retainedClaims = eligibleClaimIndexes
+        .map((claimIndex) => claimsBySubmittedIndex.get(claimIndex))
+        .filter(Boolean);
+      if (expected.get(id)?.facets?.includes("failure_mechanisms") && retainedClaims.length > 0) {
+        const missingMechanisms = missingResearchFailureMechanisms(
+          retainedClaims.map((claim) => claim?.[0] || "").join("\n"),
+        );
+        if (missingMechanisms.length > 0) {
+          failureMechanismWarnings.push({ requirement_id: id, missing: missingMechanisms });
+        }
+      }
+      const grounded = eligibleClaimIndexes.filter((claimIndex) => {
+        const claim = claimsBySubmittedIndex.get(claimIndex);
+        return Array.isArray(claim?.[1]?.evidence)
+          && claim[1].evidence.some(isGroundedClaimEvidence)
+          ? true
+          : false;
+      });
+      if (grounded.length > 0) {
+        if (grounded.length !== claimIndexes.length) coverageAdjustedAfterEvidenceCleanup += 1;
+        normalized.push({ requirement_id: id, status, claim_indexes: grounded });
+      } else if (gapClaimIndexes.length > 0 && unknown.length === 0) {
+        coverageAdjustedAfterEvidenceCleanup += 1;
+        normalized.push({
+          requirement_id: id,
+          status: "unresolved",
+          reason: `Submitted claims ${gapClaimIndexes.join(", ")} explicitly report that the required implementation evidence remains open.`,
+        });
+      } else if (unknown.length === 0 && claimIndexes.every((claimIndex) => demotedSubmittedIndexes.has(claimIndex))) {
+        coverageAdjustedAfterEvidenceCleanup += 1;
+        normalized.push({
+          requirement_id: id,
+          status: "unresolved",
+          reason: "Submitted supporting claims were not retained with grounded evidence.",
+        });
+      } else {
+        normalized.push({ requirement_id: id, status, claim_indexes: claimIndexes });
+      }
+    } else {
+      normalized.push({ requirement_id: id, status, reason: entry.reason });
+    }
+  }
+  const missing = [...expected.keys()].filter((id) => !seen.has(id));
+  if (missing.length > 0) problems.push(`coverage is missing ${missing.join(", ")}`);
+  if (problems.length === 0) {
+    const priorRepair = latestRejectedTraversalCompletionRepair(context, check);
+    const stillSupported = priorRepair?.requirementIds.filter((id) => (
+      supplied.some((entry) => {
+        if (entry.requirement_id !== id || entry.status !== "supported") return false;
+        const priorGapIndexes = priorRepair.claimIndexesByRequirement?.get(id);
+        // A requirement can legitimately shed the claim that disclosed the
+        // gap and remain supported by other grounded claims. Preserve the
+        // novel-source guard when the same gap-bearing claim is retained (and
+        // for legacy rejection rows that did not record claim indexes), but
+        // do not punish an evidence-state correction as mere rewording.
+        return !priorGapIndexes?.length
+          || entry.claim_indexes.some((claimIndex) => priorGapIndexes.includes(claimIndex));
+      })
+    )) || [];
+    if (stillSupported.length > 0 && !hasNovelResearchSourceAfter(context, priorRepair.observationId)) {
+      for (const id of stillSupported) {
+        evidenceRefreshRequirementIds.add(id);
+        const priorGapIndexes = priorRepair.claimIndexesByRequirement?.get(id);
+        if (priorGapIndexes?.length) {
+          evidenceRefreshClaimIndexesByRequirement.set(id, priorGapIndexes);
+        }
+      }
+      problems.push(
+        `coverage ${stillSupported.join(", ")} was previously rejected for an evidence-completeness gap; before retrying with supported status, retrieve novel implementation source using code.window, code.lens, or symbol.get, or mark the requirement unresolved. Rewording alone is not a repair`,
+      );
+    }
+  }
+  if (problems.length > 0) {
+    recordTraversalCompletionGate(context, check, {
+      status: "rejected",
+      supplied_count: supplied.length,
+      missing_ids: missing,
+      problem_count: problems.length,
+      evidence_refresh_requirement_ids: [...evidenceRefreshRequirementIds],
+      evidence_refresh_claim_indexes_by_requirement: Object.fromEntries(
+        evidenceRefreshClaimIndexesByRequirement,
+      ),
+    });
+    fail(
+      "AGENT_HANDOFF_COMPLETENESS_REQUIRED",
+      `agent_handoff coverage check failed: ${problems.join("; ")}`,
+    );
+  }
+  const unresolved = normalized.filter((entry) => entry.status === "unresolved");
+  if (unresolved.length > 0) {
+    const report = packet.handoffs[0].report;
+    const note = unresolved.map((entry) => `${entry.requirement_id}: ${entry.reason}`).join(" | ");
+    const priorSummary = report.summary;
+    report.summary = boundedString(
+      `${report.summary}\n\nUnresolved task coverage: ${note}`,
+      "handoffs[0].report.summary",
+      AGENT_HANDOFF_LIMITS.maxCallBytes,
+    );
+    packet.narrative_chars += report.summary.length - priorSummary.length;
+    validateNarrativeEvidenceBoundary(packet.handoffs[0], 0);
+  }
+  packet.completion_coverage = normalized;
+  packet.completion_coverage_digest = check.requirements_digest;
+  recordTraversalCompletionGate(context, check, {
+    status: "accepted",
+    supplied_count: normalized.length,
+    unresolved_count: unresolved.length,
+    coverage_adjusted_after_evidence_cleanup: coverageAdjustedAfterEvidenceCleanup,
+    failure_mechanism_warning_count: failureMechanismWarnings.length,
+    failure_mechanism_warnings: failureMechanismWarnings,
+  });
+}
+
 export function stageAgentHandoff(args, {
   context = {},
   role = "",
@@ -4392,7 +4893,22 @@ export function stageAgentHandoff(args, {
     db: database,
   };
   const effectiveRole = String(call.role || role || "");
-  const packet = materializeAgentHandoff(args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
+  const serializedArgs = JSON.stringify(args ?? null);
+  if (Buffer.byteLength(serializedArgs, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
+    fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
+  }
+  const completionInput = effectiveRole === "researcher"
+    ? compactResearcherCoverageInput(args)
+    : { args, coverage: null };
+  const packet = materializeAgentHandoff(completionInput.args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
+  if (effectiveRole === "researcher") {
+    enforceResearcherTraversalCompletion(
+      packet,
+      completionInput.coverage,
+      getTraversalCompletionSnapshotForCall(resolvedContext),
+      resolvedContext,
+    );
+  }
   enforceArtificerImageGeneration(packet, call, resolvedContext);
   const diagnostics = {
     ...(packet.ignored_field_count > 0 ? {

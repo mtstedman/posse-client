@@ -426,6 +426,7 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
   const meta = envelope.meta || {};
   if (Array.isArray(data.items)) data.items = data.items.map(compactSymbolAddress);
   if (Array.isArray(data.beam)) data.beam = data.beam.map(compactScopeBeamCandidate);
+  pruneAgentFileEvidence(data, meta);
   delete meta.scoreScheme;
   if (JSON.stringify(envelope).length <= maxChars) return envelope;
   if (Array.isArray(data.entities) && JSON.stringify(envelope).length > maxChars) delete data.entities;
@@ -471,6 +472,30 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
     delete envelope.meta;
   }
   return envelope;
+}
+
+/**
+ * Native search keeps file-ranking evidence for diagnostics and internal
+ * consumers. The agent projection already carries the selected symbol
+ * addresses, so retaining the same file evidence here can consume the entire
+ * result rail and force those addresses out.
+ *
+ * @param {any} data
+ * @param {any} meta
+ */
+function pruneAgentFileEvidence(data, meta) {
+  delete data.fileEvidence;
+  delete data.fileEvidenceSymbols;
+  delete meta.fileEvidence;
+  delete meta.fileEvidenceSymbols;
+  const candidateDepth = meta.candidateDepth;
+  if (!candidateDepth || typeof candidateDepth !== "object") return;
+  if (candidateDepth.admitted && typeof candidateDepth.admitted === "object") {
+    delete candidateDepth.admitted.fileEvidenceSymbols;
+  }
+  if (candidateDepth.rejected && typeof candidateDepth.rejected === "object") {
+    delete candidateDepth.rejected.fileEvidence;
+  }
 }
 
 function compactSymbolAddress(value, { minimal = false } = {}) {

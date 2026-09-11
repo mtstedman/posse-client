@@ -8,6 +8,8 @@ import {
   HUMAN_INPUT_BEST_JUDGMENT_ANSWER,
   humanInputChoicesForPayload,
   nonInteractiveHumanInputAnswerForPayload,
+  scopeModeHumanInputAnswerForPayload,
+  SCOPE_MODE_APPROVAL_SOURCE,
 } from "../../../../catalog/human-input.js";
 import {
   getHumanGate,
@@ -158,6 +160,18 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
   const { questions, context, promptOptions } = resolveHumanInputPrompt(job, payload);
   const promptIdentity = buildHumanPromptIdentity(job, payload);
   promptOptions.promptIdentity = promptIdentity;
+
+  const scopeAnswer = scopeModeHumanInputAnswerForPayload(payload, worker.scopeMode);
+  if (scopeAnswer) {
+    worker.emit(job.id, `${C.cyan}[human] Scope mode auto approved requested file scope${C.reset}`);
+    return JSON.stringify({
+      questions,
+      answers: questions.map((question) => ({ question, answer: scopeAnswer })),
+      prompt_identity: promptIdentity,
+      unattended: true,
+      source: SCOPE_MODE_APPROVAL_SOURCE,
+    });
+  }
 
   if (worker.nonInteractive) {
     const harness = isAbHarnessEnvironment();

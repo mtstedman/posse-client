@@ -61,6 +61,14 @@ import {
 } from "./source-evidence.js";
 
 import { alignSourceContinuationPage, sourceContinuationPayload, sourceRows } from "./source-continuation.js";
+import {
+  COMPACT_STRUCTURE_DEFAULT_MAX_CHARS,
+  COMPACT_STRUCTURE_ENVELOPE_RESERVE_CHARS,
+  COMPACT_STRUCTURE_PROJECTION,
+  compactCodeStructurePageRows,
+  paginateCompactCodeStructure,
+  projectCompactCodeStructure,
+} from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
 import { sourceLineDisplay } from "./source-line-display.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
@@ -73,6 +81,7 @@ const EVIDENCE_REF_SURFACE_MIN_CHARS = 1;
 const EVIDENCE_REF_TOOLS = new Set([
   "code.skeleton",
   "code.window",
+  "symbol.get",
   "code.lens",
   "code.survey",
   "code.structure",
@@ -839,7 +848,8 @@ function refreshCodeWindowMapCoverage(data) {
 }
 
 function isDirectSymbolWindow(args, data) {
-  const selection = args?.action === "code.window" && args.args && typeof args.args === "object"
+  const selection = ["code.window", "symbol.get"].includes(args?.action)
+    && args.args && typeof args.args === "object"
     ? args.args : args;
   if (String(selection?.granularity || "symbol") !== "symbol"
     || selection?.sliceContext != null || data.redirect || data.degradedReason) return false;
@@ -853,6 +863,75 @@ function isDirectSymbolWindow(args, data) {
     && identifiers.every((identifier) => found.has(String(identifier).toLowerCase())));
 }
 
+function exactAnchoredWindowTarget(args, data) {
+  const selection = ["code.window", "symbol.get"].includes(args?.action)
+    && args.args && typeof args.args === "object"
+    ? args.args : args;
+  const identifiers = Array.isArray(selection?.identifiersToFind)
+    ? selection.identifiersToFind.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  if (
+    String(selection?.granularity || "symbol") !== "fileWindow"
+    || !selection?.file
+    || identifiers.length !== 1
+    || !Array.isArray(data?.map?.requested)
+  ) return null;
+  const wanted = identifiers[0].toLowerCase();
+  const requests = data.map.requested.filter((entry) => (
+    String(entry?.identifier || "").trim().toLowerCase() === wanted
+  ));
+  if (requests.length !== 1) return null;
+  const targets = (Array.isArray(requests[0]?.targets) ? requests[0].targets : [])
+    .map((target) => {
+      const lines = target?.lines !== undefined
+        ? target.lines
+        : [target?.location?.startLine, target?.location?.endLine];
+      return Array.isArray(lines) && lines.length === 2
+        && Number.isSafeInteger(lines[0]) && Number.isSafeInteger(lines[1])
+        && lines[0] > 0 && lines[1] >= lines[0]
+        ? { startLine: lines[0], endLine: lines[1] }
+        : null;
+    })
+    .filter(Boolean);
+  return targets.length === 1 ? targets[0] : null;
+}
+
+function focusedAnchoredWindow(lines, startLine, target, budget) {
+  const targetStart = target.startLine - startLine;
+  const targetEnd = target.endLine - startLine + 1;
+  if (targetStart < 0 || targetEnd > lines.length || targetEnd <= targetStart) return null;
+  const chars = (from, to) => lines.slice(from, to).reduce((sum, row) => sum + row.length, 0);
+  if (chars(targetStart, targetEnd) > budget) return null;
+
+  // Keep the complete governing body, then spend the remaining display budget
+  // on balanced surrounding context. This is intentionally limited to one
+  // unambiguous mapped target; broad and multi-target windows retain prefix
+  // paging semantics.
+  let from = targetStart;
+  let to = targetEnd;
+  let used = chars(from, to);
+  const contextLimit = 40;
+  let before = 0;
+  let after = 0;
+  while ((from > 0 && before < contextLimit) || (to < lines.length && after < contextLimit)) {
+    let advanced = false;
+    if (from > 0 && before < contextLimit && used + lines[from - 1].length <= budget) {
+      from -= 1;
+      before += 1;
+      used += lines[from].length;
+      advanced = true;
+    }
+    if (to < lines.length && after < contextLimit && used + lines[to].length <= budget) {
+      used += lines[to].length;
+      to += 1;
+      after += 1;
+      advanced = true;
+    }
+    if (!advanced) break;
+  }
+  return { from, to };
+}
+
 export function compactCodeWindowLensResult(toolName, result, {
   args = {},
   context = {},
@@ -860,7 +939,8 @@ export function compactCodeWindowLensResult(toolName, result, {
   enabled = null,
   minChars = null,
 } = {}) {
-  const tool = String(toolName || "");
+  const requestedTool = String(toolName || "");
+  const tool = requestedTool === "symbol.get" ? "code.window" : requestedTool;
   if ((tool !== "code.window" && tool !== "code.lens") || typeof result !== "string") {
     return { result, compacted: false };
   }
@@ -1020,6 +1100,7 @@ export function compactCodeWindowLensResult(toolName, result, {
       : [];
     const carriedNativeContinuation = Array.isArray(data._continuationWindows);
     delete data._continuationWindows;
+    let displayPrefix = null;
     let displayTail = null;
     let displayOriginal = null;
     if (
@@ -1076,25 +1157,43 @@ export function compactCodeWindowLensResult(toolName, result, {
         const startLine = Number(data.startLine) || 1;
         const contentEndLine = startLine + lines.length - 1;
         const originalEndLine = contentEndLine;
+        const target = exactAnchoredWindowTarget(args, data);
+        const focused = target && target.endLine > startLine + splitAt - 1
+          ? focusedAnchoredWindow(lines, startLine, target, inlineContentBudget)
+          : null;
         displayOriginal = {
+          startLine,
           endLine: originalEndLine,
           outputTruncated: data.outputTruncated === true,
           truncated: data.truncated === true,
         };
+        if (focused?.from > 0) {
+          displayPrefix = {
+            content: lines.slice(0, focused.from).join(""),
+            startLine,
+            endLine: startLine + focused.from - 1,
+            identifiers: [],
+          };
+        }
+        const inlineFrom = focused?.from ?? 0;
+        const inlineTo = focused?.to ?? splitAt;
         displayTail = {
-          content: lines.slice(splitAt).join(""),
-          startLine: startLine + splitAt,
+          content: lines.slice(inlineTo).join(""),
+          startLine: startLine + inlineTo,
           endLine: originalEndLine,
           identifiers: [],
         };
-        data.content = lines.slice(0, splitAt).join("");
-        data.endLine = displayTail.startLine - 1;
+        if (!displayTail.content) displayTail = null;
+        data.content = lines.slice(inlineFrom, inlineTo).join("");
+        data.startLine = startLine + inlineFrom;
+        data.endLine = startLine + inlineTo - 1;
         data.outputTruncated = true;
         data.truncated = true;
       }
     }
     const continuation = dedupeCodeWindowContinuationWindows([
       ...nativeContinuation,
+      ...(displayPrefix ? [displayPrefix] : []),
       ...(displayTail ? [displayTail] : []),
     ]);
     const lensTail = tool === "code.lens"
@@ -1207,16 +1306,18 @@ export function compactCodeWindowLensResult(toolName, result, {
         // Materialization failure must not silently discard selected evidence.
         // Restore the display tail to the primary content and expose native
         // slices inline.
-        if (displayTail) {
-          data.content = `${data.content}${displayTail.content}`;
+        if (displayPrefix || displayTail) {
+          data.content = `${displayPrefix?.content || ""}${data.content}${displayTail?.content || ""}`;
+          data.startLine = displayOriginal.startLine;
           data.endLine = displayOriginal.endLine;
           data.outputTruncated = displayOriginal.outputTruncated;
           data.truncated = displayOriginal.truncated;
         }
-        const nativeInline = continuation.filter((entry) => !(displayTail
-          && entry.startLine === displayTail.startLine
-          && entry.endLine === displayTail.endLine
-          && entry.content === displayTail.content));
+        const nativeInline = continuation.filter((entry) => !([displayPrefix, displayTail]
+          .filter(Boolean)
+          .some((display) => entry.startLine === display.startLine
+            && entry.endLine === display.endLine
+            && entry.content === display.content)));
         if (tool === "code.lens") {
           data.continuationWindowsInline = nativeInline;
           data.continuationInline = true;
@@ -1243,16 +1344,18 @@ export function compactCodeWindowLensResult(toolName, result, {
       }
       compacted = true;
     } else if (continuation.length > 0) {
-      if (displayTail) {
-        data.content = `${data.content}\n${displayTail.content}`;
+      if (displayPrefix || displayTail) {
+        data.content = `${displayPrefix?.content || ""}${data.content}${displayTail?.content || ""}`;
+        data.startLine = displayOriginal.startLine;
         data.endLine = displayOriginal.endLine;
         data.outputTruncated = displayOriginal.outputTruncated;
         data.truncated = displayOriginal.truncated;
       }
-      const nativeInline = continuation.filter((entry) => !(displayTail
-        && entry.startLine === displayTail.startLine
-        && entry.endLine === displayTail.endLine
-        && entry.content === displayTail.content));
+      const nativeInline = continuation.filter((entry) => !([displayPrefix, displayTail]
+        .filter(Boolean)
+        .some((display) => entry.startLine === display.startLine
+          && entry.endLine === display.endLine
+          && entry.content === display.content)));
       if (tool === "code.lens") {
         data.continuationWindowsInline = nativeInline;
         data.continuationInline = true;
@@ -1336,6 +1439,93 @@ export function compactCodeWindowLensResult(toolName, result, {
   return compacted
     ? { result: JSON.stringify(envelope), compacted: true }
     : { result, compacted: false };
+}
+
+/**
+ * Store one already-bounded symbol.get body as an unseen scoped traversal.
+ * The returned ref is routing custody only: source coverage is recorded when
+ * traverse_ref actually materializes the chosen body, never when choices are
+ * created.
+ *
+ * @param {{file:string, source:Record<string, any>}} choice
+ * @param {{context?:Record<string, unknown>, symbolId?:string|null}} [options]
+ * @returns {string|null}
+ */
+export function createSymbolGetSourceTraversalRef({ file, source }, {
+  context = {},
+  symbolId = null,
+} = {}) {
+  const hashContext = contextForHashRefs(context);
+  const sourcePath = canonicalEvidenceSourcePath(file || source?.repo_rel_path);
+  if (!hasHashRefScope(hashContext) || !sourcePath || !source || typeof source !== "object") return null;
+
+  const candidates = [
+    typeof source.content === "string" ? source : null,
+    ...(Array.isArray(source.additionalWindows) ? source.additionalWindows : []),
+    ...(Array.isArray(source._continuationWindows) ? source._continuationWindows : []),
+  ].filter((window) => window && typeof window.content === "string" && window.content.length > 0
+    && Number.isSafeInteger(Number(window.startLine)) && Number(window.startLine) > 0
+    && Number.isSafeInteger(Number(window.endLine)) && Number(window.endLine) >= Number(window.startLine));
+  const seen = new Set();
+  const windows = candidates
+    .map((window) => ({
+      content: window.content,
+      startLine: Number(window.startLine),
+      endLine: Number(window.endLine),
+    }))
+    .sort((a, b) => a.startLine - b.startLine || a.endLine - b.endLine || a.content.localeCompare(b.content))
+    .filter((window) => {
+      const key = `${window.startLine}:${window.endLine}:${window.content}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  if (windows.length === 0) return null;
+
+  const stored = sourceContinuationPayload(windows, {
+    path: sourcePath,
+    repositoryIdentity: source.repositoryIdentity,
+    sourceVersion: source.sourceVersion,
+    selectorFingerprint: sourceSelectorFingerprint({
+      symbolId: symbolId || source.symbolId || null,
+      file: sourcePath,
+    }),
+  });
+  if (!stored.payload || stored.sourceWindows.length === 0) return null;
+
+  const surfaced = surfaceHashRefForContext(hashContext, {
+    entryKind: "materialized",
+    payloadText: stored.payload,
+    descriptor: {
+      kind: "symbol_get_choice",
+      tool: "symbol.get",
+      args: { symbolId: symbolId || source.symbolId || null, file: sourcePath },
+      source: "tool:symbol.get",
+    },
+    objectType: "symbol.get.choice",
+    source: "tool:symbol.get",
+    note: `${sourcePath} selected symbol body`,
+    sizeChars: stored.payload.length,
+    recomputable: true,
+    // Identical blobs at different repository paths are distinct symbol.get
+    // choices. Content-hash reuse would collapse their path/source identity.
+    reuse: false,
+    metadata: {
+      surfaced_by: "symbol_get_ambiguity_choice",
+      fetch_class: "result_continuation",
+      ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
+      tool: "symbol.get",
+      path: sourcePath,
+      ...(symbolId || source.symbolId ? { symbol_id: symbolId || source.symbolId } : {}),
+      line_semantics: "source",
+      source_payload_encoding: RAW_SOURCE_LINES_ENCODING,
+      ...(source.repositoryIdentity ? { repository_identity: source.repositoryIdentity } : {}),
+      ...(source.sourceVersion ? { source_version: source.sourceVersion } : {}),
+      source_windows: stored.sourceWindows,
+    },
+  });
+  if (!surfaced?.ok || !surfaced?.entry?.ref) return null;
+  return surfaced.model_ref || surfaced.entry.ref;
 }
 
 function shouldSurfaceHashRef(toolName, result, {
@@ -3068,3 +3258,160 @@ export const __testHashAdderInternals = Object.freeze({
   normalizeRef,
   shouldSurfaceHashRef,
 });
+
+// ---- code.structure compact presentation + paging (P0.4) -------------------
+// Researcher-only presentation of the exact structure inventory. The full
+// native payload is projected (compact-presentation.js), split into pages that
+// each fit the wire bound, and every page after the first is stored as a
+// frozen hash entry chained through `next_traversal_ref`. Page 1 stays inline.
+// Storage failure never drops rows: the whole compact projection is returned
+// inline instead, with `pagination: null`, so the model is never promised a
+// continuation the store cannot serve.
+const STRUCTURE_PAGE_SURFACED_BY = "structure_page_compactor";
+
+function structurePageCursor(page) {
+  if (!page?.ref) return null;
+  return traversalRefSurface(page.ref, {
+    kind: "structure_page",
+    ranks: page.ranks,
+    count: page.count,
+  });
+}
+
+export function compactCodeStructureResult(toolName, result, {
+  args = {},
+  context = {},
+  ownerScope = null,
+  projection = null,
+  maxChars = COMPACT_STRUCTURE_DEFAULT_MAX_CHARS,
+} = {}) {
+  if (String(toolName || "") !== "code.structure" || typeof result !== "string") {
+    return { result, compacted: false };
+  }
+  if (projection !== COMPACT_STRUCTURE_PROJECTION) return { result, compacted: false };
+  let envelope;
+  try {
+    envelope = JSON.parse(result);
+  } catch {
+    return { result, compacted: false };
+  }
+  // The MCP owner stamps the BARE structure payload ({files, ...edges,
+  // metrics}); dispatch envelopes nest it under .data. Accept both.
+  const nested = envelope?.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+    ? envelope.data
+    : null;
+  const data = nested || (Array.isArray(envelope?.files) ? envelope : null);
+  if (!data || !Array.isArray(data.files)) return { result, compacted: false };
+  if (envelope?.ok === false || envelope?.error) return { result, compacted: false };
+
+  const projected = projectCompactCodeStructure(data, {
+    edgesRequested: args?.includeEdges === false ? false : (args?.includeEdges === true ? true : null),
+    requestedMaxFiles: args?.maxFiles,
+  });
+  const bound = Math.max(400, Number(maxChars) || COMPACT_STRUCTURE_DEFAULT_MAX_CHARS);
+  const pageChars = Math.max(400, bound - COMPACT_STRUCTURE_ENVELOPE_RESERVE_CHARS);
+  const pages = paginateCompactCodeStructure(projected, { maxChars: pageChars });
+  const totalRows = compactCodeStructurePageRows(pages).length;
+  const replace = (payload) => (nested
+    ? JSON.stringify({ ...envelope, data: payload })
+    : JSON.stringify(payload));
+
+  if (pages.length <= 1) {
+    return {
+      result: replace(pages[0] || projected),
+      compacted: true,
+      projection: COMPACT_STRUCTURE_PROJECTION,
+      pages: 1,
+      rows: totalRows,
+    };
+  }
+
+  const hashContext = contextForHashRefs(context);
+  const unpaged = () => ({
+    result: replace({ ...projected, pagination: null, continuation: "unavailable" }),
+    compacted: true,
+    projection: COMPACT_STRUCTURE_PROJECTION,
+    pages: 1,
+    rows: totalRows,
+    continuationUnavailable: true,
+  });
+  if (!hasHashRefScope(hashContext)) return unpaged();
+
+  const resolvedOwnerScope = ownerScope || (hashContext.job_id != null ? "job" : "work_item");
+  let nextPage = null;
+  try {
+    for (let index = pages.length - 1; index >= 1; index -= 1) {
+      const page = pages[index];
+      const cursor = structurePageCursor(nextPage);
+      const payload = {
+        ok: true,
+        action: "code.structure.page",
+        ...page,
+        ...(cursor ? { next_traversal_ref: cursor } : {}),
+      };
+      const payloadText = JSON.stringify(payload, null, 1);
+      const rankStart = index + 1;
+      const surfaced = surfaceHashRefForContext(hashContext, {
+        entryKind: "materialized",
+        payloadText,
+        descriptor: {
+          kind: "structure_page",
+          tool: "code.structure",
+          args,
+          page: rankStart,
+          pages: pages.length,
+        },
+        recomputable: true,
+        objectType: "atlas.code.structure.page",
+        source: "tool:code.structure",
+        note: `structure page ${rankStart} of ${pages.length}`,
+        sizeChars: payloadText.length,
+        metadata: {
+          surfaced_by: STRUCTURE_PAGE_SURFACED_BY,
+          fetch_class: "cursor_page",
+          ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
+          // Frozen pages must all stay materialized for the chain to hold.
+          bounded_ingress: true,
+          tool: "code.structure",
+          page: rankStart,
+          pages: pages.length,
+          file_count: page.files.length,
+        },
+      }, { ownerScope: resolvedOwnerScope });
+      if (!surfaced?.ok || !surfaced?.entry?.ref) return unpaged();
+      nextPage = {
+        ranks: `${rankStart}-${pages.length}`,
+        count: page.files.length,
+        ref: surfaced.model_ref || surfaced.entry.ref,
+      };
+    }
+  } catch (err) {
+    recordHashSurfaceFailure(hashContext, "code.structure", result.length, err?.message || err);
+    return unpaged();
+  }
+  const first = pages[0];
+  const inlinePaths = new Set(first.files.map((file) => file.path));
+  // A file sliced across pages is one omitted file, not one per slice; a file
+  // whose first slice is already inline is not omitted at all.
+  const omittedPaths = pages.slice(1)
+    .flatMap((page) => page.files.map((file) => file.path))
+    .filter((path, position, all) => all.indexOf(path) === position && !inlinePaths.has(path));
+  const omittedFiles = omittedPaths.length;
+  const omittedPathPreview = omittedPaths.slice(0, 12);
+  const inline = {
+    ...first,
+    pagination: {
+      ...first.pagination,
+      omittedFiles,
+      omittedPathPreview,
+    },
+    next_traversal_ref: structurePageCursor(nextPage),
+  };
+  return {
+    result: replace(inline),
+    compacted: true,
+    projection: COMPACT_STRUCTURE_PROJECTION,
+    pages: pages.length,
+    rows: totalRows,
+  };
+}

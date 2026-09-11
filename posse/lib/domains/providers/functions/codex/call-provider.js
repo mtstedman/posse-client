@@ -40,6 +40,8 @@ import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolU
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
 import { createCodexRolloutUsageTailer, reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, resolveCodexLiveTurnBudget, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
 import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry.js";
+import { prepareCodexNativeBatchingCatalog } from "./native-batching-catalog.js";
+import { _toTomlLiteral } from "./config-format.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
@@ -142,6 +144,8 @@ export async function callProvider(promptText, {
   disableAgentTools = false,
   sandboxModeOverride = null,
   disableSystemTools: disableSystemToolsOverride = null,
+  nativeBatching = true,
+  nativeBatchingCatalog = undefined,
   captureNativeSubagents = false,
 } = {}) {
   const readiness = await isReadyAsync();
@@ -162,6 +166,7 @@ export async function callProvider(promptText, {
   );
 
   return new Promise((resolve, reject) => {
+    let cleanupPreparedCatalog = () => {};
     void (async () => {
     try {
     const tierConfig = getModelTierConfig(modelTier);
@@ -221,6 +226,8 @@ export async function callProvider(promptText, {
       projectDbCapability,
       needsImageGeneration,
       disableSystemTools,
+      nativeBatching,
+      nativeBatchingCatalog,
       jobId,
       workItemId,
       attemptId,
@@ -262,12 +269,26 @@ export async function callProvider(promptText, {
       ? deterministicReadMcp.serverKey
       : atlasMcpServerKey;
     if (deterministicReadMcp.codexNativeBatching) {
-      const catalog = JSON.parse(fs.readFileSync(deterministicReadMcp.nativeBatchingCatalog, "utf8"));
-      const profile = catalog.models?.find(model => model.slug === modelToUse);
-      if (!profile || profile.tool_mode !== "direct" || profile.use_responses_lite !== false
-        || profile.multi_agent_version !== "v1" || profile.apply_patch_tool_type !== null) {
+      try {
+        const catalog = await prepareCodexNativeBatchingCatalog({
+          cmd: codexCmd,
+          args: codexArgs,
+          model: modelToUse,
+          catalogPath: deterministicReadMcp.nativeBatchingCatalog,
+          cwd: spawnCwd,
+          env: buildCodexWindowsLaunchEnv(process.env, codexCmd),
+          signal: abortSignal || undefined,
+        });
+        const clearCatalogExitCleanup = codexExitCleanupRegistry.register(catalog.cleanup);
+        cleanupPreparedCatalog = () => {
+          clearCatalogExitCleanup();
+          try { catalog.cleanup(); } catch { /* best-effort temporary catalog cleanup */ }
+        };
+        deterministicReadMcp.nativeBatchingCatalog = catalog.catalogPath;
+        deterministicReadMcp.configOverrides.push(`model_catalog_json=${_toTomlLiteral(catalog.catalogPath)}`);
+      } catch (error) {
         cleanupDeterministicMcpSession();
-        throw new Error("Native researcher batching requires an explicit matching direct-tool model catalog with Responses Lite, delegation and patch tools disabled");
+        throw error;
       }
     }
     const remoteAtlasToolNames = Array.isArray(deterministicReadMcp.atlasTools)
@@ -371,6 +392,7 @@ export async function callProvider(promptText, {
       || null;
     const temp = makeTempOutputFile();
     const cleanupRunTemps = (mcpAttachProofContext = null, { syncConfigCleanup = false } = {}) => {
+      cleanupPreparedCatalog();
       const releaseResult = cleanupDeterministicMcpSession();
       let attachProofResult = null;
       if (mcpAttachProofContext) {
@@ -993,6 +1015,7 @@ export async function callProvider(promptText, {
       reject(err);
     });
     } catch (err) {
+      cleanupPreparedCatalog();
       reject(err);
     }
     })();

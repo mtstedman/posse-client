@@ -1,6 +1,10 @@
 // Traversal completion directive helpers for research/dev handoffs.
 
+import crypto from "node:crypto";
+import { AGENT_HANDOFF_LIMITS } from "../../../../catalog/handoff.js";
+
 export const DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS = 1600;
+export const MIN_TRAVERSAL_COMPLETION_MAX_CHARS = 180;
 
 export const TRAVERSAL_COMPLETION_LANES = Object.freeze([
   Object.freeze({
@@ -37,16 +41,176 @@ const TRAVERSAL_COMPLETION_MODE_VALUES = new Set(["off", "shadow", "on"]);
 const TRAVERSAL_COMPLETION_RECIPIENTS = new Set(["researcher", "dev"]);
 const TRAVERSAL_COMPLETION_JOB_TYPES = new Set(["research", "dev", "fix"]);
 
-const TRAVERSAL_COMPLETION_DIRECTIVE = [
-  "Traversal completion check:",
-  "Before finalizing, revisit each function, file window, descriptor block, or wrapper you opened or cite. Do not broaden to unrelated files unless an opened item exposes a named gap.",
-  "",
-  "- Branches and guards: if you describe one branch, check alternate branches, failures, defaults, and return shapes in the same function.",
-  "- Ordered pipelines: if you describe a step sequence, check whether any intermediate validation, deprecation, source-recording, or arbitration step occurs between the steps you named.",
-  "- Registries and arrays: if you name one descriptor/route/tool entry, check adjacent entries in the same opened block when the task asks about registration, listing, dispatch, or aliases.",
-  "- Wrappers and facades: if you saw a shim/helper, state whether it changes defaults, guards, cache keys/files, aliases, errors, deprecations, or result shape relative to the delegated call.",
-  "- Generated/dispatch results: cover consumed inputs and extra/unmatched inputs, plus success and failure/insufficient-parameter paths.",
-].join("\n");
+const TRAVERSAL_COMPLETION_DIRECTIVE_HEADING = "Task-derived completion ledger:";
+
+// Coverage IDs are not report claims: multiple atomic requirements may point
+// to the same evidence-backed claim. Do not collapse an explicit focus list to
+// the report's smaller narrative claim allowance.
+const TRAVERSAL_COMPLETION_REQUIREMENT_LIMIT = AGENT_HANDOFF_LIMITS.maxCompletionRequirements;
+const TRAVERSAL_COMPLETION_SOURCE_CLAUSE_LIMIT = TRAVERSAL_COMPLETION_REQUIREMENT_LIMIT * 2;
+const TRAVERSAL_COMPLETION_REQUIREMENT_MAX_CHARS = 480;
+const TRAVERSAL_COMPLETION_LEDGER_HEADING = "Terminal coverage ledger (report each ID exactly once as supported or unresolved):";
+const FAILURE_ACCOUNTING_ACTION_RE = /\b(?:separate|distinguish|trace|explain|cover|identify|report|describe|document)\w*\b/iu;
+const FAILURE_ACCOUNTING_TERM_PATTERNS = Object.freeze([
+  /\b(?:errors?|failures?)\b/iu,
+  /\brejections?\b/iu,
+  /\brecover(?:y|ies|able|ed|ing)?\b/iu,
+  /\bretr(?:y|ies|ied|ying)\b/iu,
+  /\bfallbacks?\b|\bfall(?:s|ing)? back\b/iu,
+  /\bshort[- ]circuit(?:s|ed|ing)?\b/iu,
+  /\bterminal(?:ly)?\b/iu,
+]);
+
+function traversalRequirementFacets(text) {
+  const clause = String(text || "");
+  const requestedTerms = FAILURE_ACCOUNTING_TERM_PATTERNS
+    .filter((pattern) => pattern.test(clause))
+    .length;
+  return !/^Required adversarial trace:/iu.test(clause)
+    && FAILURE_ACCOUNTING_ACTION_RE.test(clause)
+    && requestedTerms >= 2
+    ? ["failure_mechanisms"]
+    : [];
+}
+
+function explicitTraversalRequirementText(packet = {}) {
+  const payload = packet?._raw_payload && typeof packet._raw_payload === "object"
+    ? packet._raw_payload
+    : {};
+  return [
+    payload.task_spec,
+    payload.instructions,
+    payload.fix_instructions,
+    payload.description,
+    payload.request,
+    payload.question,
+    payload.prompt,
+    packet.project_context,
+    payload.project_context,
+    ...(Array.isArray(packet.success_criteria) ? packet.success_criteria : []),
+    ...(Array.isArray(payload.success_criteria) ? payload.success_criteria : []),
+  ].filter((value) => typeof value === "string" && value.trim());
+}
+
+function normalizedRequirementClause(value) {
+  return String(value || "")
+    .replace(/^\s*(?:[-*+]\s+|\(\d+\)\s+|\d+[.)]\s+)/u, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, TRAVERSAL_COMPLETION_REQUIREMENT_MAX_CHARS);
+}
+
+function atomicSlashFocusClauses(value) {
+  const focus = String(value || "").trim();
+  const match = /^(?<items>[a-z0-9_-]+(?:\/[a-z0-9_-]+){1,})(?<suffix>\s+(?:layers?|versions?|variants?|entries|exports?))$/iu.exec(focus);
+  if (!match?.groups?.items) return [focus];
+  const suffix = String(match.groups.suffix || "");
+  return match.groups.items.split("/").map((item) => `${item}${suffix}`);
+}
+
+function atomicNamedFocusClauses(value) {
+  const clause = String(value || "").trim();
+  const match = clause.match(/^(?<lead>.+?)\bacross\s+(?<inventory>.+?)[.!?]?$/iu);
+  if (!match?.groups) return [clause];
+  const focuses = match.groups.inventory
+    .replace(/[.!?]+$/u, "")
+    .split(/\s*,\s*/u)
+    .map((entry) => entry.replace(/^(?:and|or)\s+/iu, "").trim())
+    .filter(Boolean)
+    .flatMap(atomicSlashFocusClauses);
+  if (focuses.length < 3) return [clause];
+  // Preserve the author's clause verbatim and add only author-named substrings
+  // as focus identities. Do not manufacture a benchmark-shaped restatement.
+  return {
+    core: clause,
+    focuses,
+  };
+}
+
+const STATE_OBLIGATION_ACTION_RE = /^(?<action>enumerate|separate|identify|trace|explain|describe|document)\w*\s+(?<inventory>.+?)(?<punctuation>[;.!?]?)$/iu;
+const STATE_OBLIGATION_TERM_RE = /\b(?:state|mutat\w*|precedence|cache\w*|ownership|transfer\w*|shar\w*|invalidat\w*|cleanup|lifecycle|queues?|timers?|reentran\w*)\b/iu;
+
+// A compound state deliverable is not one evidence state. If the task author
+// explicitly enumerates three or more state/lifecycle concerns, give each
+// concern its own terminal identity so proving (for example) mutation cannot
+// silently close an unresearched cache or cleanup obligation. Keep this
+// syntax-led and task-derived: no repository or benchmark vocabulary belongs
+// here.
+function atomicStateObligationClauses(value) {
+  const clause = String(value || "").trim();
+  const match = STATE_OBLIGATION_ACTION_RE.exec(clause);
+  if (!match?.groups?.inventory) return [clause];
+  const focuses = match.groups.inventory
+    .replace(/[;.!?]+$/u, "")
+    .split(/\s*,\s*|\s+(?:and|or)\s+/iu)
+    .map((entry) => entry.replace(/^(?:and|or)\s+/iu, "").trim())
+    .filter(Boolean);
+  if (focuses.length < 3 || focuses.filter((focus) => STATE_OBLIGATION_TERM_RE.test(focus)).length < 3) {
+    return [clause];
+  }
+  const punctuation = match.groups.punctuation || "";
+  return focuses.map((focus) => `${match.groups.action} ${focus}${punctuation}`);
+}
+
+function isProceduralTraversalConstraint(value) {
+  const clause = String(value || "").replace(/[.;:]$/u, "").trim();
+  return /^read[- ]only(?:,\s*do not (?:modify|edit|change)(?: the)? files?(?: or execute tests)?)?$/iu.test(clause)
+    || /^do not (?:modify|edit|change)(?: the)? files?(?: or execute tests)?$/iu.test(clause)
+    || /^do not (?:execute|run) tests?$/iu.test(clause)
+    || /^test execution (?:belongs|is assigned) to another agent\b.*\boutside\b.*\bresearch\b/iu.test(clause)
+    || /^test execution is outside (?:this|the) research(?: comparison)?$/iu.test(clause)
+    || /^use implementation source and inspect focused\b.*\bonly where\b/iu.test(clause)
+    || /^use implementation source\b.*\b(?:read[- ]only|do not modify files|do not execute tests)\b/iu.test(clause);
+}
+
+export function buildTraversalCompletionRequirements(packet = {}) {
+  const seen = new Set();
+  const clauses = [];
+  for (const source of explicitTraversalRequirementText(packet)) {
+    const candidates = source
+      // Numbered deliverables are semantic boundaries even when the author
+      // omitted a newline after the heading or used semicolons between them.
+      .replace(/\bDeliverables:\s*/giu, "\n")
+      .replace(/\s+(?=\(\d+\)\s+)/gu, "\n")
+      .split(/(?:\r?\n)+|(?<=[.!?;])\s+/u)
+      .map(normalizedRequirementClause)
+      .filter((clause) => clause.length >= 8 && !isProceduralTraversalConstraint(clause));
+    for (const clause of candidates) {
+      const key = clause.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      clauses.push(clause);
+      if (clauses.length >= TRAVERSAL_COMPLETION_SOURCE_CLAUSE_LIMIT) break;
+    }
+    if (clauses.length >= TRAVERSAL_COMPLETION_SOURCE_CLAUSE_LIMIT) break;
+  }
+  if (clauses.length === 0 && typeof packet.title === "string" && packet.title.trim()) {
+    clauses.push(normalizedRequirementClause(packet.title));
+  }
+  const atomicFocuses = [];
+  const coreClauses = clauses.flatMap((clause) => {
+    const atomized = atomicNamedFocusClauses(clause);
+    if (Array.isArray(atomized)) return atomized.flatMap(atomicStateObligationClauses);
+    atomicFocuses.push(...atomized.focuses);
+    return [atomized.core];
+  });
+  const atomized = [...coreClauses, ...atomicFocuses];
+  // If atomization would crowd out later explicit clauses, retain the author's
+  // compound wording instead. Late deliverables are more valuable than a
+  // partial focus inventory.
+  const boundedClauses = (atomized.length <= TRAVERSAL_COMPLETION_REQUIREMENT_LIMIT
+    ? atomized
+    : clauses).slice(0, TRAVERSAL_COMPLETION_REQUIREMENT_LIMIT);
+  return boundedClauses.map((text, index) => {
+    const facets = traversalRequirementFacets(text);
+    return {
+      id: `R${String(index + 1).padStart(2, "0")}`,
+      text,
+      digest: crypto.createHash("sha256").update(text, "utf8").digest("hex"),
+      ...(facets.length > 0 ? { facets } : {}),
+    };
+  });
+}
 
 export function normalizeTraversalCompletionMode(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
@@ -126,19 +290,84 @@ export function classifyTraversalCompletionTask(packet = {}) {
   };
 }
 
-export function renderTraversalCompletionDirective({ maxChars = DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS } = {}) {
+export function renderTraversalCompletionDirective({
+  maxChars = DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
+  requirements = [],
+} = {}) {
   const cap = normalizeTraversalCompletionMaxChars(maxChars);
-  if (TRAVERSAL_COMPLETION_DIRECTIVE.length <= cap) return TRAVERSAL_COMPLETION_DIRECTIVE;
-  if (cap <= 3) return TRAVERSAL_COMPLETION_DIRECTIVE.slice(0, cap);
-  return `${TRAVERSAL_COMPLETION_DIRECTIVE.slice(0, cap - 3)}...`;
+  const heading = TRAVERSAL_COMPLETION_DIRECTIVE_HEADING;
+  const idOnlyLedger = requirements.map((entry) => `- ${entry.id}:`);
+  const fixedDirectiveChars = [
+    heading,
+    TRAVERSAL_COMPLETION_LEDGER_HEADING,
+    ...idOnlyLedger,
+  ].filter((part) => part !== "").join("\n").length;
+  // Reserve enough room to keep every task-authored ID visible, then expand
+  // the copied requirement excerpts within the configured bound.
+  const initialExcerptChars = requirements.length > 0
+    ? Math.max(0, Math.min(20, Math.floor(
+        (cap - fixedDirectiveChars - requirements.length - 4) / requirements.length,
+      )))
+    : 0;
+  const excerptLengths = requirements.map((entry) => Math.min(initialExcerptChars, entry.text.length));
+  const requirementTextFor = () => requirements.length > 0
+    ? [TRAVERSAL_COMPLETION_LEDGER_HEADING, ...requirements.map((entry, index) => (
+        excerptLengths[index] > 0
+          ? `- ${entry.id}: ${entry.text.slice(0, excerptLengths[index])}`
+          : `- ${entry.id}:`
+      ))].join("\n")
+    : "";
+  const render = () => [heading, requirementTextFor()]
+    .filter((part) => part !== "")
+    .join("\n");
+  // Short standalone requirements are usually task-authored focus leaves.
+  // Finish those labels before widening generic task/deliverable clauses so
+  // the bounded ledger preserves the most discriminating ID bindings.
+  let remaining = Math.max(0, cap - render().length);
+  const excerptPriority = requirements
+    .map((entry, index) => ({ index, length: entry.text.length }))
+    .sort((left, right) => left.length - right.length || left.index - right.index)
+    .map((entry) => entry.index);
+  for (const index of excerptPriority) {
+    if (remaining <= 0) break;
+    const available = requirements[index].text.length - excerptLengths[index];
+    const added = Math.min(available, remaining);
+    excerptLengths[index] += added;
+    remaining -= added;
+  }
+  const text = render();
+  if (text.length <= cap) return text;
+  if (cap <= 3) return text.slice(0, cap);
+  return `${text.slice(0, cap - 3)}...`;
+}
+
+function traversalCompletionMinimumChars(requirements = []) {
+  if (requirements.length === 0) return MIN_TRAVERSAL_COMPLETION_MAX_CHARS;
+  const heading = TRAVERSAL_COMPLETION_DIRECTIVE_HEADING;
+  const ledgerChars = [
+    heading,
+    TRAVERSAL_COMPLETION_LEDGER_HEADING,
+    ...requirements.map((entry) => `- ${entry.id}:`),
+  ].join("\n").length;
+  // renderTraversalCompletionDirective reserves the final three characters
+  // for its truncation marker. Never attach a directive that would truncate
+  // an authoritative requirement ID.
+  return Math.max(MIN_TRAVERSAL_COMPLETION_MAX_CHARS, ledgerChars + 3);
 }
 
 export function buildTraversalCompletionCheck(packet = {}, opts = {}) {
   const mode = normalizeTraversalCompletionMode(opts.mode);
   const maxChars = normalizeTraversalCompletionMaxChars(opts.maxChars);
   const classification = classifyTraversalCompletionTask(packet);
-  const text = classification.triggered && mode !== "off"
-    ? renderTraversalCompletionDirective({ maxChars })
+  const requirements = classification.triggered
+    ? buildTraversalCompletionRequirements(packet)
+    : [];
+  const minimumChars = traversalCompletionMinimumChars(requirements);
+  const misconfigured = classification.triggered
+    && mode !== "off"
+    && maxChars < minimumChars;
+  const text = classification.triggered && mode !== "off" && !misconfigured
+    ? renderTraversalCompletionDirective({ maxChars, requirements })
     : "";
 
   return {
@@ -146,11 +375,17 @@ export function buildTraversalCompletionCheck(packet = {}, opts = {}) {
     triggered: classification.triggered,
     matched_terms: classification.matchedTerms,
     matched_lanes: classification.matchedLanes,
+    requirements,
+    requirements_digest: requirements.length > 0
+      ? crypto.createHash("sha256").update(JSON.stringify(requirements), "utf8").digest("hex")
+      : null,
     task_text_chars: classification.taskTextChars,
     max_chars: maxChars,
+    minimum_chars: minimumChars,
     rendered_chars: text.length,
     text,
-    attach: mode === "on" && classification.triggered,
-    shadow: mode === "shadow" && classification.triggered,
+    misconfigured,
+    attach: mode === "on" && classification.triggered && !misconfigured,
+    shadow: mode === "shadow" && classification.triggered && !misconfigured,
   };
 }

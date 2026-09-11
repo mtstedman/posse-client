@@ -274,9 +274,21 @@
 /**
  * @typedef {Object} SymbolCallersParams
  * @property {string} symbolId
+ * @property {"caller" | "reference" | "all"} [mode]
  * @property {number} [limit]
  * @property {number} [offset]
  * @property {number} [minConfidence] 0..1 or 0..100
+ * @property {"compact-v1"} [projection] Runtime-issued projection; absent retains the legacy caller response.
+ * @property {string} [indexVersion] Internal expected index generation for a continued page.
+ */
+
+/**
+ * @typedef {Object} SymbolGetParams
+ * @property {string} [symbolId]
+ * @property {SymbolRef} [symbolRef] Exact name lookup; file narrows to one repository path.
+ * @property {string} [file] Exact repository-relative path for duplicate-content disambiguation.
+ * @property {string[]} [identifiersToFind] Optional exact in-body anchors retained in the coverage map.
+ * @property {number} [maxTokens] Optional bounded source token cap.
  */
 
 /**
@@ -702,6 +714,7 @@
  *   | { action: "symbol.card" } & SymbolGetCardParams
  *   | { action: "symbol.overview" } & SymbolUsagesParams
  *   | { action: "symbol.callers" } & SymbolCallersParams
+ *   | { action: "symbol.get" } & SymbolGetParams
  *   | { action: "tree.overview" } & TreeOverviewParams
  *   | { action: "tree.branch" } & TreeOverviewParams
  *   | { action: "tree.scope" } & TreeScopeParams
@@ -761,7 +774,9 @@ export const ATLAS_TOOL_ACTIONS = Object.freeze(/** @type {const} */ ([
   "buffer.status",
   "symbol.search",
   "symbol.card",
-  "symbol.overview", "symbol.callers",
+  "symbol.overview",
+  "symbol.callers",
+  "symbol.get",
   "tree.overview",
   "tree.branch",
   "tree.scope",

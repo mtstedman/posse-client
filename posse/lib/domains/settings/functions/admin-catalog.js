@@ -315,6 +315,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   research_evidence_reuse: "Research evidence reuse",
   research_traversal_completion_check: "Traversal completion check",
   research_traversal_completion_max_chars: "Traversal check text limit",
+  research_synthesis_max_physical_calls: "Research physical call ceiling",
   scheduler_poll_ms: "Scheduler poll interval",
   scheduler_repair_poll_ms: "Scheduler repair interval",
   default_lease_seconds: "Job lease duration",
@@ -449,6 +450,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   research_evidence_reuse: "Measures strict research-to-planner evidence reuse and counterfactual prefetch suppression without changing retrieval behavior.",
   research_traversal_completion_check: "Controls the experimental check for incomplete code traversal before a researcher or developer hands off.",
   research_traversal_completion_max_chars: "Maximum amount of traversal-check guidance added to a researcher or developer handoff.",
+  research_synthesis_max_physical_calls: "Experimental per-attempt ceiling on physical researcher tool executions. Blank keeps the built-in 26; other research limits stay unchanged.",
   posse_kaizen_to_atlas: "Reserved for a retired integration path. It currently has no effect.",
 });
 
@@ -894,6 +896,7 @@ export const SETTINGS_GROUPS = Object.freeze([
       "research_evidence_reuse",
       "research_traversal_completion_check",
       "research_traversal_completion_max_chars",
+      "research_synthesis_max_physical_calls",
     ]),
   },
   {
@@ -1021,6 +1024,7 @@ export const TUNING_SETTING_KEYS = new Set([
   "research_evidence_reuse",
   "research_traversal_completion_check",
   "research_traversal_completion_max_chars",
+  "research_synthesis_max_physical_calls",
   "snapshot_retention_days",
   "snapshot_max_bytes",
   "snapshot_max_refs",

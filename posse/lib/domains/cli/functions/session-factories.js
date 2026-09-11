@@ -68,7 +68,7 @@ import {
 } from "./review-report.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { inferWiMode } from "../../intake/functions/mode-inference.js";
-import { nonInteractiveHumanInputAnswerForPayload } from "../../../catalog/human-input.js";
+import { nonInteractiveHumanInputAnswerForPayload, scopeModeHumanInputAnswerForPayload, SCOPE_APPROVAL_MODES } from "../../../catalog/human-input.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import {
   defaultResearchModelTier,
@@ -117,6 +117,24 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) 
     reason: "non-interactive automatic-resolution policy became available",
   });
   return { approvedPlanGateIds, requeued };
+}
+
+export function prepareScopeModeHumanInputGates({ workItemIds = [], scopeMode } = {}) {
+  if (scopeMode !== SCOPE_APPROVAL_MODES.AUTO) return [];
+  const scopedIds = new Set(workItemIds.map(Number));
+  const eligibleIds = new Set(listWorkItems()
+    .filter((item) => !TERMINAL_WORK_ITEM_STATUSES.includes(item.status)
+      && (scopedIds.size === 0 || scopedIds.has(Number(item.id))))
+    .map((item) => Number(item.id)));
+  return requeueWaitingHumanInputJobs({
+    filter: (job) => {
+      if (!eligibleIds.has(Number(job.work_item_id))) return false;
+      let payload;
+      try { payload = JSON.parse(job.payload_json || "{}"); } catch { return false; }
+      return scopeModeHumanInputAnswerForPayload(payload, scopeMode) != null;
+    },
+    reason: "scope-mode automatic approval became available",
+  });
 }
 
 export async function createReviewSessionDeps(bootDeps) {
@@ -233,6 +251,7 @@ export async function createRunSessionDeps(bootDeps) {
     AUTO_APPROVE,
     DRY_RUN,
     nonInteractive,
+    scopeMode,
     RUN_WORK_ITEM_IDS = [],
     log,
     getResolvedImageProtocol,
@@ -319,11 +338,13 @@ export async function createRunSessionDeps(bootDeps) {
     AUTO_APPROVE,
     DRY_RUN,
     nonInteractive,
+    scopeMode,
     RUN_WORK_ITEM_IDS,
     requeueForShutdown,
     requeueWaitingHumanInputJobs,
     resurfaceParkedHumanGates,
     prepareNonInteractiveHumanInputGates,
+    prepareScopeModeHumanInputGates,
     reconcileHumanGates,
     claimHumanGatePromptPresentation,
     reconcileMergedWorkItemReviewStates,

@@ -1,5 +1,6 @@
 import { SourceCoverageOwner, completeSymbolSelectorFingerprint } from "../classes/SourceCoverageOwner.js";
 import { CODE_CONTENT_KINDS } from "../../../catalog/source-display.js";
+import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
 
 export function sourceCoverageOwnerForSession(session, bootConfig = session?.bootConfig || {}) {
   return new SourceCoverageOwner({
@@ -34,13 +35,165 @@ function replaceMcpTextResult(result, parsed, value) {
 }
 
 function hasUnseenSourceContinuation(data = {}) {
-  if (Array.isArray(data.additionalWindows) && data.additionalWindows.length > 0) return true;
   if (Number(data.returnedFunctionAnchorsOmitted) > 0) return true;
   if (String(data.traversal_ref?.ref || data.traversal_ref || data.continuationRef || "").trim()) return true;
   if (Number(data.continuationWindows) > 0) return true;
   if (Array.isArray(data._continuationWindows) && data._continuationWindows.length > 0) return true;
   if (Array.isArray(data.continuationRanges) && data.continuationRanges.length > 0) return true;
   return false;
+}
+
+function exactSourceWindow(fresh, { startLine, endLine }) {
+  const sourceLines = splitEditableLines(fresh.source).lines;
+  let content = sourceLines.slice(startLine - 1, endLine).join("\n");
+  if (endLine === sourceLines.length && fresh.source.endsWith("\n")) content += "\n";
+  return { startLine, endLine, content };
+}
+
+async function suppressCoveredInlineWindows({
+  result,
+  parsed,
+  envelope,
+  data,
+  coverageOwner,
+  toolArgs,
+}) {
+  const windows = [
+    data,
+    ...data.additionalWindows.map((window) => ({ ...window, repo_rel_path: data.repo_rel_path })),
+  ];
+  const preparedWindows = windows.map((window) => {
+    const candidate = { ...window };
+    const prepared = coverageOwner.prepareData(candidate, toolArgs);
+    return prepared ? { ...prepared, candidate } : null;
+  });
+  // Suppression is only safe when every inline body is an exact slice of the
+  // same live file. A malformed or synthesized spill window keeps the native
+  // response intact.
+  if (preparedWindows.some((prepared) => !prepared)) {
+    return { result, admission: null, resolvedChars: 0 };
+  }
+
+  let reservation = null;
+  const locallyVisibleRanges = [];
+  const retainedWindows = [];
+  const reusedRanges = [];
+  let suppressedLineCount = 0;
+  let suppressedChars = 0;
+  let resolvedChars = 0;
+
+  for (const prepared of preparedWindows) {
+    resolvedChars += prepared.content.length;
+    if (!reservation) {
+      const gate = await coverageOwner.admitResolvedIntervalOrReserve({
+        repoRelativePath: prepared.fresh.relative,
+        startLine: prepared.startLine,
+        endLine: prepared.endLine,
+      });
+      if (String(gate?.reason || "").endsWith("_fail_open")) {
+        return { result, admission: null, resolvedChars: 0, reservation: gate?.reservation || null };
+      }
+      reservation = gate?.reservation || null;
+    }
+
+    const plan = coverageOwner.resolvedIntervalPlan({
+      repoRelativePath: prepared.fresh.relative,
+      startLine: prepared.startLine,
+      endLine: prepared.endLine,
+      additionalCoveredRanges: locallyVisibleRanges,
+    });
+    if (!plan?.covered && !plan?.partial) {
+      retainedWindows.push(exactSourceWindow(prepared.fresh, prepared));
+    } else {
+      const uncovered = plan.uncoveredRanges || [];
+      const retained = uncovered.map((range) => exactSourceWindow(prepared.fresh, range));
+      retainedWindows.push(...retained);
+      const retainedChars = retained.reduce((total, window) => total + window.content.length, 0);
+      suppressedChars += Math.max(0, prepared.content.length - retainedChars);
+      suppressedLineCount += Math.max(0, Number(plan.coveredLines) || 0);
+      reusedRanges.push(...(plan.coveredRanges || []));
+    }
+    // A later inline window shares this same response boundary. Everything in
+    // the resolved interval is now either retained here or backed by durable
+    // current-attempt evidence, so it can participate in the local range union.
+    locallyVisibleRanges.push({ startLine: prepared.startLine, endLine: prepared.endLine });
+  }
+
+  if (suppressedLineCount === 0) {
+    return { result, admission: null, resolvedChars: 0, reservation };
+  }
+
+  const firstPrepared = preparedWindows[0];
+  const admission = {
+    covered: retainedWindows.length === 0,
+    partial: retainedWindows.length > 0,
+    reason: retainedWindows.length === 0 ? "covered_interval_union" : "overlapping_interval",
+    repoRelativePath: firstPrepared.fresh.relative,
+    requestedStartLine: Math.min(...preparedWindows.map((prepared) => prepared.startLine)),
+    requestedEndLine: Math.max(...preparedWindows.map((prepared) => prepared.endLine)),
+    coveredLines: suppressedLineCount,
+    coveredRanges: reusedRanges,
+    fresh: firstPrepared.fresh,
+    reservation,
+  };
+  const requestedRanges = preparedWindows.map(({ startLine, endLine }) => ({ startLine, endLine }));
+  const reuseNotice = `SOURCE_RANGE_REUSE: Omitted ${suppressedLineCount} already-visible lines from inline source windows in ${firstPrepared.fresh.relative}; this response contains only the uncovered ranges. Reuse cited evidence refs for omitted ranges and do not reread them.`;
+
+  if (retainedWindows.length > 0) {
+    const [primary, ...additionalWindows] = retainedWindows;
+    const compactData = {
+      ...data,
+      ...primary,
+      additionalWindows,
+      source_deduplicated: true,
+      requestedRanges,
+      reusedLineCount: suppressedLineCount,
+      reusedRanges,
+    };
+    delete compactData.contentSha256;
+    delete compactData.sourceVersion;
+    delete compactData.repositoryIdentity;
+    const compactEnvelope = envelope?.data && typeof envelope.data === "object"
+      ? { ...envelope, data: compactData }
+      : compactData;
+    return {
+      result: replaceMcpTextResult(result, parsed, compactEnvelope),
+      admission,
+      payload: compactEnvelope,
+      resolvedChars,
+      suppressedChars,
+      selectorAliased: false,
+      reservation,
+      reuseNotice,
+    };
+  }
+
+  admission.result = {
+    status: "covered",
+    executed: false,
+    coverage_scope: "current_attempt",
+    repo_rel_path: firstPrepared.fresh.relative,
+    startLine: admission.requestedStartLine,
+    endLine: admission.requestedEndLine,
+    requested_ranges: requestedRanges,
+    coverage_ranges: reusedRanges,
+  };
+  const compact = {
+    ...admission.result,
+    executed: true,
+    source_suppressed: true,
+    ...resolvedSelectionMetadata(data),
+  };
+  return {
+    result: replaceMcpTextResult(result, parsed, compact),
+    admission,
+    payload: compact,
+    resolvedChars,
+    suppressedChars,
+    selectorAliased: false,
+    reservation,
+    reuseNotice,
+  };
 }
 
 function resolvedSelectionMetadata(data = {}) {
@@ -62,8 +215,9 @@ function resolvedSelectionMetadata(data = {}) {
 // A selector fingerprint can miss reuse when two different selectors resolve
 // to the same already-delivered source interval. Native execution is still
 // required to resolve that interval; this admission runs before model ingress
-// and replaces only a single, exact, continuation-free source slice.
-export function suppressCoveredSourceInterval(result, coverageOwner, toolArgs = {}, {
+// and suppresses covered lines only from a byte-verified, continuation-free
+// source slice. Any uncovered subranges remain exact on-disk source windows.
+export async function suppressCoveredSourceInterval(result, coverageOwner, toolArgs = {}, {
   toolName = "code.window",
 } = {}) {
   if (toolName !== "code.window" || !coverageOwner) {
@@ -84,17 +238,65 @@ export function suppressCoveredSourceInterval(result, coverageOwner, toolArgs = 
     return { result, admission: null, resolvedChars: 0 };
   }
 
+  if (Array.isArray(data.additionalWindows) && data.additionalWindows.length > 0) {
+    return suppressCoveredInlineWindows({
+      result,
+      parsed,
+      envelope,
+      data,
+      coverageOwner,
+      toolArgs,
+    });
+  }
+
   // Besides resolving line bounds, prepareData proves that the returned body
   // is one byte-exact on-disk slice. Stitched and clipped/malformed payloads
   // therefore fail open and retain the native response.
   const prepared = coverageOwner.prepareData(data, toolArgs);
   if (!prepared) return { result, admission: null, resolvedChars: 0 };
-  const admission = coverageOwner.admitResolvedInterval({
+  const admission = await coverageOwner.admitResolvedIntervalOrReserve({
     repoRelativePath: prepared.fresh.relative,
     startLine: prepared.startLine,
     endLine: prepared.endLine,
   });
-  if (!admission?.covered) return { result, admission: null, resolvedChars: 0 };
+  if (!admission?.covered && !admission?.partial) {
+    return { result, admission: null, resolvedChars: 0, reservation: admission?.reservation || null };
+  }
+
+  if (admission.partial) {
+    const [primary, ...additional] = admission.uncoveredRanges
+      .map((range) => exactSourceWindow(admission.fresh, range));
+    const compactData = {
+      ...data,
+      ...primary,
+      additionalWindows: additional,
+      source_deduplicated: true,
+      requestedStartLine: prepared.startLine,
+      requestedEndLine: prepared.endLine,
+      reusedLineCount: admission.coveredLines,
+      reusedRanges: admission.coveredRanges,
+    };
+    delete compactData.contentSha256;
+    delete compactData.sourceVersion;
+    delete compactData.repositoryIdentity;
+    const compactEnvelope = envelope?.data && typeof envelope.data === "object"
+      ? { ...envelope, data: compactData }
+      : compactData;
+    const retainedChars = admission.uncoveredRanges
+      .map((range) => exactSourceWindow(admission.fresh, range))
+      .reduce((total, window) => total + window.content.length, 0);
+    return {
+      result: replaceMcpTextResult(result, parsed, compactEnvelope),
+      admission,
+      payload: compactEnvelope,
+      resolvedChars: prepared.content.length,
+      suppressedChars: Math.max(0, prepared.content.length - retainedChars),
+      selectorAliased: false,
+      reservation: admission.reservation || null,
+      reuseNotice: `SOURCE_RANGE_REUSE: Omitted ${admission.coveredLines} already-visible lines from ${prepared.fresh.relative}:${prepared.startLine}-${prepared.endLine}; this response contains only the uncovered ranges. Reuse the cited evidence refs for omitted ranges and do not reread them.`,
+    };
+  }
+
   const selectorAliased = coverageOwner.recordResolvedIntervalReuse(toolArgs, admission);
 
   const compact = {
@@ -108,7 +310,12 @@ export function suppressCoveredSourceInterval(result, coverageOwner, toolArgs = 
     admission,
     payload: compact,
     resolvedChars: prepared.content.length,
+    suppressedChars: prepared.content.length,
     selectorAliased,
+    reservation: admission.reservation || null,
+    reuseNotice: admission.reason === "covered_interval_union"
+      ? `EVIDENCE_REUSE: All lines in ${prepared.fresh.relative}:${prepared.startLine}-${prepared.endLine} were already visible across the cited source ranges. Use those refs directly and request only a different uncovered symbol, branch, or range.`
+      : null,
   };
 }
 

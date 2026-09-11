@@ -32,6 +32,7 @@ import {
   pathQualityPriorsEnabled,
 } from "../../functions/v2/retrieval/path-priors.js";
 import { boundSymbolSearchEnvelope } from "../../functions/v2/retrieval/search.js";
+import { projectCompactSymbolRelationships } from "../../functions/v2/retrieval/compact-presentation.js";
 import {
   attachScopeBeam,
   markScopeBeamDegraded,
@@ -68,6 +69,8 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
   "info",
   "symbol.search",
   "symbol.card",
+  "symbol.callers",
+  "symbol.get",
   "slice.build",
   "context",
   "context.summary",
@@ -129,6 +132,8 @@ const ATLAS_DISPATCH_CACHE_POLICIES = new Map([
   ["info", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
   ["symbol.search", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
   ["symbol.card", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["symbol.callers", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
+  ["symbol.get", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
   ["slice.build", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
   ["slice.refresh", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
   ["context", DISPATCH_CACHE_POLICIES.INFLIGHT_ONLY],
@@ -272,6 +277,68 @@ function conductorEnvelopeToToolResult(envelope) {
     errorMsg: null,
     ...(runtimeTelemetry ? { executor: { native: runtimeTelemetry } } : {}),
   };
+}
+
+function compactRelationshipEnvelope(envelope, args = {}) {
+  if (args.projection !== "compact-v1" || envelope?.ok === false || envelope?.error) return envelope;
+  let input = envelope?.data;
+  if (!Array.isArray(input?.entries)) {
+    if ((args.mode || "caller") !== "caller" || !Array.isArray(input?.callers)) {
+      return {
+        ok: false,
+        action: "symbol.callers",
+        versionId: envelope?.versionId || "",
+        error: {
+          code: "atlas_upgrade_required",
+          message: "This Atlas binary does not support compact reference relationships; upgrade Atlas before issuing this mode.",
+        },
+      };
+    }
+    input = {
+      entries: input.callers.map((caller) => ({
+        relationship: "caller",
+        file: caller.repoRelPath,
+        symbolId: caller.symbolId,
+        name: caller.qualifiedName || caller.name,
+      })),
+      meta: {
+        pagination: {
+          offset: Number(input.offset) || 0,
+          limit: Number(input.limit) || 20,
+          returned: input.callers.length,
+          hasMore: input.hasMore === true,
+          nextOffset: input.nextOffset ?? null,
+          indexVersion: envelope?.versionId || "",
+        },
+        indexIncomplete: input.indexTruncated === true,
+      },
+    };
+  }
+  try {
+    const projected = projectCompactSymbolRelationships(input, {
+      mode: args.mode || "caller",
+      limit: args.limit,
+      offset: args.offset,
+      indexVersion: envelope?.versionId,
+      expectedIndexVersion: args.indexVersion,
+      indexIncomplete: input?.meta?.indexIncomplete,
+    });
+    return {
+      ...envelope,
+      data: projected.data,
+      ...(projected.meta ? { meta: { ...(envelope.meta || {}), ...projected.meta } } : {}),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      action: "symbol.callers",
+      versionId: envelope?.versionId || "",
+      error: {
+        code: String(error?.code || "compact_relationship_projection_failed"),
+        message: String(error?.message || "Could not project compact symbol relationships"),
+      },
+    };
+  }
 }
 
 function modelVisibleAtlasMeta(meta) {
@@ -1119,6 +1186,12 @@ export class AtlasToolExecutor {
           });
           scopeBeamMs = Math.max(0, this.#now() - scopeBeamStartedAt);
           transformedEnvelope = boundSymbolSearchEnvelope(transformedEnvelope);
+        }
+        if (request.action === "symbol.callers") {
+          transformedEnvelope = compactRelationshipEnvelope(
+            transformedEnvelope,
+            completeToolArgs,
+          );
         }
         const converted = conductorEnvelopeToToolResult(transformedEnvelope);
         const resultTransformMs = Math.max(0, this.#now() - transformStartedAt);

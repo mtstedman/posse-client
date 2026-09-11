@@ -24,6 +24,7 @@ import { calledFromBreadcrumbs } from "./usages.js";
 import { readRepoFileResult } from "./repo-read.js";
 import { redactSecrets } from "./redaction.js";
 import { recoverIndexedPath } from "./path-recovery.js";
+import { selectSymbolTarget } from "./symbol-target.js";
 
 import {
   normalizedQualifiedIdentifier,
@@ -727,9 +728,17 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     : [];
   const sourceFallbacks = await resolveSourceIdentifierFallbacks(identifiers, fileSymbols, source, targetPath);
   const nativeSelection = nativeIdentifierSelection(identifiers, fileSymbols, { preserveWindowTargets: true, sourceFallbacks });
-  if (nativeSelection.ambiguities.length > 0) {
+  // One miss must not discard the useful part of an otherwise valid same-file
+  // batch. Preserve the strict error when every requested selector is
+  // ambiguous, but execute resolvable selectors and return explicit
+  // diagnostics for excluded selectors in a mixed batch.
+  if (nativeSelection.ambiguities.length > 0 && nativeSelection.identifiers.length === 0) {
     return ambiguousIdentifierEnvelope("code.window", versionId, nativeSelection.ambiguities[0]);
   }
+  const identifierAmbiguities = nativeSelection.ambiguities.map((entry) => ({
+    identifier: entry.identifier,
+    bearers: [...entry.bearers],
+  }));
   const windowArgs = {
     repo_rel_path: targetPath,
     source,
@@ -767,7 +776,10 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   const identifiersReturned = remapNativeIdentifiers(result.identifiersReturned, nativeSelection.aliases);
   // Index membership alone does not prove that native found the requested
   // declaration in this source version, or delivered any of its code.
-  const identifiersMissing = remapNativeIdentifiers(result.identifiersMissing, nativeSelection.aliases);
+  const identifiersMissing = [...new Set([
+    ...remapNativeIdentifiers(result.identifiersMissing, nativeSelection.aliases),
+    ...identifierAmbiguities.map((entry) => entry.identifier),
+  ])];
   const identifiersOmitted = remapNativeIdentifiers(result.identifiersOmitted, nativeSelection.aliases);
   let identifierRedirects = [];
   /** @type {CodeWindowData["redirect"] | null} */
@@ -864,6 +876,7 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     identifiersReturned,
     identifiersMissing,
     identifiersOmitted,
+    ...(identifierAmbiguities.length > 0 ? { identifierAmbiguities } : {}),
     ...(typeof result.degradedReason === "string" && result.degradedReason
       ? { degradedReason: result.degradedReason }
       : {}),
@@ -1141,7 +1154,62 @@ function normalizeIdentifiers(value) {
 
 async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
   if (params.symbolId) {
-    const resolved = await resolveCodeSymbol({ view, symbolId: params.symbolId, repoRoot, sessionId: /** @type {any} */ (params).sessionId });
+    let resolved;
+    if (params.file != null) {
+      const selected = await selectSymbolTarget({
+        view,
+        symbolId: params.symbolId,
+        file: params.file,
+      });
+      if (selected.status === "invalid_symbol_id") {
+        resolved = { symbol: null, error: "invalid" };
+      } else if (selected.status === "invalid_path") {
+        return {
+          ok: false,
+          code: "invalid_path",
+          message: `${action}: file must be canonical, got ${params.file}`,
+          details: await pathCorrectionDetails(view, params.file, action, params),
+        };
+      } else if (selected.status === "symbol_file_mismatch") {
+        return {
+          ok: false,
+          code: "symbol_file_mismatch",
+          message: `Symbol ${params.symbolId} is not indexed at ${params.file}`,
+          details: {
+            requestedFile: params.file,
+            availableFiles: selected.targets.map((target) => target.repo_rel_path),
+          },
+        };
+      } else if (selected.status === "selected") {
+        resolved = { symbol: selected.target };
+      } else {
+        // Preserve live-buffer lookup for an ID that is not yet durable.
+        resolved = await resolveCodeSymbol({
+          view,
+          symbolId: params.symbolId,
+          repoRoot,
+          sessionId: /** @type {any} */ (params).sessionId,
+        });
+        if (resolved.symbol && resolved.symbol.repo_rel_path !== params.file) {
+          return {
+            ok: false,
+            code: "symbol_file_mismatch",
+            message: `Symbol ${params.symbolId} is not available at ${params.file}`,
+            details: {
+              requestedFile: params.file,
+              availableFiles: [resolved.symbol.repo_rel_path],
+            },
+          };
+        }
+      }
+    } else {
+      resolved = await resolveCodeSymbol({
+        view,
+        symbolId: params.symbolId,
+        repoRoot,
+        sessionId: /** @type {any} */ (params).sessionId,
+      });
+    }
     if (resolved.error === "invalid") {
       return {
         ok: false,

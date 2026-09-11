@@ -131,6 +131,8 @@ import {
 
 export const HIDDEN_ATLAS_SURFACE_ACTIONS = Object.freeze(new Set([
   ...INTERNAL_ATLAS_SURFACE_ACTIONS,
+  "symbol.card",
+  "symbol.overview",
   "agent.feedback",
   "agent.feedback.query",
   "buffer.status",
@@ -523,7 +525,9 @@ const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "tree.expand",
   "symbol.search",
   "symbol.card",
-  "symbol.overview", "symbol.callers",
+  "symbol.overview",
+  "symbol.callers",
+  "symbol.get",
   "slice.build",
   "slice.refresh",
   "context",
@@ -664,7 +668,9 @@ export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"])
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
   "symbol.search",
   "symbol.card",
-  "symbol.overview", "symbol.callers",
+  "symbol.overview",
+  "symbol.callers",
+  "symbol.get",
   "edit.plan",
   "code.skeleton",
   "code.lens",
@@ -809,9 +815,15 @@ export function getToolSchemaForRole(name, role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
+  requireResearcherCoverage = false,
 } = {}) {
   if (name !== "agent_handoff") return getToolSchema(name);
-  return getAgentHandoffToolSchemaForRole(role, { compactCompletion, compactV3, compactV4 });
+  return getAgentHandoffToolSchemaForRole(role, {
+    compactCompletion,
+    compactV3,
+    compactV4,
+    requireResearcherCoverage,
+  });
 }
 
 export function getToolExecutionSpec(name) {
@@ -888,6 +900,7 @@ export function getDeterministicMcpToolNames(role, {
   dispatchAgent = false,
   webResearchHandoff = false,
   atlasAvailable = false,
+  disableSystemTools = false,
   customTools = false,
 } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
@@ -923,6 +936,17 @@ export function getDeterministicMcpToolNames(role, {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);
     tools.push("chain_read", "chain_verdict");
+  }
+  if (role === "researcher" && atlasAvailable && disableSystemTools) {
+    // An Atlas-only researcher must not retain a second, unbudgeted repository
+    // discovery lane. Keep the non-source coordination tools, but physically
+    // remove the generic file surface from both the signed allowlist and the
+    // provider declaration. Atlas-unavailable runs keep the audited chain
+    // fallback above.
+    for (const toolName of ["read_file", "list_files", "search_files"]) {
+      const index = tools.indexOf(toolName);
+      if (index !== -1) tools.splice(index, 1);
+    }
   }
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     tools.unshift("agent_handoff");

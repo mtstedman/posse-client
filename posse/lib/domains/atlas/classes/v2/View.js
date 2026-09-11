@@ -396,6 +396,17 @@ export class View {
         const response = await readResponse("symbol_callers", { global_id, min_confidence });
         return { ...response.value, truncated: response.truncated };
       },
+      symbolRelationships: async (global_id, kinds, min_confidence = 0) => {
+        const response = await readResponse("symbol_relationships", {
+          global_id,
+          kinds: Array.isArray(kinds) ? kinds : [],
+          min_confidence,
+        });
+        if (!Array.isArray(response.value)) {
+          throw new Error("ATLAS symbolRelationships returned a non-array relationship list");
+        }
+        return { relationships: response.value, truncated: response.truncated };
+      },
 
       unresolvedReferencesTo: (name) => read("unresolved_references_to", { name: String(name) }),
 
@@ -415,6 +426,16 @@ export class View {
         content_hash,
         local_id,
       }),
+
+      getAllByContentLocal: async (content_hash, local_id) => {
+        const response = await readResponse("get_many_by_content_local", {
+          keys: [{ content_hash, local_id }],
+        });
+        if (!Array.isArray(response.value)) {
+          throw new Error("ATLAS getAllByContentLocal returned a non-array symbol list");
+        }
+        return response.value;
+      },
 
       hasContentHash: async (content_hash) => {
         if (typeof content_hash !== "string" || content_hash.length === 0) return false;

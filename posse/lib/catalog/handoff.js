@@ -16,6 +16,10 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxCallBytes: 256 * 1024,
   maxEntryBytes: 32 * 1024,
   maxClaims: 12,
+  // Coverage requirements may share a report claim. Keep this independent
+  // from maxClaims so an explicit multi-part task is not collapsed merely to
+  // fit the report's narrative claim limit.
+  maxCompletionRequirements: 24,
   maxClaimChars: 1000,
   maxSelectorsPerClaim: 24,
   recommendedIdChars: 40,

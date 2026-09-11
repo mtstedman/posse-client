@@ -65,6 +65,7 @@ import {
   recordAgentHandoffRejection,
   rejectAgentHandoffForLaterTool,
   stageAgentHandoff,
+  getTraversalCompletionSnapshotForCall,
 } from "../../handoff/functions/agent-handoff.js";
 import {
   assertSubAgentParentReady,
@@ -142,6 +143,7 @@ import {
   resolveAtlasResearcherSchemaDiet,
   resolveAtlasResearcherTypedDispatcher,
   resolveAtlasResearcherWorkflow,
+  resolveResearchSynthesisPolicySnapshot,
 } from "./deterministic-mcp/gate-settings.js";
 import {
   applyResearcherDispatcherNativeGuidance,
@@ -245,6 +247,75 @@ function finishToolInvocation(invocation, opts) {
 
 const SERVER_INFO = { name: POSSE_MCP_GATEWAY_SERVER_INFO_NAME, version: "1.0.0" };
 const SUPPORTED_PROTOCOL = "2024-11-05";
+// Atlas325 P0.1: no run artifact recorded the tool surface the provider
+// actually saw (names, atlas.query action enum, schema digest, effective
+// policy, research limits). Record it once per attempt and issued digest.
+// The observation type deliberately starts with "tool." so it sits beside the
+// tool ledger, but every tool-mix consumer must skip it: it is not a call.
+export const TOOL_SURFACE_ISSUED_OBSERVATION_TYPE = "tool.surface.issued";
+const issuedToolSurfaceRecords = new Map();
+const ISSUED_TOOL_SURFACE_RECORD_LIMIT = 256;
+
+function sha256Hex(text) {
+  return crypto.createHash("sha256").update(String(text ?? ""), "utf8").digest("hex");
+}
+
+function recordIssuedToolSurfaceObservation({
+  tools = [],
+  dispatcherTool = null,
+  atlasTools = [],
+  effectivePolicy = {},
+  projections = {},
+} = {}) {
+  try {
+    const canonical = JSON.stringify(tools);
+    const schemaSha256 = sha256Hex(canonical);
+    const attemptKey = `${mcpAttemptId ?? "none"}|${mcpJobId ?? "none"}|${schemaSha256}`;
+    if (issuedToolSurfaceRecords.has(attemptKey)) return null;
+    issuedToolSurfaceRecords.set(attemptKey, Date.now());
+    while (issuedToolSurfaceRecords.size > ISSUED_TOOL_SURFACE_RECORD_LIMIT) {
+      issuedToolSurfaceRecords.delete(issuedToolSurfaceRecords.keys().next().value);
+    }
+    const names = tools.map((tool) => String(tool?.name || "")).filter(Boolean);
+    const dispatcherEnum = Array.isArray(dispatcherTool?.inputSchema?.properties?.action?.enum)
+      ? dispatcherTool.inputSchema.properties.action.enum.map((value) => String(value))
+      : null;
+    const actionEnum = dispatcherEnum
+      || atlasTools.map((tool) => _stripAtlasPrefix(String(tool?.name || ""))).filter(Boolean);
+    const instructions = mcpServerInstructions();
+    const detail = {
+      kind: "tool_surface_issued",
+      // The hot gateway loads a union catalog and the persistent owner applies
+      // the final per-session allowlist to its response. Do not mistake this
+      // internal candidate surface for the provider-visible surface.
+      projection_stage: ownerHotGateway ? "gateway_candidate" : "provider_issued",
+      names,
+      tool_count: names.length,
+      action_enum: actionEnum,
+      action_enum_source: dispatcherEnum ? "dispatcher_schema" : "atlas_tool_names",
+      schema_sha256: schemaSha256,
+      schema_chars: canonical.length,
+      effective_policy: effectivePolicy,
+      limits: { ...resolveResearchSynthesisPolicySnapshot() },
+      projections,
+      instructions_sha256: instructions ? sha256Hex(instructions) : null,
+      role: roleName,
+      provider: providerName,
+      agent_call_id: mcpAgentCallId ?? null,
+    };
+    _recordObservation({
+      work_item_id: mcpWorkItemId ?? undefined,
+      job_id: mcpJobId ?? undefined,
+      attempt_id: mcpAttemptId ?? undefined,
+      observation_type: TOOL_SURFACE_ISSUED_OBSERVATION_TYPE,
+      summary: `${ownerHotGateway ? "Gateway candidate" : "Issued"} tool surface: ${names.length} tool${names.length === 1 ? "" : "s"}; ${actionEnum.length} Atlas action${actionEnum.length === 1 ? "" : "s"}; schema ${schemaSha256.slice(0, 12)}`,
+      detail,
+    });
+    return detail;
+  } catch {
+    return null; // advisory telemetry must never break tools/list
+  }
+}
 function mcpServerInstructions() {
   if (!allowWrite || (roleName !== "dev" && roleName !== "artificer" && roleName !== "fix")) return null;
   return "Use the exposed Posse mutation tool for permitted changes; native apply_patch and shell writes are unavailable.";
@@ -1436,6 +1507,7 @@ let DECLARED_NATIVE_TOOL_NAMES = (ownerHotGateway
     ? getDeterministicMcpToolNames(roleName, {
       needsImageGeneration: allowImageGeneration,
       atlasAvailable,
+      disableSystemTools: bootConfig.disableSystemTools === true,
     })
     : legacyToolNamesForUnscopedRole()))
 ).filter(runtimeToolAvailable);
@@ -1492,10 +1564,19 @@ function compactAgentHandoffV4Issued() {
           || resolveAtlasResearcherWorkflow())));
 }
 
+function researcherTraversalCoverageRequired() {
+  if (!isResearcherRole || mcpJobId == null) return false;
+  return getTraversalCompletionSnapshotForCall({
+    jobId: mcpJobId,
+    attemptId: mcpAttemptId,
+  })?.active === true;
+}
+
 addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   compactCompletion: compactAgentHandoffIssued(),
   compactV3: compactAgentHandoffV3Issued(),
   compactV4: compactAgentHandoffV4Issued(),
+  requireResearcherCoverage: researcherTraversalCoverageRequired(),
 }));
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
@@ -2187,14 +2268,22 @@ function researchCitationFetchGate(toolName) {
   return null;
 }
 
-function buildResearchSynthesisRequiredMessage() {
+function buildResearchSynthesisRequiredMessage({ includeCurrentCall = false } = {}) {
   const status = researchSynthesisStatus() || {};
   const absoluteCeilingReached = String(status.reason || "").includes("absolute_ceiling=");
+  const observed = researchExplorationObservationStatus({
+    jobId: mcpJobId,
+    attemptId: mcpAttemptId,
+  });
+  const maxPhysicalCalls = resolveResearchSynthesisPolicySnapshot().maxPhysicalCalls;
+  const physicalCalls = Math.max(0, Number(observed.call_steps || 0))
+    + (includeCurrentCall ? 1 : 0);
   return buildResearchSynthesisRequiredText({
     explorationSteps: status.exploration_steps || 0,
     staleSteps: status.stale_steps || 0,
     absoluteCeilingReached,
     explorationCeiling: researchSynthesisExplorationCeiling({ staleSteps: status.stale_steps || 0 }),
+    finalTraversalAvailable: physicalCalls < maxPhysicalCalls,
   });
 }
 
@@ -2267,7 +2356,7 @@ function researchExplorationNoticeResult(text, toolName) {
   if (researchState.synthesisRequiredAt) {
     researchNoticeFlags.midpoint = true;
     researchNoticeFlags.curtain = true;
-    notice = buildResearchSynthesisRequiredMessage(toolName);
+    notice = buildResearchSynthesisRequiredMessage({ includeCurrentCall: true });
     noticeKind = "research_closeout";
   } else if (explorationSteps >= curtainStart && !researchNoticeFlags.curtain) {
     researchNoticeFlags.midpoint = true;
@@ -2734,6 +2823,7 @@ function computeDeclaredNativeToolNamesForCurrentBoot() {
       ? getDeterministicMcpToolNames(roleName, {
         needsImageGeneration: allowImageGeneration,
         atlasAvailable,
+        disableSystemTools: bootConfig.disableSystemTools === true,
       })
       : legacyToolNamesForUnscopedRole()))
   ).filter(runtimeToolAvailable);
@@ -2747,6 +2837,7 @@ function rebuildNativeToolSchemas() {
     compactCompletion: compactAgentHandoffIssued(),
     compactV3: compactAgentHandoffV3Issued(),
     compactV4: compactAgentHandoffV4Issued(),
+    requireResearcherCoverage: researcherTraversalCoverageRequired(),
   }));
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
@@ -3642,6 +3733,29 @@ async function handleRequest(msg) {
       researcherTypedPurposeGuidance,
       researcherTypedSymbolCardGuidance,
       tools: tools.map((tool) => tool.name),
+    });
+    recordIssuedToolSurfaceObservation({
+      tools,
+      dispatcherTool,
+      atlasTools,
+      effectivePolicy: {
+        disable_system_tools: bootConfig.disableSystemTools === true,
+        atlas_available: atlasAvailable === true,
+        traversal_coverage_required: researcherTraversalCoverageRequired(),
+        typed_dispatcher: researcherTypedDispatcher === true,
+        workflow: researcherWorkflow === true,
+        dispatcher: researcherDispatcher === true,
+        purpose_guidance: researcherTypedPurposeGuidance === true,
+        symbol_card_guidance: researcherTypedSymbolCardGuidance === true,
+        primary_language: languageLevers.primaryLanguage,
+        detected_languages: [...languageLevers.detectedLanguages],
+        schema_diet: researcherSchemaDiet === true,
+        gateway_dedup: dedupGateways === true,
+        atlas_catalog_source: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
+      },
+      projections: researcherFacade
+        ? { "symbol.callers": "compact-v1", "code.structure": "compact-structure-v1" }
+        : {},
     });
     sendMessage(jsonRpcSuccess(id, { tools }));
     return;

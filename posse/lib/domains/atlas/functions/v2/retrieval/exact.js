@@ -44,7 +44,12 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
   }
   const symbolsByPath = new Map(files.map((file) => [file.path, file.symbols]));
   const edgeKinds = normalizedStructureEdgeKinds(params.edgeKinds);
-  const edges = await materializedStructureEdges(view, files, new Set(edgeKinds));
+  // An inventory-only request must not query symbol neighborhoods: the edge
+  // table would be discarded by the native assembler anyway, and on a wide
+  // directory the neighborhood walk dominates execution time.
+  const edges = params.includeEdges === false
+    ? []
+    : await materializedStructureEdges(view, files, new Set(edgeKinds));
   const data = /** @type {Record<string, any>} */ (await runAtlasNativeMethodAsync("code-structure", {
     selectedPaths: paths,
     requestedPaths: requested,
@@ -56,6 +61,19 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
     includeEdges: params.includeEdges,
     prefixTruncated: selection.prefixTruncated === true,
   }));
+
+  if (selection.prefixTruncated === true) {
+    // Name what the file limit left out so the caller can narrow or raise
+    // maxFiles instead of mistaking the cap for a stored continuation.
+    const selected = new Set(paths);
+    const omitted = indexedPaths
+      .map((value) => String(value ?? ""))
+      .filter((repoPath) => repoPath && !selected.has(repoPath)
+        && requested.some((prefix) => repoPath === prefix || repoPath.startsWith(prefix.replace(/\/?$/, "/"))))
+      .sort();
+    data.omittedFileCount = omitted.length;
+    data.omittedPaths = omitted.slice(0, 20);
+  }
 
   const evidence = await nativePathEvidence({ view, repoRoot, paths, requested, symbolsByPath });
   const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);

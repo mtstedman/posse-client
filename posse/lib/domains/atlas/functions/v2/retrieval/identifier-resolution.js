@@ -108,7 +108,15 @@ export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNa
   for (const symbol of tailMatches) {
     const display = String(symbol?.qualified_name || symbol?.name || tail).trim();
     const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
-    const key = qualifiedName || `${normalizedQualifiedIdentifier(symbol?.name)}@${String(symbol?.repo_rel_path || "")}`;
+    // A parser can emit both a file/module container and its same-named
+    // callable. Bare qualified names carry no owner beyond their file, so use
+    // that file scope for both shapes. Otherwise the same declaration surface
+    // (for example the `fastify` module and function in fastify.js) becomes two
+    // indistinguishable ambiguity candidates.
+    const bareName = normalizedQualifiedIdentifier(symbol?.name || qualifiedName || tail);
+    const key = qualifiedName.includes(".")
+      ? qualifiedName
+      : `${bareName}@${String(symbol?.repo_rel_path || "")}`;
     if (!bearers.has(key)) bearers.set(key, display);
   }
   return {

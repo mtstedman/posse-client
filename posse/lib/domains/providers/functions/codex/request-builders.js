@@ -2,7 +2,7 @@
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
-import { CODEX_CODE_MODE_ROLES, CODEX_TERMINAL_MCP_SERVER_SUFFIX, CODEX_DIRECT_RESEARCH_TOOLS, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
+import { CODEX_CODE_MODE_ROLES, CODEX_NATIVE_BATCHING_ROLES, CODEX_TERMINAL_MCP_SERVER_SUFFIX, CODEX_DIRECT_RESEARCH_TOOLS, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp, releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import {
@@ -69,7 +69,9 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
 function buildCodexDeterministicMcpAttachment(serverConfig, {
   role = "",
   disableSystemTools = false,
-  nativeBatchingCatalog = process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || null,
+  nativeBatchingCatalog = String(role || "").trim().toLowerCase() === "researcher"
+    ? process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || null : null,
+  nativeBatching = true,
   atlasResearcherDispatcher = String(role || "").trim().toLowerCase() === "researcher"
     && (resolveAtlasResearcherDispatcher()
       || resolveAtlasResearcherTypedDispatcher()
@@ -78,7 +80,10 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
   const atlasTools = Array.isArray(serverConfig.atlasTools) ? serverConfig.atlasTools : [];
-  const codexNativeBatching = disableSystemTools === true && String(role).toLowerCase() === "researcher" && !!nativeBatchingCatalog;
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const codexNativeBatching = disableSystemTools === true
+    && CODEX_NATIVE_BATCHING_ROLES.includes(normalizedRole)
+    && nativeBatching !== false;
   const codexCodeMode = !codexNativeBatching && disableSystemTools === true
     && CODEX_CODE_MODE_ROLES.includes(String(role || "").trim().toLowerCase());
   const lazyTools = toolNames.filter((name) => CODEX_LAZY_TOOL_NAMES.has(name));
@@ -136,7 +141,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
   // ATLAS action. Those are prerequisites for the execution contract and the
   // ATLAS-first gate, so they must never depend on model-initiated discovery.
   configOverrides.push(`mcp_servers.${serverKey}.required=true`);
-  if (!codexCodeMode && (directTools.length > 0 || atlasTools.length > 0)) {
+  if (!codexCodeMode && (eagerTools.length > 0 || atlasTools.length > 0)) {
     directServerKeys.push(serverKey);
   }
   if (terminalServerKey) {
@@ -146,6 +151,7 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
       `mcp_servers.${terminalServerKey}.enabled_tools=${_toTomlLiteral(directTools.map(rawToolsMcpName))}`,
       `mcp_servers.${terminalServerKey}.required=true`,
     );
+    if (codexNativeBatching) configOverrides.push(`mcp_servers.${terminalServerKey}.supports_parallel_tool_calls=false`);
     directServerKeys.push(terminalServerKey);
   }
   if (lazyServerKey) {
@@ -157,13 +163,17 @@ function buildCodexDeterministicMcpAttachment(serverConfig, {
       `mcp_servers.${lazyServerKey}.enabled_tools=${_toTomlLiteral(rawLazyTools)}`,
       `mcp_servers.${lazyServerKey}.required=true`,
     );
+    if (codexNativeBatching) configOverrides.push(`mcp_servers.${lazyServerKey}.supports_parallel_tool_calls=false`);
   }
   if (codexCodeMode) configOverrides.push("features.code_mode.enabled=true");
   if (codexNativeBatching) configOverrides.push(
     "features.code_mode.enabled=false",
     "features.code_mode_host=false",
-    `model_catalog_json=${_toTomlLiteral(nativeBatchingCatalog)}`,
-    `mcp_servers.${serverKey}.supports_parallel_tool_calls=true`,
+    ...(nativeBatchingCatalog ? [`model_catalog_json=${_toTomlLiteral(nativeBatchingCatalog)}`] : []),
+    // Native batching controls model-turn emission separately from execution.
+    // Planner/assessor/dev calls share mutable scope/protocol state: execute
+    // their emitted batch in order, including writes and verification steps.
+    `mcp_servers.${serverKey}.supports_parallel_tool_calls=${normalizedRole === "researcher"}`,
   );
   if (codexCodeMode || directServerKeys.length > 0) {
     configOverrides.push(
@@ -340,6 +350,8 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
   projectDbCapability = "none",
   needsImageGeneration = false,
   disableSystemTools = false,
+  nativeBatching = true,
+  nativeBatchingCatalog = undefined,
   jobId = null,
   workItemId = null,
   attemptId = null,
@@ -402,7 +414,7 @@ export function buildCodexDeterministicReadConfigOverrides(role, cwd, {
     };
   }
 
-  return buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools });
+  return buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools, nativeBatching, nativeBatchingCatalog });
 }
 
 export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, options = {}) {
@@ -420,6 +432,8 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
   projectDbCapability = "none",
   needsImageGeneration = false,
   disableSystemTools = false,
+  nativeBatching = true,
+  nativeBatchingCatalog = undefined,
   jobId = null,
   workItemId = null,
   attemptId = null,
@@ -488,7 +502,11 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     };
   }
 
-  const attachment = buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools });
+  const attachment = buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools, nativeBatching, nativeBatchingCatalog });
+  // Codex imports direct schemas during its own MCP initialization. The
+  // research-only preflight below resolves folded researcher action aliases;
+  // other roles retain their existing contract and startup lifecycle.
+  if (attachment.codexNativeBatching && String(role || "").trim().toLowerCase() !== "researcher") return attachment;
   try {
     const surface = await prepareCodexResearchMcpSurface(attachment, { mcpGate });
     attachment.coreDeclarations = surface.declarations;
@@ -514,6 +532,8 @@ export function buildCodexSystemToolLockdownOverrides({
   webToolsActive = false,
 } = {}) {
   const overrides = [];
+  const disableUtilities = disableSystemTools
+    && (disableResearcherUtilities || codexCodeMode || codexNativeBatching);
   if (codexCodeMode || codexNativeBatching) {
     const excluded = [...CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES];
     if (!webToolsActive) excluded.push("web");
@@ -529,17 +549,22 @@ export function buildCodexSystemToolLockdownOverrides({
       "features.unified_exec=false",
     );
   }
-  if (disableSystemTools && disableResearcherUtilities) {
+  if (disableUtilities) {
     overrides.push(
       "features.goals=false",
       "features.view_image=false",
+      "tools.view_image=false",
       "features.multi_agent=false",
       "features.multi_agent_v2=false",
+      // The host collaboration namespace uses this setting independently of
+      // the legacy feature flags and nested code-mode namespace exclusions.
+      "agents.enabled=false",
+      "features.sleep_tool=false",
       "tools.update_plan.enabled=false",
       "tools.experimental_request_user_input.enabled=false",
     );
   }
-  if (disableNativeImageGeneration) {
+  if (disableNativeImageGeneration || disableUtilities) {
     overrides.push("features.image_generation=false");
   }
   return overrides;

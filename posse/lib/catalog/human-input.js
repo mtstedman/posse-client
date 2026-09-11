@@ -15,6 +15,9 @@ import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
 const freezeChoices = (choices) => Object.freeze([...choices]);
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
 export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved", "superseded"]);
+export const SCOPE_APPROVAL_MODES = Object.freeze({ DEFAULT: "default", AUTO: "auto" });
+export const SCOPE_APPROVAL_MODE_VALUES = Object.freeze(Object.values(SCOPE_APPROVAL_MODES));
+export const SCOPE_MODE_APPROVAL_SOURCE = "scope_mode_auto";
 
 export function humanGateStateAllowsAnswer(gateState) {
   return gateState == null || gateState === "open";
@@ -453,6 +456,18 @@ const NON_INTERACTIVE_REVIEW_ACTIONS = Object.freeze({
   unexecuted_replan_limit: "fail",
   artifact_routing_admin: "acknowledge",
 });
+
+// A scope-only run override uses the existing gate resolver and audit trail.
+// Only known file-scope gates qualify; unrelated reviews remain interactive.
+export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SCOPE_APPROVAL_MODES.DEFAULT) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (scopeMode !== SCOPE_APPROVAL_MODES.AUTO || payload.requires_interactive_approval === true) return null;
+  if (payload.subtype) return null;
+  const reviewType = String(payload.review_type || "").trim();
+  if (["scope_expansion_request", "scope_expansion_required"].includes(reviewType)) return "approve";
+  if (!reviewType && Array.isArray(payload.file_requests) && payload.file_requests.length > 0) return "approve";
+  return null;
+}
 
 /**
  * Return the bounded action a production non-interactive run may take without

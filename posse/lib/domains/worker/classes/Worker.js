@@ -426,6 +426,7 @@ export class Worker {
   constructor(opts = {}) {
     this.nonInteractive = opts.nonInteractive || false;
     this.autoApprove = opts.autoApprove || this.nonInteractive;
+    this.scopeMode = opts.scopeMode;
     this.projectDir = opts.projectDir || process.cwd();
     this.display = opts.display || null;
     this.silent = opts.silent || false;

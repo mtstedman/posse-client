@@ -91,6 +91,43 @@ tools require both the issued role grant and the operator kill switch. Internal
 ATLAS orchestration actions, including `edit.plan` and `workflow`, are excluded
 from provider and MCP surfaces even if a caller asserts them.
 
+## Codex MCP batching
+
+Restricted Codex researcher, planner, assessor, and developer sessions default
+to native MCP batching. Several ready calls may share a model turn. Researcher
+reads may run concurrently; planner, assessor, and developer operations execute
+in order, including writes. Scope approvals, sub-agent control, dependent
+decisions, and terminal handoff remain separate. An explicit
+`nativeBatching: false` provider option retains the previous transport.
+
+Native batching creates a temporary transport catalog from the selected Codex
+CLI's `debug models --bundled` output, preserving the selected model's other
+metadata. The CLI must contain that exact model. An explicitly supplied
+`nativeBatchingCatalog` provider option is validated. The legacy
+`POSSE_CODEX_RESEARCH_MODEL_CATALOG` configures the researcher catalog only;
+it is not needed to enable batching. Temporary catalogs are cleaned up when the
+provider invocation ends. The user's Codex configuration is not rewritten.
+
+These restricted batching sessions suppress Codex host utilities, including
+plain sleep and native collaboration. Posse-issued sub-agent tools retain their
+concurrent dispatch, `wait_all`, and status waits. Explicit native-tool sessions
+retain their host coordination and sleep capabilities.
+
+## Scope approval
+
+Use `posse run --scope-mode=auto` or `posse go --scope-mode=auto` to approve
+file-scope expansion requests automatically while keeping the run interactive.
+This includes requests triggered by out-of-scope edits, one-shot file requests,
+and fix scope gates. Existing waiting scope gates for the selected work items
+are resumed through the same approval policy.
+
+The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
+preserves the existing `scope_auto_approval` policy and interactive or
+non-interactive behavior. Scope mode does not change plan approval, publication,
+assessment, or clarification decisions. Approved paths still pass the normal
+scope validation, protected-path, and file-lock checks. This flag does not
+enable the proposed one-shot claim/release workflow.
+
 ## Runtime Paths
 
 By default, Posse stores runtime state inside the target project:
