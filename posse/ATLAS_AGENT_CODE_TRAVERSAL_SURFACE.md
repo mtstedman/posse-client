@@ -39,25 +39,25 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.card`, `atlas.symbol.overview`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `subagent`
 
@@ -1077,6 +1077,30 @@ List incoming resolved callers, references, or both for one exact symbol ID as c
 | `offset` | `integer` | Optional | min 0; max 100000 | Entry offset within the current index generation. |
 | `symbolId` | `string` | Required |  | Exact target symbol ID. |
 
+### `atlas.symbol.get`
+
+Remote roles: `assessor`, `dev`, `planner`, `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `symbol.get` |
+| Tool reference token | `atlas.symbol.get` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `atlas` |
+| Batchable input | No |
+| Parallel calls | Yes |
+| System-prefetch capable | No |
+
+Read one exact symbol body by returned ID or exact name reference. Supply file to select one repository path; unresolved duplicate paths return file/ref choices. Declaration-only addresses resolve to one provable same-file implementation or return explicit implementation candidates.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `file` | `string` | Optional | min length 1; max length 4000 | Optional exact repository-relative path for duplicate-body disambiguation. |
+| `identifiersToFind` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 50 | Optional exact identifiers whose in-body coverage should be reported. |
+| `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap; the repository code-window policy still applies. |
+| `symbolId` | `string` | Conditional |  | Exact symbol ID returned by Atlas. |
+| `symbolRef` | `object` | Conditional |  | Exact symbol reference used when no symbol ID is needed. |
+
 ### `atlas.symbol.search`
 
 Remote roles: `assessor`, `dev`, `planner`, `researcher`.
@@ -1207,7 +1231,6 @@ posse-remote role ceiling, so remote agents do not currently receive them:
 - `atlas.manual`
 - `atlas.query`
 - `atlas.repo`
-- `atlas.symbol.get`
 
 ## Agent-hidden execution parameters
 
