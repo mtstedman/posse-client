@@ -4540,8 +4540,11 @@ class PersistentMcpSession {
       });
       onAbort = () => {
         // A disconnected queued caller must never execute later. An already
-        // running call retains its watchdog and serial slot until it replies.
-        if (this._activeRequestId !== internalId) this._pending.delete(internalId);
+        // running call retains its promise, watchdog and serial slot so the
+        // owner processes its actual result instead of refunding active work
+        // as a transport failure merely because the HTTP client disconnected.
+        if (this._activeRequestId === internalId) return;
+        this._pending.delete(internalId);
         reject(signal.reason || new Error("MCP request aborted"));
       };
       signal?.addEventListener("abort", onAbort, { once: true });

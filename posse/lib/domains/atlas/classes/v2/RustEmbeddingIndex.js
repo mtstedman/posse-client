@@ -43,6 +43,9 @@ export class RustEmbeddingIndex {
   #timeoutMs;
   #indexId = null;
   #opening = null;
+  #closing = null;
+  #generation = 0;
+  #workerSessionId = null;
   #closed = false;
   #lastAddTiming = null;
 
@@ -79,6 +82,7 @@ export class RustEmbeddingIndex {
 
   async #ensureOpen() {
     if (this.#closed) throw stateError("RustEmbeddingIndex: closed");
+    if (this.#closing) throw stateError("RustEmbeddingIndex: closing");
     if (this.#indexId) return;
     if (this.#opening) return await this.#opening;
     this.#opening = this.#invoke("vector.open", {
@@ -93,18 +97,24 @@ export class RustEmbeddingIndex {
       const indexId = String(data?.indexId || "");
       if (!indexId) throw protocolError("vector.open did not return indexId");
       this.#indexId = indexId;
+      this.#generation += 1;
     }).finally(() => { this.#opening = null; });
     return await this.#opening;
   }
 
   async #request(method, payload = {}, { retry = true } = {}) {
     await this.#ensureOpen();
+    if (this.#closed || this.#closing) throw stateError("RustEmbeddingIndex: closing or closed");
+    const generation = this.#generation;
     try {
       return await this.#invoke(method, { indexId: this.#indexId, ...payload });
     } catch (error) {
       if (!retry || !recoverableSessionError(error)) throw error;
-      this.#indexId = null;
+      // Another failed request may already have replaced this session. Worker
+      // restarts can reuse the same indexId, so compare local generations.
+      if (this.#generation === generation) this.#indexId = null;
       await this.#ensureOpen();
+      if (this.#closed || this.#closing) throw stateError("RustEmbeddingIndex: closing or closed");
       return await this.#invoke(method, { indexId: this.#indexId, ...payload });
     }
   }
@@ -118,11 +128,19 @@ export class RustEmbeddingIndex {
       timeoutMs: this.#timeoutMs,
       worker: true,
       workerFallback: false,
+      // Handle operations belong to the host that opened the index. Recovery
+      // owns reopening; transport-level replay cannot reuse an old numeric ID.
+      idempotent: false,
+      ...(method === "vector.open" ? {} : { workerSessionId: this.#workerSessionId }),
       requiredRoute: VECTOR_NATIVE_ROUTE,
     });
     if (!result.ok) {
       const error = new Error(String(result.stderr || result.error?.message || `vector method ${method} failed`));
       /** @type {any} */ (error).code = /** @type {any} */ (result.error)?.code || "VECTOR_NATIVE_PROCESS_FAILED";
+      const details = /** @type {any} */ (result.error)?.details;
+      if (details && typeof details === "object" && !Array.isArray(details)) {
+        /** @type {any} */ (error).details = { ...details };
+      }
       throw error;
     }
     const frame = result.json;
@@ -135,6 +153,7 @@ export class RustEmbeddingIndex {
     if (frame.ok !== true || !Object.prototype.hasOwnProperty.call(frame, "data")) {
       throw protocolError(`${method} returned an invalid response envelope`);
     }
+    if (method === "vector.open") this.#workerSessionId = result.workerSessionId ?? null;
     return frame.data;
   }
 
@@ -220,15 +239,29 @@ export class RustEmbeddingIndex {
 
   async close() {
     if (this.#closed) return;
-    const indexId = this.#indexId;
-    this.#closed = true;
-    this.#indexId = null;
-    if (!indexId) return;
+    if (this.#closing) return await this.#closing;
+    this.#closing = this.#closeIndex();
     try {
-      await this.#invoke("vector.close", { indexId });
-    } catch (error) {
-      if (!recoverableSessionError(error)) throw error;
+      await this.#closing;
+    } finally {
+      this.#closing = null;
     }
+  }
+
+  async #closeIndex() {
+    if (this.#opening) await this.#opening;
+    const indexId = this.#indexId;
+    if (indexId) {
+      try {
+        await this.#invoke("vector.close", { indexId });
+      } catch (error) {
+        if (!recoverableSessionError(error)) throw error;
+      }
+    }
+    // A failed flush retains the handle and permits an explicit close retry.
+    this.#indexId = null;
+    this.#workerSessionId = null;
+    this.#closed = true;
   }
 }
 
@@ -253,7 +286,13 @@ function vectorB64(vector, dim, label) {
 
 function recoverableSessionError(error) {
   const code = String(error?.code || "");
-  return code === "invalid_state" || code === "POSSE_NATIVE_WORKER_UNAVAILABLE";
+  return code === "unknown_index"
+    || (code === "POSSE_NATIVE_WORKER_UNAVAILABLE" && (
+      error?.details?.reason === "transport_gone"
+      || (error?.details == null && error?.message === "native vector worker unavailable (transport_gone)")
+    ))
+    // Compatibility with native workers predating the dedicated handle code.
+    || (code === "invalid_state" && /^unknown indexId '[^']+'$/.test(String(error?.message || "")));
 }
 
 function unavailableError(method) {

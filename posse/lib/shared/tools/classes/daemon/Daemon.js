@@ -28,6 +28,8 @@ const DEFAULT_BREAKER_WINDOW_MS = 60_000;
 const DEFAULT_BREAKER_COOLDOWN_MS = 300_000;
 const DEFAULT_RETIRE_GRACE_MS = 2_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 250;
+// Process-local identity, unique even when a Daemon instance is replaced.
+let nextSessionId = 1;
 
 export class Daemon {
   /**
@@ -65,6 +67,7 @@ export class Daemon {
 
     /** @type {import("./transport.js").Transport | null} */
     this._transport = null;
+    this._sessionId = 0;
     /** Detached transport incarnations retained until their hosts terminate. */
     /** @type {Set<import("./transport.js").Transport>} */
     this._retiredTransports = new Set();
@@ -228,6 +231,7 @@ export class Daemon {
         ...(isRetireReplacement ? { retire_replacement: true } : {}),
       });
       this._transport = transport;
+      this._sessionId = nextSessionId++;
       this._runningKey = desiredKey;
       if (!this._exitHookInstalled && !this._exitHookDelegated) {
         this._exitHookInstalled = true;
@@ -296,12 +300,15 @@ export class Daemon {
    * untouched for the wrapper to interpret.
    *
    * @param {Record<string, unknown>} payload
-   * @param {{ signal?: AbortSignal, timeoutMs?: number, onProgress?: (event: unknown) => void }} [opts]
+   * @param {{ signal?: AbortSignal, timeoutMs?: number, onProgress?: (event: unknown) => void, expectedSessionId?: number | null }} [opts]
    * @returns {Promise<Record<string, unknown>>}
    */
   request(payload, opts = {}) {
     if (!this.#ensureTransport() || !this._transport) {
       return Promise.resolve({ ok: false, error: { message: "daemon unavailable" }, _transportGone: true });
+    }
+    if (opts.expectedSessionId != null && opts.expectedSessionId !== this._sessionId) {
+      return Promise.resolve({ ok: false, error: { message: "daemon session changed" }, _transportGone: true });
     }
     if (opts.signal?.aborted) {
       return Promise.resolve({ ok: false, error: { message: "aborted" }, _aborted: true });
@@ -342,6 +349,11 @@ export class Daemon {
   /** Start the host without sending a product request. */
   ensureStarted() {
     return this.#ensureTransport();
+  }
+
+  /** Identity of the last started host; request checks it before sending. */
+  sessionId() {
+    return this._sessionId;
   }
 
   /** Send an id-less private control frame to the live host. */

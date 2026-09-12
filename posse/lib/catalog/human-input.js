@@ -519,11 +519,11 @@ export function humanInputChoiceFromAnswer(answer, choices = []) {
   if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\b[\s\S]{0,20}\b(?:pass|passed|approve|approved|accept|accepted|allow|allowed|mark done|succeed|succeeded)\b/.test(text)) {
     // A negated approval can accompany an explicit recovery action. Parse
     // that action without letting the negated word match an approval alias.
-    const retryMatch = /\bretry(?::[a-z0-9_-]+)?\b/.exec(text);
-    const retry = retryMatch && !/\b(?:not|never|don't|dont|cannot|can't|won't)\s+$/.test(text.slice(0, retryMatch.index))
-      ? retryMatch[0] : null;
-    const explicitRetry = normalizedChoices.find(choice => choice.toLowerCase() === retry);
-    if (explicitRetry) return explicitRetry;
+    for (const recoveryMatch of text.matchAll(/\b(?:retry(?::[a-z0-9_-]+)?|skip)\b/g)) {
+      if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\s+$/.test(text.slice(0, recoveryMatch.index))) continue;
+      const explicitRecovery = normalizedChoices.find(choice => choice.toLowerCase() === recoveryMatch[0]);
+      if (explicitRecovery) return explicitRecovery;
+    }
     return normalizedChoices.find((choice) => ["fail", "deny", "reject"].includes(choice.toLowerCase())) || null;
   }
   // Resolve an exact provider-qualified choice before testing decorated

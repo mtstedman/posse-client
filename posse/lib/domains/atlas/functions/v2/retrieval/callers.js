@@ -12,7 +12,6 @@ export async function symbolCallers({ view, versionId, params }) {
   const parsed = parseSymbolId(params.symbolId);
   if (!parsed) return errorEnvelope({ action, versionId, code: "invalid_symbol_id", message: "symbol.callers requires a valid symbolId" });
   if (params.projection === "compact-v1"
-    && Number(params.offset || 0) > 0
     && params.indexVersion
     && params.indexVersion !== versionId) {
     return errorEnvelope({

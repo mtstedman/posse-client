@@ -4506,12 +4506,12 @@ const RESEARCH_FAILURE_MECHANISM_PATTERNS = Object.freeze({
 // negative behavior prose is not evidence of a research gap: e.g. a cache not
 // read on cold start, or a loop variable named `i`.
 const RESEARCH_UNCLOSED_EVIDENCE_GAP_PATTERNS = Object.freeze([
-  /\b(?:required|relevant|final|terminal|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\bnot\s+retrieved\s*(?=[.!?;]|$)/iu,
-  /\b(?:implementation|relevant source|required source|evidence|source body)[^.!?\n]{0,60}\b(?:was|were|has been|have been)\s+not\s+(?:read|inspected|verified)\s*(?=[.!?;]|$)/iu,
+  /\b(?:required|relevant|final|terminal|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\bnot\s+retrieved\s*(?=[.!?;,]|$)/iu,
+  /\b(?:implementation|relevant source|required source|evidence|source body)[^.!?\n]{0,60}\b(?:was|were|has been|have been)\s+not\s+(?:read|inspected|verified)\s*(?=[.!?;,]|$)/iu,
   /\b(?:I|[Ww]e|[Tt]his research)\s+(?:(?:have|has|did|do)\s+)?not\s+(?:read|inspected|verified)\b/u,
-  /\b(?:evidence|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\bnot\s+established\s*(?=[.!?;]|$)/iu,
+  /\b(?:evidence|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\bnot\s+established\s*(?=[.!?;,]|$)/iu,
   /\b(?:was|were|is|are)\s+not\s+(?:in|among)\s+(?:the\s+)?(?:retrieved|read|inspected|delivered)\s+(?:body|source|evidence|results?)\b/iu,
-  /(?:^|[.!?;]\s*)(?:(?:I|we|this research|the researcher)\s+)?(?:could not|couldn't|(?:was |were |am |are )?unable to)\s+(?:retrieve|read|inspect|verify|establish|find)\b[^.!?;\n]*[.!?;]?$/iu,
+  /(?:^|[.!?;]\s*)(?:(?:I|we|this research|the researcher)\s+)?(?:could not|couldn't|(?:was |were |am |are )?unable to)\s+(?:retrieve|read|inspect|verify|establish|find)\b[^.!?;\n]*(?=[.!?;]|$)/iu,
   /\b(?:evidence|implementation|source|path|boundary|sink)\s+(?:remains?|is|was)\s+(?:unresolved|unverified|unestablished)\b/iu,
 ]);
 

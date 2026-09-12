@@ -154,7 +154,7 @@ export function projectCompactSymbolRelationships(input, options = {}) {
   );
   const indexVersion = String(options.indexVersion ?? rawPagination?.indexVersion ?? "").trim() || null;
   const expectedIndexVersion = String(options.expectedIndexVersion ?? "").trim() || null;
-  if (offset > 0 && expectedIndexVersion && expectedIndexVersion !== indexVersion) {
+  if (expectedIndexVersion && expectedIndexVersion !== indexVersion) {
     throw presentationError(
       "index_version_changed",
       `Compact relationship page belongs to index ${expectedIndexVersion}, current index is ${indexVersion || "unknown"}`,

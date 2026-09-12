@@ -279,7 +279,7 @@
  * @property {number} [offset]
  * @property {number} [minConfidence] 0..1 or 0..100
  * @property {"compact-v1"} [projection] Runtime-issued projection; absent retains the legacy caller response.
- * @property {string} [indexVersion] Internal expected index generation for a continued page.
+ * @property {string} [indexVersion] Internal expected index generation; when supplied, applies to every page including offset zero.
  */
 
 /**

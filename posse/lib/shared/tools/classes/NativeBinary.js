@@ -131,7 +131,7 @@ function isUnsupportedNativeVersionError(error) {
     || error?.remoteCode === "unsupported_native_version";
 }
 
-/** @typedef {Error & { code?: string, status?: number | null, remoteCode?: string }} NativeBinaryError */
+/** @typedef {Error & { code?: string, status?: number | null, remoteCode?: string, details?: { reason: string } }} NativeBinaryError */
 
 /**
  * @typedef {object} PulseEnvelopeProvider
@@ -151,6 +151,7 @@ function isUnsupportedNativeVersionError(error) {
  * @property {string[]} [workerArgs]
  * @property {boolean} [workerFallback]
  * @property {boolean} [idempotent]
+ * @property {number | null} [workerSessionId] Host identity required by session-bound handles.
  * @property {number} [maxBuffer]
  * @property {string} [requiredRoute]
  * @property {(event: unknown) => void} [onProgress]
@@ -160,6 +161,7 @@ function isUnsupportedNativeVersionError(error) {
 /**
  * @typedef {Object} RunResult
  * @property {boolean} ok
+ * @property {number} [workerSessionId]
  * @property {number | null} code
  * @property {string | null} [signal]
  * @property {string} stdout
@@ -660,17 +662,26 @@ export class NativeBinary {
     // command.
     const workerEnvelope = { ...envelope };
     delete workerEnvelope.pulse;
-    let response = await this.#daemon().request(workerEnvelope, {
-      signal: requestOpts.signal,
-      timeoutMs: requestOpts.timeoutMs,
-      onProgress: requestOpts.onProgress,
-    });
+    let workerSessionId;
+    const dispatch = () => {
+      const daemon = this.#daemon();
+      const pending = daemon.request(workerEnvelope, {
+        signal: requestOpts.signal,
+        timeoutMs: requestOpts.timeoutMs,
+        onProgress: requestOpts.onProgress,
+        expectedSessionId: opts.workerSessionId,
+      });
+      // request starts/selects its host synchronously, before yielding.
+      workerSessionId = daemon.sessionId();
+      return pending;
+    };
+    let response = await dispatch();
     if (response?._transportGone === true) {
       // The host this pulse state was delivered to is gone; the replacement
       // host is (re)seeded by the request-borne pulse on its next dispatch.
       this.#clearWorkerAuthState();
     }
-    if (response?._transportGone === true && requestOpts.signal?.aborted !== true && opts.idempotent !== false) {
+    if (response?._transportGone === true && requestOpts.signal?.aborted !== true && opts.idempotent !== false && opts.workerSessionId == null) {
       // Host died/retired under this request. Reads and idempotent methods
       // take one transparent retry on the replacement host, which keeps the
       // fast path instead of degrading to a per-call spawn. Non-idempotent
@@ -678,11 +689,7 @@ export class NativeBinary {
       // lost host may have committed before dying, so the caller must see
       // the failure rather than risk a double-apply.
       if (!route || await this.#ensureWorkerRouteAuth(route)) {
-        response = await this.#daemon().request(workerEnvelope, {
-          signal: requestOpts.signal,
-          timeoutMs: requestOpts.timeoutMs,
-          onProgress: requestOpts.onProgress,
-        });
+        response = await dispatch();
       }
     }
     if (response?._timedOut === true) {
@@ -703,12 +710,13 @@ export class NativeBinary {
       // worker may have committed before its reply disappeared. Preserve the
       // caller's non-idempotent contract and surface the uncertain outcome
       // instead of replaying it in a second process.
-      const replayUnsafe = opts.idempotent === false && reason !== "overloaded";
+      const replayUnsafe = opts.workerSessionId != null || (opts.idempotent === false && reason !== "overloaded");
       if (opts.workerFallback === false || replayUnsafe) {
         const error = /** @type {NativeBinaryError} */ (
           new Error(`native ${this.name} worker unavailable (${reason})`)
         );
         error.code = "POSSE_NATIVE_WORKER_UNAVAILABLE";
+        error.details = { reason };
         return { ok: false, code: null, signal: null, stdout: "", stderr: error.message, error };
       }
       return this.#runPerCall(subcommand, args, requestOpts);
@@ -740,6 +748,7 @@ export class NativeBinary {
       stderr: response?.ok === false ? String(/** @type {any} */ (response.error)?.message || "") : "",
       error: null,
       json: response,
+      workerSessionId,
     };
   }
 
