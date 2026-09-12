@@ -3,6 +3,7 @@
 // ATLAS handoff-state resolution, planner slice prefetch, and context rendering.
 
 import fs from "node:fs";
+import { identifierRoutingShadowDetail } from "./identifier-routing-observation.js";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { extractJson } from "../../../../shared/format/functions/json.js";
@@ -1925,9 +1926,14 @@ export function rankAtlasTreeScopeCandidates(candidates, {
 // + compressed-tree seed annotations). When usable, this IS the handoff
 // prefetch; the graph slice only runs as a fallback when the tree is
 // unavailable or empty.
-async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null, atlasConfig = null }) {
+async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null, atlasConfig = null, execute = _executeAtlasPrefetchForReuse }) {
+  let shadowEnabled = false;
+  let shadow = null;
+  let rankedFiles = [];
+  let shadowError = null;
   try {
     const effectiveAtlasConfig = atlasConfig || packet.atlas_config || getAtlasIntegrationConfig();
+    shadowEnabled = effectiveAtlasConfig?.treeIdentifierRoutingShadow === true;
     const entrypointRank = effectiveAtlasConfig?.prefetchEntrypointRank === true && prefetchMode === "broad";
     const treePayload = {
       ...(taskText ? { taskText } : {}),
@@ -1936,7 +1942,7 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
         ? ATLAS_TREE_SCOPE_RANK_POOL_FILES
         : ATLAS_TREE_SCOPE_MAX_FILES,
     };
-    const raw = await _executeAtlasPrefetchForReuse(packet, action, treePayload, {
+    const raw = await execute(packet, action, treePayload, {
       cwd: packet.cwd,
       config: effectiveAtlasConfig
         ? {
@@ -1951,14 +1957,18 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       gapReason: prefetchMode === "broad" ? "task_scope_discovery" : "research_seed_expansion",
     });
     if (String(raw || "").startsWith("Error:")) {
-      return { ok: false, action, error: String(raw).slice(0, 300) };
+      shadowError = String(raw).slice(0, 300);
+      return { ok: false, action, error: shadowError };
     }
     const parsed = extractAtlasJsonPayload(raw);
     if (!parsed) {
-      return { ok: false, action, error: `ATLAS returned non-JSON ${action} payload.` };
+      shadowError = `ATLAS returned non-JSON ${action} payload.`;
+      return { ok: false, action, error: shadowError };
     }
     const data = atlasResultData(action, parsed) || {};
+    shadow = data.identifierRoutingShadow || null;
     if (data.available === false) {
+      shadowError = String(data.reason || `${action}_unavailable`);
       return { ok: false, action, error: String(data.reason || `${action}_unavailable`).slice(0, 300) };
     }
     const rawCandidates = atlasResultField(action, parsed, "candidateFiles");
@@ -1990,6 +2000,8 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
         handoffTopChanged: candidates[0]?.path !== handoffShadow[0]?.path,
       };
     }
+    shadow = identifierRoutingShadow;
+    rankedFiles = candidates.map(entry => entry.path);
     const candidateFiles = _uniqueAtlasPaths(
       candidates.map((entry) => entry.path),
       ATLAS_TREE_SCOPE_MAX_FILES,
@@ -2027,7 +2039,24 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       identifierRoutingShadow,
     };
   } catch (err) {
-    return { ok: false, action, error: String(err?.message || err).slice(0, 300) };
+    shadowError = String(err?.message || err).slice(0, 300);
+    return { ok: false, action, error: shadowError };
+  } finally {
+    if (shadowEnabled) {
+      try {
+        const context = getObservationContext() || {};
+        recordObservation({
+          work_item_id: context.work_item_id ?? packet?.work_item_id ?? null,
+          job_id: context.job_id ?? packet?.job_id ?? null,
+          attempt_id: context.attempt_id ?? null,
+          observation_type: "atlas.prefetch.identifier_routing_shadow",
+          summary: "ATLAS prefetch identifier routing counterfactual",
+          detail: identifierRoutingShadowDetail({ shadow, rankedFiles, error: shadowError }),
+        });
+      } catch {
+        // Diagnostic persistence must never change handoff selection or success.
+      }
+    }
   }
 }
 
@@ -4039,3 +4068,5 @@ export function collectAtlasCoveredFiles(packet) {
   }
   return _pathSet(paths);
 }
+
+export const __testPrefetchAtlasTreeScope = _prefetchAtlasTreeScope;

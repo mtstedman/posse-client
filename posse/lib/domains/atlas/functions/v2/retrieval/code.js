@@ -7,6 +7,7 @@
 // `readFile` function so this module stays pure — the dispatcher decides
 // where to read from (worktree fs, in-memory fixture, etc.).
 
+import { CONTEXT_BOUNDING_POLICIES } from "../../../../../catalog/context.js";
 import { CODE_CONTENT_KINDS } from "../../../../../catalog/source-display.js";
 import { sourceDecisionNavigation } from "../../../../../shared/tools/functions/source-decision-points.js";
 import { parseSymbolId, symbolHit } from "./cards.js";
@@ -717,6 +718,9 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   const maxTokens = Math.min(
     typeof params.maxTokens === "number" && params.maxTokens > 0 ? params.maxTokens : codeWindowPolicy.maxWindowTokens,
     codeWindowPolicy.maxWindowTokens,
+    ["symbol", "block"].includes(params.granularity || "symbol")
+      ? Math.floor((CONTEXT_BOUNDING_POLICIES["code.window"].capChars - CODE_WINDOW_MAP_MAX_CHARS) / 4)
+      : Infinity,
   );
   const fileMode = Boolean(params.file && !params.symbolId);
   const oversizedFileMode = Boolean(
@@ -1364,3 +1368,5 @@ function positiveInteger(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }
+
+export const __testCodeNeedWindowWithNative = codeNeedWindowWithNative;

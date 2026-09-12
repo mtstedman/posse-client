@@ -149,6 +149,8 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
     tailChars: 1200,
     digest: "generic",
   }),
+  "symbol.get": Object.freeze({ capChars: 24000, headChars: 18000, tailChars: 1200, digest: "generic" }),
+  "atlas.symbol.get": Object.freeze({ capChars: 24000, headChars: 18000, tailChars: 1200, digest: "generic" }),
   "code.lens": Object.freeze({
     capChars: 24000,
     headChars: 18000,

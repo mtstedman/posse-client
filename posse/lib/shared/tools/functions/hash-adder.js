@@ -71,6 +71,7 @@ import {
   projectCompactCodeStructure,
 } from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
 import { sourceLineDisplay } from "./source-line-display.js";
+import { boundSourceWindowEnvelope } from "./source-window-budget.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -950,7 +951,7 @@ export function compactCodeWindowLensResult(toolName, result, {
   enabled = null,
   minChars = null,
 } = {}) {
-  const requestedTool = String(toolName || "");
+  const requestedTool = String(toolName || "").replace(/^atlas\./, "");
   const tool = requestedTool === "symbol.get" ? "code.window" : requestedTool;
   if ((tool !== "code.window" && tool !== "code.lens") || typeof result !== "string") {
     return { result, compacted: false };
@@ -1202,6 +1203,16 @@ export function compactCodeWindowLensResult(toolName, result, {
         data.truncated = true;
       }
     }
+    // This owner cap also applies when optional paging is off or an exact
+    // symbol body is exempt from the softer display threshold.
+    const hardPolicy = boundingPolicyFor(requestedTool, requestedTool);
+    if (tool === "code.window" && hardPolicy && hasHashRefScope(hashContext)) {
+      const overflow = boundSourceWindowEnvelope(envelope, hardPolicy.capChars);
+      if (overflow.length > 0) {
+        nativeContinuation = [...nativeContinuation, ...overflow];
+        compacted = true;
+      }
+    }
     const continuation = dedupeCodeWindowContinuationWindows([
       ...nativeContinuation,
       ...(displayPrefix ? [displayPrefix] : []),
@@ -1283,6 +1294,14 @@ export function compactCodeWindowLensResult(toolName, result, {
         recordHashSurfaceFailure(hashContext, tool, continuationPayload.length, err?.message || err);
       }
       if (surfaced?.ok && surfaced?.entry?.ref) {
+        // A second owner-cap pass must not orphan an already-issued native
+        // continuation when it moves more inline source out of this envelope.
+        if (data.traversal_ref?.ref) {
+          data.continuation_refs = [
+            ...(Array.isArray(data.continuation_refs) ? data.continuation_refs : []),
+            { ...data.traversal_ref, ranges: data.continuationRanges || [] },
+          ];
+        }
         data.traversal_ref = traversalRefSurface(surfaced.model_ref || surfaced.entry.ref, {
           kind: `${continuationTool.replace(".", "_")}_continuation`,
         });
@@ -1980,10 +1999,21 @@ export function appendHashRefIfMajor(toolName, result, {
     return result;
   }
 
-  const text = String(result);
-  const sizeChars = text.length;
+  let text = String(result);
+  const originalSizeChars = text.length;
   const effectiveObjectType = normalizeObjectType(objectType || toolName || "tool_result") || "tool_result";
   const boundPolicy = boundingPolicyFor(toolName, effectiveObjectType, { searchPaging });
+  const sourceWindow = /(?:^|\.)(?:code\.window|symbol\.get)$/.test(String(toolName));
+  if (sourceWindow && boundPolicy && text.length > boundPolicy.capChars) {
+    text = compactCodeWindowLensResult(toolName, text, { args, context, ownerScope }).result;
+    if (text.length > boundPolicy.capChars) {
+      // Storage failure or an invalid source envelope cannot become a sliced
+      // JSON citation. Keep the failure explicit and leave no false coverage.
+      recordHashSurfaceFailure(hashContext, toolName, originalSizeChars, "source window could not be paged within the owner cap");
+      return "Error: Source window could not be retained within the response limit. Request a smaller source scope.";
+    }
+  }
+  const sizeChars = text.length;
   const boundedIngress = !!(boundPolicy && sizeChars > boundPolicy.capChars);
   const descriptor = {
     kind: "tool_result",
@@ -2178,33 +2208,33 @@ export function appendHashRefIfMajor(toolName, result, {
   } catch (err) {
     recordHashSurfaceFailure(hashContext, toolName, sizeChars, err?.message || err);
     recordContextMeterSample(hashContext, toolName, {
-      fullSizeChars: sizeChars,
+      fullSizeChars: originalSizeChars,
       emittedSizeChars: sizeChars,
-      bounded: false,
+      bounded: originalSizeChars > sizeChars,
     });
-    return result;
+    return text;
   }
   if (!surfaced?.ok) {
     recordHashSurfaceFailure(hashContext, toolName, sizeChars, surfaced || "surface_failed");
     recordContextMeterSample(hashContext, toolName, {
-      fullSizeChars: sizeChars,
+      fullSizeChars: originalSizeChars,
       emittedSizeChars: sizeChars,
-      bounded: false,
+      bounded: originalSizeChars > sizeChars,
     });
-    return result;
+    return text;
   }
   recordHashObservation(hashContext, surfaced, toolName, sizeChars, { refRole: "citation" });
-  if (!boundedIngress) registerGetBriefEvidenceForCurrentCall(toolName, result, hashContext);
-  const stamped = `${result}${refStub({
+  if (!boundedIngress) registerGetBriefEvidenceForCurrentCall(toolName, text, hashContext);
+  const stamped = `${text}${refStub({
     entry: { ...surfaced.entry, ref: surfaced.model_ref || surfaced.entry.ref },
     toolName,
     sizeChars,
     refRole: "citation",
   })}`;
   recordContextMeterSample(hashContext, toolName, {
-    fullSizeChars: sizeChars,
+    fullSizeChars: originalSizeChars,
     emittedSizeChars: stamped.length,
-    bounded: false,
+    bounded: originalSizeChars > sizeChars,
     ref: surfaced.entry?.ref || null,
   });
   return stamped;
