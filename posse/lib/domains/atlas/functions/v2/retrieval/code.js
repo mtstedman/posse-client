@@ -660,9 +660,10 @@ async function materializeLensContinuationRanges(source, value) {
  *   repoId?: string | null,
  *   config?: Record<string, any>,
  *   findIdentifierRedirects?: (identifiers: string[], requestedFile: string) => Promise<Array<{identifier:string,matches:any[]}>>,
+ *   selectedSource?: Record<string, any> | null,
  * }} args
  */
-export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects }) {
+export async function codeNeedWindow({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects, selectedSource = null }) {
   if (Array.isArray(/** @type {any} */ (params).items)) {
     return errorEnvelope({
       action: "code.window",
@@ -671,11 +672,11 @@ export async function codeNeedWindow({ view, versionId, params, readFile, repoRo
       message: "code.window multi-selection is disabled; issue independent scalar calls together",
     });
   }
-  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects }, codeWindowNative);
+  return await codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects, selectedSource }, codeWindowNative);
 }
 
-async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects }, buildWindow) {
-  const resolved = await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
+async function codeNeedWindowWithNative({ view, versionId, params, readFile, repoRoot, ledger, repoId, config, findIdentifierRedirects, selectedSource = null }, buildWindow) {
+  const resolved = selectedSource || await resolveCodeTarget({ view, params, readFile, repoRoot, action: "code.window" });
   if (!resolved.ok) return errorEnvelope({
     action: "code.window",
     versionId,

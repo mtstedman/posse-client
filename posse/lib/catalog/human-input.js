@@ -396,7 +396,7 @@ const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
   approve: /\b(approve|approved|yes|allow|allowed|ok|okay|proceed|ship)\b/i,
   deny: /\b(deny|denied|reject|rejected|no|decline|declined|cancel|canceled|cancelled|block|blocked)\b/i,
   reject: /\b(reject|rejected|deny|denied|no|decline|declined|cancel|canceled|cancelled|block|blocked)\b/i,
-  retry: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again|replan|re-plan|simplify|split|narrow|claude|openai|codex|grok)\b/i,
+  retry: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again|replan|re-plan|simplify|split|narrow)\b/i,
   skip: /\b(skip|skipped|unblock|ignore|bypass|cancel|canceled|cancelled)\b/i,
   retry_assessment: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again)\b/i,
   retry_with_changes: /\b(retry|rertry|re-try|rerun|re-run|try again|run again|simplify|split|narrow|claude|openai|codex|grok)\b/i,
@@ -516,6 +516,16 @@ export function humanInputChoiceFromAnswer(answer, choices = []) {
   const text = String(answer || "").trim().toLowerCase();
   if (!text) return null;
   const normalizedChoices = normalizeHumanInputChoices(choices, { limit: Number.POSITIVE_INFINITY });
+  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\b[\s\S]{0,20}\b(?:pass|passed|approve|approved|accept|accepted|allow|allowed|mark done|succeed|succeeded)\b/.test(text)) {
+    // A negated approval can accompany an explicit recovery action. Parse
+    // that action without letting the negated word match an approval alias.
+    const retryMatch = /\bretry(?::[a-z0-9_-]+)?\b/.exec(text);
+    const retry = retryMatch && !/\b(?:not|never|don't|dont|cannot|can't|won't)\s+$/.test(text.slice(0, retryMatch.index))
+      ? retryMatch[0] : null;
+    const explicitRetry = normalizedChoices.find(choice => choice.toLowerCase() === retry);
+    if (explicitRetry) return explicitRetry;
+    return normalizedChoices.find((choice) => ["fail", "deny", "reject"].includes(choice.toLowerCase())) || null;
+  }
   // Resolve an exact provider-qualified choice before testing decorated
   // prefixes. Otherwise the earlier `retry` entry captures `retry:claude`
   // and the durable resolution loses the operator's selected route.

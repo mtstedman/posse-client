@@ -507,7 +507,6 @@ let atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().to
 // Fail-open deadman: if ATLAS-first gate remains locked while ATLAS calls are
 // stuck/cancelled in the host bridge, unlock native tools to avoid permanent
 // job deadlock. Keep this short so blocked runs recover promptly.
-const GATE_FAIL_OPEN_MS = 15000;
 const GATEWAY_SCOPE_STATE_LIMIT = 5000;
 const gatewayScopeStateByKey = new Map();
 const ownerAtlasGateEventSeqByScope = new Map();
@@ -1246,25 +1245,6 @@ function appendToolLog(entry = {}) {
     fs.appendFileSync(toolLogPath, `${JSON.stringify(payload)}\n`, "utf8");
   } catch {
     // Logging must never break tool execution.
-  }
-}
-
-function maybeFailOpenLockedGate(reason = "limbo_timeout") {
-  try {
-    if (!isGateActive({ scopeKey: gateScopeKey }) || isGateUnlocked({ scopeKey: gateScopeKey })) return false;
-    const state = gatewayScopeState(gateScopeKey);
-    const elapsedMs = Date.now() - state.gateBootedAtMs;
-    if (elapsedMs < GATE_FAIL_OPEN_MS) return false;
-    unlockForAtlasUnavailable({ reason, scopeKey: gateScopeKey });
-    appendToolLog({
-      event: "atlas_gate_fail_open",
-      reason,
-      elapsedMs,
-      role: roleName,
-    });
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -3548,6 +3528,10 @@ async function completeNativeToolCall({
 }
 
 async function handleRequest(msg) {
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+    sendMessage(jsonRpcError(null, -32600, "Invalid request: expected an object"));
+    return;
+  }
   const privateSession = hiddenSessionFromParams(msg?.params);
   const id = msg && Object.prototype.hasOwnProperty.call(msg, "id") ? msg.id : null;
   if (privateSession && !ownerHotProcess) {
@@ -3620,7 +3604,6 @@ async function handleRequest(msg) {
       }));
       return;
     }
-    maybeFailOpenLockedGate("limbo_timeout_tools_list");
     let nativeAllowedToolNames;
     let atlasAllowedActions;
     try {
@@ -3768,7 +3751,6 @@ async function handleRequest(msg) {
       }));
       return;
     }
-    maybeFailOpenLockedGate("limbo_timeout_tools_call");
     const requestedToolName = String(params?.name || "");
     const normalizedRequestToolName = _normalizeGatewayToolRequestName(requestedToolName);
     const requestedAtlasTool = normalizedRequestToolName.startsWith("atlas.") || normalizedRequestToolName.startsWith("atlas_");
@@ -4428,10 +4410,10 @@ function dispatchParsed(parsed) {
   const sessionBoot = session?.bootConfig || {};
   requestQueue = requestQueue.then(() => runWithObservationContext(
     {
-      work_item_id: Number(sessionBoot.workItemId) || mcpWorkItemId,
-      job_id: Number(sessionBoot.jobId) || mcpJobId,
-      attempt_id: Number(sessionBoot.attemptId) || mcpAttemptId,
-      agent_call_id: Number(sessionBoot.agentCallId) || mcpAgentCallId,
+      work_item_id: session ? Number(sessionBoot.workItemId) || null : mcpWorkItemId,
+      job_id: session ? Number(sessionBoot.jobId) || null : mcpJobId,
+      attempt_id: session ? Number(sessionBoot.attemptId) || null : mcpAttemptId,
+      agent_call_id: session ? Number(sessionBoot.agentCallId) || null : mcpAgentCallId,
     },
     () => handleRequest(parsed),
   )).catch((err) => {
@@ -4491,8 +4473,25 @@ function processInputBuffer() {
     if (headPreview.startsWith("content-length:")) {
       outboundFraming = "lsp";
       const separatorIndex = inputBuffer.indexOf("\r\n\r\n");
-      if (separatorIndex < 0) return; // incomplete header — wait for more
+      if (separatorIndex < 0) {
+        const headerText = inputBuffer.toString("utf8");
+        const invalidLine = /\n(?=[{\[]|content-length:)/iu.exec(headerText);
+        if (invalidLine || inputBuffer.length > 8192) {
+          const consumed = invalidLine ? invalidLine.index + 1 : inputBuffer.length;
+          inputBuffer = inputBuffer.subarray(consumed);
+          reportParseError("lsp", new Error("Unterminated Content-Length header"), consumed);
+          continue;
+        }
+        return; // A bounded partial header may still arrive in another chunk.
+      }
       const headerBlock = inputBuffer.subarray(0, separatorIndex).toString("utf8");
+      if (!headerBlock.split("\r\n").every((line) => /^[\w-]+:[^\r\n]*$/u.test(line))
+        || headerBlock.split("\r\n").filter(line => /^content-length:/iu.test(line)).length !== 1) {
+        const consumed = inputBuffer.indexOf(0x0a) + 1;
+        inputBuffer = inputBuffer.subarray(consumed);
+        reportParseError("lsp", new Error("Malformed Content-Length header"), consumed);
+        continue;
+      }
       const match = headerBlock.match(/content-length:\s*(\d+)/i);
       if (!match) {
         inputBuffer = inputBuffer.subarray(separatorIndex + 4);

@@ -178,13 +178,20 @@ export class RemoteComposer {
       })
       : "";
     const promptCap = Number(maxPromptChars);
-    const basePrompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment]);
+    const researchCoverage = packet?.recipient === "planner"
+      ? packet?._raw_payload?.research_evidence?.completion_coverage : null;
+    const inheritedResearch = packet?.recipient === "planner" ? joinPromptParts([
+      Array.isArray(researchCoverage) && researchCoverage.length > 0
+        ? `RESEARCH COMPLETION COVERAGE (claim indexes refer to rendered evidence labels):\n${JSON.stringify(researchCoverage)}` : "",
+    ]) : "";
+    const basePrompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment, inheritedResearch]);
     const evidenceBudget = Number.isFinite(promptCap) && promptCap > 0
       ? Math.max(0, Math.min(32000, promptCap - basePrompt.length - 2))
       : undefined;
     const localDevBriefEvidence = renderAutoExpandedDevBriefEvidence(packet?.hash_ref_packet, {
       maxChars: evidenceBudget,
     });
+    packet.dev_brief_evidence_dropped = localDevBriefEvidence.dropped;
     if (localDevBriefEvidence.text) {
       stageAutoExpandedDevBriefEvidence(packet, localDevBriefEvidence);
     }
@@ -193,6 +200,7 @@ export class RemoteComposer {
       remoteUserPrompt || skeleton,
       localPolicyOverlay,
       enrichment,
+      inheritedResearch,
       localDevBriefEvidence.text,
     ]);
     if (Number.isFinite(promptCap) && promptCap > 0 && prompt.length > promptCap) {

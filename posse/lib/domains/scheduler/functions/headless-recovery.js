@@ -134,20 +134,22 @@ export function recoverHeadlessHumanTimeouts({
         //    auto-requeue the original job in headless mode. Re-running a
         //    task that already needs human input/review just creates a loop
         //    (run -> review gate -> timeout -> run again). Leave the
-        //    original job parked and fail only the timed-out human_input.
+        //    original job terminal so it cannot remain stranded behind a
+        //    gate that no longer accepts an answer.
         try {
           humanPayload = parseJobPayload(hj);
           if (humanPayload.original_job_id) {
             const origJob = getJob(humanPayload.original_job_id);
             if (origJob && ["waiting_on_review", "waiting_on_human", "blocked"].includes(origJob.status)) {
+              updateJobStatus(origJob.id, "failed", { expectedStatuses: [origJob.status] });
               logEvent({
                 work_item_id: hj.work_item_id,
                 job_id: origJob.id,
                 event_type: EVENT_TYPES.JOB_HEADLESS_RECOVERY,
                 actor_type: EVENT_ACTORS.SCHEDULER,
-                message: `Left parked in ${origJob.status} after human_input #${hj.id} timed out in headless mode`,
+                message: `Failed after human_input #${hj.id} timed out in headless mode`,
               });
-              log(`  → left original job #${origJob.id} parked in ${origJob.status}`, "yellow");
+              log(`  → failed original job #${origJob.id} after its decision timed out`, "yellow");
             }
           }
         } catch (err) {

@@ -206,6 +206,7 @@ function inheritedEvidenceStatus(packet, db) {
   const offered = researchEvidenceRefs(evidence);
   const rows = coverageRowsForPacket(packet, db).map((row) => ({ row, detail: jsonObject(row.detail_json) }));
   const identities = packetRepositoryIdentities(packet);
+  const sourceVersions = new Map();
   const statuses = offered.map(({ lane, ref }) => {
     const sourceRefs = sourceRefsForOfferedRef(db, ref);
     const materialized = materializedRefChars(db, sourceRefs);
@@ -214,7 +215,10 @@ function inheritedEvidenceStatus(packet, db) {
     for (const candidate of candidates) {
       const detail = candidate.detail;
       if (!["delivered", "reused"].includes(String(detail.delivery_state || ""))) continue;
-      const current = currentSourceVersion(packet.cwd, detail.repo_rel_path);
+      if (!sourceVersions.has(detail.repo_rel_path)) {
+        sourceVersions.set(detail.repo_rel_path, currentSourceVersion(packet.cwd, detail.repo_rel_path));
+      }
+      const current = sourceVersions.get(detail.repo_rel_path);
       const identityCurrent = identities.has(String(detail.repository_identity || ""));
       const sourceCurrent = current?.version === detail.source_version;
       if (identityCurrent && sourceCurrent && materialized) {

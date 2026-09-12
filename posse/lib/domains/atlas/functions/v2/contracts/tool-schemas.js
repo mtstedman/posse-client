@@ -844,7 +844,7 @@ export function normalizeAtlasToolCall(call) {
   if (!schema) return call;
   const params = { .../** @type {Record<string, unknown>} */ (call) };
   delete params.action;
-  if (["code.window", "code.lens", "code.skeleton"].includes(action)
+  if (["code.window", "code.lens", "code.skeleton", "symbol.get"].includes(action)
     && typeof params.identifiersToFind === "string"
     && params.identifiersToFind.trim()) {
     const rawIdentifiers = params.identifiersToFind.trim();
@@ -1006,6 +1006,9 @@ function normalizeEnumValue(value, schema, path, required) {
   if (schema.enum.includes(value)) return value;
   const canonical = canonicalEnumValue(value, schema.enum, path);
   if (canonical !== undefined) return canonical;
+  // These selectors change which source or relationships are returned.
+  // Keep invalid values for validation instead of silently changing the query.
+  if (path === "$.mode" || path === "$.granularity") return value;
   if (Object.prototype.hasOwnProperty.call(schema, "default")) return schema.default;
   return required ? value : DELETE_NORMALIZED_FIELD;
 }

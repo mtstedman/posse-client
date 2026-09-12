@@ -73,4 +73,6 @@ export const TEST_SUBPROCESS_ENV_KEYS = Object.freeze([
   "programfiles", "programfiles(x86)", "programw6432", "systemdrive",
   "systemroot", "temp", "term", "tmp", "tmpdir", "tz", "user",
   "userdomain", "username", "userprofile", "windir",
+  "cargo_home", "rustup_home", "goroot", "gopath", "java_home",
+  "dotnet_root", "virtual_env", "pythonpath",
 ]);

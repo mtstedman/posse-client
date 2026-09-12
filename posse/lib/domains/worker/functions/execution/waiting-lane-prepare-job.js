@@ -603,6 +603,7 @@ export async function runWaitingLanePreparationJob(
     if (result.retry || result.deferred) {
       const delay = result.deferred ? WAITING_LANE_DISABLED_REQUEUE_DELAY_MS : 0;
       worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+        attemptId: attempt.attempt.id,
         readyAt: new Date(Date.now() + delay).toISOString(),
       });
       worker.emit(
@@ -646,6 +647,7 @@ export async function runWaitingLanePreparationJob(
         error_text: message,
       });
       worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+        attemptId: attempt.attempt.id,
         readyAt: new Date(Date.now() + 1000).toISOString(),
       });
       return;

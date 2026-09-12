@@ -363,11 +363,16 @@ export function releaseLease(jobId, leaseToken, finalStatus, { readyAt = null } 
   return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
 }
 
-export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus, { readyAt = null } = {}) {
+export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus, { readyAt = null, attemptId = null } = {}) {
   const db = getDb();
   const execute = () => {
     const released = releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt });
-    if (released) {
+    // Pre-attempt deferrals have nothing to refund. The execution owner must
+    // supply the attempt it created under this lease; assessment attempts use
+    // their own counter and never refund an implementation attempt.
+    if (released && attemptId != null && db.prepare(`
+      SELECT 1 FROM job_attempts WHERE id = ? AND job_id = ? AND attempt_kind IN ('implementation', 'human')
+    `).get(attemptId, jobId)) {
       // Inline of decrementAttemptCount to keep this module free of an
       // import back into queue/index.js.
       db.prepare(`UPDATE jobs SET attempt_count = MAX(0, attempt_count - 1), updated_at = ? WHERE id = ?`)

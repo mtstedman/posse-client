@@ -755,6 +755,8 @@ export function validatePlannedTask(task, index, taskCount) {
     errors.push("task_spec is required");
   }
 
+  if (jobType === "human_input") return errors;
+
   if (task.success_criteria == null) {
     errors.push("success_criteria is required");
   } else if (!(Array.isArray(task.success_criteria) || typeof task.success_criteria === "string")) {

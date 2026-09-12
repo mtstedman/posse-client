@@ -307,6 +307,7 @@ export function sanitizePlannerDevBrief(value, projectDir) {
     proof: triage.proof,
     support: triage.support,
     decoy: triage.decoy,
+    dropped: triage.dropped,
   });
 
   const hasSubstance = Object.keys(brief).some((key) => key !== "source");

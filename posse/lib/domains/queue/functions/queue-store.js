@@ -2407,7 +2407,7 @@ function abandonScopeRequestForCanceledGate(gateJob) {
 }
 
 /** Resolve a human answer for a request created by requestJobScopeExpansion. */
-export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" } = {}) {
+export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "", actorType = EVENT_ACTORS.HUMAN } = {}) {
   const humanJob = getJob(Number(approvalJobId));
   const humanPayload = parseJobPayloadObject(humanJob);
   if (!humanJob || humanPayload.review_type !== SCOPE_REQUEST_REVIEW_TYPE) {
@@ -2462,7 +2462,7 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
         work_item_id: original.work_item_id,
         job_id: original.id,
         event_type: EVENT_TYPES.JOB_SCOPE_REQUEST_APPROVED,
-        actor_type: EVENT_ACTORS.HUMAN,
+        actor_type: actorType,
         message: `Approved scope for ${entries.map((entry) => entry.path).join(", ")}`,
         event_json: JSON.stringify({ request, approval_job_id: humanJob.id, answer: String(answer || "").slice(0, 300) }),
       });
@@ -2498,7 +2498,7 @@ export function resolveJobScopeExpansion({ approvalJobId, approved, answer = "" 
       work_item_id: original.work_item_id,
       job_id: original.id,
       event_type: EVENT_TYPES.JOB_SCOPE_REQUEST_REJECTED,
-      actor_type: EVENT_ACTORS.HUMAN,
+      actor_type: actorType,
       message: error,
       event_json: JSON.stringify({ request, approval_job_id: humanJob.id, answer: String(answer || "").slice(0, 300) }),
     });
@@ -2822,7 +2822,11 @@ export function requeueForShutdown(jobId) {
           lease_expires_at = NULL,
           ready_at = ?,
           attempt_count = CASE
-            WHEN status = 'awaiting_assessment' THEN attempt_count
+            WHEN status != 'running' OR NOT EXISTS (
+              SELECT 1 FROM job_attempts a WHERE a.job_id = jobs.id
+                AND a.id = (SELECT MAX(id) FROM job_attempts WHERE job_id = jobs.id)
+                AND a.status = 'running' AND a.attempt_kind IN ('implementation', 'human')
+            ) THEN attempt_count
             ELSE MAX(0, attempt_count - 1)
           END,
           updated_at = ?
@@ -3249,7 +3253,11 @@ export function requeueOrphanedJobs({ force = false } = {}) {
             finished_at = NULL,
             ready_at = ?,
             attempt_count = CASE
-              WHEN status = 'awaiting_assessment' THEN attempt_count
+              WHEN status != 'running' OR NOT EXISTS (
+              SELECT 1 FROM job_attempts a WHERE a.job_id = jobs.id
+                AND a.id = (SELECT MAX(id) FROM job_attempts WHERE job_id = jobs.id)
+                AND a.status = 'running' AND a.attempt_kind IN ('implementation', 'human')
+            ) THEN attempt_count
               ELSE MAX(0, attempt_count - 1)
             END,
             updated_at = ?
@@ -3405,7 +3413,11 @@ export function requeueExpiredLeases() {
         finished_at = NULL,
         ready_at = ?,
         attempt_count = CASE
-          WHEN status = 'awaiting_assessment' THEN attempt_count
+          WHEN status != 'running' OR NOT EXISTS (
+              SELECT 1 FROM job_attempts a WHERE a.job_id = jobs.id
+                AND a.id = (SELECT MAX(id) FROM job_attempts WHERE job_id = jobs.id)
+                AND a.status = 'running' AND a.attempt_kind IN ('implementation', 'human')
+            ) THEN attempt_count
           ELSE MAX(0, attempt_count - 1)
         END,
         updated_at = ?

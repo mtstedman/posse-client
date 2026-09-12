@@ -15,10 +15,16 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
-import { SUB_AGENT_EVIDENCE_OUTCOMES } from "../../../catalog/sub-agent.js";
+import { SUB_AGENT_EVIDENCE_OUTCOMES, isSubAgentEvidenceSafeNativeTool, isSubAgentEvidenceSafeAtlasTool } from "../../../catalog/sub-agent.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_SESSION_RELEASED_NOTIFICATION,
+  MCP_REQUEST_TIMEOUT_MS,
+  MCP_CONCURRENT_ATLAS_ACTIONS,
+  MCP_COMPOSED_CHECK_TIMEOUT_MS,
+  MCP_CONTROL_METHODS,
+  MCP_OWNER_PROGRESS_HEADER,
+  MCP_OWNER_HEARTBEAT_INTERVAL_MS,
 } from "../../../catalog/mcp.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { roleUsesBoundedRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
@@ -97,6 +103,7 @@ import {
   subAgentMutationTargetKeys,
 } from "../../../domains/sub-agent/functions/routing-identity.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
+import { stripPosseMcpGatewayPrefix } from "../../../domains/integrations/functions/mcp-gateway.js";
 import {
   recordObservation,
   recordToolUseObservations,
@@ -153,7 +160,7 @@ import {
 } from "../../../domains/research/functions/owner-source-admission.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
-const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+const DEFAULT_REQUEST_TIMEOUT_MS = MCP_REQUEST_TIMEOUT_MS;
 const MAX_OWNER_ATLAS_GATE_EVENTS = 64;
 // A child that produces NO response across this many consecutive request
 // timeouts is treated as wedged (event loop blocked, native deadlock) rather
@@ -224,37 +231,7 @@ function researcherStructureProjection(session) {
 export const __testCompactCallerExecutorArgs = compactCallerExecutorArgs;
 export const __testResearcherStructureExecutorArgs = researcherStructureExecutorArgs;
 export const __testRememberCompactCallerPageVersion = rememberCompactCallerPageVersion;
-const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set([
-  "action.search",
-  "repo.status",
-  "repo.overview",
-  "repo.quality",
-  "buffer.status",
-  "symbol.search",
-  "symbol.card",
-  "symbol.overview",
-  "symbol.callers",
-  "symbol.get",
-  "tree.overview",
-  "tree.branch",
-  "tree.scope",
-  "tree.expand",
-  "slice.build",
-  "edit.plan",
-  "code.skeleton",
-  "code.lens",
-  "code.window",
-  "code.survey",
-  "code.structure",
-  "code.db",
-  "context.summary",
-  "review.delta",
-  "review.analyze",
-  "review.risk",
-  "file.read",
-  "policy.get",
-  "usage.stats",
-]);
+const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set(MCP_CONCURRENT_ATLAS_ACTIONS);
 const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 2;
 const SUB_AGENT_ROUTING_MIN_TARGETS = 2;
 const SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS = 3000;
@@ -790,7 +767,7 @@ function nestedAtlasAction(args = {}) {
 }
 
 function requestedToolPolicyName(name, args = {}) {
-  const raw = String(name || "").trim();
+  const raw = stripPosseMcpGatewayPrefix(name);
   if (raw.startsWith("atlas.") || raw.startsWith("atlas_")) {
     const action = normalizeAtlasActionName(raw);
     return {
@@ -809,6 +786,17 @@ function requestedToolPolicyName(name, args = {}) {
       ? String(args?.op || "").trim().toLowerCase()
       : "",
   };
+}
+
+function delegatedEvidenceRequestAllowed(name, args) {
+  const requested = requestedToolPolicyName(name, args);
+  const canonical = requested.suite === "atlas" && requested.name === "query"
+    ? `atlas.${requested.nested}` : `${requested.suite}.${requested.name}`;
+  return isSubAgentEvidenceSafeNativeTool(canonical) || isSubAgentEvidenceSafeAtlasTool(canonical);
+}
+
+export function __testDelegatedEvidenceRequestAllowed(name, args = {}) {
+  return delegatedEvidenceRequestAllowed(name, args);
 }
 
 export function __testAssessorFallbackReadKey(name, args = {}) {
@@ -970,7 +958,7 @@ function appendResearcherSymbolHandles(result, session) {
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   let issued = 0;
-  const text = first.text.replace(
+  let text = first.text.replace(
     /("symbolId"\s*:\s*")([0-9a-f]{64}:[0-9]+)(")/g,
     (match, prefix, symbolId, suffix) => {
       const handle = atlasSymbolHandleForId(session, symbolId);
@@ -979,6 +967,12 @@ function appendResearcherSymbolHandles(result, session) {
       return `${prefix}${symbolId}${suffix},"symbolHandle":"${handle}"`;
     },
   );
+  text = text.replace(/"([0-9a-f]{64}:[0-9]+)"\s*:/gu, (match, symbolId) => {
+    const handle = atlasSymbolHandleForId(session, symbolId);
+    if (!handle) return match;
+    issued += 1;
+    return `"${handle}":`;
+  });
   if (issued === 0 || text === first.text) return result;
   return annotateOwnerResultTransform({
     ...result,
@@ -1059,6 +1053,7 @@ function normalizeResearcherTypedAtlasResultFieldNames(result, session, toolName
 
 const TYPED_FLAT_WINDOW_FIELDS = new Set([
   "file",
+  "path",
   "granularity",
   "identifiersToFind",
   "maxTokens",
@@ -1089,8 +1084,9 @@ function normalizeResearcherTypedDispatcherEnvelope(policy, toolName, toolArgs =
   const flatArgs = /** @type {Record<string, any>} */ (toolArgs);
   const hasSymbol = [flatArgs.symbolId, flatArgs.symbolHandle]
     .some((value) => typeof value === "string" && value.trim() !== "");
-  const hasAnchoredFile = typeof flatArgs.file === "string"
-    && flatArgs.file.trim() !== ""
+  const anchoredFile = flatArgs.file ?? flatArgs.path;
+  const hasAnchoredFile = typeof anchoredFile === "string"
+    && anchoredFile.trim() !== ""
     && Array.isArray(flatArgs.identifiersToFind)
     && flatArgs.identifiersToFind.length > 0;
   if (hasSymbol === hasAnchoredFile) return { toolArgs, transforms: [] };
@@ -2556,9 +2552,17 @@ function researcherTypedArgumentRepair(session, toolName, toolArgs = {}) {
     && !String(toolArgs?.symbolId || "").trim()
     && !(toolArgs?.symbolRef && typeof toolArgs.symbolRef === "object"
       && !Array.isArray(toolArgs.symbolRef) && String(toolArgs.symbolRef.name || "").trim());
-  const problem = missingSymbolSelector
+  const nativeProblem = missingSymbolSelector
     ? "args.symbolId or args.symbolRef is required"
     : String(failure?.message || validation.message || "the selected action arguments are invalid");
+  const problem = nativeProblem.replace(/\b(?:maxFiles|maxLines|symbols|fileRelPaths|search_mode)\b/gu, (field) => {
+    if (field === "maxFiles" && ["code.survey", "code.structure"].includes(requested.name)) return "limit";
+    if (field === "maxLines" && requested.name === "code.skeleton") return "limit";
+    if (field === "symbols" && requested.name === "code.survey") return "identifiersToFind";
+    if (field === "fileRelPaths" && requested.name.startsWith("memory.")) return "paths";
+    if (field === "search_mode" && requested.name === "traverse_ref") return "searchMode";
+    return field;
+  });
   if (!resolveAtlasResearchRuntimeGuidance()) {
     const error = {
       code: "invalid_params",
@@ -3498,7 +3502,7 @@ function normalizedEvidenceDigestValue(value, key = "") {
   }
   if (typeof value === "string") {
     return value
-      .replace(/#[0-9a-f]{4,64}\b/gi, "#ref")
+      .replace(/#[0-9a-z]{4,64}\b/gi, "#ref")
       .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, "<timestamp>");
   }
   void key;
@@ -4255,6 +4259,8 @@ class PersistentMcpSession {
     this._proc = null;
     this._stdoutBuffer = Buffer.alloc(0);
     this._pending = new Map();
+    this._activeRequestId = null;
+    this._controlSession = null;
     this._seq = 0;
     this._consecutiveTimeouts = 0;
     this._crashesSinceHealthy = 0;
@@ -4434,6 +4440,7 @@ class PersistentMcpSession {
       entry.reject(error);
     }
     this._pending.clear();
+    this._activeRequestId = null;
   }
 
   ensureStarted() {
@@ -4511,7 +4518,8 @@ class PersistentMcpSession {
     }
   }
 
-  request(message = {}) {
+  request(message = {}, { signal = null } = {}) {
+    if (signal?.aborted) return Promise.reject(signal.reason || new Error("MCP request aborted"));
     this.ensureStarted();
     const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
     const outbound = cloneJson(message);
@@ -4521,37 +4529,67 @@ class PersistentMcpSession {
     }
     const internalId = `owner-${this.id}-${++this._seq}`;
     outbound.id = internalId;
+    let onAbort;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this._pending.delete(internalId);
-        // A wedged child (blocked event loop, native deadlock) never answers,
-        // so the caller's timeout is the only signal. Count consecutive
-        // no-response timeouts; once the child looks wedged rather than slow,
-        // force-kill it. Its exit drives finish() → rejects remaining pending,
-        // and the next request respawns a fresh child via ensureStarted. Without
-        // this the single shared gateway child stays wedged forever, costing
-        // every subsequent request a full 120s timeout.
-        this._consecutiveTimeouts += 1;
-        if (this._consecutiveTimeouts >= MAX_CONSECUTIVE_REQUEST_TIMEOUTS) {
-          try { this.stop({ force: true }); } catch { /* best effort; exit path handles pending */ }
-        }
-        reject(new Error(`MCP session request timed out after ${DEFAULT_REQUEST_TIMEOUT_MS}ms`));
-      }, DEFAULT_REQUEST_TIMEOUT_MS);
-      timer.unref?.();
       this._pending.set(internalId, {
         originalId: id,
         resolve,
         reject,
-        timer,
+        timer: null,
+        outbound,
       });
-      try {
-        this._write(outbound);
-      } catch (err) {
-        clearTimeout(timer);
-        this._pending.delete(internalId);
-        reject(err);
-      }
+      onAbort = () => {
+        // A disconnected queued caller must never execute later. An already
+        // running call retains its watchdog and serial slot until it replies.
+        if (this._activeRequestId !== internalId) this._pending.delete(internalId);
+        reject(signal.reason || new Error("MCP request aborted"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this._startNextRequest();
+    }).finally(() => signal?.removeEventListener("abort", onAbort));
+  }
+
+  requestControl(message, options = {}) {
+    if (!MCP_CONTROL_METHODS.includes(message?.method)) throw new Error("MCP control child only accepts handshake methods");
+    this._controlSession ||= new PersistentMcpSession({
+      id: `${this.id}-control`, token: this.token, claims: this.claims,
+      bootConfig: this.bootConfig, serverSpec: this.serverSpec, spawnImpl: this._spawn,
     });
+    this._controlSession.update({ serverSpec: this.serverSpec });
+    return this._controlSession.request(message, options);
+  }
+
+  _startNextRequest() {
+    if (this._activeRequestId || this._pending.size === 0) return;
+    const [id, entry] = this._pending.entries().next().value;
+    this._activeRequestId = id;
+    const tool = stripPosseMcpGatewayPrefix(entry.outbound?.params?.name);
+    const timeoutMs = ["run_scoped_checks", "run_test_suite"].includes(tool)
+      ? MCP_COMPOSED_CHECK_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS;
+    const onTimeout = () => {
+      // Retain the active entry after rejecting its caller: a late response
+      // releases the serial child and resets the watchdog. Queued requests
+      // cannot create additional strikes against that same slow operation.
+      this._consecutiveTimeouts += 1;
+      entry.reject(new Error(`MCP session request timed out after ${timeoutMs}ms`));
+      if (this._consecutiveTimeouts >= MAX_CONSECUTIVE_REQUEST_TIMEOUTS) {
+        this.stop({ force: true });
+        return;
+      }
+      entry.timer = setTimeout(onTimeout, timeoutMs);
+      entry.timer.unref?.();
+    };
+    entry.timer = setTimeout(onTimeout, timeoutMs);
+    entry.timer.unref?.();
+    try {
+      this._write(entry.outbound);
+    } catch (err) {
+      clearTimeout(entry.timer);
+      this._pending.delete(id);
+      this._activeRequestId = null;
+      entry.reject(err);
+      this._startNextRequest();
+    }
   }
 
   notify(message = {}) {
@@ -4626,6 +4664,7 @@ class PersistentMcpSession {
     const entry = this._pending.get(id);
     if (!entry) return;
     this._pending.delete(id);
+    this._activeRequestId = null;
     clearTimeout(entry.timer);
     // The child answered — it is alive and responsive, so clear any accumulated
     // timeout strikes and crash-loop history.
@@ -4633,6 +4672,7 @@ class PersistentMcpSession {
     this._crashesSinceHealthy = 0;
     const restored = { ...message, id: entry.originalId };
     entry.resolve(restored);
+    this._startNextRequest();
   }
 
   stop({ force = false } = {}) {
@@ -4661,6 +4701,13 @@ class PersistentMcpSession {
   }
 
   close({ force = false, timeoutMs = 10000 } = {}) {
+    return Promise.all([
+      this._closeProcess({ force, timeoutMs }),
+      this._controlSession?.close({ force, timeoutMs }),
+    ]).then(([closed]) => closed);
+  }
+
+  _closeProcess({ force = false, timeoutMs = 10000 } = {}) {
     const proc = this._proc;
     if (!proc || proc.exitCode != null) return Promise.resolve(false);
     return new Promise((resolve) => {
@@ -4971,7 +5018,10 @@ export class PersistentMcpOwner {
   }
 
   _notifyGatewaySessionRelease(session) {
-    return this._gatewaySession?.notify?.(gatewaySessionReleaseNotification(session)) === true;
+    const notification = gatewaySessionReleaseNotification(session);
+    const releasedExecution = this._gatewaySession?.notify?.(notification) === true;
+    const releasedControl = this._gatewaySession?._controlSession?.notify?.(notification) === true;
+    return releasedExecution || releasedControl;
   }
 
   _removeSession(id, { reason = "released", context = null, telemetry = true } = {}) {
@@ -5303,12 +5353,26 @@ export class PersistentMcpOwner {
       this._sessionIdsByTokenHash.set(tokenHash(token), id);
     }
     session.touch();
+    const requestAbort = new AbortController();
+    let heartbeat = null;
+    if (req.headers[MCP_OWNER_PROGRESS_HEADER] === "1") {
+      res.writeProcessing();
+      heartbeat = setInterval(() => {
+        if (!res.destroyed && !res.writableEnded) res.writeProcessing();
+      }, MCP_OWNER_HEARTBEAT_INTERVAL_MS);
+      heartbeat.unref?.();
+    }
+    res.once("close", () => {
+      if (heartbeat) clearInterval(heartbeat);
+      if (!res.writableFinished) requestAbort.abort(new Error("MCP client disconnected"));
+    });
     const method = String(message?.method || "").trim();
     if (method === MCP_SESSION_RELEASED_NOTIFICATION) {
       sendJson(res, 403, { ok: false, error: "reserved_owner_method" });
       return;
     }
-    const proofEvent = session.noteRequest(message);
+    const preflight = body?.preflight === true && method === "tools/list";
+    const proofEvent = preflight ? null : session.noteRequest(message);
     if (proofEvent === "initialize") {
       this._logAttachProof(session, "mcp.attach.initialize_seen", {
         method,
@@ -5358,6 +5422,15 @@ export class PersistentMcpOwner {
       if (message.method === "tools/call") {
         const providerToolName = String(message?.params?.name || "");
         const rawProviderToolArgs = message?.params?.arguments || {};
+        if (delegatedEvidence) {
+          if (!delegatedEvidenceRequestAllowed(providerToolName, rawProviderToolArgs)) {
+            sendJson(res, 200, { ok: true, message: {
+              jsonrpc: "2.0", id: message.id,
+              result: mcpToolErrorPayload("Citation children may only consume issued read-only evidence tools"),
+            } });
+            return;
+          }
+        }
         const normalizedProviderRequest = normalizeResearcherDispatcherRequest(
           policy,
           providerToolName,
@@ -5856,9 +5929,23 @@ export class PersistentMcpOwner {
           return;
         }
       }
-      let response = await this._gatewaySession.request(injectSessionContext(message, session, {
-        delegatedEvidence,
-      }));
+      const gatewayAdmission = {
+        tracked: Number.isSafeInteger(assignedResearchPhysicalCallStep),
+        assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
+      };
+      let response;
+      try {
+        const outbound = injectSessionContext(message, session, { delegatedEvidence });
+        response = MCP_CONTROL_METHODS.includes(message.method)
+          ? await this._gatewaySession.requestControl(outbound, { signal: requestAbort.signal })
+          : await this._gatewaySession.request(outbound, { signal: requestAbort.signal });
+      } catch (error) {
+        this._refundResearchInfrastructureFailure(session, gatewayAdmission, null, {
+          code: "native_transport_error", message: String(error?.message || error),
+        });
+        throw error;
+      }
+      this._refundResearchInfrastructureFailure(session, gatewayAdmission, response?.result);
       if (message.method === "tools/call") {
         const requested = requestedToolPolicyName(
           String(message?.params?.name || ""),
@@ -5966,7 +6053,8 @@ export class PersistentMcpOwner {
       if (message.method === "tools/list") {
         response = filterToolsListMessage(response, policy);
         recordProviderIssuedToolSurface(session, response);
-        const count = session.noteToolsList(response);
+        const count = preflight ? toolsListCount(response) : session.noteToolsList(response);
+        if (!preflight) {
         this._logAttachProof(session, "mcp.attach.tools_list_seen", {
           method,
           tool_count: count,
@@ -5977,6 +6065,7 @@ export class PersistentMcpOwner {
           agent_handoff_schema_chars: session.attachProof.agentHandoffToolSchemaChars,
           request_count: session.attachProof.requestCount,
         });
+        }
       }
       const completedTool = message.method === "tools/call"
         ? requestedToolPolicyName(
@@ -6720,7 +6809,8 @@ export class PersistentMcpOwner {
               ...hashContext,
               researchPhase: synthesisAdmission.researchPhase || null,
               enforcePolicy: roleUsesBoundedRefTraversal(session?.bootConfig?.role),
-              requireTraversal: isCanonicalAtlasTraversalTool(toolName, toolArgs),
+              requireTraversal: roleUsesBoundedRefTraversal(session?.bootConfig?.role)
+                || isCanonicalAtlasTraversalTool(toolName, toolArgs),
             });
         const deliveredRefs = createRef
           ? []

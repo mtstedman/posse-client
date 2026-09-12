@@ -5,7 +5,7 @@ import { atlasMemoryEnabled } from "../../policies/functions/memory-mode.js";
 
 const PROVIDER_ROLE_SET = new Set(PROVIDER_ROLE_NAMES);
 const WRITE_ROLES = new Set(["dev", "artificer"]);
-const READ_DB_ROLES = new Set(["researcher", "planner", "assessor"]);
+const READ_DB_ROLES = new Set(["assessor"]);
 const HANDOFF_ROLES = new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
 
 /**

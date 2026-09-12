@@ -12,7 +12,7 @@ import {
   buildPromptAsync,
   buildHandoffPacket,
   handoff,
-  packetToDynamicContextString,
+  attachRequestedContext,
   parseMissingContext,
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
@@ -256,6 +256,7 @@ export class DeveloperRole extends BaseRole {
     const prompt = await buildPromptAsync(ctx.packet, taskInstructions, {
       providerName: ctx.providerName,
     });
+    if (ctx.promptState) ctx.promptState.initialPrompt = prompt;
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {
       storeArtifact({
         work_item_id: job.work_item_id,
@@ -378,11 +379,10 @@ export class DeveloperRole extends BaseRole {
       });
 
       ctx.packet.related_files = [...new Set([...(ctx.packet.related_files || []), ...filesForStep])];
-      await handoff(ctx.packet, { providerName: ctx.providerName });
-      const expandedPrompt = await buildPromptAsync(ctx.packet, ctx.promptState?.taskInstructions || "", {
-        providerName: ctx.providerName,
-      })
-        + `\n\nADDITIONAL CONTEXT (requested by previous attempt):\n${packetToDynamicContextString(ctx.packet)}\n\nYou now have additional context. Continue implementation.`;
+      const delta = attachRequestedContext(ctx.packet, filesForStep);
+      ctx.promptState.requestedContext = `${ctx.promptState.requestedContext || ""}\n${delta}`;
+      const expandedPrompt = ctx.promptState.initialPrompt
+        + `\n\nADDITIONAL CONTEXT (requested by previous attempt):\n${ctx.promptState.requestedContext}\n\nYou now have additional context. Continue implementation.`;
 
       const retry = await this.providerClient.call(expandedPrompt, {
         ...this.buildOpts(job, ctx),

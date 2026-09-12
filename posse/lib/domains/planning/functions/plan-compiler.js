@@ -313,7 +313,7 @@ function mergeSkillId(skillIds, skillId) {
 }
 
 export function createJobsFromPlan(worker, planJob, tasks, {
-  atlasDevBriefsEnabled = false,
+  atlasDevBriefsEnabled: _atlasDevBriefsEnabled = false,
   sourceHashRefContext = null,
   fileKindProjectDir = worker.projectDir,
   artifactTaskSlug = (title, mode) => `${String(mode || "task")}-${String(title || "task")}`,
@@ -1078,6 +1078,27 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         const jobType = PLANNER_ALLOWED_TYPES.has(t.job_type) ? t.job_type : "dev";
         if (t.job_type && t.job_type !== jobType) {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: invalid job_type "${t.job_type}" in task "${t.title}" — defaulting to "dev"`);
+        }
+        if (jobType === "human_input") {
+          const gate = spawnFromRole(plannerRole, "succeeded", "human_input", {
+            work_item_id: planJob.work_item_id,
+            title: t.title,
+            parent_job_id: planJob.id,
+            priority: t.priority || planJob.priority || "normal",
+            model_tier: "cheap",
+            payload_json: JSON.stringify({
+              questions: Array.isArray(t.questions) && t.questions.length > 0
+                ? t.questions : [t.task_spec || t.instructions || t.title],
+              context: t.task_spec || null,
+              allow_best_judgment: false,
+            }),
+          });
+          allCreatedJobIds.add(gate.id);
+          recordCompiledTaskJob(i, gate.id);
+          jobMap.set(i, gate.id);
+          recordPlannerDependencies(gate, t, i);
+          createdCount++;
+          continue;
         }
         const normalizeTierAlias = (value) => {
           let current = value;
@@ -1885,7 +1906,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             : "execution policy";
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: policy adjusted ${policyChanges.join(", ")} in task "${t.title}" (${reasons})`);
         }
-        const devBriefResult = atlasDevBriefsEnabled && finalJobType === "dev" && taskMode === "code"
+        const devBriefResult = finalJobType === "dev" && taskMode === "code"
           ? sanitizePlannerDevBrief(t.dev_brief, worker.projectDir)
           : { brief: null, droppedFiles: [], droppedHashRefs: [] };
         if (devBriefResult.droppedFiles.length > 0 || devBriefResult.droppedHashRefs.length > 0) {
@@ -1893,7 +1914,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped ${droppedCount} ATLAS dev_brief item(s) in task "${t.title}"`);
         }
         let activeHashRefPacket = devBriefResult.hashRefPacket || null;
-        if (!activeHashRefPacket && atlasDevBriefsEnabled && finalJobType === "dev" && taskMode === "code" && researchMaterialFallbackPacket) {
+        if (!activeHashRefPacket && finalJobType === "dev" && taskMode === "code" && researchMaterialFallbackPacket) {
           activeHashRefPacket = researchMaterialFallbackPacket;
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: filled missing ATLAS hash_ref_packet for task "${t.title}" from the researcher's highest-priority material ref`);
         }

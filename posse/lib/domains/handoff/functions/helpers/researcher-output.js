@@ -137,6 +137,7 @@ export function researcherPacketToStructuredOutput(packet) {
       .map((claim) => claim?.[0])
       .filter(Boolean),
     claim_evidence: projectResearchClaimEvidence(report),
+    ...(Array.isArray(packet.completion_coverage) ? { completion_coverage: packet.completion_coverage } : {}),
     key_files: files,
     related_files: relatedFiles,
     key_symbols: Array.isArray(research.key_symbols) ? research.key_symbols : [],
@@ -259,8 +260,11 @@ export function normalizeResearcherCitationTriage(parsed, opts = {}) {
   for (const lane of HASH_REF_LANES) {
     const entries = Array.isArray(parsed?.[lane]) ? parsed[lane] : [];
     for (const entry of entries) {
-      if (out[lane].length >= maxRefsPerLane) break;
       const parts = citationEntryParts(entry);
+      if (out[lane].length >= maxRefsPerLane) {
+        out.dropped.push({ lane, ref: String(parts.rawRef || "").trim(), reason: "lane_ref_cap" });
+        continue;
+      }
       const hash = normalizeHashRefAlias(parts.rawRef);
       const lines = normalizeCitationLines(parts.lines);
       const selector = formatHashRefSelector(hash, lines);

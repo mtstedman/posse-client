@@ -1411,8 +1411,8 @@ export class Worker {
     return true;
   }
 
-  _releaseWithoutAttemptPenalty(job, leaseToken, finalStatus, { readyAt = null } = {}) {
-    const released = this._releaseLeaseWithoutAttemptPenalty(job.id, leaseToken, finalStatus, { readyAt });
+  _releaseWithoutAttemptPenalty(job, leaseToken, finalStatus, { readyAt = null, attemptId = null } = {}) {
+    const released = this._releaseLeaseWithoutAttemptPenalty(job.id, leaseToken, finalStatus, { readyAt, attemptId });
     if (released) {
       job.status = finalStatus;
       if (readyAt !== null) job.ready_at = readyAt;

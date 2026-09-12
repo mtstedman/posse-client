@@ -109,6 +109,16 @@ export class HashRefCapabilityStore {
     );
   }
 
+  evidenceForJobs(ref, jobIds) {
+    const ids = [...new Set(jobIds)].filter(id => Number.isSafeInteger(id) && id > 0);
+    if (!this.ids.workItemId || ids.length === 0) return null;
+    return deserialize(this.db.prepare(`
+      SELECT * FROM ${TABLES.evidence}
+      WHERE ref = ? AND work_item_id = ? AND job_id IN (${ids.map(() => "?").join(",")})
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(normalizeHashRefAlias(ref), this.ids.workItemId, ...ids));
+  }
+
   traversal(ref) {
     return deserialize(this._row(TABLES.traversal, ref));
   }

@@ -196,7 +196,7 @@ export const REPLAN_CANCELABLE_JOB_TYPES = new Set([
 // (research, plan, delegate, assess) which the runtime spawns implicitly,
 // and atlas_warm which is scheduled separately.
 export const PLANNER_ALLOWED_JOB_TYPES = new Set([
-  "dev", "artificer", "promote",
+  "dev", "artificer", "promote", "human_input",
 ]);
 
 // Job types that represent role-driven planning work (researcher/planner/

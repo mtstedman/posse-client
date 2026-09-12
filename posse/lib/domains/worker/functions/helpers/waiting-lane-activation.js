@@ -19,6 +19,7 @@ import {
   setWorkItemBranch,
 } from "../../../queue/functions/index.js";
 import { Worktree } from "../../../git/classes/Worktree.js";
+import { WorktreeLockTimeoutError } from "../../../git/classes/WorktreeLockTimeoutError.js";
 import { configureWorktreeScopeAsync } from "../../../git/functions/worktree-create.js";
 import {
   sleepMsAsync,
@@ -38,6 +39,7 @@ import { ledgerBranchForWi } from "../../../atlas/functions/v2/runtime-paths.js"
 import { withAtlasViewWriteLock } from "../../../atlas/functions/v2/view-write-lock.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { writeActiveWorktreeSentinel } from "./worktree-sentinel.js";
+import { isAbortError } from "../../../runtime/functions/yield.js";
 
 const ACTIVE_JOB_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
@@ -630,11 +632,8 @@ export async function tryActivateWaitingLaneForJobAsync({
   try {
     childSettlement = await cancelAndBoundedWait(claimed, job.id, { signal, waitMs: childWaitMs });
   } catch (error) {
-    closeActivationClaimForDeferred(
-      wi.id,
-      claimed,
-      stateReason("activation_child_settlement_error", error?.message || error),
-    );
+    // The activating claim is resumable and fences cleanup while a child exits.
+    if (isAbortError(error)) throw error;
     return {
       activated: false,
       fallback: false,
@@ -643,7 +642,6 @@ export async function tryActivateWaitingLaneForJobAsync({
     };
   }
   if (!childSettlement.settled) {
-    closeActivationClaimForDeferred(wi.id, claimed, "activation_children_still_active");
     return {
       activated: false,
       fallback: false,
@@ -979,6 +977,10 @@ export async function tryActivateWaitingLaneForJobAsync({
       }, { signal, waitMs: 30_000 });
     }, { signal, waitMs: 30_000 });
   } catch (error) {
+    if (isAbortError(error)) throw error;
+    if (WorktreeLockTimeoutError.is(error)) {
+      return { activated: false, fallback: false, deferred: true, preserve_path: expectedRoot, reason: "activation_lock_timeout" };
+    }
     let current = null;
     try { current = getWaitingLanePreparation(wi.id); } catch { /* state transition helpers below remain fail-closed */ }
     if (!attached) {

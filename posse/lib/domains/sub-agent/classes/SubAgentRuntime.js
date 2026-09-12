@@ -608,8 +608,7 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
   const entry = authorizedTools.get(tool);
   const readOnly = entry && !entry.mutating
     && (
-      entry.access === "read"
-      || isSubAgentEvidenceSafeNativeTool(tool)
+      isSubAgentEvidenceSafeNativeTool(tool)
       || isSubAgentEvidenceSafeAtlasTool(tool)
     );
   if (!readOnly || FORBIDDEN_CURSOR_TOOLS.has(tool)) {

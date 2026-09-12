@@ -20,6 +20,7 @@ import {
 import {
   isHashRefAlias,
   normalizeHashRefAlias,
+  parseHashRefSelector,
 } from "../../../catalog/hash-store.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getSetting } from "../../../domains/queue/functions/settings.js";
@@ -116,13 +117,23 @@ const TREE_SCOPE_DEFERRED_PAGES = Object.freeze([
 ]);
 
 function normalizeRef(value) {
-  return normalizeHashRefAlias(value);
+  const raw = String(value || "").trim();
+  const stub = raw.match(/^\[(?:traversal_ref|evidence_ref)\s+(#[0-9a-z]{4,12}(?::L?\d+-L?\d+)?)(?:\s[^\]]*)?\]$/iu);
+  const selector = parseHashRefSelector(stub?.[1] || raw);
+  return selector?.ref || normalizeHashRefAlias(value);
+}
+
+function normalizeTraversalSelector(value) {
+  const raw = String(value || "").trim();
+  const stub = raw.match(/^\[(?:traversal_ref|evidence_ref)\s+(#[0-9a-z]{4,12}(?::L?\d+-L?\d+)?)(?:\s[^\]]*)?\]$/iu);
+  const selector = parseHashRefSelector(stub?.[1] || raw);
+  return selector?.lines ? `${selector.ref}:L${selector.lines.start}-L${selector.lines.end}` : normalizeRef(value);
 }
 
 function refInputs(args = {}) {
   const out = [];
   const push = (value) => {
-    const normalized = normalizeRef(value);
+    const normalized = normalizeTraversalSelector(value);
     if (normalized && !out.includes(normalized)) out.push(normalized);
   };
   const addMany = (value) => {
@@ -131,7 +142,7 @@ function refInputs(args = {}) {
       return;
     }
     if (typeof value === "string" && /[\s,;]+/.test(value.trim())) {
-      for (const entry of value.split(/[\s,;]+/)) push(entry);
+      for (const entry of value.match(/\[(?:traversal_ref|evidence_ref)\s+[^\]]+\]|[^\s,;]+/giu) || []) push(entry);
       return;
     }
     push(value);
@@ -1644,11 +1655,9 @@ function registerGetBriefEvidenceForCurrentCall(toolName, result, hashContext) {
       if (fetchHashRefEvidenceForContext(hashContext, ref)?.found) continue;
       const source = fetchHashRefForContext(hashContext, ref);
       if (!source?.found || source.entry?.entry_kind !== "materialized" || source.entry.payload_text == null) continue;
-      const created = createHashRefEvidenceForContext(hashContext, {
+      const created = issueHashRefTraversalForContext(hashContext, {
         ref: source.entry.ref,
         sourceRef: source.entry.ref,
-        selector: { mode: "full" },
-        viewText: source.entry.payload_text,
         sourceContentHash: source.entry.content_hash,
       });
       if (created?.ok) promoted += 1;
@@ -2787,7 +2796,9 @@ export function fetchHashRefTool(args = {}, {
       }
     : args;
 
-  const fetchOne = (ref) => {
+  const fetchOne = (requestedRef) => {
+    const requestedSelector = parseHashRefSelector(requestedRef);
+    const ref = requestedSelector?.ref || normalizeRef(requestedRef);
     const traversal = isHashRefAlias(ref)
       ? fetchHashRefTraversalForContext(hashContext, ref)
       : { found: false };
@@ -2803,7 +2814,7 @@ export function fetchHashRefTool(args = {}, {
         }
       : (isHashRefAlias(ref) ? fetchHashRefForContext(hashContext, ref) : invalidRefResult(ref));
     const storedSelector = traversal?.capability?.selector || null;
-    const selectorArgs = storedSelector
+    let selectorArgs = storedSelector
       ? {
           ...deliveryArgs,
           ...storedSelector,
@@ -2834,6 +2845,22 @@ export function fetchHashRefTool(args = {}, {
           } : {}),
         }
       : deliveryArgs;
+    if (requestedSelector?.lines && result?.entry?.entry_kind === "materialized") {
+      if (args.offset != null || args.search || storedSelector?.search || Number(storedSelector?.offset) > 0) {
+        return JSON.stringify({ ok: false, ref, error: "A line-range selector cannot be combined with an offset, search, or positioned cursor. Use the issued cursor without a range." });
+      }
+      const text = String(result.entry.payload_text || "");
+      const rows = [...text.matchAll(/[^\n]*(?:\n|$)/g)].filter(match => match[0].length > 0);
+      const { start, end } = requestedSelector.lines;
+      if (start < 1 || end > rows.length || (storedSelector?.limit != null && rows[end - 1].index + rows[end - 1][0].replace(/\r?\n$/, "").length > storedSelector.limit)) {
+        return JSON.stringify({ ok: false, ref, error: "Line range exceeds the issued source view." });
+      }
+      selectorArgs = {
+        ...selectorArgs,
+        offset: rows[start - 1].index,
+        end_offset: rows[end - 1].index + rows[end - 1][0].replace(/\r?\n$/, "").length,
+      };
+    }
     const history = result?.entry?.content_hash
       ? hashRefFetchObservationLedger({
           jobId: hashContext.job_id,
@@ -3100,7 +3127,10 @@ function createOneHashRef(hashContext, item = {}) {
         ...(reason ? { non_citable_reason: reason } : {}),
       };
     }
-    const sliced = sliceSourcePayload(fetched.entry.payload_text, item);
+    const sourceSelector = parseHashRefSelector(sourceRef);
+    const selectorLines = sourceSelector?.lines;
+    const sliced = sliceSourcePayload(fetched.entry.payload_text, selectorLines && item.lines == null
+      ? { ...item, lines: `${selectorLines.start}-${selectorLines.end}` } : item);
     if (sliced.error) return createRefError(sliced.error, { source_ref: sourceAlias });
     payload = sliced.text;
     sliceNote = sliced.slice;

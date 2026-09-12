@@ -688,6 +688,31 @@ function _attachRelatedFiles(packet) {
     maxRelatedFilesTotal: _maxRelatedFilesTotal(),
   });
 }
+
+export function attachRequestedContext(packet, paths) {
+  // An explicit follow-up read is different from speculative prefetch. Reuse
+  // the bounded file attachment path without rebuilding the original handoff.
+  const editable = new Set([...(packet.files_to_modify || []), ...(packet.files_to_create || [])]);
+  const requested = [...new Set(paths)];
+  const writable = { cwd: packet.cwd, files_to_modify: [], related_files: requested.filter(p => editable.has(p)) };
+  _attachRelatedFiles(writable);
+  const delta = {
+    cwd: packet.cwd, context_hints: packet.context_hints,
+    files_to_modify: requested.filter(p => editable.has(p)),
+    editable_files: writable.related_files_content,
+    editable_file_metadata: Object.fromEntries(Object.keys(writable.related_files_content).map(p => [p, { exists: true, contentPreloaded: true, preloadKind: "full" }])),
+    related_files: requested.filter(p => !editable.has(p)),
+  };
+  attachRelatedFilesFromModule(delta, {
+    readFile: _readFile,
+    maxRelatedFilesTotal: Math.max(0, _maxRelatedFilesTotal() - writable.related_files_total_bytes),
+  });
+  delta.related_files_dropped = [...writable.related_files_dropped, ...delta.related_files_dropped];
+  Object.assign(packet.editable_files ||= {}, delta.editable_files);
+  Object.assign(packet.editable_file_metadata ||= {}, delta.editable_file_metadata);
+  Object.assign(packet.related_files_content ||= {}, delta.related_files_content);
+  return packetToDynamicContextStringFromModule(delta);
+}
 function _attachDirectoryTree(packet) {
   return attachDirectoryTreeFromModule(packet, {
     directoryTree: _directoryTree,
@@ -1872,6 +1897,7 @@ function _applyTraversalCompletionCheck(packet) {
   );
   const check = buildTraversalCompletionCheckFromModule(packet, { mode, maxChars });
   packet.traversal_completion_check = check;
+  if (check.mode === "off") return check;
 
   try {
     const ctx = getObservationContext() || {};
@@ -2430,6 +2456,12 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
     maxContextChars: Number(opts.maxContextChars) > 0 ? Number(opts.maxContextChars) : _maxContextChars(),
   };
 
+  if (packet.recipient === "planner") {
+    const research = packet._raw_payload?.research_evidence;
+    if (research) packet.hash_ref_packet = issueHandoffTraversalRefsForCurrentCall(packet, {
+      source: "atlas", ...research,
+    });
+  }
   if (packet.recipient === "dev" || packet.job_type === "fix") {
     const issuedHashRefPacket = issueHandoffTraversalRefsForCurrentCall(
       packet,
@@ -2443,6 +2475,7 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
           job_id: packet.job_id ?? observation.job_id ?? null,
           attempt_id: observation.attempt_id ?? packet.attempt_id ?? null,
           agent_call_id: observation.agent_call_id ?? packet.agent_call_id ?? null,
+          cwd: packet.cwd,
         },
       });
       packet.hash_ref_packet = expanded.packet || issuedHashRefPacket;

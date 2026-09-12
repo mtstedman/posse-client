@@ -562,7 +562,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash"],
       imageGeneration: ["generate_image"],
     }),
     // Assessor carries project_db_query on the READ lane so it can verify the
@@ -573,17 +573,13 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
       write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
     }),
-    // researcher/planner carry project_db_query as a READ-lane tool: the
-    // execution capability cap limits them to SELECT/inspection regardless of
-    // the operator grant, and the contract gate drops the tool entirely when
-    // the repo grants no read permission.
     researcher: Object.freeze({
-      read: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
-      write: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      write: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     planner: Object.freeze({
-      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
-      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool
@@ -593,7 +589,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     delegator: Object.freeze({ read: [], write: [] }),
     default: Object.freeze({
       read: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "bash", "project_db_query"],
+      write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "bash"],
     }),
   }),
   deterministicMcp: Object.freeze({
@@ -662,7 +658,7 @@ export const DETERMINISTIC_OCR_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.ocr;
 // they need the same opt-in web lane that Posse splits across researcher,
 // assessor, and artificer roles. The account toggle and provider policy still
 // fail closed.
-export const WEB_TOOL_ROLES = new Set(["researcher", "assessor", "artificer", "native"]);
+export const WEB_TOOL_ROLES = new Set(["researcher", "assessor", "native"]);
 export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"]);
 
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
@@ -931,7 +927,7 @@ export function getDeterministicMcpToolNames(role, {
   // operator grant, read-lane roles (researcher/planner) are capped to SELECT
   // at execution. The MCP gateway's runtimeToolAvailable() hides the tool
   // unless this repo's admin config enables it with a usable grant.
-  if (["dev", "artificer", "assessor", "researcher", "planner"].includes(role)) tools.push("project_db_query");
+  if (["dev", "assessor"].includes(role)) tools.push("project_db_query");
   if (role === "researcher" && !atlasAvailable) {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);

@@ -34,6 +34,7 @@ import {
   verificationOutcome,
 } from "./verification-outcome.js";
 import { resolveRepositoryVerificationPlan } from "../../../verification/functions/verification-plan.js";
+import { TEST_SCRIPT_NO_VERIFICATION_REASON } from "../../../../catalog/verification.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
 const RECEIPT_MIME_TYPE = "application/vnd.posse.test-execution+json";
@@ -240,8 +241,8 @@ async function runCommand(command, {
       }
     } catch (error) {
       resolveAfterBrokerClose({
-        status: "failed",
-        ok: false,
+        status: "infrastructure_error",
+        ok: null,
         code: error?.code ?? null,
         signal: null,
         timed_out: false,
@@ -278,7 +279,7 @@ async function runCommand(command, {
       if (idleTimer) clearTimeout(idleTimer);
       const status = timedOut
         ? "timed_out"
-        : error
+        : error || signal
           ? "infrastructure_error"
           : code === 0 && !error
             ? "passed"
@@ -297,7 +298,9 @@ async function runCommand(command, {
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
         timeout_kind: timedOut ? timeoutKind : null,
-        reason: error
+        reason: signal && !timedOut
+          ? `test_runner_terminated:${signal}`
+          : error
           ? `test_runner_spawn_failed:${error.code || "unknown"}`
           : timedOut && timeoutKind === "idle"
             ? "test_idle_timeout"
@@ -933,6 +936,7 @@ function referencedPackageScripts(command, scripts = {}) {
 }
 
 function declaredScriptValidation(definitions = []) {
+  let hasPotentialVerification = false;
   const validateCommand = (command) => {
     let words;
     try { words = parseCommandArguments(command); } catch { words = String(command || "").split(/\s+/); }
@@ -945,6 +949,17 @@ function declaredScriptValidation(definitions = []) {
     if (flags.some((flag) => INTERACTIVE_TEST_FLAGS.has(flag))) {
       return { ok: false, reason: "test_script_contains_interactive_flag" };
     }
+    // Reject literal placeholder scripts, while leaving unknown runners and
+    // shell compositions to execution. A lifecycle hook can supply the check.
+    const literal = !/[\n\r$`;&|<>]/.test(command);
+    const executable = String(words[0] || "");
+    const knownNoop = literal && (
+      words.length === 0
+      || executable === "echo" || executable === "printf"
+      || (words.length === 1 && ["true", ":"].includes(executable))
+      || (executable === "exit" && words.length === 2 && words[1] === "0")
+    );
+    if (!knownNoop) hasPotentialVerification = true;
     return { ok: true };
   };
 
@@ -969,7 +984,9 @@ function declaredScriptValidation(definitions = []) {
       }
     }
   }
-  return { ok: true };
+  return hasPotentialVerification
+    ? { ok: true }
+    : { ok: false, reason: TEST_SCRIPT_NO_VERIFICATION_REASON };
 }
 
 export function validatePlannerTestCommandForRepository(command, cwd) {
@@ -1612,6 +1629,9 @@ async function executeReceipt({
     }
   }
 
+  const testCounts = testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
+  const noTestsExecuted = result.status === "passed" && testCounts
+    && (testCounts.total === 0 || testCounts.skipped === testCounts.total);
   const receiptData = {
     kind: RECEIPT_KIND,
     schema_version: RECEIPT_SCHEMA_VERSION,
@@ -1627,10 +1647,11 @@ async function executeReceipt({
     tested_integrated_descendant: testedIntegratedDescendant,
     status: cleanupStatus === "failed" || cleanupStatus === "unavailable"
       ? "infrastructure_error"
-      : result.status,
+      : noTestsExecuted ? "skipped" : result.status,
     ok: cleanupStatus === "failed" || cleanupStatus === "unavailable"
       ? null
-      : result.ok,
+      : noTestsExecuted ? null : result.ok,
+    test_counts: testCounts,
     exit_code: result.code,
     signal: result.signal,
     timed_out: result.timed_out,
@@ -1638,7 +1659,7 @@ async function executeReceipt({
     ...receiptIdentity,
     duration_ms: result.duration_ms,
     failure_fingerprint: compactFailureFingerprint(result),
-    reason: cleanupError || result.reason || null,
+    reason: cleanupError || (noTestsExecuted ? "no_tests_executed" : result.reason) || null,
     missing_executable: result.missing_executable || null,
     cleanup_status: cleanupStatus,
     stdout: result.stdout,
@@ -1837,9 +1858,44 @@ function compactOutput(receipt) {
     .slice(-MAX_EVIDENCE_OUTPUT_CHARS);
 }
 
+// Parse runner summaries, never assertions about success in arbitrary prose.
+// Unknown formats retain their exit-code result with explicitly unknown counts.
+export function testExecutionCounts(output = "") {
+  const text = String(output).replace(/\x1b\[[0-9;]*m/g, "");
+  const node = [...text.matchAll(/^\s*(?:#|ℹ) tests\s+(\d+)\s*$/gm)];
+  if (node.length) {
+    return {
+      total: node.reduce((sum, match) => sum + Number(match[1]), 0),
+      skipped: [...text.matchAll(/^\s*(?:#|ℹ) (?:skipped|todo)\s+(\d+)\s*$/gm)]
+        .reduce((sum, match) => sum + Number(match[1]), 0),
+    };
+  }
+  const jest = [...text.matchAll(/^\s*Tests:\s*(.*?)(\d+) total\s*$/gm)];
+  if (jest.length) return {
+    total: jest.reduce((sum, match) => sum + Number(match[2]), 0),
+    skipped: jest.reduce((sum, match) => sum + [...match[1].matchAll(/(\d+) (?:skipped|todo)/g)]
+      .reduce((count, skip) => count + Number(skip[1]), 0), 0),
+  };
+  const cargo = [...text.matchAll(/^\s*test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;/gm)];
+  if (cargo.length) return {
+    total: cargo.reduce((sum, match) => sum + Number(match[1]) + Number(match[2]) + Number(match[3]), 0),
+    skipped: cargo.reduce((sum, match) => sum + Number(match[3]), 0),
+  };
+  const php = /\bTests:\s*(\d+),\s*Assertions:\s*\d+/.exec(text);
+  if (php) return { total: Number(php[1]), skipped: Number(/Skipped:\s*(\d+)/.exec(text)?.[1] || 0) };
+  // Go's package summaries do not report case counts. A testless package
+  // cannot erase evidence from another package in the same `go test ./...`.
+  if (/^\s*(?:ok|FAIL)\s+\S+|^\s*--- (?:PASS|FAIL|SKIP):/m.test(text)) return null;
+  if (/^\s*(?:No tests (?:executed|found|collected)[.!]?|No tests found, exiting with code 0|no tests ran in .+|\?\s+\S+\s+\[no test files\])\s*$/mi.test(text)) {
+    return { total: 0, skipped: 0 };
+  }
+  return null;
+}
+
 export function testExecutionDelta(baseline, postChange) {
   if (!baseline) return "post_only";
   if (!postChange) return "baseline_only";
+  if (baseline.status === "passed" && postChange.status === "timed_out") return "regression";
   if (isVerificationInfrastructureOutcome(baseline)
     || isVerificationInfrastructureOutcome(postChange)) return "infrastructure_unavailable";
   const failed = (receipt) => receipt?.status === "failed";

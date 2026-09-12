@@ -32,8 +32,6 @@ export const SUB_AGENT_LIMITS = Object.freeze({
 
 export const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS = Object.freeze([
   "tools.read_file",
-  "tools.pull_brief",
-  "tools.get_brief",
   "tools.list_files",
   "tools.search_files",
   "tools.git_history",

@@ -103,6 +103,13 @@ function resolveAtlasAuthEnvelope(opts, manager) {
 export function buildAtlasNativeMethodRequest(method, payload) {
   const name = String(method || "").trim();
   if (!name) throw new TypeError("ATLAS native method name is required");
+  // Public Atlas confidence inputs are percentages. The native complete-tool
+  // ABI accepts fractional confidence; normalize once at that boundary.
+  const toolPayload = /** @type {Record<string, any> | null} */ (payload);
+  if (name === "execute-tool" && ["symbol.callers", "symbol.overview"].includes(toolPayload?.action)
+    && toolPayload?.args?.minConfidence != null) {
+    payload = { ...toolPayload, args: { ...toolPayload.args, minConfidence: Number(toolPayload.args.minConfidence) / 100 } };
+  }
   return {
     protocol: ATLAS_NATIVE_PROTOCOL,
     method: name,

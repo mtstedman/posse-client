@@ -20,6 +20,7 @@ import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { WorktreeLock, AsyncWorktreeLock } from "../classes/WorktreeLock.js";
+import { WorktreeLockTimeoutError } from "../classes/WorktreeLockTimeoutError.js";
 import { runGitNativeMethod } from "./native/invoke.js";
 
 const WORKTREE_LOCK_STALE_MS = 2 * 60 * 1000;
@@ -677,7 +678,7 @@ export function withWorktreeLock(wtPath, projectDir, fn, opts = {}) {
   const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   const lock = acquireWorktreeLock(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
+    throw new WorktreeLockTimeoutError(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`, lockPath);
   }
   try {
     return fn();
@@ -690,7 +691,7 @@ export async function withWorktreeLockAsync(wtPath, projectDir, fn, opts = {}) {
   const lockPath = worktreeLockPath(wtPath, projectDir, { disabled: true });
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
+    throw new WorktreeLockTimeoutError(`Timed out waiting for worktree lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`, lockPath);
   }
   try {
     return await fn();
@@ -703,7 +704,7 @@ export async function withRepositoryWorktreeAdminLockAsync(wtPath, projectDir, f
   const lockPath = repositoryWorktreeAdminLockPath(wtPath, projectDir, { disabled: true });
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for repository worktree-admin lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
+    throw new WorktreeLockTimeoutError(`Timed out waiting for repository worktree-admin lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`, lockPath);
   }
   try {
     return await fn();
@@ -716,7 +717,7 @@ export function withBranchLock(wtPath, branchName, projectDir, fn, opts = {}) {
   const lockPath = gitBranchLockPath(wtPath, branchName, projectDir);
   const lock = acquireWorktreeLock(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for git branch lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
+    throw new WorktreeLockTimeoutError(`Timed out waiting for git branch lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`, lockPath);
   }
   try {
     return fn();
@@ -729,7 +730,7 @@ export async function withBranchLockAsync(wtPath, branchName, projectDir, fn, op
   const lockPath = gitBranchLockPath(wtPath, branchName, projectDir);
   const lock = await acquireWorktreeLockAsync(lockPath, opts);
   if (!lock.acquired) {
-    throw new Error(`Timed out waiting for git branch lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`);
+    throw new WorktreeLockTimeoutError(`Timed out waiting for git branch lock: ${lockPath}${worktreeLockTimeoutDetail(lock)}`, lockPath);
   }
   try {
     return await fn();

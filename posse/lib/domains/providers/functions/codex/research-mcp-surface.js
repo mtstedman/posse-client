@@ -92,7 +92,7 @@ async function listViaShim(config) {
 export async function prepareCodexResearchMcpSurface(attachment, { mcpGate = null } = {}) {
   if (!attachment.codexCodeMode && !attachment.codexNativeBatching) return { declarations: [], atlasTools: attachment.atlasTools || [] };
   const tools = mcpGate?.rpc
-    ? await listCatalog(message => mcpGate.rpc(message, { timeoutMs: SETUP_TIMEOUT_MS, maxResponseBytes: MAX_CATALOG_BYTES }))
+    ? await listCatalog(message => mcpGate.rpc(message, { timeoutMs: SETUP_TIMEOUT_MS, maxResponseBytes: MAX_CATALOG_BYTES, preflight: true }))
     : await listViaShim(attachment.serverConfig);
   const byName = new Map();
   for (const tool of tools) {

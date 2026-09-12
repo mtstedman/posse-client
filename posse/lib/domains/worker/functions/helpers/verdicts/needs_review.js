@@ -46,7 +46,8 @@ export function handle(job, verdict, ctx) {
     return;
   }
 
-  if (!asksForOperatorReview) {
+  const confidenceReview = verdict?._assessment_confidence_review === true;
+  if (!asksForOperatorReview && !confidenceReview) {
     const changed = typeof ctx.updateJobStatus === "function"
       ? ctx.updateJobStatus("failed")
       : updateJobStatus(job.id, "failed");
@@ -71,7 +72,8 @@ export function handle(job, verdict, ctx) {
 
   // Always spawn a human_input job. Without one, waiting_on_review is a
   // permanent trap with no mechanism to unblock.
-  const questions = explicitHumanQuestions;
+  const questions = explicitHumanQuestions.length > 0 ? explicitHumanQuestions
+    : ["Automatic assessment could not establish sufficient confidence. Should this work pass or fail?"];
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,
     title: `Review needed: ${job.title}`,
@@ -82,12 +84,12 @@ export function handle(job, verdict, ctx) {
       original_job_id: job.id,
       questions,
       context: verdict.reasons,
-      ...(visualAcceptanceReview
+      ...(visualAcceptanceReview || confidenceReview
         ? {
             review_type: "needs_review",
             question_kind: "assessment_review",
             choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
-            visual_acceptance_review: true,
+            ...(visualAcceptanceReview ? { visual_acceptance_review: true } : {}),
           }
         : { allow_best_judgment: true }),
     }),

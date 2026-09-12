@@ -2,8 +2,9 @@
 
 import http from "node:http";
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
+import { MCP_TRANSPORT_TIMEOUT_MS, MCP_OWNER_LIVENESS_TIMEOUT_MS, MCP_OWNER_PROGRESS_HEADER } from "../../../catalog/mcp.js";
 
-const DEFAULT_RPC_TIMEOUT_MS = 150000;
+const DEFAULT_RPC_TIMEOUT_MS = MCP_TRANSPORT_TIMEOUT_MS;
 const DEFAULT_RPC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const gateTokens = new WeakMap();
 const gateState = new WeakMap();
@@ -252,9 +253,11 @@ export class McpGate {
 
   async rpc(message = {}, {
     timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
+    livenessTimeoutMs = MCP_OWNER_LIVENESS_TIMEOUT_MS,
     maxResponseBytes = DEFAULT_RPC_MAX_RESPONSE_BYTES,
     signal = null,
     delegatedEvidence = false,
+    preflight = false,
   } = {}) {
     if (this.disposed) throw gateError("POSSE_MCP_GATE_DISPOSED", "MCP gate has been disposed");
     if (!this.binding) throw gateError("POSSE_MCP_GATE_ATTACHMENT_MISSING", "MCP gate has no active Job attachment");
@@ -266,13 +269,16 @@ export class McpGate {
       token: this.token,
       message,
       ...(delegatedEvidence === true ? { delegatedEvidence: true } : {}),
+      ...(preflight === true ? { preflight: true } : {}),
     });
     const payload = await new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
+      let livenessTimer = null;
       let request = null;
       const cleanup = () => {
         if (timer) clearTimeout(timer);
+        if (livenessTimer) clearTimeout(livenessTimer);
         signal?.removeEventListener?.("abort", onAbort);
       };
       const settle = (fn, value) => {
@@ -293,6 +299,7 @@ export class McpGate {
         path: "/v1/mcp/rpc",
         headers: {
           authorization: `Bearer ${endpoint.token}`,
+          [MCP_OWNER_PROGRESS_HEADER]: "1",
           "content-type": "application/json",
           "content-length": Buffer.byteLength(body),
         },
@@ -337,6 +344,18 @@ export class McpGate {
           }
         });
       });
+      const refreshLiveness = () => {
+        if (settled) return;
+        if (livenessTimer) clearTimeout(livenessTimer);
+        livenessTimer = setTimeout(() => {
+          const error = gateError("POSSE_MCP_GATE_TIMEOUT", "MCP owner stopped responding");
+          fail(error);
+          request.destroy(error);
+        }, Math.max(1, Number(livenessTimeoutMs) || MCP_OWNER_LIVENESS_TIMEOUT_MS));
+        livenessTimer.unref?.();
+      };
+      request.on("information", info => { if (info.statusCode === 102) refreshLiveness(); });
+      refreshLiveness();
       request.on("error", fail);
       const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || DEFAULT_RPC_TIMEOUT_MS);
       timer = setTimeout(() => {

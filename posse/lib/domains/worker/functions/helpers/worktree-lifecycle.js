@@ -13,6 +13,7 @@ import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js"
 import {
   clearWaitingLanePreparedAssetProof,
   completeAttempt,
+  getJob,
   getWaitingLanePreparation,
   getWorkItem,
   incrementAndCreateAttempt,
@@ -451,7 +452,7 @@ async function rollbackCrossWiSyncPathsAsync(wtPath, paths = [], { signal = null
   }
 }
 
-async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal = null } = {}) {
+export async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal = null } = {}) {
   if (!wtPath) return;
   const payload = worker.parsePayload(job);
   const syncs = pendingCrossWiFileSyncs(payload);
@@ -583,6 +584,20 @@ async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal =
   }
 }
 
+export async function completePendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal = null } = {}) {
+  if (!wtPath) return null;
+  const fresh = getJob(job.id) || job;
+  if (pendingCrossWiFileSyncs(worker.parsePayload(fresh)).length === 0) return null;
+  job.payload_json = fresh.payload_json;
+  const before = await gitCurrentHashAsync(wtPath, { signal });
+  await applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal });
+  if (pendingCrossWiFileSyncs(worker.parsePayload(getJob(job.id) || job)).length > 0) {
+    throw new Error("Required cross-WI file synchronization remains incomplete");
+  }
+  const hash = await gitCurrentHashAsync(wtPath, { signal });
+  return { before, hash, changed: before !== hash };
+}
+
 function deferTerminalCleanupIfActiveWork(wi, wtDir) {
   const siblingLocks = activeLiveSiblingWriteLocks({ work_item_id: wi.id });
   const sentinel = readActiveWorktreeSentinel(wtDir);
@@ -630,6 +645,8 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
   let wtPath = null;
   let branchName = null;
   let prepTrace = null;
+  let reusedWorktree = false;
+  let pendingTargetMerge = false;
   let toleratedResidualLogged = false;
   let toleratedSiblingDirtyLogged = false;
   try {
@@ -651,6 +668,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     const slug = slugify(wi.title, { maxLength: 40 });
     branchName = wi.branch_name || `posse/wi-${wi.id}-${slug}`;
     const wtDir = await worktreePathAsync(worker.projectDir, wi.id, wi.title, { signal });
+    reusedWorktree = fs.existsSync(wtDir);
     const shouldSkipReusedDirtyRecovery = async ({ wtPath: candidatePath, currentBranch = null, branchName: expectedBranch = null }) => {
       if (!earlyPayload) return false;
       const actual = String(currentBranch || "").trim();
@@ -1049,6 +1067,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               });
               throw new Error(result.message || "rebase abort failed; manual cleanup required");
             } else if (!result.ok && (result.leftInTree || result.alreadyInProgress)) {
+              pendingTargetMerge = true;
               const conflictList = (result.conflicts || []).slice(0, 10).join(", ");
               const more = (result.conflicts || []).length > 10 ? " …" : "";
               const reason = result.alreadyInProgress ? "prior merge still in progress" : "rebase hit conflicts";
@@ -1072,7 +1091,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     }
 
     await withPhase("cross_wi_sync", prepTrace, async () => {
-      await applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal });
+      if (!pendingTargetMerge) await applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal });
     });
 
     job._worktreePath = wtPath;
@@ -1249,7 +1268,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       await yieldNow({ signal }).catch(() => {});
       const wi = getWorkItem(job.work_item_id);
       const wtDir = await worktreePathAsync(worker.projectDir, wi.id, wi.title, { signal });
-      if (fs.existsSync(wtDir)) {
+      if (!reusedWorktree && !pendingTargetMerge && fs.existsSync(wtDir)) {
         const siblingLocks = activeLiveSiblingWriteLocks(job);
         const sentinel = readActiveWorktreeSentinel(wtDir);
         const sentinelBlocks = sentinel?.payload?.jobId != null

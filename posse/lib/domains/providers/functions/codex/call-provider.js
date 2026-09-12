@@ -34,7 +34,8 @@ import { buildCodexWindowsLaunchEnv, formatSpawnLaunchForError, getCodexLaunchSt
 import { buildCodexExecArgs, cleanupTempDir, collectCodexExtraDirs, makeTempOutputFile, prepareCodexConfigForSpawn } from "./cli-spawn.js";
 import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
-import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
+import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicMcpAttachment, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
+import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
 import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
@@ -215,7 +216,7 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAttachment,
     });
-    const deterministicReadMcp = await buildCodexDeterministicReadConfigOverridesAsync(role, mcpWorkspaceCwd, {
+    let deterministicReadMcp = await buildCodexDeterministicReadConfigOverridesAsync(role, mcpWorkspaceCwd, {
       scopedFiles,
       createFiles,
       deleteFiles,
@@ -285,10 +286,27 @@ export async function callProvider(promptText, {
           try { catalog.cleanup(); } catch { /* best-effort temporary catalog cleanup */ }
         };
         deterministicReadMcp.nativeBatchingCatalog = catalog.catalogPath;
+        deterministicReadMcp.configOverrides = deterministicReadMcp.configOverrides.filter(value => !value.startsWith("model_catalog_json="));
         deterministicReadMcp.configOverrides.push(`model_catalog_json=${_toTomlLiteral(catalog.catalogPath)}`);
       } catch (error) {
-        cleanupDeterministicMcpSession();
-        throw error;
+        if (abortSignal?.aborted || deterministicReadMcp.nativeBatchingCatalog) {
+          cleanupDeterministicMcpSession();
+          throw error;
+        }
+        // Native batching is an optional transport. A model absent from the
+        // bundled catalog can still use the CLI's ordinary model resolution.
+        deterministicReadMcp = buildCodexDeterministicMcpAttachment(deterministicReadMcp.serverConfig, {
+          role, disableSystemTools, nativeBatching: false,
+        });
+        try {
+          const surface = await prepareCodexResearchMcpSurface(deterministicReadMcp, { mcpGate });
+          deterministicReadMcp.coreDeclarations = surface.declarations;
+          deterministicReadMcp.atlasTools = surface.atlasTools;
+          deterministicReadMcp.atlasContractTools = surface.atlasContractTools;
+        } catch (surfaceError) {
+          cleanupDeterministicMcpSession();
+          throw surfaceError;
+        }
       }
     }
     const remoteAtlasToolNames = Array.isArray(deterministicReadMcp.atlasTools)
@@ -310,6 +328,7 @@ export async function callProvider(promptText, {
       webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
     });
     const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({
+      role,
       disableSystemTools,
       disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
       disableResearcherUtilities: deterministicReadMcp.atlasResearcherDispatcher === true,

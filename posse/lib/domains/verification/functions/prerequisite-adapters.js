@@ -200,7 +200,8 @@ function commandSpec(ecosystem, projectDir, networkPolicy) {
       ok: true,
       command: "cargo",
       args: ["fetch", "--locked", ...(offline ? ["--offline"] : [])],
-      env: { CARGO_HOME: cacheRoot(projectDir, "cargo", lockPath) },
+      // cargo test must see the same registry/cache as this repair. An isolated
+      // CARGO_HOME here was discarded before the verifier started.
       lockPath,
       generated: ["target"],
     };

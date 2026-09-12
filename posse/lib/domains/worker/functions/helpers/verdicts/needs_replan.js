@@ -80,9 +80,9 @@ export function handle(job, verdict, ctx) {
           questions: [
             `WI#${job.work_item_id} has been replanned ${replanCount} times and the assessor wants another replan.\n` +
             `Reasons: ${verdict.reasons.join("; ")}\n` +
-            originalNeverExecuted
+            (originalNeverExecuted
               ? "The implementation never executed. Replan, fail it, or explicitly waive execution; it cannot be passed as completed."
-              : "The task may be fundamentally blocked or poorly scoped. How should we proceed?",
+              : "The task may be fundamentally blocked or poorly scoped. How should we proceed?"),
           ],
           context: "Replan depth limit hit. Previous approaches keep failing assessment.",
           review_type: originalNeverExecuted ? "unexecuted_replan_limit" : "replan_limit",

@@ -25,7 +25,7 @@ export async function symbolCallers({ view, versionId, params }) {
   const target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
   if (!target) return errorEnvelope({ action, versionId, code: "symbol_not_found", message: `No symbol found for ${params.symbolId}` });
   const confidence = Number(params.minConfidence || 0);
-  const minimum = Math.ceil(Math.max(0, Math.min(100, confidence <= 1 ? confidence * 100 : confidence)));
+  const minimum = Math.ceil(Math.max(0, Math.min(100, confidence)));
   if (params.projection === "compact-v1") {
     const mode = params.mode || "caller";
     const kinds = /** @type {("calls" | "references")[]} */ (mode === "all"

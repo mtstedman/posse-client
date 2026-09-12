@@ -537,6 +537,10 @@ export function createHashRefEvidenceForContext(context = {}, {
 
 export function materializeHashRefEvidenceForContext(context = {}, ref, opts = {}) {
   const resolved = fetchHashRefEvidenceForContext(context, ref, opts);
+  return materializeResolvedHashRefEvidence(context, resolved);
+}
+
+function materializeResolvedHashRefEvidence(context, resolved) {
   if (!resolved?.found || !resolved.source || !resolved.capability) return resolved;
   const source = resolved.source;
   if (source.entry_kind !== "materialized" || source.payload_text == null) {
@@ -667,7 +671,27 @@ export function fetchHashRefAcrossJobAttempts(context = {}, ref, opts = {}) {
     owner = null;
   }
   if (!owner?.attempt_id) {
-    return { ok: false, found: false, ref: normalized, error: "not_found_or_not_visible" };
+    // Sliced traversal views live in the capability table, not the owner
+    // payload tables. Resolve their issuing call only inside this job's
+    // ancestry; ordinary current-call evidence lookup remains exact-scope.
+    try {
+      const evidence = capabilityStoreForResolvedContext(resolved, db)?.evidenceForJobs(normalized, ancestorIds);
+      if (!evidence) return { ok: false, found: false, ref: normalized, error: "not_found_or_not_visible" };
+      const issuingContext = {
+        work_item_id: resolved.workItemId, job_id: evidence.job_id,
+        attempt_id: evidence.attempt_id, agent_call_id: evidence.agent_call_id,
+      };
+      const source = fetchHashRefForContext(issuingContext, evidence.source_ref, { ...opts, db });
+      if (!source?.found || !source.entry) return source;
+      // The stored scope key survives ON DELETE SET NULL of the issuing call.
+      // Only this ancestry-checked reissue path can materialize that row;
+      // ordinary evidence lookup still requires exact current-call custody.
+      return materializeResolvedHashRefEvidence(issuingContext, {
+        ok: true, found: true, capability: evidence, source: source.entry,
+      });
+    } catch {
+      return { ok: false, found: false, ref: normalized, error: "not_found_or_not_visible" };
+    }
   }
   return fetchHashRefForContext({
     work_item_id: resolved.workItemId,

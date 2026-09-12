@@ -4,12 +4,14 @@
 // file-request follow-ups, research->plan chaining, and question extraction.
 
 import fs from "fs";
+import crypto from "node:crypto";
 import path from "path";
 import { sanitizeHumanQuestions } from "./human-question-classifier.js";
 import { kaizenRunInsightsEnabled } from "./insights.js";
 import {
   addDependency,
-  createJob,
+  createJob as createQueueJob,
+  runInTransaction,
   getArtifactsByWorkItem,
   getDependents,
   getJob,
@@ -43,7 +45,7 @@ import {
   resolveResearchBudgetForRouting,
   researchBudgetToReasoningEffort,
 } from "../../../../shared/policies/functions/role-utils.js";
-import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
+import { spawnFromRole as spawnQueueJobFromRole } from "../../../queue/functions/spawn-guard.js";
 import { ResearchSession } from "../../../research/classes/ResearchSession.js";
 import { researchReturnsFinalReport } from "../../../research/functions/output-routing.js";
 import {
@@ -61,6 +63,27 @@ import {
   PROVIDER_AFFINITY_ROUTES,
   providerForAffinityRoute,
 } from "../../../../shared/policies/functions/provider-affinity.js";
+
+function createContinuationJob(options, create = createQueueJob) {
+  return runInTransaction(() => {
+    const key = crypto.createHash("sha256").update(JSON.stringify([
+      options.parent_job_id, options.job_type, options.title, options.payload_json,
+    ])).digest("hex");
+    const existing = listJobsByWorkItem(options.work_item_id).find(job => (
+      job.parent_job_id === options.parent_job_id && job.status !== "canceled"
+      && parseJobPayload(job)._continuation_key === key
+    ));
+    if (existing) return existing;
+    const payload = JSON.parse(options.payload_json || "{}");
+    return create({ ...options, payload_json: JSON.stringify({ ...payload, _continuation_key: key }) });
+  });
+}
+
+function spawnContinuationFromRole(role, outcome, jobType, options) {
+  return createContinuationJob({ ...options, job_type: jobType }, candidate => (
+    spawnQueueJobFromRole(role, outcome, jobType, candidate)
+  ));
+}
 
 const ALLOWED_BARE_DOTFILES = new Set([
   ".env",
@@ -181,6 +204,10 @@ export function parsePreflightRoutingDecision(output, { fallbackBudget = "normal
 }
 
 export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, attemptId) {
+  return runInTransaction(() => spawnFileRequestFollowUpInternal(worker, originJob, requestsByRisk, attemptId));
+}
+
+function spawnFileRequestFollowUpInternal(worker, originJob, requestsByRisk, attemptId) {
   const originRole = worker?.roleRegistry?.get?.(originJob?.job_type);
   const continuationProvider = providerForAffinityRoute(
     originJob,
@@ -317,7 +344,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
     const { filePaths } = buildFileScope(autoApproved);
     const riskLabels = autoApproved.map(r => `${r.path} (${r.risk})`).join(", ");
 
-    const devJob = spawnFromRole(originRole, "succeeded", "dev", {
+    const devJob = spawnContinuationFromRole(originRole, "succeeded", "dev", {
       work_item_id: originJob.work_item_id,
       title: `Create files (auto): ${filePaths.slice(0, 3).join(", ")}${filePaths.length > 3 ? ` (+${filePaths.length - 3})` : ""}`,
       parent_job_id: originJob.id,
@@ -362,7 +389,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
 
     const approvalLabel = originIsOneshot ? "human-gated one-shot file creation" : "high-risk file(s)";
     // 1. Human approval gate
-    const humanJob = spawnFromRole(originRole, "succeeded", "human_input", {
+    const humanJob = spawnContinuationFromRole(originRole, "succeeded", "human_input", {
       work_item_id: originJob.work_item_id,
       title: `Approve files: ${approvalPaths.slice(0, 3).join(", ")}${approvalPaths.length > 3 ? ` (+${approvalPaths.length - 3})` : ""}`,
       parent_job_id: originJob.id,
@@ -384,7 +411,7 @@ export function spawnFileRequestFollowUp(worker, originJob, requestsByRisk, atte
     });
 
     // 2. Dev job to create the files
-    const devJob = spawnFromRole(originRole, "succeeded", "dev", {
+    const devJob = spawnContinuationFromRole(originRole, "succeeded", "dev", {
       work_item_id: originJob.work_item_id,
       title: `Create files (approved): ${approvalPaths.slice(0, 3).join(", ")}${approvalPaths.length > 3 ? ` (+${approvalPaths.length - 3})` : ""}`,
       parent_job_id: originJob.id,
@@ -625,7 +652,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
     }
   }
 
-  const researchJob = createJob({
+  const researchJob = createContinuationJob({
     work_item_id: preflightJob.work_item_id,
     job_type: "research",
     title: `Research: ${wiTitle}`,
@@ -709,11 +736,26 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
 }
 
 export function spawnPlanAfterResearch(worker, researchJob, output, _options = {}) {
+  const preparedPayload = worker.parsePayload(researchJob);
+  const extractedQuestions = extractResearcherQuestions(output);
+  const afterCommit = [];
+  const transactionalWorker = Object.create(worker);
+  transactionalWorker.emit = (...args) => afterCommit.push(() => worker.emit?.(...args));
+  const result = runInTransaction(() => spawnPlanAfterResearchInternal(
+    transactionalWorker, researchJob, output, { ..._options, preparedPayload, extractedQuestions, afterCommit },
+  ));
+  for (const notify of afterCommit) notify();
+  return result;
+}
+
+function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = {}) {
   const wi = getWorkItem(researchJob.work_item_id);
   if (wi?.research_skipped) {
     updateWorkItemResearchSkip(researchJob.work_item_id, { skipped: false, reason: null });
   }
-  const researchPayload = worker.parsePayload(researchJob);
+  const currentJob = getJob(researchJob.id) || researchJob;
+  const researchPayload = currentJob.payload_json === researchJob.payload_json
+    ? _options.preparedPayload : worker.parsePayload(currentJob);
   const planningPayload = redTeamPlanningPayload(isRedTeamPlanningPayload(researchPayload));
   const roleMode = String(researchPayload.role_mode || "solo").trim().toLowerCase();
   const isFanoutChild = roleMode === "child";
@@ -736,7 +778,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
   }
 
   // -- Detect researcher questions --
-  const extractedQuestions = isFanoutSynth ? [] : extractResearcherQuestions(output);
+  const extractedQuestions = isFanoutSynth ? [] : _options.extractedQuestions;
 
   // Is this already a self-resolution attempt? Check payload for the flag.
   const researchBudget = getResearchBudget(wi, researchPayload);
@@ -770,7 +812,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
           `${C.red}[pipeline]${C.reset} WI#${researchJob.work_item_id}: clarification limit (${MAX_CLARIFICATION_ROUNDS}) reached — completing with current research`);
         // Fall through to complete without further research
       } else {
-        const humanJob = createJob({
+        const humanJob = createContinuationJob({
           work_item_id: researchJob.work_item_id,
           job_type: "human_input",
           title: `Researcher questions: ${wi.title.slice(0, 60)}`,
@@ -787,7 +829,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
         worker.emit(researchJob.id,
           `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: researcher has ${questions.length} question(s) — spawned human_input #${humanJob.id}`);
 
-        const followUp = createJob({
+        const followUp = createContinuationJob({
           work_item_id: researchJob.work_item_id,
           job_type: "research",
           title: `Research (follow-up): ${wi.title.slice(0, 50)}`,
@@ -812,24 +854,26 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
       }
     }
 
-    try {
-      const dbPath = getRuntimeDbPath();
-      const answerDir = path.join(path.dirname(dbPath), "answers");
-      const reportDir = workItemArtifactRoot(researchJob.work_item_id);
-      fs.mkdirSync(answerDir, { recursive: true });
-      fs.mkdirSync(reportDir, { recursive: true });
-      fs.writeFileSync(path.join(reportDir, "report.md"), String(output || ""), "utf-8");
-      fs.writeFileSync(
-        path.join(answerDir, `wi-${researchJob.work_item_id}.json`),
-        JSON.stringify({
-          work_item_id: researchJob.work_item_id,
-          title: wi.title,
-          answer: output,
-          timestamp: new Date().toISOString(),
-        }, null, 2),
-        "utf-8"
-      );
-    } catch { /* best effort */ }
+    _options.afterCommit.push(() => {
+      try {
+        const dbPath = getRuntimeDbPath();
+        const answerDir = path.join(path.dirname(dbPath), "answers");
+        const reportDir = workItemArtifactRoot(researchJob.work_item_id);
+        fs.mkdirSync(answerDir, { recursive: true });
+        fs.mkdirSync(reportDir, { recursive: true });
+        fs.writeFileSync(path.join(reportDir, "report.md"), String(output || ""), "utf-8");
+        fs.writeFileSync(
+          path.join(answerDir, `wi-${researchJob.work_item_id}.json`),
+          JSON.stringify({
+            work_item_id: researchJob.work_item_id,
+            title: wi.title,
+            answer: output,
+            timestamp: new Date().toISOString(),
+          }, null, 2),
+          "utf-8"
+        );
+      } catch { /* best effort */ }
+    });
     worker.emit(researchJob.id,
       `${C.cyan}[pipeline]${C.reset} WI#${researchJob.work_item_id}: report saved — done`);
     return;
@@ -846,7 +890,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
     const questions = extractedQuestions;
     const nextRound = isLoopback ? clarificationRound : 0;
     const selfResolveBudget = maxResearchBudget(researchBudget, "high");
-    const selfResolve = createJob({
+    const selfResolve = createContinuationJob({
       work_item_id: researchJob.work_item_id,
       job_type: "research",
       title: `Research (self-resolve): ${wiTitle}`,
@@ -904,7 +948,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
         });
       } catch { /* best effort */ }
     }
-    const humanJob = createJob({
+    const humanJob = createContinuationJob({
       work_item_id: researchJob.work_item_id,
       job_type: "human_input",
       title: `Researcher questions: ${wiTitle}`,
@@ -926,7 +970,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
         `${C.yellow}[pipeline]${C.reset} WI#${researchJob.work_item_id}: clarification limit (${MAX_CLARIFICATION_ROUNDS}) reached — spawned human_input #${humanJob.id}; planning will wait for the answer`);
       // Fall through to plan creation below, gated on the final human answer.
     } else {
-      const followUp = createJob({
+      const followUp = createContinuationJob({
         work_item_id: researchJob.work_item_id,
         job_type: "research",
         title: `Research (follow-up): ${wiTitle}`,
@@ -1008,7 +1052,7 @@ export function spawnPlanAfterResearch(worker, researchJob, output, _options = {
     return chain.synthJob;
   }
 
-  const planJob = createJob({
+  const planJob = createContinuationJob({
     work_item_id: researchJob.work_item_id,
     job_type: "plan",
     title: researchPayload.replan_reason ? `Replan: ${wiTitle}` : `Plan: ${wiTitle}`,

@@ -255,7 +255,7 @@ function normalizeConfidence(value) {
   if (value == null) return 0;
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
-  return n > 1 ? Math.max(0, Math.min(1, n / 100)) : Math.max(0, Math.min(1, n));
+  return Math.max(0, Math.min(1, n / 100));
 }
 
 /**

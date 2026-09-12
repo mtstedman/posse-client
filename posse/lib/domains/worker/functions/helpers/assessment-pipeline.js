@@ -472,17 +472,22 @@ function _addedScopedTestDiffText(scopedDiff = "") {
   return added.join("\n");
 }
 
-function _isFalsyDisabledTestMarkerValue(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (["false", "null", "undefined", "nan", "''", "\"\"", "``", "void 0"].includes(normalized)) {
-    return true;
-  }
-  return /^[+-]?(?:0+(?:\.0*)?|\.0+)(?:e[+-]?\d+)?n?$/.test(normalized);
-}
-
 function _disabledRequiredTestMarkers(scopedDiff = "") {
-  const added = _addedScopedDiffText(scopedDiff);
-  if (!added) return [];
+  const addedTests = _addedScopedTestDiffText(scopedDiff)
+    || (!/^\+\+\+ /m.test(scopedDiff) ? _addedScopedDiffText(scopedDiff) : "");
+  if (!addedTests) return [];
+  // Remove comments and string contents while preserving literal truthiness.
+  // A TODO comment or a fixture object is not a disabled test declaration.
+  const literals = [];
+  const code = addedTests.replace(
+    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g,
+    (_all, literal) => {
+      if (!literal) return " ";
+      if (literal.length <= 2) return '""';
+      const index = literals.push(literal.slice(0, 160)) - 1;
+      return `"literal:${index}"`;
+    },
+  );
   const patterns = [
     /\b(?:describe|it|test)\.(?:skip|todo)\s*\(/gi,
     /\b(?:xdescribe|xit|xtest)\s*\(/gi,
@@ -490,12 +495,11 @@ function _disabledRequiredTestMarkers(scopedDiff = "") {
     /\bpytest\.skip\s*\(/gi,
     /#\s*\[\s*ignore\s*\]/gi,
   ];
-  const addedTests = _addedScopedTestDiffText(scopedDiff);
-  const propertyMarkers = [...addedTests.matchAll(/\b(?:todo|skip)\s*:\s*([^,}\n]+)/gi)]
-    .filter((match) => !_isFalsyDisabledTestMarkerValue(match[1]))
-    .map((match) => match[0]);
+  const propertyMarkers = [...code.matchAll(/\b(?:test|it|describe)\s*\(\s*"[^"]*"\s*,\s*\{([^}]*)\}/g)]
+    .flatMap(match => [...match[1].matchAll(/\b(?:todo|skip)\s*:\s*(true|"literal:\d+"|[1-9]\d*)\s*(?=[,}]|$)/g)]
+      .map(property => property[0].replace(/"literal:(\d+)"/, (_match, index) => literals[Number(index)])));
   return [...new Set([
-    ...patterns.flatMap((pattern) => added.match(pattern) || []),
+    ...patterns.flatMap(pattern => code.match(pattern) || []),
     ...propertyMarkers,
   ])];
 }
@@ -506,7 +510,7 @@ function _buildDisabledRequiredTestsVerdict({ assessmentContext = null, taskSpec
   if (markers.length === 0) return null;
   const requirement = String(taskSpec || "");
   const requiresActiveTests = /\b(?:test|tests|testing|regression|coverage|assertion|assertions)\b/i.test(requirement);
-  const explicitlyAllowsDisabledTests = /\b(?:allow|keep|preserve|create|add)\b[^.\n]{0,100}\b(?:skipped|disabled|todo|ignored)\b/i.test(requirement);
+  const explicitlyAllowsDisabledTests = /\b(?:allow|keep|preserve|create|add)\s+(?:(?:the|some|these|those|a|an)\s+)?(?:skipped|disabled|todo|ignored)\s+(?:tests?|coverage|assertions?|suites?)\b/i.test(requirement);
   if (!requiresActiveTests || explicitlyAllowsDisabledTests) return null;
   return {
     verdict: "fail",

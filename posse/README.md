@@ -118,8 +118,9 @@ retain their host coordination and sleep capabilities.
 Use `posse run --scope-mode=auto` or `posse go --scope-mode=auto` to approve
 file-scope expansion requests automatically while keeping the run interactive.
 This includes requests triggered by out-of-scope edits, one-shot file requests,
-and fix scope gates. Existing waiting scope gates for the selected work items
-are resumed through the same approval policy.
+high-risk file requests, and fix scope gates that spawn the proposed fix.
+Existing waiting scope gates for the selected work items are resumed through
+the same approval policy.
 
 The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
 preserves the existing `scope_auto_approval` policy and interactive or

@@ -394,6 +394,9 @@ export class View {
       symbolNeighborhood: (global_id) => read("symbol_neighborhood", { global_id }),
       symbolCallers: async (global_id, min_confidence = 0) => {
         const response = await readResponse("symbol_callers", { global_id, min_confidence });
+        if (!response.value || typeof response.value !== "object") {
+          throw new Error("ATLAS symbolCallers returned an invalid relationship result");
+        }
         return { ...response.value, truncated: response.truncated };
       },
       symbolRelationships: async (global_id, kinds, min_confidence = 0) => {

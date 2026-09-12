@@ -2005,6 +2005,24 @@ function isCompatibilityProofProvenance(evidence) {
 }
 
 function materializeClaimEvidenceSelectors(value, context) {
+  const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
+  const key = `claim:${JSON.stringify(value)}`;
+  if (cache?.has(key)) {
+    const cached = cache.get(key);
+    if (cached.error) throw cached.error;
+    return cached.value;
+  }
+  try {
+    const resolved = resolveClaimEvidenceSelectors(value, context);
+    cache?.set(key, { value: resolved });
+    return resolved;
+  } catch (error) {
+    cache?.set(key, { error });
+    throw error;
+  }
+}
+
+function resolveClaimEvidenceSelectors(value, context) {
   try {
     return [materializeAgentHandoffEvidenceSelector(value, context)];
   } catch (error) {
@@ -2675,7 +2693,7 @@ function hasCanonicalAssessorEnvelope(source) {
     const entry = plainObject(raw);
     if (!entry || Object.keys(entry).some((key) => !entryKeys.has(key))) return false;
     const target = plainObject(entry.target);
-    if (target?.kind !== "pipeline" || target?.role !== "$pipeline") return false;
+    if (target?.kind !== "pipeline" || (target?.role != null && target.role !== "$pipeline")) return false;
     const report = plainObject(entry.report);
     return !report || Object.keys(report).every((key) => PLANNER_REPORT_KEYS.includes(key));
   });
@@ -3411,7 +3429,7 @@ function materializeTerminalCompletion(args, role) {
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile,
-    outcome: status.toLowerCase(),
+    outcome: status === "VERIFIED_NO_CHANGE" ? "complete" : status === "PARTIAL" ? "failed" : status.toLowerCase(),
     role,
     completion: {
       status,
@@ -4286,6 +4304,8 @@ export function getLatestCommittedAgentHandoffPacket({
     JOIN ${TABLE} p ON p.agent_call_id = ac.id
     WHERE ac.work_item_id = ?
       AND ac.job_id = ?
+      AND ac.parent_agent_call_id IS NULL
+      AND ac.role = 'researcher'
       ${attemptClause}
     ORDER BY ac.id DESC
     LIMIT 1
@@ -4482,11 +4502,16 @@ const RESEARCH_FAILURE_MECHANISM_PATTERNS = Object.freeze({
   terminal: /\bterminal(?:ly)?\b/iu,
 });
 
+// Explicit research omissions end a clause or name retrieved evidence. Broad
+// negative behavior prose is not evidence of a research gap: e.g. a cache not
+// read on cold start, or a loop variable named `i`.
 const RESEARCH_UNCLOSED_EVIDENCE_GAP_PATTERNS = Object.freeze([
-  /\b(?:required|relevant|final|terminal|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\b(?:was|were|is|are|has|have|had)?\s*not\s+(?:retrieved|read|inspected|verified)\b/iu,
-  /\b(?:evidence|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\b(?:was|were|is|are|has|have|had)?\s*not\s+established\b/iu,
+  /\b(?:required|relevant|final|terminal|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\bnot\s+retrieved\s*(?=[.!?;]|$)/iu,
+  /\b(?:implementation|relevant source|required source|evidence|source body)[^.!?\n]{0,60}\b(?:was|were|has been|have been)\s+not\s+(?:read|inspected|verified)\s*(?=[.!?;]|$)/iu,
+  /\b(?:I|[Ww]e|[Tt]his research)\s+(?:(?:have|has|did|do)\s+)?not\s+(?:read|inspected|verified)\b/u,
+  /\b(?:evidence|implementation|source|body|path|boundary|sink)[^.!?\n]{0,80}\bnot\s+established\s*(?=[.!?;]|$)/iu,
   /\b(?:was|were|is|are)\s+not\s+(?:in|among)\s+(?:the\s+)?(?:retrieved|read|inspected|delivered)\s+(?:body|source|evidence|results?)\b/iu,
-  /\b(?:could not|couldn't|was unable to|were unable to|unable to)\s+(?:retrieve|read|inspect|verify|establish|find)\b/iu,
+  /(?:^|[.!?;]\s*)(?:(?:I|we|this research|the researcher)\s+)?(?:could not|couldn't|(?:was |were |am |are )?unable to)\s+(?:retrieve|read|inspect|verify|establish|find)\b[^.!?;\n]*[.!?;]?$/iu,
   /\b(?:evidence|implementation|source|path|boundary|sink)\s+(?:remains?|is|was)\s+(?:unresolved|unverified|unestablished)\b/iu,
 ]);
 
@@ -4853,7 +4878,12 @@ function enforceResearcherTraversalCompletion(packet, coverage, check, context) 
     packet.narrative_chars += report.summary.length - priorSummary.length;
     validateNarrativeEvidenceBoundary(packet.handoffs[0], 0);
   }
-  packet.completion_coverage = normalized;
+  const renderedClaimIndexes = new Map(claims.map((claim, index) => [
+    Number(claim?.[CLAIM_SUBMITTED_INDEX] || index + 1), index + 1,
+  ]));
+  packet.completion_coverage = normalized.map((entry) => entry.status === "supported"
+    ? { ...entry, claim_indexes: entry.claim_indexes.map((index) => renderedClaimIndexes.get(index)).filter(Boolean) }
+    : entry);
   packet.completion_coverage_digest = check.requirements_digest;
   recordTraversalCompletionGate(context, check, {
     status: "accepted",
@@ -5264,6 +5294,15 @@ function evidenceRefs(report) {
       why: reason,
     });
   }
+  for (const lane of Object.keys(lanes)) {
+    const seen = new Set();
+    lanes[lane] = lanes[lane].filter((entry) => {
+      const key = JSON.stringify([entry.ref, entry.lines || null]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
   return lanes;
 }
 
@@ -5274,7 +5313,7 @@ function plannerTaskSpec(handoff) {
   if (summary) sections.push(summary);
   const claims = [...new Set(
     (report.claims || [])
-      .map((claim) => String(claim?.[0] || "").trim())
+      .map((claim) => [claim?.[0], claim?.[1]?.prose].filter(Boolean).join(" — ").trim())
       .filter(Boolean),
   )];
   if (claims.length > 0) {
@@ -5423,7 +5462,6 @@ function plannerCompatibilityTasks(packet) {
   return packet.handoffs.map((handoff) => {
     const taskSpec = plannerTaskSpec(handoff);
     const refs = evidenceRefs(handoff.report);
-    const hasRefs = Object.values(refs).some((entries) => entries.length > 0);
     const metadata = Object.fromEntries(
       PLANNER_REPORT_METADATA_KEYS
         .filter((key) => handoff.report[key] != null)
@@ -5442,9 +5480,10 @@ function plannerCompatibilityTasks(packet) {
         ...(handoff.report.scope.output_root ? { output_root: handoff.report.scope.output_root } : {}),
         ...metadata,
         job_type: handoff.target.role === "artificer" ? "artificer" : handoff.target.role,
+        ...(handoff.target.role === "human_input" ? { questions: handoff.report.questions } : {}),
         dev_brief: {
           source: "hash_ref_store",
-          ...(hasRefs ? {} : { summary: handoff.report.summary }),
+          summary: handoff.report.summary,
           key_files: handoff.report.scope.files_to_modify || [],
           related_files: [],
           planner_file_priorities: (handoff.report.scope.files_to_modify || []).map((path, index) => ({ path, rank: index + 1 })),
@@ -5486,7 +5525,7 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
   });
   if (packet.profile === "assessor.verdict.v1") {
     const reasons = [...new Set(
-      [first.report.summary, ...first.report.claims.map((claim) => claim[0])]
+      [first.report.summary, ...first.report.claims.map((claim) => [claim[0], claim[1]?.prose].filter(Boolean).join(" — "))]
         .map((reason) => String(reason || "").trim())
         .filter(Boolean),
     )];

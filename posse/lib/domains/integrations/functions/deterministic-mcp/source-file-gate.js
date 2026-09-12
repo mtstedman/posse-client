@@ -28,7 +28,7 @@ export function normalizeRepoPathForGate(value, { cwd = null } = {}) {
   if (absolute) raw = toRepoRelativePath(cwd, raw);
   if (!raw) return null;
 
-  let text = raw.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+/g, "/").replace(/\/+$/g, "");
+  const text = path.posix.normalize(raw.replace(/\\/g, "/")).replace(/\/+$/g, "");
   if (!text || text.includes(":")) return null;
   if (text.startsWith("/") || text.startsWith("../") || text === "..") return null;
 

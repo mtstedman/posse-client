@@ -592,6 +592,7 @@ export class PlannerRole extends BaseRole {
           proof: Array.isArray(structuredData.proof) ? structuredData.proof : [],
           support: Array.isArray(structuredData.support) ? structuredData.support : [],
           decoy: Array.isArray(structuredData.decoy) ? structuredData.decoy : [],
+          completion_coverage: structuredData.completion_coverage || [],
         } : null,
         files_to_modify: [],
         context_hints: {

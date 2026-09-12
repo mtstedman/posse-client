@@ -31,8 +31,10 @@ async function readSelectedBody({
   readSymbolBody,
   maxTokens,
   identifiersToFind,
+  source = null,
 }) {
   return await readSymbolBody({
+    ...(source == null ? {} : { selectedSource: { ok: true, target, targetPath: target.repo_rel_path, source, symbolId } }),
     view,
     versionId,
     params: {
@@ -279,6 +281,7 @@ export async function symbolGet({
     const resolution = await selectedBodyResolution({ view, target: selection.target, readFile });
     const body = await readSelectedBody({
       target: resolution.target,
+      source: resolution.source,
       symbolId: symbolIdOf(resolution.target),
       view,
       versionId,
@@ -312,27 +315,36 @@ export async function symbolGet({
   }
 
   const candidates = [];
+  const unavailable = [];
   for (const target of selection.targets) {
-    const resolution = await selectedBodyResolution({ view, target, readFile });
-    const body = await readSelectedBody({
-      target: resolution.target,
-      symbolId: symbolIdOf(resolution.target),
-      view,
-      versionId,
-      readFile,
-      repoRoot,
-      ledger,
-      repoId,
-      config,
-      readSymbolBody,
-      maxTokens: params.maxTokens,
-      identifiersToFind: params.identifiersToFind,
-    });
-    if (body?.ok === false || !body?.data) return { ...body, action: "symbol.get" };
-    candidates.push({
-      file: target.repo_rel_path,
-      source: annotateSymbolBody(body, resolution, params.identifiersToFind).data,
-    });
+    try {
+      const resolution = await selectedBodyResolution({ view, target, readFile });
+      const body = await readSelectedBody({
+        target: resolution.target,
+        source: resolution.source,
+        symbolId: symbolIdOf(resolution.target),
+        view,
+        versionId,
+        readFile,
+        repoRoot,
+        ledger,
+        repoId,
+        config,
+        readSymbolBody,
+        maxTokens: params.maxTokens,
+        identifiersToFind: params.identifiersToFind,
+      });
+      if (body?.ok === false || !body?.data) {
+        unavailable.push({ file: target.repo_rel_path, error: body?.error || "source_unavailable" });
+        continue;
+      }
+      candidates.push({
+        file: target.repo_rel_path,
+        source: annotateSymbolBody(body, resolution, params.identifiersToFind).data,
+      });
+    } catch (error) {
+      unavailable.push({ file: target.repo_rel_path, error: String(error?.message || "source_unavailable") });
+    }
   }
 
   try {
@@ -345,7 +357,7 @@ export async function symbolGet({
         return ref || "";
       }),
     });
-    return { ok: true, action: "symbol.get", versionId, data: choices };
+    return { ok: true, action: "symbol.get", versionId, data: [...choices, ...unavailable] };
   } catch (error) {
     return errorEnvelope({
       action: "symbol.get",

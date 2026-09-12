@@ -38,8 +38,8 @@ export const TRAVERSAL_COMPLETION_TRIGGER_TERMS = Object.freeze([
 ]);
 
 const TRAVERSAL_COMPLETION_MODE_VALUES = new Set(["off", "shadow", "on"]);
-const TRAVERSAL_COMPLETION_RECIPIENTS = new Set(["researcher", "dev"]);
-const TRAVERSAL_COMPLETION_JOB_TYPES = new Set(["research", "dev", "fix"]);
+const TRAVERSAL_COMPLETION_RECIPIENTS = new Set(["researcher"]);
+const TRAVERSAL_COMPLETION_JOB_TYPES = new Set(["research"]);
 
 const TRAVERSAL_COMPLETION_DIRECTIVE_HEADING = "Task-derived completion ledger:";
 
@@ -85,8 +85,7 @@ function explicitTraversalRequirementText(packet = {}) {
     payload.request,
     payload.question,
     payload.prompt,
-    packet.project_context,
-    payload.project_context,
+    ...(!payload.task_spec ? [packet.project_context, payload.project_context] : []),
     ...(Array.isArray(packet.success_criteria) ? packet.success_criteria : []),
     ...(Array.isArray(payload.success_criteria) ? payload.success_criteria : []),
   ].filter((value) => typeof value === "string" && value.trim());

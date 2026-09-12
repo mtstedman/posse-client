@@ -206,6 +206,7 @@ export function sessionContractFingerprint(options = {}, providerName = "") {
         }
       : {}),
     role: String(effective.role || "").trim().toLowerCase(),
+    disableSystemTools: effective.disableSystemTools === true,
     promptVersion,
     remoteSystemPromptSha256: remoteSystemPrompt
       ? crypto.createHash("sha256").update(remoteSystemPrompt).digest("hex")
@@ -1990,7 +1991,10 @@ export class TrackedProviderClient {
       }
       providerReturnedAt ??= Date.now();
       if (abortSignal?.aborted) {
-        throw providerCallAbortedError(abortSignal, this.worker, job_id);
+        const error = providerCallAbortedError(abortSignal, this.worker, job_id);
+        error.stats = providerResult?.stats || {};
+        error.output = providerResult?.output || "";
+        throw error;
       }
       const providerOutput = typeof providerResult?.output === "string" ? providerResult.output : "";
       const stats = {
@@ -2669,7 +2673,7 @@ export class TrackedProviderClient {
           recordObservation({
             work_item_id,
             job_id,
-            attempt_id: ambient.attempt_id ?? null,
+            attempt_id: attempt_id ?? ambient.attempt_id ?? null,
             observation_type: "provider.fallback",
             summary: `${previousProviderName} -> ${fallbackName}`,
             detail: {
@@ -2793,6 +2797,8 @@ export class TrackedProviderClient {
     if (createdAbortController) this.worker._abortControllers.set(job_id, ac);
     opts = { ...opts, abortSignal: explicitAbortSignal || ac.signal };
 
+    opts = { ...opts, disableSystemTools: typeof opts.disableSystemTools === "boolean"
+      ? opts.disableSystemTools : this.deps.resolveDisableSystemTools() };
     const sessionPrepared = await timeProviderSetupPhase("provider.session_prepare", {
       role: opts.role,
       provider: providerName,
@@ -2802,7 +2808,7 @@ export class TrackedProviderClient {
       providerName,
       job_id,
       work_item_id,
-      attempt_id: ambient.attempt_id ?? null,
+      attempt_id: attempt_id ?? ambient.attempt_id ?? null,
     }));
     // Session reuse may replace the prompt with a resume-handoff delta and
     // suppress the role/system prompt (skipRolePrompt/stableContext). Retries
@@ -2863,6 +2869,13 @@ export class TrackedProviderClient {
       return result;
     } catch (err) {
       let activeErr = err;
+      if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
+      if (opts.abortSignal?.aborted || this.worker?._killReasons?.has?.(job_id)) {
+        activeErr.name = "AbortError";
+        const killReason = this.worker?._killReasons?.get?.(job_id);
+        if (killReason) activeErr._killReason = killReason;
+        throw activeErr;
+      }
       const runtimeFallbackCandidate = opts._modelFallbackAttempted
         ? null
         : (isRuntimeModelError(activeErr) ? resolveRuntimeModelFallback(providerName, tier, executionModelName) : null);
@@ -2878,7 +2891,7 @@ export class TrackedProviderClient {
           recordObservation({
             work_item_id,
             job_id,
-            attempt_id: ambient.attempt_id ?? null,
+            attempt_id: attempt_id ?? ambient.attempt_id ?? null,
             observation_type: "provider.model_fallback",
             summary: `${providerName} ${executionModelName || "(provider default)"} -> ${runtimeFallbackModel}`,
             detail: {
@@ -2918,7 +2931,7 @@ export class TrackedProviderClient {
             observationContext: {
               work_item_id,
               job_id,
-              attempt_id: ambient.attempt_id ?? null,
+              attempt_id: attempt_id ?? ambient.attempt_id ?? null,
               role: opts.role ?? ambient.role ?? null,
             },
             abortSignal: opts.abortSignal,
@@ -2935,6 +2948,13 @@ export class TrackedProviderClient {
         }
       }
 
+      if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
+      if (opts.abortSignal?.aborted || this.worker?._killReasons?.has?.(job_id)) {
+        activeErr.name = "AbortError";
+        const killReason = this.worker?._killReasons?.get?.(job_id);
+        if (killReason) activeErr._killReason = killReason;
+        throw activeErr;
+      }
       if (this.isProviderError(activeErr) || isRuntimeModelError(activeErr)) {
         recordAttemptedProvider(attemptedProviders, providerName);
         const fallbackName = this._selectFallbackCandidate({
@@ -2987,7 +3007,7 @@ export class TrackedProviderClient {
                   recordObservation({
                     work_item_id,
                     job_id,
-                    attempt_id: ambient.attempt_id ?? null,
+                    attempt_id: attempt_id ?? ambient.attempt_id ?? null,
                     observation_type: "atlas.fallback.rebind",
                     summary: `ATLAS method rebind ${opts.atlasMethod || "null"} -> ${fbAtlasMethod}`,
                     detail: {
@@ -3007,7 +3027,7 @@ export class TrackedProviderClient {
             recordObservation({
               work_item_id,
               job_id,
-              attempt_id: ambient.attempt_id ?? null,
+              attempt_id: attempt_id ?? ambient.attempt_id ?? null,
               observation_type: "provider.fallback",
               summary: `${providerName} -> ${fallbackName}`,
               detail: { role: opts.role, from: providerName, to: fallbackName, provider_pool: configuredPool },
@@ -3024,21 +3044,16 @@ export class TrackedProviderClient {
               role: opts.role,
               modelTier: tier,
             });
-            const fbAc = new AbortController();
-            if (job_id) {
-              const prevAc = this.worker._abortControllers.get(job_id);
-              if (prevAc?.signal?.aborted) fbAc.abort(prevAc.signal.reason);
-              this.worker._abortControllers.set(job_id, fbAc);
-            }
             const {
               _sessionRecycle: _discardSessionRecycle,
               priorSessionHandle: _discardPriorSessionHandle,
               recyclingMode: _discardRecyclingMode,
               ...sessionlessOpts
-            } = opts;
+            } = preReuseOpts;
             const fbOpts = {
               ...sessionlessOpts,
-              abortSignal: fbAc.signal,
+              ...(opts.loaderCwd ? { loaderCwd: opts.loaderCwd, mcpCwd: opts.mcpCwd } : {}),
+              abortSignal: opts.abortSignal,
               modelName: fbModelName || undefined,
               _fallbackAttempted: true,
               _fallbackAttemptedProviders: [...attemptedProviders, fallbackName],
@@ -3053,7 +3068,7 @@ export class TrackedProviderClient {
                     previousProviderName: providerName,
                     role: opts.role,
                   })
-                : prompt;
+                : preReusePrompt;
             const fallbackResult = await this._executeOneAttempt(fallbackPrompt, fbOpts, {
               providerName: fallbackName,
               provider: fbProvider,
@@ -3068,7 +3083,7 @@ export class TrackedProviderClient {
                 attempt_id: attempt_id ?? ambient.attempt_id ?? null,
                 role: opts.role ?? ambient.role ?? null,
               },
-              abortSignal: fbAc.signal,
+              abortSignal: opts.abortSignal,
             });
             const { stats: fbStats } = fallbackResult;
 

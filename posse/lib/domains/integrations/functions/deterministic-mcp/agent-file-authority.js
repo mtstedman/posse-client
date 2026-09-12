@@ -160,16 +160,17 @@ function assertRuntimeCwd({ cwd, job, payload, role, roots }) {
   return { artifactMode, outputRoot };
 }
 
-function assertPathsWithin(paths, { cwd, allowedRoots, label, rejectBroadRoot = false }) {
+function assertPathsWithin(paths, { cwd, allowedRoots, label, rejectBroadRoot = false, artifactRoot = null }) {
   for (const entry of paths) {
-    const normalized = entry.replace(/\\/g, "/");
-    if (rejectBroadRoot && ["*", ".", "./"].includes(normalized)) {
+    const normalized = path.posix.normalize(entry.replace(/\\/g, "/"));
+    const target = path.resolve(cwd, normalized);
+    if (rejectBroadRoot && (normalized === "*" || (samePath(target, cwd)
+      && !(artifactRoot && path.isAbsolute(normalized) && samePath(target, artifactRoot))))) {
       throw authorityError(
         "POSSE_AGENT_AUTHORITY_SCOPE_ESCAPE",
         `Persisted Job ${label} cannot grant its entire runtime root`,
       );
     }
-    const target = path.resolve(cwd, entry);
     if (!isInsideAny(target, allowedRoots)) {
       throw authorityError(
         "POSSE_AGENT_AUTHORITY_SCOPE_ESCAPE",
@@ -266,6 +267,7 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
     allowedRoots: writeRoots,
     label: "create_roots",
     rejectBroadRoot: true,
+    artifactRoot: runtime.artifactMode ? runtime.outputRoot : null,
   });
   for (const entry of readRoots) {
     const target = path.resolve(cwd, entry);

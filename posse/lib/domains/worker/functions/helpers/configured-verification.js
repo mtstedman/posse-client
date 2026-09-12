@@ -413,6 +413,8 @@ export async function ensureConfiguredVerification(worker, {
       : `Pre-assessment hook failed: ${String(error?.message || error).split("\n")[0]}`;
     worker.emit(job.id, `${C.red}[pre-assess] ${message}${C.reset}`);
     recordCommandObservation(job, attemptId, message, {
+      ...currentBinding,
+      verification_eligible: currentBinding.verification_eligible === true && !error?.verification_git_state,
       command: plan.command,
       cwd: wtPath,
       status: timedOut ? "timed_out" : "failed",

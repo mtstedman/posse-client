@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // @ts-check
 //
-// Tiny stdio MCP shim. This file intentionally imports only Node stdlib.
+// Tiny stdio MCP shim. Imports must not initialize runtime/database state.
 // It parses MCP stdio frames and forwards JSON-RPC messages to the persistent
 // Posse MCP owner, carrying the signed session capability token with each call.
 
 import http from "node:http";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { MCP_TRANSPORT_TIMEOUT_MS, MCP_OWNER_LIVENESS_TIMEOUT_MS, MCP_OWNER_PROGRESS_HEADER } from "../../../catalog/mcp.js";
+import { McpForwardQueue } from "../../../shared/tools/classes/McpForwardQueue.js";
 
 const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 const MAX_STDIN_BUFFER_BYTES = MAX_STDIN_CONTENT_LENGTH_BYTES * 2;
@@ -21,11 +23,11 @@ const OWNER_RETRY_DEADLINE_MS = 5000;
 // no gateway tools is almost always a single transient miss at attach time.
 const OWNER_HANDSHAKE_RETRY_DEADLINE_MS = 30000;
 // Per-request timeouts so a wedged owner never hangs the shim forever. Keep the
-// non-idempotent budget above the owner's own request timeout (120s) so the
+// non-idempotent budget above the owner's execution and grace deadlines so the
 // owner returns a proper error first instead of the shim cutting off a legit
 // long-running tool call (e.g. a slow test run).
 const OWNER_HANDSHAKE_REQUEST_TIMEOUT_MS = 30000;
-const OWNER_DEFAULT_REQUEST_TIMEOUT_MS = 150000;
+const OWNER_DEFAULT_REQUEST_TIMEOUT_MS = MCP_TRANSPORT_TIMEOUT_MS;
 // Pre-connect errors are safe to retry for any method. Mid-stream connection
 // errors may occur after the owner started executing the request, so replay
 // them only for idempotent methods.
@@ -80,6 +82,7 @@ if (IS_MAIN && (!ownerPipe || !ownerToken || !mcpOAuthToken)) {
 let outboundFraming = "jsonl";
 let inputBuffer = Buffer.alloc(0);
 let requestQueue = Promise.resolve();
+const forwardQueue = new McpForwardQueue();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,6 +113,7 @@ function sendMessageAndWaitForFlush(payload) {
 
 function ownerRequest(message, {
   timeoutMs = OWNER_DEFAULT_REQUEST_TIMEOUT_MS,
+  livenessTimeoutMs = MCP_OWNER_LIVENESS_TIMEOUT_MS,
   pipePath = ownerPipe,
   ownerBearer = ownerToken,
   sessionToken = mcpOAuthToken,
@@ -118,10 +122,12 @@ function ownerRequest(message, {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
+    let livenessTimer = null;
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (livenessTimer) clearTimeout(livenessTimer);
       fn(value);
     };
     const fail = (error) => settle(reject, error);
@@ -131,6 +137,7 @@ function ownerRequest(message, {
       method: "POST",
       headers: {
         authorization: `Bearer ${ownerBearer}`,
+        [MCP_OWNER_PROGRESS_HEADER]: "1",
         "content-type": "application/json; charset=utf-8",
         "content-length": Buffer.byteLength(body),
       },
@@ -204,6 +211,18 @@ function ownerRequest(message, {
       }, timeoutMs);
       timer.unref?.();
     }
+    const refreshLiveness = () => {
+      if (settled) return;
+      if (livenessTimer) clearTimeout(livenessTimer);
+      livenessTimer = setTimeout(() => {
+        const error = Object.assign(new Error("MCP owner stopped responding"), { code: "ETIMEDOUT" });
+        fail(error);
+        req.destroy(error);
+      }, Math.max(1, Number(livenessTimeoutMs) || MCP_OWNER_LIVENESS_TIMEOUT_MS));
+      livenessTimer.unref?.();
+    };
+    req.on("information", info => { if (info.statusCode === 102) refreshLiveness(); });
+    refreshLiveness();
     req.on("error", fail);
     req.write(body, "utf8");
     req.end();
@@ -258,7 +277,7 @@ export function __testForwardToOwner(message, options = {}) {
 }
 
 function dispatchParsed(parsed) {
-  requestQueue = requestQueue.then(async () => {
+  requestQueue = forwardQueue.enqueue(parsed, () => (async () => {
     const response = await forwardToOwner(parsed);
     if (!response) return;
     const terminalHandoffReceipt = response[TERMINAL_HANDOFF_RECEIPT] === true;
@@ -272,14 +291,14 @@ function dispatchParsed(parsed) {
       method: AGENT_HANDOFF_RECEIPT_NOTIFICATION,
       params: {},
     }, { timeoutMs: 5000 }).catch(() => {});
-  }).catch((err) => {
+  })().catch((err) => {
     const id = parsed && Object.prototype.hasOwnProperty.call(parsed, "id") ? parsed.id : null;
     if (id == null) {
       try { process.stderr.write(`[posse-mcp-shim] ${err?.message || err}\n`); } catch {}
       return;
     }
     sendMessage(jsonRpcError(id, -32603, String(err?.message || err || "MCP owner error")));
-  });
+  }));
 }
 
 function reportParseError(framing, err, byteLength) {

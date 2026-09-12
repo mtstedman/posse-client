@@ -387,7 +387,7 @@ export async function runHumanInputJob(worker, job, {
         duration_ms: Date.now() - startTime,
         error_text: "Parked: waiting for human input (no display)",
       });
-      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
       refreshAndExtractInsights(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
       return;
@@ -418,7 +418,7 @@ export async function runHumanInputJob(worker, job, {
           error_text: choiceMessage,
         });
         worker.emit(job.id, `${C.yellow}[human] ${choiceMessage}; keeping the gate open${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
         refreshAndExtractInsights(job.work_item_id);
         worker._cleanupWorktreeIfDone(job.work_item_id);
         return;
@@ -458,7 +458,7 @@ export async function runHumanInputJob(worker, job, {
           error_text: message,
         });
         worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
         refreshAndExtractInsights(job.work_item_id);
         worker._cleanupWorktreeIfDone(job.work_item_id);
         return;
@@ -483,7 +483,7 @@ export async function runHumanInputJob(worker, job, {
         worker._releaseLease(job, leaseToken, "canceled");
       } else {
         worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); keeping the gate open${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
       }
       refreshAndExtractInsights(job.work_item_id);
       return;
@@ -589,6 +589,7 @@ export async function runHumanInputJob(worker, job, {
         approvalJobId: job.id,
         approved,
         answer: lastAnswer,
+        actorType: resolutionActorType,
       });
       if (!resolved.ok) {
         finalHumanStatus = "failed";
@@ -892,7 +893,7 @@ export async function runHumanInputJob(worker, job, {
           reasons: [`Human requested replan for blocked job via recovery job #${job.id}: ${lastAnswer || "(no details)"}`],
           spawn_jobs: [],
           human_questions: [],
-        }, { emit: emitFn, autoApprove: worker.autoApprove });
+        }, { emit: emitFn, autoApprove: worker.autoApprove, humanApprovedReplan: true });
         worker.emit(job.id, `${C.cyan}[human] Blocked job #${origJob.id} routed to replan${C.reset}`);
       } else if (decision === "skip") {
         await worker._setJobRowStatus(origJob, "canceled");
@@ -1410,7 +1411,7 @@ export async function runHumanInputJob(worker, job, {
       leaseToken,
       error: err.message,
     });
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
   } finally {
     if (deliveredAnswerReservation) {
       try {

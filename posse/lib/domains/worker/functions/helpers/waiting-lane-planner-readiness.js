@@ -101,6 +101,7 @@ function deferPlanner(worker, job, leaseToken, preparation, reason, {
     0,
     Number(payload._waiting_lane_planner_wait_count) || 0,
   ) + 1;
+  delayMs = Math.min(10000, delayMs * (2 ** Math.min(5, payload._waiting_lane_planner_wait_count - 1)));
   writePayload(job, payload);
   const readyAt = new Date(nowMs + Math.max(100, delayMs)).toISOString();
   worker.emit(

@@ -7,7 +7,6 @@ import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
-  applyDelegation,
   countFailedJobs,
   getAttempts,
   getDependents,
@@ -133,7 +132,8 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
 
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
-  if (testRun?.delta !== "regression" || verdict?.verdict !== "pass") return verdict;
+  if (verdict?.verdict !== "pass" || !["regression", "changed_failure", "post_only"].includes(testRun?.delta)
+    || !["failed", "timed_out"].includes(postChange?.status)) return verdict;
   const outputTail = [postChange?.stdout, postChange?.stderr]
     .map((value) => String(value || "").trim())
     .filter(Boolean)
@@ -144,7 +144,7 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     verdict: "fail",
     _disable_internal_retry: true,
     reasons: [
-      `The automatic post-change test regressed from passing at baseline to ${postChange?.status || "failing"}; the change must be repaired before it can pass.${outputTail ? `\nTest output tail:\n${outputTail}` : ""}`,
+      `The automatic post-change test ${testRun.delta === "regression" ? "regressed from passing at baseline" : "has an unverified failure"} (${postChange.status}); the change must be repaired before it can pass.${outputTail ? `\nTest output tail:\n${outputTail}` : ""}`,
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
@@ -207,7 +207,7 @@ function latestCanonicalVerification(jobId, assessedCommitHash) {
     for (const row of rows) {
       let detail;
       try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
-      if (detail?.source !== "setting" || detail?.status !== "passed") continue;
+      if (detail?.source !== "setting" || !["passed", "failed", "timed_out"].includes(detail?.status)) continue;
       if (detail?.verification_eligible !== true) continue;
       const assessedCommit = String(detail?.assessed_commit_hash || "").trim().toLowerCase();
       if (assessedCommit !== requiredCommit) continue;
@@ -722,6 +722,18 @@ export function prepareVerdictForDispatch(job, verdict) {
   const scopedVerification = latestScopedCheckVerification(job.id, assessedCommitHash);
   const canonicalVerification = latestCanonicalVerification(job.id, assessedCommitHash);
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
+  const canonicalOutcome = canonicalVerification?.verification_outcome
+    || (canonicalVerification ? verificationOutcome({ ...canonicalVerification, phase: "post_change" }) : null);
+  if (prepared.verdict === "pass" && canonicalOutcome?.type === "product_failed") {
+    prepared = {
+      ...prepared,
+      verdict: "fail",
+      reasons: [
+        `Required repository verification failed for the assessed commit: ${canonicalVerification.command}`,
+        ...(Array.isArray(prepared.reasons) ? prepared.reasons : []),
+      ],
+    };
+  }
   prepared = capVerdictForHighRiskVerificationGap(
     prepared,
     payload,
@@ -742,6 +754,7 @@ export function prepareVerdictForDispatch(job, verdict) {
       ...prepared,
       verdict: "needs_review",
       confidence: "low",
+      _assessment_confidence_review: true,
       reasons: [
         "A low-confidence pass is non-terminal and requires one stronger automatic assessment.",
         ...(Array.isArray(prepared.reasons) ? prepared.reasons : []),
@@ -784,6 +797,7 @@ export function prepareVerdictForDispatch(job, verdict) {
         ...prepared,
         verdict: "needs_review",
         confidence,
+        _assessment_confidence_review: true,
         reasons: [
           `Deterministic assessment policy requires ${passConfidenceFloor} confidence to pass this risk profile; assessor returned ${confidence}.`,
           ...(prepared.reasons || []),
@@ -989,7 +1003,7 @@ function _queueInternalAssessmentRetry(
     });
     return false;
   }
-  const previousTier = job.model_tier || "standard";
+  const previousTier = payload._assess_model_tier || "cheap";
   const retryTier = _nextAssessmentRetryTier(previousTier);
   if (retryTier === previousTier) return false;
   payload._assess_only = true;
@@ -1002,11 +1016,6 @@ function _queueInternalAssessmentRetry(
       leaseToken != null ? { leaseToken } : {},
     );
     if (!changed) return false;
-    if (retryTier !== previousTier || job.model_name) {
-      applyDelegation(job.id, { model_tier: retryTier, model: null });
-      job.model_tier = retryTier;
-      job.model_name = null;
-    }
     updateJobPayload(job.id, JSON.stringify(payload));
     if (typeof recordAssessorVerdict === "function" && !recordAssessorVerdict()) {
       throw new Error(`Unable to record assessor verdict for job #${job.id} before internal retry`);

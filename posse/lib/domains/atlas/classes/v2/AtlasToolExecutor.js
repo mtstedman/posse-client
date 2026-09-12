@@ -1416,7 +1416,9 @@ export class AtlasToolExecutor {
 
   #dedupeRepoKeyForRequest(request, repoKey) {
     const readRoot = this.#requestReadContext(request)?.readRoot;
-    return readRoot ? `${repoKey}|readRoot=${normalizeRepoKey(readRoot)}` : repoKey;
+    const rootKey = readRoot ? `${repoKey}|readRoot=${normalizeRepoKey(readRoot)}` : repoKey;
+    const hashRefContext = request.config?.hashRefContext;
+    return hashRefContext ? `${rootKey}|hashRefContext=${stableStringify(hashRefContext)}` : rootKey;
   }
 
   #invalidateMismatchedReadContext(request, repoKey) {

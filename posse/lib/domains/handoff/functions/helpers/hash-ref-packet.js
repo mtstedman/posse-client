@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 import {
   formatHashRefSelector,
   HASH_REF_DESTINATION_SET,
@@ -234,8 +237,11 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
   for (const lane of HASH_REF_LANES) {
     lanes[lane] = [];
     for (const entry of packetLaneSource(input, lane)) {
-      if (lanes[lane].length >= maxRefsPerLane) break;
       const parts = entryParts(entry, maxWhyChars);
+      if (lanes[lane].length >= maxRefsPerLane) {
+        dropped.push({ lane, ref: String(parts.ref || "").trim(), reason: "lane_ref_cap" });
+        continue;
+      }
       const ref = normalizeHashRefAlias(parts.ref);
       const lines = normalizeLineRange(parts.lines);
       const selector = formatHashRefSelector(ref, lines);
@@ -281,7 +287,9 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
     }
   }
 
-  if (!hasLaneRefs(lanes)) return { packet: null, dropped };
+  if (!hasLaneRefs(lanes) && !dropped.length && !input.upstream_dropped?.length && !input.dropped?.length) {
+    return { packet: null, dropped };
+  }
 
   const packet = {
     schema_version: 1,
@@ -291,8 +299,16 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
     lanes,
     ref_count: laneCount(lanes),
   };
-  if (Array.isArray(input.dropped) && input.dropped.length > 0) {
-    packet.upstream_dropped = input.dropped.slice(0, 50);
+  const priorDropped = Array.isArray(input.upstream_dropped) ? input.upstream_dropped : [];
+  const newDropped = [...(Array.isArray(input.dropped) ? input.dropped : []), ...dropped];
+  const upstreamDropped = [...new Map([...priorDropped, ...newDropped].map((entry) => {
+    const bounded = { lane: compactText(entry?.lane, 32), ref: compactText(entry?.ref, 120), reason: compactText(entry?.reason, 120) };
+    return [JSON.stringify(bounded), bounded];
+  })).values()].slice(0, 50);
+  if (upstreamDropped.length > 0) {
+    packet.upstream_dropped = upstreamDropped;
+    packet.upstream_dropped_count = Math.min(Number.MAX_SAFE_INTEGER,
+      Math.max(priorDropped.length, Number(input.upstream_dropped_count) || 0) + newDropped.length);
   }
   const trustProofExpansions = opts.trustProofExpansions === true
     || input.proof_expansions_generated === PROOF_EXPANSION_GENERATOR;
@@ -662,6 +678,8 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
   let usedChars = 0;
   let missed = 0;
   const expandedMaterializedRefs = new Set();
+  const currentVersions = new Map();
+  const fetchedRefs = new Map();
 
   for (const lane of ["proof", "support"]) {
     for (const laneEntry of packet.lanes[lane] || []) {
@@ -676,7 +694,8 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
       }
       let fetchResult = null;
       try {
-        fetchResult = fetchEvidenceOrSource(context, laneEntry.ref);
+        if (!fetchedRefs.has(laneEntry.ref)) fetchedRefs.set(laneEntry.ref, fetchEvidenceOrSource(context, laneEntry.ref));
+        fetchResult = fetchedRefs.get(laneEntry.ref);
       } catch (err) {
         fetchResult = { ok: false, found: false, ref: laneEntry.ref, error: err?.message || "fetch_failed" };
       }
@@ -695,6 +714,22 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
         dropped.push({ lane, ref: laneEntry.ref, reason: "dev_brief_evidence_not_materialized" });
         continue;
       }
+      const stale = context.cwd && (expansion.source_windows || []).find(window => {
+        if (!/^[0-9a-f]{64}$/i.test(window.source_version || "")) return false;
+        const absolute = path.resolve(context.cwd, window.path);
+        const relative = path.relative(path.resolve(context.cwd), absolute);
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return true;
+        if (!currentVersions.has(absolute)) {
+          let version = null;
+          try { version = crypto.createHash("sha256").update(fs.readFileSync(absolute, "utf8").replace(/\r\n/g, "\n")).digest("hex"); } catch { /* unavailable source is not fresh evidence */ }
+          currentVersions.set(absolute, version);
+        }
+        return currentVersions.get(absolute) !== window.source_version;
+      });
+      if (stale) {
+        dropped.push({ lane, ref: laneEntry.ref, reason: "source_version_changed", path: stale.path });
+        continue;
+      }
       const expansionChars = String(expansion.text || "").length;
       if (usedChars + expansionChars > charLimit) {
         dropped.push({ lane, ref: laneEntry.ref, reason: "dev_brief_expansion_char_cap" });
@@ -708,6 +743,7 @@ export function expandHashRefHandoffPacketForDevBrief(input, {
 
   packet.dev_brief_expanded_count = packet.dev_brief_expansions.length;
   packet.dev_brief_expanded_chars = usedChars;
+  packet.dev_brief_expansion_dropped = dropped;
   return {
     packet,
     expansions: packet.dev_brief_expansions,
@@ -732,14 +768,17 @@ export function renderAutoExpandedDevBriefEvidence(input, {
   }
   const charLimit = Math.max(0, Number(maxChars) || 0);
   const header = [
-    "PLANNER DEV BRIEF EVIDENCE (auto-expanded locally):",
-    "The planner selected this existing-code evidence as directly relevant. It is already visible in this call: use the evidence_ref directly and do not traverse it. Writable scope is unchanged.",
+    "HANDOFF EVIDENCE (auto-expanded locally):",
+    "The handoff selected this existing-code evidence as relevant. Only the excerpts below are visible in this call; cite those evidence refs directly. Other refs may require traversal. Writable scope is unchanged.",
   ].join("\n");
-  if (header.length > charLimit) return { text: "", expansions: [], dropped: [] };
+  const dropped = [...new Map([...(input.upstream_dropped || []), ...(input.dev_brief_expansion_dropped || [])]
+    .map(item => [JSON.stringify(item), item])).values()];
+  if (header.length > charLimit) return { text: "", expansions: [], dropped: [
+    ...dropped, ...(input.dev_brief_expansions || []).map(item => ({ ref: item.ref, reason: "dev_brief_render_char_cap" })),
+  ] };
 
   const parts = [header];
   const expansions = [];
-  const dropped = [];
   let usedChars = header.length;
   for (const expansion of Array.isArray(input.dev_brief_expansions) ? input.dev_brief_expansions : []) {
     const location = expansionLocation(expansion);
@@ -753,7 +792,7 @@ export function renderAutoExpandedDevBriefEvidence(input, {
       String(expansion.text || "") || "(empty evidence payload)",
     ].join("\n");
     const addedChars = block.length + 2;
-    if (usedChars + addedChars > charLimit) {
+    if (usedChars + addedChars > charLimit - 180) {
       dropped.push({ lane: expansion.lane, ref: expansion.ref, reason: "dev_brief_render_char_cap" });
       continue;
     }
@@ -761,7 +800,17 @@ export function renderAutoExpandedDevBriefEvidence(input, {
     expansions.push(expansion);
     usedChars += addedChars;
   }
-  if (expansions.length === 0) return { text: "", expansions: [], dropped };
+  if (expansions.length === 0) {
+    const emptyHeader = "HANDOFF EVIDENCE (auto-expanded locally):\nNo evidence excerpts were delivered. Retrieve the omitted evidence before citing it. Writable scope is unchanged.";
+    usedChars += emptyHeader.length - parts[0].length;
+    parts[0] = emptyHeader;
+  }
+  if (dropped.length > 0) {
+    const remaining = Math.max(0, Math.min(178, charLimit - usedChars - 2));
+    const omittedCount = dropped.length + Math.max(0, (Number(input.upstream_dropped_count) || 0) - (input.upstream_dropped?.length || 0));
+    if (remaining > 0) parts.push(`Omitted ${omittedCount} evidence selection(s): ${dropped.slice(0, 3).map(item => `${item.ref || "?"} (${item.reason})`).join(", ")}. Read current source for omitted or stale evidence.`.slice(0, remaining));
+  }
+  if (expansions.length === 0 && dropped.length === 0) return { text: "", expansions: [], dropped };
   return { text: parts.join("\n\n"), expansions, dropped };
 }
 
@@ -1058,10 +1107,10 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
       }
     }
   }
-  if (normalized.dropped.length > 0) {
+  if (packet.upstream_dropped?.length > 0) {
     lines.push("");
-    lines.push("Dropped refs:");
-    for (const entry of normalized.dropped.slice(0, 12)) {
+    lines.push(`Dropped refs (${packet.upstream_dropped_count} total; bounded sample):`);
+    for (const entry of packet.upstream_dropped.slice(0, 12)) {
       lines.push(`- ${entry.lane}:${entry.ref || "(empty)"}:${entry.reason}`);
     }
   }

@@ -180,7 +180,10 @@ const WORKFLOW_ACTIONS = Object.freeze([
 // schema-valid atlas.query calls.
 const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
   traverse_ref: Object.freeze({ required: Object.freeze(["traversal_ref"]) }),
-  "symbol.search": Object.freeze({ required: Object.freeze(["query"]) }),
+  "symbol.search": Object.freeze({
+    required: Object.freeze(["query"]),
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 500 }) }),
+  }),
   "symbol.card": Object.freeze({
     anyOf: Object.freeze([
       Object.freeze({ required: Object.freeze(["symbolId"]) }),
@@ -189,12 +192,14 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
     ]),
   }),
   "symbol.overview": Object.freeze({
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 500 }) }),
     anyOf: Object.freeze([
       Object.freeze({ required: Object.freeze(["symbolId"]) }),
       Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
     ]),
   }),
   "symbol.callers": Object.freeze({
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 100 }) }),
     anyOf: Object.freeze([
       Object.freeze({ required: Object.freeze(["symbolId"]) }),
       Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
@@ -213,11 +218,16 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
       Object.freeze({ required: Object.freeze(["symbolId"]) }),
       Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
       Object.freeze({ required: Object.freeze(["file"]) }),
+      Object.freeze({ required: Object.freeze(["path"]) }),
     ]),
   }),
   "code.survey": Object.freeze({
     required: Object.freeze(["paths"]),
-    properties: Object.freeze({ limit: Object.freeze({ maximum: 128 }) }),
+    properties: Object.freeze({
+      limit: Object.freeze({ maximum: 64 }),
+      identifiersToFind: Object.freeze({ maxItems: 16 }),
+      paths: Object.freeze({ maxItems: 64 }),
+    }),
   }),
   "code.structure": Object.freeze({
     required: Object.freeze(["paths"]),
@@ -229,9 +239,16 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
       Object.freeze({ required: Object.freeze(["symbolId"]) }),
       Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
       Object.freeze({ required: Object.freeze(["file"]) }),
+      Object.freeze({ required: Object.freeze(["path"]) }),
     ]),
   }),
-  "code.window": Object.freeze({ required: Object.freeze(["file", "identifiersToFind"]) }),
+  "code.window": Object.freeze({
+    required: Object.freeze(["identifiersToFind"]),
+    anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["file"]) }),
+      Object.freeze({ required: Object.freeze(["path"]) }),
+    ]),
+  }),
   "memory.surface": Object.freeze({}),
   "memory.get": Object.freeze({}),
 });
@@ -251,6 +268,7 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "edgeKinds",
   "exportedOnly",
   "file",
+  "path",
   "fileRelPaths",
   "granularity",
   "identifiersToFind",
@@ -296,6 +314,7 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     properties: {
       name: { type: "string", minLength: 1 },
       file: { type: "string", minLength: 1 },
+      path: { type: "string", minLength: 1 },
       kind: { type: "string", minLength: 1 },
       exportedOnly: { type: "boolean" },
     },
@@ -323,6 +342,7 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     includeUnresolved: { type: "boolean" },
     includeResolutionMetadata: { type: "boolean" },
     file: { type: "string", minLength: 1, description: "Existing repository-relative path already surfaced by Atlas; never guess a dependency file." },
+    path: { type: "string", minLength: 1, description: "Alias for file, as surfaced in Atlas results." },
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 128 },
     identifiersToFind: {
       type: "array",
@@ -419,11 +439,24 @@ export function normalizeResearcherTypedActionArgs(action, args = {}) {
     return null;
   };
   let error = move("symbolHandle", "symbolId");
+  if (!error) error = move("path", "file");
+  if (!error && normalized.symbolRef && typeof normalized.symbolRef === "object"
+    && !Array.isArray(normalized.symbolRef) && Object.hasOwn(normalized.symbolRef, "path")) {
+    const { path, ...selector } = normalized.symbolRef;
+    if (Object.hasOwn(selector, "file") && selector.file !== path) {
+      error = "Typed Atlas fields symbolRef.path and symbolRef.file conflict";
+    } else {
+      normalized.symbolRef = { ...selector, file: path };
+      aliases.push({ from: "symbolRef.path", to: "symbolRef.file" });
+    }
+  }
   if (!error && action === "traverse_ref") error = move("searchMode", "search_mode");
   if (!error && action === "code.survey") error = move("identifiersToFind", "symbols");
   if (!error && ["code.survey", "code.structure"].includes(action)) error = move("limit", "maxFiles");
   if (!error && action === "code.skeleton") error = move("limit", "maxLines");
   if (!error && ["memory.surface", "memory.get"].includes(action)) error = move("paths", "fileRelPaths");
+  if (!error && ["memory.surface", "memory.get"].includes(action)
+    && typeof normalized.fileRelPaths === "string") normalized.fileRelPaths = [normalized.fileRelPaths];
   if (!error && action === "code.lens" && Number.isInteger(normalized.contextLines) && normalized.contextLines > 8) {
     const requested = normalized.contextLines;
     normalized.contextLines = 8;

@@ -143,13 +143,18 @@ export function projectAgentToolSchema(schema) {
   return projectSchemaValue(schema);
 }
 
-function stripSchemaDescriptions(value) {
-  if (Array.isArray(value)) return value.map(stripSchemaDescriptions);
+function stripSchemaDescriptions(value, propertyMap = false) {
+  if (Array.isArray(value)) return value.map((child) => stripSchemaDescriptions(child));
   if (!isObject(value)) return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== "description")
-      .map(([key, child]) => [key, stripSchemaDescriptions(child)]),
+      .filter(([key]) => propertyMap || key !== "description")
+      .map(([key, child]) => [key,
+        !propertyMap && ["const", "enum", "default", "examples"].includes(key)
+          ? child
+          : stripSchemaDescriptions(child, !propertyMap
+            && ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"].includes(key)),
+      ]),
   );
 }
 

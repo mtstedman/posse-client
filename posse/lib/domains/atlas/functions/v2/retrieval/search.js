@@ -438,12 +438,6 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
     data.beam.pop();
   }
   syncScopeBeamMetadata(envelope);
-  // File evidence is supporting context; the symbol addresses are the
-  // answer. Shed it before a single hit is sacrificed, otherwise every
-  // non-exact query collapses to the one-address fallback below.
-  while (Array.isArray(data.fileEvidence) && data.fileEvidence.length > 0 && JSON.stringify(envelope).length > maxChars) {
-    data.fileEvidence.pop();
-  }
   while (Array.isArray(data.items) && data.items.length > 1 && JSON.stringify(envelope).length > maxChars) {
     data.items.pop();
     data.truncated = true;

@@ -325,7 +325,7 @@ export function handleDeterministicInterruption(worker, job, attemptId, startTim
       actor_type: EVENT_ACTORS.SYSTEM,
       message: `${reason} — requeuing`,
     });
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attemptId, readyAt: new Date().toISOString() });
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${reason.toLowerCase()} — requeuing${C.reset}`);
     return true;
   }
@@ -347,7 +347,7 @@ export function handleDeterministicInterruption(worker, job, attemptId, startTim
       actor_type: EVENT_ACTORS.SYSTEM,
       message: "Post-merge closeout budget exhausted — requeuing",
     });
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attemptId,
       readyAt: new Date(Date.now() + 60_000).toISOString(),
     });
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} closeout budget exhausted — requeuing${C.reset}`);
@@ -407,6 +407,30 @@ export async function handleExecuteAttemptError(worker, {
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${cancelMsg.toLowerCase()}${C.reset}`);
     refreshAndExtractInsights(job.work_item_id);
     worker._cleanupWorktreeIfDone(job.work_item_id);
+    return;
+  }
+
+  // Success is durable before best-effort finalization/insight cleanup.
+  // A late cleanup failure cannot rewrite the completed attempt or replay work.
+  if (currentJob?.status === "succeeded"
+    && getAttempts(job.id).some((row) => row.id === attempt?.id && row.status === "succeeded")) {
+    worker.emit(job.id, `${C.yellow}[worker] job #${job.id} completed; finalization failed: ${err?.message || err}${C.reset}`);
+    return;
+  }
+
+  // Compiled children are the planner's durable commit point. A later artifact
+  // or settlement failure must not replay the plan and create another wave.
+  if (["plan", "research", "preflight"].includes(job.job_type) && attempt?.started_at && listJobsByWorkItem(job.work_item_id).some((candidate) => (
+    Number(candidate.parent_job_id) === Number(job.id)
+    && ["plan", "research", "dev", "artificer", "promote", "human_input"].includes(candidate.job_type)
+    && String(candidate.created_at || "") >= String(attempt.started_at)
+  ))) {
+    completeAttempt(attempt.id, {
+      status: "succeeded",
+      duration_ms: Date.now() - startTime,
+    });
+    worker._releaseLease(job, leaseToken, "succeeded");
+    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} planner settlement recovered; existing child jobs will not be replayed${C.reset}`);
     return;
   }
 
@@ -477,7 +501,7 @@ export async function handleExecuteAttemptError(worker, {
           duration_ms: Date.now() - startTime,
           error_text: "Provider exited as live scope approval arrived",
         });
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id,
           readyAt: new Date().toISOString(),
         });
         worker.emit(
@@ -511,7 +535,7 @@ export async function handleExecuteAttemptError(worker, {
         });
       }
       const hasStash = await stashInterruptedWork(job, wtPath, "scope-wait-interrupted", worker?.projectDir);
-      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id,
         readyAt: new Date(Date.now() + interruption.backoffMs).toISOString(),
       });
       worker.emit(
@@ -557,6 +581,10 @@ export async function handleExecuteAttemptError(worker, {
       autoApprove: worker.autoApprove,
       leaseToken,
     });
+    const replanned = getJob(job.id);
+    if (["waiting_on_human", "waiting_on_review"].includes(replanned?.status)) {
+      worker._releaseLease(job, leaseToken, replanned.status);
+    }
     decrementAttemptCount(job.id);
     worker.emit(
       job.id,
@@ -591,7 +619,7 @@ export async function handleExecuteAttemptError(worker, {
       message: `${reason} — requeuing${hasStash ? " (partial work stashed for resume)" : ""}`,
     });
 
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt: new Date().toISOString() });
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${reason.toLowerCase()} — requeuing${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
     return;
   }
@@ -615,7 +643,7 @@ export async function handleExecuteAttemptError(worker, {
       message: `Operator nudged job - requeuing immediately${hasStash ? " (partial work stashed for resume)" : ""}`,
     });
 
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt: new Date().toISOString() });
     worker.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id} nudged by operator - requeuing${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
     return;
   }
@@ -649,7 +677,7 @@ export async function handleExecuteAttemptError(worker, {
       message: `Stall detector killed process (${stallCount}/${MAX_STALL_RETRIES}) — requeuing${hasStash ? " (partial work stashed for resume)" : ""}`,
     });
 
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt: new Date().toISOString() });
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} stalled (${stallCount}/${MAX_STALL_RETRIES}) — requeuing${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
     return;
   }
@@ -703,11 +731,12 @@ export async function handleExecuteAttemptError(worker, {
     // provider and no working fallback) loops forever — no scheduler/queue-side
     // bound exists. Past the cap, force the normal fail path. (B7)
     const MAX_PROVIDER_ERROR_REQUEUES = 8;
-    const priorProviderErrorRequeues = getAttempts(job.id).filter(
-      (a) => a.status === "interrupted"
-        && typeof a.error_text === "string"
-        && a.error_text.startsWith("Provider error:"),
-    ).length;
+    let priorProviderErrorRequeues = 0;
+    for (const prior of getAttempts(job.id).filter((row) => row.id !== attempt.id)
+      .sort((a, b) => b.attempt_number - a.attempt_number)) {
+      if (prior.status !== "interrupted" || !String(prior.error_text || "").startsWith("Provider error:")) break;
+      priorProviderErrorRequeues += 1;
+    }
     if (priorProviderErrorRequeues >= MAX_PROVIDER_ERROR_REQUEUES) {
       completeAttempt(attempt.id, {
         status: "failed",
@@ -757,7 +786,7 @@ export async function handleExecuteAttemptError(worker, {
     });
 
     const readyAt = new Date(Date.now() + backoffSec * 1000).toISOString();
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt });
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${jobProvider} ${source} — requeuing in ${backoffSec}s (attempt not consumed): ${firstErrorLine.slice(0, 160)}${C.reset}`);
     return;
   }

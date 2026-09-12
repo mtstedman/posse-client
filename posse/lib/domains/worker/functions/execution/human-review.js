@@ -43,6 +43,7 @@ export function classifyApprovalAnswer(answer) {
 export function classifyReviewAnswer(answer) {
   const text = String(answer || "").trim().toLowerCase();
   if (!text || text === "(skipped)") return "unknown";
+  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\b[\s\S]{0,20}\b(?:pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/.test(text)) return "fail";
   const prefixed = text.match(/^(retry|re-run|rerun|reassess|re-assess|try again|replan|skip|skipped|pass|passed|approve|approved|yes|y|fail|failed|reject|rejected|no|n)\s*:/);
   if (prefixed) {
     const verb = prefixed[1];

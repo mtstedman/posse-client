@@ -144,7 +144,9 @@ export function materializeHashRefView(text, args = {}) {
   }
 
   const offset = positiveInt(args.offset, 0);
-  const page = String(text || "").slice(offset, offset + limit);
+  const endOffset = args.end_offset == null ? String(text || "").length
+    : Math.max(offset, Math.min(String(text || "").length, Number(args.end_offset) || 0));
+  const page = String(text || "").slice(offset, Math.min(endOffset, offset + limit));
   return {
     text: page,
     page: {
@@ -152,8 +154,9 @@ export function materializeHashRefView(text, args = {}) {
       offset,
       limit,
       returned_chars: page.length,
-      next_offset: offset + page.length < String(text || "").length ? offset + page.length : null,
-      has_more: offset + page.length < String(text || "").length,
+      ...(args.end_offset == null ? {} : { end_offset: endOffset }),
+      next_offset: offset + page.length < endOffset ? offset + page.length : null,
+      has_more: offset + page.length < endOffset,
     },
   };
 }
@@ -172,6 +175,7 @@ export function hashRefViewSelector(view, args = {}) {
   return {
     mode: "offset",
     offset: Math.max(0, Number(page.offset) || 0),
+    ...(page.end_offset == null ? {} : { end_offset: page.end_offset }),
     limit: Math.max(1, Number(page.limit) || Number(args.limit) || CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS),
   };
 }
@@ -182,6 +186,7 @@ export function nextHashRefViewSelector(view, { inheritLimit = true } = {}) {
   return {
     mode: page.mode === "search" ? "search" : "offset",
     offset: Math.max(0, Number(page.next_offset) || 0),
+    ...(page.end_offset == null ? {} : { end_offset: page.end_offset }),
     ...(inheritLimit ? {
       limit: Math.max(1, Number(page.limit) || CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS),
     } : {}),

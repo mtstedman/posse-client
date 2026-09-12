@@ -490,6 +490,12 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       const msg = err?.message || String(err);
       worker.emit(job.id, `${C.yellow}[atlas] warm job #${job.id} could not start: ${msg}${C.reset}`);
       logAtlasError("[atlas-warm] job #" + job.id + " failed before attempt creation:", err);
+      const killReason = err?._killReason || worker._killReasons?.get?.(job.id);
+      const canceled = killReason === "user_canceled" || killReason === "work_item_canceled";
+      const interrupted = !canceled && (killReason || err?.name === "AbortError");
+      worker._releaseLease(job, leaseToken, canceled ? "canceled" : interrupted ? "queued" : "failed",
+        interrupted ? { readyAt: new Date(Date.now() + 5000).toISOString() } : {});
+      if (job.work_item_id) refreshWorkItemStatus(job.work_item_id);
       return;
     }
     if (worker._handleDeterministicInterruption?.(job, attempt.attempt.id, startTime, leaseToken, err)) {

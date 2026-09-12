@@ -66,7 +66,7 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
   });
 }
 
-function buildCodexDeterministicMcpAttachment(serverConfig, {
+export function buildCodexDeterministicMcpAttachment(serverConfig, {
   role = "",
   disableSystemTools = false,
   nativeBatchingCatalog = String(role || "").trim().toLowerCase() === "researcher"
@@ -530,6 +530,7 @@ export function buildCodexSystemToolLockdownOverrides({
   codexCodeMode = false,
   codexNativeBatching = false,
   webToolsActive = false,
+  role = null,
 } = {}) {
   const overrides = [];
   const disableUtilities = disableSystemTools
@@ -539,9 +540,11 @@ export function buildCodexSystemToolLockdownOverrides({
     if (!webToolsActive) excluded.push("web");
     overrides.push(
       "features.apps=false",
-      `tool_output_token_limit=${CODEX_RESEARCHER_TRANSPORT_LIMITS.outputTokens}`,
       `features.code_mode.excluded_tool_namespaces=${_toTomlLiteral(excluded)}`,
     );
+    if (codexCodeMode || role === "researcher" || disableResearcherUtilities) {
+      overrides.push(`tool_output_token_limit=${CODEX_RESEARCHER_TRANSPORT_LIMITS.outputTokens}`);
+    }
   }
   if (disableSystemTools) {
     overrides.push(

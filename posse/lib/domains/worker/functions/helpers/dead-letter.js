@@ -653,7 +653,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     // A planned dev/fix job with no dependents previously matched no recovery
     // branch at all: the dead letter silently flipped the work item to failed.
     // Stall-exhausted dead letters keep their own capped recovery branch below.
-    const isMutatingLeaf = !isOneshotLeaf && !stallExhausted && (job.job_type === "dev" || job.job_type === "fix");
+    const isMutatingLeaf = !isOneshotLeaf && !stallExhausted && ["dev", "fix", "artificer", "promote", "plan", "delegate", "summarize"].includes(job.job_type);
     if (!suppressOperatorRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
       if (recoveryIsUnattended(worker)) {
         emitUnattendedRecoverySkipped(worker, job, isMutatingLeaf ? (job.job_type === "fix" ? "Fix" : "Dev") : (isOneshotLeaf ? "One-shot" : "Research"), {
@@ -662,7 +662,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
         });
       } else if (isMutatingLeaf) {
         const attemptHistory = buildAttemptSummary(job.id);
-        const jobLabel = job.job_type === "fix" ? "Fix job" : "Dev job";
+        const jobLabel = `${job.job_type[0].toUpperCase()}${job.job_type.slice(1)} job`;
         const recoveryJob = createJob({
           work_item_id: job.work_item_id,
           job_type: "human_input",

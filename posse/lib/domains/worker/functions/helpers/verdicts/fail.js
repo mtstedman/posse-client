@@ -381,6 +381,9 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
     }),
   });
   spawnedJobs.push(escalationJob);
+  for (const dep of getDependents(job.id)) {
+    rewireDependency(dep.job_id, job.id, escalationJob.id, dep.dependency_kind);
+  }
   log(`${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} failure threshold (${failedCount}/${threshold})  escalated #${escalationJob.id}`);
   jobLog("ESCALATED", { wi: job.work_item_id, job: job.id, detail: `${failedCount} failures  spawned human_input #${escalationJob.id}. Reasons: ${verdict.reasons.slice(0, 2).join("; ").slice(0, 120)}` });
 

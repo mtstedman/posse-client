@@ -11,6 +11,7 @@ import {
   listActiveFileLocks,
   logEvent,
   rewireDependency,
+  runInTransaction,
   settleJobScopeExpansionAttempt,
   setAttemptCommitHash,
   setJobResult,
@@ -54,6 +55,7 @@ import {
 } from "../../functions/execution/commit-diagnostics.js";
 import { storePostAgentFailureCheckpoint } from "../../functions/execution/post-agent-checkpoint.js";
 import { linkSiblingDirtyRecoverySnapshot } from "../../functions/helpers/sibling-dirty-recovery.js";
+import { completePendingCrossWiFileSyncsAsync } from "../../functions/helpers/worktree-lifecycle.js";
 import {
   runPostExecutionAssessment as runPostExecutionAssessmentFromModule,
 } from "../../functions/helpers/assessment-pipeline.js";
@@ -384,7 +386,7 @@ export async function handlePostExecutionForWorker({
               ];
               const readyAt = new Date(Date.now() + delayMs).toISOString();
               this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
-              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
               refreshAndExtractInsightsFromModule(job.work_item_id);
               this._cleanupWorktreeIfDone(job.work_item_id);
               return;
@@ -424,18 +426,25 @@ export async function handlePostExecutionForWorker({
 
           if (blockedCount >= 2) {
             this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: blocked ${blockedCount + 1} times — dead-lettering${C.reset}`);
-            this._releaseWithoutAttemptPenalty(job, leaseToken, "dead_letter");
-          } else {
-            createJob({
-              work_item_id: job.work_item_id,
-              job_type: "human_input",
-              title: `Blocked: ${job.title.slice(0, 80)}`,
-              parent_job_id: job.id,
-              priority: "high",
-              payload_json: JSON.stringify(blockedPayload),
-            });
-            this._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
           }
+          const parked = runInTransaction(() => {
+            if (!this._releaseWithoutAttemptPenalty(job, leaseToken, blockedCount >= 2 ? "dead_letter" : "waiting_on_human", { attemptId: attempt.id })) return false;
+            const blockedGate = createJob({
+                work_item_id: job.work_item_id,
+                job_type: "human_input",
+                title: `Blocked: ${job.title.slice(0, 80)}`,
+                parent_job_id: job.id,
+                priority: "high",
+                payload_json: JSON.stringify(blockedPayload),
+            });
+            if (blockedCount >= 2) {
+              for (const dependent of getDependents(job.id)) {
+                rewireDependency(dependent.job_id, job.id, blockedGate.id);
+              }
+            }
+            return true;
+          });
+          if (!parked) return;
           refreshAndExtractInsightsFromModule(job.work_item_id);
           this._cleanupWorktreeIfDone(job.work_item_id);
           return;
@@ -617,6 +626,13 @@ export async function handlePostExecutionForWorker({
                 });
                 await new Promise((resolve) => setTimeout(resolve, (commitInfraRetries + 1) * 2000));
               }
+            }
+            // A merge left for the developer can defer upstream file syncs.
+            // Resolve those obligations after the developer commit and before
+            // Atlas warming, output checks, or pre-assessment verification.
+            const sync = await completePendingCrossWiFileSyncsAsync(this, job, wtPath);
+            if (sync?.changed) {
+              commitResult = { ...commitResult, hash: sync.hash, createdCommit: true, mergeTreeChanged: true };
             }
             const {
               hash: commitHash,
@@ -899,7 +915,7 @@ export async function handlePostExecutionForWorker({
                 ? { ok: true }
                 : await validateDeclaredOutputContract({
                     job,
-                    payload: jobPayload,
+                    payload: this.parsePayload(job),
                     filesCommitted,
                     cwd: wtPath,
                   });
@@ -959,7 +975,7 @@ export async function handlePostExecutionForWorker({
                       leaseToken,
                       output: partialOutput,
                       pendingFileRequests: null,
-                      preAssessAlreadyVerified: true,
+                      preAssessAlreadyVerified: false,
                       preManifestState,
                       satisfiedNoop: false,
                       startTime,
@@ -1058,7 +1074,7 @@ export async function handlePostExecutionForWorker({
                       leaseToken,
                       output: partialOutput,
                       pendingFileRequests: null,
-                      preAssessAlreadyVerified: true,
+                      preAssessAlreadyVerified: false,
                       preManifestState,
                       satisfiedNoop: false,
                       startTime,
@@ -1257,12 +1273,32 @@ export async function handlePostExecutionForWorker({
             });
             if (lockTimeout.timeout) {
               const readyAt = new Date(Date.now() + 5000).toISOString();
-              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
               return;
             }
             this._retryOrFail(job, leaseToken, `Git commit failed: ${gitFailureDetail}`);
             return;
           }
+          }
+        }
+
+        // Also cover providers that completed the merge themselves and left
+        // a clean tree, so the automatic commit block above did not execute.
+        const remainingSync = await completePendingCrossWiFileSyncsAsync(this, job, wtPath);
+        if (remainingSync?.changed) {
+          committedHash = remainingSync.hash;
+          commitBaseHash ||= remainingSync.before;
+          hasFileChanges = true;
+          preAssessAlreadyVerified = false;
+          setAttemptCommitHash(attempt.id, committedHash, commitBaseHash);
+          filesCommitted = (await gitExecAsync(["diff", "--name-only", "--relative", commitBaseHash, committedHash], wtPath)).split("\n").filter(Boolean);
+          const refresh = await this._kickAtlasReindex(job, committedHash);
+          if (refresh?.emission) {
+            const payload = this.parsePayload(job);
+            payload._atlas_evidence_warm_required = true;
+            payload._atlas_evidence_warm_job_id = refresh.emission.warmJobId || null;
+            job.payload_json = JSON.stringify(payload);
+            updateJobPayload(job.id, job.payload_json);
           }
         }
 
@@ -1442,7 +1478,7 @@ export async function handlePostExecutionForWorker({
                 ];
                 const readyAt = new Date(Date.now() + delayMs).toISOString();
                 this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
-                this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+                this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
                 refreshAndExtractInsightsFromModule(job.work_item_id);
                 this._cleanupWorktreeIfDone(job.work_item_id);
                 return;
@@ -1460,7 +1496,7 @@ export async function handlePostExecutionForWorker({
             if (blockedCount >= MAX_BLOCKED_CYCLES) {
               // Same block keeps recurring — dead-letter instead of looping
               this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: blocked ${blockedCount + 1} times — dead-lettering${C.reset}`);
-              this._releaseWithoutAttemptPenalty(job, leaseToken, "dead_letter");
+              this._releaseWithoutAttemptPenalty(job, leaseToken, "dead_letter", { attemptId: attempt.id });
 
               // Spawn recovery human_input with full context
               const dependents = getDependents(job.id);
@@ -1533,7 +1569,7 @@ export async function handlePostExecutionForWorker({
               priority: "high",
               payload_json: JSON.stringify(blockedPayload),
             });
-            this._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human");
+            this._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.id });
             refreshAndExtractInsightsFromModule(job.work_item_id);
             return;
           }

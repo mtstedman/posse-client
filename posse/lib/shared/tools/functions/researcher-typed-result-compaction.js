@@ -87,7 +87,11 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
       }
     }
   }
-  if (action === "code.window") {
+  if (action === "code.window" || action === "symbol.get") {
+    if (parsed.bodyKind === "implementation") {
+      delete parsed.bodyKind;
+      removedDefaultFields += 1;
+    }
     if (Object.prototype.hasOwnProperty.call(parsed, "estimatedTokens")) {
       delete parsed.estimatedTokens;
       removedDefaultFields += 1;
@@ -143,7 +147,6 @@ const TYPED_OUTPUT_FIELD_ALIASES = Object.freeze([
   ["content_line_format", "contentLineFormat"],
   ["content_next_block", "contentInNextBlock"],
   ["source_blocks_follow", "sourceBlocksFollow"],
-  ["traversal_ref", "nextTraversalRef"],
   ["next_traversal_ref", "nextTraversalRef"],
   ["object_type", "objectType"],
   ["content_hash", "contentHash"],
@@ -214,7 +217,10 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
       return;
     }
     if (!value || typeof value !== "object") return;
-    for (const child of Object.values(value)) visit(child);
+    // Embedded calls use the native input contract, not result field names.
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== "args") visit(child);
+    }
     if (typeof value.symbolHandle === "string" && value.symbolHandle) {
       value.symbolId = value.symbolHandle;
       delete value.symbolHandle;

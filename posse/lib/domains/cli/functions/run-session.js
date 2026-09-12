@@ -241,14 +241,20 @@ export function handleWrapUpSignal({
   finalizeRuntimeResources = null,
   closeRuntimeState = closeRuntimeStateForExit,
   exit = process.exit,
+  forceExitMs = 10000,
 } = {}) {
   if (display) display.stop();
   const code = signal === "SIGTERM" ? 143 : 130;
   process.exitCode = code;
+  let finished = false;
   const finish = () => {
-    closeRuntimeState?.();
-    exit(code);
+    if (finished) return;
+    finished = true;
+    clearTimeout(forceTimer);
+    try { closeRuntimeState?.(); } finally { exit(code); }
   };
+  const forceTimer = setTimeout(finish, forceExitMs);
+  forceTimer.unref?.();
   const finalize = () => {
     try {
       const result = finalizeRuntimeResources?.();
