@@ -1823,7 +1823,7 @@ function mergeSourceWindows(windows) {
 function structuredSourceMetadata(toolName, payload, args = {}) {
   const normalizedTool = String(toolName || "").toLowerCase().replace(/^tools[.:]/, "");
   const isRead = ["read_file", "chain_read", "inspect_file"].includes(normalizedTool);
-  const isWindow = normalizedTool.endsWith("code.window");
+  const isWindow = normalizedTool.endsWith("code.window") || normalizedTool.endsWith("symbol.get");
   const isLens = normalizedTool.endsWith("code.lens");
   const isSkeleton = normalizedTool.endsWith("code.skeleton");
   if (!isRead && !isWindow && !isLens && !isSkeleton) return null;

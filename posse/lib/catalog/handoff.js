@@ -11,8 +11,13 @@ export const AGENT_HANDOFF_BEARER_PROSE_TERMS = Object.freeze([
   "authorization", "authentication",
 ]);
 
+// Explicit telemetry classification, independent of cleanup action names.
+export const AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES = Object.freeze({
+  DROPPED: "dropped",
+  NORMALIZED: "normalized",
+});
+
 export const AGENT_HANDOFF_LIMITS = Object.freeze({
-  maxShorthandGapLines: 5,
   maxCallBytes: 256 * 1024,
   maxEntryBytes: 32 * 1024,
   maxClaims: 12,

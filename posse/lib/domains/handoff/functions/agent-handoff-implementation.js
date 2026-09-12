@@ -6,6 +6,7 @@ import { RAW_SOURCE_LINES_ENCODING } from "../../../catalog/source-display.js";
 import {
   AGENT_HANDOFF_ALIAS_POLICY,
   AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY,
+  AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES,
   AGENT_HANDOFF_LIMITS,
   AGENT_HANDOFF_PLANNER_CONTRACT_KEYS,
   AGENT_HANDOFF_PLANNER_CONTRACT_VERSION,
@@ -115,19 +116,39 @@ function evidenceSelectorText(selector) {
 
 function recordEvidenceCleanup(context, {
   action,
+  outcome,
+  refObjectType,
   selector,
   normalizedSelector = null,
+  normalizedSelectors = null,
   code = "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
   message = null,
 } = {}) {
+  if (!Object.values(AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES).includes(outcome)) {
+    throw new TypeError("Evidence cleanup requires an explicit dropped or normalized outcome");
+  }
   const records = context?.[EVIDENCE_CLEANUP];
   if (!Array.isArray(records) || !action) return;
+  let ref = null;
+  try { ref = parseAgentHandoffEvidenceSelector(selector).ref; } catch { /* Prose and claim cleanup have no ref. */ }
+  if (refObjectType === undefined) {
+    const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
+    const cacheKey = `cleanup_object_type:${ref}`;
+    if (ref && cache?.has(cacheKey)) refObjectType = cache.get(cacheKey);
+    else {
+      refObjectType = ref ? fetchHashRefForContext(context, ref)?.entry?.object_type || null : null;
+      if (ref) cache?.set(cacheKey, refObjectType);
+    }
+  }
   const record = {
     action,
+    outcome,
+    ref_object_type: refObjectType || null,
     selector: evidenceSelectorText(selector).slice(0, 500),
     ...(normalizedSelector == null ? {} : {
       normalized_selector: evidenceSelectorText(normalizedSelector).slice(0, 500),
     }),
+    ...(normalizedSelectors == null ? {} : { normalized_selectors: normalizedSelectors }),
     code,
     ...(message == null ? {} : { message: String(message).slice(0, 500) }),
   };
@@ -285,6 +306,7 @@ function boundedString(value, label, max, { required = true, lenient = false, co
       const redacted = redactString(text);
       if (!detectSensitiveAgentHandoffText(redacted)) {
         recordEvidenceCleanup(context, {
+          outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
           action: "redact_sensitive_prose",
           selector: label,
           code: "AGENT_HANDOFF_SENSITIVE_CONTENT",
@@ -556,7 +578,7 @@ function mergeSourceContentRecords(records) {
   return merged;
 }
 
-function payloadSourceContentWindows(entry, lineage) {
+function payloadSourceContentWindows(entry, lineage, { allowUnrecordedWindows = false } = {}) {
   const payload = String(entry?.payload_text || "");
   // Delegated excerpts and raw source windows are joins of the source-line
   // array, not raw file bytes. A trailing LF can therefore be the declared
@@ -748,6 +770,9 @@ function payloadSourceContentWindows(entry, lineage) {
     }
   }
 
+  // Legacy compact envelopes have no authoritative metadata. Preserve each
+  // candidate independently so overlapping windows cannot hide ambiguity.
+  if (allowUnrecordedWindows && authoritative.length === 0) return records;
   const mergedRecords = mergeSourceContentRecords(records);
   return authoritative.map((window) => {
     const record = mergedRecords.find((candidate) => (
@@ -841,14 +866,13 @@ function sourceLineSlice(entry, lineage, start, end, {
   };
 }
 
-// Ref-relative ("page") coordinates → source coordinates. Every materialized
-// ref the model can cite — a continuation page, a batched symbol-mode window
-// item, a single symbol body — is delivered to the model as lines 1..N of that
-// ref, and the tool labels it `cite_or_handoff`. A selector is translated when
-// it fits the materialized range of exactly one recorded window; source
-// coordinates are still tried first by the caller, so a cite that already fits
-// a window in source space never reaches this path. A single recorded window
-// without materialized coordinates is treated as materialized at 1..span.
+// Ref-relative ("page") coordinates → source coordinates for compatibility
+// with citations that treat a compact body or continuation page as lines 1..N.
+// Source-numbered display is authoritative: any source-coordinate overlap,
+// including partial overlap, wins and is trimmed by claim materialization.
+// Only a selector with no source overlap reaches this translation path. It
+// must resolve against one unambiguous materialized window. A single scoped
+// window without materialized coordinates is treated as materialized at 1..span.
 function refRelativeCoordinates(entry, lineage, start, end, { sourcePath = null } = {}) {
   if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
   const requestedPath = canonicalSourcePath(sourcePath);
@@ -882,11 +906,10 @@ function refRelativeCoordinates(entry, lineage, start, end, { sourcePath = null 
   if (translatable.length !== 1) {
     // A compact code.window envelope can be one serialized JSON line while
     // carrying exact multi-line source windows in its content fields. The
-    // model cites that visible embedded body as 1..N, but the envelope's
-    // recorded materialized range is then 1..1. When there is exactly one
-    // path/window and its full source content is available, translate against
-    // uniquely covering body deterministically. Never apply this when two
-    // embedded windows could satisfy the same ref-relative selector.
+    // model may cite that embedded body as 1..N when those coordinates have
+    // no source overlap, but the envelope's recorded range is 1..1. Translate
+    // against the unique available body that covers the relative start line.
+    // Never apply this when two bodies could satisfy the same selector.
     const contentWindows = coalescedSourceContentWindows(lineage.content_entry || entry, lineage)
       .filter((window) => !requestedPath || window.path === requestedPath)
       .filter((window) => Array.isArray(window.content_lines)
@@ -1638,6 +1661,9 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   const fetched = capabilityEvidence?.found
     ? capabilityEvidence
     : fetchHashRefForContext(context, selector.ref);
+  // Cleanup shares this packet-scoped cache, including failed ref lookups.
+  // Do not cache the evidence itself here: custody checks still run normally.
+  cache?.set(`cleanup_object_type:${selector.ref}`, fetched?.entry?.object_type || null);
   if (!fetched?.found || !fetched.entry) {
     fail("AGENT_HANDOFF_EVIDENCE_NOT_FOUND", `Evidence ${selector.ref} is not visible to the current agent call`);
   }
@@ -1683,8 +1709,11 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   }
   const lines = normalizedLines(entry.payload_text);
   const lineage = sourceLineage(entry, context);
-  const lineSemantics = lineage.line_semantics;
-  if (coordinateSpace && coordinateSpace !== lineSemantics) {
+  let lineSemantics = lineage.line_semantics;
+  const legacySourceCoordinates = lineSemantics === "materialized"
+    && lines.length === 1 && selector.start > lines.length && coordinateSpace !== "materialized";
+  if (coordinateSpace && coordinateSpace !== lineSemantics
+    && !(coordinateSpace === "source" && legacySourceCoordinates)) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
       `Evidence ${selector.ref} is recorded with ${lineSemantics} line semantics, not ${coordinateSpace}`,
@@ -1765,13 +1794,21 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
             end = clampedEnd;
             sourceSlice = clampedSlice;
             recordEvidenceCleanup(context, {
+              outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
               action: "clamp_source_end",
+              refObjectType: entry.object_type || null,
               selector: selectorValue,
               normalizedSelector: `${selector.ref}:${start}-${end}`,
             });
           }
         }
-        if (!sourceSlice.matched) translatedCoordinates = refRelativeCoordinates(entry, lineage, start, end, {
+        // Partial source-coordinate overlap is a citation to trim, not a
+        // ref-relative request for different source lines in the same payload.
+        const overlapsSource = sourceContentWindows.some((window) => (
+          (!requestedPath || window.path === requestedPath)
+          && start <= window.source_end_line && end >= window.source_start_line
+        ));
+        if (!sourceSlice.matched && !overlapsSource) translatedCoordinates = refRelativeCoordinates(entry, lineage, start, end, {
           sourcePath: selectedSourcePath,
         });
         if (translatedCoordinates?.matched) {
@@ -1779,14 +1816,18 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
           end = translatedCoordinates.translatedEnd;
           if (translatedCoordinates.sourceContentRelative === true) {
             recordEvidenceCleanup(context, {
+              outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
               action: "normalize_compact_source_relative_range",
+              refObjectType: entry.object_type || null,
               selector: selectorValue,
               normalizedSelector: `${selector.ref}:${start}-${end}`,
             });
           }
           if (translatedCoordinates.clampedMaterializedEnd != null) {
             recordEvidenceCleanup(context, {
+              outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
               action: "clamp_ref_relative_end",
+              refObjectType: entry.object_type || null,
               selector: selectorValue,
               normalizedSelector: `${selector.ref}:${start}-${end}`,
             });
@@ -1809,7 +1850,9 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
         });
         if (surfacedPathEvidence) {
           recordEvidenceCleanup(context, {
+            outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
             action: "normalize_ref_source_coordinates_to_surfaced_path",
+            refObjectType: entry.object_type || null,
             selector: selectorValue,
             normalizedSelector: surfacedPathEvidence.source_selector,
           });
@@ -1842,21 +1885,45 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   } else {
     start = selector.start ?? 1;
     end = selector.end ?? Math.max(1, lines.length);
-    if (start > lines.length) {
+    // Only repair coordinates with no competing materialized interpretation.
+    // Explicitly staged materialized evidence must retain its original meaning.
+    const legacyWindows = legacySourceCoordinates
+      ? payloadSourceContentWindows(entry, lineage, { allowUnrecordedWindows: true }).filter((window) => (
+        Array.isArray(window.content_lines)
+        && (!selectedSourcePath || window.path === selectedSourcePath)
+        && start >= window.source_start_line && end <= window.source_end_line
+      ))
+      : [];
+    if (legacyWindows.length === 1) {
+      const window = legacyWindows[0];
+      excerpt = window.content_lines.slice(start - window.source_start_line, end - window.source_start_line + 1).join("\n");
+      selectedPath = window.path;
+      selectedSourceWindows = [Object.fromEntries(Object.entries(window).filter(([key]) => key !== "content_lines"))];
+      lineSemantics = "source";
+      recordEvidenceCleanup(context, {
+        outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+        action: "normalize_materialized_envelope_to_source_window",
+        refObjectType: entry.object_type || null,
+        selector: selectorValue,
+        normalizedSelector: `${selector.ref}:${start}-${end}`,
+      });
+    } else if (start > lines.length) {
       fail(
         "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
         `Evidence ${selector.ref} has ${lines.length} materialized lines; requested ${start}-${end}`,
       );
     }
-    if (end > lines.length) {
+    if (excerpt == null && end > lines.length) {
       end = lines.length;
       recordEvidenceCleanup(context, {
+        outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
         action: "clamp_materialized_end",
+        refObjectType: entry.object_type || null,
         selector: selectorValue,
         normalizedSelector: `${selector.ref}:${start}-${end}`,
       });
     }
-    excerpt = lines.slice(start - 1, end).join("\n");
+    excerpt ??= lines.slice(start - 1, end).join("\n");
   }
   if (!excerpt.trim()) {
     fail(
@@ -2026,7 +2093,7 @@ function resolveClaimEvidenceSelectors(value, context) {
   try {
     return [materializeAgentHandoffEvidenceSelector(value, context)];
   } catch (error) {
-    if (error.code !== "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID") throw error;
+    if (!["AGENT_HANDOFF_EVIDENCE_RANGE_INVALID", "AGENT_HANDOFF_EVIDENCE_TOO_LARGE"].includes(error.code)) throw error;
     const selector = parseAgentHandoffEvidenceSelector(value);
     let ranges;
     let sourcePath = selector.path;
@@ -2055,9 +2122,16 @@ function resolveClaimEvidenceSelectors(value, context) {
     if (!segments) throw error;
     // All segments must pass the ordinary custody and byte checks atomically.
     // Report consumers receive separate exact citations, never the broad span.
-    return segments.map((lines) => materializeAgentHandoffEvidenceSelector({
+    const materialized = segments.map((lines) => materializeAgentHandoffEvidenceSelector({
       ...(selector.ref ? { ref: selector.ref } : {}), path: sourcePath, lines,
     }, context));
+    recordEvidenceCleanup(context, {
+      outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+      action: "trim_selector_to_delivered_ranges",
+      selector: value,
+      normalizedSelectors: materialized.map((evidence) => evidence.source_selector || evidence.selector),
+    });
+    return materialized;
   }
 }
 
@@ -2114,6 +2188,7 @@ function materializeClaim(
     hasUnverifiedSupport = cleanableFailures.length > 0;
     for (const { selector, error, action } of cleanableFailures) {
       recordEvidenceCleanup(context, {
+        outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
         action,
         selector,
         code: error.code,
@@ -2143,6 +2218,7 @@ function materializeClaim(
         const action = evidenceRecoveryAction(error, evidenceFailureMode);
         if (!action) throw error;
         recordEvidenceCleanup(context, {
+          outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
           action: "drop_unverifiable_decoy_selector",
           selector: normalizedEntry[0],
           code: error.code,
@@ -3692,6 +3768,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           const action = evidenceRecoveryAction(error, evidenceFailureMode);
           if (action) {
             recordEvidenceCleanup(context, {
+              outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
               action,
               selector,
               code: error.code,
@@ -3717,6 +3794,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
               const action = evidenceRecoveryAction(error, evidenceFailureMode);
               if (action) {
                 recordEvidenceCleanup(context, {
+                  outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
                   action: "drop_unverifiable_decoy_selector",
                   selector: decoy[0],
                   code: error.code,
@@ -3931,6 +4009,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         for (const claim of unverifiedClaims) {
           const claimIndex = Number(claim?.[CLAIM_SUBMITTED_INDEX] || 0);
           recordEvidenceCleanup(materializationContext, {
+            outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
             action: "demote_unverified_claim_to_summary",
             selector: `<claim:${claimIndex || "unknown"}>`,
             code: "AGENT_HANDOFF_CLAIM_EVIDENCE_UNAVAILABLE",
