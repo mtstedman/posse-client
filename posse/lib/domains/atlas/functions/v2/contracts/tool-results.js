@@ -905,6 +905,42 @@
  */
 
 /**
+ * Model-facing header of a file-mode code.window after source line display.
+ * The native CodeWindowData above is what the owner, paging, reuse and
+ * coverage read; the researcher receives this collapsed form instead of
+ * `startLine`/`endLine`, `additionalWindows`, `map`, `identifiersFound`,
+ * `identifiersReturned` and `identifiersOmitted`, each of which repeated the
+ * same ranges or names. `identifiersMissing` and the continuation, traversal
+ * and evidence fields are unchanged.
+ * @typedef {Object} CodeWindowDisplayHeader
+ * @property {Array<{lines:[number,number],symbols?:string[],content_block:number}>} displayed One row per delivered source block, in block order; `symbols` are the map target ids (or names) whose declaration intersects the block.
+ * @property {Array<{symbolId?:SymbolId,name?:string,lines?:[number,number],identifier?:string}>} [omitted] Requested declarations not fully inline (a partially delivered declaration appears here and in `displayed`), plus found-but-withheld identifiers the map did not list.
+ * @property {Array<{lines:[number,number],evidence_refs?:Array<{ref:string,usage:string}>}>} [reused] Ranges withheld because they are already visible under the listed refs.
+ * @property {false} [selectionBounded] Present only when the whole file was delivered; a bounded selection is the default and not stated.
+ * @property {string[]} [missing] Requested identifiers not found in the file.
+ * @property {true} [truncated]
+ */
+
+/**
+ * Model-facing header of a symbol target (symbol.get, or code.window with a
+ * symbolId) after source line display: the address, the citation handle and
+ * only the identifiers the body did not carry. `selectionBounded`,
+ * `identifiersComplete`, `identifiersFound`, `identifiersReturned`,
+ * `decisionPoints`, the line-format marker and `evidence_ref.exact_field`/
+ * `chars` are not delivered; they are true by construction, restate the body,
+ * or have no reader.
+ * @typedef {Object} SymbolWindowDisplayHeader
+ * @property {string} path
+ * @property {string} symbolId Short symbol handle.
+ * @property {[number,number]} lines Inclusive source lines of the delivered body.
+ * @property {number} contentBlock
+ * @property {{ref:string,usage:string}} evidence_ref
+ * @property {string[]} [omitted] Requested identifiers the body did not carry.
+ * @property {string[]} [missing] Requested identifiers not found in the file.
+ * @property {true} [truncated]
+ */
+
+/**
  * @typedef {Object} CodeWindowMapTarget
  * @property {SymbolId} symbolId
  * @property {string} name Qualified name when available, otherwise the declaration name.
