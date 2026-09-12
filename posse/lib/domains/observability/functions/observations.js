@@ -671,6 +671,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
     `).all(...scopeParams, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
     let explorationCount = 0;
     let physicalCallCount = 0;
+    const physicalBatches = new Set();
     let symbolFollowupsDiscounted = 0;
     let lastSuccessfulOwnerExplorationStep = 0;
     let lastNovelEvidenceStep = 0;
@@ -782,7 +783,10 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         const atlasCitationFetch = isResearchAtlasCitationFetchAction(detail?.action);
         if (!atlasExploration && !atlasCitationFetch) continue;
         if (isRefundedInfrastructureFailure(row, detail)) continue;
-        physicalCallCount += 1;
+        const batchId = detail.research_physical_batch_version === 1
+          && detail.transport === "mcp_owner" ? String(detail.research_physical_batch_id || "") : "";
+        if (!batchId || !physicalBatches.has(batchId)) physicalCallCount += 1;
+        if (batchId) physicalBatches.add(batchId);
         if (atlasCitationFetch) continue;
         if (detail?.symbol_followup_discounted === true) symbolFollowupsDiscounted += 1;
         const explorationStep = explorationStepForDetail(detail);

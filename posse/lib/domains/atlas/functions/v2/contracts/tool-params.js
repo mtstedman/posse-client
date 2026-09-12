@@ -284,6 +284,7 @@
 
 /**
  * @typedef {Object} SymbolGetParams
+ * @property {SymbolGetParams[]} [items] Bounded independent selectors; nesting is rejected.
  * @property {string} [symbolId]
  * @property {SymbolRef} [symbolRef] Exact name lookup; file narrows to one repository path.
  * @property {string} [file] Exact repository-relative path for duplicate-content disambiguation.

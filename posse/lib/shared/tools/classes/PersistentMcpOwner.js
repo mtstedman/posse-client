@@ -95,7 +95,8 @@ import {
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
 import { evidenceRefSurface } from "../functions/ref-surface.js";
-import { sourceLineDisplay } from "../functions/source-line-display.js";
+import { sourceLineDisplay, compactSourceEvidenceSuffix } from "../functions/source-line-display.js";
+import { planSymbolGetBatch, combineSymbolGetBatchResults } from "../../../domains/atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { refreshSourceDecisionNavigation } from "../functions/source-decision-points.js";
 import {
   subAgentDispatchIdentities,
@@ -2398,11 +2399,12 @@ function finalizeSourceTransport(result, context = null) {
       continue;
     }
     const removedFields = stripInternalSourceCoverageFields(parsed) + refreshSourceDecisionNavigation(parsed);
-    const suffix = structured.remainder;
-    const numbered = sourceLineDisplay(parsed, 0, context ? (ref) => {
+    const resolveEvidence = context ? (ref) => {
       const visible = materializeHashRefEvidenceForContext(context, ref);
       return visible?.ok ? visible.entry : null;
-    } : null);
+    } : null;
+    const suffix = compactSourceEvidenceSuffix(parsed, structured.remainder, resolveEvidence);
+    const numbered = sourceLineDisplay(parsed, 0, resolveEvidence);
     if (numbered) {
       nextContent.push({
         ...part,
@@ -3873,6 +3875,10 @@ function recordOwnerToolObservation({
             physical_call_step: synthesisAdmission.assignedPhysicalCallStep,
             physical_call_ceiling: admissionMaxPhysicalCalls(synthesisAdmission),
             physical_request: 1,
+          } : {}),
+          ...(synthesisAdmission?.physicalBatchId ? {
+            research_physical_batch_version: 1,
+            research_physical_batch_id: synthesisAdmission.physicalBatchId,
           } : {}),
           ...(observationDetail && typeof observationDetail === "object" ? observationDetail : {}),
           atlas_artifacts: result?._meta?.atlasArtifacts || null,
@@ -6159,6 +6165,7 @@ export class PersistentMcpOwner {
   }
 
   _refundResearchInfrastructureFailure(session, admission, result, error = null) {
+    if (admission?.physicalBatchId) return false;
     if (!admission?.tracked || admission.citationFetch) return false;
     const structuredError = ownerToolStructuredError(result, error);
     if (!isResearchInfrastructureFailure(structuredError)) return false;
@@ -6437,6 +6444,24 @@ export class PersistentMcpOwner {
     ].join(":");
     const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
     const effectiveAction = effectiveAtlasResearchAction(requested);
+    if (effectiveAction === "symbol.get" && args?.toolArgs?.items != null) {
+      const plan = planSymbolGetBatch(args.toolArgs, {
+        resolveSymbolId: value => resolveAtlasSymbolHandle(args.session, value),
+        sourcePathForId: value => atlasSymbolSourcePath(args.session, value),
+      });
+      if (plan.error) return mcpToolResultMessage(args.message, mcpToolErrorPayload(plan.error));
+      const physicalStep = Number.isSafeInteger(args.assignedPhysicalCallStep)
+        ? args.assignedPhysicalCallStep : this._reserveResearchPhysicalCall(args.session, requested);
+      const physicalBatchId = crypto.randomUUID();
+      const responses = await Promise.all(plan.items.map((item, index) => item.invalid
+        ? { result: mcpToolErrorPayload(item.error || "Invalid symbol.get batch item") }
+        : this._executeAtlasToolCall({ ...args, binding, toolName: "atlas.symbol.get", toolArgs: item,
+          assignedPhysicalCallStep: physicalStep,
+          physicalBatchId,
+          message: { ...args.message, id: `${args.message?.id ?? "symbols"}:${index}` },
+        }).catch(() => ({result: mcpToolErrorPayload("symbol.get batch item execution failed")}))));
+      return mcpToolResultMessage(args.message, combineSymbolGetBatchResults(responses.map(response => response.result)));
+    }
     const enqueuedAt = Date.now();
     const researchExploration = String(boot.role || "") === "researcher"
       && isResearchAtlasExplorationAction(effectiveAction);
@@ -6499,6 +6524,7 @@ export class PersistentMcpOwner {
               assignedPhysicalCallStep,
             })
           : null);
+    if (synthesisAdmission && args.physicalBatchId) Object.assign(synthesisAdmission, {physicalBatchId: args.physicalBatchId});
     if (researchBatch && isTerminalResearchExplorationAdmission(synthesisAdmission)) {
       researchBatch.terminal = true;
     }

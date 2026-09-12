@@ -10,13 +10,13 @@ export const TOOL_BATCHING_CLASSES = Object.freeze({
 const PARALLEL_READ_TOOLS = new Set([
   "read_file", "list_files", "search_files", "git_history", "hash_file", "read_image_metadata",
   "validate_artifact_output", "extract_image_text", "query", "code", "repo", "action.search",
-  "manual", "symbol.search", "symbol.overview", "symbol.callers", "symbol.get", "tree.branch", "tree.expand", "code.skeleton",
+  "manual", "symbol.search", "symbol.overview", "symbol.callers", "tree.branch", "tree.expand", "code.skeleton",
   "code.lens", "code.window", "code.structure", "review.delta", "review.analyze", "review.risk",
   "file.read",
 ]);
 
 const NATIVE_BATCH_TOOLS = new Set([
-  "sub_agent", "inspect_file", "create_test", "run_test", "fetch_ref", "traverse_ref", "create_ref", "symbol.card",
+  "sub_agent", "inspect_file", "create_test", "run_test", "fetch_ref", "traverse_ref", "create_ref", "symbol.card", "symbol.get",
   "code.survey", "memory.surface", "memory.get",
 ]);
 

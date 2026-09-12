@@ -12,6 +12,7 @@ import {
   INTERNAL_ATLAS_SURFACE_ACTION_SET,
   INTERNAL_TOOL_FAMILY,
 } from "./internal-tools.js";
+import { SYMBOL_GET_BATCH_POLICY } from "./symbol-get-batch.js";
 
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
 
@@ -669,10 +670,20 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.get": {
     type: "function",
     name: "atlas_symbol_get",
-    description: "Read one exact symbol body by returned ID or exact name reference. Supply file to select one repository path; unresolved duplicate paths return file/ref choices. Declaration-only addresses resolve to one provable same-file implementation or return explicit implementation candidates.",
+    description: "Read an exact symbol body, or batch up to three independent selectors in items. Batch maxTokens is a shared cap (default and maximum 8000), divided across items; errors remain per item. Scalar ID/name lookup and file disambiguation are unchanged.",
     parameters: {
       type: "object",
       properties: {
+        items: {
+          type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
+          description: "Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode.",
+          items: { type: "object", properties: {
+            symbolId: {type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN},
+            symbolRef: {type: "object", properties: {name: {type: "string"}, file: {type: "string"}, kind: {type: "string"}, exportedOnly: {type: "boolean"}}, required: ["name"], additionalProperties: false},
+            file: {type: "string"}, identifiersToFind: {type: "array", items: {type: "string"}, maxItems: 50},
+            maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokens},
+          }, anyOf: [{required: ["symbolId"]}, {required: ["symbolRef"]}], additionalProperties: false},
+        },
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact symbol ID returned by Atlas." },
         symbolRef: {
           type: "object",
@@ -697,6 +708,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Optional inline token cap; the repository code-window policy still applies." },
       },
       anyOf: [
+        { required: ["items"] },
         { required: ["symbolId"] },
         { required: ["symbolRef"] },
       ],

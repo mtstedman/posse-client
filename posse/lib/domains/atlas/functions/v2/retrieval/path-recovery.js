@@ -28,7 +28,9 @@ export async function recoverIndexedPath(view, requestedPath) {
       ? basenameDistance
       : Math.min(editRatio(requestedPath, candidate), basenameDistance + 0.15);
     const directoryRank = parts.directory === requested.directory ? 0 : sameDirectory ? 1 : 2;
-    return { path: candidate, directory: parts.directory, sameDirectory, directoryRank, basenameDistance, score };
+    const exactDescendant = requested.directory && basenameDistance === 0
+      && parts.directory.startsWith(`${requested.directory}/`);
+    return { path: candidate, directory: parts.directory, sameDirectory, directoryRank: exactDescendant ? -1 : directoryRank, basenameDistance, score };
   }).sort((left, right) => (
     (requested.directory ? left.directoryRank - right.directoryRank : 0)
     || left.score - right.score || left.path.localeCompare(right.path)

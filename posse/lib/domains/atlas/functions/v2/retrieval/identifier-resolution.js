@@ -23,8 +23,12 @@ export function requestedIdentifierCandidates(value) {
   const normalized = normalizedQualifiedIdentifier(value);
   if (!normalized) return [];
   const segments = normalized.split(".").filter(Boolean);
+  // Exact index queries may be case-sensitive. Preserve the caller's member
+  // spelling while still using normalized qualified matching to prove owner.
+  const originalTail = String(value || "").trim().split(/::|[.\\/#]/u).at(-1);
   return [...new Set([
     normalized,
+    ...(originalTail ? [originalTail] : []),
     ...(segments.length > 1 ? [segments.at(-1)] : []),
   ].filter(Boolean))];
 }

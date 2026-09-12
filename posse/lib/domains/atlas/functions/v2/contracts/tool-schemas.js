@@ -8,6 +8,7 @@
 
 import { ATLAS_TOOL_ACTIONS } from "./tool-params.js";
 import { ATLAS_RUNTIME_INPUTS } from "./runtimes.js";
+import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch.js";
 import {
   INTERNAL_ATLAS_ACTIONS,
   INTERNAL_TOOL_FAMILY,
@@ -416,6 +417,11 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     indexVersion: s({ minLength: 1, maxLength: 512 }),
   }, ["symbolId"]),
   "symbol.get": o({
+    items: a(o({
+      symbolId: symbolId(), symbolRef: symbolRef(), file: s({ minLength: 1, maxLength: 4000 }),
+      identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
+      maxTokens: i({ minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokens }),
+    }, [], { anyOf: [{ required: ["symbolId"] }, { required: ["symbolRef"] }] }), { minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems }),
     symbolId: symbolId(),
     symbolRef: symbolRef(),
     file: s({ minLength: 1, maxLength: 4000 }),
@@ -423,6 +429,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
   }, [], {
     anyOf: [
+      { required: ["items"] },
       { required: ["symbolId"] },
       { required: ["symbolRef"] },
     ],

@@ -1,4 +1,5 @@
 // @ts-check
+import { SYMBOL_GET_BATCH_POLICY } from "../../../../catalog/symbol-get-batch.js";
 
 const DISPATCHER_TOOL_NAME = "atlas.query";
 // Three transformed direct results remain below the Codex MCP client's 48K
@@ -21,7 +22,7 @@ const ACTION_CARDS = Object.freeze({
   "symbol.search": "requires query; for a known exact name call symbol.get with symbolRef{name,file?,kind?} directly; search only an unknown, ambiguous, or missed target, using scope=name, semantic=false, and limit at most 10 for an exact name; never repeat case or scope variants after a usable hit; a hit is an address, not a source body; batch independent searches and reuse returned IDs; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; list compact incoming caller or reference symbols grouped by file; fields symbolId,mode,limit,offset",
-  "symbol.get": "requires symbolId or symbolRef; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; batch maxTokens is shared, at most 8000; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; fields symbolId,kind,minConfidence,limit,includeUnresolved",
   "code.skeleton": "fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
   "code.survey": "requires paths; fields paths,identifiersToFind,limit",
@@ -41,7 +42,7 @@ const TYPED_ACTION_CARDS = Object.freeze({
   "symbol.search": "requires query; for a known exact name call symbol.get with symbolRef{name,file?,kind?} directly; search only an unknown, ambiguous, or missed target, using scope=name, semantic=false, and limit at most 10 for an exact name; never repeat case or scope variants after a usable hit; a hit is an address, not a source body; batch independent searches, then reuse returned IDs; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; get a compact relationship summary for one or several identified symbols; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; list compact incoming resolved callers, references, or both by file, then use symbol.get on a returned ID; fields symbolId,mode,limit,offset",
-  "symbol.get": "requires symbolId or symbolRef; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; batch maxTokens is shared, at most 8000; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; inspect concrete call and reference sites when relationships are the missing fact; fields symbolId,kind,minConfidence,limit,includeUnresolved",
   "code.skeleton": "orient within one known file or symbol using a compact body-free outline before exact source; fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
   "code.survey": "requires paths; use when the exact target is unknown or behavior spans files, returning a ranked multi-file symbol preview and call map; fields paths,identifiersToFind,limit",
@@ -57,7 +58,7 @@ const TYPED_ACTION_CARDS = Object.freeze({
 // prompt pressure: native validation still rejects every malformed window.
 const TYPED_TERSE_ACTION_CARDS = Object.freeze({
   ...ACTION_CARDS,
-  "symbol.get": "requires symbolId or symbolRef; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; batch maxTokens is shared, at most 8000; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "code.window": "requires file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; fields file,identifiersToFind,granularity,maxTokens",
 });
 
@@ -207,6 +208,7 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
   }),
   "symbol.get": Object.freeze({
     anyOf: Object.freeze([
+      Object.freeze({ required: Object.freeze(["items"]) }),
       Object.freeze({ required: Object.freeze(["symbolId"]) }),
       Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
       Object.freeze({ required: Object.freeze(["symbolRef"]) }),
@@ -296,6 +298,7 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "symbolId",
   "symbolHandle",
   "symbolIds",
+  "items",
   "symbolRef",
   "symbols",
   "traversal_ref",
@@ -322,6 +325,12 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     additionalProperties: false,
   };
   const properties = {
+    items: {type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
+      items: {type: "object", properties: {
+        symbolId, symbolRef: symbolRefItem, file: {type: "string"}, path: {type: "string"},
+        identifiersToFind: {type: "array", items: {type: "string"}, maxItems: 50},
+        maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokens},
+      }, anyOf: [{required: ["symbolId"]}, {required: ["symbolRef"]}], additionalProperties: false}},
     query: { type: "string", minLength: 1 },
     scope: { type: "string", enum: ["name", "body", "either"] },
     limit: { type: "integer", minimum: 1, maximum: 20000 },
@@ -423,6 +432,15 @@ function researcherReadActionArgsSchema(options = {}) {
 export function normalizeResearcherTypedActionArgs(action, args = {}) {
   const normalized = { ...args };
   const aliases = [];
+  if (action === "symbol.get" && Array.isArray(normalized.items)) {
+    if (normalized.items.some(item => !item || typeof item !== "object" || item.items != null)) {
+      return {args: normalized, aliases, error: "symbol.get batch items must be scalar selectors"};
+    }
+    const children = normalized.items.map(item => normalizeResearcherTypedActionArgs(action, item));
+    const invalid = children.find(child => child.error);
+    if (invalid) return {args: normalized, aliases, error: invalid.error};
+    normalized.items = children.map(child => child.args);
+  }
   const move = (from, to) => {
     if (!Object.prototype.hasOwnProperty.call(normalized, from)) return null;
     if (Object.prototype.hasOwnProperty.call(normalized, to)) {

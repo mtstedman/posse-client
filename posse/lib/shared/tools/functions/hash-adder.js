@@ -559,6 +559,17 @@ function surveyFetchCursor(page) {
   };
 }
 
+// Keep flat records compact but retain record boundaries for line-oriented
+// traversal/search. A single-line page would turn every match into a full read.
+function compactSurveyJson(value) {
+  if (Array.isArray(value)) return `[${value.map(compactSurveyJson).join(",\n")}]`;
+  if (value && typeof value === "object" && Object.values(value).some(child => child && typeof child === "object")) {
+    return `{${Object.entries(value).filter(([, child]) => child !== undefined)
+      .map(([key, child]) => `${JSON.stringify(key)}:${compactSurveyJson(child)}`).join(",\n")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export function materializeCodeSurveyPages(data, {
   args = {},
   context = {},
@@ -590,7 +601,7 @@ export function materializeCodeSurveyPages(data, {
       const rankStart = start + 1;
       const rankEnd = start + pageFiles.length;
       const cursor = surveyFetchCursor(nextPage);
-      const payloadText = JSON.stringify({
+      const payloadText = compactSurveyJson({
         ok: true,
         action: "code.survey.page",
         pagination: {
@@ -601,7 +612,7 @@ export function materializeCodeSurveyPages(data, {
         },
         ...(start === 0 ? { survey: surveyMetadata } : {}),
         files: pageFiles,
-      }, null, 2);
+      });
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",
         payloadText,

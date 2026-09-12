@@ -154,9 +154,16 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   }
   const matches = uniqueResolutionSymbols(resolution.matches).sort(compareSymbolTargets);
   if (matches.length === 0) {
-    const fallbackResolution = requestedFile
-      ? resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(eligible), name)
-      : { matches: [] };
+    const recovery = [...eligible];
+    if (symbolRef.kind) {
+      for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name)])]) {
+        recovery.push(...await view.query.findSymbol(candidate, { fuzzy: false, limit: 500 }));
+      }
+    }
+    const visibleRecovery = symbolRef.exportedOnly === true
+      ? recovery.filter(symbol => !["private", "protected"].includes(String(symbol.visibility || "").toLowerCase()))
+      : recovery;
+    const fallbackResolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(visibleRecovery), name);
     return {
       status: "symbol_ref_not_found",
       requestedFile,

@@ -1275,11 +1275,15 @@ async function resolveCodeTarget({ view, params, readFile, repoRoot, action }) {
 async function repoReadFailureWithSuggestions({ view, repoRoot, repoRelPath, targetSource, action, params }) {
   const failure = repoReadFailure(repoRoot, repoRelPath, targetSource);
   if (targetSource !== "file") return failure;
+  const recovery = await pathCorrectionDetails(view, repoRelPath, action, params);
   return {
     ...failure,
+    ...(recovery.candidates.length > 0 ? {
+      message: `${failure.message} Suggested paths: ${recovery.candidates.map(row => row.path).join(", ").slice(0, 3000)}`,
+    } : {}),
     details: {
       ...(failure.details || {}),
-      ...await pathCorrectionDetails(view, repoRelPath, action, params),
+      ...recovery,
     },
   };
 }

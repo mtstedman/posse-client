@@ -123,12 +123,40 @@ function displayedCoverage(range, displayedRanges) {
   return cursor > range[1] ? "full" : "partial";
 }
 
+// Keep backing refs and capability issuance intact; suppress only a redundant
+// visible stub after proving that the header ref covers every delivered window.
+export function compactSourceEvidenceSuffix(value, suffix, resolveEvidence) {
+  const ref = value?.evidence_ref;
+  if (!resolveEvidence || ref?.usage !== "cite_or_handoff" || !ref.ref) return suffix;
+  const entry = resolveEvidence(ref.ref);
+  if (!entry || entry.metadata?.line_semantics !== "source" || entry.metadata?.citable === false) return suffix;
+  const proof = normalizedEvidenceSourceWindows(entry.metadata.source_windows);
+  const windows = [value, ...(Array.isArray(value.additionalWindows) ? value.additionalWindows : [])]
+    .filter(window => typeof window?.content === "string" && window.content.length > 0);
+  if (windows.length === 0 || Array.isArray(value.requestedWindows)) return suffix;
+  for (const window of windows) {
+    const range = targetLines({lines: [window.startLine, window.endLine]});
+    const sourcePath = canonicalEvidenceSourcePath(window.repo_rel_path || value.repo_rel_path);
+    const ranges = proof.filter(row => row.path === sourcePath)
+      .map(row => [row.source_start_line, row.source_end_line]);
+    if (!range || displayedCoverage(range, ranges) !== "full") return suffix;
+  }
+  return String(suffix || "").replace(/\[evidence_ref #[^\]\r\n]*\]/gu, "").trim();
+}
+
 function fileWindowDisplay(header, windows, value) {
   const requests = Array.isArray(value.map?.requested) ? value.map.requested : [];
   const targets = requests.flatMap((request) => (
     (Array.isArray(request.targets) ? request.targets : []).map((target) => ({ request, target }))
   ));
   const displayedRanges = windows.map(({ window }) => [window.startLine, window.endLine]);
+  // Admission has already validated these byte-exact ranges and their refs.
+  // Previously delivered evidence remains available even when not redisplayed.
+  const reusedRanges = (Array.isArray(value.reusedRanges) ? value.reusedRanges : [])
+    .filter((range) => Array.isArray(range.evidence_refs) && range.evidence_refs.length > 0)
+    .map((range) => targetLines({ lines: [range.startLine, range.endLine] }))
+    .filter(Boolean);
+  const availableRanges = [...displayedRanges, ...reusedRanges];
   const additionalIdentifiers = new Set(windows.flatMap(({ window }) => (
     Array.isArray(window.identifiers) ? window.identifiers.map(lowered) : []
   )));
@@ -173,7 +201,7 @@ function fileWindowDisplay(header, windows, value) {
     }
     for (const target of requestTargets) {
       const lines = targetLines(target);
-      const coverage = lines ? displayedCoverage(lines, displayedRanges) : target.coverage;
+      const coverage = lines ? displayedCoverage(lines, availableRanges) : target.coverage;
       if (coverage === "full") continue;
       omitted.push({
         ...(target.symbolId != null ? { symbolId: target.symbolId } : {}),
@@ -250,7 +278,7 @@ function displayWindows(value, blockOffset) {
     // window that failed to number, so it is not displayed. The reshape runs
     // even with no numbered block at all (a map-only or fully paged response)
     // so the native map never reaches the model.
-    const windows = lifted.filter(({ empty }, index) => !(index === 0 && empty));
+    const windows = lifted.filter(({ empty }) => !empty);
     return { header: fileWindowDisplay(header, windows, value), blocks };
   }
   if (blocks.length === 0) return null;

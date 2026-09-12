@@ -1327,6 +1327,13 @@ function resolveSurfacedEvidencePath(requestedPath, context) {
   };
   const exact = resolveUnique(candidates.filter((candidate) => candidate.path === requested));
   if (exact) return exact;
+  // A Markdown-style # prefix is sometimes attached to an actual source path.
+  // Normalize only an exact already-surfaced path; never resolve unknown refs,
+  // guessed paths, basenames, or ranges outside the existing evidence custody.
+  if (requested.startsWith("#") && requested.includes("/")) {
+    const unprefixed = resolveUnique(candidates.filter((candidate) => candidate.path === requested.slice(1)));
+    if (unprefixed) return unprefixed;
+  }
   const suffix = resolveUnique(candidates.filter((candidate) => candidate.path.endsWith(`/${requested}`)));
   if (suffix) return suffix;
   if (!requested.includes("/")) {

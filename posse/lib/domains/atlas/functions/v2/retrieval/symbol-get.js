@@ -8,6 +8,7 @@ import { symbolIdOf } from "./cards.js";
 import { resolveSymbolBodyTarget, symbolSourceText } from "./symbol-body-resolution.js";
 import { selectSymbolRefTarget, selectSymbolTarget } from "./symbol-target.js";
 import { resolveRequestedIdentifierSymbols } from "./identifier-resolution.js";
+import { planSymbolGetBatch } from "./symbol-get-batch.js";
 
 const INTERNAL_SYMBOL_GET_REASON = "symbol.get exact indexed body";
 const MAX_SYMBOL_GET_AMBIGUITY_CHOICES = 20;
@@ -58,6 +59,10 @@ async function readSelectedBody({
 
 function targetSelectionError(selection, selector, versionId) {
   const action = "symbol.get";
+  // Some MCP clients show text only, not structuredContent/error.details.
+  const recovery = selection.bearers?.length > 0
+    ? ` Exact candidates: ${JSON.stringify(selection.bearers).slice(0, MAX_SYMBOL_GET_AMBIGUITY_PATH_CHARS)}`
+    : "";
   if (selection.status === "invalid_symbol_id") {
     return errorEnvelope({
       action,
@@ -112,7 +117,7 @@ function targetSelectionError(selection, selector, versionId) {
       action,
       versionId,
       code: "ambiguous_symbol",
-      message: `Symbol ${selector} matches multiple exact bearers; use one of the qualified names in error.details.bearers.`,
+      message: `Symbol ${selector} matches multiple exact bearers.${recovery}`,
       details: { requested: selector, bearers: selection.bearers || [] },
     });
   }
@@ -120,9 +125,7 @@ function targetSelectionError(selection, selector, versionId) {
     action,
     versionId,
     code: "symbol_not_found",
-    message: selection.bearers?.length > 0 && selection.requestedFile
-      ? `No symbol found for ${selector} at ${selection.requestedFile}; exact bearers are listed in error.details.bearers.`
-      : `No symbol found for ${selector}`,
+    message: `No symbol found for ${selector}${selection.requestedFile ? ` at ${selection.requestedFile}` : ""}${recovery ? ` with the requested constraints.${recovery}` : ""}`,
     details: selection.bearers?.length > 0
       ? { requested: selector, requestedFile: selection.requestedFile || null, bearers: selection.bearers }
       : undefined,
@@ -261,6 +264,15 @@ export async function symbolGet({
   readSymbolBody = codeNeedWindow,
   storeSourceTraversalRef = null,
 }) {
+  if (params.items != null) {
+    const plan = planSymbolGetBatch(params);
+    if (plan.error) return errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: plan.error});
+    const items = await Promise.all(plan.items.map(item => item.invalid
+      ? errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: "Invalid symbol.get batch item"})
+      : symbolGet({view, versionId, params: item, readFile, repoRoot, ledger, repoId, config,
+        hashRefContext, readSymbolBody, storeSourceTraversalRef})));
+    return {ok: true, action: "symbol.get", versionId, data: {items}};
+  }
   const selection = params.symbolId
     ? await selectSymbolTarget({
       view,
