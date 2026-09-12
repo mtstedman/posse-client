@@ -457,3 +457,12 @@ export const EVENT_TYPES = Object.freeze({
   WORKTREE_TERMINAL_SNAPSHOT: "worktree.terminal_snapshot",
   WORKTREE_UNTRACKED_RESIDUAL_TOLERATED: "worktree.untracked_residual_tolerated",
 });
+
+// Operational event projections survive the bounded observability tail.
+export const QUEUE_STATE_EVENT_TYPES = Object.freeze([
+  EVENT_TYPES.WORK_ITEM_MERGED,
+  EVENT_TYPES.WORK_ITEM_REOPENED,
+  EVENT_TYPES.WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_STALE,
+  EVENT_TYPES.JOB_WRITE_LOCK_BLOCKED,
+  EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING,
+]);

@@ -84,6 +84,9 @@ async function main() {
   if (task === "executePush") {
     return helpers._executePush(args);
   }
+  if (task === "validatePushCandidate") {
+    return helpers._validatePushCandidate(args);
+  }
   if (task === "gitDiffStat") {
     return helpers.gitDiffStat(args.mergeBase, args.branch, args.cwd || projectDir);
   }

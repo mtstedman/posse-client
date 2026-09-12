@@ -299,6 +299,9 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
     lanes,
     ref_count: laneCount(lanes),
   };
+  for (const key of ["reissued_count", "missed_count"]) {
+    if (Number.isSafeInteger(input[key]) && input[key] >= 0) packet[key] = input[key];
+  }
   const priorDropped = Array.isArray(input.upstream_dropped) ? input.upstream_dropped : [];
   const newDropped = [...(Array.isArray(input.dropped) ? input.dropped : []), ...dropped];
   const upstreamDropped = [...new Map([...priorDropped, ...newDropped].map((entry) => {

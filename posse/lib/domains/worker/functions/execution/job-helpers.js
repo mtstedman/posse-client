@@ -6,24 +6,7 @@ import {
 import { slugify } from "../../../../shared/format/functions/slug.js";
 import { estimateCallCost } from "../../../billing/functions/pricing.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
-
-const PROVIDER_ERROR_PATTERNS = [
-  /overloaded_error/i,
-  /API Error:\s*5\d\d/i,
-  /api_error.*internal server error/i,
-  /rate.?limit|429|too many requests/i,
-  /out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low|session limit|hit your.*limit/i,
-  /configuration.*corrupted/i,
-  /Failed to spawn claude/i,
-  /claude exited null/i,
-  /claude exited with unknown status/i,
-  /claude exited via signal/i,
-  /socket connection was closed unexpectedly/i,
-  /^Codex CLI exited with code 1\s*$/i,
-  /ECONNREFUSED|ECONNRESET|ETIMEDOUT/i,
-  /connection error/i,
-  /circuit breaker open/i,
-];
+import { isProviderInfrastructureError } from "./provider-error.js";
 
 export function loadNudges(jobId, { attemptId = null, agentCallId = null } = {}) {
   return buildOperatorGuidanceForAttempt({
@@ -75,8 +58,7 @@ export function buildIntermediateReportTask(task, artifactDirAbs, desiredOutputs
 }
 
 export function isProviderError(err) {
-  const msg = err.message || "";
-  return PROVIDER_ERROR_PATTERNS.some((re) => re.test(msg));
+  return isProviderInfrastructureError(err);
 }
 
 export function resolveCallCostEstimate(stats) {

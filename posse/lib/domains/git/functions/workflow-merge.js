@@ -47,7 +47,7 @@ export function createMergeWorkflowHelpers(context, {
   isRuntimePorcelainLine,
   sourceWorktreeDirtyState,
   sweepOrphanedInferTsconfig,
-  validatePushCandidate = () => ({ ok: true }),
+  validatePushCandidateAsync = async () => ({ ok: true }),
 }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
   const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
@@ -964,6 +964,21 @@ export function createMergeWorkflowHelpers(context, {
         log(message, { json: { branch, target: targetBranch, merge_in_progress: true } });
         return { ok: false, dirty: true, message };
       }
+      for (const state of ["REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"]) {
+        let present = false;
+        try { gitMergeExec(["rev-parse", "--verify", state], cwd); present = true; } catch { /* no state ref */ }
+        if (!present) continue;
+        const message = `Merge refused: target worktree has an in-progress ${state} before merging ${branch}; finish or abort it manually`;
+        log(message, { json: { branch, target: targetBranch, sequencer_in_progress: state } });
+        return { ok: false, dirty: true, message };
+      }
+      for (const state of ["rebase-merge", "rebase-apply", "sequencer"]) {
+        const statePath = gitMergeExec(["rev-parse", "--git-path", state], cwd);
+        if (!fs.existsSync(path.resolve(cwd, statePath))) continue;
+        const message = `Merge refused: target worktree has an in-progress ${state} before merging ${branch}; finish or abort it manually`;
+        log(message, { json: { branch, target: targetBranch, sequencer_in_progress: state } });
+        return { ok: false, dirty: true, message };
+      }
 
       // Pre-flight: unmerged index entries without MERGE_HEAD do have Posse
       // origins (a crashed conflicted squash merge, a failed stash pop), so
@@ -1459,7 +1474,7 @@ export function createMergeWorkflowHelpers(context, {
       purpose,
       purposeKey,
       mergeLocalCandidate: runLocal,
-      validateCandidate: validatePushCandidate,
+      validateCandidate: validatePushCandidateAsync,
       mergeLockAlreadyHeld,
     });
   }

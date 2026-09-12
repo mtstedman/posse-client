@@ -84,6 +84,7 @@ import {
 import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
+import { isProviderInfrastructureError } from "../functions/execution/provider-error.js";
 import {
   markUsageSegmentsIncomplete,
   recordUsageSegment,
@@ -231,24 +232,6 @@ function terminalHandoffContractChars(options = {}) {
   return contract?.length || 0;
 }
 
-const DEFAULT_PROVIDER_ERROR_PATTERNS = [
-  /overloaded_error/i,
-  /API Error:\s*5\d\d/i,
-  /api_error.*internal server error/i,
-  /rate.?limit|429|too many requests/i,
-  /out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low|session limit|hit your.*limit/i,
-  /configuration.*corrupted/i,
-  /Failed to spawn claude/i,
-  /claude exited null/i,
-  /claude exited with unknown status/i,
-  /claude exited via signal/i,
-  /socket connection was closed unexpectedly/i,
-  /^Codex CLI exited with code 1\s*$/i,
-  /MCP_ATTACH_PROOF_MISSING|MCP_ATTACH_PROJECTION_MISMATCH|MCP attach proof missing|deterministic MCP attach proof missing|deterministic MCP projection mismatch/i,
-  /ECONNREFUSED|ECONNRESET|ETIMEDOUT/i,
-  /connection error/i,
-  /circuit breaker open/i,
-];
 const RUNTIME_MODEL_ERROR_PATTERNS = [
   /\b(?:model|deployment)\b[^\n]{0,160}\b(?:does\s+not\s+exist|unsupported|is\s+not\s+supported|not\s+supported|does\s+not\s+support)\b/i,
   /\b(?:unknown|unsupported|invalid)\s+model\b/i,
@@ -349,8 +332,7 @@ async function timeProviderSetupPhase(label, meta, fn, { warnMs = SLOW_PROVIDER_
 }
 
 function defaultIsProviderError(err) {
-  const msg = err?.message || "";
-  return DEFAULT_PROVIDER_ERROR_PATTERNS.some((re) => re.test(msg));
+  return isProviderInfrastructureError(err);
 }
 
 function errorSearchText(err) {
@@ -501,6 +483,7 @@ function nonNegativeTokenCount(value) {
 
 function providerUsageStatus(stats, { measured, unavailable } = {}) {
   if (unavailable) return "unavailable_after_terminal_stop";
+  if (stats.usageEstimated === true || stats.usageCapturePrecision === "unknown") return "estimated";
   if (!measured) return "unavailable";
   return stats.tokenUsageSource === "codex_rollout"
     ? "measured_codex_rollout"
@@ -955,7 +938,9 @@ export class TrackedProviderClient {
   }) {
     const providerUsageMeasured = !terminalUsageUnavailable
       && stats.inputTokens != null
-      && stats.outputTokens != null;
+      && stats.outputTokens != null
+      && stats.usageEstimated !== true
+      && stats.usageCapturePrecision !== "unknown";
     const captureIncomplete = terminalUsageUnavailable
       || stats.usageCapturePrecision === "incomplete"
       || (!providerUsageMeasured && missingUsagePrecision === "incomplete");

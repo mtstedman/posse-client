@@ -306,6 +306,7 @@ export async function callProvider(promptText, {
   activity = "",
   silent = false,
   autoApprove = false,
+  disableSystemTools = null,
   scopedFiles = null,  // string[] — files_to_modify: Write/Edit scoped to these exact paths
   createFiles = null,  // string[] — files_to_create: Write scoped to these exact new file paths
   createRoots = null,  // string[] — directories where Write is allowed for any path under them
@@ -461,7 +462,8 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAttachment,
     });
-    const disableSystemToolsResolved = resolveDisableSystemTools();
+    const disableSystemToolsResolved = typeof disableSystemTools === "boolean"
+      ? disableSystemTools : resolveDisableSystemTools();
     const deterministicReadMcp = await buildClaudeDeterministicReadMcpConfigPayloadAsync(role, mcpWorkspaceCwd, {
       scopedFiles,
       createFiles,

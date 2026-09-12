@@ -4,6 +4,7 @@
 // protocol in one place: progress messages, structured error hydration,
 // timeout/abort termination, and listener cleanup.
 
+import { threadLifetimeRegistry } from "./ThreadLifetimeRegistry.js";
 import { Worker as NodeWorker } from "node:worker_threads";
 import { sanitizeWorkerExecArgv } from "../../../domains/runtime/functions/worker-exec-argv.js";
 
@@ -138,11 +139,19 @@ export class ThreadManager {
         ...workerOptions,
         execArgv: sanitizeWorkerExecArgv(execArgv),
       };
-      const worker = new this.WorkerClass(workerUrl, /** @type {any} */ ({
-        type: "module",
-        workerData,
-        ...sanitizedWorkerOptions,
-      }));
+      const lifetime = threadLifetimeRegistry.reserve();
+      let worker;
+      try {
+        worker = new this.WorkerClass(workerUrl, /** @type {any} */ ({
+          type: "module",
+          ...sanitizedWorkerOptions,
+          workerData: { ...workerData, .../** @type {Record<string, unknown>} */ (workerOptions.workerData || {}), posseThreadLifetime: lifetime },
+        }));
+      } catch (error) {
+        threadLifetimeRegistry.retire(lifetime);
+        throw error;
+      }
+      worker.once("exit", () => threadLifetimeRegistry.retire(lifetime));
       emitLifecycle(onLifecycle, {
         kind: "start",
         label,

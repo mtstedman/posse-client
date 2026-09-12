@@ -1,3 +1,4 @@
+import { IMAGE_TOOL_CHAT_PROVIDERS } from "../../../catalog/provider.js";
 // lib/domains/providers/functions/delegation-routing.js
 //
 // Shared delegation and provider-assignment helpers used by the worker's
@@ -146,6 +147,7 @@ export function selectFallbackProvider(allProviders = [], providerName, needsIma
   const fallbackProviders = Array.isArray(allProviders) ? allProviders : [];
   // The configured pool is an authorization boundary. Do not invent Claude
   // when an operator or experiment explicitly pins a role to one provider.
-  return fallbackProviders.find((p) => p !== providerName)
+  return fallbackProviders.find((p) => p !== providerName
+    && (!needsImageGeneration || IMAGE_TOOL_CHAT_PROVIDERS.includes(p)))
     || null;
 }

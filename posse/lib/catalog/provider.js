@@ -5,6 +5,10 @@
 
 export const PROVIDER_OPTIONS = Object.freeze(["claude", "openai", "codex", "grok", "copilot", "posse-local"]);
 
+// Artificer chat runtimes can invoke the issued image-generation tool. Codex
+// has no such execution route; image model ownership is a separate catalog.
+export const IMAGE_TOOL_CHAT_PROVIDERS = Object.freeze(PROVIDER_OPTIONS.filter((provider) => provider !== "codex"));
+
 export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
 export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
 

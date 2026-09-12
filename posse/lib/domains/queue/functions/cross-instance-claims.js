@@ -11,7 +11,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
 import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-native.js";
 import { now, runImmediateTransaction } from "./common.js";
-import { logEvent } from "./events.js";
+import { logDurableEvent, logEvent } from "./events.js";
 import { readRuntimeStatus, RUNTIME_STATUS_KEYS } from "./runtime-status.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 
@@ -620,28 +620,30 @@ export function warnForPeerClaimAtToolWrite(job, filePath) {
   const db = getDb();
   const fingerprint = `${job.id}:${claimIdentity(claim)}:${path}`;
   const recent = db.prepare(`
-    SELECT event_json FROM events
+    SELECT event_json FROM queue_event_state
     WHERE job_id = ? AND event_type = ?
     ORDER BY id DESC LIMIT 1
   `).get(job.id, EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING);
   try {
     if (JSON.parse(recent?.event_json || "{}").fingerprint === fingerprint) return conflict;
   } catch { /* emit a fresh bounded warning */ }
-  logEvent({
-    work_item_id: job.work_item_id,
-    job_id: job.id,
-    event_type: EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING,
-    actor_type: EVENT_ACTORS.WORKER,
-    actor_id: `job-${job.id}`,
-    message: `Peer instance ${claim.instance_id} is editing ${path}; a merge conflict is possible`,
-    event_json: JSON.stringify({
-      fingerprint,
-      peer_instance_id: claim.instance_id,
-      peer_work_item_id: claim.work_item_id,
-      path,
-      advisory: true,
-    }),
-  });
+  try {
+    logDurableEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      event_type: EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING,
+      actor_type: EVENT_ACTORS.WORKER,
+      actor_id: `job-${job.id}`,
+      message: `Peer instance ${claim.instance_id} is editing ${path}; a merge conflict is possible`,
+      event_json: JSON.stringify({
+        fingerprint,
+        peer_instance_id: claim.instance_id,
+        peer_work_item_id: claim.work_item_id,
+        path,
+        advisory: true,
+      }),
+    });
+  } catch { /* Advisory telemetry must not refuse an otherwise permitted write. */ }
   return conflict;
 }
 

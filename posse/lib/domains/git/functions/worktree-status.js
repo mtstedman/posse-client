@@ -10,7 +10,7 @@ import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
 import { gitCommitAll } from "./commit-scope.js";
 import { gitExec } from "./utils.js";
-import { acquireWorktreeLock, gitStashLockPath } from "./worktree-locks.js";
+import { acquireWorktreeLock, gitStashLockPath, withWorktreeLock } from "./worktree-locks.js";
 import { worktreePath as canonicalWorktreePath, findLegacyWorktreeForWi } from "./worktree.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { runHook } from "./hooks.js";
@@ -262,7 +262,7 @@ function commitScopeFromReviewScope(scope = {}) {
   };
 }
 
-export function commitInScopeChanges({ wtDir, scope, message = "review: include in-scope dirty changes" }) {
+function commitInScopeChangesUnlocked({ wtDir, scope, message = "review: include in-scope dirty changes" }) {
   if (!wtDir || !fs.existsSync(wtDir)) {
     return { ok: false, message: "Worktree directory missing" };
   }
@@ -302,6 +302,12 @@ export function commitInScopeChanges({ wtDir, scope, message = "review: include 
   }
 }
 
+export function commitInScopeChanges(args = {}) {
+  const { wtDir, projectDir = wtDir } = args;
+  if (!wtDir || !fs.existsSync(wtDir)) return { ok: false, message: "Worktree directory missing" };
+  return withWorktreeLock(wtDir, projectDir, () => commitInScopeChangesUnlocked(args));
+}
+
 export function commitInScopeChangesAsync(args = {}) {
   return runWorktreeStatusTaskOffMainThread("commitInScopeChanges", args);
 }
@@ -322,7 +328,7 @@ function isTracked(wtDir, p) {
   }
 }
 
-export function discardWorktreeFiles({ wtDir, paths }) {
+function discardWorktreeFilesUnlocked({ wtDir, paths }) {
   if (!wtDir || !fs.existsSync(wtDir)) {
     return { ok: false, message: "Worktree directory missing" };
   }
@@ -362,6 +368,12 @@ export function discardWorktreeFiles({ wtDir, paths }) {
     return { ok: false, message: "Discard had no effect (paths already clean?)" };
   }
   return { ok: true, message: `Discarded ${cleaned.length} path(s)`, paths: cleaned };
+}
+
+export function discardWorktreeFiles(args = {}) {
+  const { wtDir, projectDir = wtDir } = args;
+  if (!wtDir || !fs.existsSync(wtDir)) return { ok: false, message: "Worktree directory missing" };
+  return withWorktreeLock(wtDir, projectDir, () => discardWorktreeFilesUnlocked(args));
 }
 
 export function discardWorktreeFilesAsync(args = {}) {

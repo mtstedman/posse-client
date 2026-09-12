@@ -58,7 +58,7 @@ export class ProviderAttemptLifecycle {
           error_text: errMsg,
         });
         await wrappedJob.setError(errMsg);
-        worker._retryOrFail(job, leaseToken, errMsg);
+        worker._retryOrFail(job, leaseToken, errMsg, { attemptId: routeAttempt.attempt.id });
         return { ok: false, currentAttemptId: routeAttempt.attempt.id };
       }
       const needsModelClear = isImageOnlyModelNameFromModule(job.model_name);
@@ -112,7 +112,7 @@ export class ProviderAttemptLifecycle {
           error_text: errMsg,
         });
         await wrappedJob.setError(errMsg);
-        worker._retryOrFail(job, leaseToken, errMsg);
+        worker._retryOrFail(job, leaseToken, errMsg, { attemptId: livenessAttempt.attempt.id });
         return { ok: false, currentAttemptId: livenessAttempt.attempt.id };
       }
     }

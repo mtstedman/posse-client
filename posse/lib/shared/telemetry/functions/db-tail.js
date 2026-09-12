@@ -78,6 +78,7 @@ function fetchRowsById(db, safeTable, ids) {
 }
 
 export function pruneTelemetryTableToTail(db, tableName, limit = getDbTelemetryTailLimit()) {
+  if (db.inTransaction) return 0; // Never mirror uncommitted rows.
   const safeTable = String(tableName || "");
   if (!["events", "job_observations"].includes(safeTable)) {
     throw new Error(`Unsupported telemetry tail table: ${safeTable}`);

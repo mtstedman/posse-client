@@ -514,7 +514,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     });
     try { await wrappedJob?.setError?.(msg); } catch { /* best effort */ }
     // ATLAS_WARM_JOB_POLICY.maxAttempts is 1 — _retryOrFail dead-letters this.
-    worker._retryOrFail(job, leaseToken, msg);
+    worker._retryOrFail(job, leaseToken, msg, { attemptId: attempt.attempt.id });
   }
 }
 

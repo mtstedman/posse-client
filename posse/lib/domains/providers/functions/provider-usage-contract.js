@@ -81,14 +81,17 @@ function normalizeUsageRecords(records = []) {
       calls: 0,
       rawTokens: 0,
       billableTokens: 0,
+      billingUsageUnknownCalls: 0,
       costUsd: 0,
     };
-    current.calls += finiteNonNegative(record?.callCount ?? record?.call_count) || 0;
+    const calls = finiteNonNegative(record?.callCount ?? record?.call_count) || 0;
+    current.calls += calls;
     current.rawTokens += finiteNonNegative(record?.usedTokens ?? record?.raw_tokens ?? record?.tokens) || 0;
     const billable = finiteNonNegative(record?.usedBillableTokens ?? record?.billable_tokens);
-    current.billableTokens += billable == null
-      ? finiteNonNegative(record?.usedTokens ?? record?.raw_tokens ?? record?.tokens) || 0
-      : billable;
+    if (billable == null) current.billableTokens = null;
+    else if (current.billableTokens != null) current.billableTokens += billable;
+    current.billingUsageUnknownCalls += finiteNonNegative(record?.billingUsageUnknownCalls
+      ?? record?.billing_usage_unknown_calls) ?? (billable == null ? calls : 0);
     current.costUsd += finiteNonNegative(record?.costUsd ?? record?.cost_usd) || 0;
     byProvider.set(id, current);
   }
@@ -242,7 +245,8 @@ export function buildProviderUsageDocument({
       current_run: {
         calls: normalizedRunStartedAt ? currentRun?.calls || 0 : null,
         raw_tokens: normalizedRunStartedAt ? currentRun?.rawTokens || 0 : null,
-        billable_tokens: normalizedRunStartedAt ? currentRun?.billableTokens || 0 : null,
+        billable_tokens: normalizedRunStartedAt ? (currentRun ? currentRun.billableTokens : 0) : null,
+        billing_usage_unknown_calls: normalizedRunStartedAt ? currentRun?.billingUsageUnknownCalls || 0 : null,
         cost_usd: normalizedRunStartedAt ? currentRun?.costUsd || 0 : null,
         qualifier: usageQualifier(id),
       },

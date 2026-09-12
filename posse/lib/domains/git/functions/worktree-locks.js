@@ -1,3 +1,4 @@
+import { threadLifetimeRegistry } from "../../../shared/concurrency/classes/ThreadLifetimeRegistry.js";
 // File-based worktree locks. The same lock file is used to gate concurrent
 // worktree mutations from inside the same machine — both within one Posse
 // process and across cooperating processes. Owner metadata (pid + createdAt)
@@ -131,6 +132,7 @@ function shouldReclaimParsedWorktreeLock({
   ownerPid,
   ownerState,
   ownerThreadId,
+  ownerLifetime,
   ownerToken,
   releasedAtMs,
   staleMs,
@@ -140,6 +142,7 @@ function shouldReclaimParsedWorktreeLock({
   if (ownerState === false) return { reclaim: true, ownerToken, stat };
   if (hasOwnerPid && ownerState === true) {
     if (Number(ownerPid) === process.pid) {
+      if (threadLifetimeRegistry.hasExited(ownerLifetime)) return { reclaim: true, ownerToken, stat };
       if (
         !ownerToken
         || !Number.isInteger(ownerThreadId)
@@ -174,6 +177,7 @@ function lockMetadata(ownerToken) {
   return {
     pid: process.pid,
     threadId,
+    lifetime: threadLifetimeRegistry.current(),
     ownerToken,
     createdAt: now,
   };
@@ -347,12 +351,14 @@ function shouldReclaimWorktreeLock(lockPath, {
   let hasOwnerPid = false;
   let ownerPid = null;
   let ownerThreadId = null;
+  let ownerLifetime = null;
   let ownerCreatedAtMs = null;
   let releasedAtMs = null;
   let ownerToken = null;
   try {
     const parsed = readLockMetadata(lockPath);
     ownerToken = parsed?.ownerToken || null;
+    ownerLifetime = parsed?.lifetime || null;
     const parsedReleasedAt = Date.parse(parsed?.releasedAt || "");
     if (Number.isFinite(parsedReleasedAt)) releasedAtMs = parsedReleasedAt;
     if (parsed?.pid != null) {
@@ -373,6 +379,7 @@ function shouldReclaimWorktreeLock(lockPath, {
     ownerPid,
     ownerState,
     ownerThreadId,
+    ownerLifetime,
     ownerToken,
     releasedAtMs,
     staleMs,
@@ -389,12 +396,14 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
   let hasOwnerPid = false;
   let ownerPid = null;
   let ownerThreadId = null;
+  let ownerLifetime = null;
   let ownerCreatedAtMs = null;
   let releasedAtMs = null;
   let ownerToken = null;
   try {
     const parsed = await readLockMetadataAsync(lockPath);
     ownerToken = parsed?.ownerToken || null;
+    ownerLifetime = parsed?.lifetime || null;
     const parsedReleasedAt = Date.parse(parsed?.releasedAt || "");
     if (Number.isFinite(parsedReleasedAt)) releasedAtMs = parsedReleasedAt;
     if (parsed?.pid != null) {
@@ -415,6 +424,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
     ownerPid,
     ownerState,
     ownerThreadId,
+    ownerLifetime,
     ownerToken,
     releasedAtMs,
     staleMs,

@@ -199,7 +199,7 @@ export function finishNoWriteAttempt(worker, {
 
   if (!softRetry) {
     worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: Dev produced no file changes - treating as failed${C.reset}`);
-    worker._retryOrFail(job, leaseToken, message);
+    worker._retryOrFail(job, leaseToken, message, { attemptId: attempt.id });
     return true;
   }
 

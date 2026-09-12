@@ -559,6 +559,7 @@ export async function callProvider(promptText, {
         `Failed to spawn codex at: ${formatSpawnLaunchForError(launch)}\n${err.message}`
       );
       wrapped.code = err.code || null;
+      wrapped.providerFailure = true;
       wrapped.stats = {
         role,
         modelTier,
@@ -1019,6 +1020,7 @@ export async function callProvider(promptText, {
           : `Codex CLI exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`
       );
       err.code = code;
+      err.providerFailure = true;
       err.stats = stats;
       err.stallKill = killedByStallDetector;
       err.stallReason = stallKillReason;

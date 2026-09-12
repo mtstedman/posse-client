@@ -462,6 +462,7 @@ export class WorkerExecutionCoordinator {
         job,
         leaseToken,
         outerErr,
+        attemptId: currentAttemptId,
       });
     } finally {
       jobLease.stop();

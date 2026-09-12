@@ -83,6 +83,7 @@ export class SessionMonitor {
     this._inFlight = null;
     this._consecutiveFailures = 0;
     this._lastStatus = null;
+    this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
   }
 
@@ -110,6 +111,7 @@ export class SessionMonitor {
     const state = this._getState();
     if (!state || state.phase !== "active" || !state.relay_token) {
       this._lastStatus = null;
+      this._unavailable = false;
       this._nextDueAt = 0;
       this._client = null;
       this._stateId = null;
@@ -121,7 +123,7 @@ export class SessionMonitor {
     }
     const now = this._nowMs();
     if (!force && now < this._nextDueAt) {
-      return { attempted: false, skipped: "cadence", status: this._lastStatus };
+      return { attempted: false, skipped: "cadence", status: this._lastStatus, unavailable: this._unavailable };
     }
     this._nextDueAt = now + SESSION_HEARTBEAT_MS;
     if (this._stateId !== state.id) {
@@ -168,6 +170,7 @@ export class SessionMonitor {
       this._writePeers(projectedStatus);
       this._lastStatus = projectedStatus;
       this._consecutiveFailures = 0;
+      this._unavailable = false;
       return {
         attempted: true,
         status: projectedStatus,
@@ -175,13 +178,14 @@ export class SessionMonitor {
       };
     } catch (error) {
       this._consecutiveFailures += 1;
-      if ([401, 403].includes(Number(error?.status))) {
+      this._unavailable = true;
+      if ([401, 403].includes(Number(error?.status)) || error?.code === "pairing_session_changed") {
         this._tokenManager.clearAuthentication();
       }
       return {
         attempted: true,
         unavailable: true,
-        fatal: [401, 403].includes(Number(error?.status)) || this._consecutiveFailures >= 4,
+        fatal: [401, 403].includes(Number(error?.status)) || error?.code === "pairing_session_changed",
         error,
       };
     }
@@ -191,6 +195,7 @@ export class SessionMonitor {
     this._client = null;
     this._stateId = null;
     this._lastStatus = null;
+    this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
     this._tokenManager.setSessionContext(null);
     this._clearPeers();

@@ -8,6 +8,7 @@ import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.
 import {
   applyDelegation,
   cancelDeadlockedJobsAtomic,
+  completeAttempt,
   createJob,
   getArtifacts,
   getAttempts,
@@ -461,6 +462,7 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
 }
 
 export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
+  attemptId = null,
   stallExhausted = false,
   suppressHumanRecovery = false,
   providerErrorExhausted = false,
@@ -483,8 +485,9 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   const suppressOperatorRecovery = suppressHumanRecovery || terminalProtocolFailure || providerErrorExhausted;
 
   if (worker.shuttingDown) {
-    const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
+    const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt: new Date().toISOString() });
     if (released) {
+      if (attemptId != null) completeAttempt(attemptId, { status: "interrupted", error_text: "Graceful shutdown" });
       worker.emit(job.id, `${C.dim}[worker] WI#${job.work_item_id} job #${job.id} interrupted by shutdown — requeuing${C.reset}`);
     }
     return;

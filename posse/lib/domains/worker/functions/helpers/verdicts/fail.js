@@ -494,7 +494,6 @@ function _extractOriginalPayloadContext(job) {
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand: inheritableTestCommand, origTaskAbTestCommand,
-    originalOperationalCommand,
     originalDevBrief, originalHashRefPacket,
     verificationPlanInvalid: origPayload._verification_plan_invalid && typeof origPayload._verification_plan_invalid === "object"
       ? origPayload._verification_plan_invalid
@@ -616,7 +615,6 @@ function _spawnRecoveryJobsForVerdict({
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
-    originalOperationalCommand,
     originalDevBrief, originalHashRefPacket, verificationPlanInvalid,
   } = origCtx;
   // One-shot lineage marker survives every recovery spawn so later fixes and
@@ -866,14 +864,6 @@ function _spawnRecoveryJobsForVerdict({
       ...(originalTestCommand ? { test_command: originalTestCommand } : {}),
       ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
       ...(verificationPlanInvalid ? { _verification_plan_invalid: verificationPlanInvalid } : {}),
-      ...(originalOperationalCommand ? {
-        _parent_operational_command_omitted: {
-          schema_version: 1,
-          command_sha256: originalOperationalCommand.command_sha256,
-          source_job_id: job.id,
-          reason: "operator_approval_is_job_scoped",
-        },
-      } : {}),
       ...(currentPayload.risk != null ? { risk: currentPayload.risk } : {}),
       ...(currentPayload._execution_policy && typeof currentPayload._execution_policy === "object"
         ? { _execution_policy: currentPayload._execution_policy }

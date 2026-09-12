@@ -1,3 +1,4 @@
+import { registerAttemptStartHook } from "./attempts.js";
 // lib/queue.js — SQLite DB layer for the orchestrator job queue
 //
 // All database operations organized by entity.
@@ -60,6 +61,7 @@ import { findDeadlockedJobs } from "./dependencies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
   __registerHumanGateReconcileHook,
+  registerGateCanceledHook,
   findActiveHumanGateForPayload,
   registerHumanGate,
 } from "./human-gates.js";
@@ -866,12 +868,12 @@ export function reconcileMergedWorkItemReviewStates() {
       WHERE wi.merge_state = 'merged'
          OR EXISTS (
            SELECT 1
-           FROM events merged_event
+           FROM queue_event_state merged_event
            WHERE merged_event.work_item_id = wi.id
              AND merged_event.event_type = ?
              AND NOT EXISTS (
                SELECT 1
-               FROM events reopened_event
+               FROM queue_event_state reopened_event
                WHERE reopened_event.work_item_id = wi.id
                  AND reopened_event.event_type = ?
                  AND reopened_event.id > merged_event.id
@@ -1010,12 +1012,12 @@ function effectiveMergedEvidence(db, current) {
   if (current.merge_state === "merged") return true;
   return !!db.prepare(`
     SELECT 1
-    FROM events merged_event
+    FROM queue_event_state merged_event
     WHERE merged_event.work_item_id = ?
       AND merged_event.event_type = ?
       AND NOT EXISTS (
         SELECT 1
-        FROM events reopened_event
+        FROM queue_event_state reopened_event
         WHERE reopened_event.work_item_id = merged_event.work_item_id
           AND reopened_event.event_type = ?
           AND reopened_event.id > merged_event.id
@@ -1319,16 +1321,19 @@ export function refreshWorkItemStatus(workItemId) {
     const completionJobs = jobs.filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
     const stateJobs = completionJobs.length > 0 ? completionJobs : jobs;
     const gateContracts = db.prepare(`
-      SELECT hg.gate_job_id, hg.original_job_id, hg.gate_state
+      SELECT hg.gate_job_id, hg.original_job_id, hg.gate_state, hg.resolution_action
       FROM human_gates hg
       JOIN jobs gate_job ON gate_job.id = hg.gate_job_id
       WHERE gate_job.work_item_id = ?
     `).all(workItemId);
     const gateStates = new Map(gateContracts.map((row) => [Number(row.gate_job_id), row.gate_state]));
     const acceptedOriginalJobIds = new Set(gateContracts
-      .filter((row) => ["resolving", "resolved"].includes(row.gate_state))
+      .filter((row) => ["resolving", "resolved"].includes(row.gate_state) && row.resolution_action != null)
       .map((row) => Number(row.original_job_id))
       .filter((id) => Number.isSafeInteger(id) && id > 0));
+    const acceptedGateJobIds = new Set(gateContracts
+      .filter((row) => ["resolving", "resolved"].includes(row.gate_state) && row.resolution_action != null)
+      .map((row) => Number(row.gate_job_id)));
     const hasAnswerableHumanGate = stateJobs.some((job) => (
       job.job_type === "human_input"
       && !TERMINAL_JOB_STATUS_SET.has(job.status)
@@ -1337,8 +1342,7 @@ export function refreshWorkItemStatus(workItemId) {
     const hasAcceptedHumanGate = stateJobs.some((job) => (
       job.status === "waiting_on_human"
       && (
-        (job.job_type === "human_input"
-          && ["resolving", "resolved"].includes(gateStates.get(Number(job.id))))
+        (job.job_type === "human_input" && acceptedGateJobIds.has(Number(job.id)))
         || acceptedOriginalJobIds.has(Number(job.id))
       )
     ));
@@ -1902,7 +1906,8 @@ export function skipJob(jobId) {
     const job = getJob(jobId);
     if (!job) return null;
 
-    if (TERMINAL_JOB_STATUS_SET.has(job.status) || ACTIVE_LEASE_STATUS_SET.has(job.status)) return null;
+    if (TERMINAL_JOB_STATUS_SET.has(job.status) || ACTIVE_LEASE_STATUS_SET.has(job.status)
+      || job.job_type === "human_input") return null;
 
     if (!updateJobStatus(jobId, "succeeded")) return null;
     logEvent({
@@ -3520,6 +3525,7 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
   const conditions = [
     "j.status = 'queued'",
     "j.ready_at <= ?",
+    "NOT EXISTS (SELECT 1 FROM work_items wi WHERE wi.id = j.work_item_id AND wi.status = 'canceled')",
   ];
   const params = [ts];
 
@@ -3633,6 +3639,21 @@ export function hasOutstandingHumanInputJobs(workItemId) {
 // factory in ./leases.js so it can be called via the LeaseManager
 // surface without leases.js needing to statically import this index.
 __registerRequeueExpiredLeases(requeueExpiredLeases);
+registerGateCanceledHook(abandonScopeRequestForCanceledGate);
+registerAttemptStartHook((jobId) => {
+  const payload = parseJobPayloadObject(getJob(jobId));
+  const pending = payload._pending_scope_request;
+  if (!pending) return;
+  if (pending.decision) {
+    // Scope/denial history was recorded with the answer. A newly leased
+    // implementation cannot consume the previous attempt's pending wait.
+    delete payload._pending_scope_request;
+    updateJobPayload(jobId, JSON.stringify(payload));
+  } else {
+    abandonJobScopeExpansionRequest({ jobId, force: true, code: "scope_request_attempt_restarted",
+      message: "A new implementation attempt retired the previous scope wait." });
+  }
+});
 __registerHumanGateReconcileHook((workItemIds) => {
   let statusChanged = false;
   for (const workItemId of workItemIds) {

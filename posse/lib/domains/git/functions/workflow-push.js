@@ -237,6 +237,10 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     return { ok: true };
   }
 
+  function validatePushCandidateAsync({ pushBranch }, workerOptions = {}) {
+    return runGitWorkflowTaskOffMainThread("validatePushCandidate", { pushBranch }, workerOptions);
+  }
+
   function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
     const pushBranchWorkItem = workItemForBranch(pushBranch);
     if (pushBranchWorkItem) {
@@ -469,6 +473,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     executePush,
     executePushAsync,
     validatePushCandidate,
+    validatePushCandidateAsync,
     offerPush,
   };
 }

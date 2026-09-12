@@ -55,7 +55,7 @@ import {
 } from "../../functions/execution/commit-diagnostics.js";
 import { storePostAgentFailureCheckpoint } from "../../functions/execution/post-agent-checkpoint.js";
 import { linkSiblingDirtyRecoverySnapshot } from "../../functions/helpers/sibling-dirty-recovery.js";
-import { completePendingCrossWiFileSyncsAsync } from "../../functions/helpers/worktree-lifecycle.js";
+import { finishPostCommitSync } from "../../functions/helpers/post-commit-sync.js";
 import {
   runPostExecutionAssessment as runPostExecutionAssessmentFromModule,
 } from "../../functions/helpers/assessment-pipeline.js";
@@ -290,7 +290,7 @@ export async function handlePostExecutionForWorker({
               duration_ms: Date.now() - startTime,
               error_text: completionMsg,
             });
-            this._retryOrFail(job, leaseToken, completionMsg);
+            this._retryOrFail(job, leaseToken, completionMsg, { attemptId: attempt.id });
             return;
           }
         }
@@ -365,7 +365,7 @@ export async function handlePostExecutionForWorker({
           if (permanentProviderRuntimeBlock) {
             this._invalidatePendingSessionRecycleForMcpInfra(job, "provider_runtime_bootstrap_failure");
             this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: provider runtime bootstrap failed — terminating without a human recovery gate${C.reset}`);
-            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
             await this._cleanupWorktreeIfDone(job.work_item_id);
             return;
           }
@@ -392,7 +392,7 @@ export async function handlePostExecutionForWorker({
               return;
             }
             this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
-            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
             await this._cleanupWorktreeIfDone(job.work_item_id);
             return;
           }
@@ -630,7 +630,15 @@ export async function handlePostExecutionForWorker({
             // A merge left for the developer can defer upstream file syncs.
             // Resolve those obligations after the developer commit and before
             // Atlas warming, output checks, or pre-assessment verification.
-            const sync = await completePendingCrossWiFileSyncsAsync(this, job, wtPath);
+            if (scopedCommitCreated(commitResult, headBefore)) {
+              committedHash = commitResult.hash;
+              commitBaseHash = headBefore;
+            }
+            const syncResult = await finishPostCommitSync(this, {
+              job, attempt, leaseToken, wtPath, commitHash: committedHash, baseHash: commitBaseHash, startTime,
+            });
+            if (!syncResult.ok) return;
+            const sync = syncResult.sync;
             if (sync?.changed) {
               commitResult = { ...commitResult, hash: sync.hash, createdCommit: true, mergeTreeChanged: true };
             }
@@ -1004,7 +1012,7 @@ export async function handlePostExecutionForWorker({
                   duration_ms: Date.now() - startTime,
                   error_text: contractMsg,
                 });
-                this._retryOrFail(job, leaseToken, contractMsg);
+                this._retryOrFail(job, leaseToken, contractMsg, { attemptId: attempt.id });
                 return;
               }
               if (outputContract.unmodifiedDeclaredScope?.length > 0) {
@@ -1031,6 +1039,20 @@ export async function handlePostExecutionForWorker({
               // -- Deterministic hook: post-dev build/lint verification --
               const verifyResult = await runHookAsync("post_dev_verify", { cwd: wtPath });
               if (!verifyResult.ok) {
+                if (verifyResult.signal && !verifyResult.timedOut) {
+                  const interrupted = `Post-dev verification interrupted by ${verifyResult.signal}`;
+                  completeAttempt(attempt.id, {
+                    status: "interrupted",
+                    duration_ms: Date.now() - startTime,
+                    error_text: interrupted,
+                  });
+                  this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+                    attemptId: attempt.id,
+                    readyAt: new Date().toISOString(),
+                  });
+                  this.emit(job.id, `${C.yellow}[hook] WI#${job.work_item_id} job #${job.id}: ${interrupted}; requeuing${C.reset}`);
+                  return;
+                }
                 const verifyMsg = `Build/lint verification failed after commit — ${verifyResult.output.slice(0, 500)}`;
                 this.emit(job.id, `${C.red}[hook] WI#${job.work_item_id} job #${job.id}: post-dev-verify BLOCKED${C.reset}`);
                 logEvent({
@@ -1103,7 +1125,7 @@ export async function handlePostExecutionForWorker({
                   duration_ms: Date.now() - startTime,
                   error_text: verifyMsg,
                 });
-                this._retryOrFail(job, leaseToken, verifyMsg);
+                this._retryOrFail(job, leaseToken, verifyMsg, { attemptId: attempt.id });
                 return;
               }
               preAssessAlreadyVerified = true;
@@ -1127,7 +1149,7 @@ export async function handlePostExecutionForWorker({
                 duration_ms: Date.now() - startTime,
                 error_text: cleanMsg,
               });
-              this._retryOrFail(job, leaseToken, cleanMsg);
+              this._retryOrFail(job, leaseToken, cleanMsg, { attemptId: attempt.id });
               return;
             } else {
               this.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} ${branchName}: no changes to commit${C.reset}`);
@@ -1276,7 +1298,7 @@ export async function handlePostExecutionForWorker({
               this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
               return;
             }
-            this._retryOrFail(job, leaseToken, `Git commit failed: ${gitFailureDetail}`);
+            this._retryOrFail(job, leaseToken, `Git commit failed: ${gitFailureDetail}`, { attemptId: attempt.id });
             return;
           }
           }
@@ -1284,7 +1306,11 @@ export async function handlePostExecutionForWorker({
 
         // Also cover providers that completed the merge themselves and left
         // a clean tree, so the automatic commit block above did not execute.
-        const remainingSync = await completePendingCrossWiFileSyncsAsync(this, job, wtPath);
+        const remainingSyncResult = await finishPostCommitSync(this, {
+          job, attempt, leaseToken, wtPath, commitHash: committedHash, baseHash: commitBaseHash, startTime,
+        });
+        if (!remainingSyncResult.ok) return;
+        const remainingSync = remainingSyncResult.sync;
         if (remainingSync?.changed) {
           committedHash = remainingSync.hash;
           commitBaseHash ||= remainingSync.before;
@@ -1459,7 +1485,7 @@ export async function handlePostExecutionForWorker({
             if (permanentProviderRuntimeBlock) {
               this._invalidatePendingSessionRecycleForMcpInfra(job, "provider_runtime_bootstrap_failure");
               this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: provider runtime bootstrap failed — terminating without a human recovery gate${C.reset}`);
-              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
               await this._cleanupWorktreeIfDone(job.work_item_id);
               return;
             }
@@ -1484,7 +1510,7 @@ export async function handlePostExecutionForWorker({
                 return;
               }
               this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
-              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true });
+              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
               await this._cleanupWorktreeIfDone(job.work_item_id);
               return;
             }

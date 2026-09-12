@@ -1,6 +1,9 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { LEASE_HOLDING_STATUSES, now } from "./common.js";
+import { LEASE_HOLDING_STATUSES, now, runImmediateTransaction } from "./common.js";
 import { leaseNowMs } from "./lease-clock.js";
+
+let _attemptStartHook = null;
+export function registerAttemptStartHook(fn) { _attemptStartHook = fn; }
 
 function leaseNowIso() {
   return new Date(leaseNowMs()).toISOString();
@@ -31,7 +34,7 @@ export function isLeaseValid(jobId, leaseToken) {
  */
 export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelName = null, reasoningEffort = null) {
   const db = getDb();
-  return db.transaction(() => {
+  return runImmediateTransaction(db, () => {
     // Validate lease is still ours before touching attempt data
     const job = db.prepare(`
       SELECT lease_token, lease_expires_at, status, attempt_count
@@ -41,6 +44,8 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     if (!job || job.lease_token !== leaseToken) return null;
     if (!LEASE_HOLDING_STATUSES.includes(job.status)) return null;
     if (!job.lease_expires_at || job.lease_expires_at < leaseNowIso()) return null;
+
+    _attemptStartHook?.(jobId);
 
     // Derive next attempt number from actual rows, not the counter - the counter
     // can drift when requeueExpiredLeases/decrementAttemptCount undo increments
@@ -71,7 +76,7 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     );
     const attempt = db.prepare(`SELECT * FROM job_attempts WHERE id = ?`).get(info.lastInsertRowid);
     return { attemptCount: newCount, attempt };
-  })();
+  });
 }
 
 /**

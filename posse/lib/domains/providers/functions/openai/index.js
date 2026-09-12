@@ -858,6 +858,7 @@ export async function callProvider(promptText, {
       // Track tokens
       addUsage(response.usage, response);
     }
+    if (abortSignal?.aborted) throw signalAbortError(abortSignal, "OpenAI provider aborted");
   } catch (err) {
     const durationMs = Date.now() - start;
     emit(`${C.red}[error] OpenAI API call failed: ${err.message}${C.reset}`);
@@ -900,6 +901,7 @@ export async function callProvider(promptText, {
     };
     wrapped.toolUses = toolUses.length > 0 ? toolUses : null;
     if (err.stallKill) wrapped.stallKill = true;
+    if (err._killReason) wrapped._killReason = err._killReason;
     if (err.name === "AbortError" || err.aborted) {
       wrapped.name = "AbortError";
       wrapped.aborted = true;
@@ -907,10 +909,6 @@ export async function callProvider(promptText, {
     throw wrapped;
   } finally {
     releaseGate({ scopeKey: gateScopeKey });
-  }
-
-  if (abortSignal?.aborted) {
-    throw signalAbortError(abortSignal, "OpenAI provider aborted");
   }
 
   const durationMs = Date.now() - start;

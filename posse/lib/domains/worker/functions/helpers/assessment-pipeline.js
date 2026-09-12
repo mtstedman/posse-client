@@ -2772,7 +2772,7 @@ export async function runPostExecutionAssessment(worker, {
             duration_ms: Date.now() - startTime,
             error_text: emptyMsg,
           });
-          worker._retryOrFail(job, leaseToken, emptyMsg);
+          worker._retryOrFail(job, leaseToken, emptyMsg, { attemptId: attempt.id });
           return;
         }
 

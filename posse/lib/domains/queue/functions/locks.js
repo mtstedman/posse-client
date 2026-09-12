@@ -3,7 +3,7 @@ import { now, runImmediateTransaction } from "./common.js";
 
 function isLockContentionError(err) {
   const code = err?.code;
-  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+
   if (code === "SQLITE_CONSTRAINT_PRIMARYKEY" || code === "SQLITE_CONSTRAINT_UNIQUE") return true;
   return code === "SQLITE_CONSTRAINT"
     && /(?:UNIQUE|PRIMARY KEY) constraint failed: scheduler_locks\.lock_name/i.test(err?.message || "");

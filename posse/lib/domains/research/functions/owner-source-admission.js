@@ -102,9 +102,7 @@ async function suppressCoveredInlineWindows({
       endLine: prepared.endLine,
       additionalCoveredRanges: locallyVisibleRanges,
     });
-    // A partially new requested window stays coherent. Only suppress complete
-    // windows; subtracting arbitrary visible lines splits guards from bodies.
-    if (!plan?.covered) {
+    if (!plan?.covered && !plan?.partial) {
       retainedWindows.push(exactSourceWindow(prepared.fresh, prepared));
     } else {
       const uncovered = plan.uncoveredRanges || [];
@@ -261,9 +259,44 @@ export async function suppressCoveredSourceInterval(result, coverageOwner, toolA
     startLine: prepared.startLine,
     endLine: prepared.endLine,
   });
-  if (!admission?.covered) {
+  if (!admission?.covered && !admission?.partial) {
     return { result, admission: null, resolvedChars: 0, reservation: admission?.reservation || null };
   }
+
+  if (admission.partial) {
+    const [primary, ...additional] = admission.uncoveredRanges
+      .map((range) => exactSourceWindow(admission.fresh, range));
+    const compactData = {
+      ...data,
+      ...primary,
+      additionalWindows: additional,
+      source_deduplicated: true,
+      requestedStartLine: prepared.startLine,
+      requestedEndLine: prepared.endLine,
+      reusedLineCount: admission.coveredLines,
+      reusedRanges: admission.coveredRanges,
+    };
+    delete compactData.contentSha256;
+    delete compactData.sourceVersion;
+    delete compactData.repositoryIdentity;
+    const compactEnvelope = envelope?.data && typeof envelope.data === "object"
+      ? { ...envelope, data: compactData }
+      : compactData;
+    const retainedChars = admission.uncoveredRanges
+      .map((range) => exactSourceWindow(admission.fresh, range))
+      .reduce((total, window) => total + window.content.length, 0);
+    return {
+      result: replaceMcpTextResult(result, parsed, compactEnvelope),
+      admission,
+      payload: compactEnvelope,
+      resolvedChars: prepared.content.length,
+      suppressedChars: Math.max(0, prepared.content.length - retainedChars),
+      selectorAliased: false,
+      reservation: admission.reservation || null,
+      reuseNotice: `SOURCE_RANGE_REUSE: Omitted ${admission.coveredLines} already-visible lines from ${prepared.fresh.relative}:${prepared.startLine}-${prepared.endLine}; this response contains only the uncovered ranges. Reuse the cited evidence refs for omitted ranges and do not reread them.`,
+    };
+  }
+
   const selectorAliased = coverageOwner.recordResolvedIntervalReuse(toolArgs, admission);
 
   const compact = {

@@ -146,6 +146,7 @@ function _aggregateProviderUsageRows(rows = []) {
       usedOutputTokens: 0,
       usedTokens: 0,
       usedBillableTokens: 0,
+      billingUsageUnknownCalls: 0,
       costUsd: 0,
       knownCostUsd: 0,
       costPrecision: "unknown",
@@ -164,6 +165,7 @@ function _aggregateProviderUsageRows(rows = []) {
     if (billableInputTokens == null || billableTokens == null) {
       existing.usedBillableInputTokens = null;
       existing.usedBillableTokens = null;
+      existing.billingUsageUnknownCalls += 1;
     } else if (existing.usedBillableInputTokens != null) {
       existing.usedBillableInputTokens += billableInputTokens;
       existing.usedBillableTokens += billableTokens;

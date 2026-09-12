@@ -101,6 +101,7 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
 const TABLE = "agent_handoff_packets";
 const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materialization_cache");
 const EVIDENCE_CLEANUP = Symbol("agent_handoff_evidence_cleanup");
+const EVIDENCE_CLEANUP_OVERFLOW = Symbol("agent_handoff_evidence_cleanup_overflow");
 const READY_DBS = new WeakSet();
 
 function fail(code, message) {
@@ -121,6 +122,7 @@ function recordEvidenceCleanup(context, {
   selector,
   normalizedSelector = null,
   normalizedSelectors = null,
+  omittedCount = null,
   code = "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
   message = null,
 } = {}) {
@@ -150,11 +152,19 @@ function recordEvidenceCleanup(context, {
     }),
     ...(normalizedSelectors == null ? {} : { normalized_selectors: normalizedSelectors }),
     code,
+    ...(omittedCount == null ? {} : { omitted_count: omittedCount }),
     ...(message == null ? {} : { message: String(message).slice(0, 500) }),
   };
   const key = JSON.stringify(record);
   if (records.some((entry) => entry.key === key)) return;
-  if (records.length < 24) records.push({ key, ...record });
+  // Coverage reconciliation reads claim-demotion records by submitted index.
+  // Keep every demotion, even when ordinary diagnostics have reached their cap.
+  if (action === "demote_unverified_claim_to_summary"
+    || records.filter((entry) => entry.action !== "demote_unverified_claim_to_summary").length < 24) {
+    records.push({ key, ...record });
+  } else {
+    context[EVIDENCE_CLEANUP_OVERFLOW] += 1;
+  }
 }
 
 // Pipeline handoffs feed the next role, not a human-facing report. A
@@ -1186,7 +1196,13 @@ function successfulToolReadCandidates(context) {
     const start = Number(detail?.offset) || 1;
     const resultLines = Number(detail?.result_lines);
     if (!sourcePath || !Number.isInteger(start) || start < 1 || !Number.isInteger(resultLines) || resultLines < 1) continue;
-    candidates.push({ path: sourcePath, start, end: start + resultLines - 1 });
+    candidates.push({
+      path: sourcePath,
+      repository_identity: detail?.repository_identity || null,
+      source_version: detail?.source_version || null,
+      start,
+      end: start + resultLines - 1,
+    });
   }
   return candidates;
 }
@@ -1239,10 +1255,19 @@ function mergedLineRanges(ranges = []) {
 
 function surfacedPathCandidates(context) {
   const byPath = new Map();
+  const upgradeProvenance = (existing, candidate) => {
+    if (!existing.repository_identity && candidate.repository_identity) {
+      existing.repository_identity = candidate.repository_identity;
+    }
+    if (!existing.source_version && candidate.source_version) {
+      existing.source_version = candidate.source_version;
+    }
+  };
   for (const candidate of deliveredSourceCoverageCandidates(context)) {
     const exactRange = { start: candidate.start, end: candidate.end };
     const existing = byPath.get(candidate.path);
     if (existing) {
+      upgradeProvenance(existing, candidate);
       if (existing.restrict_to_opened_ranges) existing.opened_ranges.push(exactRange);
       continue;
     }
@@ -1255,13 +1280,14 @@ function surfacedPathCandidates(context) {
   for (const candidate of successfulToolReadCandidates(context)) {
     const existing = byPath.get(candidate.path);
     if (existing) {
+      upgradeProvenance(existing, candidate);
       if (existing.restrict_to_opened_ranges) existing.opened_ranges.push({ start: candidate.start, end: candidate.end });
       continue;
     }
     byPath.set(candidate.path, {
       path: candidate.path,
-      repository_identity: null,
-      source_version: null,
+      repository_identity: candidate.repository_identity,
+      source_version: candidate.source_version,
       restrict_to_opened_ranges: true,
       opened_ranges: [{ start: candidate.start, end: candidate.end }],
     });
@@ -1290,6 +1316,7 @@ function surfacedPathCandidates(context) {
     if (!canonical) continue;
     const existing = byPath.get(canonical);
     if (existing) {
+      upgradeProvenance(existing, window);
       if (existing.restrict_to_opened_ranges) {
         existing.opened_ranges.push({ start: window.start, end: window.end });
       }
@@ -1443,6 +1470,13 @@ function materializeWorktreeEvidenceSelector(selector, context) {
     );
   }
   const endLine = Math.min(selector.end, lines.length);
+  if (endLine !== selector.end) {
+    recordEvidenceCleanup(context, {
+      action: "clamp_path_end", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+      selector: `${resolved.path}:${selector.start}-${selector.end}`,
+      normalizedSelector: `${resolved.path}:${selector.start}-${endLine}`,
+    });
+  }
   const selectedLineCount = endLine - selector.start + 1;
   if (selectedLineCount > AGENT_HANDOFF_LIMITS.maxSelectorLines) {
     fail(
@@ -2930,29 +2964,40 @@ function researcherEvidenceSelector(value, context) {
         first.source_end_line - first.source_start_line + 1,
         AGENT_HANDOFF_LIMITS.targetSelectorLines,
       );
-      return {
-        ref: parsed.ref,
-        path: first.path,
-        lines: { start: first.source_start_line, count },
-      };
+      const narrowed = { ref: parsed.ref, path: first.path, lines: { start: first.source_start_line, count } };
+      recordEvidenceCleanup(context, { action: "narrow_whole_ref", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+        selector: candidate, normalizedSelector: narrowed, code: error.code });
+      return narrowed;
     }
     const lineCount = normalizedLines(fetched.entry.payload_text).length;
     const end = Math.min(Math.max(1, lineCount), AGENT_HANDOFF_LIMITS.targetSelectorLines);
-    return `${parsed.ref}:1-${end}`;
+    const narrowed = `${parsed.ref}:1-${end}`;
+    recordEvidenceCleanup(context, { action: "narrow_whole_ref", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+      selector: candidate, normalizedSelector: narrowed, code: error.code });
+    return narrowed;
   }
 }
 
-function researcherEvidenceSelectors(value, context) {
+function boundedResearcherItems(values, limit, label, context, inputCount = values.length) {
+  const kept = values.slice(0, limit);
+  const omittedCount = Math.max(0, inputCount - kept.length);
+  if (omittedCount > 0) recordEvidenceCleanup(context, {
+    action: "drop_researcher_overflow", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
+    selector: label, code: "AGENT_HANDOFF_TOO_LARGE", omittedCount,
+    message: `${label}: omitted ${omittedCount} item(s); retained ${kept.length}`,
+  });
+  return kept;
+}
+
+function researcherEvidenceSelectors(value, context, label = "research_evidence") {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((entry) => researcherEvidenceSelector(entry, context))
-    .filter(Boolean)
-    .slice(0, AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim);
+  return boundedResearcherItems(value.map((entry) => researcherEvidenceSelector(entry, context)).filter(Boolean),
+    AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim, label, context);
 }
 
 function compactResearcherClaims(value, context) {
   if (!Array.isArray(value)) return value ?? [];
-  return value.map((raw) => {
+  return value.map((raw, index) => {
     const tuple = Array.isArray(raw);
     const detail = tuple ? plainObject(raw[1]) : plainObject(raw);
     if (!detail) return raw;
@@ -2961,7 +3006,7 @@ function compactResearcherClaims(value, context) {
       ...(Array.isArray(evidence) ? evidence : []),
       ...(Array.isArray(proof) ? proof : []),
       ...(Array.isArray(support) ? support : []),
-    ], context);
+    ], context, `claim_evidence:${index + 1}`);
     const narrowed = {
       ...rest,
       ...(selectors.length > 0 ? { evidence: selectors } : {}),
@@ -3030,7 +3075,7 @@ function researcherClaims(value, {
       ...(Array.isArray(source.evidence) ? source.evidence : []),
       ...(Array.isArray(source.proof) ? source.proof : []),
       ...(Array.isArray(source.support) ? source.support : []),
-    ], context);
+    ], context, `claim_evidence:${index + 1}`);
     if (claimEvidence.length) detail.evidence = claimEvidence;
     if (normalized.prose) detail.prose = normalized.prose;
     return [[normalized.claim, detail]];
@@ -3136,7 +3181,7 @@ function normalizeResearcherTerminalArgs(source, context) {
     : (["success", "gap", "input_required"].includes(outcomeInput)
         ? outcomeInput
         : "success");
-  const keyFiles = researcherStringArray(
+  const keyFiles = boundedResearcherItems(researcherStringArray(
     first.key_files,
     first.keyFiles,
     reportScope.key_files,
@@ -3144,15 +3189,15 @@ function normalizeResearcherTerminalArgs(source, context) {
     research.keyFiles,
     research.files,
     source.key_files,
-  ).slice(0, 100);
-  const relatedFiles = researcherStringArray(
+  ), 100, "key_files", context);
+  const relatedFiles = boundedResearcherItems(researcherStringArray(
     first.related_files,
     first.relatedFiles,
     reportScope.related_files,
     research.related_files,
     research.relatedFiles,
     source.related_files,
-  ).slice(0, 100);
+  ), 100, "related_files", context);
   const priorities = first.file_priorities
     ?? first.filePriorities
     ?? research.planner_file_priorities
@@ -3172,7 +3217,7 @@ function normalizeResearcherTerminalArgs(source, context) {
     research.patterns,
     source.patterns,
   ].find((value) => Array.isArray(value)) || [];
-  const patterns = patternsInput.flatMap((raw) => {
+  const patterns = boundedResearcherItems(patternsInput.flatMap((raw) => {
     const entry = plainObject(raw);
     const name = firstAssessorText(entry?.name, entry?.label);
     const description = firstAssessorText(entry?.description, entry?.summary);
@@ -3181,13 +3226,13 @@ function normalizeResearcherTerminalArgs(source, context) {
       name: compactResearcherText(name).slice(0, 80),
       description: compactResearcherText(description).slice(0, 500),
     }];
-  }).slice(0, 50);
+  }), 50, "patterns", context, patternsInput.length);
   const memoriesInput = [
     first.memories,
     research.memories,
     source.memories,
   ].find((value) => Array.isArray(value)) || [];
-  const memories = memoriesInput.flatMap((raw) => {
+  const memories = boundedResearcherItems(memoriesInput.flatMap((raw) => {
     const entry = plainObject(raw);
     const title = firstAssessorText(entry?.title);
     const content = firstAssessorText(entry?.content, entry?.summary);
@@ -3195,13 +3240,13 @@ function normalizeResearcherTerminalArgs(source, context) {
     return [{
       title: compactResearcherText(title).slice(0, 120),
       content: compactResearcherText(content).slice(0, 1200),
-      key_files: researcherStringArray(entry.key_files, entry.keyFiles).slice(0, 12),
+      key_files: boundedResearcherItems(researcherStringArray(entry.key_files, entry.keyFiles), 12, `memory_key_files:${title}`, context),
       key_symbols: normalizeResearchSymbolSeeds(
         researcherStringArray(entry.key_symbols, entry.keySymbols),
         12,
       ),
     }];
-  }).slice(0, 2);
+  }), 2, "memories", context, memoriesInput.length);
   const absenceChecks = [
     first.absence_checks,
     first.absenceChecks,
@@ -3868,6 +3913,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     ...context,
     [EVIDENCE_MATERIALIZATION_CACHE]: new Map(),
     [EVIDENCE_CLEANUP]: [],
+    [EVIDENCE_CLEANUP_OVERFLOW]: 0,
   };
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
     normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
@@ -4146,7 +4192,11 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     .map(({ key: _key, ...entry }) => entry);
   if (cleanupItems.length > 0) {
     Object.defineProperty(packet, "evidence_cleanup", {
-      value: Object.freeze({ count: cleanupItems.length, items: Object.freeze(cleanupItems) }),
+      value: Object.freeze({
+        count: cleanupItems.length,
+        items: Object.freeze(cleanupItems),
+        dropped: materializationContext[EVIDENCE_CLEANUP_OVERFLOW],
+      }),
       enumerable: false,
     });
   }

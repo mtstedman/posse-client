@@ -30,7 +30,7 @@ export function createGitWorkflowHelpers(options = {}) {
     isRuntimePorcelainLine: startup.isRuntimePorcelainLine,
     sourceWorktreeDirtyState: review.sourceWorktreeDirtyState,
     sweepOrphanedInferTsconfig: startup.sweepOrphanedInferTsconfig,
-    validatePushCandidate: push.validatePushCandidate,
+    validatePushCandidateAsync: push.validatePushCandidateAsync,
   });
   const autoMerge = createAutoMergeWorkflowHelpers(context, {
     gitMergeToTargetAsync: merge.gitMergeToTargetAsync,

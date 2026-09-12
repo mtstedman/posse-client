@@ -632,7 +632,8 @@ function postDevVerify({ cwd }) {
     });
     return { ok: true, output: "" };
   } catch (err) {
-    return { ok: false, output: postDevVerifyFailureOutput(cmd, err) };
+    return { ok: false, output: postDevVerifyFailureOutput(cmd, err),
+      signal: err.signal || null, timedOut: err.timedOut === true, timeoutKind: err.timeoutKind || null };
   }
 }
 
@@ -649,7 +650,8 @@ async function postDevVerifyAsync({ cwd }) {
     });
     return { ok: true, output: "" };
   } catch (err) {
-    return { ok: false, output: postDevVerifyFailureOutput(cmd, err) };
+    return { ok: false, output: postDevVerifyFailureOutput(cmd, err),
+      signal: err.signal || null, timedOut: err.timedOut === true, timeoutKind: err.timeoutKind || null };
   }
 }
 

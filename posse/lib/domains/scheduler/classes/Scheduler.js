@@ -807,11 +807,11 @@ export class Scheduler {
     const readyDelayMs = this._nextQueuedReadyDelayMs();
     const sharedTrunkDelayMs = this._sharedTrunkPoller?.delayUntilDueMs?.();
     const sessionDelayMs = this._sessionMonitor?.delayUntilDueMs?.();
-    const sessionJobDelayMs = this._sessionJobRouter?.delayUntilDueMs?.();
+    const sessionJobDelayMs = this._sessionRoutingUnavailable ? null : this._sessionJobRouter?.delayUntilDueMs?.();
     const delays = [repairMs, readyDelayMs, sharedTrunkDelayMs, sessionDelayMs, sessionJobDelayMs]
       .filter((value) => value != null && Number.isFinite(Number(value)))
       .map((value) => Math.max(0, Number(value)));
-    return delays.length > 0 ? Math.min(...delays) : repairMs;
+    return delays.length > 0 ? Math.max(1, Math.min(...delays)) : repairMs;
   }
 
   async _sleepUntilQueueWakeOrRepair(generation) {
@@ -955,7 +955,7 @@ export class Scheduler {
     });
     emitBootEvent("lock acquired", { section: "scheduler", status: "running" });
 
-    let gotLock = this.schedulerLock.acquire();
+    let gotLock = await this.schedulerLock.acquireWithRetry();
     if (gotLock) {
       this._log("Boot: lock acquired (no contention)");
       recordSchedulerLockDiagnostic({
@@ -1626,6 +1626,7 @@ export class Scheduler {
     let lastStopRequestCheck = 0;
     const STOP_REQUEST_CHECK_MS = 2_000;
     let pairingDrainRequested = false;
+    let pairingDrainStartedAt = null;
 
     try {
       let idleCount = 0;
@@ -1643,12 +1644,13 @@ export class Scheduler {
         // where a scheduler could otherwise fetch/mutate with an unscoped
         // cached envelope before its first session heartbeat.
         const sessionPoll = await this._sessionMonitor.poll();
+        this._sessionRoutingUnavailable = sessionPoll?.unavailable === true;
         if (sessionPoll?.requestsDrain || sessionPoll?.fatal) {
           pairingDrainRequested = true;
           this._log(
             sessionPoll?.requestsDrain
               ? `Session ${sessionPoll.status?.status || "closed"}; draining active workers`
-              : `Session heartbeat authorization failed; draining active workers`,
+              : `Session authorization or identity invalidated; draining active workers`,
             "yellow",
           );
         }
@@ -1659,7 +1661,7 @@ export class Scheduler {
         await this._sharedTrunkPoller.poll({
           idle: activeWorkers.size === 0 && idleCount > 0,
         });
-        await this._sessionJobRouter.poll();
+        if (!sessionPoll?.unavailable) await this._sessionJobRouter.poll();
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
         // for another scheduler cannot stop this one; consumed either way so
@@ -1895,7 +1897,80 @@ export class Scheduler {
         const foregroundTrackedJobs = trackedJobsForCloseout.filter((job) => !isRunBackgroundJob(job));
         const backgroundTrackedJobs = trackedJobsForCloseout.filter(isRunBackgroundJob);
         const requiredBackgroundTrackedJobs = backgroundTrackedJobs.filter(isRequiredRunBackgroundJob);
+        // ── Max job runtime watchdog ──
+        // Kill workers that exceed their role runtime cap — the job is likely stuck
+        // (producing output so the stall detector doesn't fire, but making no real
+        // progress). Requeue with consumed attempt so model tier escalates.
+        if (onKillJob) {
+          const now = Date.now();
+          for (const [jobId, entry] of activeWorkers) {
+            // Re-kill/wedged handling must run before the live-scope
+            // exemption: a worker already killed for runtime that opens a
+            // fresh scope request must keep receiving RUNTIME_KILL_RETRY_MS
+            // re-kills and wedged logging, not earn a new exemption.
+            const killState = killedForRuntime.get(jobId);
+            if (killState) {
+              // Kill was sent but the worker promise hasn't settled. There is
+              // no top-level abort race around job execution, so a single
+              // signal-ignoring await can hold this compute slot forever.
+              // Re-send the kill periodically and surface a wedged event once
+              // so the stuck slot is visible instead of silent.
+              if (now - killState.lastKillAt >= RUNTIME_KILL_RETRY_MS) {
+                killState.lastKillAt = now;
+                this._invokeCallback("onKillJob", onKillJob, jobId, "runtime_exceeded");
+              }
+              if (!killState.wedgedLogged && now - killState.firstKillAt >= RUNTIME_KILL_WEDGED_MS) {
+                killState.wedgedLogged = true;
+                const stuckSec = Math.round((now - killState.firstKillAt) / 1000);
+                this._log(`WI#${entry.job.work_item_id} job #${jobId} still running ${stuckSec}s after runtime kill — worker is ignoring abort; compute slot is stuck until it exits`, "red");
+                logEvent({
+                  job_id: jobId,
+                  work_item_id: entry.job.work_item_id,
+                  event_type: EVENT_TYPES.SCHEDULER_WORKER_WEDGED,
+                  actor_type: EVENT_ACTORS.SCHEDULER,
+                  actor_id: this.ownerId,
+                  message: `Worker still running ${stuckSec}s after runtime kill; abort is not being honored`,
+                });
+              }
+              continue;
+            }
+            const runtimeElapsedMs = runtimeWatchdogElapsedMs(entry, getJob(jobId) || entry.job, now);
+            if (runtimeElapsedMs == null) continue;
+            const runtimeSec = runtimeElapsedMs / 1000;
+            const runtimeLimitSec = maxJobRuntimeSecFor(entry.job);
+            if (runtimeSec > runtimeLimitSec) {
+              killedForRuntime.set(jobId, { firstKillAt: now, lastKillAt: now, wedgedLogged: false });
+              this._log(`WI#${entry.job.work_item_id} job #${jobId} exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for escalation`, "red");
+              logEvent({
+                job_id: jobId,
+                work_item_id: entry.job.work_item_id,
+                event_type: EVENT_TYPES.JOB_RUNTIME_EXCEEDED,
+                actor_type: EVENT_ACTORS.SCHEDULER,
+                actor_id: this.ownerId,
+                message: `Job exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for model escalation`,
+              });
+              this._invokeCallback("onKillJob", onKillJob, jobId, "runtime_exceeded");
+            }
+          }
+        }
+
         if (pairingDrainRequested) {
+          pairingDrainStartedAt ??= Date.now();
+          for (const [jobId, entry] of activeWorkers) {
+            const fresh = getJob(jobId) || entry.job;
+            if (fresh.job_type === "human_input" && fresh.status === "waiting_on_human" && !entry.drainKillSent) {
+              entry.drainKillSent = true;
+              this._invokeCallback("onKillJob", onKillJob, jobId, "shutdown");
+            }
+          }
+          const drainLimit = Math.max(this._shutdownWorkerWaitMs,
+            ...[...activeWorkers.values()].map((entry) =>
+              entry.drainKillSent ? this._shutdownWorkerWaitMs : maxJobRuntimeSecFor(entry.job) * 1000 + RUNTIME_KILL_WEDGED_MS));
+          if (Date.now() - pairingDrainStartedAt > drainLimit) {
+            this._log("Pairing drain timed out; aborting workers while retaining their scheduler lock", "yellow");
+            this.requestStop();
+            continue;
+          }
           if (activeWorkers.size === 0) {
             clearRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_DRAIN_REQUEST);
             this._log("Pairing drain complete - scheduler stopped before trunk integration", "yellow");
@@ -2083,7 +2158,11 @@ export class Scheduler {
               skipJobIds.add(job.id);
               continue;
             }
-            const sessionRoute = await this._sessionJobRouter.offer(job);
+            if (sessionPoll?.unavailable && parseJobPayload(job).session_delegation) {
+              skipJobIds.add(job.id);
+              continue;
+            }
+            const sessionRoute = sessionPoll?.unavailable ? null : await this._sessionJobRouter.offer(job);
             if (sessionRoute?.delegated) {
               skipJobIds.add(job.id);
               continue;
@@ -2451,63 +2530,6 @@ export class Scheduler {
           }
         }
 
-        // ── Max job runtime watchdog ──
-        // Kill workers that exceed their role runtime cap — the job is likely stuck
-        // (producing output so the stall detector doesn't fire, but making no real
-        // progress). Requeue with consumed attempt so model tier escalates.
-        if (onKillJob) {
-          const now = Date.now();
-          for (const [jobId, entry] of activeWorkers) {
-            // Re-kill/wedged handling must run before the live-scope
-            // exemption: a worker already killed for runtime that opens a
-            // fresh scope request must keep receiving RUNTIME_KILL_RETRY_MS
-            // re-kills and wedged logging, not earn a new exemption.
-            const killState = killedForRuntime.get(jobId);
-            if (killState) {
-              // Kill was sent but the worker promise hasn't settled. There is
-              // no top-level abort race around job execution, so a single
-              // signal-ignoring await can hold this compute slot forever.
-              // Re-send the kill periodically and surface a wedged event once
-              // so the stuck slot is visible instead of silent.
-              if (now - killState.lastKillAt >= RUNTIME_KILL_RETRY_MS) {
-                killState.lastKillAt = now;
-                this._invokeCallback("onKillJob", onKillJob, jobId, "runtime_exceeded");
-              }
-              if (!killState.wedgedLogged && now - killState.firstKillAt >= RUNTIME_KILL_WEDGED_MS) {
-                killState.wedgedLogged = true;
-                const stuckSec = Math.round((now - killState.firstKillAt) / 1000);
-                this._log(`WI#${entry.job.work_item_id} job #${jobId} still running ${stuckSec}s after runtime kill — worker is ignoring abort; compute slot is stuck until it exits`, "red");
-                logEvent({
-                  job_id: jobId,
-                  work_item_id: entry.job.work_item_id,
-                  event_type: EVENT_TYPES.SCHEDULER_WORKER_WEDGED,
-                  actor_type: EVENT_ACTORS.SCHEDULER,
-                  actor_id: this.ownerId,
-                  message: `Worker still running ${stuckSec}s after runtime kill; abort is not being honored`,
-                });
-              }
-              continue;
-            }
-            const runtimeElapsedMs = runtimeWatchdogElapsedMs(entry, getJob(jobId) || entry.job, now);
-            if (runtimeElapsedMs == null) continue;
-            const runtimeSec = runtimeElapsedMs / 1000;
-            const runtimeLimitSec = maxJobRuntimeSecFor(entry.job);
-            if (runtimeSec > runtimeLimitSec) {
-              killedForRuntime.set(jobId, { firstKillAt: now, lastKillAt: now, wedgedLogged: false });
-              this._log(`WI#${entry.job.work_item_id} job #${jobId} exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for escalation`, "red");
-              logEvent({
-                job_id: jobId,
-                work_item_id: entry.job.work_item_id,
-                event_type: EVENT_TYPES.JOB_RUNTIME_EXCEEDED,
-                actor_type: EVENT_ACTORS.SCHEDULER,
-                actor_id: this.ownerId,
-                message: `Job exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for model escalation`,
-              });
-              this._invokeCallback("onKillJob", onKillJob, jobId, "runtime_exceeded");
-            }
-          }
-        }
-
         // Progress watchdog — detect soft-deadlocks where jobs exist but none progress.
         // Workers completing jobs also counts as progress (they remove from activeWorkers,
         // allowing the next tick to dispatch and reset lastProgressTime).
@@ -2654,7 +2676,7 @@ export class Scheduler {
       this._stopRunLoopKeepAlive();
       unsubscribeQueueWake();
       const shutdownReason = this._lockLost ? "lock_lost" : (this._stopRequested ? "stop_requested" : "run_loop_exit");
-      this.stop({ activeWorkers, reason: shutdownReason });
+      this.stop({ activeWorkers, reason: shutdownReason, fromRunLoop: true });
       this._activeRunWorkers = null;
       this._sharedTrunkPoller = null;
       this._sessionMonitor?.stop?.();
@@ -2674,7 +2696,7 @@ export class Scheduler {
     this._stopWaitingLaneMaintenance();
     // Interrupt the poll sleep so the loop exits immediately
     this._wakeSleeps();
-    this.schedulerLock.stopRenewal();
+    if (!this._activeRunWorkers && !this._deferredStopPromise) this.schedulerLock.stopRenewal();
   }
 
   _startRunLoopKeepAlive() {
@@ -2695,7 +2717,24 @@ export class Scheduler {
   /**
    * Stop the scheduler loop and release the lock.
    */
-  stop({ activeWorkers = this._activeRunWorkers, reason = "scheduler_stop" } = {}) {
+  stop({ activeWorkers = this._activeRunWorkers, reason = "scheduler_stop", fromRunLoop = false } = {}) {
+    // An external stop only requests the run loop's shutdown. Its finally
+    // block releases the lock after workers have acknowledged their aborts.
+    if ((this._activeRunWorkers && !fromRunLoop) || this._deferredStopPromise) {
+      this.requestStop();
+      return;
+    }
+    if (activeWorkers?.size > 0) {
+      // The bounded shutdown wait may expire while a worker still owns its
+      // worktree. Keep the lock until that worker exits (or this process dies).
+      this.requestStop();
+      this._deferredStopPromise = Promise.allSettled([...activeWorkers.values()].map((entry) => entry.promise))
+        .then(() => {
+          this._deferredStopPromise = null;
+          try { this.stop({ activeWorkers: new Map(), reason }); } catch { /* lock expiry remains the recovery path */ }
+        });
+      return;
+    }
     if (this._stopMarked) {
       this.requestStop();
       return;

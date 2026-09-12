@@ -386,6 +386,6 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       error_text: err.message,
     });
     await wrappedJob.setError(err.message);
-    worker._retryOrFail(job, leaseToken, err.message);
+    worker._retryOrFail(job, leaseToken, err.message, { attemptId: attempt.attempt.id });
   }
 }

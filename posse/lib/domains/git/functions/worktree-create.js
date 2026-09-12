@@ -115,8 +115,8 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
         // A missing gitfile can make Git walk into the parent checkout.
         // Verify identity before dirty recovery, branch removal, or HEAD reset.
         const toplevel = String(await gitExecAsync(["rev-parse", "--show-toplevel"], wtPath, { signal })).trim();
-        const actualRoot = path.resolve(toplevel);
-        const expectedRoot = path.resolve(wtPath);
+        const actualRoot = fs.realpathSync.native(path.resolve(toplevel));
+        const expectedRoot = fs.realpathSync.native(path.resolve(wtPath));
         const sameRoot = process.platform === "win32"
           ? actualRoot.toLowerCase() === expectedRoot.toLowerCase() : actualRoot === expectedRoot;
         if (!toplevel || !sameRoot) {

@@ -8,7 +8,7 @@
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { now, runImmediateTransaction, TERMINAL_JOB_STATUSES_SQL } from "./common.js";
-import { logEvent, flushEventsNow } from "./events.js";
+import { logDurableEvent, logEvent, flushEventsNow } from "./events.js";
 import { parseJobPayload } from "./payload.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
@@ -307,14 +307,14 @@ function logStaleCrossWiDependencyOnce(targetWorkItemId, sourceWorkItemId, reaso
   const key = `${targetWorkItemId}:${sourceWorkItemId}:${reason}`;
   const previous = db.prepare(`
     SELECT 1
-    FROM events
+    FROM queue_event_state
     WHERE work_item_id = ?
       AND event_type = ?
       AND json_extract(event_json, '$.dedupe_key') = ?
     LIMIT 1
   `).get(targetWorkItemId, EVENT_TYPES.WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_STALE, key);
   if (previous) return;
-  logEvent({
+  logDurableEvent({
     work_item_id: targetWorkItemId,
     event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_STALE,
     actor_type: EVENT_ACTORS.SYSTEM,

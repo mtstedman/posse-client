@@ -15,6 +15,8 @@ import { jobHasLiveLeaseAt } from "./lease-state.js";
 const ACTIVE_GATE_STATES = Object.freeze(["open", "resolving"]);
 const WORK_ITEM_SINGLETON_GATE_KINDS = new Set(["oneshot_scope_selection"]);
 let _humanGateReconcileHook = null;
+let _gateCanceledHook = null;
+export function registerGateCanceledHook(fn) { _gateCanceledHook = fn; }
 
 // queue-store owns the authoritative work-item state machine, while it also
 // imports this module for gate registration. Register a callback after that
@@ -657,6 +659,7 @@ export function reconcileHumanGates() {
             last_error=COALESCE(last_error, ?), updated_at=?
         WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
       `).run(ts, normalizedReason, ts, gateJobId);
+      if (canceled.changes > 0) _gateCanceledHook?.(db.prepare("SELECT * FROM jobs WHERE id = ?").get(gateJobId));
       const superseded = db.prepare(`
         UPDATE human_gates
         SET gate_state='superseded', resolver_lease_token=NULL,
@@ -718,6 +721,7 @@ export function reconcileHumanGates() {
         ts,
       );
       if (result.changes > 0) {
+        if (terminalStatus === "canceled") _gateCanceledHook?.(db.prepare("SELECT * FROM jobs WHERE id = ?").get(row.gate_job_id));
         retired += 1;
         noteGateMutation(row.work_item_id);
       }

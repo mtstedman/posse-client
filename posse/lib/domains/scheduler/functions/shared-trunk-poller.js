@@ -15,7 +15,6 @@ import {
 import { resolveSharedTrunkConfigRuntime } from "../../git/functions/shared-trunk-config.js";
 import {
   createJob,
-  listJobs,
   listActiveFileLocks,
   logEvent,
   readRuntimeStatus,
@@ -35,7 +34,12 @@ function parseJson(value) {
 }
 
 function provenanceGateRows() {
-  return listJobs().filter((job) => parseJson(job.payload_json)?.subtype === "shared_trunk_provenance");
+  return getDb().prepare(`
+    SELECT * FROM jobs
+    WHERE CASE WHEN json_valid(payload_json)
+      THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_provenance'
+      ELSE 0 END
+  `).all();
 }
 
 function applyProvenanceGateDecision() {
@@ -173,6 +177,14 @@ export class SharedTrunkPoller {
     // bad config per lap is the busy-spin this guard exists to prevent.
     if (!force && this._configErrorAt != null && this._nowMs() < this._nextDueAt) {
       return { attempted: false, unavailable: true, configurationError: true, skipped: "cadence" };
+    }
+    const cachedDueAt = this._lastPollAt == null ? 0 : this._lastPollAt + positiveSeconds(
+      idle ? this._lastConfig?.fetchIntervalIdleSec : this._lastConfig?.fetchIntervalSec,
+      idle ? 300 : 30,
+    ) * 1000;
+    if (!force && this._lastConfig?.enabled && this._nowMs() < cachedDueAt) {
+      this._nextDueAt = cachedDueAt;
+      return { attempted: false, skipped: "cadence", config: this._lastConfig, nextDueAt: cachedDueAt };
     }
     let config;
     try {

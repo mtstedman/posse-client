@@ -1,3 +1,4 @@
+import { registerTransactionLifecycleHooks } from "./common.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { warnOnceForInvalidEventType } from "../../observability/functions/event-types.js";
 import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
@@ -228,6 +229,11 @@ const EVENT_FLUSH_INTERVAL_MS = 100;
 const EVENT_BATCH_FLUSH_AT = 64;
 const _pendingEvents = [];
 let _eventFlushTimer = null;
+let _eventFlushAfterTransaction = false;
+registerTransactionLifecycleHooks({
+  onCommit: () => { if (_eventFlushAfterTransaction) flushEventsNow(); },
+  onRollback: () => { _eventFlushAfterTransaction = false; },
+});
 let _eventExitHookInstalled = false;
 
 function _ensureEventExitHook() {
@@ -251,14 +257,22 @@ function _scheduleEventFlush() {
 /**
  * Drain the pending event queue into the DB in a single transaction.
  * Safe to call from any context (including process.on("exit")). Callers
- * that need an event to be visible to a subsequent SELECT in the same
- * tick should call this before the SELECT.
+ * that need an event to be visible to a subsequent SELECT should call this
+ * outside an open transaction. Nested callers defer the batch for replay.
  */
 export function flushEventsNow() {
   if (_pendingEvents.length === 0) return 0;
-  const drain = _pendingEvents.splice(0, _pendingEvents.length);
   let db;
   try { db = getDb(); } catch { return 0; }
+  // A nested commit is only a savepoint: its outer transaction can roll back.
+  // Keep the batch available for replay and mirror only after a real commit.
+  if (db.inTransaction) {
+    _eventFlushAfterTransaction = true;
+    _scheduleEventFlush();
+    return 0;
+  }
+  _eventFlushAfterTransaction = false;
+  const drain = _pendingEvents.splice(0, _pendingEvents.length);
   const stmt = db.prepare(`
     INSERT INTO events (work_item_id, job_id, attempt_id, event_type, actor_type, actor_id, message, event_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -438,6 +452,7 @@ export function logAgentActivity({
  * that recreate the DB between cases.
  */
 export function _discardPendingEventsForTests() {
+  _eventFlushAfterTransaction = false;
   _pendingEvents.length = 0;
   if (_eventFlushTimer) {
     clearTimeout(_eventFlushTimer);

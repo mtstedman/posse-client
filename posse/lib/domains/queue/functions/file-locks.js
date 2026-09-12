@@ -17,7 +17,7 @@ import {
   runImmediateTransaction,
   TERMINAL_JOB_STATUSES,
 } from "./common.js";
-import { logEvent, flushEventsNow } from "./events.js";
+import { logDurableEvent, logEvent, flushEventsNow } from "./events.js";
 import { leaseNowMs } from "./lease-clock.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -386,6 +386,8 @@ export function listFileLaneWaits({ workItemId = null } = {}) {
 
 export function reconcileFileLaneWaits() {
   const db = getDb();
+  if (!db.inTransaction) return runImmediateTransaction(db, () => reconcileFileLaneWaits());
+  const snapshot = listActiveFileLocks();
   const desired = new Map();
   let lastId = 0;
   for (;;) {
@@ -400,7 +402,7 @@ export function reconcileFileLaneWaits() {
     if (jobs.length === 0) break;
     for (const job of jobs) {
       lastId = Number(job.id);
-      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job));
+      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job, getJobWriteScope(job), snapshot));
       if (!descriptor) continue;
       desired.set(`${descriptor.waiter_job_id}|${descriptor.lane_id}|${descriptor.holder_key}`, descriptor);
     }
@@ -590,17 +592,19 @@ function activeJobLocks(db, {
   return rows;
 }
 
-export function findWriteLockConflict(job, scope = getJobWriteScope(job)) {
+export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null) {
   if (!jobNeedsWriteLocks(job) || !hasWriteScope(scope)) return null;
   const db = getDb();
   if (!jobNeedsAssessmentBarrier(job)) {
-    const wiConflict = locksConflict(scope, activeWiLocks(db), {
+    const wiConflict = locksConflict(scope, snapshot?.work_items || activeWiLocks(db), {
       allowWorkItemId: job.work_item_id,
       ignoreSameWorkItemLocks: true,
     });
     if (wiConflict) return { type: "work_item", ...wiConflict };
   }
-  const sameWorkItemJobLocks = activeJobLocks(db, { workItemId: job.work_item_id });
+  const sameWorkItemJobLocks = snapshot
+    ? snapshot.jobs.filter((lock) => Number(lock.work_item_id) === Number(job.work_item_id))
+    : activeJobLocks(db, { workItemId: job.work_item_id });
   const allowJobIds = new Set([
     ...ancestorJobIdsForJob(job, db),
     ...queuedCohortJobIdsForJob(job, db),
@@ -860,13 +864,13 @@ function logWriteLockBlockedOnce(db, job, ownerId, message, conflict) {
   flushEventsNow();
   const previous = db.prepare(`
     SELECT message
-    FROM events
+    FROM queue_event_state
     WHERE job_id = ? AND event_type = ?
     ORDER BY id DESC
     LIMIT 1
   `).get(job.id, EVENT_TYPES.JOB_WRITE_LOCK_BLOCKED);
   if (previous?.message === message) return false;
-  logEvent({
+  logDurableEvent({
     work_item_id: job.work_item_id,
     job_id: job.id,
     event_type: EVENT_TYPES.JOB_WRITE_LOCK_BLOCKED,

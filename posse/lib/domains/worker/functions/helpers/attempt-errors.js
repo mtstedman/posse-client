@@ -198,6 +198,21 @@ function isNudgeKillReason(reason) {
   return reason === "operator_nudge" || reason === "user_nudge";
 }
 
+function isLeaseInterruption(reason) {
+  return ["lease_expired", "lease_renew_failed", "session_lease_expired", "session_lease_renew_failed"].includes(reason);
+}
+
+function interruptionLabel(reason) {
+  return reason === "shutdown" ? "Graceful shutdown" : reason.replaceAll("_", " ");
+}
+
+function isOtherAbortInterruption(err) {
+  const reason = err?._killReason;
+  return Boolean(reason && isAbortError(err)
+    && !["user_canceled", "work_item_canceled", "operator_nudge", "user_nudge",
+      "runtime_exceeded", "post_merge_closeout_budget"].includes(reason));
+}
+
 export async function handlePendingScopeApprovalPause(worker, {
   attempt,
   job,
@@ -275,8 +290,9 @@ function handlePreAttemptInterruption(worker, { job, leaseToken, outerErr }) {
     return true;
   }
 
-  if (killReason === "shutdown" || killReason === "lease_expired") {
-    const reason = killReason === "shutdown" ? "Graceful shutdown" : "Lease expired";
+  if (killReason === "shutdown" || isLeaseInterruption(killReason) || isOtherAbortInterruption(outerErr)
+    || killReason === "runtime_exceeded") {
+    const reason = interruptionLabel(killReason);
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -310,8 +326,8 @@ function handlePreAttemptInterruption(worker, { job, leaseToken, outerErr }) {
 export function handleDeterministicInterruption(worker, job, attemptId, startTime, leaseToken, err) {
   if (!err?._killReason) return false;
 
-  if (err._killReason === "shutdown" || err._killReason === "lease_expired") {
-    const reason = err._killReason === "shutdown" ? "Graceful shutdown" : "Lease expired";
+  if (err._killReason === "shutdown" || isLeaseInterruption(err._killReason) || isOtherAbortInterruption(err)) {
+    const reason = interruptionLabel(err._killReason);
     completeAttempt(attemptId, {
       status: "interrupted",
       duration_ms: Date.now() - startTime,
@@ -403,18 +419,17 @@ export async function handleExecuteAttemptError(worker, {
       message: cancelMsg,
     });
 
-    worker._releaseLease(job, leaseToken, "canceled");
+    if (currentJob?.status !== "canceled") worker._releaseLease(job, leaseToken, "canceled");
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${cancelMsg.toLowerCase()}${C.reset}`);
     refreshAndExtractInsights(job.work_item_id);
     worker._cleanupWorktreeIfDone(job.work_item_id);
     return;
   }
 
-  // Success is durable before best-effort finalization/insight cleanup.
-  // A late cleanup failure cannot rewrite the completed attempt or replay work.
-  if (currentJob?.status === "succeeded"
-    && getAttempts(job.id).some((row) => row.id === attempt?.id && row.status === "succeeded")) {
-    worker.emit(job.id, `${C.yellow}[worker] job #${job.id} completed; finalization failed: ${err?.message || err}${C.reset}`);
+  // A release is the durable boundary. Cleanup errors after it must not
+  // rewrite the attempt or repeat retry/dead-letter side effects.
+  if (currentJob?.lease_token !== leaseToken) {
+    worker.emit(job.id, `${C.yellow}[worker] job #${job.id} lease already released; finalization failed: ${err?.message || err}${C.reset}`);
     return;
   }
 
@@ -597,8 +612,8 @@ export async function handleExecuteAttemptError(worker, {
 
   // Worker was killed because the user hit Ctrl+C or the lease expired.
   // Stash any partial work, requeue without consuming an attempt.
-  if (err._killReason === "shutdown" || err._killReason === "lease_expired") {
-    const reason = err._killReason === "shutdown" ? "Graceful shutdown" : "Lease expired";
+  if (err._killReason === "shutdown" || isLeaseInterruption(err._killReason) || isOtherAbortInterruption(err)) {
+    const reason = interruptionLabel(err._killReason);
 
     if (attempt?.id) {
       completeAttempt(attempt.id, {
@@ -662,7 +677,7 @@ export async function handleExecuteAttemptError(worker, {
     if (stallCount >= MAX_STALL_RETRIES) {
       worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id} stalled ${stallCount} times — treating as failure${C.reset}`);
       setJobError(job.id, `Stalled ${stallCount} times — task may be too complex for the current timeout`);
-      worker._retryOrFail(job, leaseToken, `Stalled ${stallCount} times`, { stallExhausted: true });
+      worker._retryOrFail(job, leaseToken, `Stalled ${stallCount} times`, { stallExhausted: true, attemptId: attempt.id });
       return;
     }
 
@@ -745,7 +760,7 @@ export async function handleExecuteAttemptError(worker, {
       });
       setJobError(job.id, `Persistent provider error after ${priorProviderErrorRequeues} retries`);
       worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id} provider error persisted ${priorProviderErrorRequeues}x — failing instead of looping${C.reset}`);
-      worker._retryOrFail(job, leaseToken, `Persistent provider error: ${err.message}`, { providerErrorExhausted: true });
+      worker._retryOrFail(job, leaseToken, `Persistent provider error: ${err.message}`, { providerErrorExhausted: true, attemptId: attempt.id });
       return;
     }
 
@@ -840,7 +855,7 @@ export async function handleExecuteAttemptError(worker, {
     });
   }
 
-  worker._retryOrFail(job, leaseToken, err);
+  worker._retryOrFail(job, leaseToken, err, { attemptId: attempt.id });
 }
 
 const SQLITE_CONTENTION_MAX_REQUEUES = 4;
@@ -858,8 +873,16 @@ function isVerificationInfrastructureError(err) {
   return String(err?.code || "") === "POSSE_VERIFICATION_INFRASTRUCTURE";
 }
 
-export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerErr }) {
-  if (handlePreAttemptInterruption(worker, { job, leaseToken, outerErr })) {
+export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerErr, attemptId = null }) {
+  // Lease release, rather than attempt completion, is the recovery boundary.
+  // Late finalization errors must not mutate a released job or a newer owner.
+  try {
+    if (!leaseToken || getJob(job.id)?.lease_token !== leaseToken) return;
+  } catch {
+    // Ownership could not be established; leave recovery to lease expiry.
+    return;
+  }
+  if (attemptId == null && handlePreAttemptInterruption(worker, { job, leaseToken, outerErr })) {
     return;
   }
 
@@ -978,7 +1001,10 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
         updateJobPayload(job.id, JSON.stringify(payload));
         const delayMs = SQLITE_CONTENTION_BACKOFF_BASE_MS * (priorRequeues + 1);
         const readyAt = new Date(Date.now() + delayMs).toISOString();
-        if (worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt })) {
+        if (worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt })) {
+          if (attemptId != null) {
+            completeAttempt(attemptId, { status: "interrupted", error_text: "Transient SQLite contention" });
+          }
           worker.emit(
             job.id,
             `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: transient SQLite contention (${priorRequeues + 1}/${SQLITE_CONTENTION_MAX_REQUEUES}) — requeued without attempt penalty, retrying in ${Math.round(delayMs / 1000)}s${C.reset}`,
@@ -992,13 +1018,21 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
   }
   try {
     if (worker.shuttingDown) {
-      if (worker._releaseLease(job, leaseToken, "queued", { readyAt: new Date().toISOString() })) {
-        decrementAttemptCount(job.id);
+      if (worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt: new Date().toISOString() })
+        && attemptId != null) {
+        completeAttempt(attemptId, { status: "interrupted", error_text: "Graceful shutdown" });
       }
     } else {
       // Cap catastrophic retries so persistent failures dead-letter eventually.
-      incrementAttemptCount(job.id);
-      worker._retryOrFail(job, leaseToken, `Catastrophic error: ${outerErr.message}`);
+      if (attemptId == null) {
+        incrementAttemptCount(job.id);
+      } else {
+        const attempt = getAttempts(job.id).find((row) => row.id === attemptId);
+        if (attempt?.status === "running") {
+          completeAttempt(attemptId, { status: "failed", error_text: outerErr.message });
+        }
+      }
+      worker._retryOrFail(job, leaseToken, `Catastrophic error: ${outerErr.message}`, { attemptId });
     }
   } catch {
     // lease will expire naturally

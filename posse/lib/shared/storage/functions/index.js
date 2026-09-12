@@ -1,3 +1,4 @@
+import { installEventState } from "./event-state.js";
 // lib/db.js — SQLite connection singleton
 //
 // Opens the orchestrator database (better-sqlite3, synchronous).
@@ -2870,6 +2871,7 @@ export function getDb() {
   createAgentHandoffPacketTable(_db);
   installJsonValidityTriggers(_db);
   installTerminalTransitionTracking(_db);
+  installEventState(_db);
 
   return _db;
 }

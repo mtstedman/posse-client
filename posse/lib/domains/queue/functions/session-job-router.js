@@ -242,8 +242,12 @@ export async function offerSessionJob(job, {
           packet_oid=excluded.packet_oid, claim_oid=excluded.claim_oid,
           state='offered', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
       `).run(key, state.remote_session_id, instanceId, workItem.id, job.id, key, packetOid, claimOid, job.job_type, job.provider || null);
-      updateJobStatus(job.id, "blocked", { expectedStatuses: ["queued"] });
-      updateWorkItemStatus(workItem.id, "blocked");
+      if (!updateJobStatus(job.id, "blocked", { expectedStatuses: ["queued"] })) {
+        throw new Error(`Session job #${job.id} is no longer queued`);
+      }
+      if (!updateWorkItemStatus(workItem.id, "blocked")) {
+        throw new Error(`Session work item #${workItem.id} can no longer be blocked`);
+      }
     });
     logEvent({
       work_item_id: workItem.id,
@@ -409,7 +413,9 @@ export class SessionJobRouter {
   }
 
   delayUntilDueMs() {
-    return this._getState()?.phase === "active" ? Math.max(0, this._nextDueAt - this._nowMs()) : null;
+    const state = this._getState();
+    return state?.phase === "active" && state.compute_policy !== "each-member"
+      ? Math.max(0, this._nextDueAt - this._nowMs()) : null;
   }
 
   offer(job) {
@@ -463,7 +469,7 @@ export class SessionJobRouter {
         } else if (["succeeded", "failed"].includes(offer.state)) {
           const nextState = offer.state === "succeeded" ? "running" : "failed";
           if (row.state !== nextState) {
-            if (offer.state === "failed") updateJobStatus(row.origin_job_id, "failed", { force: true });
+            if (offer.state === "failed") updateJobStatus(row.origin_job_id, "failed", { expectedStatuses: ["blocked"] });
             getDb().prepare(`UPDATE work_item_delegations SET state=?, claim_oid=?, completed_at=?, updated_at=? WHERE offer_key=?`)
               .run(nextState, ref.oid, now(), now(), ref.key);
             if (offer.state === "failed") refreshWorkItemStatus(row.origin_work_item_id);
@@ -546,8 +552,9 @@ export class SessionJobRouter {
       });
       if (resultOutcome(result) !== "applied") continue;
       getDb().prepare(`UPDATE work_item_delegations SET state='recalled', updated_at=? WHERE offer_key=?`).run(now(), row.offer_key);
-      updateJobStatus(row.origin_job_id, "queued", { force: true });
-      updateWorkItemStatus(row.origin_work_item_id, "running");
+      if (updateJobStatus(row.origin_job_id, "queued", { expectedStatuses: ["blocked"] })) {
+        updateWorkItemStatus(row.origin_work_item_id, "running");
+      }
       try {
         await casRef({
           projectDir: this.projectDir, remote: state.remote_name, namespace: "handoff",
@@ -587,7 +594,7 @@ export class SessionJobRouter {
         SET state='failed', completed_at=?, updated_at=?
         WHERE offer_key=? AND state='claimed'
       `).run(now(), now(), row.offer_key);
-      updateJobStatus(row.origin_job_id, "failed", { force: true });
+      updateJobStatus(row.origin_job_id, "failed", { expectedStatuses: ["blocked"] });
       refreshWorkItemStatus(row.origin_work_item_id);
       if (row.packet_oid) {
         try {
@@ -634,7 +641,7 @@ export async function reconcileSessionDelegationCommits(projectDir = process.cwd
   for (const row of rows) {
     const trailer = `Posse-Origin-Work-Item: ${instanceId}:${row.origin_work_item_id}`;
     if (!messages.some((message) => message.split(/\r?\n/u).includes(trailer))) continue;
-    updateJobStatus(row.origin_job_id, "succeeded", { force: true });
+    if (!updateJobStatus(row.origin_job_id, "succeeded", { expectedStatuses: ["blocked"] })) continue;
     getDb().prepare(`
       UPDATE work_item_delegations
       SET state='merged', completed_at=COALESCE(completed_at, ?), updated_at=?

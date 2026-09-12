@@ -74,6 +74,32 @@ export class SchedulerLockLease {
     return acquired;
   }
 
+  async acquireWithRetry({ attempts = 3, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let busy = null;
+      try {
+        if (this.acquire()) return true;
+      } catch (error) {
+        if (!/^SQLITE_(BUSY|LOCKED)(_|$)/.test(error?.code || "")) throw error;
+        busy = error;
+      }
+      // A real owner remains a refusal. An absent row after a busy write is
+      // temporary database contention, not proof of another scheduler.
+      let owner;
+      try { owner = this.info(); } catch (error) {
+        if (!/^SQLITE_(BUSY|LOCKED)(_|$)/.test(error?.code || "")) throw error;
+        busy ||= error;
+      }
+      if (owner) return false;
+      if (attempt + 1 === attempts) {
+        if (busy) throw busy;
+        return false;
+      }
+      await sleep(50 * (attempt + 1));
+    }
+    return false;
+  }
+
   forceAcquire(durationSec = this.durationSec) {
     const acquired = this.forceAcquireLockFn(this.lockName, this.ownerId, durationSec);
     if (acquired) this.markHeld();

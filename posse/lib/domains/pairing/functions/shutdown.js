@@ -72,17 +72,22 @@ export async function waitForPairingSchedulerStop({
   onProgress = () => {},
   sleepFn = sleep,
   kill = process.kill.bind(process),
+  timeoutMs = 2 * 60 * 60 * 1000,
+  nowMs = () => Date.now(),
 } = {}) {
   const request = graceful ? requestPairingDrain(state) : requestPairingForceStop(state);
   if (request.stopped) {
     if (graceful) clearRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_DRAIN_REQUEST);
     return { ok: true, alreadyStopped: true };
   }
-  const startedAt = Date.now();
+  const startedAt = nowMs();
   let termSentAt = null;
   let termTarget = null;
   while (liveScheduler()) {
-    const elapsed = Date.now() - startedAt;
+    const elapsed = nowMs() - startedAt;
+    if (elapsed >= timeoutMs) {
+      throw new Error("Session close timed out waiting for active workers; the scheduler lock is still held. Retry close after the workers exit.");
+    }
     if (!graceful && termSentAt == null && elapsed >= FORCE_REQUEST_GRACE_MS) {
       termTarget = schedulerSignalTarget(request.ownerId);
       if (termTarget) {

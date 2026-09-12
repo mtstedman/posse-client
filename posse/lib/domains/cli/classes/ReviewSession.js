@@ -1190,6 +1190,7 @@ export class ReviewSession {
         const commitFn = commitInScopeChangesAsyncFn || this.commitInScopeChangesFn;
         const result = await commitFn({
           wtDir: ws.wtDir,
+          projectDir: PROJECT_DIR,
           scope: ws.scope,
         });
         if (result.ok) {
@@ -1304,14 +1305,14 @@ export class ReviewSession {
           results.push({
             location: "target",
             paths: selectedTargetPaths,
-            result: await discardFn({ wtDir: targetDir, paths: selectedTargetPaths, targetBranch: this.targetBranch() }),
+            result: await discardFn({ wtDir: targetDir, projectDir: PROJECT_DIR, paths: selectedTargetPaths, targetBranch: this.targetBranch() }),
           });
         }
         if (selectedWorktreePaths.length > 0) {
           results.push({
             location: "worktree",
             paths: selectedWorktreePaths,
-            result: await discardFn({ wtDir: ws.wtDir, paths: selectedWorktreePaths, targetBranch: this.targetBranch() }),
+            result: await discardFn({ wtDir: ws.wtDir, projectDir: PROJECT_DIR, paths: selectedWorktreePaths, targetBranch: this.targetBranch() }),
           });
         }
         const failed = results.find((entry) => !entry.result?.ok);

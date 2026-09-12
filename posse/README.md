@@ -450,6 +450,17 @@ a per-command local capability broker and passes its locator in
 `POSSE_VERIFICATION_PULSE_CAPABILITY`, so key-gated native routes still work
 inside a verification run while the secret stays with the parent.
 
+Queue decisions that rely on merge/reopen evidence or deduplicated lock notices
+use compact durable state independent of the 20-row telemetry tail. Event
+readers continue to combine the SQLite tail with JSONL history. Batch event
+flushes defer during open transactions so rollback cannot leave phantom mirror
+entries.
+
+A successful implementation commit is recorded before cross-WI synchronization.
+If required synchronization fails, the attempt retains its commit hash and fails
+with the sync diagnostic; the provider is not automatically rerun. The branch
+and pending synchronization remain available for repair.
+
 ### Skips are named and classified
 
 The default reporter lists every skipped test with its reason at the end of
@@ -621,6 +632,12 @@ recovery gate for accepting that exact tip or rejecting it for manual review.
 With `capability-routing`, a throttled or unavailable local provider can offer a
 bounded work packet through `refs/posse/handoff/*`; `host-only` routes member
 work to the host. The winner is selected by CAS in `refs/posse/jobs/*`.
+Transient relay failures pause session routing while local dispatch continues;
+a later successful heartbeat resumes routing. Invalid authorization or session
+identity drains the scheduler. Graceful drain interrupts parked human gates and
+still applies worker runtime limits. Close reports a timeout if workers remain
+wedged, preserving the scheduler lock until they exit.
+
 Unreachable transport runs locally, unclaimed offers are recalled, executor-side
 human gates remain with the executor, and origin work completes only after the
 shared trunk contains its `Posse-Origin-Work-Item` trailer. Model-call cost rows

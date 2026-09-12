@@ -22,7 +22,7 @@ import {
   emitMainAdvanced as emitAtlasV2MainAdvanced,
   isAtlasV2EmissionEnabled,
 } from "../../atlas/classes/v2/PipelineHooks.js";
-import { resolveSharedTrunkConfigRuntime } from "./shared-trunk-config.js";
+import { resolveSharedTrunkConfigRuntime, SharedTrunkConfigError } from "./shared-trunk-config.js";
 import {
   fetchSharedTrunkNative,
   ffUpdateSharedTrunkNative,
@@ -139,18 +139,30 @@ async function underMergeLock(fn, ownerSuffix, alreadyHeld = false) {
 async function runtimeSharedTrunkConfig(projectDir) {
   let capabilityEnvelope = null;
   let capabilityError = null;
-  const config = await resolveSharedTrunkConfigRuntime(projectDir, {
-    nativeCapabilityPreflight: async ({ projectDir: root }) => {
-      try {
-        capabilityEnvelope = await sharedTrunkCapabilities(root);
-      } catch (err) {
-        capabilityError = err;
-      }
-      // Preserve the validated config in the typed unavailable result below;
-      // the coordinator still fails closed before any mutation.
-      return capabilityEnvelope?.available === true ? capabilityEnvelope : true;
-    },
-  });
+  let config;
+  try {
+    config = await resolveSharedTrunkConfigRuntime(projectDir, {
+      nativeCapabilityPreflight: async ({ projectDir: root }) => {
+        try {
+          capabilityEnvelope = await sharedTrunkCapabilities(root);
+        } catch (err) {
+          capabilityError = err;
+        }
+        // Preserve the validated config in the typed unavailable result below;
+        // the coordinator still fails closed before any mutation.
+        return capabilityEnvelope?.available === true ? capabilityEnvelope : true;
+      },
+    });
+  } catch (err) {
+    if (!(err instanceof SharedTrunkConfigError)) throw err;
+    return {
+      config: { enabled: true, remote: null, branch: null, claimsEnabled: false },
+      capabilities: null,
+      unavailable: true,
+      reason: err.code,
+      error: err,
+    };
+  }
   if (!config.enabled) return { config, capabilities: null, unavailable: false };
   if (capabilityError || nativeUnavailable(capabilityEnvelope)) {
     return {
@@ -1010,7 +1022,7 @@ export async function mergeToSharedTrunkAsync({
             phase: "deferred",
             lastErrorCode: local?.deterministicConflict ? "deterministic_conflict" : (local?.reason || "merge_failed"),
           });
-          return { ...local, deferred: true, operation };
+          return { ...local, operation };
         }
         const candidateSha = local.mergeHash || refSha(projectDir, config.branch);
         if (!candidateSha) return { ok: false, reason: "candidate_head_unresolved", operation };
@@ -1283,9 +1295,9 @@ export async function mergeToSharedTrunkAsync({
     }
     return { ok: false, reason: "push_retry_exhausted", operation };
   }), "shared-trunk-merge", mergeLockAlreadyHeld === true);
-  return coordinated && typeof coordinated === "object"
-    ? { ...coordinated, ...(coordinated.ok ? {} : { deferred: true }), sharedTrunk: true }
-    : coordinated;
+  if (!coordinated || typeof coordinated !== "object") return coordinated;
+  const result = { ...coordinated, sharedTrunk: true };
+  return result.ok ? result : { ...result, deferred: isTransientSharedTrunkMergeResult(result) };
 }
 
 export const __testSharedTrunkInternals = Object.freeze({

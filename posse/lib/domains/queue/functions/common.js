@@ -106,16 +106,12 @@ export function normalizeSkillsColumn(value) {
   return ids.length > 0 ? JSON.stringify(ids) : null;
 }
 
-// Transaction lifecycle hooks. wakeups.js registers a flush/discard pair so
-// deferred wake-listener emissions only fire after COMMIT succeeds. We use a
-// setter rather than a direct import to avoid a static cycle (wakeups.js
-// already imports `now` from this file).
-let _commitHook = null;
-let _rollbackHook = null;
+// Modules subscribe without a static cycle. Deferred notifications and event
+// mirroring run only after the outer managed transaction has ended.
+const transactionLifecycleHooks = [];
 
 export function registerTransactionLifecycleHooks({ onCommit = null, onRollback = null } = {}) {
-  _commitHook = typeof onCommit === "function" ? onCommit : null;
-  _rollbackHook = typeof onRollback === "function" ? onRollback : null;
+  transactionLifecycleHooks.push({ onCommit, onRollback });
 }
 
 export function runImmediateTransaction(db, fn) {
@@ -131,9 +127,11 @@ export function runImmediateTransaction(db, fn) {
     try { db.exec("ROLLBACK"); } catch { /* ignore rollback errors */ }
     throw err;
   } finally {
-    try {
-      if (committed) _commitHook?.();
-      else _rollbackHook?.();
-    } catch { /* lifecycle hooks must never break the caller */ }
+    for (const hooks of transactionLifecycleHooks) {
+      try {
+        if (committed) hooks.onCommit?.();
+        else hooks.onRollback?.();
+      } catch { /* lifecycle hooks must never break the caller */ }
+    }
   }
 }
