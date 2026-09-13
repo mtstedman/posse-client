@@ -9,6 +9,7 @@ import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-re
 import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.js";
 import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
 import { normalizeAtlasIdentifierList } from "../../atlas/functions/v2/contracts/identifiers.js";
+import { contiguousSourceReuse } from "../functions/contiguous-source-reuse.js";
 import {
   normalizeResearchEvidenceReuseMode,
   recordSourceCoverageReuseShadow,
@@ -380,9 +381,8 @@ export class SourceCoverageOwner {
         entry.coverage.evidence_ref,
       ].join(":"), entry);
     }
-    // One covered response carries one canonical evidence ref. Multiple
-    // disjoint regions remain reachable but cannot safely stand in for the
-    // selector as a whole, so exact-selector admission fails open.
+    // Disjoint regions cannot stand in for one selector. Adjacent delivered
+    // pages may reuse their validated refs together once no tail is unseen.
     if (delivered.size === 1) {
       const [{ row, coverage, selectorMatch }] = delivered.values();
       const fresh = this.#freshSource(coverage.repo_rel_path);
@@ -394,7 +394,20 @@ export class SourceCoverageOwner {
       });
       if (result) return result;
     }
-    if (delivered.size > 1) return { covered: false, reason: "multiple_regions_fail_open" };
+    if (delivered.size > 1) {
+      if (!latest.some(({ coverage }) => coverage.origin === "continuation")) {
+        return { covered: false, reason: "multiple_regions_fail_open" };
+      }
+      const combined = contiguousSourceReuse([...delivered.values()].map(({ row, coverage, selectorMatch }) => (
+        this.#coveredResult(row, coverage, selectorMatch, {
+          fresh: this.#freshSource(coverage.repo_rel_path),
+          requestedStartLine: coverage.start_line,
+          requestedEndLine: coverage.end_line,
+          selectorArgs: args,
+        })
+      )));
+      return combined || { covered: false, reason: "multiple_regions_fail_open" };
+    }
     return { covered: false, reason: "uncovered" };
   }
 
@@ -713,7 +726,10 @@ export class SourceCoverageOwner {
     const content = data.content.replace(/\r\n/g, "\n");
     const contentSha256 = sha256(content);
     const sourceSlice = sourceLines.slice(startLine - 1, endLine).join("\n");
-    const sourceSliceWithFinalEol = endLine === sourceLines.length && fresh.source.endsWith("\n")
+    // Paging retains the separator after the last inline source line. That
+    // newline is byte-exact even when the following line stays in a cursor.
+    // At EOF it is valid only when the file actually ends with a newline.
+    const sourceSliceWithFinalEol = endLine < sourceLines.length || fresh.source.endsWith("\n")
       ? `${sourceSlice}\n`
       : null;
     if (sourceSlice !== content && sourceSliceWithFinalEol !== content) return null;

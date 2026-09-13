@@ -41,6 +41,7 @@ import {
 } from "./cli-discovery.js";
 import { InteractiveCliUnavailableError } from "../../classes/InteractiveCliSession.js";
 import { ClaudeInteractiveSession } from "../../classes/claude/ClaudeInteractiveSession.js";
+import { ClaudeStreamTelemetry } from "../../classes/claude/ClaudeStreamTelemetry.js";
 import { stripTerminalControls } from "../shared/interactive-cli-session.js";
 import {
   extractClaudeSessionHandleFromStreamMessage,
@@ -925,7 +926,13 @@ export async function callProvider(promptText, {
     // Prompt is piped via stdin to avoid Windows 32K command-line length limit.
     // "-p" puts Claude Code in print mode reading from stdin.
     // "--output-format stream-json" gives us streaming JSONL with token usage stats.
-    const fullArgs = [...resolvedClaude.args, ...args, "-p", "--verbose", "--output-format", "stream-json"];
+    const fullArgs = [...resolvedClaude.args, ...args, "-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages"];
+    // Opus 5 omits readable thinking by default; request its supported summary
+    // display without changing effort or adding thinking to the answer body.
+    if (/^claude-opus-5(?:$|-)/.test(modelToUse)
+      && !fullArgs.some((arg) => String(arg).startsWith("--thinking-display"))) {
+      fullArgs.push("--thinking-display", "summarized");
+    }
 
     let proc;
     try {
@@ -1016,6 +1023,16 @@ export async function callProvider(promptText, {
     let _lastChainReadPath = null; // remember so chain_verdict live log shows the file
     let resultData = null;     // final result message with usage stats
     let latestSessionHandle = null;
+    const streamTelemetry = new ClaudeStreamTelemetry();
+
+    function observeStreamTelemetry(message) {
+      for (const summary of streamTelemetry.observe(message)) {
+        for (const line of summary.split(/\r?\n/).filter(Boolean)) {
+          if (directOutput) process.stdout.write(`${color}|${C.reset} [thinking] ${line}\n`);
+          else onLine?.(`[thinking] ${line}`);
+        }
+      }
+    }
 
     function shouldShowPreResultToolTarget(displayName, target) {
       if (displayName === "list_files") return false;
@@ -1297,6 +1314,7 @@ export async function callProvider(promptText, {
           if (!raw.trim()) continue;
           try {
             const msg = JSON.parse(raw);
+            observeStreamTelemetry(msg);
             latestSessionHandle = extractClaudeSessionHandleFromStreamMessage(msg) || latestSessionHandle;
 
           // Text content deltas — stream to display.
@@ -1419,6 +1437,7 @@ export async function callProvider(promptText, {
       if (jsonLineBuf.trim()) {
         try {
           const msg = JSON.parse(jsonLineBuf);
+          observeStreamTelemetry(msg);
           latestSessionHandle = extractClaudeSessionHandleFromStreamMessage(msg) || latestSessionHandle;
           if (msg.type === "content_block_delta" && msg.delta?.text) {
             fullOutput += msg.delta.text;
@@ -1489,7 +1508,15 @@ export async function callProvider(promptText, {
       }
 
       // Extract token usage from stream-json result, fallback to stderr parsing
-      const usage = _extractStreamUsage(resultData);
+      const captured = streamTelemetry.snapshot();
+      const usage = resultData != null ? _extractStreamUsage(resultData) : captured.usage;
+      // Some CLI result versions omit thinking details even though every
+      // completed message reported them. Supplement only matching totals.
+      if (resultData != null && captured.finalized && !usage.output_tokens_details
+        && ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+          .every(field => usage[field] === captured.usage[field])) {
+        usage.output_tokens_details = captured.usage.output_tokens_details;
+      }
       const stderrTokens = parseTokenUsage(stderr);
       const normalizedUsage = normalizeProviderUsage("claude", usage, { stderrTokens });
       const apiEquivalentCostUsd = _estimateClaudeApiEquivalentCostUsd({
@@ -1513,14 +1540,15 @@ export async function callProvider(promptText, {
         cacheReadInputTokens: normalizedUsage.cacheReadInputTokens,
         cachedInputTokens: normalizedUsage.cachedInputTokens,
         reasoningOutputTokens: normalizedUsage.reasoningOutputTokens,
-        // The CLI's final "result" message is its completed accounting. When it
-        // arrived before a terminal stop killed the process, usage is complete
-        // and trustworthy; stderr-parsed fallback tokens are not.
-        usageFinalized: resultData != null,
-        usageCapturePrecision: resultData != null ? "aggregate_only" : "unknown",
+        usageFinalized: resultData != null || captured.finalized,
+        usageCapturePrecision: resultData != null ? "aggregate_only" : captured.finalized ? "exact" : "unknown",
+        thinkingTelemetry: captured.thinking,
+        longContextInputTokens: captured.finalized ? Math.max(...captured.segments.map(segment => (
+          segment.usage.input_tokens + segment.usage.cache_read_input_tokens + segment.usage.cache_creation_input_tokens
+        ))) : null,
         costUsd: apiEquivalentCostUsd ?? resultData?.cost_usd ?? null,
         totalCostUsd: resultData?.total_cost_usd ?? null,
-        numTurns: resultData?.num_turns || null,
+        numTurns: resultData?.num_turns || captured.numTurns,
         durationMs,
         exitCode: code,
         maxTurns: turns,
@@ -1554,7 +1582,22 @@ export async function callProvider(promptText, {
           totalCostUsd: stats.totalCostUsd ?? stats.costUsd,
         });
       }
-      if (resultData != null) {
+      if (resultData == null && captured.finalized) {
+        for (const [index, segment] of captured.segments.entries()) {
+          const normalized = normalizeProviderUsage("claude", segment.usage);
+          try {
+            onUsageSegment?.({
+              requestOrdinal: index + 1,
+              provider: "claude",
+              modelName: segment.model || modelToUse,
+              ...normalized,
+              requestContextInputTokens: normalized.inputTokens,
+              usageSource: "stream",
+              precision: "exact",
+            });
+          } catch { /* accounting persistence cannot break provider execution */ }
+        }
+      } else if (resultData != null) {
         try {
           onUsageSegment?.({
             requestOrdinal: 1,

@@ -1002,8 +1002,12 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWind
       seenIndexed.add(requested.toLowerCase());
       indexed.push(requested);
     }
+    // A unique bare name has the same indexed declaration custody as an
+    // owner-qualified name. Without the target, native occurrence selection
+    // can seat on an earlier call and return its caller instead of the body.
+    // Preserve occurrence selection when a bare name has multiple bearers.
     if (preserveWindowTargets && resolution.matchKind === "qualified"
-      && normalizedQualifiedIdentifier(requested).includes(".")) {
+      && (normalizedQualifiedIdentifier(requested).includes(".") || matches.length === 1)) {
       addNative(requested, requested);
       identifierTargets.push(...matches.map((target) => ({ identifier: requested, target })));
       continue;

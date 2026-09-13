@@ -1311,7 +1311,11 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         description:
           "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
       },
-      claims: { ...RESEARCHER_PIPELINE_HANDOFF_CLAIMS, default: [] },
+      claims: {
+        ...RESEARCHER_PIPELINE_HANDOFF_CLAIMS,
+        description:
+          "For researcher.report.v1, this array is required and must contain at least one finding; put each self-contained finding here with its visible evidence selectors. Summary prose and [EN] labels refer to these claims. Posse expands the selectors and assembles the report. For researcher.pipeline.v1, claims are optional advisory planner input and evidence may be omitted.",
+      },
       key_files: {
         type: "array",
         maxItems: 12,

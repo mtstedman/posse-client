@@ -7270,7 +7270,7 @@ export class PersistentMcpOwner {
           selector_alias_recorded: resolvedCoverageSuppression.selectorAliased === true,
         } : null,
       });
-      if (coverageOwner) {
+      if (coverageOwner && windowSelections.length > 0) {
         recordSourceSelectionObservations({
           session,
           toolArgs,

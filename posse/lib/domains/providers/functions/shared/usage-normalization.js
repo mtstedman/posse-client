@@ -1,4 +1,5 @@
 function usageNumber(value) {
+  if (value == null || value === "" || typeof value === "boolean") return null;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
@@ -33,7 +34,7 @@ export function normalizeProviderUsage(providerName, usage = {}, { stderrTokens 
       cacheCreationInputTokens: cacheCreationInput || null,
       cacheReadInputTokens: cacheReadInput || null,
       cachedInputTokens: cacheReadInput || null,
-      reasoningOutputTokens: firstUsageNumber(outputDetails.reasoning_tokens, usage?.reasoning_tokens),
+      reasoningOutputTokens: firstUsageNumber(outputDetails.thinking_tokens, outputDetails.reasoning_tokens, usage?.reasoning_tokens),
     };
   }
 

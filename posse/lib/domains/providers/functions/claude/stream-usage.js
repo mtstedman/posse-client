@@ -37,8 +37,9 @@ export function parseTokenUsage(stderr) {
 }
 
 export function _usageNumberOrNull(value) {
+  if (value == null || value === "" || typeof value === "boolean") return null;
   const num = Number(value);
-  return Number.isFinite(num) ? num : null;
+  return Number.isFinite(num) && num >= 0 ? num : null;
 }
 
 export function _extractStreamUsage(resultData) {
