@@ -52,6 +52,7 @@ export const SETTING_KEYS = Object.freeze({
   ASSESSOR_MAX_TOOL_CALLS: "assessor_max_tool_calls",
   ASSESSOR_PARSE_RETRY_INPUT_TOKENS_CAP: "assessor_parse_retry_input_tokens_cap",
   AGENT_COORDINATION_MODE: "agent_coordination_mode",
+  INTAKE_ROUTING_MODE: "intake_routing_mode",
   PLANNER_DISPATCH_MODE: "planner_dispatch_mode",
   PLANNER_RESEARCH_EFFORT_CEILING: "planner_research_effort_ceiling",
   PLANNER_RESEARCH_MAX_CHILDREN: "planner_research_max_children",
@@ -213,6 +214,7 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
 export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive"]);
 export const ASSESSMENT_SCOPE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
+export const INTAKE_ROUTING_MODE_VALUES = Object.freeze(["auto", "research_first"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
 export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
 export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);

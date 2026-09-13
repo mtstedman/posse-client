@@ -313,6 +313,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   context_compaction_session_reset_input_tokens: "Session reset threshold",
   context_compaction_recent_target_tokens: "Recent context target",
   research_fanout: "Parallel research",
+  intake_routing_mode: "Initial research routing",
   research_evidence_reuse: "Research evidence reuse",
   research_traversal_completion_check: "Traversal completion check",
   research_traversal_completion_max_chars: "Traversal check text limit",
@@ -889,6 +890,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     pane: "debug",
     label: "Context & Research Experiments",
     keys: Object.freeze([
+      "intake_routing_mode",
       "context_compaction_mode",
       "context_compaction_trigger_input_tokens",
       "context_compaction_session_reset_input_tokens",

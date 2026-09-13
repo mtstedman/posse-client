@@ -1,6 +1,7 @@
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
 import { hasExplicitOneshotIntent } from "../../intake/functions/hints.js";
+
 import {
   evaluateScopedContractDirectEligibility,
   ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE,
@@ -11,6 +12,20 @@ import {
   ONESHOT_RENAME_SIGNAL_RE as RENAME_RE,
   evaluateOneshotRequestEligibility,
 } from "./oneshot-policy.js";
+
+// A repo's research-first policy only replaces routes that would skip or
+// delegate the initial research decision. Existing researcher routes and
+// explicit one-shot/web-only requests retain their specialized behavior.
+export function applyIntakeRoutingMode(routing, mode = "auto") {
+  if (mode !== "research_first" || !["preplan", "ambiguous", "no_research", "oneshot_candidate"].includes(routing?.bucket)) {
+    return routing;
+  }
+  return {
+    ...routing,
+    bucket: "solo",
+    reason: `Research-first intake (original route: ${routing.bucket}; ${routing.reason || "no reason"})`,
+  };
+}
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
 const ONESHOT_SIMPLE_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|copy\s*edit|docs?\s+fix|whitespace)\b/i;

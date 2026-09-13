@@ -23,7 +23,9 @@ import { ensureProjectMap, getCachedProjectMap } from "../../project/functions/m
 import { gitExec } from "../../git/functions/utils.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
-import { buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
+import { applyIntakeRoutingMode, buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
+import { getSetting } from "../../settings/functions/repository-settings.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { buildOneshotScopeSelector } from "./oneshot-scope-selection.js";
 import {
   evaluateScopedContractDirectEligibility,
@@ -727,13 +729,14 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
   if (!routing) {
     throw new Error("createInitialResearchOrPlanJob requires a precomputed routing decision");
   }
-  const effectiveRouting = routing;
+  const intakeMode = getSetting(SETTING_KEYS.INTAKE_ROUTING_MODE, { projectDir }) || "auto";
+  const effectiveRouting = applyIntakeRoutingMode(routing, intakeMode);
   const metadata = parseWorkItemMetadata(workItem);
   const actualBudget = resolveResearchBudgetForRouting(deepthinkBudget, effectiveRouting.budget, {
     baseExplicit: !!deepthinkBudgetExplicit || metadata.research_budget_explicit === true,
   });
   const dispatchPolicy = readPlannerDispatchPolicy({ projectDir });
-  if (dispatchPolicy.enabled && !["oneshot", "oneshot_candidate", "web_only_answer"].includes(effectiveRouting.bucket)) {
+  if (intakeMode !== "research_first" && dispatchPolicy.enabled && !["oneshot", "oneshot_candidate", "web_only_answer"].includes(effectiveRouting.bucket)) {
     const job = createPlanAfterSkippedResearch(workItem, {
       routing: { ...effectiveRouting, reason: "Planner decides whether research is needed" },
       budget: actualBudget, source, redTeamPlan, plannerDispatch: true,

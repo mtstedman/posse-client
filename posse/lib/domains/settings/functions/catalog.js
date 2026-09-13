@@ -36,6 +36,7 @@ import {
   SHARED_TRUNK_DEFAULTS,
   SHARED_TRUNK_LIMITS,
   AGENT_COORDINATION_MODE_VALUES,
+  INTAKE_ROUTING_MODE_VALUES,
   ASSESSMENT_SCOPE_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
@@ -80,6 +81,7 @@ import {
 
 export {
   AGENT_COORDINATION_MODE_VALUES,
+  INTAKE_ROUTING_MODE_VALUES,
   ASSESSMENT_SCOPE_MODE_VALUES,
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
@@ -313,6 +315,7 @@ export const SETTINGS_CATALOG = [
   { key: "snapshot_max_refs", default: "500", numeric: { integer: true, min: 0 }, description: "Maximum recovered snapshot refs to retain" },
   { key: "snapshot_dedup", default: "true", valueType: "boolean", description: "Reuse duplicate recovered dirty-worktree snapshots" },
   { key: "web_tools_enabled",    default: "true", valueType: "boolean", description: "Allow web research tools (Claude WebSearch/WebFetch, Codex web_search) for researcher, assessor, artificer, and native-team roles" },
+  { key: SETTING_KEYS.INTAKE_ROUTING_MODE, default: "auto", scope: "repo", options: INTAKE_ROUTING_MODE_VALUES, description: "Initial work-item routing: auto uses normal routing; research_first sends preflight and direct-plan candidates to a researcher before planning" },
   { key: "research_fanout",      default: "off", options: RESEARCH_FANOUT_MODE_VALUES, description: "Research fanout mode for preflight fanout-clear decisions (off, shadow, on)" },
   { key: SETTING_KEYS.RESEARCH_CLAIM_REVIEW, default: "off", scope: "repo", options: RESEARCH_CLAIM_REVIEW.modes, description: "Bounded source-backed review of committed research claims; shadow records findings and usage without changing the report" },
   { key: SETTING_KEYS.RESEARCH_EVIDENCE_REUSE, default: "shadow", scope: "repo", options: RESEARCH_EVIDENCE_REUSE_MODE_VALUES, description: "Research evidence reuse accounting: off records nothing; shadow measures strict source and Atlas duplicate candidates without changing retrieval routing" },

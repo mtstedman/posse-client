@@ -113,6 +113,14 @@ plain sleep and native collaboration. Posse-issued sub-agent tools retain their
 concurrent dispatch, `wait_all`, and status waits. Explicit native-tool sessions
 retain their host coordination and sleep capabilities.
 
+### Initial research routing
+
+For repository work that should always start with a researcher, set
+`intake_routing_mode=research_first` with `posse admin set intake_routing_mode research_first`.
+This bypasses preflight and direct-plan intake decisions for new work items;
+validated one-shot and web-only requests keep their specialized routes. The
+default is `auto`. This setting does not reroute jobs already queued.
+
 ### Experimental planner dispatch
 
 Set repository settings `planner_dispatch_mode=planner` and
