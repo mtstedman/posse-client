@@ -13,6 +13,7 @@ import { ensureBootDependencyGuard } from "../functions/boot-dependency-guard.js
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
 import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
+import { verifyFrozenResearchFixture, assertFrozenResearchJob } from "../../runtime/functions/frozen-research-fixture.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
@@ -401,6 +402,11 @@ export class RunSession {
   const jobs = isScopedRun
     ? operationalCandidateJobs.filter((job) => scopedWorkItemIdSet.has(Number(job.work_item_id)))
     : operationalCandidateJobs;
+  const frozenResearchFixture = verifyFrozenResearchFixture({ cwd: PROJECT_DIR });
+  if (frozenResearchFixture) {
+    if (!isScopedRun) throw new Error("Frozen fixture research requires an explicit work-item scope");
+    jobs.forEach(assertFrozenResearchJob);
+  }
   const needsGit = jobsNeedGitWorktree(jobs);
   const parkedStatusSet = new Set(PARKED_JOB_STATUSES);
   const parkedJobs = jobs.filter((job) => parkedStatusSet.has(job.status));
@@ -822,6 +828,11 @@ export class RunSession {
   // Required gate: inspect, run the doctor repair engine when unhealthy, then
   // verify. Await after Git cleanup and before scheduler/ATLAS startup.
   const guardBootDependencies = async () => {
+    if (frozenResearchFixture) {
+      verifyFrozenResearchFixture({ cwd: PROJECT_DIR });
+      updateBootStep("dependencies", { section: "workspace", status: "ok", detail: "frozen research source; project installs disabled", force: true });
+      return;
+    }
     updateBootStep("dependencies", { section: "workspace", status: "running", detail: "checking packages", force: true });
     try {
       const dependencyConfig = typeof getAtlasIntegrationConfig === "function" ? getAtlasIntegrationConfig() : null;
@@ -2763,7 +2774,13 @@ export class RunSession {
     surfaceActionableHumanGates: (activeJobs) => displayActions.surfaceActionableHumanGates(activeJobs),
   });
   await scheduler.runLoop(
-    (job) => worker.execute(job),
+    (job) => {
+      if (frozenResearchFixture) {
+        assertFrozenResearchJob(job);
+        verifyFrozenResearchFixture({ cwd: PROJECT_DIR });
+      }
+      return worker.execute(job);
+    },
     schedulerCallbacks.callbacks(),
   );
   // Scheduler.runLoop owns its successful-return stop path. Drop the outer

@@ -24,8 +24,13 @@ export function normalizeBossyStreamRepoPath(projectDir = process.cwd(), platfor
 
 export function getBossyLocalStreamPath(projectDir = process.cwd(), platform = process.platform) {
   const normalized = normalizeBossyStreamRepoPath(projectDir, platform);
-  if (platform !== "win32") return path.join(normalized, ".posse", "run", "bossy.sock");
   const hash = crypto.createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16);
+  if (platform !== "win32") {
+    const repoSocket = path.join(normalized, ".posse", "run", "bossy.sock");
+    const maxBytes = platform === "linux" ? 107 : 103;
+    if (Buffer.byteLength(repoSocket) <= maxBytes) return repoSocket;
+    return path.join("/tmp", `posse-bossy-${process.getuid()}`, `${hash}.sock`);
+  }
   return `\\\\.\\pipe\\posse-bossy-${hash}`;
 }
 
@@ -52,6 +57,7 @@ export class BossyLocalStream {
     this.changeStream = changeStream;
     this.pollMs = pollMs;
     this.server = null;
+    this.socketPathPrepared = false;
     this.clients = new Set();
     this.onFrame = (frame) => this.broadcast(frame);
   }
@@ -98,8 +104,16 @@ export class BossyLocalStream {
 
   prepareSocketPath() {
     if (process.platform === "win32") return;
-    fs.mkdirSync(path.dirname(this.socketPath), { recursive: true, mode: 0o700 });
+    const socketDir = path.dirname(this.socketPath);
+    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+    if (socketDir === path.join("/tmp", `posse-bossy-${process.getuid()}`)) {
+      const stat = fs.lstatSync(socketDir);
+      if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) {
+        throw new Error(`Bossy socket directory is not private to the current user: ${socketDir}`);
+      }
+    }
     try { fs.rmSync(this.socketPath, { force: true }); } catch { /* listen reports residual failures */ }
+    this.socketPathPrepared = true;
   }
 
   accept(socket) {
@@ -178,8 +192,9 @@ export class BossyLocalStream {
     }
     try { this.changeStream?.close?.(); } catch { /* best effort */ }
     this.changeStream = null;
-    if (process.platform !== "win32") {
+    if (process.platform !== "win32" && this.socketPathPrepared) {
       try { fs.rmSync(this.socketPath, { force: true }); } catch { /* best effort */ }
+      this.socketPathPrepared = false;
     }
   }
 }

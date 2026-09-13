@@ -14,6 +14,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+import { appendResearchWorkBudget, isResearchWorkBudgetBlock } from "../../../domains/research/functions/work-budget.js";
+import { compactResearchSearchResult } from "../functions/research-search-presentation.js";
+
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
 import { SUB_AGENT_EVIDENCE_OUTCOMES, isSubAgentEvidenceSafeNativeTool, isSubAgentEvidenceSafeAtlasTool } from "../../../catalog/sub-agent.js";
 import {
@@ -2465,6 +2468,7 @@ function ownerControlNoticePublicMetadata(notice = {}) {
 }
 
 function preserveOwnerModelControlNotices(source, target) {
+  if (source === target) return target;
   const controlNotices = source?.[OWNER_MODEL_CONTROL_NOTICES];
   if (Array.isArray(controlNotices) && controlNotices.length > 0) {
     Object.defineProperty(target, OWNER_MODEL_CONTROL_NOTICES, {
@@ -3098,6 +3102,7 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 }
 
 function appendOwnerResearchSynthesisNotice(result, session, toolName, admission, toolArgs = {}) {
+  if (!admission?.physicalBatchId) result = preserveOwnerModelControlNotices(result, appendResearchWorkBudget(result, admission));
   if (result?.isError === true || !admission?.tracked) return result;
   const guidanceEnabled = resolveAtlasResearchRuntimeGuidance();
   let next = guidanceEnabled
@@ -3262,7 +3267,7 @@ function ownerResearchPhysicalBudgetRejection({
     absoluteCeilingReached: true,
     finalTraversalAvailable: false,
   });
-  const result = guidanceEnabled
+  let result = guidanceEnabled
     ? tagOwnerModelControlNotice({
         content: [{ type: "text", text: gateText }],
         isError: false,
@@ -3276,6 +3281,7 @@ function ownerResearchPhysicalBudgetRejection({
         executed: false,
         reason: "physical_call_ceiling",
       }));
+  result = preserveOwnerModelControlNotices(result, appendResearchWorkBudget(result, admission));
   recordOwnerToolObservation({
     session,
     toolName,
@@ -3480,7 +3486,8 @@ const OWNER_SOURCE_BEARING_ACTIONS = new Set([
 
 function ownerResultTextWithoutControls(result = null) {
   let text = Array.isArray(result?.content)
-    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("\n")
+    ? result.content.filter((entry) => !isResearchWorkBudgetBlock(entry, result))
+      .map((entry) => typeof entry?.text === "string" ? entry.text : "").join("\n")
     : "";
   for (const notice of result?.[OWNER_MODEL_CONTROL_NOTICES] || []) {
     const noticeText = String(notice?.text || "");
@@ -3883,6 +3890,8 @@ function recordOwnerToolObservation({
           ...(observationDetail && typeof observationDetail === "object" ? observationDetail : {}),
           atlas_artifacts: result?._meta?.atlasArtifacts || null,
           atlas_batch: result?._meta?.atlasBatch || null,
+          ...(result?._meta?.researchWorkBudget ? { research_work_budget: result._meta.researchWorkBudget } : {}),
+          ...(result?._meta?.researchSearchDiagnostics ? { search_diagnostics: result._meta.researchSearchDiagnostics } : {}),
           ...(evidenceIdentities == null ? {} : {
             evidence_identity_version: OWNER_EVIDENCE_IDENTITY_VERSION,
             evidence_identities: evidenceIdentities,
@@ -5955,6 +5964,14 @@ export class PersistentMcpOwner {
         throw error;
       }
       this._refundResearchInfrastructureFailure(session, gatewayAdmission, response?.result);
+      if (gatewayAdmission.tracked && response?.result) {
+        response = { ...response, result: preserveOwnerModelControlNotices(response.result,
+          appendResearchWorkBudget(response.result, {
+            ...gatewayAdmission,
+            maxPhysicalCalls: researchSynthesisPolicyFor(session).maxPhysicalCalls,
+            reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(session.bootConfig)),
+          })) };
+      }
       if (message.method === "tools/call") {
         const requested = requestedToolPolicyName(
           String(message?.params?.name || ""),
@@ -6460,7 +6477,12 @@ export class PersistentMcpOwner {
           physicalBatchId,
           message: { ...args.message, id: `${args.message?.id ?? "symbols"}:${index}` },
         }).catch(() => ({result: mcpToolErrorPayload("symbol.get batch item execution failed")}))));
-      return mcpToolResultMessage(args.message, combineSymbolGetBatchResults(responses.map(response => response.result)));
+      return mcpToolResultMessage(args.message, appendResearchWorkBudget(
+        combineSymbolGetBatchResults(responses.map(response => response.result)),
+        { tracked: String(boot.role || "") === "researcher", assignedPhysicalCallStep: physicalStep,
+          maxPhysicalCalls: researchSynthesisPolicyFor(args.session).maxPhysicalCalls,
+          reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(boot)) },
+      ));
     }
     const enqueuedAt = Date.now();
     const researchExploration = String(boot.role || "") === "researcher"
@@ -6524,6 +6546,9 @@ export class PersistentMcpOwner {
               assignedPhysicalCallStep,
             })
           : null);
+    if (synthesisAdmission) Object.assign(synthesisAdmission, {
+      reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(boot)),
+    });
     if (synthesisAdmission && args.physicalBatchId) Object.assign(synthesisAdmission, {physicalBatchId: args.physicalBatchId});
     if (researchBatch && isTerminalResearchExplorationAdmission(synthesisAdmission)) {
       researchBatch.terminal = true;
@@ -6667,7 +6692,7 @@ export class PersistentMcpOwner {
           absoluteCeilingReached: ["exploration_ceiling", "physical_call_ceiling"].includes(synthesisAdmission.blockReason),
           finalTraversalAvailable: synthesisAdmission.blockReason !== "physical_call_ceiling",
         });
-      const result = guidanceEnabled
+      let result = guidanceEnabled
         ? tagOwnerModelControlNotice({
             content: [{
               type: "text",
@@ -6689,6 +6714,7 @@ export class PersistentMcpOwner {
             executed: false,
             reason: synthesisAdmission.blockReason || "research_closeout",
           }));
+      if (!synthesisAdmission.physicalBatchId) result = preserveOwnerModelControlNotices(result, appendResearchWorkBudget(result, synthesisAdmission));
       for (const notice of result?.[OWNER_MODEL_CONTROL_NOTICES] || []) {
         recordOwnerModelControlNotice(session, toolName, notice);
       }
@@ -7145,6 +7171,9 @@ export class PersistentMcpOwner {
         args: toolArgs,
         ...atlasGateResultState(result),
       });
+      if (String(session?.bootConfig?.role || "") === "researcher" && requested.name === "symbol.search") {
+        result = composed("search_presentation", compactResearchSearchResult(result));
+      }
       result = composed("symbol_handles", appendResearcherSymbolHandles(result, session));
       result = composed("hash_ref_surface", appendHashRefToMcpTextResult(result, toolName, toolArgs, session));
       noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);

@@ -6,6 +6,7 @@
 // in-process v2 ledger/view backend.
 
 import fs from "fs";
+import { frozenResearchFixtureEnabled, verifyFrozenResearchFixture } from "../../runtime/functions/frozen-research-fixture.js";
 import path from "path";
 import { fileURLToPath } from "node:url";
 import { Worker as NodeWorker } from "node:worker_threads";
@@ -434,7 +435,7 @@ function uniqueSourceLanguages(values = []) {
 }
 
 function isAtlasIndexMaintenanceEnabled(config = {}) {
-  return !!(config?.enabled && Array.isArray(config.phases) && config.phases.length > 0);
+  return !frozenResearchFixtureEnabled() && !!(config?.enabled && Array.isArray(config.phases) && config.phases.length > 0);
 }
 
 function repoStorageFor({ cwd = null, config = getAtlasIntegrationConfig() } = {}) {
@@ -2125,6 +2126,11 @@ function seedAtlasBootReadiness({ ok, result = null, config = null }) {
 
 export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
+  const frozen = verifyFrozenResearchFixture({ cwd: opts?.cwd });
+  if (frozen) {
+    seedAtlasBootReadiness({ ok: true, result: null, config });
+    return { attempted: false, ok: true, status: 0, skipped: "frozen_research_fixture", backend: "atlas-v2", generation: frozen.generation };
+  }
   if (!shouldUseAtlasV2({ config }) || !config?.enabled || !isAtlasIndexMaintenanceEnabled(config)) {
     // No warm will ever run this session — both bars honestly read "off".
     warmReadinessSeed({ atlas: null, onnx: null, atlasEnabled: false, onnxEnabled: false });

@@ -104,7 +104,6 @@ const CREATE_REF_MAX_NOTE_CHARS = 300;
 const CREATE_REF_MAX_BATCH = 24;
 const CREATE_REF_OWNER_SCOPES = new Set(["work_item", "job"]);
 const RESEARCH_FETCH_REF_MAX_REFS = 24;
-const RESEARCH_FETCH_REF_BATCH_PER_REF_CHARS = 8000;
 const RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS = 32000;
 const RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS = 40000;
 const RESEARCH_FETCH_REF_ENVELOPE_BASE_RESERVE = 4096;
@@ -2644,14 +2643,14 @@ function researchFetchDeliveryBudget(refCount) {
       - (count * RESEARCH_FETCH_REF_ENVELOPE_PER_REF_RESERVE),
   );
   const totalTextChars = Math.min(RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS, envelopeAwareTextCap);
-  const perRefCap = count === 1
-    ? totalTextChars
-    : RESEARCH_FETCH_REF_BATCH_PER_REF_CHARS;
+  // Small batches share the existing aggregate budget; an independent second
+  // ref must not halve usable source capacity through a fixed per-ref cap.
+  const perRefCap = Math.max(1, Math.floor(totalTextChars / count));
   return {
     max_refs: RESEARCH_FETCH_REF_MAX_REFS,
     max_per_ref_chars: perRefCap,
     max_single_ref_chars: RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS,
-    max_batch_per_ref_chars: RESEARCH_FETCH_REF_BATCH_PER_REF_CHARS,
+    max_batch_per_ref_chars: perRefCap,
     max_total_text_chars: RESEARCH_FETCH_REF_TOTAL_TEXT_CHARS,
     max_serialized_chars: RESEARCH_FETCH_REF_MAX_SERIALIZED_CHARS,
     allocated_total_text_chars: totalTextChars,

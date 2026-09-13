@@ -107,6 +107,18 @@ if (process.argv.includes("--bossy")) {
   process.exit(await launchBossy());
 }
 
+// Read-only repository Atlas access for Bossy, before queue/runtime startup.
+if (process.argv[2] === "atlas-read") {
+  try {
+    const { runBossyAtlasReadCli } = await import("./lib/domains/atlas/functions/bossy-read.js");
+    await runBossyAtlasReadCli();
+    process.exit(0);
+  } catch (error) {
+    process.stderr.write(`atlas_read_error: ${error?.message || error}\n`);
+    process.exit(1);
+  }
+}
+
 // The machine automation owner has its own private database and lifecycle. It
 // must be callable without opening a repository queue so Bossy and service
 // managers can use the same operator protocol from any working directory.
