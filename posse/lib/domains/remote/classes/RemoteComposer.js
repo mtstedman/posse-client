@@ -440,6 +440,7 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
       sub_agent_v1: subAgentEnabled,
       sub_agent_next_input_v1: subAgentNextInputEnabled,
       dispatch_agent_v1: dispatchAgentEnabled,
+      research_investigation_v1: packet?.agent_coordination?.research_investigation_v1 === true && issued.coordination?.researchInvestigationV1 === true,
       web_research_handoff_v1: webResearchHandoffEnabled,
       status: "experimental",
     },

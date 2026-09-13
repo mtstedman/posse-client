@@ -5,6 +5,7 @@
 
 export const AGENT_CALL_CHILD_KINDS = Object.freeze({
   CITATION: "citation",
+  RESEARCH: "research",
   WEB_RESEARCH: "web_research",
   RESEARCH_CLAIM_REVIEW: "research_claim_review",
 });

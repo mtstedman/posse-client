@@ -115,7 +115,7 @@ Finish the current agent turn with a terminal handoff. Dev/fix and artificer use
 | `handoffs` | `any | array<object>` | Conditional | min items 1; max items 50 |  |
 | `no_change_rationale` | `string` | Optional | min length 1; max length 1000 |  |
 | `outcome` | `string` | Conditional | values "success", "complete", "partial", "gap", "input_required", "failed", "blocked", "pass", "fail", "needs_replan", "needs_review" | Profile-specific outcome: researcher.pipeline.v1=success\|gap\|input_required; researcher.report.v1=complete; planner.plan.v1=success; dev.result.v1 and artificer.result.v1=complete\|failed\|blocked; assessor.verdict.v1=pass\|fail\|needs_replan\|needs_review\|blocked; citation_synthesis.v1=complete\|partial\|failed. |
-| `profile` | `string` | Conditional | values "researcher.pipeline.v1", "researcher.report.v1", "planner.plan.v1", "dev.result.v1", "artificer.result.v1", "assessor.verdict.v1", "citation_synthesis.v1" |  |
+| `profile` | `string` | Conditional | values "researcher.pipeline.v1", "researcher.report.v1", "planner.plan.v1", "dev.result.v1", "artificer.result.v1", "assessor.verdict.v1", "citation_synthesis.v1", "research_investigation.v1" |  |
 | `protocol` | `string` | Conditional | values "posse.agent_handoff.v1" |  |
 | `remaining_work` | `array<string>` | Optional | min items 1; max items 20 |  |
 | `status` | `string` | Optional | default "COMPLETE"; values "COMPLETE", "VERIFIED_NO_CHANGE", "PARTIAL", "BLOCKED" |  |
@@ -424,12 +424,13 @@ Remote roles: `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Dispatch one isolated specialty agent and wait for its bounded result. The web route receives only the question, performs web search/fetch in its own context, and returns parent-visible evidence selectors without exposing its browsing transcript.
+Dispatch an isolated researcher and wait for its evidence-backed result. Select code for repository investigation or web for online research. Supply a self-contained question including scope and facts needed. The administrator bounds child count, effort, turns, and duration.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `question` | `string` | Required | min length 1; max length 2000 | Self-contained web research question for the isolated agent. |
-| `route` | `string` | Required | values "web" | Specialty agent route. Only web is currently supported. |
+| `agent_type` | `string` | Required | values "code", "web" |  |
+| `budget` | `object` | Optional |  |  |
+| `question` | `string` | Required | min length 1; max length 2000 |  |
 
 ### `tools.edit_file`
 

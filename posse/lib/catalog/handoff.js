@@ -112,6 +112,12 @@ export const AGENT_HANDOFF_PROFILE_POLICY = Object.freeze({
     targetKinds: Object.freeze(["pipeline"]),
     maxHandoffs: 1,
   }),
+  "research_investigation.v1": Object.freeze({
+    roles: Object.freeze(["researcher"]),
+    outcomes: Object.freeze(["complete", "partial", "failed"]),
+    targetKinds: Object.freeze(["parent"]),
+    maxHandoffs: 1,
+  }),
   "citation_synthesis.v1": Object.freeze({
     roles: Object.freeze(["subagent"]),
     outcomes: Object.freeze(["complete", "partial", "failed"]),

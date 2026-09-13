@@ -327,6 +327,7 @@ function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
     if (!includeUnscoped && !hasLiveJob && !hasLiveWorkItem) continue;
     enriched.push({
       job_id: row.job_id,
+      agent_call_id: _rowDetailObject(row)?.agent_call_id ?? _rowDetailObject(row)?.child_agent_call_id ?? _rowDetailObject(row)?.parent_agent_call_id ?? null,
       work_item_id: resolvedWorkItemId,
       observation_type: row.observation_type,
       summary: row.summary,
@@ -628,7 +629,16 @@ export function recordObservation({
   }
 }
 
-export function researchExplorationObservationStatus({ jobId = null, attemptId = null } = {}) {
+export function researchChildBudgetCallId(agentCallId) {
+  const id = Number(agentCallId);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  try {
+    const call = getDb().prepare("SELECT parent_agent_call_id, child_kind FROM agent_calls WHERE id = ?").get(id);
+    return call?.parent_agent_call_id && call.child_kind === "research" ? id : null;
+  } catch { return null; }
+}
+
+export function researchExplorationObservationStatus({ jobId = null, attemptId = null, agentCallId = null } = {}) {
   const normalizedAttemptId = Number(attemptId);
   const normalizedJobId = Number(jobId);
   const useAttempt = Number.isInteger(normalizedAttemptId) && normalizedAttemptId > 0;
@@ -655,12 +665,17 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
   }
   try {
     const db = getDb();
-    const scopeWhere = useAttempt && useJob
+    let scopeWhere = useAttempt && useJob
       ? "job_id = ? AND attempt_id = ?"
       : useAttempt ? "attempt_id = ?" : "job_id = ?";
     const scopeParams = useAttempt && useJob
       ? [normalizedJobId, normalizedAttemptId]
       : [useAttempt ? normalizedAttemptId : normalizedJobId];
+    const childCallId = researchChildBudgetCallId(agentCallId);
+    if (childCallId) {
+      scopeWhere += " AND json_extract(detail_json, '$.agent_call_id') = ?";
+      scopeParams.push(childCallId);
+    }
     const placeholders = RESEARCH_EXPLORATION_OBSERVATION_TYPES.map(() => "?").join(", ");
     const explorationRows = db.prepare(`
       SELECT id, observation_type, detail_json

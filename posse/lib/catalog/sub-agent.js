@@ -3,6 +3,8 @@
 // canonical tool names but do not trust remote-provided access labels, so both
 // native and Atlas evidence safety must be explicit closed sets.
 
+export const RESEARCH_CHILD_PROFILE = "research_investigation.v1";
+export const RESEARCH_CHILD_PROMPT_PROFILE = "researcher_code_child";
 export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
 export const SUB_AGENT_EVIDENCE_OUTCOMES = Object.freeze({
   DELIVERED: "evidence_delivered",

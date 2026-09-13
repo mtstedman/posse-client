@@ -147,7 +147,14 @@ function selectActiveGuidance(db, { job_id, nowIso }) {
   `).all(job_id, nowIso).map(normalizeRow);
 }
 
-function selectPendingOperatorFeedback(db, { job_id, nowIso, limit = 20 }) {
+function feedbackMatchesCall(db, row, agentCallId) {
+  const target = normalizePositiveInt(row.agent_call_id);
+  if (target) return target === normalizePositiveInt(agentCallId);
+  if (!agentCallId) return true;
+  return !db.prepare("SELECT parent_agent_call_id FROM agent_calls WHERE id = ?").get(agentCallId)?.parent_agent_call_id;
+}
+
+function selectPendingOperatorFeedback(db, { job_id, nowIso, limit = 20, agent_call_id = undefined }) {
   const safeLimit = Math.min(100, Math.max(1, Number.parseInt(String(limit), 10) || 20));
   return db.prepare(`
     SELECT *
@@ -162,7 +169,8 @@ function selectPendingOperatorFeedback(db, { job_id, nowIso, limit = 20 }) {
       AND (expires_at IS NULL OR expires_at > ?)
     ORDER BY created_at ASC, id ASC
     LIMIT ?
-  `).all(job_id, nowIso, safeLimit).map(normalizeRow);
+  `).all(job_id, nowIso, agent_call_id === undefined ? safeLimit : 100).map(normalizeRow)
+    .filter((row) => agent_call_id === undefined || feedbackMatchesCall(db, row, agent_call_id)).slice(0, safeLimit);
 }
 
 function feedbackToolPayload(row) {
@@ -287,7 +295,7 @@ export function createAgentInteraction({
 // Retire any other active nudges for a job so the requeue path injects a single
 // authoritative guidance set ("latest correction wins") rather than an
 // ever-growing stack that can never leave the 'active' status.
-function supersedePriorActiveNudges({ jobId, exceptId } = {}) {
+function supersedePriorActiveNudges({ jobId, exceptId, agentCallId = null } = {}) {
   const normalizedJobId = normalizePositiveInt(jobId);
   if (!normalizedJobId) return [];
   const keepId = normalizePositiveInt(exceptId, 0);
@@ -297,10 +305,11 @@ function supersedePriorActiveNudges({ jobId, exceptId } = {}) {
     FROM agent_interactions
     WHERE job_id = ?
       AND id != ?
+      AND agent_call_id IS ?
       AND direction = 'user_to_agent'
       AND kind = 'nudge'
       AND status = 'active'
-  `).all(normalizedJobId, keepId).map(normalizeRow);
+  `).all(normalizedJobId, keepId, normalizePositiveInt(agentCallId)).map(normalizeRow);
   if (priors.length === 0) return [];
 
   const nowIso = now();
@@ -365,7 +374,7 @@ export function createOperatorNudge({
       metadata_json,
       expires_at,
     });
-    supersedePriorActiveNudges({ jobId: created.job_id, exceptId: created.id });
+    supersedePriorActiveNudges({ jobId: created.job_id, exceptId: created.id, agentCallId: created.agent_call_id });
     return created;
   });
   return row;
@@ -551,7 +560,7 @@ export function applyActiveAgentInteractionsForAttempt({
   const nowIso = now();
 
   if (!attemptId) {
-    const candidates = selectPendingOperatorFeedback(db, { job_id: jobId, nowIso, limit });
+    const candidates = selectPendingOperatorFeedback(db, { job_id: jobId, nowIso, limit, agent_call_id: agentCallId });
     if (candidates.length > 0) {
       const update = db.prepare(`
         UPDATE agent_interactions
@@ -574,6 +583,7 @@ export function applyActiveAgentInteractionsForAttempt({
   const applied = runImmediateTransaction(db, () => {
     let candidates = selectPendingOperatorFeedback(db, {
       job_id: jobId,
+      agent_call_id: agentCallId,
       nowIso,
       // Direct delivery must advance past already-delivered, unacknowledged
       // items when more than one result-sized batch is pending.
@@ -660,7 +670,7 @@ function applyOperatorGuidanceToPrompt({
     // Select and acknowledge in the same transaction so feedback arriving
     // during prompt assembly cannot be consumed without appearing in the
     // returned prompt text.
-    const active = selectActiveGuidance(db, { job_id: jobId, nowIso });
+    const active = selectActiveGuidance(db, { job_id: jobId, nowIso }).filter((row) => feedbackMatchesCall(db, row, agentCallId));
     const insert = db.prepare(`
       INSERT OR IGNORE INTO agent_interaction_applications (
         interaction_id, work_item_id, job_id, attempt_id, agent_call_id, applied_at, result
@@ -741,13 +751,16 @@ export function hasPendingOperatorFeedbackForJob(jobId) {
   return !!row;
 }
 
-export function countPendingOperatorFeedbackForJob(jobId) {
+export function countPendingOperatorFeedbackForJob(jobId, agentCallId = undefined) {
   const normalizedJobId = normalizePositiveInt(jobId);
   if (!normalizedJobId) return 0;
   const row = getDb().prepare(`
     SELECT COUNT(*) AS count
     FROM agent_interactions
     WHERE job_id = ?
+      AND (? = 0 OR agent_call_id = ? OR (agent_call_id IS NULL AND NOT EXISTS (
+        SELECT 1 FROM agent_calls WHERE id = ? AND parent_agent_call_id IS NOT NULL
+      )))
       AND direction = 'user_to_agent'
       AND kind IN ('nudge','answer','scope_request','status_request')
       AND status IN ('active','answered')
@@ -755,7 +768,7 @@ export function countPendingOperatorFeedbackForJob(jobId) {
       AND ack_state = 'pending'
       AND ack_decision IS NULL
       AND (expires_at IS NULL OR expires_at > ?)
-  `).get(normalizedJobId, now());
+  `).get(normalizedJobId, agentCallId === undefined ? 0 : 1, agentCallId ?? null, agentCallId ?? null, now());
   return Number(row?.count || 0);
 }
 
@@ -867,6 +880,9 @@ export function acknowledgeOperatorFeedback({
     if (normalizedJobId && current.job_id !== normalizedJobId) {
       throw new Error(`operator feedback #${id} does not belong to job #${normalizedJobId}`);
     }
+    if (!feedbackMatchesCall(db, current, agent_call_id)) {
+      throw new Error(`operator feedback #${id} belongs to a different agent call`);
+    }
     const info = db.prepare(`
       UPDATE agent_interactions
       SET ack_state = 'acknowledged',
@@ -922,10 +938,10 @@ export function acknowledgeOperatorFeedback({
  * so, instead of leaving `ack_state='pending'` rows that render on no surface
  * while the operator believes the nudge landed.
  *
- * @param {{ job_id: number, reason?: string }} args
+ * @param {{ job_id: number, reason?: string, agent_call_id?: number }} args
  * @returns {number} rows expired
  */
-export function expireUnackedOperatorFeedbackForJob({ job_id, reason = "job_finalized" } = {}) {
+export function expireUnackedOperatorFeedbackForJob({ job_id, reason = "job_finalized", agent_call_id = null } = {}) {
   const jobId = normalizePositiveInt(job_id);
   if (!jobId) return 0;
   const db = getDb();
@@ -934,12 +950,12 @@ export function expireUnackedOperatorFeedbackForJob({ job_id, reason = "job_fina
     const rows = db.prepare(`
       SELECT id, work_item_id, job_id, kind
       FROM agent_interactions
-      WHERE job_id = ?
+      WHERE job_id = ? AND (? IS NULL OR agent_call_id = ?)
         AND direction = 'user_to_agent'
         AND kind IN ('nudge','answer','scope_request','status_request')
         AND ack_state = 'pending'
         AND status IN ('active','answered')
-    `).all(jobId).map(normalizeRow);
+    `).all(jobId, agent_call_id, agent_call_id).map(normalizeRow);
     if (rows.length === 0) return rows;
     const update = db.prepare(`
       UPDATE agent_interactions

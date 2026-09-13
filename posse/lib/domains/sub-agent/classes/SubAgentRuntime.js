@@ -1,3 +1,5 @@
+import { RESEARCH_CHILD_PROFILE } from "../../../catalog/sub-agent.js";
+import { PLANNER_RESEARCH_EFFORT_VALUES, RESEARCH_AGENT_TYPES } from "../../../catalog/planner-dispatch.js";
 // @ts-check
 
 import crypto from "node:crypto";
@@ -99,11 +101,35 @@ function safeError(error) {
 
 function sanitizePacket(packet) {
   if (!packet || typeof packet !== "object") return null;
+  const handoffs = packet.profile === RESEARCH_CHILD_PROFILE
+    ? (packet.handoffs || []).map((handoff) => ({
+        ...handoff,
+        report: {
+          ...handoff.report,
+          claims: (handoff.report?.claims || []).map((claim) => {
+            const compactEvidence = (items) => items.map((evidence) => {
+              if (!evidence || typeof evidence !== "object") return evidence;
+              const { selector, ref, path, lines, source_start_line, source_end_line } = evidence;
+              return {
+                ...(selector != null ? { selector } : {}),
+                ...(ref != null ? { ref } : {}),
+                ...(path != null ? { path } : {}),
+                ...(lines != null ? { lines } : {}),
+                ...(source_start_line != null ? { source_start_line } : {}),
+                ...(source_end_line != null ? { source_end_line } : {}),
+              };
+            });
+            if (Array.isArray(claim)) return [claim[0], { ...claim[1], evidence: compactEvidence(claim[1]?.evidence || []) }];
+            return { ...claim, evidence: compactEvidence(claim?.evidence || []) };
+          }),
+        },
+      }))
+    : packet.handoffs;
   return {
     protocol: packet.protocol,
     profile: packet.profile,
     outcome: packet.outcome,
-    handoffs: packet.handoffs,
+    handoffs,
     evidence_chars: packet.evidence_chars,
     narrative_chars: packet.narrative_chars,
   };
@@ -193,13 +219,13 @@ function validateChildEvidenceScope(packet, authorizedEvidence) {
   return cited;
 }
 
-function surfaceChildPacketEvidenceToParent(packet, parentContext) {
+function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext = parentContext) {
   const refs = new Set(packetEvidence(packet).map((evidence) => {
     const selector = parseAgentHandoffEvidenceSelector(evidence?.selector ?? evidence);
     return "ref" in selector ? selector.ref : null;
   }).filter(Boolean));
   for (const ref of refs) {
-    const fetched = fetchHashRefForContext(parentContext, ref);
+    const fetched = fetchHashRefForContext(sourceContext, ref);
     const source = fetched?.found ? fetched.entry : null;
     if (!source || source.entry_kind !== "materialized" || source.payload_text == null) {
       throw runtimeError(
@@ -831,13 +857,15 @@ export class SubAgentRuntime {
     this.activeChildren = 0;
   }
 
-  registerParent({ agentCallId, runChild, executeInput = null, authorizedToolSurface = [] }) {
+  registerParent({ agentCallId, runChild, runResearchChild = null, researchPolicy = null, executeInput = null, authorizedToolSurface = [] }) {
     const id = positiveId(agentCallId);
     if (!id || typeof runChild !== "function") return () => {};
     const previous = this.parents.get(id);
     if (previous) previous.accepting = false;
     const registration = {
       runChild,
+      runResearchChild,
+      researchPolicy,
       executeInput: typeof executeInput === "function" ? executeInput : null,
       authorizedTools: normalizedToolEntries(authorizedToolSurface),
       accepting: true,
@@ -852,9 +880,7 @@ export class SubAgentRuntime {
       registration.accepting = false;
       if (this.parents.get(id) !== registration) return;
       this.parents.delete(id);
-      const batchId = this.batchByParent.get(id);
-      const batch = batchId ? this.batches.get(batchId) : null;
-      if (batch) {
+      for (const batch of [...this.batches.values()].filter((item) => item.parentCallId === id)) {
         batch.parentClosed = true;
         this.#abortBatch(batch, (entry) => runtimeError(
           "SUB_AGENT_PARENT_CLOSED",
@@ -1135,13 +1161,25 @@ export class SubAgentRuntime {
 
   prepareChildHandoff(agentCallId, packet) {
     const binding = this.childBindings.get(positiveId(agentCallId));
-    if (!binding) return false;
+    if (!binding) {
+      if (packet?.profile === RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_RESEARCH_UNBOUND", "Research reports require an active investigating child", { stage: "terminal" });
+      return false;
+    }
     const { entry } = binding;
     if (entry.controller.signal.aborted) {
       throw entry.controller.signal.reason
         || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "terminal" });
     }
     if (entry.sealed) throw runtimeError("SUB_AGENT_CURSOR_SEALED", "Citation child already submitted its terminal handoff", { stage: "terminal" });
+    if (entry.profile === RESEARCH_CHILD_PROFILE) {
+      if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Research child must return a research report", { stage: "terminal" });
+      const claims = packet?.handoffs?.[0]?.report?.claims || [];
+      if (packet.outcome !== "failed" && (claims.length === 0 || claims.some((claim) => !(claim.evidence?.length)))) {
+        throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Each research finding requires visible evidence selectors", { stage: "terminal" });
+      }
+      if (JSON.stringify(packet).length > entry.resultChars) throw runtimeError("SUB_AGENT_RESULT_TOO_LARGE", `Compact research report must fit ${entry.resultChars} characters`, { stage: "terminal" });
+      return true;
+    }
     if (entry.consumedEvidence.length === 0 && packet?.outcome !== "failed") {
       throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child must consume at least one successful cursor input", { stage: "terminal" });
     }
@@ -1185,9 +1223,8 @@ export class SubAgentRuntime {
   }
 
   hasOpenBatch(agentCallId) {
-    const batchId = this.batchByParent.get(positiveId(agentCallId));
-    const batch = batchId ? this.batches.get(batchId) : null;
-    return !!batch && (batch.status === "running" || batch.acknowledged !== true);
+    return [...this.batches.values()].some((batch) => batch.parentCallId === positiveId(agentCallId)
+      && (batch.status === "running" || batch.acknowledged !== true));
   }
 
   completionSignal(agentCallId, toolName = "") {
@@ -1238,8 +1275,15 @@ export class SubAgentRuntime {
       throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "completion.mode must be async or wait_all", { stage: "validation" });
     }
     const digest = requestDigest(input);
+    const researchRequest = input.requests.every((item) => item.profile === RESEARCH_CHILD_PROFILE);
+    const priorBatches = [...this.batches.values()].filter((batch) => batch.parentCallId === parentCallId);
     const existingBatchId = this.batchByParent.get(parentCallId);
-    const existingBatch = existingBatchId ? this.batches.get(existingBatchId) : null;
+    const existingBatch = researchRequest
+      ? priorBatches.find((batch) => batch.requestDigest === digest)
+      : existingBatchId ? this.batches.get(existingBatchId) : null;
+    if (researchRequest && !existingBatch && priorBatches.reduce((sum, batch) => sum + batch.entries.length, 0) + input.requests.length > (registration.researchPolicy?.maxChildren || 0)) {
+      throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Planner research child limit reached", { stage: "admission" });
+    }
     if (existingBatch) {
       if (existingBatch.requestDigest !== digest) {
         throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Only one sub_agent batch is allowed per parent agent call", { stage: "admission" });
@@ -1259,10 +1303,38 @@ export class SubAgentRuntime {
 
     const seenRequests = new Set();
     const normalized = input.requests.map((raw, requestIndex) => {
-      const request = exactObject(raw, ["id", "profile", "intent", "inputs", "budget"], `requests[${requestIndex}]`);
+      const request = exactObject(raw, ["id", "profile", "intent", "inputs", "budget", "agent_type"], `requests[${requestIndex}]`);
       const id = boundedString(request.id, `requests[${requestIndex}].id`, 40);
       if (seenRequests.has(id)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "request ids must be unique", { stage: "validation" });
       seenRequests.add(id);
+      if (request.profile === RESEARCH_CHILD_PROFILE) {
+        if (!registration.researchPolicy?.enabled || typeof registration.runResearchChild !== "function") {
+          throw runtimeError("SUB_AGENT_RESEARCH_DISABLED", "Investigating children require an eligible gated planner", { stage: "admission" });
+        }
+        if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research agent_type", { stage: "validation" });
+        const policy = registration.researchPolicy;
+        if (completion.mode !== "wait_all" || input.requests.length > policy.maxChildren
+          || input.requests.some((item) => item.profile !== RESEARCH_CHILD_PROFILE)) {
+          throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Research requires one bounded wait_all batch of research requests", { stage: "validation" });
+        }
+        exactObject(request, ["id", "profile", "intent", "budget", "agent_type"], `requests[${requestIndex}]`);
+        const budget = request.budget == null ? {} : exactObject(request.budget, ["timeout_ms", "max_turns", "reasoning_effort"], "research budget");
+        const effort = budget.reasoning_effort || "medium";
+        if (!PLANNER_RESEARCH_EFFORT_VALUES.includes(effort)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research effort", { stage: "validation" });
+        for (const field of ["timeout_ms", "max_turns"]) {
+          if (budget[field] != null && (!Number.isSafeInteger(budget[field]) || budget[field] <= 0)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `Invalid ${field}`, { stage: "validation" });
+        }
+        return {
+          id, profile: RESEARCH_CHILD_PROFILE, agentType: request.agent_type,
+
+          intent: boundedString(request.intent, "research intent", SUB_AGENT_LIMITS.maxIntentChars),
+          timeoutMs: Math.max(5000, Math.min(policy.childTimeoutMs, budget.timeout_ms || policy.childTimeoutMs)),
+          maxTurns: Math.min(policy.childMaxTurns, budget.max_turns || policy.childMaxTurns),
+          reasoningEffort: PLANNER_RESEARCH_EFFORT_VALUES[Math.min(PLANNER_RESEARCH_EFFORT_VALUES.indexOf(effort), PLANNER_RESEARCH_EFFORT_VALUES.indexOf(policy.effortCeiling))],
+          resultChars: policy.resultChars,
+          inputs: [], maxInputs: 0, parentContext: { ...context },
+        };
+      }
       if (request.profile !== "citation_synthesis.v1") {
         throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Only citation_synthesis.v1 is supported", { stage: "validation" });
       }
@@ -1303,6 +1375,7 @@ export class SubAgentRuntime {
       }
       return {
         id,
+        profile: "citation_synthesis.v1",
         intent,
         inputs,
         maxInputs: Math.min(requestedMaxInputs, inputs.length),
@@ -1347,7 +1420,7 @@ export class SubAgentRuntime {
     this.batchByParent.set(parentCallId, batch.id);
     this.activeChildren += batch.entries.length;
 
-    const tasks = batch.entries.map((entry) => this.#runEntry(batch, entry, registration.runChild));
+    const tasks = batch.entries.map((entry) => this.#runEntry(batch, entry, entry.profile === RESEARCH_CHILD_PROFILE ? registration.runResearchChild : registration.runChild));
     batch.settledPromise = Promise.allSettled(tasks).then(() => {
       batch.status = batch.entries.every((entry) => entry.status === "timed_out")
         ? "timed_out"
@@ -1387,19 +1460,30 @@ export class SubAgentRuntime {
           dispatchId: entry.handle,
           requestId: entry.id,
           intent: entry.intent,
+          agentType: entry.agentType,
+          parentContext: entry.parentContext,
           manifest: visibleManifest(entry),
           maxInputs: entry.maxInputs,
+          maxTurns: entry.maxTurns,
+          resultChars: entry.resultChars,
+          reasoningEffort: entry.reasoningEffort,
           timeoutMs: entry.timeoutMs,
           signal: entry.controller.signal,
         });
       });
       const result = await Promise.race([childRun, hardSettlement]);
-      const record = getAgentHandoffRecord(result?.agentCallId);
-      if (!record || record.status !== "committed" || record.packet?.profile !== "citation_synthesis.v1") {
-        throw runtimeError("SUB_AGENT_TERMINAL_REPORT_MISSING", `Child ${entry.id} did not commit a citation report`, { stage: "terminal" });
+      const record = result?.webPacket ? { status: "committed", packet: result.webPacket } : getAgentHandoffRecord(result?.agentCallId);
+      if (!record || record.status !== "committed" || record.packet?.profile !== entry.profile) {
+        throw runtimeError("SUB_AGENT_TERMINAL_REPORT_MISSING", `Child ${entry.id} did not commit its terminal report`, { stage: "terminal" });
       }
-      const cited = validateChildEvidenceScope(record.packet, entry.consumedEvidence);
-      surfaceChildPacketEvidenceToParent(record.packet, entry.parentContext);
+      const research = entry.profile === RESEARCH_CHILD_PROFILE;
+      const cited = research ? packetEvidence(record.packet) : validateChildEvidenceScope(record.packet, entry.consumedEvidence);
+      const childContext = { ...entry.parentContext, agent_call_id: result.agentCallId, agentCallId: result.agentCallId };
+      surfaceChildPacketEvidenceToParent(record.packet, entry.parentContext, research && !result.webPacket ? childContext : entry.parentContext);
+      if (research) {
+        const compact = sanitizePacket(record.packet);
+        if (JSON.stringify(compact).length > entry.resultChars) throw runtimeError("SUB_AGENT_RESULT_TOO_LARGE", `Research report exceeds ${entry.resultChars} characters; full report retained`, { stage: "terminal" });
+      }
       entry.packet = sanitizePacket(record.packet);
       entry.coverage = coverageForEntry(entry, cited.length);
       entry.usage = usageFromChild(result);

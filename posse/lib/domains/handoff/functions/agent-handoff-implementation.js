@@ -3150,6 +3150,7 @@ function hasCanonicalResearcherEnvelope(source) {
 }
 
 function normalizeResearcherTerminalArgs(source, context) {
+  if (source.profile === "research_investigation.v1") return null;
   if (!Array.isArray(source.handoffs) || hasCanonicalResearcherEnvelope(source)) {
     return null;
   }

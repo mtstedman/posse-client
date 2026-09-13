@@ -1,3 +1,4 @@
+import { RESEARCH_AGENT_TYPES } from "./planner-dispatch.js";
 // Native deterministic-MCP tool schema definitions (pure data).
 //
 // Canonical JSON Schemas for the in-tree deterministic tools. Per the catalog
@@ -557,6 +558,7 @@ export const TOOL_AGENT_HANDOFF = {
           "artificer.result.v1",
           "assessor.verdict.v1",
           "citation_synthesis.v1",
+          "research_investigation.v1",
         ],
       },
       outcome: {
@@ -1515,6 +1517,31 @@ export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   maxHandoffs: 1,
 });
 
+export const TOOL_AGENT_HANDOFF_RESEARCH_CHILD = semanticRoleTool({
+  description: "Return one compact, evidence-backed investigation report to your parent. Every claim must cite a visible selector from your own reads. The receipt ends provider generation.",
+  profile: "research_investigation.v1",
+  outcomes: ["complete", "partial", "failed"],
+  handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
+    summaryMaxLength: 2000,
+    claims: {
+      type: "array",
+      maxItems: 12,
+      description: "Use named claim objects, not researcher.report.v1 claim tuples. A non-failed report needs at least one evidence-backed claim.",
+      items: {
+        type: "object",
+        properties: {
+          claim: { type: "string", minLength: 1, maxLength: 1000 },
+          evidence: { type: "array", minItems: 1, maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
+          summary: { type: "string", maxLength: 300 },
+        },
+        required: ["claim", "evidence"],
+        additionalProperties: false,
+      },
+    },
+  })),
+  maxHandoffs: 1,
+});
+
 // Backward-compatible internal export. New role projection code must select
 // the exact researcher/planner/citation schemas above instead of this alias.
 export const TOOL_AGENT_HANDOFF_REPORT = TOOL_AGENT_HANDOFF_RESEARCHER;
@@ -1580,7 +1607,11 @@ export function getAgentHandoffToolSchemaForRole(role, {
   compactV3 = false,
   compactV4 = false,
   requireResearcherCoverage = false,
+  researchInvestigation = false,
 } = {}) {
+  if (String(role || "").trim().toLowerCase() === "researcher" && researchInvestigation) {
+    return TOOL_AGENT_HANDOFF_RESEARCH_CHILD;
+  }
   if (!compactCompletion) return TOOL_AGENT_HANDOFF;
   const normalizedRole = String(role || "").trim().toLowerCase();
   if (normalizedRole === "dev" || normalizedRole === "fix") return TOOL_AGENT_HANDOFF_DEV;
@@ -1757,26 +1788,58 @@ export const TOOL_SUB_AGENT = {
 export const TOOL_DISPATCH_AGENT = {
   type: "function",
   name: "dispatch_agent",
-  description:
-    "Dispatch one isolated specialty agent and wait for its bounded result. " +
-    "The web route receives only the question, performs web search/fetch in its own context, and returns parent-visible evidence selectors without exposing its browsing transcript.",
+  description: "Dispatch an isolated researcher and wait for its evidence-backed result. Select code for repository investigation or web for online research. Supply a self-contained question including scope and facts needed. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
     properties: {
-      route: {
-        type: "string",
-        enum: ["web"],
-        description: "Specialty agent route. Only web is currently supported.",
-      },
-      question: {
-        type: "string",
-        minLength: 1,
-        maxLength: 2000,
-        description: "Self-contained web research question for the isolated agent.",
+      agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
+      question: { type: "string", minLength: 1, maxLength: 2000 },
+      budget: {
+        type: "object",
+        properties: {
+          timeout_ms: { type: "integer", minimum: 5000 },
+          max_turns: { type: "integer", minimum: 1, maximum: 64 },
+          reasoning_effort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+        },
+        additionalProperties: false,
       },
     },
-    required: ["route", "question"],
+    required: ["agent_type", "question"],
     additionalProperties: false,
+  },
+};
+
+export const TOOL_DISPATCH_AGENT_PLANNER = {
+  ...TOOL_DISPATCH_AGENT,
+  description: "Dispatch one focused researcher or a batch of two to three independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question. The administrator bounds child count, effort, turns, and duration.",
+  parameters: {
+    type: "object",
+    oneOf: [
+      TOOL_DISPATCH_AGENT.parameters,
+      {
+        type: "object",
+        properties: {
+          requests: {
+            type: "array",
+            minItems: 2,
+            maxItems: 3,
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", minLength: 1, maxLength: 40 },
+                agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
+                question: { type: "string", minLength: 1, maxLength: 2000 },
+                budget: TOOL_DISPATCH_AGENT.parameters.properties.budget,
+              },
+              required: ["id", "agent_type", "question"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["requests"],
+        additionalProperties: false,
+      },
+    ],
   },
 };
 

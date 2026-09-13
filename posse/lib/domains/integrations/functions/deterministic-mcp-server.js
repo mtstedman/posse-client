@@ -42,7 +42,6 @@ import {
 } from "../../../shared/tools/functions/toolkit/index.js";
 import {
   TOOL_AGENT_HANDOFF,
-  TOOL_DISPATCH_AGENT,
   TOOL_PROJECT_DB_QUERY,
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
@@ -1399,6 +1398,7 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "custom_tools",
   "sub_agent",
   "sub_agent_next_input",
+  "dispatch_agent",
   "agent_handoff",
   "read_file",
   "chain_read",
@@ -1557,10 +1557,13 @@ addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   compactV3: compactAgentHandoffV3Issued(),
   compactV4: compactAgentHandoffV4Issued(),
   requireResearcherCoverage: researcherTraversalCoverageRequired(),
+  researchInvestigation: bootConfig.researchInvestigation === true,
 }));
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
-addToolSchema(TOOL_DISPATCH_AGENT);
+addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
+  researchInvestigation: bootConfig.researchInvestigation === true,
+}));
 addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
 
 // Atlas-active researchers use the ordinary bounded read_file fallback. The
@@ -2501,7 +2504,7 @@ function getOperatorFeedback(args = {}) {
   const scopeError = liveChannelSessionScopeError("get_operator_feedback");
   if (scopeError) return scopeError;
   if (!mcpJobId) return "No active job context is available for get_operator_feedback.";
-  if (countPendingOperatorFeedbackForJob(mcpJobId) <= 0) {
+  if (countPendingOperatorFeedbackForJob(mcpJobId, mcpAgentCallId) <= 0) {
     const error = new Error("POSSE_FEEDBACK_RECOVERY_UNAVAILABLE: no unacknowledged operator feedback is pending. This internal recovery endpoint must not be polled.");
     error.code = "POSSE_FEEDBACK_POLL_LIMIT";
     throw error;
@@ -2546,8 +2549,14 @@ function ackOperatorFeedback(args = {}) {
 }
 
 function executeAgentHandoff(args = {}) {
-  assertSubAgentParentReady(mcpAgentCallId);
-  const preparedSubAgentHandoff = prepareSubAgentHandoff(mcpAgentCallId, args);
+  // The persistent owner holds the live child binding and validates this
+  // handoff before forwarding it. Its gateway runs in another process and
+  // cannot inspect that binding's in-memory runtime.
+  const ownerValidatedHandoff = ownerHotGateway && mcpMessageSessionScoped;
+  if (!ownerValidatedHandoff) assertSubAgentParentReady(mcpAgentCallId);
+  const preparedSubAgentHandoff = ownerValidatedHandoff
+    ? false
+    : prepareSubAgentHandoff(mcpAgentCallId, args);
   const receipt = stageAgentHandoff(args, {
     context: {
       workItemId: mcpWorkItemId,
@@ -2818,10 +2827,13 @@ function rebuildNativeToolSchemas() {
     compactV3: compactAgentHandoffV3Issued(),
     compactV4: compactAgentHandoffV4Issued(),
     requireResearcherCoverage: researcherTraversalCoverageRequired(),
+    researchInvestigation: bootConfig.researchInvestigation === true,
   }));
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
-  addToolSchema(TOOL_DISPATCH_AGENT);
+  addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
+    researchInvestigation: bootConfig.researchInvestigation === true,
+  }));
   addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
   if (ownerHotGateway) {
     addToolSchema(readFileSchemaForCurrentBoot());
@@ -4131,7 +4143,7 @@ async function handleRequest(msg) {
     // success/failure are captured — not just successful completions.
     const toolInvocation = beginToolInvocation({ tool: toolName, input: recordInput, cwd: workspaceCwd });
     try {
-      if (toolName === "agent_handoff" && countPendingOperatorFeedbackForJob(mcpJobId) > 0) {
+      if (toolName === "agent_handoff" && countPendingOperatorFeedbackForJob(mcpJobId, mcpAgentCallId) > 0) {
         await completeNativeToolCall({
           id,
           requestedToolName,

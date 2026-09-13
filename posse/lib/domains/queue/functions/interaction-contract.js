@@ -1565,6 +1565,7 @@ export function replaceOperatorNudge(args = {}) {
       if (!replaced
         || replaced.work_item_id !== workItemId
         || replaced.job_id !== jobId
+        || (replaced.agent_call_id ?? null) !== agentCallId
         || replaced.kind !== "nudge"
         || replaced.direction !== "user_to_agent"
         || replaced.status !== "active"
@@ -1575,10 +1576,10 @@ export function replaceOperatorNudge(args = {}) {
     } else {
       replaced = db.prepare(`
         SELECT * FROM agent_interactions
-        WHERE work_item_id = ? AND job_id = ? AND direction = 'user_to_agent'
+        WHERE work_item_id = ? AND job_id = ? AND agent_call_id IS ? AND direction = 'user_to_agent'
           AND kind = 'nudge' AND status = 'active' AND ack_state = 'pending' AND ack_decision IS NULL
         ORDER BY id DESC LIMIT 1
-      `).get(workItemId, jobId) || null;
+      `).get(workItemId, jobId, agentCallId) || null;
     }
     const observedAt = now();
     const metadata = {

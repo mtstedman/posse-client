@@ -1,3 +1,4 @@
+import { readPlannerDispatchPolicy } from "./planner-dispatch-policy.js";
 // lib/domains/planning/functions/planner-helpers.js
 //
 // Stateless helpers extracted from the PlannerRole class file. These build
@@ -64,8 +65,28 @@ export function normalizePlannerRoleMode(value) {
   return ["normal", "primary", "redteam", "synth"].includes(raw) ? raw : "normal";
 }
 
-export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", roleMode = "normal" } = {}) {
-  if (!packet || planningMode !== "dual_redteam" || roleMode !== "redteam") return packet;
+export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", roleMode = "normal", assessmentReplan = false, plannerDispatch = false, projectDir = null } = {}) {
+  if (!packet) return packet;
+  const dispatchPolicy = readPlannerDispatchPolicy({ projectDir });
+  const dispatchEligible = plannerDispatch && !assessmentReplan && ["normal", "primary"].includes(roleMode)
+    && dispatchPolicy.enabled;
+  packet.planner_dispatch = dispatchEligible;
+  packet.planner_dispatch_policy = dispatchEligible ? dispatchPolicy : null;
+  if (plannerDispatch) {
+    packet.agent_coordination = {
+      ...(packet.agent_coordination || {}), sub_agent_v1: false,
+      dispatch_agent_v1: dispatchEligible,
+      research_investigation_v1: dispatchEligible,
+    };
+  }
+  if (assessmentReplan) {
+    packet.agent_coordination = {
+      ...(packet.agent_coordination || {}),
+      sub_agent_v1: false,
+      dispatch_agent_v1: false,
+    };
+  }
+  if (planningMode !== "dual_redteam" || roleMode !== "redteam") return packet;
   packet.prompt_profile = "planner_redteam";
   packet.agent_coordination = {
     ...(packet.agent_coordination || {}),
@@ -74,6 +95,7 @@ export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", ro
     agent_handoff_compact_v2: false,
     agent_handoff_compact_v3: false,
     sub_agent_v1: false,
+    dispatch_agent_v1: false,
   };
   return packet;
 }

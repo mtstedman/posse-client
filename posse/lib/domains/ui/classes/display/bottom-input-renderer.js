@@ -266,7 +266,7 @@ export class DisplayBottomInputRenderer {
     // ── Nudge text mode ──
     if (this._inputMode === "nudge_text") {
       lines.push("");
-      lines.push(` ${C.cyan}${C.bold}\u270e Nudge job #${this._nudgeJobId}${C.reset}  ${C.dim}What should it do instead?${C.reset}`);
+      lines.push(` ${C.cyan}${C.bold}\u270e Nudge ${this._nudgeAgentCallId ? `child call #${this._nudgeAgentCallId}` : `job #${this._nudgeJobId}`}${C.reset}  ${C.dim}What should it do instead?${C.reset}`);
       lines.push("");
       const cursor = this._spinIdx % 2 === 0 ? "\u2588" : "\u258c";
       const maxBuf = width - 5;

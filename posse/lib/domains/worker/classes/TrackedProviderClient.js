@@ -1,3 +1,7 @@
+import { expireUnackedOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
+import { recordResearchDispatchAudit } from "../../planning/functions/research-dispatch-telemetry.js";
+import { runResearchChild } from "../../planning/functions/run-research-child.js";
+import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 // lib/domains/worker/classes/TrackedProviderClient.js
 //
 // Tracked provider-call orchestration extracted from Worker. The Worker still
@@ -146,6 +150,7 @@ function agentGateSurfaceFingerprint(options = {}, providerName = "") {
       subAgentV1: issued.coordination?.subAgentV1 === true,
       subAgentNextInputV1: issued.coordination?.subAgentNextInputV1 === true,
       dispatchAgentV1: issued.coordination?.dispatchAgentV1 === true,
+      researchInvestigationV1: issued.coordination?.researchInvestigationV1 === true,
       webResearchHandoffV1: issued.coordination?.webResearchHandoffV1 === true,
     },
     researcherSchemaDiet: String(options?.role || "").trim().toLowerCase() === "researcher"
@@ -268,7 +273,7 @@ function expectedCoordinationMode(options = {}) {
 function assertExpectedCoordination(options, { localHandoff, remoteHandoff } = {}) {
   const expected = expectedCoordinationMode(options);
   if (!expected) return;
-  const coordinationChild = options?._subAgentChild === true;
+  const coordinationChild = options?._subAgentChild === true || options?._researchChild === true;
   const role = String(options?._agentCallRole || options?.role || "").trim().toLowerCase();
   const effectiveExpected = coordinationChild && expected === "subagents" ? "handoff" : expected;
   const localSubAgent = options?.sessionPacket?.agent_coordination?.sub_agent_v1 === true;
@@ -293,7 +298,7 @@ function assertExpectedCoordination(options, { localHandoff, remoteHandoff } = {
   const subAgentExpected = effectiveExpected === "subagents"
     && SUB_AGENT_CALLER_ROLES.has(role)
     && options?.sessionPacket?.job_type !== "fix";
-  const childCursorExpected = coordinationChild && expected === "subagents";
+  const childCursorExpected = options?._subAgentChild === true && expected === "subagents";
   if (!["off", "handoff", "subagents"].includes(expected)
     || localHandoff !== handoffExpected
     || remoteHandoff !== handoffExpected
@@ -627,7 +632,7 @@ function isSessionReuseCandidate({ providerName, opts, job_id, work_item_id }) {
   const provider = String(providerName || "").toLowerCase();
   if (!provider) return false;
   if (opts?._subAgentChild === true) return false;
-  if (opts?._webResearchChild === true) return false;
+  if (opts?._webResearchChild === true || opts?._researchChild === true) return false;
   // Provider self-declares session-resume support via the capabilities flag
   // on its module. Replaces a hardcoded ["openai","claude","codex"] whitelist
   // so a new provider that supports resume just sets capabilities.sessionResume.
@@ -695,6 +700,7 @@ function providerAgentIdentity(opts = {}, {
       subAgent,
       dispatchAgent,
       webResearchHandoff,
+      researchInvestigation: opts._remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
       coordinationChild,
       atlasAvailable,
       ...(coordinationChild && opts._coordinationChildPermitId
@@ -713,6 +719,7 @@ function providerAgentIdentity(opts = {}, {
     subAgent,
     dispatchAgent,
     webResearchHandoff,
+    researchInvestigation: opts._remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
     coordinationChild,
     atlasAvailable,
     ...(coordinationChild && opts._coordinationChildPermitId
@@ -766,6 +773,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     subAgent,
     dispatchAgent,
     webResearchHandoff,
+    researchInvestigation: opts._remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
     ...(issuedToolAllowlist ? { toolAllowlist: issuedToolAllowlist } : {}),
     coordinationChild: opts._subAgentChild === true,
     atlasAvailable: issuedToolAllowlist
@@ -1731,9 +1739,19 @@ export class TrackedProviderClient {
       const subAgentEnabled = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.subAgentV1 === true
         && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.sub_agent_v1 === true
         && opts._subAgentChild !== true;
-      if (subAgentEnabled) {
+      const researchPolicy = readPlannerDispatchPolicy({ projectDir: cwd });
+      const researchEnabled = opts.role === "planner" && effectiveCapabilityOpts.sessionPacket?.planner_dispatch === true
+        && researchPolicy.enabled && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true;
+      if (subAgentEnabled || researchEnabled) {
         unregisterSubAgentParent = subAgentRuntime.registerParent({
           agentCallId,
+          researchPolicy: researchEnabled ? researchPolicy : null,
+          runResearchChild: (request) => runResearchChild(this, {
+            agentCallId, jobId: job_id, workItemId: work_item_id, attemptId: observationContext?.attempt_id,
+            cwd, provider: providerName, tier, model: modelName,
+            packet: effectiveCapabilityOpts.sessionPacket, disableAtlas: opts.disableAtlas,
+            disableSystemTools: effectiveCapabilityOpts.disableSystemTools,
+          }, { ...request, signal: combinedAbortSignal(abortSignal, request.signal) }),
           authorizedToolSurface: effectiveCapabilityOpts?._remoteToolSurface?.tools
             || effectiveCapabilityOpts?.sessionPacket?.remote_issuance?.tools
             || [],
@@ -1823,7 +1841,7 @@ export class TrackedProviderClient {
       if (webResearchEnabled) {
         unregisterWebResearchParent = webResearchRuntime.registerParent({
           agentCallId,
-          runChild: async ({ dispatchId, question, signal }) => {
+          runChild: async ({ dispatchId, question, signal, budget }) => {
             const childSessionPacket = {
               recipient: "researcher",
               job_type: "research",
@@ -1868,8 +1886,8 @@ export class TrackedProviderClient {
                 roleMode: "web",
                 modelTier: tier,
                 modelName,
-                reasoningEffort: "low",
-                activity: "isolated web research",
+                reasoningEffort: budget?.reasoningEffort || "low",
+                activity: question,
                 allowWrite: false,
                 allowShell: false,
                 allowTests: false,
@@ -1879,7 +1897,7 @@ export class TrackedProviderClient {
                 disableAtlas: true,
                 disableSystemTools: true,
                 fallbackReads: 0,
-                maxTurns: 8,
+                maxTurns: budget?.maxTurns || 8,
                 maxOutputTokens: 4096,
                 skipRolePrompt: true,
                 recyclingMode: "fresh",
@@ -2505,6 +2523,18 @@ export class TrackedProviderClient {
       throw err;
     } finally {
       try {
+        try {
+          if (opts._parentAgentCallId && job_id) {
+            expireUnackedOperatorFeedbackForJob({ job_id, agent_call_id: agentCallId, reason: "child_call_finished" });
+          }
+          if (opts.sessionPacket?.planner_dispatch === true) {
+            recordResearchDispatchAudit({ jobId: job_id, workItemId: work_item_id, agentCallId,
+              requests: [...subAgentRuntime.batches.values()].filter((batch) => batch.parentCallId === agentCallId).flatMap((batch) => batch.entries),
+            });
+          }
+        } catch {
+          // Observability must not prevent child cancellation or gate cleanup.
+        }
         unregisterAgentHandoffTerminal?.();
         unregisterSubAgentParent?.();
         unregisterSubAgentChild?.();

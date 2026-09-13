@@ -91,11 +91,12 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
     atlas: atlasCapabilities,
     coordination: {
       agent_handoff_v1: packet?.agent_coordination?.agent_handoff_v1 === true,
-      agent_handoff_compact_v1: packet?.agent_coordination?.agent_handoff_v1 === true,
+      agent_handoff_compact_v1: packet?.agent_coordination?.agent_handoff_v1 === true && packet?.agent_coordination?.agent_handoff_compact_v1 !== false,
       agent_handoff_compact_v2: packet?.agent_coordination?.agent_handoff_compact_v2 === true,
       agent_handoff_compact_v3: packet?.agent_coordination?.agent_handoff_compact_v3 === true,
       sub_agent_v1: packet?.agent_coordination?.sub_agent_v1 === true,
       dispatch_agent_v1: packet?.agent_coordination?.dispatch_agent_v1 === true,
+      research_investigation_v1: packet?.agent_coordination?.research_investigation_v1 === true,
       web_research_handoff_v1: packet?.agent_coordination?.web_research_handoff_v1 === true,
     },
   };

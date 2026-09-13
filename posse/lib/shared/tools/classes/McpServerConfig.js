@@ -648,6 +648,7 @@ function buildDeterministicMcpBootPayload(role, {
   subAgent = false,
   dispatchAgent = false,
   webResearchHandoff = false,
+  researchInvestigation = false,
   coordinationChild = false,
   customTools = false,
 } = {}) {
@@ -704,6 +705,7 @@ function buildDeterministicMcpBootPayload(role, {
       subAgent: subAgent === true,
       dispatchAgent: dispatchAgent === true,
       webResearchHandoff: webResearchHandoff === true,
+      researchInvestigation: researchInvestigation === true,
       coordinationChild: coordinationChild === true,
       customTools: customTools === true,
       role,
@@ -1336,6 +1338,7 @@ export class McpServerConfig {
       subAgent: opts.mcpGate?.contractBootConfig?.subAgent === true,
       dispatchAgent: opts.mcpGate?.contractBootConfig?.dispatchAgent === true,
       webResearchHandoff: opts.mcpGate?.contractBootConfig?.webResearchHandoff === true,
+      researchInvestigation: opts.mcpGate?.contractBootConfig?.researchInvestigation === true,
       coordinationChild: opts.mcpGate?.contractBootConfig?.coordinationChild === true,
     });
     let remoteResolution = null;

@@ -55,6 +55,11 @@ import {
 } from "../../../planning/functions/red-team-plan.js";
 import { BaseRole } from "../BaseRole.js";
 import {
+  resolveAssessmentReplanCwd,
+  buildAssessmentReplanDiffBlock,
+  buildPlannerAssessmentReplanContext,
+} from "../../../planning/functions/assessment-replan-context.js";
+import {
   classifyPlannerOutput as defaultClassifyPlannerOutput,
   getResearchBudget as defaultGetResearchBudget,
   isDeepthinkTask as defaultIsDeepthinkTask,
@@ -97,6 +102,8 @@ const DEFAULT_DEPS = {
   researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
   ensureAtlasReadRootMounted,
   resolvePlannerReadRoot,
+  resolveAssessmentReplanCwd,
+  buildAssessmentReplanDiffBlock,
   shortJobTitle: defaultShortJobTitle,
   unwrapTaskArray: defaultUnwrapTaskArray,
 };
@@ -260,17 +267,31 @@ export class PlannerRole extends BaseRole {
       ensureAtlasReadRootMounted: ensureReadRootMounted,
       getResearchBudget,
       resolvePlannerReadRoot: resolveReadRoot,
+      resolveAssessmentReplanCwd: resolveReplanCwd,
+      buildAssessmentReplanDiffBlock: buildReplanDiff,
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
     const payload = worker.parsePayload(job);
+    const assessmentReplan = payload._assessment_replan === true;
     const waitingLanePlannerRead = job._waitingLanePlannerRead || null;
-    const plannerReadRoot = await resolveReadRoot(
+    let plannerReadRoot = await resolveReadRoot(
       worker.projectDir,
       job.work_item_id,
       waitingLanePlannerRead?.projectCwd || job._worktreePath,
       { allowWorktreeLookup: !!workItem?.branch_name },
     );
+    const replanCwd = assessmentReplan
+      ? await resolveReplanCwd(worker.projectDir, job, payload, { signal: ctx.abortSignal || null })
+      : null;
+    if (replanCwd) plannerReadRoot = replanCwd.cwd;
+    const assessmentReplanContext = assessmentReplan
+      ? buildPlannerAssessmentReplanContext(payload, {
+          readRoot: plannerReadRoot,
+          cwdError: replanCwd?.error || "",
+          diffBlock: await buildReplanDiff(payload, plannerReadRoot),
+        })
+      : "";
     const atlasReadMount = await ensureReadRootMounted({
       projectDir: worker.projectDir,
       readRoot: plannerReadRoot,
@@ -280,7 +301,7 @@ export class PlannerRole extends BaseRole {
     });
     if (atlasReadMount.config) job._atlasConfig = atlasReadMount.config;
     const disableAtlasForReadRoot = atlasReadMount.required && !atlasReadMount.mounted;
-    const planningMode = isRedTeamPlanningPayload(payload) ? RED_TEAM_PLANNING_MODE : "normal";
+    const planningMode = !assessmentReplan && isRedTeamPlanningPayload(payload) ? RED_TEAM_PLANNING_MODE : "normal";
     const plannerRoleMode = planningMode === RED_TEAM_PLANNING_MODE
       ? normalizePlannerRoleMode(payload.planner_role_mode)
       : "normal";
@@ -601,7 +622,7 @@ export class PlannerRole extends BaseRole {
         },
       },
     }, { providerName: plannerExecProvider });
-    applyPlannerRoleModePolicy(plannerPacket, { planningMode, roleMode: plannerRoleMode });
+    applyPlannerRoleModePolicy(plannerPacket, { planningMode, roleMode: plannerRoleMode, assessmentReplan, plannerDispatch: payload.planner_dispatch === true, projectDir: worker.projectDir });
     const plannerAttempts = getAttempts(job.id);
     Object.assign(plannerPacket, {
       job_type: job.job_type,
@@ -623,7 +644,9 @@ export class PlannerRole extends BaseRole {
     });
     const atlasHandoffBlock = renderAtlasHandoffSections(plannerPacket);
 
-    const contextDirsBlock = researchSkipped
+    const contextDirsBlock = assessmentReplan
+      ? assessmentReplanContext
+      : researchSkipped
       ? [
         "RESEARCH WAS SKIPPED:",
         "  The original work item, intake hints, and candidate files below are the complete planning input.",
@@ -646,7 +669,7 @@ export class PlannerRole extends BaseRole {
       promptLiteral("DESCRIPTION", workItem.description || "(none)"),
       intakeHintsBlock ? `${intakeHintsBlock}\n` : "",
       humanAnswers ? `HUMAN ANSWERS (from researcher clarification questions):\n${humanAnswers}\n` : "",
-      payload.replan_reason ? `REPLAN REASON (previous approach failed - you MUST take a different approach):\n${payload.replan_reason}\n` : "",
+      payload.replan_reason && !assessmentReplan ? `REPLAN REASON (previous approach failed - you MUST take a different approach):\n${payload.replan_reason}\n` : "",
       planningMode === RED_TEAM_PLANNING_MODE && plannerRoleMode === "redteam"
         ? `PRIMARY PLANNER OUTPUT (candidate plan to critique):\n${primaryPlanText || "(missing primary planner output)"}\n`
         : "",
@@ -701,7 +724,9 @@ export class PlannerRole extends BaseRole {
   }
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {
-    const remoteInstructions = [contract, contextText]
+    const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
+    const researchBudget = researchPolicy ? `Research budgets: choose whether research is needed within ${researchPolicy.triageMaxTurns} triage turns. Zero children is valid. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, effort ${researchPolicy.effortCeiling}, result ${researchPolicy.resultChars} characters.` : null;
+    const remoteInstructions = [contract, researchBudget, contextText]
       .filter((part) => part != null && String(part) !== "")
       .join("\n");
     if (!remoteInstructions) {

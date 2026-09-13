@@ -1,3 +1,4 @@
+import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 // Outer wrapper around the pure routing classifier in ./routing.js.
 // Handles the "live" side effects: caching the project map onto the
 // work item, logging telemetry events, and turning a routing decision
@@ -383,7 +384,7 @@ export function classifyResearchForRouting({
   return routing;
 }
 
-export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null } = {}) {
+export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null, plannerDispatch = false } = {}) {
   const deepthinkBudget = normalizeResearchBudget(budget);
   const reason = routing?.reason || "deterministic no_research route";
   updateWorkItemResearchSkip(workItem.id, { skipped: true, reason });
@@ -399,6 +400,7 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
       parentJob,
       basePayload: researchPayload({
         research_skipped: true,
+        ...(plannerDispatch ? { planner_dispatch: true } : {}),
         research_skip_reason: reason,
       }, deepthinkBudget),
       budget: deepthinkBudget,
@@ -432,6 +434,7 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
     reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
     payload_json: JSON.stringify(researchPayload({
       research_skipped: true,
+        ...(plannerDispatch ? { planner_dispatch: true } : {}),
       research_skip_reason: reason,
     }, deepthinkBudget)),
   });
@@ -729,6 +732,18 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
   const actualBudget = resolveResearchBudgetForRouting(deepthinkBudget, effectiveRouting.budget, {
     baseExplicit: !!deepthinkBudgetExplicit || metadata.research_budget_explicit === true,
   });
+  const dispatchPolicy = readPlannerDispatchPolicy({ projectDir });
+  if (dispatchPolicy.enabled && !["oneshot", "oneshot_candidate", "web_only_answer"].includes(effectiveRouting.bucket)) {
+    const job = createPlanAfterSkippedResearch(workItem, {
+      routing: { ...effectiveRouting, reason: "Planner decides whether research is needed" },
+      budget: actualBudget, source, redTeamPlan, plannerDispatch: true,
+    });
+    return { kind: "plan", job, routing: effectiveRouting };
+  }
+  if (dispatchPolicy.mode === "planner" && !dispatchPolicy.enabled) {
+    logEvent({ work_item_id: workItem.id, event_type: EVENT_TYPES.PLANNER_DISPATCH_INACTIVE,
+      actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: ${dispatchPolicy.inactiveReason}` });
+  }
   const fanoutMode = effectiveRouting.bucket === "fanout_clear" ? getResearchFanoutMode() : "off";
   if (effectiveRouting.bucket === "oneshot") {
     const outcome = createOneshotDevJob(workItem, {

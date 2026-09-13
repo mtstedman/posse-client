@@ -17,7 +17,7 @@ PRAGMA foreign_keys = ON;
 --  16 = + pending shared-session enrollment phase.
 --  17 = + session identity, policy, scope, and provenance state.
 --  18 = + authoritative cross-instance work-item delegation journal.
-PRAGMA user_version = 18;
+PRAGMA user_version = 19;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -700,7 +700,7 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   job_id INTEGER,
   attempt_id INTEGER,
   parent_agent_call_id INTEGER,
-  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('citation','web_research')),
+  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('citation','research','web_research','research_claim_review')),
 
   role TEXT NOT NULL,
   model_tier TEXT NOT NULL,

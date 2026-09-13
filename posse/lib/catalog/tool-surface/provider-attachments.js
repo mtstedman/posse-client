@@ -14,6 +14,8 @@ export const TOOL_ATTACHMENT_BY_PROVIDER = Object.freeze({
 // Research reads compose inside the executor; terminal submission stays direct.
 // Core declarations are delivered during setup, independently of this routing.
 export const CODEX_TERMINAL_MCP_SERVER_SUFFIX = "terminal";
+export const CODEX_AGENTS_MCP_SERVER_SUFFIX = "agents";
+export const CODEX_AGENT_DISPATCH_TOOLS = Object.freeze(["sub_agent", "dispatch_agent"]);
 export const CODEX_DIRECT_RESEARCH_TOOLS = Object.freeze(["agent_handoff"]);
 
 export const CODEX_CODE_MODE_ROLES = Object.freeze(["researcher"]);

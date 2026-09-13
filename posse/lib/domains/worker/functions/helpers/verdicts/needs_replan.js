@@ -23,11 +23,11 @@ import { getMaxReplans } from "../../../../settings/functions/tunables.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
-function isLoopbackReplanResearchJob(job) {
-  if (job?.job_type !== "research") return false;
+function isLoopbackReplanJob(job) {
+  if (!["research", "plan"].includes(job?.job_type)) return false;
   const payload = parseJobPayload(job);
   if (payload?._assessment_replan === true) return true;
-  return /^Research \(replan\):/.test(job?.title || "");
+  return job.job_type === "research" && /^Research \(replan\):/.test(job?.title || "");
 }
 
 function collectScopedFiles(payload = {}) {
@@ -56,10 +56,10 @@ function latestCommitHashForJob(jobId) {
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
 
-  // Cap replan cycles to prevent infinite research -> plan -> dev -> assess loops.
+  // Count direct planner cycles and legacy research cycles against the same cap.
   const MAX_REPLANS = getMaxReplans();
   const allJobs = listJobsByWorkItem(job.work_item_id);
-  const replanCount = allJobs.filter(isLoopbackReplanResearchJob).length;
+  const replanCount = allJobs.filter(isLoopbackReplanJob).length;
   if (replanCount >= MAX_REPLANS && !ctx.humanApprovedReplan) {
     runInTransaction(() => {
       log(`${C.red}[assessor] WI#${job.work_item_id} hit replan limit (${replanCount}/${MAX_REPLANS}) - escalating to human${C.reset}`);
@@ -159,9 +159,9 @@ export function handle(job, verdict, ctx) {
     const originalPayload = parseJobPayload(job);
     const originalScopedFiles = collectScopedFiles(originalPayload);
     const originalCommitHash = latestCommitHashForJob(job.id);
-    const reResearchJob = spawnFromAssessor("failed", "research", {
+    const replanJob = spawnFromAssessor("failed", "plan", {
       work_item_id: job.work_item_id,
-      title: `Research (replan): ${wiTitle}`,
+      title: `Replan: ${wiTitle}`,
       parent_job_id: job.id,
       priority: job.priority,
       model_tier: "standard",
@@ -174,15 +174,29 @@ export function handle(job, verdict, ctx) {
         original_job_type: job.job_type,
         original_task_mode: originalPayload.task_mode || "code",
         original_title: job.title,
+        original_task_spec: originalPayload.task_spec || originalPayload.instructions || "",
+        original_success_criteria: Array.isArray(originalPayload.success_criteria) ? originalPayload.success_criteria : [],
+        test_command: originalPayload.test_command || null,
+        retained_work: allJobs
+          .filter((sibling) => sibling.id !== job.id
+            && ["dev", "fix", "artificer", "promote"].includes(sibling.job_type)
+            && (sibling.status === "succeeded" || isDeferredImplementationAssessmentJob(sibling)))
+          .map((sibling) => ({
+            job_id: sibling.id,
+            job_type: sibling.job_type,
+            title: sibling.title,
+            status: sibling.status,
+            assessment_state: sibling.assessment_state,
+            scoped_files: collectScopedFiles(parseJobPayload(sibling)),
+          })),
         original_commit_hash: originalCommitHash,
         original_scoped_files: originalScopedFiles,
         wi_branch_name: wi?.branch_name || null,
         wi_merge_base_hash: null,
-        instructions: `Re-research for replan. Previous approach failed:\n${verdict.reasons.join("\n")}\nInvestigate the current codebase state and produce an updated research brief.`,
       }),
     });
-    spawnedJobs.push(reResearchJob);
-    log(`${C.yellow}[assessor]${C.reset} spawned replan research #${reResearchJob.id}`);
+    spawnedJobs.push(replanJob);
+    log(`${C.yellow}[assessor]${C.reset} spawned replan #${replanJob.id}`);
   });
   if (!changedJob) return;
   try { cleanupArtifactDirs(wiScopeId(job.work_item_id), null, { keepArtifacts: true }); }

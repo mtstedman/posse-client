@@ -1006,7 +1006,8 @@ function needsAgentCallsChildKindsRepair(db) {
   if (!row?.sql) return false;
   return needsAgentCallsParentageRepair(db)
     || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'web_research'/iu.test(row.sql)
-    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'research_claim_review'/iu.test(row.sql);
+    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'research_claim_review'/iu.test(row.sql)
+    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'research'/iu.test(row.sql);
 }
 
 function repairAgentCallsChildKindsSchema(db) {
@@ -2863,6 +2864,10 @@ export function getDb() {
     name: "work_item_delegations",
     needs: needsWorkItemDelegationSchema,
     migrate: installWorkItemDelegationSchema,
+  });
+  runHostMigration(_db, {
+    version: 19, name: "agent_calls_investigating_research_child",
+    needs: needsAgentCallsChildKindsRepair, migrate: repairAgentCallsChildKindsSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

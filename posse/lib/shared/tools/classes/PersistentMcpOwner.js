@@ -1,3 +1,4 @@
+import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 // @ts-check
 //
 // Persistent MCP owner for provider-launched stdio shims.
@@ -114,6 +115,7 @@ import {
   isResearchInfrastructureFailure,
   RESEARCH_INFRASTRUCTURE_REFUND_LIMIT,
   researchExplorationObservationStatus,
+  researchChildBudgetCallId,
   researchSurveyCoverageStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
@@ -559,7 +561,7 @@ function isResearchPhysicalWorkRequest(requested) {
 }
 
 function researchBudgetKey(boot = {}) {
-  return [boot.jobId ?? "no-job", boot.attemptId ?? "no-attempt"].join(":");
+  return [boot.jobId ?? "no-job", boot.attemptId ?? "no-attempt", researchChildBudgetCallId(boot.agentCallId) || "parent"].join(":");
 }
 
 // One-shot notice progress per job/attempt. Owner-assigned exploration steps
@@ -2787,6 +2789,7 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
   const status = researchExplorationObservationStatus({
     jobId: boot.jobId ?? null,
     attemptId: boot.attemptId ?? null,
+    agentCallId: boot.agentCallId ?? null,
   });
   const citationFetches = Math.max(0, Number(status.citation_fetches || 0));
   const citationFetchBatches = Math.max(0, Number(status.citation_fetch_batches || 0));
@@ -3053,6 +3056,7 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
   const current = researchExplorationObservationStatus({
     jobId: boot.jobId ?? null,
     attemptId: boot.attemptId ?? null,
+    agentCallId: boot.agentCallId ?? null,
   });
   if (current.synthesis_required) return;
   const explorationSteps = Math.max(
@@ -3220,6 +3224,7 @@ function ownerResearchPhysicalBudgetRejection({
   const observed = researchExplorationObservationStatus({
     jobId: boot.jobId ?? null,
     attemptId: boot.attemptId ?? null,
+    agentCallId: boot.agentCallId ?? null,
   });
   const requested = requestedToolPolicyName(toolName, toolArgs);
   const effectiveAction = requested.suite === "atlas"
@@ -5774,10 +5779,26 @@ export class PersistentMcpOwner {
           }
           return;
         }
-        if (requested.suite === "tools" && requested.name === "sub_agent") {
+        if (requested.suite === "tools" && requested.name === "web_research_handoff") {
+          try {
+            const receipt = submitWebResearchHandoff(session?.bootConfig?.agentCallId, toolArgs);
+            sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, terminalHandoffReceipt: true, message: {
+              jsonrpc: "2.0", id: message?.id ?? null,
+              result: { content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false },
+            } });
+          } catch (error) {
+            sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
+              jsonrpc: "2.0", id: message?.id ?? null,
+              result: { content: [{ type: "text", text: String(error?.message || error) }], isError: true },
+            } });
+          }
+          return;
+        }
+        if (requested.suite === "tools" && ["sub_agent", "dispatch_agent"].includes(requested.name)) {
           const startedAt = Date.now();
           try {
-            const result = await executeSubAgent(toolArgs, {
+            const execute = requested.name === "dispatch_agent" ? executeDispatchAgent : executeSubAgent;
+            const result = await execute(toolArgs, {
               context: {
                 workItemId: session?.bootConfig?.workItemId,
                 jobId: session?.bootConfig?.jobId,
@@ -5789,8 +5810,8 @@ export class PersistentMcpOwner {
               work_item_id: session?.bootConfig?.workItemId ?? null,
               job_id: session?.bootConfig?.jobId ?? null,
               attempt_id: session?.bootConfig?.attemptId ?? null,
-              observation_type: "tool.sub_agent",
-              summary: `Sub-agent ${toolArgs?.op || "operation"} completed`,
+              observation_type: `tool.${requested.name}`,
+              summary: `${requested.name} ${toolArgs?.agent_type || toolArgs?.op || "operation"} completed`,
               detail: {
                 op: toolArgs?.op || null,
                 batch_id: result?.batch_id || toolArgs?.batch_id || null,
@@ -5832,7 +5853,7 @@ export class PersistentMcpOwner {
               work_item_id: session?.bootConfig?.workItemId ?? null,
               job_id: session?.bootConfig?.jobId ?? null,
               attempt_id: session?.bootConfig?.attemptId ?? null,
-              observation_type: "tool.sub_agent.error",
+              observation_type: `tool.${requested.name}.error`,
               summary: `Sub-agent ${toolArgs?.op || "operation"} rejected`,
               detail: {
                 op: toolArgs?.op || null,
@@ -5854,7 +5875,7 @@ export class PersistentMcpOwner {
                 jsonrpc: "2.0",
                 id: message?.id ?? null,
                 result: {
-                  content: [{ type: "text", text: `Error executing sub_agent: ${String(error?.message || error).slice(0, 500)}` }],
+                  content: [{ type: "text", text: `Error executing ${requested.name}: ${String(error?.message || error).slice(0, 500)}` }],
                   isError: true,
                 },
               },
@@ -5984,6 +6005,7 @@ export class PersistentMcpOwner {
           const observed = researchExplorationObservationStatus({
             jobId: session?.bootConfig?.jobId ?? null,
             attemptId: session?.bootConfig?.attemptId ?? null,
+            agentCallId: session?.bootConfig?.agentCallId ?? null,
           });
           if (observed.synthesis_required !== true) {
             recordOwnerResearchSynthesisRequired(session, {
@@ -6172,6 +6194,7 @@ export class PersistentMcpOwner {
     const observed = researchExplorationObservationStatus({
       jobId: boot.jobId ?? null,
       attemptId: boot.attemptId ?? null,
+    agentCallId: boot.agentCallId ?? null,
     });
     const assigned = Math.max(
       Math.max(0, Number(observed.call_steps || 0)),
@@ -6191,6 +6214,7 @@ export class PersistentMcpOwner {
     const observed = researchExplorationObservationStatus({
       jobId: boot.jobId ?? null,
       attemptId: boot.attemptId ?? null,
+    agentCallId: boot.agentCallId ?? null,
     });
     const refunded = Math.max(
       Number(observed.infrastructure_refunds || 0),
@@ -6231,6 +6255,7 @@ export class PersistentMcpOwner {
     const observed = researchExplorationObservationStatus({
       jobId: boot.jobId ?? null,
       attemptId: boot.attemptId ?? null,
+    agentCallId: boot.agentCallId ?? null,
     });
     const observedSteps = Math.max(0, Number(observed.exploration_steps || 0));
     const highestReserved = Math.max(

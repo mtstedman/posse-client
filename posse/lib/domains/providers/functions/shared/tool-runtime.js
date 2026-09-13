@@ -246,7 +246,7 @@ const OBSERVED_TOOL_FORMATTERS = {
     return { target: String(input.position ?? ""), summary: `SubAgentInput: ${input.position ?? "?"}` };
   },
   dispatch_agent(input = {}) {
-    return { target: input.route || "", summary: `DispatchAgent: ${input.route || "?"}` };
+    return { target: input.agent_type || input.route || "", summary: `DispatchAgent: ${input.agent_type || input.route || "?"} ${input.question || ""}` };
   },
   web_research_handoff(input = {}) {
     return { target: input.protocol || "", summary: `WebResearchHandoff: ${(input.findings || []).length} finding(s)` };
@@ -768,7 +768,7 @@ export async function executeToolWithMap(name, argsStr, context, {
     if (
       name === "agent_handoff"
       && ambient.job_id != null
-      && countPendingOperatorFeedbackForJob(ambient.job_id) > 0
+      && countPendingOperatorFeedbackForJob(ambient.job_id, ambient.agent_call_id ?? null) > 0
     ) {
       return appendOperatorFeedbackDelivery(
         "Error: agent_handoff paused: acknowledge pending operator feedback with ack_operator_feedback before terminal handoff.",

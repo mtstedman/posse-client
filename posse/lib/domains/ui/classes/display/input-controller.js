@@ -191,6 +191,7 @@ export class DisplayInputController {
     if (agents.length === 0) return false;
     const idx = Math.max(0, Math.min(agents.length - 1, Number(index) || 0));
     this._monitorSelectedJobId = agents[idx].jobId;
+    this._monitorSelectedAgentCallId = agents[idx].agentCallId || null;
     this._monitorFeedbackScroll = 0;
     return true;
   }
@@ -198,10 +199,11 @@ export class DisplayInputController {
   _cycleMonitorSelection(delta) {
     const agents = this._getMonitorAgents();
     if (agents.length === 0) return false;
-    const current = agents.findIndex((agent) => agent.jobId === this._monitorSelectedJobId);
+    const current = agents.findIndex((agent) => agent.jobId === this._monitorSelectedJobId && (agent.agentCallId || null) === (this._monitorSelectedAgentCallId || null));
     const base = current >= 0 ? current : 0;
     const next = (base + delta + agents.length) % agents.length;
     this._monitorSelectedJobId = agents[next].jobId;
+    this._monitorSelectedAgentCallId = agents[next].agentCallId || null;
     this._monitorFeedbackScroll = 0;
     return true;
   }
@@ -451,10 +453,10 @@ export class DisplayInputController {
       return;
     }
     try {
-      this.onNudge(this._nudgeJobId, correction);
+      this.onNudge(this._nudgeJobId, correction, this._nudgeAgentCallId || null);
       this._inputMode = false;
       this._inputBuf = "";
-      this.addEvent(`${C.cyan}\u270e Nudge sent to job #${this._nudgeJobId}: ${correction.slice(0, 60)}${C.reset}`);
+      this.addEvent(`${C.cyan}\u270e Nudge sent to ${this._nudgeAgentCallId ? `child call #${this._nudgeAgentCallId}` : `job #${this._nudgeJobId}`}: ${correction.slice(0, 60)}${C.reset}`);
       this._drainQuestions();
     } catch (err) {
       this._inputMode = "nudge_text";
@@ -614,6 +616,7 @@ export class DisplayInputController {
             .filter((jobId) => this.workers.has(jobId));
         if (idx < jobIds.length) {
           this._nudgeJobId = jobIds[idx];
+          this._nudgeAgentCallId = null;
           this._nudgeJobIds = null;
           this._inputMode = "nudge_text";
           this._inputBuf = "";
@@ -651,6 +654,7 @@ export class DisplayInputController {
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "n") && this.onNudge && this._monitorSelectedJobId) {
         this._inputMode = "nudge_text";
         this._nudgeJobId = this._monitorSelectedJobId;
+        this._nudgeAgentCallId = this._monitorSelectedAgentCallId || null;
         this._nudgeJobIds = null;
         this._inputBuf = "";
         this.requestRender({ force: true });
@@ -659,7 +663,7 @@ export class DisplayInputController {
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "w") && this._jumpToWaitingMonitorAgent()) {
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "!") && this.onKill
-        && this._monitorSelectedJobId && this.workers.has(this._monitorSelectedJobId)) {
+        && this._monitorSelectedJobId && !this._monitorSelectedAgentCallId && this.workers.has(this._monitorSelectedJobId)) {
         // Kill the SELECTED agent, routed through the kill-confirm picker
         // (single entry) so one stray keypress can't drop a worker.
         this._inputMode = "kill";
@@ -772,6 +776,7 @@ export class DisplayInputController {
       } else if (matchesHotkey(str, key, "n") && this.onNudge && this._getNudgeWorkers().length > 0) {
         this._inputMode = "nudge_select";
         this._nudgeJobId = null;
+        this._nudgeAgentCallId = null;
         this._nudgeJobIds = this._getNudgeWorkers().map(([jobId]) => jobId);
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "?") && this.onAsk) {

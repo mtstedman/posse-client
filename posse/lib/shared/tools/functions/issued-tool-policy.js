@@ -201,6 +201,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (tool.suite === "tools" && tool.name === "sub_agent_next_input") return coordination.subAgentNextInput === true;
   if (tool.suite === "tools" && tool.name === "dispatch_agent") return coordination.dispatchAgent === true;
   if (tool.suite === "tools" && tool.name === "web_research_handoff") return coordination.webResearchHandoff === true;
+  if (tool.suite === "tools" && tool.name === "ack_operator_feedback" && coordination.webResearchHandoff === true) return true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
@@ -366,6 +367,7 @@ function failClosedIssuedPolicy() {
       agentHandoffCompactV3: false,
       subAgentV1: false,
       dispatchAgentV1: false,
+      researchInvestigationV1: false,
       webResearchHandoffV1: false,
     },
   };
@@ -409,6 +411,7 @@ export function normalizeRemoteIssuedPolicy(value, {
     subAgentNextInputV1: coordinationSource?.agent_handoff_v1 === true
       && coordinationSource?.sub_agent_next_input_v1 === true,
     dispatchAgentV1: coordinationSource?.dispatch_agent_v1 === true,
+    researchInvestigationV1: coordinationSource?.research_investigation_v1 === true,
     webResearchHandoffV1: coordinationSource?.web_research_handoff_v1 === true,
   };
   const toolSurface = normalizeIssuedToolSurface(
@@ -471,6 +474,7 @@ export function normalizeRemoteIssuedPolicy(value, {
         && toolSurface.includes("tools.agent_handoff"),
       subAgentV1: subAgentEnabled,
       dispatchAgentV1: dispatchAgentEnabled,
+      researchInvestigationV1: coordination.researchInvestigationV1,
       webResearchHandoffV1: webResearchHandoffEnabled,
       ...(coordination.subAgentNextInputV1 && childCursorIssued
         ? { subAgentNextInputV1: true }
@@ -524,6 +528,7 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
       sub_agent_next_input_v1: "subAgentNextInputV1" in issued.coordination
         && issued.coordination.subAgentNextInputV1 === true,
       dispatch_agent_v1: issued.coordination.dispatchAgentV1 === true,
+      research_investigation_v1: issued.coordination.researchInvestigationV1 === true,
       web_research_handoff_v1: issued.coordination.webResearchHandoffV1 === true,
     },
   };
@@ -563,6 +568,7 @@ export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue,
     || authority.provider !== candidate.provider
     || candidate.toolSurface.some((tool) => !authority.toolSurface.includes(tool))
     || candidate.childToolSurface.some((tool) => !authority.childToolSurface.includes(tool))
+    || candidate.coordination.researchInvestigationV1 && !authority.coordination.researchInvestigationV1
     || candidate.toolPolicy.allow_read && !authority.toolPolicy.allow_read
     || candidate.toolPolicy.allow_write && !authority.toolPolicy.allow_write
     || candidate.toolPolicy.allow_shell && !authority.toolPolicy.allow_shell

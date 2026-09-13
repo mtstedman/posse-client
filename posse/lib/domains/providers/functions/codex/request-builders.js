@@ -13,6 +13,8 @@ import {
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
+import { CODEX_AGENTS_MCP_SERVER_SUFFIX, CODEX_AGENT_DISPATCH_TOOLS } from "../../../../catalog/tool-surface/provider-attachments.js";
+import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
 const CODEX_LAZY_MCP_SERVER_SUFFIX = "lazy";
@@ -69,6 +71,7 @@ function appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverC
 export function buildCodexDeterministicMcpAttachment(serverConfig, {
   role = "",
   disableSystemTools = false,
+  plannerDispatchPolicy = null,
   nativeBatchingCatalog = String(role || "").trim().toLowerCase() === "researcher"
     ? process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || null : null,
   nativeBatching = true,
@@ -88,11 +91,22 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     && CODEX_CODE_MODE_ROLES.includes(String(role || "").trim().toLowerCase());
   const lazyTools = toolNames.filter((name) => CODEX_LAZY_TOOL_NAMES.has(name));
   const eagerTools = toolNames.filter((name) => !CODEX_LAZY_TOOL_NAMES.has(name));
+  // The experimental gate only relocates already-issued tools. It cannot mint
+  // planner/research capabilities or enable dispatch through the master switch.
+  const issuedAgentTools = eagerTools.filter((name) => CODEX_AGENT_DISPATCH_TOOLS.includes(name));
+  const dispatchPolicy = issuedAgentTools.length > 0
+    ? plannerDispatchPolicy || readPlannerDispatchPolicy({ projectDir: serverConfig.cwd })
+    : null;
+  const agentTools = dispatchPolicy?.enabled === true ? issuedAgentTools : [];
+  const agentsServerKey = agentTools.length > 0
+    ? _toCodexConfigKey(`${serverKey}_${CODEX_AGENTS_MCP_SERVER_SUFFIX}`)
+    : null;
   const directTools = codexCodeMode || codexNativeBatching
-    ? eagerTools.filter((name) => CODEX_DIRECT_RESEARCH_TOOLS.includes(name))
+    ? eagerTools.filter((name) => CODEX_DIRECT_RESEARCH_TOOLS.includes(name) || agentTools.includes(name))
     : eagerTools;
+  const terminalTools = directTools.filter((name) => !agentTools.includes(name));
   const nestedTools = codexCodeMode ? eagerTools.filter((name) => !directTools.includes(name)) : [];
-  const terminalServerKey = (codexCodeMode || codexNativeBatching) && directTools.length > 0
+  const terminalServerKey = (codexCodeMode || codexNativeBatching) && terminalTools.length > 0
     ? _toCodexConfigKey(`${serverKey}_${CODEX_TERMINAL_MCP_SERVER_SUFFIX}`)
     : null;
   const lazyServerKey = lazyTools.length > 0
@@ -131,7 +145,7 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
   }
 
   appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, { toolNames });
-  const baseDisabledTools = [...lazyTools, ...(terminalServerKey ? directTools : [])].map(rawToolsMcpName);
+  const baseDisabledTools = [...lazyTools, ...(terminalServerKey ? terminalTools : []), ...agentTools].map(rawToolsMcpName);
   if (baseDisabledTools.length > 0) {
     configOverrides.push(
       `mcp_servers.${serverKey}.disabled_tools=${_toTomlLiteral(baseDisabledTools)}`,
@@ -141,18 +155,28 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
   // ATLAS action. Those are prerequisites for the execution contract and the
   // ATLAS-first gate, so they must never depend on model-initiated discovery.
   configOverrides.push(`mcp_servers.${serverKey}.required=true`);
-  if (!codexCodeMode && (eagerTools.length > 0 || atlasTools.length > 0)) {
+  if (!codexCodeMode && (eagerTools.some((name) => !agentTools.includes(name)) || atlasTools.length > 0)) {
     directServerKeys.push(serverKey);
   }
   if (terminalServerKey) {
     // Reuse the same shim credentials/owner session, preserving source custody.
-    appendCodexMcpServerLaunchOverrides(configOverrides, terminalServerKey, serverConfig, { toolNames: directTools });
+    appendCodexMcpServerLaunchOverrides(configOverrides, terminalServerKey, serverConfig, { toolNames: terminalTools });
     configOverrides.push(
-      `mcp_servers.${terminalServerKey}.enabled_tools=${_toTomlLiteral(directTools.map(rawToolsMcpName))}`,
+      `mcp_servers.${terminalServerKey}.enabled_tools=${_toTomlLiteral(terminalTools.map(rawToolsMcpName))}`,
       `mcp_servers.${terminalServerKey}.required=true`,
     );
     if (codexNativeBatching) configOverrides.push(`mcp_servers.${terminalServerKey}.supports_parallel_tool_calls=false`);
     directServerKeys.push(terminalServerKey);
+  }
+  if (agentsServerKey) {
+    appendCodexMcpServerLaunchOverrides(configOverrides, agentsServerKey, serverConfig, { toolNames: agentTools });
+    configOverrides.push(
+      `mcp_servers.${agentsServerKey}.enabled_tools=${_toTomlLiteral(agentTools.map(rawToolsMcpName))}`,
+      `mcp_servers.${agentsServerKey}.tool_timeout_sec=${dispatchPolicy.toolTimeoutSec}`,
+      `mcp_servers.${agentsServerKey}.supports_parallel_tool_calls=false`,
+      `mcp_servers.${agentsServerKey}.required=true`,
+    );
+    directServerKeys.push(agentsServerKey);
   }
   if (lazyServerKey) {
     const rawLazyTools = lazyTools.map(rawToolsMcpName);
@@ -188,7 +212,9 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     {
       providerName: "codex",
       codexNestedMcp: codexCodeMode && !directTools.includes(toolName),
-      serverName: CODEX_LAZY_TOOL_NAMES.has(toolName) && lazyServerKey
+      serverName: agentTools.includes(toolName) && agentsServerKey
+        ? agentsServerKey
+        : CODEX_LAZY_TOOL_NAMES.has(toolName) && lazyServerKey
         ? lazyServerKey
         : terminalServerKey && directTools.includes(toolName) ? terminalServerKey : serverKey,
     },
@@ -199,6 +225,8 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     tools: toolNames,
     directTools,
     nestedTools,
+    agentTools,
+    agentsServerKey,
     terminalServerKey,
     codexCodeMode,
     codexNativeBatching,

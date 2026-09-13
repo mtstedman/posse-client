@@ -103,6 +103,8 @@ export const EVENT_TYPES = Object.freeze({
   AGENT_INTERACTION_CREATED: "agent_interaction.created",
   AGENT_QUESTION_ANSWERED: "agent_question.answered",
   AGENT_QUESTION_CREATED: "agent_question.created",
+  PLANNER_DISPATCH_INACTIVE: "planner.dispatch_inactive",
+  PLANNER_DISPATCH_COMPLETED: "planner.dispatch_completed",
   OPERATOR_NUDGE_APPLIED: "operator_nudge.applied",
   OPERATOR_NUDGE_CREATED: "operator_nudge.created",
   OPERATOR_NUDGE_EXPIRED: "operator_nudge.expired",

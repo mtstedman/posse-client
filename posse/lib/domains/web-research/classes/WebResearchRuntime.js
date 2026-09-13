@@ -1,3 +1,6 @@
+import { RESEARCH_AGENT_TYPES } from "../../../catalog/planner-dispatch.js";
+import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
+import { RESEARCH_CHILD_PROFILE, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 // @ts-check
 
 import crypto from "node:crypto";
@@ -309,7 +312,7 @@ export class WebResearchRuntime {
     return true;
   }
 
-  async execute(args, { context = {} } = {}) {
+  async execute(args, { context = {}, budget = null, signal = null } = {}) {
     const runtimeContext = /** @type {Record<string, any>} */ (context);
     const parentAgentCallId = positiveId(runtimeContext.agentCallId ?? runtimeContext.agent_call_id);
     if (!parentAgentCallId) {
@@ -319,6 +322,7 @@ export class WebResearchRuntime {
         { stage: "admission" },
       );
     }
+    if (signal?.aborted) throw signal.reason || runtimeError("WEB_RESEARCH_ABORTED", "Web research was aborted", { stage: "control" });
     const input = exactObject(args, ["route", "question"], "dispatch_agent");
     if (input.route !== "web") {
       throw runtimeError(
@@ -370,15 +374,19 @@ export class WebResearchRuntime {
       childAgentCallId: null,
       controller: new AbortController(),
     };
+    const forwardAbort = () => dispatch.controller.abort(signal.reason);
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+    if (signal?.aborted) forwardAbort();
     this.dispatches.set(dispatch.id, dispatch);
     this.activeChildren += 1;
+    const timeoutMs = budget?.timeoutMs || this.timeoutMs;
     const timeout = setTimeout(() => {
       dispatch.controller.abort(runtimeError(
         "WEB_RESEARCH_TIMEOUT",
-        `Web research exceeded ${this.timeoutMs}ms`,
+        `Web research exceeded ${timeoutMs}ms`,
         { stage: "child" },
       ));
-    }, this.timeoutMs);
+    }, timeoutMs);
     timeout.unref?.();
     /** @type {() => void} */
     let handleAbort = () => {};
@@ -397,6 +405,7 @@ export class WebResearchRuntime {
         registration.runChild({
           dispatchId: dispatch.id,
           question,
+          budget,
           signal: dispatch.controller.signal,
         }),
         abortPromise,
@@ -423,6 +432,7 @@ export class WebResearchRuntime {
       };
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", forwardAbort);
       dispatch.controller.signal.removeEventListener("abort", handleAbort);
       if (dispatch.childAgentCallId) this.childBindings.delete(dispatch.childAgentCallId);
       this.dispatches.delete(dispatch.id);
@@ -434,6 +444,49 @@ export class WebResearchRuntime {
 export const webResearchRuntime = new WebResearchRuntime();
 
 export async function executeDispatchAgent(args, options = {}) {
+  const raw = options.context || {};
+  const context = { ...raw, work_item_id: raw.work_item_id ?? raw.workItemId, job_id: raw.job_id ?? raw.jobId,
+    attempt_id: raw.attempt_id ?? raw.attemptId, agent_call_id: raw.agent_call_id ?? raw.agentCallId };
+  options = { ...options, context };
+  const parentId = Number(context.agentCallId ?? context.agent_call_id);
+  const research = subAgentRuntime.parents.get(parentId)?.researchPolicy?.enabled;
+  if (Object.hasOwn(args || {}, "requests")) {
+    if (!research) throw runtimeError("RESEARCH_BATCH_DISABLED", "Research batches require an eligible planner", { stage: "admission" });
+    exactObject(args, ["requests"], "dispatch_agent");
+    if (!Array.isArray(args.requests) || args.requests.length < 2 || args.requests.length > 3) {
+      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain two or three entries", { stage: "validation" });
+    }
+    const requests = args.requests.map((raw, index) => {
+      const request = exactObject(raw, ["id", "agent_type", "question", "budget"], `requests[${index}]`);
+      if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) {
+        throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
+      }
+      return {
+        id: boundedString(request.id, `requests[${index}].id`, 40),
+        profile: RESEARCH_CHILD_PROFILE,
+        agent_type: request.agent_type,
+        intent: boundedString(request.question, `requests[${index}].question`, 2000),
+        ...(request.budget ? { budget: request.budget } : {}),
+      };
+    });
+    return await subAgentRuntime.execute({
+      protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" }, requests,
+    }, options);
+  }
+  if (research && args?.agent_type == null) throw runtimeError("RESEARCH_AGENT_TYPE_REQUIRED", "dispatch_agent requires agent_type code or web", { stage: "validation" });
+  if (args?.agent_type != null && research) {
+    exactObject(args, ["agent_type", "question", "budget"], "dispatch_agent");
+    if (!RESEARCH_AGENT_TYPES.includes(args.agent_type)) throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
+    return await subAgentRuntime.execute({
+      protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" },
+      requests: [{ id: "research", profile: RESEARCH_CHILD_PROFILE, agent_type: args.agent_type, intent: args.question, ...(args.budget ? { budget: args.budget } : {}) }],
+    }, options);
+  }
+  if (args?.agent_type != null) {
+    exactObject(args, ["agent_type", "question"], "dispatch_agent");
+    if (args.agent_type !== "web") throw runtimeError("RESEARCH_AGENT_TYPE_DISABLED", "Code research requires the gated planner", { stage: "admission" });
+    return await webResearchRuntime.execute({ route: "web", question: args.question }, options);
+  }
   return await webResearchRuntime.execute(args, options);
 }
 

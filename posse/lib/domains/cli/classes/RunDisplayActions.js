@@ -1,3 +1,4 @@
+import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { createHash } from "node:crypto";
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
@@ -192,7 +193,7 @@ export class RunDisplayActions {
     this.display.onInject = (description) => this.inject(description);
     this.display.onImage = (prompt) => this.image(prompt);
     this.display.onKill = (jobId) => this.kill(jobId);
-    this.display.onNudge = (jobId, correction) => this.nudge(jobId, correction);
+    this.display.onNudge = (jobId, correction, agentCallId = null) => this.nudge(jobId, correction, agentCallId);
     this.display.onKillWI = (wiId) => this.killWorkItem(wiId);
     this.display.onSkipJob = (jobId) => this.skip(jobId);
     this.display.onReviewPending = () => this.reviewPending();
@@ -502,7 +503,11 @@ export class RunDisplayActions {
     }
   }
 
-  nudge(jobId, correction) {
+  nudge(jobId, correction, agentCallId = null) {
+    if (agentCallId) {
+      const call = getAgentCallById(agentCallId);
+      if (!call || call.job_id !== jobId || call.status !== "running") throw new Error("Selected child has finished; select a running agent");
+    }
     const job = this.getJob(jobId);
     // A finished job can never retrieve guidance — refuse instead of telling
     // the operator "agent will retrieve it live" about a nudge that would sit
@@ -515,11 +520,12 @@ export class RunDisplayActions {
     createOperatorNudge({
       work_item_id: job?.work_item_id,
       job_id: jobId,
+      agent_call_id: agentCallId,
       body: correction,
       source: "terminal",
     });
 
-    this.display.addEvent(`${this.C.cyan}✎ Feedback queued for job #${jobId} — agent will retrieve it live${this.C.reset}`);
+    this.display.addEvent(`${this.C.cyan}✎ Feedback queued for ${agentCallId ? `child call #${agentCallId}` : `job #${jobId}`} — agent will retrieve it live${this.C.reset}`);
   }
 
   killWorkItem(wiId) {

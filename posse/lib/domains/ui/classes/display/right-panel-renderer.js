@@ -1,3 +1,4 @@
+import { appendResearchChildMonitorRows } from "../../functions/display/helpers/research-children.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { statusIcon as paletteStatusIcon } from "../../functions/display/status-palette.js";
 import { fit, stripAnsi, _sanitizeDisplayLine } from "../../functions/display/helpers/formatters.js";
@@ -151,6 +152,9 @@ function monitorStateMeta(state) {
   // killed) to keep its alarm value.
   if (state === "ask") return { label: "ASK", color: C.yellow, rail: C.yellow };
   if (state === "nudge") return { label: "nudge", color: C.yellow, rail: C.yellow };
+  if (state === "done") return { label: "done", color: C.dim, rail: C.dim };
+  if (state === "failed") return { label: "failed", color: C.red, rail: C.red };
+  if (state === "canceled") return { label: "canceled", color: C.dim, rail: C.dim };
   if (state === "idle") return { label: "idle", color: C.dim, rail: C.dim };
   return { label: "live", color: C.green, rail: C.green };
 }
@@ -631,7 +635,7 @@ export class DisplayRightPanelRenderer {
     const divider = `${C.dim}\u2502${C.reset}`;
     const leftHead = ` ${C.dim}FLEET${C.reset}${" ".repeat(Math.max(1, leftW - 19))}${C.dim}< > cycle${C.reset}`;
     const rightHead = selected
-      ? ` ${C.brightWhite}${C.bold}[${selected.index}] ${selected.role} #${selected.jobId}${C.reset}${C.dim} \u00b7 ${selected.wiLabel}${selected.attempt > 1 ? ` \u00b7 attempt ${selected.attempt}` : ""}${C.reset}`
+      ? ` ${C.brightWhite}${C.bold}[${selected.index}] ${selected.role} #${selected.agentCallId ? `call ${selected.agentCallId}` : selected.jobId}${C.reset}${C.dim} \u00b7 ${selected.wiLabel}${selected.attempt > 1 ? ` \u00b7 attempt ${selected.attempt}` : ""}${C.reset}`
       : "";
     lines.push(`${visiblePad(leftHead, leftW)}${divider}${fit(rightHead, rightW)}`);
     lines.push(`${C.dim}${"\u2500".repeat(leftW)}\u253c${"\u2500".repeat(rightW)}${C.reset}`);
@@ -670,7 +674,7 @@ export class DisplayRightPanelRenderer {
     if (selected?.state === "ask") actions.push(`${C.green}[a] answer${C.reset}`);
     if (selected && this.onNudge) actions.push(`${C.yellow}[n] nudge${C.reset}`);
     if (selected) actions.push(`${C.magenta}[d] changes${C.reset}`);
-    if (selected && this.onKill && this.workers?.has?.(selected.jobId)) actions.push(`${C.red}[!] kill${C.reset}`);
+    if (selected && !selected.agentCallId && this.onKill && this.workers?.has?.(selected.jobId)) actions.push(`${C.red}[!] kill${C.reset}`);
     if (actions.length === 0) actions.push(`${C.dim}no agent selected${C.reset}`);
     const nav = [
       `[1-${Math.min(agents.length, 9)}] jump`,
@@ -893,7 +897,7 @@ export class DisplayRightPanelRenderer {
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(agent);
     }
-    const ordered = [...grouped.values()].flat();
+    const ordered = appendResearchChildMonitorRows([...grouped.values()].flat(), { toolRows: toolRecent });
     ordered.forEach((agent, idx) => { agent.index = idx + 1; });
     this._monitorAgentsCache = ordered;
     this._monitorAgentsCacheAt = cacheNow;
@@ -907,13 +911,14 @@ export class DisplayRightPanelRenderer {
       this._monitorSelectedJobId = null;
       return null;
     }
-    let selected = agents.find((agent) => agent.jobId === this._monitorSelectedJobId);
+    let selected = agents.find((agent) => agent.jobId === this._monitorSelectedJobId && (agent.agentCallId || null) === (this._monitorSelectedAgentCallId || null));
     if (!selected) {
       // Prefer an agent that's blocked on the operator: when the previous
       // selection finishes (or nothing is selected yet), the focus pane lands
       // on whoever actually needs attention rather than whoever is first.
       selected = agents.find((agent) => agent.state === "ask") || agents[0];
       this._monitorSelectedJobId = selected.jobId;
+      this._monitorSelectedAgentCallId = selected.agentCallId || null;
       this._monitorFeedbackScroll = 0;
     }
     return selected;
@@ -950,7 +955,7 @@ export class DisplayRightPanelRenderer {
             : ` ${C.blue}${C.bold}WI#${key}${C.reset}`);
         }
         const meta = monitorActivityState(agent, spin);
-        const isSelected = selected?.jobId === agent.jobId;
+        const isSelected = selected?.jobId === agent.jobId && (selected?.agentCallId || null) === (agent.agentCallId || null);
         // Only the selected row carries the cursor and the bright/bold ink, so
         // the focused agent pops from the roster instead of sharing its weight
         // with every row. The rail bar keeps the ROLE tint (researcher purple,
@@ -960,7 +965,7 @@ export class DisplayRightPanelRenderer {
         const selector = isSelected ? `${C.brightWhite}${C.bold}\u258c${C.reset}` : " ";
         const rail = `${roleBrandColor(agent.role)}\u2503${C.reset}`;
         const titleInk = isSelected ? `${C.brightWhite}${C.bold}` : "";
-        const title = `${selector}${rail} ${titleInk}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.jobId}${C.reset}`;
+        const title = `${selector}${rail} ${titleInk}[${agent.index}] ${agent.role}${C.reset} ${C.dim}#${agent.agentCallId ? `call ${agent.agentCallId}` : agent.jobId}${C.reset}`;
         const tag = `${meta.color}${meta.bold ? C.bold : ""}${meta.glyph} ${meta.label}${C.reset}`;
         blockLines.push(`${visiblePad(title, Math.max(0, width - stripAnsi(tag).length - 1))}${tag}`);
         blockLines.push(`   ${C.dim}${fit(agent.activity, Math.max(8, width - 5))}${C.reset}`);
@@ -1055,12 +1060,13 @@ export class DisplayRightPanelRenderer {
 
 
 
-  _monitorToolActivityForJob(jobId, { limit = 8 } = {}) {
+  _monitorToolActivityForJob(jobId, { limit = 8, agentCallId = null, excludeCallIds = [] } = {}) {
     let data = null;
     try { data = typeof this.getToolData === "function" ? this.getToolData() : null; } catch { data = null; }
     const recent = Array.isArray(data?.recent) ? data.recent : [];
     const allRows = recent
-      .filter((row) => Number(row.job_id) === Number(jobId));
+      .filter((row) => Number(row.job_id) === Number(jobId)
+        && (agentCallId ? Number(row.agent_call_id) === agentCallId : !excludeCallIds.includes(Number(row.agent_call_id))));
     return {
       toolRows: allRows
         .filter((row) => !LIVE_CHANNEL_TOOL_TYPES.has(String(row.observation_type || "")))
@@ -1207,7 +1213,7 @@ export class DisplayRightPanelRenderer {
 
 
   _buildMonitorFeedbackToolLanes(agent, width, height) {
-    const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 60 });
+    const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 60, agentCallId: agent.agentCallId, excludeCallIds: agent.excludeCallIds });
     const feedbackEntries = this._monitorFeedbackEntries(agent, toolActivity.feedbackToolRows, { limit: 60 });
     const toolRows = [...toolActivity.toolRows]
       .sort((a, b) => (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0));
@@ -1322,8 +1328,9 @@ export class DisplayRightPanelRenderer {
     const rest = total - cardH - askBoxH;
     const feedbackDesired = Math.max(2, Math.min(Math.max(1, feedbackRows.length), FEEDBACK_MAX));
     const toolCap = Math.max(MIN_TOOLS_H, rest - (feedbackDesired + 4));
-    if (this._monitorToolRatchetJob !== agent.jobId) {
-      this._monitorToolRatchetJob = agent.jobId;
+    const toolLaneId = `${agent.jobId}:${agent.agentCallId || "parent"}`;
+    if (this._monitorToolRatchetJob !== toolLaneId) {
+      this._monitorToolRatchetJob = toolLaneId;
       this._monitorToolRatchetH = 0;
     }
     let toolBoxH = Math.max(MIN_TOOLS_H, Math.min(renderedToolRows.length + 4, toolCap));
@@ -1421,7 +1428,7 @@ export class DisplayRightPanelRenderer {
       if (Number.isFinite(f.additions)) add += f.additions;
       if (Number.isFinite(f.deletions)) del += f.deletions;
     }
-    const toolCount = this._monitorToolActivityForJob(agent.jobId, { limit: 500 }).toolRows.length;
+    const toolCount = this._monitorToolActivityForJob(agent.jobId, { limit: 500, agentCallId: agent.agentCallId, excludeCallIds: agent.excludeCallIds }).toolRows.length;
     const nudges = agent.pendingGuidance?.length || 0;
     const ago = agent.lastActivityAt ? `${fmtAgo(Date.now() - agent.lastActivityAt)} ago` : "idle";
 
@@ -1429,7 +1436,7 @@ export class DisplayRightPanelRenderer {
     const wiLabel = agent.wiLabel || "WI?";
     const chip = monitorWiStateChip(agent);
     const chipText = chip ? ` ${chip.color}${chip.label}${C.reset}` : "";
-    const wiTitle = _sanitizeDisplayLine(agent.wiTitle || "");
+    const wiTitle = _sanitizeDisplayLine(agent.researchQuestion || agent.wiTitle || "");
     const titleBudget = Math.max(6, textW - wiLabel.length - stripAnsi(chipText).length - 3);
     const row1 = ` ${C.blue}${C.bold}${wiLabel}${C.reset}${wiTitle ? ` ${C.brightWhite}${fit(wiTitle, titleBudget)}${C.reset}` : ""}${chipText}`;
 
@@ -1442,7 +1449,9 @@ export class DisplayRightPanelRenderer {
     // Row 3 \u2014 change + tool tally.
     const tally = `${toolCount} tool call${toolCount === 1 ? "" : "s"}`;
     let row3;
-    if (diff.loading) {
+    if (agent.agentCallId) {
+      row3 = ` ${C.dim}${tally} · parent call #${agent.parentAgentCallId}${C.reset}`;
+    } else if (diff.loading) {
       row3 = ` ${C.dim}changes computing\u2026 \u00b7 ${tally}${C.reset}`;
     } else if (diff.error) {
       row3 = ` ${C.dim}changes ${fit(diff.error, Math.max(8, textW - 10))}${C.reset}`;

@@ -14,6 +14,7 @@
 //   provider/model/internal rows into their own renderers.
 
 import { RESEARCH_CLAIM_REVIEW } from "../../../catalog/research-claim-review.js";
+import { PLANNER_DISPATCH_SETTINGS } from "../../../catalog/planner-dispatch.js";
 import {
   IMAGE_PROVIDER_OPTIONS,
   MODEL_TIERS as MODEL_TIER_NAMES,
@@ -334,6 +335,7 @@ export const SETTINGS_CATALOG = [
     description: "Choose whether plans run automatically, require approval only for critical risk, or always require approval",
   },
   { key: "agent_coordination_mode", default: "handoff", scope: "repo", options: AGENT_COORDINATION_MODE_VALUES, description: "Agent coordination: terminal handoff reports by default, off to disable them, or subagents to add bounded citation sub-agents." },
+  ...PLANNER_DISPATCH_SETTINGS,
   { key: "disable_system_tools", default: "true", valueType: "boolean", adminVisible: false, description: "Disable Claude's native Read/Write/Grep/Glob/Edit/Bash; agents use only the deterministic MCP + ATLAS tool surface" },
 
   // ── Assessor tuning ──────────────────────────────────────────────────────

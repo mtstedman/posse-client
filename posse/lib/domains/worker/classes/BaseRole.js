@@ -9,7 +9,9 @@ const SLOW_ROLE_PHASE_MS = 1000;
 const SLOW_PROVIDER_CALL_MS = 45000;
 
 function dispatchPacketFromContext(ctx = {}) {
-  return ctx.packet
+  return (ctx.role === "planner" && ctx.plannerPacket)
+    || (ctx.role === "researcher" && ctx.researcherPacket)
+    || ctx.packet
     || ctx.researcherPacket
     || ctx.plannerPacket
     || null;
@@ -141,6 +143,7 @@ export class BaseRole {
           agentHandoff: packet?.agent_coordination?.agent_handoff_v1 === true,
           subAgent: packet?.agent_coordination?.sub_agent_v1 === true,
           dispatchAgent: packet?.agent_coordination?.dispatch_agent_v1 === true,
+          researchInvestigation: packet?.agent_coordination?.research_investigation_v1 === true,
           webResearchHandoff: packet?.agent_coordination?.web_research_handoff_v1 === true,
           ...(atlasAvailable != null ? { atlasAvailable } : {}),
           handoffRequest: packet || {

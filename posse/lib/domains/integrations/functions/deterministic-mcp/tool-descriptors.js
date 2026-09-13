@@ -69,6 +69,7 @@ import {
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_DISPATCH_AGENT,
+  TOOL_DISPATCH_AGENT_PLANNER,
   TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../../catalog/native-tools.js";
 
@@ -812,13 +813,18 @@ export function getToolSchemaForRole(name, role, {
   compactV3 = false,
   compactV4 = false,
   requireResearcherCoverage = false,
+  researchInvestigation = false,
 } = {}) {
+  if (name === "dispatch_agent" && role === "planner" && researchInvestigation) {
+    return TOOL_DISPATCH_AGENT_PLANNER;
+  }
   if (name !== "agent_handoff") return getToolSchema(name);
   return getAgentHandoffToolSchemaForRole(role, {
     compactCompletion,
     compactV3,
     compactV4,
     requireResearcherCoverage,
+    researchInvestigation,
   });
 }
 

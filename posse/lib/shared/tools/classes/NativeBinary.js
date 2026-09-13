@@ -265,9 +265,33 @@ export class NativeBinary {
 
   /** Args to launch this binary's `worker --stdio` host. */
   #buildWorkerArgs() {
-    return this._configuredWorkerArgs
+    const args = this._configuredWorkerArgs
       ? [...this._configuredWorkerArgs]
       : ["worker", "--stdio"];
+    if (this.#developmentAuthPolicy()) args.push("--development-auth");
+    return args;
+  }
+
+  /** Debug native binaries accept local signing keys only with this test-only opt-in. */
+  #developmentAuthPolicy() {
+    const env = this._env || process.env;
+    if (!this.keyGated || env.POSSE_NATIVE_DEBUG_AUTH !== "1"
+      || !(env.POSSE_TEST_RUN || env.NODE_TEST_CONTEXT)) return null;
+    const policy = this.#authManager().getTrustedAuthPolicy();
+    return policy?.developmentMode === true && policy.envelope?.heartbeatJwtPublicKey
+      ? policy
+      : null;
+  }
+
+  /** The native debug verifier reads trusted development keys from each request. */
+  #developmentAuthForPulse(pulse) {
+    const policy = this.#developmentAuthPolicy();
+    const kid = String(pulse?.kid || "").trim();
+    if (!policy || !kid) return null;
+    return {
+      devOrigin: policy.origin,
+      devSigningKeys: [{ kid, publicKeyBase64: policy.envelope.heartbeatJwtPublicKey }],
+    };
   }
 
   /**
@@ -662,6 +686,8 @@ export class NativeBinary {
     // command.
     const workerEnvelope = { ...envelope };
     delete workerEnvelope.pulse;
+    const developmentAuth = this.#developmentAuthForPulse(this._workerAuthState.get(route)?.envelope);
+    if (developmentAuth) workerEnvelope.auth = developmentAuth;
     let workerSessionId;
     const dispatch = () => {
       const daemon = this.#daemon();
@@ -1275,6 +1301,7 @@ export class NativeBinary {
     const out = [];
     if (subcommand) out.push(subcommand);
     for (const a of args) out.push(a);
+    if (this.#developmentAuthPolicy()) out.push("--development-auth");
     return out;
   }
 
@@ -1408,7 +1435,10 @@ export class NativeBinary {
         route,
       };
     }
+    /** @type {Record<string, unknown>} */
     const requestWithPulse = { .../** @type {Record<string, unknown>} */ (parsed.request), pulse };
+    const developmentAuth = this.#developmentAuthForPulse(pulse);
+    if (developmentAuth) requestWithPulse.auth = developmentAuth;
     return {
       input: this.#encodeNativeRequest(requestWithPulse, parsed.wasBuffer),
       request: requestWithPulse,
@@ -1447,7 +1477,10 @@ export class NativeBinary {
         pulseCold: true,
       };
     }
+    /** @type {Record<string, unknown>} */
     const requestWithPulse = { .../** @type {Record<string, unknown>} */ (parsed.request), pulse };
+    const developmentAuth = this.#developmentAuthForPulse(pulse);
+    if (developmentAuth) requestWithPulse.auth = developmentAuth;
     return {
       input: this.#encodeNativeRequest(requestWithPulse, parsed.wasBuffer),
       request: requestWithPulse,

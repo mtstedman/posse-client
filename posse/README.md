@@ -113,6 +113,58 @@ plain sleep and native collaboration. Posse-issued sub-agent tools retain their
 concurrent dispatch, `wait_all`, and status waits. Explicit native-tool sessions
 retain their host coordination and sleep capabilities.
 
+### Experimental planner dispatch
+
+Set repository settings `planner_dispatch_mode=planner` and
+`agent_coordination_mode=subagents` to enable planner-led intake. The default
+`router` retains the existing upfront research/preflight flow. On the gated route,
+the planner can plan simple work directly or call one tool:
+
+```json
+{"agent_type":"code","question":"Find the request validation path and its tests","budget":{"reasoning_effort":"medium","max_turns":12}}
+```
+
+`dispatch_agent` accepts `agent_type: "code" | "web"`. Code children investigate
+the repository with read-only tools; web children use online research. Each call
+blocks and returns a compact evidence-backed report. Child calls do not receive
+the parent's transcript or dispatch tools. Existing citation-only `sub_agent`
+behavior remains available to its existing callers; gated planners receive only
+`dispatch_agent` for delegation.
+
+Repository settings bound total children per planner call (default 2), child
+turns (24), timeout (1200 seconds), effort (high), and returned report size
+(12000 characters). The triage turn setting is prompt guidance; child limits are
+runtime-enforced. The separate dispatch MCP timeout (1500 seconds) reserves time
+to return results. Existing child cancellation and stall handling are reused.
+
+Monitor Agents shows code/web child rows with their question, progress, tool
+history, provider/model/effort, and completion state. Select a running child and
+press `n` to send guidance to that exact call. Parent and sibling nudges remain
+separate. Agent-call records and planner completion events retain child lineage,
+usage, questions, and the zero-child decision.
+
+Testing requires the matching `feat/planner-dispatch-framework` remote branch
+for the code-child prompt and capability contract. Use both workbranches with an
+isolated test repository and enable the two settings there. Test a simple direct
+plan, a code investigation, a web investigation, a child nudge, and a canceled
+parent. The feature remains off by default. Oneshot and web-only intake retain
+their existing routes; red-team/synthesis and assessment loopbacks cannot dispatch.
+
+## Assessment replanning
+
+An assessor's `needs_replan` verdict returns directly to the standard planner.
+The planner receives the failed task, its success criteria and test command,
+assessor reasons, original scope/commit, and a record of retained work. Local
+preparation selects a read-only work-item branch snapshot and supplies the commit
+diff when available. Prior research remains historical context; the planner
+checks the affected current source before revising the remaining plan.
+
+Both researcher-dispatch tools are disabled on this route, independently of
+`planner_dispatch_mode`. Stale queued branches are canceled transactionally;
+completed work and implementations awaiting assessment are retained. The existing
+`posse_max_replans` limit counts direct planner cycles and legacy research cycles.
+Already-queued research loopbacks continue through their existing continuation.
+
 ## Scope approval
 
 Use `posse run --scope-mode=auto` or `posse go --scope-mode=auto` to approve
