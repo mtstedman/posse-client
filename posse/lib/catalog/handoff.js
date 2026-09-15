@@ -150,6 +150,21 @@ export const AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY = Object.freeze({
   rule: "at_least_one_claim",
 });
 
+// A planner may coin names only for cross-task symbols that repository lookup
+// cannot supply. Posse then copies the declarations into every referenced dev
+// task, avoiding independently invented interfaces while preserving the
+// canonical packet and downstream job format.
+export const AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY = Object.freeze({
+  profiles: Object.freeze(["planner.plan.v1"]),
+  taskRoles: Object.freeze(["dev"]),
+  scope: "new_repository_symbols",
+  minTaskRefs: 2,
+  ownerMustReference: true,
+  maxContracts: 20,
+  maxDeclarations: 12,
+  maxRefsPerTask: 20,
+});
+
 // Agent-facing schemas advertise canonical handoff fields only. Runtime keeps
 // these explicitly cataloged compatibility forms for older trusted callers and
 // malformed-response repair; accepting an alias never makes it model-facing.

@@ -61,6 +61,7 @@ import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
 import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
 import { renderClaimEvidenceReferences } from "./helpers/evidence-references.js";
+import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -88,6 +89,7 @@ const PLANNER_REPORT_KEYS = Object.freeze([
 const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
   "id",
   "depends_on",
+  "contract_refs",
   ...compatibilityAliasKeys("plannerTaskRole"),
   "intent",
   "summary",
@@ -2703,7 +2705,7 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
   const candidate = plainObject(args);
   if (normalizedRole !== "planner" || !candidate || !Object.hasOwn(candidate, "tasks")) return args;
 
-  const source = exactKeys(candidate, ["tasks"], "agent_handoff");
+  const source = exactKeys(candidate, ["shared_contracts", "tasks"], "agent_handoff");
   if (!Array.isArray(source.tasks) || source.tasks.length < 1) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.tasks must contain at least one task");
   }
@@ -2711,6 +2713,7 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
     fail("AGENT_HANDOFF_TOO_LARGE", "agent_handoff.tasks exceeds 50 entries");
   }
 
+  const contractAdditions = sharedPlanContractAdditions(source.tasks, source.shared_contracts);
   const handoffs = source.tasks.map((raw, index) => {
     const task = exactKeys(raw, PLANNER_COMPACT_TASK_KEYS, `agent_handoff.tasks[${index}]`);
     for (const key of ["summary", "scope", "success_criteria"]) {
@@ -2725,12 +2728,19 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
     }
     const taskRole = boundedString(taskRoleInput, `${label}.role`, 40);
     const targetKind = ["dev", "artificer"].includes(taskRole) ? "agent" : "system";
+    const additions = contractAdditions.get(index) || { constraints: [], successCriteria: [] };
+    if (task.constraints != null && !Array.isArray(task.constraints)) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.constraints must be an array`);
+    }
+    if (!Array.isArray(task.success_criteria) || task.success_criteria.length === 0) {
+      fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.success_criteria must be a non-empty array`);
+    }
     const report = {
       summary: task.summary,
       claims: task.claims ?? [],
       scope: task.scope ?? {},
-      constraints: task.constraints ?? [],
-      success_criteria: task.success_criteria ?? [],
+      constraints: [...(task.constraints ?? []), ...additions.constraints],
+      success_criteria: [...task.success_criteria, ...additions.successCriteria],
     };
     for (const key of PLANNER_REPORT_METADATA_KEYS) {
       if (task[key] != null) report[key] = task[key];

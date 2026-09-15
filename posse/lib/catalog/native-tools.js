@@ -13,6 +13,7 @@ import {
   AGENT_HANDOFF_LIMITS,
   AGENT_HANDOFF_PROTOCOL,
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
+  AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY,
 } from "./handoff.js";
 import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
 import { WEB_RESEARCH_PROTOCOL } from "./web-research.js";
@@ -923,6 +924,38 @@ const PLANNER_SCOPE = {
   additionalProperties: false,
 };
 
+const PLANNER_SHARED_CONTRACT = {
+  type: "object",
+  description:
+    "One plan-local naming contract for new symbols absent from repository code. " +
+    "Every referenced task receives the same declarations verbatim.",
+  properties: {
+    id: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      pattern: "^[a-z][a-z0-9-]*$",
+      description: "Stable plan-local label referenced by task.contract_refs.",
+    },
+    owner_task_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: 80,
+      description: "ID of the dev task that owns implementation of these declarations.",
+    },
+    declarations: {
+      type: "array",
+      minItems: 1,
+      maxItems: AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY.maxDeclarations,
+      items: { type: "string", minLength: 1, maxLength: 500 },
+      description:
+        "Exact new class, method, function, route, schema, or data-shape names, including paths and callable signatures where applicable.",
+    },
+  },
+  required: ["id", "owner_task_id", "declarations"],
+  additionalProperties: false,
+};
+
 const COMMON_HANDOFF_FIELDS = {
   id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates a deterministic ID when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
   depends_on: { type: "array", maxItems: 50, default: [], items: { type: "string", minLength: 1, maxLength: 80 } },
@@ -1021,6 +1054,14 @@ const PLANNER_COMPACT_TASK_V3 = {
   properties: {
     id: { type: "string", minLength: 1, maxLength: 80, description: "Optional; Posse generates task-N when omitted. Target 40 characters or fewer; 80 is the hard ceiling." },
     depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
+    contract_refs: {
+      type: "array",
+      maxItems: AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY.maxRefsPerTask,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9-]*$" },
+      description:
+        "IDs from top-level shared_contracts. Use only for new cross-task symbols that cannot be discovered in existing repository code.",
+    },
     role: { type: "string", enum: ["dev", "artificer", "human_input", "promote"] },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
     summary: {
@@ -1250,6 +1291,14 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   parameters: {
     type: "object",
     properties: {
+      shared_contracts: {
+        type: "array",
+        maxItems: AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY.maxContracts,
+        uniqueItems: true,
+        items: PLANNER_SHARED_CONTRACT,
+        description:
+          "Optional plan-local declarations for new symbols shared by multiple dev tasks. Existing repository names must be discovered and used directly instead.",
+      },
       tasks: {
         type: "array",
         minItems: 1,
@@ -1492,6 +1541,14 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   parameters: {
     type: "object",
     properties: {
+      shared_contracts: {
+        type: "array",
+        maxItems: AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY.maxContracts,
+        uniqueItems: true,
+        items: PLANNER_SHARED_CONTRACT,
+        description:
+          "Optional plan-local declarations for new symbols shared by multiple dev tasks. Existing repository names must be discovered and used directly instead.",
+      },
       tasks: {
         type: "array",
         minItems: 1,
