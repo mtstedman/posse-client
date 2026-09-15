@@ -61,6 +61,7 @@ import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
 import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
 import { renderClaimEvidenceReferences } from "./helpers/evidence-references.js";
+import { missingReportClaimsMessage } from "./helpers/missing-report-claims.js";
 import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
@@ -3776,7 +3777,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
     if (researcherReport && report.claims.length === 0) {
       issues.push({
         code: "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
-        message: `${label}.report.claims requires at least one evidence-backed claim`,
+        message: missingReportClaimsMessage(label, report.summary),
       });
     }
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {
@@ -4017,7 +4018,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     if (researcherReport && report.claims.length === 0) {
       fail(
         "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
-        `handoffs[${index}].report.claims requires at least one evidence-backed claim`,
+        missingReportClaimsMessage(`handoffs[${index}]`, report.summary),
       );
     }
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {

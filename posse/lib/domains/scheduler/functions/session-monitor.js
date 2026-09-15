@@ -138,6 +138,7 @@ export class SessionMonitor {
     this._tokenManager.setSessionContext({
       instanceId,
       sessionId: state.remote_session_id,
+      requireWorkItemGrant: state.submission_approval_enabled === 1,
     });
     try {
       if (this._scopeCapabilityConfirmed == null) {
@@ -152,6 +153,25 @@ export class SessionMonitor {
         : await this._client.heartbeat(state.relay_token, this._collectPresence(this.projectDir));
       const status = this._validate("heartbeat", raw);
       assertStatusMatches(state, status);
+      const priorPolicyRevision = Number(state.submission_approval_revision) || 0;
+      if (status.submission_approval_enabled == null) {
+        if (state.submission_approval_enabled === 1) {
+          throw sessionChanged("Session relay omitted the active Team approval policy");
+        }
+      } else if (status.submission_policy_revision < priorPolicyRevision
+          || (status.submission_policy_revision === priorPolicyRevision
+            && status.submission_approval_enabled !== (state.submission_approval_enabled === 1))) {
+        throw sessionChanged("Session Team approval policy regressed");
+      }
+      const teamPolicyEnabled = status.submission_approval_enabled === true;
+      this._tokenManager.setSessionContext({
+        instanceId,
+        sessionId: state.remote_session_id,
+        requireWorkItemGrant: teamPolicyEnabled,
+      });
+      // Changing the policy changes the pulse cache key and clears the native
+      // scope proof, even when the same binary was verified earlier this run.
+      this._tokenManager.confirmNativeScopeEnforcement(this._scopeCapabilityConfirmed);
       const roster = state.role === "host"
         ? await this._client?.members?.(state.relay_token)
         : null;
@@ -163,8 +183,15 @@ export class SessionMonitor {
         computePolicy: status.compute_policy,
         integrationPolicy: status.integration_policy,
         enrollmentOpen: status.enrollment_open,
+        submissionApprovalEnabled: status.submission_approval_enabled ?? null,
+        submissionPolicyRevision: status.submission_policy_revision ?? null,
       });
-      if (scopeChanged) this._tokenManager.clearAuthentication();
+      if (scopeChanged || teamPolicyEnabled !== (state.submission_approval_enabled === 1)
+          || status.submission_policy_revision !== priorPolicyRevision) {
+        this._tokenManager.clearAuthentication();
+        const { invalidateVerifiedTeamGrantCache } = await import("../../pairing/functions/team-submissions.js");
+        invalidateVerifiedTeamGrantCache();
+      }
       this._touch(state.id);
       const projectedStatus = roster ? { ...status, members: roster.members || [] } : status;
       this._writePeers(projectedStatus);

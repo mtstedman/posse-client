@@ -252,6 +252,7 @@ export class RelayClient extends EventEmitter {
       const ack = await this.dispatch(frame, {
         projectDir: this.projectDir,
         actor: "bridge-relay",
+        bridgeInstanceId: this.instanceId,
         tailBridgeEvents: this.tailBridgeEvents,
         getHeadEventId: this.getHeadEventId,
         getBridgeEpoch: this.getBridgeEpoch,

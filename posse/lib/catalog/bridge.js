@@ -12,6 +12,12 @@ export const WORK_ITEM_HISTORY_PROTOCOL = "posse.work_item_history.v1";
 export const WORK_ITEM_OVERVIEW_PROTOCOL = "posse.work_item_overview.v1";
 export const WORK_ITEM_STATS_PROTOCOL = "posse.work_item_stats.v1";
 export const WORK_ITEM_ACTION_PROTOCOL = "posse.work_item_action.v1";
+export const TEAM_OVERVIEW_PROTOCOL = "posse.team_overview.v1";
+export const TEAM_DECISION_PROTOCOL = "posse.team_decision.v1";
+export const TEAM_PROVIDER_PR_PROTOCOL = "posse.team_provider_pr.v1";
+export const TEAM_PROVIDER_PUBLISH_PROTOCOL = "posse.team_provider_publish.v1";
+export const TEAM_PROVIDER_PROTECTION_PROTOCOL = "posse.team_provider_protection.v1";
+export const TEAM_PROMOTION_PROTOCOL = "posse.team_promotion.v1";
 
 export const WORK_ITEM_BOUNDS = Object.freeze({
   ACTIVE: 100,
@@ -55,6 +61,15 @@ export const BRIDGE_COMMANDS = Object.freeze({
   PLAN_APPROVE: "plan.approve",
   PLAN_REJECT: "plan.reject",
   GIT_PUSH: "git.push",
+  TEAM_OVERVIEW: "team.overview",
+  TEAM_SUBMISSION_DECIDE: "team.submission.decide",
+  TEAM_POLICY_SET: "team.policy.set",
+  TEAM_GRANT_REQUEST: "team.grant.request",
+  TEAM_GRANT_ISSUE: "team.grant.issue",
+  TEAM_PROVIDER_PR_PREPARE: "team.provider_pr.prepare",
+  TEAM_PROVIDER_PR_PUBLISH: "team.provider_pr.publish",
+  TEAM_PROVIDER_PROTECTION_CONFIGURE: "team.provider_protection.configure",
+  TEAM_PROMOTION_APPROVE: "team.promotion.approve",
 });
 
 export const BRIDGE_ALLOWED_COMMANDS = Object.freeze(Object.values(BRIDGE_COMMANDS));

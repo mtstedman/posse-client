@@ -14,6 +14,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { teamManagedToolAdmitted } from "../../../domains/pairing/functions/team-managed-write.js";
 
 import { appendResearchWorkBudget, isResearchWorkBudgetBlock } from "../../../domains/research/functions/work-budget.js";
 import { compactResearchSearchResult } from "../functions/research-search-presentation.js";
@@ -5460,6 +5461,19 @@ export class PersistentMcpOwner {
           rawProviderToolArgs,
         );
         const providerToolArgs = normalizedProviderRequest.toolArgs;
+        const managedRequest = requestedToolPolicyName(providerToolName, providerToolArgs);
+        if (!teamManagedToolAdmitted(managedRequest.suite, managedRequest.name)) {
+          sendJson(res, 200, {
+            ok: true,
+            bootId: this.bootId,
+            sessionId: id,
+            message: mcpToolResultMessage(message, mcpToolErrorPayload(
+              "Team approval mode does not permit this tool route",
+              { code: "team_tool_route_blocked" },
+            )),
+          });
+          return;
+        }
         if (normalizedProviderRequest.routingError) {
           recordDeniedToolCall(session, providerToolName, providerToolArgs, policy, message, {
             code: "invalid_arguments",

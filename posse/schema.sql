@@ -17,7 +17,9 @@ PRAGMA foreign_keys = ON;
 --  16 = + pending shared-session enrollment phase.
 --  17 = + session identity, policy, scope, and provenance state.
 --  18 = + authoritative cross-instance work-item delegation journal.
-PRAGMA user_version = 19;
+--  19 = + investigating research and claim-review agent-call child kinds.
+--  20 = + Team submission approval policy and publication mode state.
+PRAGMA user_version = 20;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -1296,6 +1298,8 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
   close_action TEXT NOT NULL DEFAULT 'integrate',
   original_ssh_command TEXT,
   credential_directory TEXT,
+  submission_approval_enabled INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_enabled IN (0,1)),
+  submission_approval_revision INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_revision >= 0),
   phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
   process_pid INTEGER,
   last_error TEXT,

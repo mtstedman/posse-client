@@ -89,6 +89,7 @@ import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntim
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
 import { isProviderInfrastructureError } from "../functions/execution/provider-error.js";
+import { assertTeamManagedProvider } from "../../pairing/functions/team-managed-write.js";
 import {
   markUsageSegmentsIncomplete,
   recordUsageSegment,
@@ -1331,6 +1332,10 @@ export class TrackedProviderClient {
     } = this.deps;
     const attachedSourceEvidence = normalizeAttachedSourceEvidence(opts._attachedSourceEvidence);
     const effectiveCapabilityOpts = narrowProviderOptionsToRemoteIssuance(opts);
+    // Only these provider adapters execute file edits through Posse's
+    // mediated tool runtime. Claude/Codex can expose native shell/patch/file
+    // writes; local synchronous tools cannot fetch a fresh grant per call.
+    assertTeamManagedProvider(providerName);
     delete effectiveCapabilityOpts._attachedSourceEvidence;
     // Resolve the account-backed lockdown once, before minting/attaching the
     // Agent gate, and pass that same boolean to the Provider. Previously only

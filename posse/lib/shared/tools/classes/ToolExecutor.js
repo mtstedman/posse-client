@@ -11,6 +11,7 @@ import { protectedMutablePathReason, relativePathFromCwd } from "../../../domain
 import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../format/functions/display-paths.js";
 import { guardToolWriteLock } from "../../../domains/queue/functions/write-lock-guard.js";
 import { agentHiddenReadablePathReason } from "../../scope/functions/agent-hidden-paths.js";
+import { teamManagedSynchronousToolDenied } from "../../../domains/pairing/functions/team-managed-write.js";
 
 function normalizeScope(scope = {}) {
   return {
@@ -52,6 +53,8 @@ export class ToolExecutor {
 
   execute(toolName, args = {}) {
     const name = String(toolName || "").trim();
+    const managedErr = teamManagedSynchronousToolDenied(name);
+    if (managedErr) return managedErr;
     const handlers = this.handlers();
     const fn = handlers[name];
     if (typeof fn !== "function") return `Error: Unknown tool "${name}"`;
@@ -69,11 +72,13 @@ export class ToolExecutor {
       scopePredicates: this._scopePredicates,
     };
     const toolkit = this._toolkit;
+    const managedMutation = (name, handler) => (args) =>
+      teamManagedSynchronousToolDenied(name) || handler(args);
     return {
       read_file: (args) => toolkit.execReadFile(args, ctx.cwd, ctx.scopePredicates),
       request_scope: (args) => this._requestScope(args),
-      write_file: (args) => this._writeFile(args, toolkit, ctx),
-      edit_file: (args) => this._editFile(args, toolkit, ctx),
+      write_file: managedMutation("write_file", (args) => this._writeFile(args, toolkit, ctx)),
+      edit_file: managedMutation("edit_file", (args) => this._editFile(args, toolkit, ctx)),
       list_files: (args) => toolkit.execListFiles(args, ctx.cwd, ctx.scopePredicates),
       search_files: (args) => toolkit.execSearchFiles(args, ctx.cwd, ctx.scopePredicates),
       git_history: (args) => toolkit.execGitHistory(args, ctx.cwd, ctx.scopePredicates),
@@ -82,17 +87,17 @@ export class ToolExecutor {
       pull_brief: (args) => toolkit.execPullBrief(args, ctx.cwd, ctx.scopePredicates),
       get_brief: (args) => toolkit.execGetBrief(args, ctx.cwd, ctx.scopePredicates),
       validate_artifact_output: (args) => this._invokeOptional(toolkit.execValidateArtifactOutput, "validate_artifact_output", args, ctx),
-      prune_artifact_output: (args) => this._invokeOptional(toolkit.execPruneArtifactOutput, "prune_artifact_output", args, ctx),
-      resize_image: (args) => this._imageWrite("resize_image", args, toolkit.execResizeImage, ctx),
+      prune_artifact_output: managedMutation("prune_artifact_output", (args) => this._invokeOptional(toolkit.execPruneArtifactOutput, "prune_artifact_output", args, ctx)),
+      resize_image: managedMutation("resize_image", (args) => this._imageWrite("resize_image", args, toolkit.execResizeImage, ctx)),
       read_image_metadata: (args) => this._invokeOptional(toolkit.execReadImageMetadata, "read_image_metadata", args, ctx),
-      optimize_image: (args) => this._imageWrite("optimize_image", args, toolkit.execOptimizeImage, ctx),
-      reencode_image: (args) => this._imageWrite("reencode_image", args, toolkit.execReencodeImage, ctx),
-      clean_image: (args) => this._cleanImage(args, toolkit, ctx),
+      optimize_image: managedMutation("optimize_image", (args) => this._imageWrite("optimize_image", args, toolkit.execOptimizeImage, ctx)),
+      reencode_image: managedMutation("reencode_image", (args) => this._imageWrite("reencode_image", args, toolkit.execReencodeImage, ctx)),
+      clean_image: managedMutation("clean_image", (args) => this._cleanImage(args, toolkit, ctx)),
       extract_image_text: (args) => this._invokeOptional(toolkit.execExtractImageText, "extract_image_text", args, ctx),
-      move_file: (args) => this._moveFile(args, ctx),
-      copy_file: (args) => this._copyFile(args, ctx),
-      make_dir: (args) => this._makeDir(args, ctx),
-      bash: (args) => this._bash(args, ctx.cwd, ctx.allowWrite, ctx.scopePredicates.hasScope ? true : null),
+      move_file: managedMutation("move_file", (args) => this._moveFile(args, ctx)),
+      copy_file: managedMutation("copy_file", (args) => this._copyFile(args, ctx)),
+      make_dir: managedMutation("make_dir", (args) => this._makeDir(args, ctx)),
+      bash: managedMutation("bash", (args) => this._bash(args, ctx.cwd, ctx.allowWrite, ctx.scopePredicates.hasScope ? true : null)),
     };
   }
 

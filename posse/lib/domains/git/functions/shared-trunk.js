@@ -64,6 +64,18 @@ function sharedTrunkPush(args) {
   return (testOverrides?.push || pushSharedTrunkNative)(args);
 }
 
+async function teamPublicationGate(args) {
+  if (testOverrides?.teamGate) return testOverrides.teamGate(args);
+  const { gateTeamCandidateForPublication } = await import("../../pairing/functions/team-submissions.js");
+  return gateTeamCandidateForPublication(args);
+}
+
+async function teamPublishedProof(args) {
+  if (testOverrides?.teamPublishedProof) return testOverrides.teamPublishedProof(args);
+  const { verifyTeamPublishedCandidate } = await import("../../pairing/functions/team-submissions.js");
+  return verifyTeamPublishedCandidate(args);
+}
+
 function nativeResult(envelope) {
   return envelope && Object.prototype.hasOwnProperty.call(envelope, "result")
     ? envelope.result
@@ -414,6 +426,13 @@ export function isTransientSharedTrunkMergeResult(result) {
     "fast_forward_blocked",
     "remote_head_unresolved",
     "local_trunk_diverged",
+    "approval_pending",
+    "approval_unavailable",
+    "approval_stale",
+    "waiting_for_files",
+    "team_grant_missing",
+    "team_grant_inactive",
+    "signed_grant_invalid",
   ].includes(reason) || reason.startsWith("unexpected_fast_forward_outcome");
 }
 
@@ -514,6 +533,12 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
         }
       }
       if (operation.candidateSha && isAncestor(projectDir, operation.candidateSha, observed.remoteSha)) {
+        const proof = await teamPublishedProof({ projectDir, operation, observedOid: observed.remoteSha });
+        if (!proof?.ok) {
+          unresolved.push(operation);
+          operations.push({ operation, recovered: "team_publication_unverified", reason: proof?.reason });
+          continue;
+        }
         handleSharedTrunkAdvance(projectDir, {
           oldSha: operation.baseSha,
           newSha: observed.remoteSha,
@@ -988,6 +1013,8 @@ export async function mergeToSharedTrunkAsync({
           }
         }
         if (landed) {
+          const proof = await teamPublishedProof({ projectDir, operation, observedOid: observed.remoteSha });
+          if (!proof?.ok) return { ok: false, reason: proof?.reason || "team_publication_unverified", operation };
           handleSharedTrunkAdvance(projectDir, {
             oldSha: operation.baseSha,
             newSha: observed.remoteSha,
@@ -1102,6 +1129,8 @@ export async function mergeToSharedTrunkAsync({
           };
         }
         if (landed) {
+          const proof = await teamPublishedProof({ projectDir, operation, observedOid: prePushFetch.remoteSha });
+          if (!proof?.ok) return { ok: false, reason: proof?.reason || "team_publication_unverified", operation };
           handleSharedTrunkAdvance(projectDir, {
             oldSha: operation.baseSha,
             newSha: prePushFetch.remoteSha,
@@ -1176,6 +1205,22 @@ export async function mergeToSharedTrunkAsync({
           remote_sha: prePushFetch.remoteSha,
         }, Number(workItemId));
         continue;
+      }
+
+      const approval = await teamPublicationGate({ projectDir, operation });
+      if (!approval?.ok) {
+        operation = transition(operation, {
+          phase: "candidate",
+          lastErrorCode: approval?.reason || "team_approval_unavailable",
+        });
+        recordPublicationHealth(config, [operation]);
+        return {
+          ...approval,
+          ok: false,
+          operation,
+          sharedTrunk: true,
+          message: approval?.message || "Team submission requires originator approval",
+        };
       }
 
       let pushedEnvelope;

@@ -40,7 +40,7 @@ export class PulseTokenManager {
    *   now?: () => number,
    *   refreshSkewMs?: number,
    *   timeoutMs?: number,
-   *   sessionContext?: { instanceId: string, sessionId: string } | null,
+   *   sessionContext?: { instanceId: string, sessionId: string, requireWorkItemGrant?: boolean } | null,
    * }} [opts]
    */
   constructor({
@@ -69,7 +69,7 @@ export class PulseTokenManager {
     this._refreshes = new Map();
     /** @type {Map<string, { rejectedAt: number, status: number | undefined, remoteCode: string | undefined }>} */
     this._nativeVersionRejections = new Map();
-    /** @type {Map<string, { cacheKey: string, requiredRoute: string, nativePackage: string | null, nativeVersion: string | null }>} */
+    /** @type {Map<string, { cacheKey: string, requiredRoute: string, nativePackage: string | null, nativeVersion: string | null, workItemContext: { workItemId: string, grantRevision: number, grantJti: string } | null }>} */
     this._routeHeartbeatSpecs = new Map();
     /** @type {Map<string, NodeJS.Timeout>} */
     this._routeHeartbeatTimers = new Map();
@@ -122,6 +122,25 @@ export class PulseTokenManager {
       "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED",
       "scoped session mutation requires a posse-git binary with scope enforcement",
     );
+  }
+
+  #workItemContextForRoute(route, value) {
+    if (route !== GIT_MUTATE_ROUTE) {
+      if (value != null) {
+        throw pulseError("POSSE_PULSE_WORK_ITEM_ROUTE_INVALID", "work-item grants only authorize git mutation");
+      }
+      return null;
+    }
+    if (value == null) {
+      if (this._sessionContext?.requireWorkItemGrant) {
+        throw pulseError("POSSE_PULSE_WORK_ITEM_REQUIRED", "this Session requires a work-item grant for git mutation");
+      }
+      return null;
+    }
+    if (!this._sessionContext) {
+      throw pulseError("POSSE_PULSE_WORK_ITEM_SESSION_REQUIRED", "work-item grants require a Session context");
+    }
+    return normalizeWorkItemContext(value);
   }
 
   /**
@@ -215,13 +234,14 @@ export class PulseTokenManager {
    * version gets a distinct server-signed grant, while the raw key remains
    * inside this process-owned broker.
    *
-   * @param {{ refresh?: boolean, requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null }} opts
+   * @param {{ refresh?: boolean, requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null, workItemContext?: {workItemId: string, grantRevision: number, grantJti: string} | null }} opts
    * @returns {Promise<Readonly<NativePulseEnvelope> | null>} null when no launch key is available.
    */
-  async getPulseEnvelope({ refresh = false, requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
+  async getPulseEnvelope({ refresh = false, requiredRoute, nativePackage = null, nativeVersion = null, workItemContext = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) throw pulseError("POSSE_PULSE_ROUTE_REQUIRED", "a native pulse envelope requires an explicit route");
     this.#assertScopedMutateSupported(route);
+    const wiContext = this.#workItemContextForRoute(route, workItemContext);
     const nativeIdentity = normalizedNativeIdentity(nativePackage, nativeVersion);
     const rawKey = this.authManager.getLaunchKey({ refresh });
     if (!rawKey) return null;
@@ -229,13 +249,14 @@ export class PulseTokenManager {
     if (!policy?.envelope?.heartbeatUrl) {
       throw pulseError("POSSE_PULSE_AUTH_POLICY_UNAVAILABLE", "trusted heartbeat policy is unavailable");
     }
-    const cacheKey = `${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
-    const specKey = routeHeartbeatSpecKey(route, nativeIdentity);
+    const cacheKey = `${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}${workItemContextCacheKey(wiContext)}`;
+    const specKey = routeHeartbeatSpecKey(route, nativeIdentity, wiContext);
     this._routeHeartbeatSpecs.set(specKey, {
       cacheKey,
       requiredRoute: route,
       nativePackage: nativeIdentity?.package || null,
       nativeVersion: nativeIdentity?.version || null,
+      workItemContext: wiContext,
     });
     const now = this.now();
     const rejected = this._nativeVersionRejections.get(cacheKey);
@@ -249,7 +270,7 @@ export class PulseTokenManager {
       this.#scheduleRouteHeartbeat(specKey, cached);
       return cached.envelope;
     }
-    const minted = await this.#mintPulse(cacheKey, rawKey, policy, route, nativeIdentity);
+    const minted = await this.#mintPulse(cacheKey, rawKey, policy, route, nativeIdentity, wiContext);
     const refreshed = this._cache.get(cacheKey);
     if (refreshed) {
       assertExactRoute(refreshed.routes, route);
@@ -263,14 +284,16 @@ export class PulseTokenManager {
    * cannot await the heartbeat exchange. Returns null (never fetches) when no
    * unexpired envelope for the route is cached.
    *
-   * @param {{ requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null }} opts
+   * @param {{ requiredRoute: string, nativePackage?: string | null, nativeVersion?: string | null, workItemContext?: {workItemId: string, grantRevision: number, grantJti: string} | null }} opts
    * @returns {Readonly<NativePulseEnvelope> | null}
    */
-  getCachedPulseEnvelope({ requiredRoute, nativePackage = null, nativeVersion = null } = /** @type {any} */ ({})) {
+  getCachedPulseEnvelope({ requiredRoute, nativePackage = null, nativeVersion = null, workItemContext = null } = /** @type {any} */ ({})) {
     const route = String(requiredRoute || "").trim();
     if (!route) return null;
+    let wiContext;
     try {
       this.#assertScopedMutateSupported(route);
+      wiContext = this.#workItemContextForRoute(route, workItemContext);
     } catch {
       return null;
     }
@@ -279,7 +302,7 @@ export class PulseTokenManager {
     if (!rawKey) return null;
     const policy = this.authManager.getTrustedAuthPolicy();
     if (!policy?.envelope?.heartbeatUrl) return null;
-    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`);
+    const cached = this._cache.get(`${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}${workItemContextCacheKey(wiContext)}`);
     if (!cached?.envelope || this.now() >= cached.expiresAt) return null;
     try {
       assertExactRoute(cached.routes, route);
@@ -298,13 +321,14 @@ export class PulseTokenManager {
    * @param {{ envelope: Readonly<Record<string, unknown>>, developmentMode: boolean }} policy
    * @param {string | null} requiredRoute
    * @param {{ package: string, version: string } | null} nativeIdentity
+   * @param {{ workItemId: string, grantRevision: number, grantJti: string } | null} workItemContext
    * @returns {Promise<{ token: string, envelope: Readonly<NativePulseEnvelope> | null }>}
    */
-  #mintPulse(cacheKey, rawKey, policy, requiredRoute, nativeIdentity = null) {
+  #mintPulse(cacheKey, rawKey, policy, requiredRoute, nativeIdentity = null, workItemContext = null) {
     const inFlight = this._refreshes.get(cacheKey);
     if (inFlight) return inFlight;
     const generation = this._generation;
-    const promise = this.#refreshPulse(rawKey, policy, requiredRoute, nativeIdentity).then((entry) => {
+    const promise = this.#refreshPulse(rawKey, policy, requiredRoute, nativeIdentity, workItemContext).then((entry) => {
       if (this._generation !== generation) {
         throw pulseError("POSSE_PULSE_AUTH_CHANGED", "heartbeat authentication changed while the pulse was being minted");
       }
@@ -392,10 +416,12 @@ export class PulseTokenManager {
         requiredRoute: spec.requiredRoute,
         nativePackage: spec.nativePackage,
         nativeVersion: spec.nativeVersion,
+        workItemContext: spec.workItemContext,
       });
     } catch (error) {
       if (!this._heartbeatRunning) return;
-      if (error?.code === "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED") {
+      if (error?.code === "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED"
+        || (spec.workItemContext && error?.status === 403)) {
         this._routeHeartbeatSpecs.delete(specKey);
         return;
       }
@@ -414,7 +440,7 @@ export class PulseTokenManager {
     for (const spec of specs) {
       const cached = this._cache.get(spec.cacheKey);
       if (cached?.envelope && this.now() < cached.refreshAt && this.now() < cached.expiresAt) {
-        this.#scheduleRouteHeartbeat(routeHeartbeatSpecKey(spec.requiredRoute, normalizedNativeIdentity(spec.nativePackage, spec.nativeVersion)), cached);
+        this.#scheduleRouteHeartbeat(routeHeartbeatSpecKey(spec.requiredRoute, normalizedNativeIdentity(spec.nativePackage, spec.nativeVersion), spec.workItemContext), cached);
         continue;
       }
       await this.getPulseEnvelope({
@@ -422,6 +448,7 @@ export class PulseTokenManager {
         requiredRoute: spec.requiredRoute,
         nativePackage: spec.nativePackage,
         nativeVersion: spec.nativeVersion,
+        workItemContext: spec.workItemContext,
       });
     }
   }
@@ -457,8 +484,9 @@ export class PulseTokenManager {
    *   request names the route so each native grant is distinct. Omitted for
    *   Node's own outbound HTTPS bearer (unscoped legacy body).
    * @param {{ package: string, version: string } | null} [nativeIdentity]
+   * @param {{ workItemId: string, grantRevision: number, grantJti: string } | null} [workItemContext]
    */
-  async #refreshPulse(rawKey, policy, requiredRoute = null, nativeIdentity = null) {
+  async #refreshPulse(rawKey, policy, requiredRoute = null, nativeIdentity = null, workItemContext = null) {
     const heartbeatUrl = String(policy.envelope.heartbeatUrl || "");
     this.assertTrustedResourceUrl(heartbeatUrl, "heartbeat request");
     const ac = new AbortController();
@@ -469,7 +497,7 @@ export class PulseTokenManager {
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     let response;
     try {
-      /** @type {Record<string, string>} */
+      /** @type {Record<string, string | number>} */
       const heartbeatBody = { posse_key: rawKey };
       if (requiredRoute) heartbeatBody.route = requiredRoute;
       if (nativeIdentity) {
@@ -479,6 +507,11 @@ export class PulseTokenManager {
       if (this._sessionContext) {
         heartbeatBody.instanceId = this._sessionContext.instanceId;
         heartbeatBody.sessionId = this._sessionContext.sessionId;
+      }
+      if (workItemContext) {
+        heartbeatBody.workItemId = workItemContext.workItemId;
+        heartbeatBody.grantRevision = workItemContext.grantRevision;
+        heartbeatBody.grantJti = workItemContext.grantJti;
       }
       response = await this.fetchImpl(heartbeatUrl, {
         method: "POST",
@@ -501,7 +534,7 @@ export class PulseTokenManager {
     }
     let text;
     try {
-      if (response.status === 401 || response.status === 403) this.clearAuthentication();
+      if (response.status === 401 || (response.status === 403 && !workItemContext)) this.clearAuthentication();
       // The request deadline and response-size ceiling apply to errors too.
       // Preserve only the server's bounded machine code; arbitrary remote
       // text is never reflected into errors or child processes.
@@ -726,8 +759,8 @@ function normalizedNativeIdentity(nativePackage, nativeVersion) {
   return Object.freeze({ package: packageName, version });
 }
 
-function routeHeartbeatSpecKey(route, nativeIdentity) {
-  return `${String(route || "").trim()}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}`;
+function routeHeartbeatSpecKey(route, nativeIdentity, workItemContext = null) {
+  return `${String(route || "").trim()}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}${workItemContextCacheKey(workItemContext)}`;
 }
 
 function normalizedRoutes(value) {
@@ -847,11 +880,42 @@ function normalizeSessionContext(value) {
   if (!instanceId || !sessionId || instanceId.length > 128 || sessionId.length > 128) {
     throw new TypeError("native session context requires bounded instanceId and sessionId");
   }
-  return Object.freeze({ instanceId, sessionId });
+  return Object.freeze({
+    instanceId,
+    sessionId,
+    requireWorkItemGrant: value.requireWorkItemGrant === true,
+  });
 }
 
 function sessionContextCacheKey(value) {
-  return value ? `:session=${value.sessionId}:instance=${value.instanceId}` : "";
+  return value
+    ? `:session=${value.sessionId}:instance=${value.instanceId}:wiRequired=${value.requireWorkItemGrant}`
+    : "";
+}
+
+function normalizeWorkItemContext(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw pulseError("POSSE_PULSE_WORK_ITEM_INVALID", "work-item pulse context is invalid");
+  }
+  const workItemId = String(value.workItemId || "").trim();
+  const grantJti = String(value.grantJti || "").trim();
+  const grantRevision = Number(value.grantRevision);
+  const tokenPattern = /^[A-Za-z0-9._:-]{1,128}$/;
+  if (!tokenPattern.test(workItemId)
+      || !tokenPattern.test(grantJti)
+      || !Number.isSafeInteger(grantRevision)
+      || grantRevision < 1) {
+    throw pulseError("POSSE_PULSE_WORK_ITEM_INVALID", "work-item pulse context is invalid");
+  }
+  return Object.freeze({ workItemId, grantRevision, grantJti });
+}
+
+function workItemContextCacheKey(value) {
+  if (!value) return "";
+  const digest = createHash("sha256")
+    .update(`${value.workItemId}\0${value.grantRevision}\0${value.grantJti}`)
+    .digest("hex");
+  return `:wi=${digest}`;
 }
 
 function unsupportedNativeVersionError(rejected) {

@@ -60,7 +60,7 @@ import {
 } from "../../../research/functions/waiting-lane-demand.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 import { runResearchClaimReview } from "../../../research/functions/run-claim-review.js";
-import { researchReturnsFinalReport } from "../../../research/functions/output-routing.js";
+import { researchUsesReportProfile } from "../../../research/functions/output-routing.js";
 
 const CHILD_BRIEF_SYNTH_CHAR_LIMIT = 12000;
 const CHILD_BRIEF_EXCERPT_CHAR_LIMIT = 3000;
@@ -475,7 +475,7 @@ export class ResearcherRole extends BaseRole {
       : getResearchBudget(workItem, payload);
     const deepthink = isResearchBudgetDeep(researchBudget);
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
-    const reportMode = roleMode === "solo" && researchReturnsFinalReport(workItem, payload);
+    const reportMode = researchUsesReportProfile(workItem, payload);
     const promptProfile = researchPromptProfile(roleMode, { reportMode });
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), this.getRole());
     const webFetchCachePreload = buildWebFetchCachePreload(job.work_item_id);

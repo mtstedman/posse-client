@@ -31,6 +31,7 @@ import {
   needsPairingSessionSchema,
   needsPairingSessionPendingPhaseSchema,
   needsPairingSessionPolicySchema,
+  needsPairingSubmissionApprovalSchema,
   needsWorkItemDelegationSchema,
   needsWorkItemsGovernanceTierRepair,
   rebuildArtifactsTable,
@@ -43,6 +44,7 @@ import {
   installPairingSessionSchema,
   repairPairingSessionPendingPhaseSchema,
   installPairingSessionPolicySchema,
+  installPairingSubmissionApprovalSchema,
   installWorkItemDelegationSchema,
   installBridgeCommandResultsSchema,
   repairWorkItemsGovernanceTierSchema,
@@ -2868,6 +2870,12 @@ export function getDb() {
   runHostMigration(_db, {
     version: 19, name: "agent_calls_investigating_research_child",
     needs: needsAgentCallsChildKindsRepair, migrate: repairAgentCallsChildKindsSchema,
+  });
+  runHostMigration(_db, {
+    version: 20,
+    name: "pairing_submission_approval",
+    needs: needsPairingSubmissionApprovalSchema,
+    migrate: installPairingSubmissionApprovalSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

@@ -699,8 +699,11 @@ During the compatibility rollout, `posse serve --pair` still pairs a
 phone/client to the durable Remote bridge. It does not bypass session admission
 or enroll another Posse clone.
 
-Manual configuration remains available for long-lived administrator-managed
-trunks. Create the branch once, push it, then enable the feature last:
+Manual configuration remains available for existing long-lived administrator-managed
+trunks through explicit `posse admin set` commands. These legacy runtime keys are
+omitted from the Posse and Bossy admin settings editors; Session manages new
+team trunks and their approvals. Create the branch once, push it, then enable
+the feature last:
 
 ```bash
 git switch -c posse/shared

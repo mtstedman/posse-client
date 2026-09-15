@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 19;
+export const HOST_SCHEMA_VERSION = 20;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -560,6 +560,10 @@ export function installPairingSessionSchema(db) {
       close_action TEXT NOT NULL DEFAULT 'integrate',
       original_ssh_command TEXT,
       credential_directory TEXT,
+      submission_approval_enabled INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_enabled IN (0,1)),
+      submission_approval_revision INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_revision >= 0),
+      team_publication_mode TEXT NOT NULL DEFAULT 'direct' CHECK (team_publication_mode IN ('direct','github-pr')),
+      team_publication_revision INTEGER NOT NULL DEFAULT 0 CHECK (team_publication_revision >= 0),
       phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
       process_pid INTEGER,
       last_error TEXT,
@@ -616,6 +620,10 @@ export function repairPairingSessionPendingPhaseSchema(db) {
         close_action TEXT NOT NULL DEFAULT 'integrate',
         original_ssh_command TEXT,
         credential_directory TEXT,
+        submission_approval_enabled INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_enabled IN (0,1)),
+        submission_approval_revision INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_revision >= 0),
+        team_publication_mode TEXT NOT NULL DEFAULT 'direct' CHECK (team_publication_mode IN ('direct','github-pr')),
+        team_publication_revision INTEGER NOT NULL DEFAULT 0 CHECK (team_publication_revision >= 0),
         phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
         process_pid INTEGER,
         last_error TEXT,
@@ -654,6 +662,8 @@ const PAIRING_SESSION_POLICY_COLUMNS = Object.freeze([
   ["close_action", "TEXT NOT NULL DEFAULT 'integrate'"],
   ["original_ssh_command", "TEXT"],
   ["credential_directory", "TEXT"],
+  ["team_publication_mode", "TEXT NOT NULL DEFAULT 'direct' CHECK (team_publication_mode IN ('direct','github-pr'))"],
+  ["team_publication_revision", "INTEGER NOT NULL DEFAULT 0 CHECK (team_publication_revision >= 0)"],
 ]);
 
 export function needsPairingSessionPolicySchema(db) {
@@ -676,6 +686,24 @@ export function installPairingSessionPolicySchema(db) {
 
 export function __testInstallPairingSessionPolicySchema(db) {
   return installPairingSessionPolicySchema(db);
+}
+
+export function needsPairingSubmissionApprovalSchema(db) {
+  return tableExists(db, "pairing_sessions")
+    && ["submission_approval_enabled", "submission_approval_revision"]
+      .some((column) => !getTableColumnNames(db, "pairing_sessions").includes(column));
+}
+
+export function installPairingSubmissionApprovalSchema(db) {
+  if (!needsPairingSubmissionApprovalSchema(db)) return false;
+  const columns = getTableColumnNames(db, "pairing_sessions");
+  if (!columns.includes("submission_approval_enabled")) {
+    db.exec("ALTER TABLE pairing_sessions ADD COLUMN submission_approval_enabled INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_enabled IN (0,1))");
+  }
+  if (!columns.includes("submission_approval_revision")) {
+    db.exec("ALTER TABLE pairing_sessions ADD COLUMN submission_approval_revision INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_revision >= 0)");
+  }
+  return true;
 }
 
 export function needsWorkItemDelegationSchema(db) {

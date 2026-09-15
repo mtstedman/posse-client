@@ -79,6 +79,7 @@ import {
 } from "../../web-research/classes/WebResearchRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
+import { researcherReportOnlyForSession } from "./deterministic-mcp/researcher-report-profile.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
@@ -105,6 +106,7 @@ import {
   requestJobScopeExpansion,
 } from "../../queue/functions/index.js";
 import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
+import { runWithTeamManagedToolGrant } from "../../pairing/functions/team-managed-write.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
 import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
@@ -1556,6 +1558,7 @@ addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   compactCompletion: compactAgentHandoffIssued(),
   compactV3: compactAgentHandoffV3Issued(),
   compactV4: compactAgentHandoffV4Issued(),
+  researcherReportOnly: researcherReportOnlyForSession({ role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId }),
   requireResearcherCoverage: researcherTraversalCoverageRequired(),
   researchInvestigation: bootConfig.researchInvestigation === true,
 }));
@@ -2826,6 +2829,7 @@ function rebuildNativeToolSchemas() {
     compactCompletion: compactAgentHandoffIssued(),
     compactV3: compactAgentHandoffV3Issued(),
     compactV4: compactAgentHandoffV4Issued(),
+    researcherReportOnly: researcherReportOnlyForSession({ role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId }),
     requireResearcherCoverage: researcherTraversalCoverageRequired(),
     researchInvestigation: bootConfig.researchInvestigation === true,
   }));
@@ -3213,7 +3217,13 @@ async function runNativeToolThroughGate(toolName, args, handler, {
 } = {}) {
   const label = `tool.${toolName}`;
   const key = nativeToolGateKey();
-  const run = () => handler(args);
+  const run = () => runWithTeamManagedToolGrant({
+    toolName,
+    args,
+    cwd: workspaceCwd,
+    workItemId: mcpWorkItemId,
+    run: () => handler(args),
+  });
   const result = BLOCKING_NATIVE_TOOL_NAMES.has(toolName)
     ? await DETERMINISTIC_TOOL_GATE.write(key, run, { label, waitMs: 120000 })
     : await DETERMINISTIC_TOOL_GATE.read(key, run, { label, waitMs: 30000 });
@@ -4347,9 +4357,15 @@ async function resumeDeferredLiveScopeTool(call) {
         if (decision?.approved === true) {
           grantApprovedScopeEntries(decision, effectiveScopePredicates);
           if (call.marker.operation === "write_file") {
-            result = await writeFileWithinScope(call.marker.args || {});
+            result = await runWithTeamManagedToolGrant({
+              toolName: "write_file", args: call.marker.args || {}, cwd: workspaceCwd,
+              workItemId: mcpWorkItemId, run: () => writeFileWithinScope(call.marker.args || {}),
+            });
           } else if (call.marker.operation === "edit_file") {
-            result = await editFileWithinScope(call.marker.args || {});
+            result = await runWithTeamManagedToolGrant({
+              toolName: "edit_file", args: call.marker.args || {}, cwd: workspaceCwd,
+              workItemId: mcpWorkItemId, run: () => editFileWithinScope(call.marker.args || {}),
+            });
           } else {
             result = JSON.stringify(decision, null, 2);
           }

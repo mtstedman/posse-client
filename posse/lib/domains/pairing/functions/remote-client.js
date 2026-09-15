@@ -280,9 +280,31 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
       && !["each-member", "capability-routing", "host-only"].includes(response.compute_policy)) {
       throw invalidResponse(endpoint, "compute_policy is invalid", status);
     }
-    if (response.integration_policy != null
+  if (response.integration_policy != null
       && !["none", "side-trunk"].includes(response.integration_policy)) {
       throw invalidResponse(endpoint, "integration_policy is invalid", status);
+    }
+    if (response.submission_approval_enabled != null
+      && typeof response.submission_approval_enabled !== "boolean") {
+      throw invalidResponse(endpoint, "submission_approval_enabled is invalid", status);
+    }
+    if (response.submission_policy_revision != null
+      && (!Number.isSafeInteger(response.submission_policy_revision) || response.submission_policy_revision < 0)) {
+      throw invalidResponse(endpoint, "submission_policy_revision is invalid", status);
+    }
+    if ((response.submission_approval_enabled == null) !== (response.submission_policy_revision == null)) {
+      throw invalidResponse(endpoint, "submission policy fields are incomplete", status);
+    }
+    if (response.team_publication_mode != null
+      && !["direct", "github-pr"].includes(response.team_publication_mode)) {
+      throw invalidResponse(endpoint, "team_publication_mode is invalid", status);
+    }
+    if (response.team_publication_revision != null
+      && (!Number.isSafeInteger(response.team_publication_revision) || response.team_publication_revision < 0)) {
+      throw invalidResponse(endpoint, "team_publication_revision is invalid", status);
+    }
+    if ((response.team_publication_mode == null) !== (response.team_publication_revision == null)) {
+      throw invalidResponse(endpoint, "team publication fields are incomplete", status);
     }
     validatePeers(endpoint, response, status);
   } else if (endpoint !== "resolve") {
@@ -444,6 +466,41 @@ export function createPairingRemoteClient({
     heartbeat: (token, presence = null) => validatedRequest("heartbeat", { token, body: presence }),
     close: (token, mode = "graceful") => validatedRequest("close", { token, body: { mode } }),
     leave: (token) => validatedRequest("leave", { token }),
+    teamGrants: (token, sessionId, workItemId = null) => request("team_grants", {
+      method: "GET", token,
+      path: `grants?session_id=${encodeURIComponent(String(sessionId))}`
+        + (workItemId == null ? "" : `&work_item_id=${encodeURIComponent(String(workItemId))}`),
+    }),
+    requestTeamGrant: (token, body) => request("team_grant_request", {
+      token, body, path: "grants/request",
+    }),
+    registerTeamSigningKey: (token, body) => request("team_grant_key", {
+      token, body, path: "grants/key",
+    }),
+    issueTeamGrant: (token, body) => request("team_grant_issue", {
+      token, body, path: "grants/issue",
+    }),
+    handoffTeamGrant: (token, body) => request("team_grant_handoff", {
+      token, body, path: "grants/handoff",
+    }),
+    setTeamSubmissionPolicy: (token, body) => request("team_policy", {
+      token, body, path: "submission-policy",
+    }),
+    setTeamPublicationMode: (token, body) => request("team_publication_mode", {
+      token, body, path: "team-publication-mode",
+    }),
+    teamSubmissions: (token, sessionId) => request("team_submissions", {
+      method: "GET", token, path: `submissions?session_id=${encodeURIComponent(String(sessionId))}`,
+    }),
+    submitTeamWorkbranch: (token, body) => request("team_submit", {
+      token, body, path: "submissions",
+    }),
+    decideTeamWorkbranch: (token, body) => request("team_decide", {
+      token, body, path: "submissions/decision",
+    }),
+    checkTeamWorkbranch: (token, body) => request("team_check", {
+      token, body, path: "submissions/check",
+    }),
   });
 }
 

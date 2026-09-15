@@ -21,6 +21,7 @@ import { spawn, spawnSync } from "node:child_process";
 
 import {
   ATLAS_VECTOR_NATIVE_ROUTE,
+  GIT_MUTATE_ROUTE,
   GIT_READ_ROUTE,
   NATIVE_DAEMON_PROTOCOL,
   NATIVE_WORKER_MAX_REQUEST_BYTES,
@@ -154,6 +155,7 @@ function isUnsupportedNativeVersionError(error) {
  * @property {number | null} [workerSessionId] Host identity required by session-bound handles.
  * @property {number} [maxBuffer]
  * @property {string} [requiredRoute]
+ * @property {{workItemId:string,grantRevision:number,grantJti:string}} [workItemContext]
  * @property {(event: unknown) => void} [onProgress]
  * @property {boolean} [retireWorkerOnAbort]
  */
@@ -939,6 +941,20 @@ export class NativeBinary {
     return this.#runSyncPerCall(subcommand, args, opts);
   }
 
+  /** Prime the exact versioned WI pulse before a synchronous commit worker
+   * enters its native transaction. The later sync call reads this cache. */
+  async primeWorkItemPulse(workItemContext) {
+    if (!workItemContext || typeof workItemContext.workItemId !== "string"
+        || !Number.isSafeInteger(workItemContext.grantRevision)
+        || typeof workItemContext.grantJti !== "string") {
+      throw new TypeError("A pinned work item grant is required");
+    }
+    return this.#pulseManager().getPulseEnvelope({
+      ...this.#versionedPulseOptions(GIT_MUTATE_ROUTE),
+      workItemContext,
+    });
+  }
+
   /**
    * Synchronous per-call spawn (one process per invocation).
    *
@@ -951,7 +967,7 @@ export class NativeBinary {
     const bin = this.resolvePath();
     if (!bin) return this.#unavailableResult();
     const fullArgs = this.#buildArgs(subcommand, args);
-    const inputWithAuth = this.#inputWithNativeAuthSync(opts.input, opts.requiredRoute);
+    const inputWithAuth = this.#inputWithNativeAuthSync(opts.input, opts.requiredRoute, opts.workItemContext);
     if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
       this.#retireWorkerAfterAuthFailure();
       return inputWithAuth.pulseCold
@@ -987,6 +1003,11 @@ export class NativeBinary {
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
+    // WI-scoped mutation must use its own per-call pulse. A persistent worker
+    // keeps route grants by route name and cannot safely distinguish two WIs.
+    if (opts.workItemContext && opts.requiredRoute === GIT_MUTATE_ROUTE) {
+      return this.#runPerCall(subcommand, args, opts);
+    }
     if (this.workerCapable && opts.worker === true) {
       if (Array.isArray(opts.workerArgs)) {
         return this.#runViaConfiguredWorker(subcommand, args, /** @type {any} */ (opts));
@@ -1052,7 +1073,7 @@ export class NativeBinary {
       return this.#spawnPerCall(bin, fullArgs, opts, parsed.input);
     }
     return (async () => {
-      const inputWithAuth = await this.#attachPulseAsync(parsed, opts.requiredRoute);
+      const inputWithAuth = await this.#attachPulseAsync(parsed, opts.requiredRoute, opts.workItemContext);
       if (inputWithAuth.error) {
         return this.#nativeVersionUnsupportedResult(inputWithAuth.error);
       }
@@ -1407,12 +1428,15 @@ export class NativeBinary {
    * @param {string | undefined} requiredRoute
    * @returns {Promise<{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null, error?: Error }>}
    */
-  async #attachPulseAsync(parsed, requiredRoute) {
+  async #attachPulseAsync(parsed, requiredRoute, workItemContext = null) {
     const route = this.#requiredRouteFor(requiredRoute);
-    let pulse = this.#runtimePulseFor(route);
+    let pulse = this.#runtimePulseFor(route, workItemContext);
     if (!pulse) {
       try {
-        pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
+        pulse = await this.#pulseManager().getPulseEnvelope({
+          ...this.#versionedPulseOptions(route),
+          workItemContext,
+        });
       } catch (error) {
         // Mint failures fail closed below; error details (which never include
         // token material) are not propagated into the child request.
@@ -1456,20 +1480,23 @@ export class NativeBinary {
    * @param {string | undefined} requiredRoute
    * @returns {{ input: Buffer | string | undefined, request: Record<string, unknown> | null, route: string | null, pulseCold?: boolean }}
    */
-  #inputWithNativeAuthSync(input, requiredRoute) {
+  #inputWithNativeAuthSync(input, requiredRoute, workItemContext = null) {
     const parsed = this.#parseNativeProtocolInput(input);
     if (!parsed.protocol) return { input: parsed.input, request: parsed.request, route: null, pulseCold: false };
     const route = this.#requiredRouteFor(requiredRoute);
-    let pulse = this.#runtimePulseFor(route);
+    let pulse = this.#runtimePulseFor(route, workItemContext);
     if (!pulse) {
       try {
-        pulse = this.#pulseManager().getCachedPulseEnvelope(this.#versionedPulseOptions(route));
+        pulse = this.#pulseManager().getCachedPulseEnvelope({
+          ...this.#versionedPulseOptions(route),
+          workItemContext,
+        });
       } catch {
         pulse = null;
       }
     }
     if (!isValidPulseEnvelope(pulse)) {
-      this.#warmPulse(route);
+      this.#warmPulse(route, workItemContext);
       return {
         input: this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer),
         request: parsed.request,
@@ -1490,15 +1517,21 @@ export class NativeBinary {
   }
 
   /** Fire-and-forget background mint so a later sync call finds a cached pulse. */
-  #warmPulse(route) {
+  #warmPulse(route, workItemContext = null) {
     try {
       void Promise.resolve(
-        this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route)),
+        this.#pulseManager().getPulseEnvelope({
+          ...this.#versionedPulseOptions(route),
+          workItemContext,
+        }),
       ).catch(() => {});
     } catch { /* fail-closed guard already covers the caller */ }
   }
 
-  #runtimePulseFor(route) {
+  #runtimePulseFor(route, workItemContext = null) {
+    // Legacy workers may use their route-scoped runtime pulse. A WI-scoped
+    // mutation must mint a separate grant-bound pulse for that exact WI.
+    if (route === GIT_MUTATE_ROUTE && workItemContext) return null;
     const pulse = this._runtimePulseEnvelopes.get(route) || null;
     if (isValidPulseEnvelope(pulse) && String(pulse?.route || "") === route) return pulse;
     if (pulse) this._runtimePulseEnvelopes.delete(route);

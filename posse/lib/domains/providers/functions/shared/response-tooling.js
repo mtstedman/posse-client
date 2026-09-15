@@ -19,6 +19,8 @@ import {
 import { buildEmbeddedToolDefinitions } from "./embedded-tools.js";
 import { execGenerateImageInternal } from "./image-generate-internal.js";
 import { createStandardToolHandlerMap, executeToolWithMap } from "./tool-runtime.js";
+import { runWithTeamManagedToolGrant } from "../../../pairing/functions/team-managed-write.js";
+import { getObservationContext } from "../../../observability/functions/observations.js";
 
 export { appendExecutionTools, sharedBuildScopePredicates, sharedSafePath };
 
@@ -138,14 +140,20 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
       if (limitedArgs !== gateArgs) executionArgsStr = JSON.stringify(limitedArgs);
     }
 
-    const result = await executeToolWithMap(name, executionArgsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope, abortSignal }, {
-      handlers: standardToolHandlers,
-      onUnknown: (toolName, args) => {
-        if (atlasAction) {
-          return executeEmbeddedAtlasTool(atlasAction, args, { cwd, config: atlasConfig || undefined });
-        }
-        return `Error: Unknown tool "${toolName}"`;
-      },
+    const result = await runWithTeamManagedToolGrant({
+      toolName: canonicalName,
+      args: gateArgs,
+      cwd,
+      workItemId: getObservationContext()?.work_item_id,
+      run: () => executeToolWithMap(name, executionArgsStr, { cwd, allowWrite, scopePredicates, chainScopeKey: gateScopeKey, declaredScope, abortSignal }, {
+        handlers: standardToolHandlers,
+        onUnknown: (toolName, args) => {
+          if (atlasAction) {
+            return executeEmbeddedAtlasTool(atlasAction, args, { cwd, config: atlasConfig || undefined });
+          }
+          return `Error: Unknown tool "${toolName}"`;
+        },
+      }),
     });
 
     if (atlasAction) {

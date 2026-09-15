@@ -1526,6 +1526,39 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   },
 };
 
+// Ordinary standalone report sessions use the report branch of compact v3.
+// Keep its evidence selector contract intact; the schema-diet experiment's
+// string-only selectors are a separate projection.
+export const TOOL_AGENT_HANDOFF_RESEARCHER_REPORT = {
+  ...TOOL_AGENT_HANDOFF_RESEARCHER_V3,
+  description: TOOL_AGENT_HANDOFF_RESEARCHER_V4.description,
+  parameters: {
+    type: "object",
+    properties: {
+      profile: { type: "string", enum: ["researcher.report.v1"] },
+      outcome: { type: "string", enum: ["complete"] },
+      summary: TOOL_AGENT_HANDOFF_RESEARCHER_V4.parameters.properties.summary,
+      claims: {
+        ...RESEARCHER_HANDOFF_CLAIMS,
+        minItems: 1,
+        description:
+          "Ordered findings with their visible evidence selectors. State each finding once, preserving its conditions, ordering and failure behavior. Posse expands the selectors and assembles the report; claim order supplies [E1], [E2], ... labels.",
+        items: {
+          ...RESEARCHER_HANDOFF_CLAIM,
+          properties: {
+            claim: RESEARCHER_HANDOFF_CLAIM.properties.claim,
+            evidence: RESEARCHER_HANDOFF_CLAIM.properties.evidence,
+            decoy: RESEARCHER_HANDOFF_CLAIM.properties.decoy,
+          },
+        },
+      },
+      coverage: RESEARCHER_COMPLETION_COVERAGE,
+    },
+    required: ["profile", "outcome", "summary", "claims"],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   type: "function",
   name: "agent_handoff",
@@ -1663,6 +1696,7 @@ export function getAgentHandoffToolSchemaForRole(role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
+  researcherReportOnly = false,
   requireResearcherCoverage = false,
   researchInvestigation = false,
 } = {}) {
@@ -1679,7 +1713,9 @@ export function getAgentHandoffToolSchemaForRole(role, {
   if (normalizedRole === "researcher") {
     const schema = compactV3 && compactV4
       ? TOOL_AGENT_HANDOFF_RESEARCHER_V4
-      : (compactV3 ? TOOL_AGENT_HANDOFF_RESEARCHER_V3 : TOOL_AGENT_HANDOFF_RESEARCHER);
+      : (compactV3
+        ? (researcherReportOnly ? TOOL_AGENT_HANDOFF_RESEARCHER_REPORT : TOOL_AGENT_HANDOFF_RESEARCHER_V3)
+        : TOOL_AGENT_HANDOFF_RESEARCHER);
     if (!schema.parameters?.properties?.coverage) return schema;
     if (!requireResearcherCoverage) {
       const properties = { ...schema.parameters.properties };

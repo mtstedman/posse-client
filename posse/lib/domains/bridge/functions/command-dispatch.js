@@ -20,6 +20,7 @@ import {
   withMergeLock,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { authorizeRelaySponsorship } from "./sponsorship.js";
 import {
   collectStateSnapshot,
   getWorkItemState,
@@ -41,6 +42,17 @@ import { answerWorkItemQuestion, nudgeWorkItemAgent } from "./work-item-actions.
 import { projectWorkItemHistory, projectWorkItemTail } from "./work-item-history.js";
 import { projectWorkItemOverview } from "./work-item-overview.js";
 import { projectWorkItemStats } from "./work-item-stats.js";
+import {
+  decideTeamSubmission,
+  issueTeamGrant,
+  projectTeamOverview,
+  requestTeamGrant,
+  setTeamPolicy,
+  prepareTeamProviderPullRequest,
+  publishTeamProviderPullRequest,
+  configureTeamProviderProtection,
+  approveTeamPromotion,
+} from "./team.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import {
@@ -81,6 +93,14 @@ const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.GIT_PUSH,
   BRIDGE_COMMANDS.QUESTION_ANSWER,
   BRIDGE_COMMANDS.AGENT_NUDGE,
+  BRIDGE_COMMANDS.TEAM_SUBMISSION_DECIDE,
+  BRIDGE_COMMANDS.TEAM_POLICY_SET,
+  BRIDGE_COMMANDS.TEAM_GRANT_REQUEST,
+  BRIDGE_COMMANDS.TEAM_GRANT_ISSUE,
+  BRIDGE_COMMANDS.TEAM_PROVIDER_PR_PREPARE,
+  BRIDGE_COMMANDS.TEAM_PROVIDER_PR_PUBLISH,
+  BRIDGE_COMMANDS.TEAM_PROVIDER_PROTECTION_CONFIGURE,
+  BRIDGE_COMMANDS.TEAM_PROMOTION_APPROVE,
 ]);
 
 function commandIdFromFrame(frame = {}) {
@@ -323,6 +343,33 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
     case BRIDGE_COMMANDS.WORK_ITEMS_TAIL:
       return projectWorkItemTail(args, context);
 
+    case BRIDGE_COMMANDS.TEAM_OVERVIEW:
+      return projectTeamOverview(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_SUBMISSION_DECIDE:
+      return decideTeamSubmission(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_POLICY_SET:
+      return setTeamPolicy(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_GRANT_REQUEST:
+      return requestTeamGrant(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_GRANT_ISSUE:
+      return issueTeamGrant(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_PROVIDER_PR_PREPARE:
+      return prepareTeamProviderPullRequest(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_PROVIDER_PR_PUBLISH:
+      return publishTeamProviderPullRequest(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_PROVIDER_PROTECTION_CONFIGURE:
+      return configureTeamProviderProtection(args, context);
+
+    case BRIDGE_COMMANDS.TEAM_PROMOTION_APPROVE:
+      return approveTeamPromotion(args, context);
+
     case BRIDGE_COMMANDS.QUESTION_ANSWER:
       return answerWorkItemQuestion(args, context);
 
@@ -508,8 +555,11 @@ export async function dispatchBridgeCommandFrame(frame, context = {}) {
   if (!validDurableCommandId(commandId)) {
     return createErrorAck(commandId, "invalid_command_id");
   }
+  const sponsorship = authorizeRelaySponsorship(frame, name, args, context);
+  if (!sponsorship.ok) return createErrorAck(commandId, sponsorship.reason);
   const commandResultStore = context.commandResultStore || new CommandResultStore();
-  const executionContext = { ...context, commandResultStore };
+  const executionContext = { ...context, commandResultStore,
+    ...(sponsorship.pilotInstanceId ? { sponsorship } : {}) };
   if (MUTATING_COMMAND_SET.has(name)) {
     let claim;
     try {

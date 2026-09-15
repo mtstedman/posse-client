@@ -18,6 +18,7 @@ import { getObservationContext } from "../../observability/functions/observation
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { verifyOrAcquireJobWriteLockForPath } from "./file-locks.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { teamManagedWriteGuard } from "../../pairing/functions/team-managed-write.js";
 
 function repoRelativePath(cwd, displayPath) {
   const base = path.resolve(cwd || process.cwd());
@@ -47,6 +48,8 @@ function holderLabel(conflict) {
  * assess-only).
  */
 export function guardToolWriteLock(toolName, displayPath, cwd) {
+  const teamErr = teamManagedWriteGuard(toolName, displayPath, cwd);
+  if (teamErr) return teamErr;
   const ambient = getObservationContext() || {};
   if (ambient.job_id == null) return null;
   let rel;

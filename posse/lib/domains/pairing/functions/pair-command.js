@@ -202,6 +202,9 @@ export function parsePairArgs(argv = []) {
   let hasRemoteFlag = false;
   let hasBranchFlag = false;
   let keepBranch = false;
+  let historyPreserving = false;
+  let approvedSourceOid = null;
+  let approvedOriginOid = null;
   const positional = [];
   const assignFlag = (name, value) => {
     const normalized = String(value || "").trim();
@@ -243,6 +246,27 @@ export function parsePairArgs(argv = []) {
       keepBranch = true;
       continue;
     }
+    if (arg === "--history-preserving") {
+      if (historyPreserving) throw Object.assign(new Error("--history-preserving may only be specified once"), {
+        code: "pairing_option_duplicate",
+      });
+      historyPreserving = true;
+      continue;
+    }
+    if (["--approve-source-oid", "--approve-origin-oid"].some((name) => arg === name || arg.startsWith(`${name}=`))) {
+      const source = arg.startsWith("--approve-source-oid");
+      const name = source ? "--approve-source-oid" : "--approve-origin-oid";
+      const value = arg === name ? args[++index] : arg.slice(name.length + 1);
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(value || "")) {
+        throw Object.assign(new Error(`${name} requires a full Git object ID`), { code: "pairing_approval_oid_invalid" });
+      }
+      if (source ? approvedSourceOid : approvedOriginOid) {
+        throw Object.assign(new Error(`${name} may only be specified once`), { code: "pairing_option_duplicate" });
+      }
+      if (source) approvedSourceOid = value;
+      else approvedOriginOid = value;
+      continue;
+    }
     if (arg === "--remote" || arg === "--branch") {
       const value = args[index + 1];
       assignFlag(arg, value != null && !value.startsWith("-") ? value : null);
@@ -269,6 +293,7 @@ export function parsePairArgs(argv = []) {
     ["host", [1, 1]], ["join", [2, 2]], ["leave", [1, 1]], ["close", [1, 1]],
     ["status", [1, 1]], ["admit", [2, 2]], ["members", [1, 1]], ["pending", [1, 1]],
     ["kick", [2, 2]], ["invite", [2, 2]], ["scope", [3, 3]], ["policy", [2, 2]],
+    ["publication", [2, 2]],
     ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
   ]);
   if (actionLengths.has(first)) {
@@ -292,6 +317,10 @@ export function parsePairArgs(argv = []) {
       branch,
     };
     if (keepBranch) parsed.keepBranch = true;
+    if (historyPreserving) parsed.historyPreserving = true;
+    if (approvedSourceOid && approvedOriginOid) parsed.approval = {
+      sourceOid: approvedSourceOid, originOid: approvedOriginOid,
+    };
     if (positional[2]) parsed.value = positional[2];
   } else {
     if (positional.length > 1) {
@@ -311,6 +340,28 @@ export function parsePairArgs(argv = []) {
     throw Object.assign(new Error("--keep-branch is only valid with session close"), {
       code: "pairing_option_not_allowed",
     });
+  }
+  if (historyPreserving && first !== "close") {
+    throw Object.assign(new Error("--history-preserving is only valid with session close"), {
+      code: "pairing_option_not_allowed",
+    });
+  }
+  if (historyPreserving && keepBranch) {
+    throw Object.assign(new Error("--history-preserving cannot be combined with --keep-branch"), {
+      code: "pairing_option_conflict",
+    });
+  }
+  if (approvedSourceOid || approvedOriginOid) {
+    if (first !== "integrate") {
+      throw Object.assign(new Error("Approval OIDs are only valid with session integrate"), {
+        code: "pairing_option_not_allowed",
+      });
+    }
+    if (!approvedSourceOid || !approvedOriginOid) {
+      throw Object.assign(new Error("Both frozen source and origin base OIDs are required"), {
+        code: "pairing_approval_oid_incomplete",
+      });
+    }
   }
   return parsed;
 }
@@ -427,6 +478,7 @@ async function monitorPairing(remoteClient, stateId, {
   let forceRequested = false;
   let gracefulRequested = false;
   let consecutiveFailures = 0;
+  let lastTeamHandoffPollAt = 0;
   const seenPeerActivity = new Map();
   const stop = () => { forceRequested = true; };
   const stateAtStart = getPairingState(stateId);
@@ -453,16 +505,38 @@ async function monitorPairing(remoteClient, stateId, {
         assertPairingStatusMatches(state, status);
         const nextScope = status.scope_set || {};
         const scopeChanged = JSON.stringify(nextScope) !== JSON.stringify(state.scopeSet || {});
+        const teamPolicyChanged = status.submission_approval_enabled != null
+          && (Number(status.submission_approval_enabled) !== Number(state.submission_approval_enabled)
+            || status.submission_policy_revision !== Number(state.submission_approval_revision));
         updatePairingEnrollment(state.id, {
           phase: "active",
           scopeSet: nextScope,
           computePolicy: status.compute_policy,
           integrationPolicy: status.integration_policy,
           enrollmentOpen: status.enrollment_open,
+          submissionApprovalEnabled: status.submission_approval_enabled,
+          submissionPolicyRevision: status.submission_policy_revision,
+          teamPublicationMode: status.team_publication_mode,
+          teamPublicationRevision: status.team_publication_revision,
         });
-        if (scopeChanged) pulseTokenManager.clearAuthentication();
+        if (scopeChanged || teamPolicyChanged) {
+          pulseTokenManager.clearAuthentication();
+          const { invalidateVerifiedTeamGrantCache } = await import("./team-submissions.js");
+          invalidateVerifiedTeamGrantCache();
+        }
         touchPairingState(stateId);
         writePairingPeerSnapshot(status);
+        if (state.role === "host" && status.submission_approval_enabled === true
+          && Date.now() - lastTeamHandoffPollAt >= 15_000) {
+          lastTeamHandoffPollAt = Date.now();
+          const { reconcileTeamFileHandoff } = await import("./team-submissions.js");
+          const handoff = await reconcileTeamFileHandoff({
+            projectDir, remoteClientFactory: () => remoteClient,
+          });
+          if (handoff.handedOff && !json) {
+            console.log(`  ${C.green}[session handoff]${C.reset} ${handoff.predecessorWorkItemId} -> ${handoff.successorWorkItemId} (${handoff.acceptedOid.slice(0, 8)})`);
+          }
+        }
         printPeerActivityChanges(C, status, seenPeerActivity, { json });
         consecutiveFailures = 0;
       } catch (error) {
@@ -570,8 +644,12 @@ async function finishHostShutdown(root, remoteClient, state, {
   reason,
   publish = true,
   keepBranch = false,
+  historyPreserving = false,
 } = {}) {
-  let journal = keepBranch ? null : beginPairingPromotion(state, { projectDir: root, reason });
+  let journal = keepBranch ? null : beginPairingPromotion(state, {
+    projectDir: root, reason,
+    strategy: historyPreserving || state.close_action === "integrate-fast-forward" ? "fast-forward" : "squash",
+  });
   if (journal) journal = markPairingPromotion(journal, { phase: graceful ? "draining" : "closing" });
   if (graceful) {
     const closing = validatePairingRemoteResponse(
@@ -629,7 +707,7 @@ async function finishHostShutdown(root, remoteClient, state, {
   }
   const promoted = await promotePairingTrunk(root, {
     journal,
-    publish,
+    publish: publish && journal?.approval_required !== true,
     onProgress: (message) => {
       if (!json) console.log(`  ${C.cyan}[pair integrate]${C.reset} ${message}`);
     },
@@ -639,9 +717,13 @@ async function finishHostShutdown(root, remoteClient, state, {
       code: promoted.reason || "pairing_promotion_deferred",
     });
   }
-  if (!publish) {
+  if ((!publish || journal?.approval_required === true) && promoted.pending) {
     if (!json) {
-      console.log(`  ${C.yellow}Integration candidate preserved${C.reset}; run \`posse session integrate\` to publish it.\n`);
+      if (journal?.approval_required === true) {
+        console.log(`  ${C.yellow}${promoted.strategy === "fast-forward" ? "History-preserving" : "Squash"} candidate frozen${C.reset}\n  Candidate OID: ${promoted.mergeHash}\n  Origin base OID: ${promoted.targetBaseOid}\n  Approve with: posse session integrate --approve-source-oid ${promoted.mergeHash} --approve-origin-oid ${promoted.targetBaseOid}\n`);
+      } else {
+        console.log(`  ${C.yellow}Integration candidate preserved${C.reset}; run \`posse session integrate\` to publish it.\n`);
+      }
     }
     return promoted;
   }
@@ -781,6 +863,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         json,
         reason: outcome.reason,
         keepBranch: liveState.close_action === "keep-branch",
+        historyPreserving: liveState.close_action === "integrate-fast-forward",
       });
       return { ok: true, role: "host", outcome: outcome.reason, promotion };
     }
@@ -1203,13 +1286,16 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
   return result;
 }
 
-async function runPendingIntegration({ projectDir, action, C, json }) {
+async function runPendingIntegration({ projectDir, action, C, json, approval = null, silent = false }) {
   const root = repositoryRoot(projectDir);
   const journal = readPairingPromotionJournal();
   if (!journal) {
+    if (approval) throw Object.assign(new Error("There is no frozen promotion to approve"), {
+      code: "pairing_promotion_approval_stale",
+    });
     const result = { ok: true, skipped: "no_pending_integration" };
-    if (json) console.log(JSON.stringify(result));
-    else console.log("\n  No session integration is pending.\n");
+    if (!silent && json) console.log(JSON.stringify(result));
+    else if (!silent) console.log("\n  No session integration is pending.\n");
     return result;
   }
   if (action === "abandon-integration") {
@@ -1225,15 +1311,22 @@ async function runPendingIntegration({ projectDir, action, C, json }) {
       candidateRef: journal.candidate_sha ? `refs/posse/pairing-promotions/${suffix}` : null,
       restored,
     };
-    if (json) console.log(JSON.stringify(result));
-    else console.log(`\n  Session integration abandoned${result.candidateRef ? `; candidate preserved at ${result.candidateRef}` : ""}.\n`);
+    if (!silent && json) console.log(JSON.stringify(result));
+    else if (!silent) console.log(`\n  Session integration abandoned${result.candidateRef ? `; candidate preserved at ${result.candidateRef}` : ""}.\n`);
     return result;
+  }
+  if (journal.approval_required === true
+    && (approval?.sourceOid !== journal.candidate_sha || approval?.originOid !== journal.target_base_sha)) {
+    throw Object.assign(new Error(
+      `Integration requires --approve-source-oid ${journal.candidate_sha} --approve-origin-oid ${journal.target_base_sha}`,
+    ), { code: "pairing_promotion_approval_required" });
   }
   const promoted = await promotePairingTrunk(root, {
     journal,
     publish: true,
+    approval,
     onProgress: (message) => {
-      if (!json) console.log(`  ${C.cyan}[session integrate]${C.reset} ${message}`);
+      if (!json && !silent) console.log(`  ${C.cyan}[session integrate]${C.reset} ${message}`);
     },
   });
   if (!promoted.ok) return promoted;
@@ -1243,9 +1336,37 @@ async function runPendingIntegration({ projectDir, action, C, json }) {
     ? cleanupGitHubSessionRepository(journal.temporary_repository, { cwd: root })
     : null;
   const result = { ...promoted, restored, cleanup };
-  if (json) console.log(JSON.stringify(result));
-  else console.log(`\n  ${C.green}Session integration published${C.reset} ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
+  if (!silent && json) console.log(JSON.stringify(result));
+  else if (!silent) console.log(`\n  ${C.green}Session integration published${C.reset} ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
   return result;
+}
+
+export async function approvePairingPromotion({ projectDir = process.cwd(),
+  session_id: sessionId, source_oid: sourceOid, origin_oid: originOid, action_id: actionId,
+} = {}) {
+  const state = getLivePairingState();
+  const journal = readPairingPromotionJournal();
+  const root = repositoryRoot(projectDir);
+  if (!state || state.role !== "host" || state.remote_session_id !== sessionId
+    || !journal || journal.session_id !== sessionId || journal.approval_required !== true
+    || journal.candidate_sha !== sourceOid || journal.target_base_sha !== originOid
+    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(sourceOid || "")
+    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(originOid || "")
+    || typeof actionId !== "string" || !actionId) {
+    return { ok: false, reason: "pairing_promotion_approval_stale" };
+  }
+  try {
+    const result = await runPendingIntegration({ projectDir: root, action: "integrate", C: {},
+      json: false, silent: true, approval: { sourceOid, originOid } });
+    if (!result?.ok || result.mergeHash !== sourceOid || result.restored?.ok !== true) {
+      return { ok: false, reason: "pairing_promotion_receipt_unverified" };
+    }
+    return { ok: true, protocol: "posse.team_promotion.v1", repo_path: root,
+      session_id: sessionId, action_id: actionId,
+      source_oid: sourceOid, origin_oid: originOid, published_oid: result.mergeHash };
+  } catch (error) {
+    return { ok: false, reason: error?.code || "pairing_promotion_unavailable" };
+  }
 }
 
 export async function runPairingCommand(argv = [], {
@@ -1271,6 +1392,16 @@ export async function runPairingCommand(argv = [], {
   if (["integrate", "abandon-integration"].includes(args.action)) {
     return runPendingIntegration({ ...args, projectDir, C });
   }
+  if (args.action === "publication") {
+    const { setTeamPublicationMode } = await import("./team-submissions.js");
+    const result = await setTeamPublicationMode(args.code, {
+      projectDir, remoteClientFactory: () => client,
+    });
+    if (args.json) console.log(JSON.stringify(result));
+    else if (result.ok) console.log(`\n  ${C.green}Session publication mode: ${result.mode}.${C.reset}\n`);
+    else console.error(`\n  ${C.red}Publication mode unchanged: ${result.reason}.${C.reset}\n`);
+    return result;
+  }
   if (["members", "pending", "kick", "invite", "scope", "policy"].includes(args.action)) {
     return runSessionManagement({ ...args, projectDir, remoteClient: client, C });
   }
@@ -1289,7 +1420,9 @@ export async function runPairingCommand(argv = [], {
   const root = repositoryRoot(projectDir);
   let result;
   if (state?.role === "host" && pairingProcessIsAlive(state) && state.process_pid !== process.pid) {
-    if (args.keepBranch) updatePairingEnrollment(state.id, { closeAction: "keep-branch" });
+    if (args.keepBranch || args.historyPreserving) updatePairingEnrollment(state.id, {
+      closeAction: args.keepBranch ? "keep-branch" : "integrate-fast-forward",
+    });
     const closing = validatePairingRemoteResponse(
       "close",
       await client.close(state.relay_token, "graceful"),
@@ -1309,6 +1442,7 @@ export async function runPairingCommand(argv = [], {
       json: args.json,
       reason: "host_leave",
       keepBranch: args.keepBranch || state.close_action === "keep-branch",
+      historyPreserving: args.historyPreserving || state.close_action === "integrate-fast-forward",
     });
   } else {
     result = state?.role === "host"
@@ -1318,6 +1452,7 @@ export async function runPairingCommand(argv = [], {
         json: args.json,
         reason: "host_leave",
         keepBranch: args.keepBranch || state.close_action === "keep-branch",
+        historyPreserving: args.historyPreserving || state.close_action === "integrate-fast-forward",
       })
       : await unpair(root, client, state);
   }
@@ -1390,6 +1525,7 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
         reason: "host_crash_recovery",
         publish: false,
         keepBranch: !journal && state.close_action === "keep-branch",
+        historyPreserving: state.close_action === "integrate-fast-forward",
       });
       if (promotion.kept) return { ok: true, attempted: true, recovered: true, promotion };
       return {

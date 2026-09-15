@@ -812,6 +812,7 @@ export function getToolSchemaForRole(name, role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
+  researcherReportOnly = false,
   requireResearcherCoverage = false,
   researchInvestigation = false,
 } = {}) {
@@ -823,6 +824,7 @@ export function getToolSchemaForRole(name, role, {
     compactCompletion,
     compactV3,
     compactV4,
+    researcherReportOnly,
     requireResearcherCoverage,
     researchInvestigation,
   });

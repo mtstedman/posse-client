@@ -75,9 +75,21 @@ export function readPairingPromotionJournal() {
   return null;
 }
 
-export function beginPairingPromotion(state, { projectDir = process.cwd(), reason = "host_shutdown" } = {}) {
+export function beginPairingPromotion(state, {
+  projectDir = process.cwd(), reason = "host_shutdown", strategy = "squash",
+} = {}) {
+  if (!["squash", "fast-forward"].includes(strategy)) {
+    throw Object.assign(new Error(`Unknown pairing promotion strategy: ${strategy}`), {
+      code: "pairing_promotion_strategy_invalid",
+    });
+  }
   const existing = readPairingPromotionJournal();
-  if (existing && existing.session_id === state?.remote_session_id) return existing;
+  if (existing && existing.session_id === state?.remote_session_id) {
+    if ((existing.strategy || "squash") !== strategy) {
+      throw promotionError("pairing_promotion_strategy_locked", "The frozen pairing promotion uses a different strategy");
+    }
+    return existing;
+  }
   if (existing) {
     throw Object.assign(new Error(
       `Pairing integration ${existing.session_id || "(unknown)"} is still pending`,
@@ -96,6 +108,8 @@ export function beginPairingPromotion(state, { projectDir = process.cwd(), reaso
     target_branch: validateBranchName(projectDir, state?.original_branch),
     target_ssh_command: state?.original_ssh_command || null,
     temporary_repository: state?.temporary_repository || null,
+    strategy,
+    approval_required: strategy === "fast-forward" || state?.submission_approval_enabled === 1,
     phase: "requested",
     reason,
     target_base_sha: null,
@@ -186,13 +200,159 @@ function preserveCandidate(projectDir, sessionId, candidate, exec = git) {
   return ref;
 }
 
+function promotionError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function publishedFastForward(projectDir, journal, remote, targetBranch, observed, {
+  exec, onProgress,
+}) {
+  if (observed.sha !== journal.candidate_sha) {
+    throw promotionError("pairing_promotion_publication_unresolved", "Origin advanced beyond the approved frozen source");
+  }
+  onProgress(`Verified history-preserving promotion ${journal.candidate_sha.slice(0, 8)}`);
+  markPairingPromotion(journal, { phase: "published", last_error: null });
+  clearPairingPromotionJournal();
+  return { ok: true, sourceBranch: journal.source_branch, targetBranch, remote,
+    strategy: "fast-forward", mergeHash: observed.sha, sourceOid: journal.candidate_sha };
+}
+
+async function promoteFastForwardLocked(projectDir, initialJournal, {
+  exec = git, workflowFactory = createPromotionWorkflow, onProgress = () => {}, publish = true,
+  approval = null,
+} = {}) {
+  let journal = initialJournal;
+  const remote = validateRemoteName(journal.target_remote || journal.remote);
+  const sourceBranch = validateBranchName(projectDir, journal.source_branch);
+  const targetBranch = validateBranchName(projectDir, journal.target_branch);
+  if (sourceBranch === targetBranch) throw promotionError("pairing_promotion_self_merge", "Pairing side trunk cannot equal its promotion target");
+  assertCleanPairingCheckout(projectDir);
+  const source = fetchSourceBranch(projectDir, journal, exec);
+  let target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
+  const frozen = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;
+  if (!frozen && source.sha === target.sha) {
+    clearPairingPromotionJournal();
+    return { ok: true, skipped: "already_up_to_date", sourceBranch, targetBranch,
+      remote, strategy: "fast-forward", mergeHash: target.sha, sourceOid: source.sha };
+  }
+  if (frozen && source.sha !== frozen) {
+    throw promotionError("pairing_promotion_source_moved", "The session source changed after the history-preserving candidate was frozen");
+  }
+  const candidate = frozen || source.sha;
+  if (!frozen && !isAncestor(projectDir, target.sha, candidate, exec)) {
+    throw promotionError("pairing_promotion_not_fast_forward", "Origin is not an ancestor of the frozen session trunk");
+  }
+  if (frozen && ["publishing", "publish_unknown"].includes(journal.phase)
+    && target.sha === candidate) {
+    if (journal.approved_source_sha !== candidate
+      || journal.approved_origin_sha !== journal.target_base_sha) {
+      throw promotionError("pairing_promotion_approval_required", "The publication attempt has no exact host OID approval");
+    }
+    return publishedFastForward(projectDir, journal, remote, targetBranch, target, { exec, onProgress });
+  }
+  if (!isAncestor(projectDir, target.sha, candidate, exec)) {
+    throw promotionError("pairing_promotion_target_diverged", "Origin advanced outside the frozen session history; rebase and obtain a new approval");
+  }
+  if (!frozen) {
+    preserveCandidate(projectDir, journal.session_id, candidate, exec);
+    journal = markPairingPromotion(journal, {
+      phase: "candidate", target_base_sha: target.sha, candidate_sha: candidate, last_error: null,
+    });
+  }
+  // The gate examines the exact local target branch. Align it with the frozen
+  // source commit without creating a squash or merge commit.
+  const current = refSha(projectDir, targetBranch, exec);
+  if (current && current !== candidate && current !== target.sha
+    && !isAncestor(projectDir, current, target.sha, exec)) {
+    throw promotionError("pairing_promotion_local_target_unpublished",
+      "Local target has commits absent from origin; history-preserving promotion will not reset it");
+  }
+  if (current !== candidate) {
+    exec(["switch", targetBranch], projectDir);
+    exec(["reset", "--hard", candidate], projectDir);
+  } else {
+    exec(["switch", targetBranch], projectDir);
+  }
+  if (!publish) return { ok: true, pending: true, phase: "candidate", sourceBranch,
+    targetBranch, remote, strategy: "fast-forward", mergeHash: candidate,
+    targetBaseOid: journal.target_base_sha };
+
+  if (approval?.sourceOid !== candidate || approval?.originOid !== journal.target_base_sha
+    || target.sha !== approval.originOid) {
+    throw promotionError("pairing_promotion_approval_required",
+      "History-preserving publication requires the exact frozen source and current origin base OIDs");
+  }
+
+  const workflow = workflowFactory(projectDir, targetBranch);
+  const validation = workflow._validatePushCandidate({ pushBranch: targetBranch });
+  if (!validation?.ok) {
+    journal = markPairingPromotion(journal, { phase: "candidate", last_error: "candidate_gate_failed" });
+    throw Object.assign(new Error(`Pairing promotion push gate failed: ${validation?.reason || "unknown"}`), {
+      code: "pairing_promotion_gate_failed", validation,
+    });
+  }
+  target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
+  if (!isAncestor(projectDir, target.sha, candidate, exec)) {
+    throw promotionError("pairing_promotion_target_diverged", "Origin advanced outside the frozen session history after validation");
+  }
+  if (target.sha === candidate) {
+    if (!["publishing", "publish_unknown"].includes(journal.phase)
+      || journal.approved_source_sha !== candidate
+      || journal.approved_origin_sha !== journal.target_base_sha) {
+      throw promotionError("pairing_promotion_publication_unresolved", "The candidate appeared on origin before this promotion published it");
+    }
+    return publishedFastForward(projectDir, journal, remote, targetBranch, target, { exec, onProgress });
+  }
+  journal = markPairingPromotion(journal, {
+    phase: "publishing", target_base_sha: target.sha,
+    approved_source_sha: candidate, approved_origin_sha: target.sha,
+    last_error: null,
+  });
+  try {
+    exec(targetGitArgs(journal, [
+      "push", `--force-with-lease=refs/heads/${targetBranch}:${target.sha}`,
+      remote, `${candidate}:refs/heads/${targetBranch}`,
+    ]), projectDir);
+  } catch (error) {
+    journal = markPairingPromotion(journal, { phase: "publish_unknown", last_error: "push_outcome_unknown" });
+    // A timeout can occur after the server accepts the push. Re-read the
+    // target before considering any retry, and retain the journal on doubt.
+    try {
+      const observed = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
+      if (observed.sha === candidate) {
+        return publishedFastForward(projectDir, journal, remote, targetBranch, observed, { exec, onProgress });
+      }
+    } catch { /* keep the frozen candidate and unresolved journal */ }
+    throw Object.assign(error, { code: "pairing_promotion_publication_unresolved" });
+  }
+  try {
+    target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
+  } catch (error) {
+    markPairingPromotion(journal, { phase: "publish_unknown", last_error: "post_push_fetch_failed" });
+    throw Object.assign(error, { code: "pairing_promotion_publication_unresolved" });
+  }
+  if (target.sha !== candidate) {
+    markPairingPromotion(journal, { phase: "publish_unknown", last_error: "post_push_ancestry_failed" });
+    throw promotionError("pairing_promotion_publication_unresolved", "Could not prove pairing promotion publication");
+  }
+  return publishedFastForward(projectDir, journal, remote, targetBranch, target, { exec, onProgress });
+}
+
 async function promoteLocked(projectDir, initialJournal, {
   exec = git,
   workflowFactory = createPromotionWorkflow,
   onProgress = () => {},
   publish = true,
+  approval = null,
 } = {}) {
+  if (initialJournal.strategy === "fast-forward") {
+    return promoteFastForwardLocked(projectDir, initialJournal, { exec, workflowFactory, onProgress, publish, approval });
+  }
+  if (initialJournal.strategy && initialJournal.strategy !== "squash") {
+    throw promotionError("pairing_promotion_strategy_invalid", "Unknown journaled pairing promotion strategy");
+  }
   let journal = initialJournal;
+  const approvalRequired = journal.approval_required === true;
   const remote = validateRemoteName(journal.target_remote || journal.remote);
   const sourceBranch = validateBranchName(projectDir, journal.source_branch);
   const targetBranch = validateBranchName(projectDir, journal.target_branch);
@@ -209,6 +369,20 @@ async function promoteLocked(projectDir, initialJournal, {
     const target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     const current = refSha(projectDir, targetBranch, exec);
     const candidate = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;
+
+    if (approvalRequired && candidate && journal.approved_source_sha === candidate
+      && journal.approved_origin_sha === journal.target_base_sha && target.sha === candidate) {
+      markPairingPromotion(journal, { phase: "published", last_error: null });
+      clearPairingPromotionJournal();
+      return { ok: true, sourceBranch, targetBranch, remote,
+        strategy: "squash", mergeHash: candidate, recovered: true };
+    }
+    if (approvalRequired && candidate && target.sha !== journal.target_base_sha) {
+      throw promotionError("pairing_promotion_approval_stale", "Origin moved after the squash candidate was frozen");
+    }
+    if (approvalRequired && candidate && current !== candidate) {
+      throw promotionError("pairing_promotion_candidate_moved", "Local target moved after the squash candidate was frozen");
+    }
 
     if (candidate && current === candidate && journal.target_base_sha === target.sha) {
       onProgress(`Retrying preserved pairing promotion ${candidate.slice(0, 8)}`);
@@ -259,7 +433,16 @@ async function promoteLocked(projectDir, initialJournal, {
         targetBranch,
         remote,
         mergeHash: journal.candidate_sha,
+        targetBaseOid: journal.target_base_sha,
+        strategy: "squash",
       };
+    }
+
+    if (approvalRequired && (approval?.sourceOid !== journal.candidate_sha
+      || approval?.originOid !== journal.target_base_sha
+      || target.sha !== approval.originOid)) {
+      throw promotionError("pairing_promotion_approval_required",
+        "Squash publication requires the exact frozen candidate and current origin base OIDs");
     }
 
     const validation = workflow._validatePushCandidate({ pushBranch: targetBranch });
@@ -272,6 +455,9 @@ async function promoteLocked(projectDir, initialJournal, {
 
     const refreshed = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     if (refreshed.sha !== journal.target_base_sha) {
+      if (approvalRequired) {
+        throw promotionError("pairing_promotion_approval_stale", "Origin moved after the approved squash candidate was validated");
+      }
       onProgress(`${remote}/${targetBranch} advanced; rebuilding the promotion`);
       preserveCandidate(projectDir, journal.session_id, journal.candidate_sha, exec);
       exec(["reset", "--hard", refreshed.sha], projectDir);
@@ -285,6 +471,10 @@ async function promoteLocked(projectDir, initialJournal, {
     }
 
     onProgress(`Publishing ${targetBranch} with an exact remote lease`);
+    if (approvalRequired) journal = markPairingPromotion(journal, {
+      phase: "publishing", approved_source_sha: journal.candidate_sha,
+      approved_origin_sha: journal.target_base_sha,
+    });
     try {
       exec(targetGitArgs(journal, [
         "push",
@@ -293,6 +483,19 @@ async function promoteLocked(projectDir, initialJournal, {
         `${journal.candidate_sha}:refs/heads/${targetBranch}`,
       ]), projectDir);
     } catch (error) {
+      if (approvalRequired) {
+        journal = markPairingPromotion(journal, { phase: "publish_unknown", last_error: "push_outcome_unknown" });
+        try {
+          const observed = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
+          if (observed.sha === journal.candidate_sha) {
+            markPairingPromotion(journal, { phase: "published", last_error: null });
+            clearPairingPromotionJournal();
+            return { ok: true, sourceBranch, targetBranch, remote,
+              strategy: "squash", mergeHash: observed.sha, recovered: true };
+          }
+        } catch { /* preserve unresolved publication intent */ }
+        throw Object.assign(error, { code: "pairing_promotion_publication_unresolved" });
+      }
       journal = markPairingPromotion(journal, {
         phase: "candidate",
         last_error: "push_rejected_or_unavailable",

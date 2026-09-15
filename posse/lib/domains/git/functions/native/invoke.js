@@ -17,6 +17,7 @@ import {
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
+import { getLivePairingState } from "../../../pairing/functions/state.js";
 
 export { GIT_NATIVE_PROTOCOL } from "../../../../catalog/binary.js";
 
@@ -513,6 +514,25 @@ export function gitNativeMethodRoute(method, payload = null) {
   return GIT_READ_ONLY_METHODS.has(command) ? GIT_READ_ROUTE : GIT_MUTATE_ROUTE;
 }
 
+/** The local native boundary requires WI pins for every mutation in an
+ * opted-in Session. Remote validates the revision/JTI and signed scope. */
+function assertTeamWorkItemContext(method, payload, opts) {
+  if (gitNativeMethodRoute(method, payload) !== GIT_MUTATE_ROUTE) return;
+  const state = getLivePairingState();
+  if (state?.phase !== "active" || state.submission_approval_enabled !== 1) return;
+  const pins = opts?.workItemContext;
+  if (typeof pins?.workItemId === "string" && pins.workItemId.length > 0
+      && Number.isSafeInteger(pins.grantRevision) && pins.grantRevision > 0
+      && typeof pins.grantJti === "string" && pins.grantJti.length > 0) return;
+  const error = /** @type {Error & {code:string}} */ (new Error(`Git native method ${method} requires a verified Team WI grant`));
+  error.code = "TEAM_WI_GRANT_REQUIRED";
+  throw error;
+}
+
+export function supportsNativeTeamWorkItemBoundary() {
+  return true;
+}
+
 /**
  * @typedef {Object} GitNativeMethodRunOptions
  * @property {import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager} [manager]
@@ -523,6 +543,7 @@ export function gitNativeMethodRoute(method, payload = null) {
  * @property {boolean} [bypassNativeBridge]
  * @property {boolean} [worker]
  * @property {number} [maxBuffer]
+ * @property {{workItemId:string,grantRevision:number,grantJti:string}} [workItemContext]
  * @property {(value: unknown) => unknown} [normalizeNodeResult]
  * @property {(value: unknown) => unknown} [normalizeNativeResult]
  * @property {(value: unknown) => unknown} [mapNativeReturn]
@@ -535,7 +556,7 @@ export function gitNativeMethodRoute(method, payload = null) {
  * `*Async` twins across the git function modules so the filtering cannot
  * drift per-file.
  *
- * @param {{ nativeParity?: Record<string, any>, manager?: unknown, signal?: AbortSignal | null, timeoutMs?: number }} [options]
+ * @param {{ nativeParity?: Record<string, any>, manager?: unknown, signal?: AbortSignal | null, timeoutMs?: number, workItemContext?: {workItemId:string,grantRevision:number,grantJti:string} }} [options]
  * @returns {Record<string, unknown>}
  */
 export function nativeAsyncOptions(options = {}) {
@@ -545,6 +566,7 @@ export function nativeAsyncOptions(options = {}) {
     manager: options.manager ?? parity.manager,
     signal: options.signal,
     timeoutMs: options.timeoutMs,
+    workItemContext: options.workItemContext ?? parity.workItemContext,
   };
 }
 
@@ -624,6 +646,7 @@ function gitNativeProcessError(method, res, detail) {
  * @returns {unknown}
  */
 function runGitNativeMethodOnce(method, payload, opts = {}) {
+  assertTeamWorkItemContext(method, payload, opts);
   const manager = opts.manager || nativeBinaries;
   if (!manager.shouldUse("git")) {
     const unavailable = gitNativeError(`Git native method unavailable: ${method}`);
@@ -649,6 +672,7 @@ function runGitNativeMethodOnce(method, payload, opts = {}) {
         worker: workerEligible,
         maxBuffer: opts.maxBuffer,
         requiredRoute: gitNativeMethodRoute(request.method, request.payload),
+        workItemContext: opts.workItemContext,
       },
     );
   } catch (err) {
@@ -717,7 +741,8 @@ function runGitNativeMethodOnce(method, payload, opts = {}) {
  * @returns {Promise<unknown>}
  */
 async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
-  if (opts.bypassNativeBridge !== true && hasNativeThreadBridge()) {
+  assertTeamWorkItemContext(method, payload, opts);
+  if (opts.bypassNativeBridge !== true && !opts.workItemContext && hasNativeThreadBridge()) {
     const { bypassNativeBridge, manager, signal, ...bridgeOpts } = opts;
     const bridgeManager = manager || nativeBinaries;
     const auth = resolveGitAuthEnvelope(opts, bridgeManager);
@@ -772,6 +797,7 @@ async function runGitNativeMethodAsyncOnce(method, payload, opts = {}) {
         worker: workerRequested,
         maxBuffer: opts.maxBuffer,
         requiredRoute: gitNativeMethodRoute(request.method, request.payload),
+        workItemContext: opts.workItemContext,
       },
     );
   } catch (err) {

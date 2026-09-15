@@ -101,6 +101,10 @@ export function updatePairingEnrollment(id, {
   temporaryRepository = null,
   closeAction = null,
   credentialDirectory = null,
+  submissionApprovalEnabled = null,
+  submissionPolicyRevision = null,
+  teamPublicationMode = null,
+  teamPublicationRevision = null,
 } = {}, db = getDb()) {
   return runImmediateTransaction(db, () => {
     db.prepare(`
@@ -121,6 +125,10 @@ export function updatePairingEnrollment(id, {
           temporary_repository = COALESCE(?, temporary_repository),
           close_action = COALESCE(?, close_action),
           credential_directory = COALESCE(?, credential_directory),
+          submission_approval_enabled = COALESCE(?, submission_approval_enabled),
+          submission_approval_revision = COALESCE(?, submission_approval_revision),
+          team_publication_mode = COALESCE(?, team_publication_mode),
+          team_publication_revision = COALESCE(?, team_publication_revision),
           phase = ?,
           last_error = NULL,
           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -131,6 +139,9 @@ export function updatePairingEnrollment(id, {
       integrationPolicy, enrollmentOpen == null ? null : Number(Boolean(enrollmentOpen)),
       baselineOid, originRemoteName, originRemoteUrl, temporaryRepository, closeAction,
       credentialDirectory,
+      submissionApprovalEnabled == null ? null : Number(Boolean(submissionApprovalEnabled)),
+      submissionPolicyRevision,
+      teamPublicationMode, teamPublicationRevision,
       phase, String(id),
     );
     return getPairingState(id, db);

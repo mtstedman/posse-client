@@ -10,3 +10,9 @@ export function researchReturnsFinalReport(workItem, payload = {}) {
     || payload?.task_mode === "report"
     || intakeOutputMode === "question_only";
 }
+
+export function researchUsesReportProfile(workItem, payload = {}) {
+  const roleMode = String(payload?.role_mode || "solo").trim().toLowerCase();
+  return roleMode !== "child" && roleMode !== "synth"
+    && researchReturnsFinalReport(workItem, payload);
+}

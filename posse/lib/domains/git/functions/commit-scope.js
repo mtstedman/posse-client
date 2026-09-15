@@ -5,6 +5,7 @@
 
 import fs from "fs";
 import path from "path";
+import { isMainThread } from "node:worker_threads";
 import { runHook } from "./hooks.js";
 import { gitExec, gitCurrentHash } from "./utils.js";
 import { withWorktreeLock, withWorktreeLockAsync } from "./worktree.js";
@@ -22,6 +23,7 @@ import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { UNSCOPED_GIT_ADD_TASK_MODES } from "../../../catalog/artifact.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { runGitNativeMethod } from "./native/invoke.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
 import {
   classifyScopedCommit,
   collectScopedCommitDiff,
@@ -148,6 +150,9 @@ function nativeScopedCommitOptions(opts, budget) {
     ...parity,
     manager: opts?.nativeManager ?? parity.manager,
     timeoutMs: budget.processTimeoutMs,
+    ...(opts?.verifiedTeamWorkItemContext
+      ? { workItemContext: opts.verifiedTeamWorkItemContext }
+      : {}),
   };
 }
 
@@ -310,6 +315,12 @@ async function withCommitBranchLockAsync(cwd, opts = {}, fn) {
 }
 
 export function gitCommitAll(message, cwd, scope = null, opts = {}) {
+  if (getLivePairingState()?.submission_approval_enabled === 1
+      && (!opts?.verifiedTeamWorkItemContext || isMainThread)) {
+    const error = new Error("Team approval requires a verified WI grant through the async commit worker");
+    error.code = "TEAM_WI_GRANT_REQUIRED";
+    throw error;
+  }
   const commitWithBranchLock = () => withCommitBranchLock(cwd, opts, () =>
     gitCommitAllUnlocked(message, cwd, scope, opts)
   );
@@ -323,15 +334,38 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
   if (typeof opts?.beforeCommitHook === "function") {
     throw new Error("gitCommitAllAsync cannot serialize beforeCommitHook; wrap the whole caller off the main thread instead");
   }
+  const teamState = getLivePairingState();
+  if (teamState?.submission_approval_enabled === 1) {
+    const { getVerifiedTeamGrantForWorkItem } = await import("../../pairing/functions/team-submissions.js");
+    const verified = await getVerifiedTeamGrantForWorkItem(opts?.wiId, {
+      projectDir: opts?.projectDir || cwd,
+    });
+    if (!verified.ok) {
+      const error = new Error(`Team WI grant unavailable: ${verified.reason}`);
+      error.code = "TEAM_WI_GRANT_REQUIRED";
+      throw error;
+    }
+    opts = { ...opts, verifiedTeamWorkItemContext: verified.workItemContext };
+  }
   const style = getGitCommitStyle(opts?.projectDir || cwd);
   const runWorker = async (workerOpts) => {
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
-      routesByBinary: { git: [GIT_READ_ROUTE, GIT_MUTATE_ROUTE] },
+      routesByBinary: { git: workerOpts.verifiedTeamWorkItemContext
+        ? [GIT_READ_ROUTE]
+        : [GIT_READ_ROUTE, GIT_MUTATE_ROUTE] },
     });
     return await GIT_COMMIT_THREAD_MANAGER.run(new URL("./commit-worker.js", import.meta.url), {
       label: "git commit worker",
       timeoutMs: gitCommitTimeoutBudget().processTimeoutMs + GIT_COMMIT_WORKER_OVERHEAD_MS,
-      workerData: { message, cwd, scope, opts: workerOpts, nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime },
+      workerData: {
+        message, cwd, scope, opts: workerOpts,
+        nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime,
+        ...(workerOpts.verifiedTeamWorkItemContext ? { teamSessionContext: {
+          instanceId: teamState.instance_id,
+          sessionId: teamState.remote_session_id,
+          requireWorkItemGrant: true,
+        } } : {}),
+      },
     });
   };
   if (style === "off") return await runWorker(opts);

@@ -2,6 +2,7 @@ import { isMainThread, parentPort, workerData } from "worker_threads";
 import { gitCommitAll } from "./commit-scope.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { GIT_MUTATE_ROUTE } from "../../../catalog/binary.js";
 
 function post(message) {
   try { parentPort?.postMessage(message); } catch { /* worker is closing */ }
@@ -48,6 +49,23 @@ async function runCommit() {
     }
     nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
     const { message, cwd, scope, opts } = workerData || {};
+    if (workerData?.teamSessionContext) {
+      const pins = opts?.verifiedTeamWorkItemContext;
+      if (!pins || !workerData.teamSessionContext.instanceId
+          || !workerData.teamSessionContext.sessionId) {
+        throw Object.assign(new Error("Team commit worker lacks its WI grant pins"), {
+          code: "TEAM_WI_GRANT_REQUIRED",
+        });
+      }
+      nativeBinaries.pulseManager.setSessionContext(workerData.teamSessionContext);
+      nativeBinaries.pulseManager.confirmNativeScopeEnforcement(true);
+      const pulse = await nativeBinaries.binary("git").primeWorkItemPulse(pins);
+      if (!pulse || pulse.route !== GIT_MUTATE_ROUTE) {
+        throw Object.assign(new Error("Team commit worker could not prime its WI-scoped Git pulse"), {
+          code: "TEAM_WI_PULSE_UNAVAILABLE",
+        });
+      }
+    }
     const result = gitCommitAll(message, cwd, scope, opts);
     outcome = { type: "result", result };
   } catch (err) {
