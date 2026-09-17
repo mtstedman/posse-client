@@ -11,11 +11,14 @@ import { verifyTeamGrantToken } from "./team-grant-token.js";
 import { loadOrCreateTeamSigningKey, newTeamGrantJti, signTeamGrantClaims } from "./team-signing-key.js";
 import { cleanScopePath, verifyTeamGitScope } from "./team-scope.js";
 import {
+  TEAM_FAILURE_REASONS,
+  TEAM_GRANT_REPAIRABLE_REASONS,
   TEAM_SCOPE_LABEL_PATTERN,
   TEAM_SCOPE_LIMITS,
 } from "../../../catalog/team.js";
 import { readPairingPromotionJournal } from "./promotion.js";
 import { getLivePairingState, updatePairingEnrollment } from "./state.js";
+import { teamPolicyRegression } from "./team-policy.js";
 import { readPairingPeerSnapshot } from "./work-items.js";
 
 const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu;
@@ -111,6 +114,84 @@ function requireGrant(response, workItemId, state) {
   return signature.ok ? { ok: true, grant, claims: signature.claims } : signature;
 }
 
+/** Re-resolve a grant against authoritative Remote state exactly once, then
+ * verify again.
+ *
+ * A grant is verified by comparing its signed claims against local session
+ * state — shared branch, repository fingerprint, policy revision — and against
+ * the locally held grant record. A stale local view therefore fails
+ * verification even when the signed material is perfectly good, and that is the
+ * ordinary case: the host reissued, the policy revision moved, or this clone
+ * has not caught up yet. Repair that deterministically before treating any
+ * failure as a security event.
+ *
+ * This refreshes only the inputs. Verification itself is unchanged and runs
+ * again in full, so a grant that genuinely does not verify still fails; it just
+ * fails with the stale-view explanation ruled out. Exactly one attempt, no
+ * backoff and no loop: either the refreshed state verifies, or the failure is
+ * confirmed, or the repair could not run and nothing is concluded.
+ *
+ * @returns the verified grant with `repaired`, a confirmed failure, or
+ * `signed_grant_unconfirmed` when the repair itself could not complete.
+ */
+async function repairGrantResolution({ client, state, workItemId, projectDir, firstReason }) {
+  let status;
+  try {
+    status = await client.status(state.relay_token);
+  } catch (error) {
+    return fail(TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED, error?.code || error?.message || error);
+  }
+  if (status?.session_id !== state.remote_session_id) {
+    return fail(TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED, "session identity did not match");
+  }
+  // Remote is authoritative, but a repair must never adopt a policy that walks
+  // backwards; that would make grants issued under an older revision match
+  // again. Leave the failure unconfirmed instead.
+  const regression = teamPolicyRegression(state, status);
+  if (regression) return fail(TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED, regression);
+
+  updatePairingEnrollment(state.id, {
+    scopeSet: status.scope_set || null,
+    submissionApprovalEnabled: status.submission_approval_enabled,
+    submissionPolicyRevision: status.submission_policy_revision,
+    teamPublicationMode: status.team_publication_mode,
+    teamPublicationRevision: status.team_publication_revision,
+  });
+  invalidateVerifiedTeamGrantCache();
+
+  const refreshed = activeState(projectDir);
+  if (!refreshed) return fail(TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED, "session state is unavailable");
+  let response;
+  try {
+    response = await client.teamGrants(refreshed.relay_token, refreshed.remote_session_id, workItemId);
+  } catch (error) {
+    return fail(TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED, error?.code || error?.message || error);
+  }
+  const resolved = requireGrant(response, workItemId, refreshed);
+  if (resolved.ok) return { ...resolved, state: refreshed, repaired: firstReason };
+  // The refreshed view still does not verify. The stale-view explanation is
+  // now ruled out, so report the confirmed failure rather than deferring.
+  return { ...resolved, repairAttempted: true };
+}
+
+function verifiedGrantCacheKey(state, workItemId) {
+  return JSON.stringify([
+    state.remote_session_id, state.instance_id, state.remote_url, state.shared_branch,
+    workItemId, state.scopeSet,
+  ]);
+}
+
+/** Resolve a grant, repairing a stale local view once before giving up. */
+async function resolveGrant({ client, state, workItemId, projectDir, response = null }) {
+  const fetched = response
+    ?? await client.teamGrants(state.relay_token, state.remote_session_id, workItemId);
+  const resolved = requireGrant(fetched, workItemId, state);
+  if (resolved.ok || !TEAM_GRANT_REPAIRABLE_REASONS.includes(resolved.reason)) {
+    return { ...resolved, state };
+  }
+  return repairGrantResolution({ client, state, workItemId, projectDir, firstReason: resolved.reason });
+}
+
 export function invalidateVerifiedTeamGrantCache() {
   verifiedGrantCache.clear();
 }
@@ -128,16 +209,16 @@ export async function getVerifiedTeamGrantForWorkItem(localWorkItemId, {
   if (!state || state.submission_approval_enabled !== 1) return fail("team_approval_not_active");
   const workItemId = teamWorkItemId(state, localWorkItemId);
   if (!workItemId) return fail("team_submission_identity_invalid");
-  const cacheKey = JSON.stringify([
-    state.remote_session_id, state.instance_id, state.remote_url, state.shared_branch,
-    workItemId, state.scopeSet,
-  ]);
-  const cached = verifiedGrantCache.get(cacheKey);
+  const cached = verifiedGrantCache.get(verifiedGrantCacheKey(state, workItemId));
   if (!fresh && cached && cached.expiresAt > Date.now()) return cached.value;
   try {
-    const response = await remoteClientFactory().teamGrants(state.relay_token, state.remote_session_id, workItemId);
-    const resolved = requireGrant(response, workItemId, state);
+    const client = remoteClientFactory();
+    const resolved = await resolveGrant({ client, state, workItemId, projectDir });
     if (!resolved.ok) return resolved;
+    // A repair re-reads session state, so key the entry by the state the grant
+    // actually verified against rather than the stale view it started from.
+    state = resolved.state || state;
+    const cacheKey = verifiedGrantCacheKey(state, workItemId);
     const value = Object.freeze({
       ok: true,
       workItemContext: Object.freeze({
@@ -149,6 +230,9 @@ export async function getVerifiedTeamGrantForWorkItem(localWorkItemId, {
       memberScope: state.scopeSet,
       claimGeneration: resolved.grant.claim_generation,
       expiresAt: new Date(resolved.claims.exp * 1000).toISOString(),
+      // Surfaced so a caller can record that a stale local view was repaired
+      // rather than silently masking how often that happens.
+      ...(resolved.repaired ? { repaired: resolved.repaired } : {}),
     });
     if (verifiedGrantCache.size >= MAX_TEAM_RECORDS) verifiedGrantCache.clear();
     verifiedGrantCache.set(cacheKey, {
@@ -443,9 +527,9 @@ export async function gateTeamCandidateForPublication({
     // actuator, which holds GitHub API credentials, verifies protection and
     // exact PR pins before publication. This gate still submits the immutable
     // Git refs and parks rather than attempting a direct trunk push.
-    const grantResponse = await client.teamGrants(state.relay_token, state.remote_session_id, workItemId);
-    const resolved = requireGrant(grantResponse, workItemId, state);
+    const resolved = await resolveGrant({ client, state, workItemId, projectDir });
     if (!resolved.ok) return resolved;
+    state = resolved.state || state;
     const scope = verifyTeamGitScope({
       projectDir,
       targetOid: operation.baseSha,

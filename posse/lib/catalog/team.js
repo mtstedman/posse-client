@@ -77,8 +77,23 @@ export const TEAM_FAILURE_REASONS = Object.freeze({
   GRANT_MISSING: "team_grant_missing",
   GRANT_INACTIVE: "team_grant_inactive",
   SIGNED_GRANT_EXPIRED: "signed_grant_expired",
+  SIGNED_GRANT_UNCONFIRMED: "signed_grant_unconfirmed",
   SIGNED_GRANT_INVALID: "signed_grant_invalid",
+  INVALID_GRANT_RESPONSE: "invalid_grant_response",
 });
+
+// A grant is verified by comparing its signed claims against local session
+// state (branch, repository fingerprint, policy revision) and the local grant
+// record. Stale local state therefore produces a verification failure with
+// nothing actually wrong with the signed material, and that is the common
+// case. These reasons earn exactly one deterministic repair — re-sync the
+// authoritative session state from Remote, refetch the grant, verify again —
+// before anything is treated as fatal. The repair refreshes only the inputs;
+// it never relaxes the verification itself.
+export const TEAM_GRANT_REPAIRABLE_REASONS = Object.freeze([
+  TEAM_FAILURE_REASONS.SIGNED_GRANT_INVALID,
+  TEAM_FAILURE_REASONS.INVALID_GRANT_RESPONSE,
+]);
 
 // Retryable: the condition clears on its own once the host issues, approves,
 // or reissues. A publication attempt may defer and re-attempt on these.
@@ -90,13 +105,20 @@ export const TEAM_TRANSIENT_FAILURE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.GRANT_MISSING,
   TEAM_FAILURE_REASONS.GRANT_INACTIVE,
   TEAM_FAILURE_REASONS.SIGNED_GRANT_EXPIRED,
+  // The repair could not run to completion (Remote unreachable, a status that
+  // did not match, or a policy the local side must not adopt). Nothing has
+  // been confirmed about the signed material, so this defers rather than
+  // hard-failing on what may be a transport blip.
+  TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED,
 ]);
 
-// Never retryable. A signature that does not verify, a key ID that does not
+// Never retryable, and only ever reported after the deterministic repair above
+// has run and failed. A signature that does not verify, a key ID that does not
 // match, claims bound to another audience, or permissions that differ from the
-// signed token is a security event, not a busy signal. Retrying cannot clear
-// it, and classifying it as transient hides the one indicator of tampering
-// behind an ordinary "will retry" deferral.
+// signed token is then a security event rather than a stale local view:
+// re-resolving against authoritative Remote state has already been tried and
+// changed nothing. Retrying further cannot clear it, and deferring would hide
+// the one indicator of tampering behind an ordinary "will retry" notice.
 export const TEAM_FATAL_FAILURE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.SIGNED_GRANT_INVALID,
 ]);
