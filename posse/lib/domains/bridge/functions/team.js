@@ -1,6 +1,11 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { cleanScopePath } from "../../pairing/functions/team-scope.js";
+import {
+  TEAM_SCOPE_LABEL_PATTERN,
+  TEAM_SCOPE_LIMITS,
+} from "../../../catalog/team.js";
 
 import {
   TEAM_DECISION_PROTOCOL,
@@ -108,12 +113,17 @@ function validPermissionGroup(group) {
     && Array.isArray(write.files) && Array.isArray(write.roots)
     && Array.isArray(tools) && Array.isArray(database)
     && write.files.length + write.roots.length + tools.length + database.length > 0
-    && write.files.length <= 256 && write.roots.length <= 256
-    && [...write.files, ...write.roots].every((value) =>
-      typeof value === "string" && value.length > 0 && value.length <= 1024)
-    && tools.length <= 128 && database.length <= 64
+    && write.files.length <= TEAM_SCOPE_LIMITS.MAX_WRITE_ENTRIES
+    && write.roots.length <= TEAM_SCOPE_LIMITS.MAX_WRITE_ENTRIES
+    // Apply the canonical scope-path rule at the boundary itself. Checking
+    // only type and length here read as validation while forwarding traversal,
+    // absolute, glob and control-character paths to the owner to reject.
+    && [...write.files, ...write.roots].every((value) => cleanScopePath(value))
+    && tools.length <= TEAM_SCOPE_LIMITS.MAX_TOOL_ENTRIES
+    && database.length <= TEAM_SCOPE_LIMITS.MAX_DATABASE_ENTRIES
     && [...tools, ...database].every((value) => typeof value === "string"
-      && value.length > 0 && value.length <= 128 && /^[A-Za-z0-9_:.\-]+$/u.test(value))
+      && value.length > 0 && value.length <= TEAM_SCOPE_LIMITS.MAX_LABEL_LENGTH
+      && TEAM_SCOPE_LABEL_PATTERN.test(value))
     && (budget == null || (typeof budget === "object" && !Array.isArray(budget)
       && Number.isSafeInteger(budget.max_cost_micros) && budget.max_cost_micros > 0
       && Number.isSafeInteger(budget.max_tokens) && budget.max_tokens > 0));

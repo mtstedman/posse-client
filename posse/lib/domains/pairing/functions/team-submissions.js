@@ -9,7 +9,11 @@ import { githubRepositoryName } from "./github-session.js";
 import { findTeamPullRequest, verifyProtectedTeamBranch, verifyPublishedTeamPullRequest } from "./github-team-pr.js";
 import { verifyTeamGrantToken } from "./team-grant-token.js";
 import { loadOrCreateTeamSigningKey, newTeamGrantJti, signTeamGrantClaims } from "./team-signing-key.js";
-import { verifyTeamGitScope } from "./team-scope.js";
+import { cleanScopePath, verifyTeamGitScope } from "./team-scope.js";
+import {
+  TEAM_SCOPE_LABEL_PATTERN,
+  TEAM_SCOPE_LIMITS,
+} from "../../../catalog/team.js";
 import { readPairingPromotionJournal } from "./promotion.js";
 import { getLivePairingState, updatePairingEnrollment } from "./state.js";
 import { readPairingPeerSnapshot } from "./work-items.js";
@@ -223,15 +227,14 @@ function validPermissions(permissions) {
     && Array.isArray(write.files) && Array.isArray(write.roots)
     && Array.isArray(tools) && Array.isArray(database)
     && write.files.length + write.roots.length + tools.length + database.length > 0
-    && write.files.length <= 256 && write.roots.length <= 256
-    && [...write.files, ...write.roots].every((value) => typeof value === "string"
-      && value.length > 0 && value.length <= 1024 && !value.startsWith("/")
-      && !value.includes("\\") && !value.split("/").some((part) => part === "" || part === "." || part === "..")
-      && !/[*?[\]]/u.test(value)
-      && !/[\u0000-\u001f\u007f]/u.test(value))
-    && tools.length <= 128 && database.length <= 64
+    && write.files.length <= TEAM_SCOPE_LIMITS.MAX_WRITE_ENTRIES
+    && write.roots.length <= TEAM_SCOPE_LIMITS.MAX_WRITE_ENTRIES
+    && [...write.files, ...write.roots].every((value) => cleanScopePath(value))
+    && tools.length <= TEAM_SCOPE_LIMITS.MAX_TOOL_ENTRIES
+    && database.length <= TEAM_SCOPE_LIMITS.MAX_DATABASE_ENTRIES
     && [...tools, ...database].every((value) => typeof value === "string"
-      && value.length > 0 && value.length <= 128 && /^[A-Za-z0-9_.:-]+$/u.test(value))
+      && value.length > 0 && value.length <= TEAM_SCOPE_LIMITS.MAX_LABEL_LENGTH
+      && TEAM_SCOPE_LABEL_PATTERN.test(value))
     && (budget == null || (typeof budget === "object" && !Array.isArray(budget)
       && Number.isSafeInteger(budget.max_cost_micros) && budget.max_cost_micros > 0
       && Number.isSafeInteger(budget.max_tokens) && budget.max_tokens > 0));

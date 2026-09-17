@@ -6,6 +6,10 @@
 // fetched remote before allowing another trunk write.
 
 import {
+  TEAM_FATAL_FAILURE_REASONS,
+  TEAM_TRANSIENT_FAILURE_REASONS,
+} from "../../../catalog/team.js";
+import {
   beginSharedTrunkMergeOperation,
   finalizePublishedSharedTrunkMergeOperation,
   getSharedTrunkMergeOperation,
@@ -413,6 +417,13 @@ function recordPublicationHealth(config, unresolved = []) {
  * a later attempt (lock released, transport restored, journal reconciled,
  * divergence repaired) and say nothing about the WI's own mergeability.
  */
+/** A publication failure that never clears. Surfacing it as a deferral would
+ * loop forever and mask the one signal that a grant was tampered with. */
+export function isFatalSharedTrunkTeamResult(result) {
+  if (!result || result.ok === true) return false;
+  return TEAM_FATAL_FAILURE_REASONS.includes(String(result.reason || ""));
+}
+
 export function isTransientSharedTrunkMergeResult(result) {
   if (!result || result.ok === true || result.sharedTrunk !== true) return false;
   if (result.skipped || result.unavailable || result.publishUnknown || result.resetPending) return true;
@@ -426,13 +437,11 @@ export function isTransientSharedTrunkMergeResult(result) {
     "fast_forward_blocked",
     "remote_head_unresolved",
     "local_trunk_diverged",
-    "approval_pending",
-    "approval_unavailable",
-    "approval_stale",
-    "waiting_for_files",
-    "team_grant_missing",
-    "team_grant_inactive",
-    "signed_grant_invalid",
+    // Team publication deferrals are registered in the catalog, which also
+    // records which ones never clear. A grant whose signature, key or claims
+    // do not verify is a security event, not a busy signal: retrying cannot
+    // clear it and deferring hides it behind an ordinary retry notice.
+    ...TEAM_TRANSIENT_FAILURE_REASONS,
   ].includes(reason) || reason.startsWith("unexpected_fast_forward_outcome");
 }
 

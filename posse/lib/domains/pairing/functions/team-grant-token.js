@@ -1,6 +1,8 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
+import { TEAM_FAILURE_REASONS } from "../../../catalog/team.js";
+
 const PUBLIC_KEY_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const B64URL_RE = /^[A-Za-z0-9_-]+$/u;
 const JTI_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -65,9 +67,15 @@ export function verifyTeamGrantToken(grant, {
       || !JTI_RE.test(String(claims.jti || ""))) {
       throw new Error("Grant audience or scope identity does not match");
     }
+    // A token that simply aged out is an ordinary, self-healing condition: the
+    // host reissues and the next attempt succeeds. Keep it distinct from a
+    // token whose signature, key or claims do not verify, which never heals.
     if (!Number.isSafeInteger(claims.nbf) || !Number.isSafeInteger(claims.exp)
-      || claims.nbf > nowSec || claims.exp <= nowSec || claims.exp - claims.nbf > 900) {
-      throw new Error("Grant is expired or outside its permitted lifetime");
+      || claims.exp - claims.nbf > 900) {
+      throw new Error("Grant is outside its permitted lifetime");
+    }
+    if (claims.nbf > nowSec || claims.exp <= nowSec) {
+      throw Object.assign(new Error("Grant has expired"), { expired: true });
     }
     if (grant?.grant_jti != null && grant.grant_jti !== claims.jti) {
       throw new Error("Grant token identity does not match the current grant");
@@ -90,6 +98,12 @@ export function verifyTeamGrantToken(grant, {
     }
     return { ok: true, claims };
   } catch (error) {
-    return { ok: false, reason: "signed_grant_invalid", message: String(error?.message || error).slice(0, 200) };
+    return {
+      ok: false,
+      reason: error?.expired === true
+        ? TEAM_FAILURE_REASONS.SIGNED_GRANT_EXPIRED
+        : TEAM_FAILURE_REASONS.SIGNED_GRANT_INVALID,
+      message: String(error?.message || error).slice(0, 200),
+    };
   }
 }

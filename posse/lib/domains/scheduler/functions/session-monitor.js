@@ -18,6 +18,10 @@ import {
   updatePairingEnrollment,
 } from "../../pairing/functions/state.js";
 import {
+  teamPolicyRegression,
+  teamPolicyRegressionMessage,
+} from "../../pairing/functions/team-policy.js";
+import {
   clearPairingPeerSnapshot,
   collectPairingPresence,
   writePairingPeerSnapshot,
@@ -154,14 +158,9 @@ export class SessionMonitor {
       const status = this._validate("heartbeat", raw);
       assertStatusMatches(state, status);
       const priorPolicyRevision = Number(state.submission_approval_revision) || 0;
-      if (status.submission_approval_enabled == null) {
-        if (state.submission_approval_enabled === 1) {
-          throw sessionChanged("Session relay omitted the active Team approval policy");
-        }
-      } else if (status.submission_policy_revision < priorPolicyRevision
-          || (status.submission_policy_revision === priorPolicyRevision
-            && status.submission_approval_enabled !== (state.submission_approval_enabled === 1))) {
-        throw sessionChanged("Session Team approval policy regressed");
+      const policyRegression = teamPolicyRegression(state, status);
+      if (policyRegression) {
+        throw sessionChanged(teamPolicyRegressionMessage(policyRegression));
       }
       const teamPolicyEnabled = status.submission_approval_enabled === true;
       this._tokenManager.setSessionContext({

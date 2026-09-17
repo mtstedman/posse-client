@@ -1,4 +1,5 @@
 import { adminGitExec } from "../../git/functions/admin-git.js";
+import { TEAM_SCOPE_GLOB_PATTERN, TEAM_SCOPE_LIMITS } from "../../../catalog/team.js";
 
 const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu;
 const MAX_INCOMING_COMMITS = 256;
@@ -35,19 +36,20 @@ function incomingPaths(projectDir, baseOid, headOid) {
   return paths;
 }
 
-// Remote arbitrates exclusive write claims by comparing these paths literally,
-// so a glob would claim the whole repository locally while conflicting with
-// nothing on the relay. Scope paths are exact literal repository paths.
-const GLOB_METACHARACTERS = /[*?[\]]/u;
-
+/** The single canonical scope-path rule for both sides of the boundary.
+ * Registered in the catalog because the bridge command surface, the grant
+ * request/issue validator and this scope check all have to apply exactly the
+ * same rule; they previously each applied a different one. */
 export function cleanScopePath(value) {
   return typeof value === "string"
     && value.length > 0
-    && value.length <= 1024
+    && value.length <= TEAM_SCOPE_LIMITS.MAX_PATH_LENGTH
     && !value.startsWith("/")
     && !value.includes("\\")
     && !value.includes("\0")
-    && !GLOB_METACHARACTERS.test(value)
+    && !TEAM_SCOPE_GLOB_PATTERN.test(value)
+    // eslint-disable-next-line no-control-regex
+    && !/[\u0000-\u001f\u007f]/u.test(value)
     && value.split("/").every((part) => part && part !== "." && part !== "..");
 }
 

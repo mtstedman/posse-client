@@ -57,6 +57,10 @@ import {
 } from "./promotion.js";
 import { waitForPairingSchedulerStop } from "./shutdown.js";
 import {
+  teamPolicyRegression,
+  teamPolicyRegressionMessage,
+} from "./team-policy.js";
+import {
   addGitHubMemberDeployKey,
   cleanupGitHubSessionRepository,
   configureRepositorySessionSsh,
@@ -505,6 +509,14 @@ async function monitorPairing(remoteClient, stateId, {
         assertPairingStatusMatches(state, status);
         const nextScope = status.scope_set || {};
         const scopeChanged = JSON.stringify(nextScope) !== JSON.stringify(state.scopeSet || {});
+        // Remote is authoritative for this policy but may never walk it
+        // backwards; the scheduler session monitor enforces the same rule.
+        const policyRegression = teamPolicyRegression(state, status);
+        if (policyRegression) {
+          throw Object.assign(new Error(teamPolicyRegressionMessage(policyRegression)), {
+            code: "pairing_team_policy_regressed",
+          });
+        }
         const teamPolicyChanged = status.submission_approval_enabled != null
           && (Number(status.submission_approval_enabled) !== Number(state.submission_approval_enabled)
             || status.submission_policy_revision !== Number(state.submission_approval_revision));

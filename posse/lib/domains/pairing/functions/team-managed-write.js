@@ -4,18 +4,17 @@ import path from "node:path";
 
 import { getLivePairingState } from "./state.js";
 import { permitsGrantPath } from "./team-scope.js";
+import {
+  TEAM_FILE_WRITE_TOOLS,
+  TEAM_READ_TOOLS,
+} from "../../../catalog/team.js";
 import { getVerifiedTeamGrantForWorkItem } from "./team-submissions.js";
 
-// A managed Session deliberately has a small executable write surface. These
-// names are checked at the tool dispatch boundary, before arbitrary handlers
-// (including shell, image, database, ATLAS and custom tools) can run.
-const READ_TOOLS = new Set([
-  "read_file", "list_files", "search_files", "git_history", "inspect_file",
-  "hash_file", "get_brief", "pull_brief", "read_image_metadata",
-  "validate_artifact_output", "agent_feedback", "get_operator_feedback",
-  "ack_operator_feedback", "agent_handoff", "request_scope",
-]);
-const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file"]);
+// A managed Session deliberately has a small executable write surface. The
+// canonical sets live in the catalog because the provider tool runtime and the
+// MCP transport both gate on them.
+const READ_TOOLS = new Set(TEAM_READ_TOOLS);
+const FILE_WRITE_TOOLS = new Set(TEAM_FILE_WRITE_TOOLS);
 const verifiedWriteContext = new AsyncLocalStorage();
 
 export function teamApprovalModeActive() {
@@ -29,9 +28,16 @@ export function teamManagedSynchronousToolDenied(toolName) {
     : null;
 }
 
+/** Admission for the MCP transport, which reaches the owner over JSON-RPC in a
+ * separate process. A verified, path-bound write context cannot follow that
+ * call, so a write arriving this way could never be grant-checked; refuse it
+ * here rather than admitting it and failing at the write guard with a reason
+ * that reads like a bug. Writes are admitted only on a grant-bound transport
+ * (TEAM_GRANT_BOUND_TRANSPORTS), which runs them through
+ * runWithTeamManagedToolGrant in the same process as the write. */
 export function teamManagedToolAdmitted(suite, name) {
   if (!teamApprovalModeActive()) return true;
-  return suite === "tools" && (READ_TOOLS.has(name) || FILE_WRITE_TOOLS.has(name));
+  return suite === "tools" && READ_TOOLS.has(name);
 }
 
 export function assertTeamManagedProvider(providerName) {
