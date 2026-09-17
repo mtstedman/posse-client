@@ -12,7 +12,11 @@ import { loadOrCreateTeamSigningKey, newTeamGrantJti, signTeamGrantClaims } from
 import { cleanScopePath, verifyTeamGitScope } from "./team-scope.js";
 import {
   TEAM_FAILURE_REASONS,
+  TEAM_GRANT_ISSUABLE_STATES,
   TEAM_GRANT_REPAIRABLE_REASONS,
+  TEAM_GRANT_STATES,
+  TEAM_PUBLICATION_MODE,
+  TEAM_PUBLICATION_MODES,
   TEAM_SCOPE_LABEL_PATTERN,
   TEAM_SCOPE_LIMITS,
 } from "../../../catalog/team.js";
@@ -101,7 +105,11 @@ function requireGrant(response, workItemId, state) {
     || grant.policy_revision !== Number(state.submission_approval_revision)) {
     return fail("invalid_grant_response");
   }
-  if (grant.state !== "active") return fail(grant.state === "waiting_for_files" ? "waiting_for_files" : "team_grant_inactive");
+  if (grant.state !== TEAM_GRANT_STATES.ACTIVE) {
+    return fail(grant.state === TEAM_GRANT_STATES.WAITING_FOR_FILES
+      ? TEAM_FAILURE_REASONS.WAITING_FOR_FILES
+      : TEAM_FAILURE_REASONS.GRANT_INACTIVE);
+  }
   const signature = verifyTeamGrantToken(grant, {
     sessionId: state.remote_session_id,
     instanceId: state.instance_id,
@@ -399,8 +407,8 @@ export async function issueTeamGrant({
     || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
     || !Number.isSafeInteger(policyRevision) || policyRevision !== Number(state.submission_approval_revision)
     || !Number.isSafeInteger(claimGeneration) || claimGeneration < 0
-    || !["active", "waiting_for_files"].includes(grantState)
-    || (grantState === "active" && fileHandoffConfirmed !== true)
+    || !TEAM_GRANT_ISSUABLE_STATES.includes(grantState)
+    || (grantState === TEAM_GRANT_STATES.ACTIVE && fileHandoffConfirmed !== true)
     || !validPermissions(effectivePermissions)
     || expiration == null || expiration <= nowSec || expiration - nowSec > 900) {
     return fail("invalid_grant_issue");
@@ -517,7 +525,7 @@ export async function gateTeamCandidateForPublication({
     if (status?.session_id !== state.remote_session_id
       || status.submission_approval_enabled !== true
       || status.submission_policy_revision !== Number(state.submission_approval_revision)
-      || !["direct", "github-pr"].includes(status.team_publication_mode)
+      || !TEAM_PUBLICATION_MODES.includes(status.team_publication_mode)
       || !Number.isSafeInteger(status.team_publication_revision)
       || status.team_publication_mode !== state.team_publication_mode
       || status.team_publication_revision !== Number(state.team_publication_revision)) {
@@ -579,7 +587,7 @@ export async function gateTeamCandidateForPublication({
       || typeof checked.receipt?.decision_action_id !== "string") {
       return fail("invalid_approval_receipt");
     }
-    if (status.team_publication_mode === "github-pr") {
+    if (status.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
       return { ok: false, reason: "host_provider_merge_required", providerPending: true,
         submissionId, grantRevision: pins.grant_revision, candidateOid: pins.candidate_oid,
         candidateRef: refs.candidate_ref };
@@ -641,13 +649,13 @@ export async function verifyTeamPublishedCandidate({
     if (!grant || grant.executor_instance_id !== state.instance_id
       || grant.originator_instance_id !== row.decision_actor_instance_id
       || !row.decision_action_id || row.policy_revision !== Number(state.submission_approval_revision)
-      || !["active", "merged"].includes(grant.state)
-      || (grant.state === "active" && (grant.revision !== row.grant_revision
+      || ![TEAM_GRANT_STATES.ACTIVE, TEAM_GRANT_STATES.MERGED].includes(grant.state)
+      || (grant.state === TEAM_GRANT_STATES.ACTIVE && (grant.revision !== row.grant_revision
         || grant.grant_jti !== row.grant_jti
         || grant.current_submission_id !== (row.id || row.submission_id)
         || grant.claim_generation !== row.claim_generation
         || grant.policy_revision !== row.policy_revision))
-      || (grant.state === "merged" && grant.revision !== row.grant_revision + 1)) {
+      || (grant.state === TEAM_GRANT_STATES.MERGED && grant.revision !== row.grant_revision + 1)) {
       return fail("team_approval_receipt_stale");
     }
     if (!fetchExactRef(projectDir, state.remote_name, row.workbranch_ref, row.source_oid)
@@ -660,11 +668,11 @@ export async function verifyTeamPublishedCandidate({
     if (!scope.ok) return scope;
     const trunkRef = `refs/heads/${state.shared_branch}`;
     if (advertisedOid(projectDir, state.remote_name, trunkRef) !== observedOid) return fail("team_trunk_moved");
-    if (status.team_publication_mode === "direct") {
+    if (status.team_publication_mode === TEAM_PUBLICATION_MODE.DIRECT) {
       return observedOid === row.candidate_oid ? { ok: true, acceptedOid: observedOid }
         : fail("team_candidate_not_current_trunk");
     }
-    if (status.team_publication_mode === "github-pr") {
+    if (status.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
       const proof = await verifyPublishedTeamPullRequest({ projectDir, submission: row,
         remoteUrl: state.remote_url, targetBranch: state.shared_branch });
       return proof.ok && proof.branchOid === observedOid && proof.acceptedOid === observedOid
@@ -741,7 +749,7 @@ export async function setTeamSubmissionApproval(enabled, {
 export async function setTeamPublicationMode(mode, {
   projectDir = process.cwd(), remoteClientFactory = createPairingRemoteClient,
 } = {}) {
-  if (!["direct", "github-pr"].includes(mode)) return fail("invalid_team_publication_mode");
+  if (!TEAM_PUBLICATION_MODES.includes(mode)) return fail("invalid_team_publication_mode");
   let state;
   try { state = activeState(projectDir); } catch { state = null; }
   if (!state || state.role !== "host") return fail("team_host_required");
@@ -749,12 +757,12 @@ export async function setTeamPublicationMode(mode, {
     const client = remoteClientFactory();
     const status = await client.status(state.relay_token);
     if (status?.session_id !== state.remote_session_id || status?.role !== "host"
-      || !["direct", "github-pr"].includes(status.team_publication_mode)
+      || !TEAM_PUBLICATION_MODES.includes(status.team_publication_mode)
       || !Number.isSafeInteger(status.team_publication_revision)
       || !Number.isSafeInteger(status.active_members) || status.active_members !== 0) {
       return fail("team_publication_policy_unavailable");
     }
-    if (mode === "github-pr") {
+    if (mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
       if (status.submission_approval_enabled !== true) return fail("team_approval_required");
       const protection = await verifyProtectedTeamBranch({
         projectDir, remoteUrl: state.remote_url, targetBranch: state.shared_branch,
@@ -809,17 +817,18 @@ function handoffMatch(grants, submissions, state) {
     if (submission?.state !== "approved" || !OID_RE.test(submission.candidate_oid || "")) continue;
     const predecessor = grants.find((grant) => grant.work_item_id === submission.work_item_id);
     const file = exactWriteFile(predecessor?.effective_permissions);
-    if (!file || predecessor.state !== "active" || predecessor.revision !== submission.grant_revision
+    if (!file || predecessor.state !== TEAM_GRANT_STATES.ACTIVE
+      || predecessor.revision !== submission.grant_revision
       || predecessor.grant_jti !== submission.grant_jti
       || predecessor.claim_generation !== submission.claim_generation
       || predecessor.originator_instance_id !== submission.decision_actor_instance_id
       || predecessor.current_submission_id !== (submission.id || submission.submission_id)
       || predecessor.policy_revision !== Number(state.submission_approval_revision)) continue;
-    const waiting = grants.filter((grant) => grant.state === "waiting_for_files"
+    const waiting = grants.filter((grant) => grant.state === TEAM_GRANT_STATES.WAITING_FOR_FILES
       && grant.work_item_id !== predecessor.work_item_id
       && writeCoversFile(grant.effective_permissions, file));
     if (waiting.length !== 1 || exactWriteFile(waiting[0].effective_permissions) !== file) continue;
-    const occupiers = grants.filter((grant) => grant.state === "active"
+    const occupiers = grants.filter((grant) => grant.state === TEAM_GRANT_STATES.ACTIVE
       && writeCoversFile(grant.effective_permissions, file));
     if (occupiers.length !== 1 || occupiers[0].work_item_id !== predecessor.work_item_id) continue;
     const successor = waiting[0];
@@ -850,7 +859,7 @@ export async function reconcileTeamFileHandoff({
     ]);
     if (status?.session_id !== state.remote_session_id || status.submission_approval_enabled !== true
       || status.submission_policy_revision !== Number(state.submission_approval_revision)
-      || !["direct", "github-pr"].includes(status.team_publication_mode)
+      || !TEAM_PUBLICATION_MODES.includes(status.team_publication_mode)
       || !Number.isSafeInteger(status.team_publication_revision)
       || grantResponse?.contract_version !== 1 || grantResponse.session_id !== state.remote_session_id
       || submissionResponse?.contract_version !== 1 || submissionResponse.session_id !== state.remote_session_id) {
@@ -862,11 +871,12 @@ export async function reconcileTeamFileHandoff({
     const trunkRef = `refs/heads/${state.shared_branch}`;
     const observedTrunkOid = advertisedOid(projectDir, state.remote_name, trunkRef);
     if (!observedTrunkOid) return fail("team_trunk_unverifiable");
-    if (status.team_publication_mode === "direct" && observedTrunkOid !== submission.candidate_oid) {
+    if (status.team_publication_mode === TEAM_PUBLICATION_MODE.DIRECT
+      && observedTrunkOid !== submission.candidate_oid) {
       return fail("team_candidate_not_current_trunk");
     }
     let acceptedOid = observedTrunkOid;
-    if (status.team_publication_mode === "github-pr") {
+    if (status.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
       const proof = await verifyPublishedTeamPullRequest({
         projectDir, submission, remoteUrl: state.remote_url,
         targetBranch: state.shared_branch,
@@ -939,7 +949,7 @@ export async function reconcileTeamFileHandoff({
         originator_instance_id: successor.originator_instance_id,
         expected_revision: successor.revision,
         effective_permissions: successor.effective_permissions,
-        state: "active", claim_generation: claimGeneration,
+        state: TEAM_GRANT_STATES.ACTIVE, claim_generation: claimGeneration,
         expires_at: expiresAt, decision_mode: "manual",
         policy_revision: successor.policy_revision,
         signed_grant: signedGrant,
@@ -1017,7 +1027,8 @@ export async function projectTeamOverview({
           && Number.isSafeInteger(publicationStatus.active_members);
       } catch { /* provider controls stay hidden when Remote cannot be checked */ }
     }
-    const providerReady = publicationCurrent && state.team_publication_mode === "github-pr"
+    const providerReady = publicationCurrent
+      && state.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR
       && publicationStatus.submission_approval_enabled === true
       && publicationStatus.submission_policy_revision === Number(state.submission_approval_revision);
     const approvalPolicyCurrent = publicationCurrent
@@ -1038,7 +1049,8 @@ export async function projectTeamOverview({
         requested_paths: [...(grant.requested_permissions?.write?.files || []), ...(grant.requested_permissions?.write?.roots || [])],
         grant_paths: [...(grant.effective_permissions?.write?.files || []), ...(grant.effective_permissions?.write?.roots || [])],
         claim_paths: null,
-        waiting_paths: grant.state === "waiting_for_files" ? [...(grant.effective_permissions?.write?.files || [])] : [],
+        waiting_paths: grant.state === TEAM_GRANT_STATES.WAITING_FOR_FILES
+          ? [...(grant.effective_permissions?.write?.files || [])] : [],
         claim_generation: grant.claim_generation || 0,
         payer_id: grant.payer_instance_id || grant.executor_instance_id,
         executor_id: grant.executor_instance_id,
@@ -1056,9 +1068,10 @@ export async function projectTeamOverview({
         // Remote's grant state is authoritative for availability. The list
         // response does not include the atomic handoff receipt, so do not
         // attribute an active grant to an accepted merge here.
-        recommended_issue_state: "waiting_for_files",
-        file_availability_state: grant.state === "waiting_for_files" ? "waiting_for_handoff"
-          : grant.state === "active" ? "active_grant" : grant.state || "unavailable",
+        recommended_issue_state: TEAM_GRANT_STATES.WAITING_FOR_FILES,
+        file_availability_state: grant.state === TEAM_GRANT_STATES.WAITING_FOR_FILES
+          ? "waiting_for_handoff"
+          : grant.state === TEAM_GRANT_STATES.ACTIVE ? "active_grant" : grant.state || "unavailable",
         capabilities: state.role === "host" && state.submission_approval_enabled === 1
           && originatorId
           && Number.isSafeInteger(grant.requested_revision)
@@ -1086,7 +1099,7 @@ export async function projectTeamOverview({
     const trunkOid = advertisedOid(projectDir, state.remote_name, `refs/heads/${state.shared_branch}`);
     const projectedSubmissions = submissions.map((row) => {
       const grant = grantResponse.grants.find((item) => item.work_item_id === row.work_item_id);
-      const providerEligible = providerReady && grant?.state === "active"
+      const providerEligible = providerReady && grant?.state === TEAM_GRANT_STATES.ACTIVE
         && grant.revision === row.grant_revision && grant.policy_revision === row.policy_revision
         && trunkOid === row.target_oid && ["pending", "approved"].includes(row.state);
       return {
@@ -1193,7 +1206,8 @@ export async function decideTeamSubmission(args = {}) {
       if (!grant || grant.originator_instance_id !== state.instance_id) return fail("originator_required");
       if (args.decision === "approve") {
         if (grant.revision !== row.grant_revision || grant.claim_generation !== row.claim_generation
-          || grant.policy_revision !== row.policy_revision || grant.state !== "active") return fail("grant_stale");
+          || grant.policy_revision !== row.policy_revision
+          || grant.state !== TEAM_GRANT_STATES.ACTIVE) return fail("grant_stale");
         const signed = verifyTeamGrantToken(grant, {
           sessionId: state.remote_session_id,
           instanceId: grant.executor_instance_id,

@@ -6,7 +6,7 @@
 // fetched remote before allowing another trunk write.
 
 import {
-  TEAM_FATAL_FAILURE_REASONS,
+  TEAM_ATTENTION_FAILURE_REASONS,
   TEAM_TRANSIENT_FAILURE_REASONS,
 } from "../../../catalog/team.js";
 import {
@@ -417,11 +417,13 @@ function recordPublicationHealth(config, unresolved = []) {
  * a later attempt (lock released, transport restored, journal reconciled,
  * divergence repaired) and say nothing about the WI's own mergeability.
  */
-/** A publication failure that never clears. Surfacing it as a deferral would
- * loop forever and mask the one signal that a grant was tampered with. */
-export function isFatalSharedTrunkTeamResult(result) {
+/** A Team publication failure that is still deferrable -- the work item keeps
+ * its completed passes -- but must be reported as its own blocked state rather
+ * than an ordinary "shared trunk busy" retry. It survived the deterministic
+ * repair, so the signed material itself does not verify. */
+export function sharedTrunkTeamResultNeedsAttention(result) {
   if (!result || result.ok === true) return false;
-  return TEAM_FATAL_FAILURE_REASONS.includes(String(result.reason || ""));
+  return TEAM_ATTENTION_FAILURE_REASONS.includes(String(result.reason || ""));
 }
 
 export function isTransientSharedTrunkMergeResult(result) {
@@ -437,10 +439,11 @@ export function isTransientSharedTrunkMergeResult(result) {
     "fast_forward_blocked",
     "remote_head_unresolved",
     "local_trunk_diverged",
-    // Team publication deferrals are registered in the catalog, which also
-    // records which ones never clear. A grant whose signature, key or claims
-    // do not verify is a security event, not a busy signal: retrying cannot
-    // clear it and deferring hides it behind an ordinary retry notice.
+    // Team publication deferrals are registered in the catalog. None of them
+    // means the work is bad, only that publication is not authorized yet, so
+    // all of them defer rather than finalizing the work item and forcing the
+    // whole job to run again. The ones needing a human are flagged separately
+    // by sharedTrunkTeamResultNeedsAttention.
     ...TEAM_TRANSIENT_FAILURE_REASONS,
   ].includes(reason) || reason.startsWith("unexpected_fast_forward_outcome");
 }

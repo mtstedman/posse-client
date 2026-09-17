@@ -3,6 +3,9 @@ import { isDeepStrictEqual } from "node:util";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { cleanScopePath } from "../../pairing/functions/team-scope.js";
 import {
+  TEAM_GRANT_ISSUABLE_STATES,
+  TEAM_PUBLICATION_MODE,
+  TEAM_PUBLICATION_MODES,
   TEAM_SCOPE_LABEL_PATTERN,
   TEAM_SCOPE_LIMITS,
 } from "../../../catalog/team.js";
@@ -280,7 +283,7 @@ export async function issueTeamGrant(args = {}, context = {}) {
   pins.policy_revision = nonnegativeRevision(args.policy_revision);
   pins.claim_generation = nonnegativeRevision(args.claim_generation);
   if (!base || pins.policy_revision == null || pins.claim_generation == null
-      || !["active", "waiting_for_files"].includes(args.state)
+      || !TEAM_GRANT_ISSUABLE_STATES.includes(args.state)
       || !validPermissionGroup(args.effective_permissions)) {
     return { ok: false, reason: "invalid_grant_issue" };
   }
@@ -361,7 +364,8 @@ async function runProviderPrAction(args, context, publish) {
   const state = context.teamHostState || getLivePairingState();
   if (state?.phase !== "active" || state.role !== "host"
     || state.remote_session_id !== pins.session_id
-    || state.submission_approval_enabled !== 1 || state.team_publication_mode !== "github-pr") {
+    || state.submission_approval_enabled !== 1
+    || state.team_publication_mode !== TEAM_PUBLICATION_MODE.GITHUB_PR) {
     return { ok: false, reason: "team_provider_host_required" };
   }
   const owner = await providerFunctions(context);
@@ -401,7 +405,7 @@ export async function configureTeamProviderProtection(args = {}, context = {}) {
   const state = context.teamHostState || getLivePairingState();
   if (state?.phase !== "active" || state.role !== "host"
       || state.remote_session_id !== sessionId || state.submission_approval_enabled !== 1
-      || !["direct", "github-pr"].includes(state.team_publication_mode)) {
+      || !TEAM_PUBLICATION_MODES.includes(state.team_publication_mode)) {
     return { ok: false, reason: "team_provider_host_required" };
   }
   const owner = await providerFunctions(context);

@@ -1,6 +1,7 @@
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
+import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
 
 export const PAIRING_AUTH_ROUTE = "pairing:session";
 export const PAIRING_PROTOCOL = "posse.pairing.v1";
@@ -296,7 +297,7 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
       throw invalidResponse(endpoint, "submission policy fields are incomplete", status);
     }
     if (response.team_publication_mode != null
-      && !["direct", "github-pr"].includes(response.team_publication_mode)) {
+      && !TEAM_PUBLICATION_MODES.includes(response.team_publication_mode)) {
       throw invalidResponse(endpoint, "team_publication_mode is invalid", status);
     }
     if (response.team_publication_revision != null

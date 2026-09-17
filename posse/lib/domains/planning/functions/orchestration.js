@@ -45,7 +45,10 @@ import {
   researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { isTransientSharedTrunkMergeResult } from "../../git/functions/shared-trunk.js";
+import {
+  isTransientSharedTrunkMergeResult,
+  sharedTrunkTeamResultNeedsAttention,
+} from "../../git/functions/shared-trunk.js";
 import { ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
@@ -303,19 +306,34 @@ export async function processIterativeWrapUp({
         // push contention, pending journal recovery) is retryable by design
         // and must not finalize the iterative WI as merge-failed — the next
         // wrap-up pass re-attempts the same pass merge.
+        //
+        // A Team grant that does not verify defers the same way: the completed
+        // passes are good and only publication is unauthorized, so discarding
+        // them would force the whole job to run again to reach the same
+        // commit. It is reported as its own blocked state rather than as
+        // routine shared-trunk busy-ness, because it needs a reissued grant
+        // rather than time.
+        const needsAttention = sharedTrunkTeamResultNeedsAttention(mergeResult);
         logEvent({
           work_item_id: wi.id,
-          event_type: EVENT_TYPES.WORK_ITEM_ITERATION_PASS_MERGE_DEFERRED,
+          event_type: needsAttention
+            ? EVENT_TYPES.SHARED_TRUNK_PROVENANCE_BLOCKED
+            : EVENT_TYPES.WORK_ITEM_ITERATION_PASS_MERGE_DEFERRED,
           actor_type: EVENT_ACTORS.SYSTEM,
-          message: `Iterative pass merge deferred (${mergeResult.reason || "shared-trunk deferral"}); retrying at next wrap-up`,
+          message: needsAttention
+            ? `Team publication blocked: the work-item grant did not verify after a fresh re-resolution (${mergeResult.reason}). Completed passes are preserved; reissue the grant to resume.`
+            : `Iterative pass merge deferred (${mergeResult.reason || "shared-trunk deferral"}); retrying at next wrap-up`,
           event_json: JSON.stringify({
             pass: refreshed.passCount,
             branch: wi.branch_name,
             reason: mergeResult.reason || null,
             shared_trunk: true,
+            ...(needsAttention ? { needs_attention: true, repair_attempted: true } : {}),
           }),
         });
-        say(`  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: pass merge deferred (${mergeResult.reason || "shared trunk busy"}); will retry`);
+        say(needsAttention
+          ? `  ${C.red}[iterate]${C.reset} WI#${wi.id}: Team publication blocked — grant did not verify after re-resolution (${mergeResult.reason}); passes preserved, reissue the grant to resume`
+          : `  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: pass merge deferred (${mergeResult.reason || "shared trunk busy"}); will retry`);
         continue;
       }
       if (!mergeResult.ok) {

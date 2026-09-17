@@ -67,15 +67,13 @@ export function verifyTeamGrantToken(grant, {
       || !JTI_RE.test(String(claims.jti || ""))) {
       throw new Error("Grant audience or scope identity does not match");
     }
-    // A token that simply aged out is an ordinary, self-healing condition: the
-    // host reissues and the next attempt succeeds. Keep it distinct from a
-    // token whose signature, key or claims do not verify, which never heals.
+    // Validate the signed lifetime and every binding to the current grant
+    // before classifying an otherwise valid token as merely aged out. An
+    // expired token must not hide a record whose JTI, revision or permissions
+    // were changed independently of the host signature.
     if (!Number.isSafeInteger(claims.nbf) || !Number.isSafeInteger(claims.exp)
-      || claims.exp - claims.nbf > 900) {
+      || claims.exp <= claims.nbf || claims.exp - claims.nbf > 900) {
       throw new Error("Grant is outside its permitted lifetime");
-    }
-    if (claims.nbf > nowSec || claims.exp <= nowSec) {
-      throw Object.assign(new Error("Grant has expired"), { expired: true });
     }
     if (grant?.grant_jti != null && grant.grant_jti !== claims.jti) {
       throw new Error("Grant token identity does not match the current grant");
@@ -95,6 +93,11 @@ export function verifyTeamGrantToken(grant, {
     if (!isDeepStrictEqual(normalizedPermissions(claims.effective_permissions),
       normalizedPermissions(grant?.effective_permissions))) {
       throw new Error("Grant permissions do not match the signed token");
+    }
+    // A token that simply aged out (or is not valid yet) is an ordinary,
+    // self-healing condition: the host reissues and the next attempt succeeds.
+    if (claims.nbf > nowSec || claims.exp <= nowSec) {
+      throw Object.assign(new Error("Grant is not currently valid"), { expired: true });
     }
     return { ok: true, claims };
   } catch (error) {

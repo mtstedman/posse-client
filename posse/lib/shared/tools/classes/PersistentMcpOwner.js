@@ -5462,7 +5462,10 @@ export class PersistentMcpOwner {
         );
         const providerToolArgs = normalizedProviderRequest.toolArgs;
         const managedRequest = requestedToolPolicyName(providerToolName, providerToolArgs);
-        if (!teamManagedToolAdmitted(managedRequest.suite, managedRequest.name)) {
+        if (!teamManagedToolAdmitted(managedRequest.suite, managedRequest.name, {
+          transport: "persistent-mcp",
+          workItemId: session?.bootConfig?.workItemId,
+        })) {
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,

@@ -13,6 +13,11 @@ import { createPairingRemoteClient } from "./remote-client.js";
 import { getLivePairingState } from "./state.js";
 import { verifyTeamGrantToken } from "./team-grant-token.js";
 import { verifyTeamGitScope } from "./team-scope.js";
+import {
+  TEAM_GRANT_STATES,
+  TEAM_PUBLICATION_MODE,
+  TEAM_PUBLICATION_MODES,
+} from "../../../catalog/team.js";
 
 const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu;
 const TEAM_REF_RE = /^refs\/heads\/posse\/team\/[A-Za-z0-9._/-]{1,160}\/(?:source|candidate)$/u;
@@ -63,7 +68,7 @@ export async function configureHostTeamBranchProtection({
     const client = remoteClientFactory();
     const status = await client.status(state.relay_token);
     if (status?.session_id !== sessionId
-      || !["direct", "github-pr"].includes(status.team_publication_mode)
+      || !TEAM_PUBLICATION_MODES.includes(status.team_publication_mode)
       || status.team_publication_mode !== state.team_publication_mode
       || status.team_publication_revision !== state.team_publication_revision
       || !Number.isSafeInteger(status.active_members) || status.active_members !== 0) {
@@ -116,7 +121,8 @@ export async function prepareTeamSubmissionPullRequest({
     }
   } catch { state = null; }
   if (!state || state.phase !== "active" || state.role !== "host"
-    || state.submission_approval_enabled !== 1 || state.team_publication_mode !== "github-pr"
+    || state.submission_approval_enabled !== 1
+    || state.team_publication_mode !== TEAM_PUBLICATION_MODE.GITHUB_PR
     || !Number.isSafeInteger(state.team_publication_revision)
     || state.team_publication_revision <= 0) {
     return fail("team_provider_host_required");
@@ -130,7 +136,8 @@ export async function prepareTeamSubmissionPullRequest({
   try {
     const client = remoteClientFactory();
     const status = await client.status(state.relay_token);
-    if (status?.session_id !== sessionId || status.team_publication_mode !== "github-pr"
+    if (status?.session_id !== sessionId
+      || status.team_publication_mode !== TEAM_PUBLICATION_MODE.GITHUB_PR
       || status.team_publication_revision !== state.team_publication_revision
       || status.submission_approval_enabled !== true
       || status.submission_policy_revision !== policyRevision) return fail("team_provider_policy_stale");
@@ -152,7 +159,7 @@ export async function prepareTeamSubmissionPullRequest({
     if (grants?.contract_version !== 1 || grants.session_id !== sessionId
       || !Array.isArray(grants.grants) || grants.grants.length > MAX_ROWS) return fail("team_provider_grant_invalid");
     const grant = grants.grants.find((item) => item?.work_item_id === workItemId);
-    if (!grant || grant.state !== "active" || grant.revision !== grantRevision
+    if (!grant || grant.state !== TEAM_GRANT_STATES.ACTIVE || grant.revision !== grantRevision
       || grant.claim_generation !== row.claim_generation || grant.policy_revision !== policyRevision) {
       return fail("team_provider_grant_stale");
     }
@@ -243,7 +250,8 @@ export async function publishApprovedTeamPullRequest(args = {}) {
     const grant = grants?.contract_version === 1 && grants.session_id === state.remote_session_id
       && Array.isArray(grants.grants) && grants.grants.length <= MAX_ROWS
       ? grants.grants.find((item) => item?.work_item_id === args.work_item_id) : null;
-    if (!grant || grant.state !== "active" || grant.revision !== row.grant_revision
+    if (!grant || grant.state !== TEAM_GRANT_STATES.ACTIVE
+      || grant.revision !== row.grant_revision
       || grant.originator_instance_id !== row.decision_actor_instance_id
       || !row.decision_action_id) return fail("team_provider_approval_stale");
     const pins = {
@@ -269,7 +277,7 @@ export async function publishApprovedTeamPullRequest(args = {}) {
     }
     const status = await client.status(state.relay_token);
     if (status?.session_id !== state.remote_session_id
-      || status.team_publication_mode !== "github-pr"
+      || status.team_publication_mode !== TEAM_PUBLICATION_MODE.GITHUB_PR
       || status.team_publication_revision !== prepared.publication_revision
       || status.submission_approval_enabled !== true
       || status.submission_policy_revision !== row.policy_revision) {

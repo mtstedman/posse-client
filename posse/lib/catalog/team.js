@@ -32,8 +32,8 @@ export const TEAM_GRANT_STATES = Object.freeze({
   MERGED: "merged",
 });
 
-// A host may only issue over a grant that has not reached a terminal state.
-// Re-entry after a terminal state goes through a fresh grant request.
+// States a host may choose for a newly issued grant. Re-entry after a terminal
+// state goes through a fresh grant request before one of these states is issued.
 export const TEAM_GRANT_ISSUABLE_STATES = Object.freeze([
   TEAM_GRANT_STATES.ACTIVE,
   TEAM_GRANT_STATES.WAITING_FOR_FILES,
@@ -45,7 +45,14 @@ export const TEAM_GRANT_TERMINAL_STATES = Object.freeze([
   TEAM_GRANT_STATES.MERGED,
 ]);
 
-export const TEAM_PUBLICATION_MODES = Object.freeze(["direct", "github-pr"]);
+export const TEAM_PUBLICATION_MODE = Object.freeze({
+  DIRECT: "direct",
+  GITHUB_PR: "github-pr",
+});
+
+export const TEAM_PUBLICATION_MODES = Object.freeze(
+  Object.values(TEAM_PUBLICATION_MODE),
+);
 
 // Approval mode deliberately exposes a small executable surface. These names
 // are checked at the tool dispatch boundary, before arbitrary handlers
@@ -58,16 +65,18 @@ export const TEAM_READ_TOOLS = Object.freeze([
 ]);
 
 // A file write is admitted only where a fresh per-call grant can be bound to
-// the exact path in the same process that performs the write. The in-process
-// provider tool runtime can do that; see TEAM_GRANT_BOUND_TRANSPORTS.
+// the exact path in the same process that performs the write.
 export const TEAM_FILE_WRITE_TOOLS = Object.freeze(["write_file", "edit_file"]);
 
 // Transports that can carry a verified, path-bound write context to the code
-// that performs the write. The MCP transport is JSON-RPC to a separate owner
-// process, so the async write context cannot follow the call and a write
-// arriving that way can never be grant-checked; approval mode refuses it at
-// admission rather than admitting it and failing later at the write guard.
-export const TEAM_GRANT_BOUND_TRANSPORTS = Object.freeze(["provider-tool-runtime"]);
+// that performs the write. The persistent MCP transport does not carry the
+// caller's AsyncLocalStorage context across processes; instead its signed boot
+// binding carries the WI identity and the receiving process performs the same
+// fresh grant lookup before establishing its own local write context.
+export const TEAM_GRANT_BOUND_TRANSPORTS = Object.freeze([
+  "provider-tool-runtime",
+  "persistent-mcp",
+]);
 
 export const TEAM_FAILURE_REASONS = Object.freeze({
   APPROVAL_PENDING: "approval_pending",
@@ -95,8 +104,13 @@ export const TEAM_GRANT_REPAIRABLE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.INVALID_GRANT_RESPONSE,
 ]);
 
-// Retryable: the condition clears on its own once the host issues, approves,
-// or reissues. A publication attempt may defer and re-attempt on these.
+// Deferrable: the work item keeps its completed passes and re-attempts later.
+// Every Team publication failure belongs here, because none of them means the
+// *work* is bad -- only that publication is not authorized yet. Finalizing a
+// work item for an authorization problem throws away every completed pass and
+// forces the whole job to be run again, which costs far more than carrying a
+// deferred item until a valid grant arrives. Deferring re-attempts cost one
+// Remote round trip; re-running costs the entire job.
 export const TEAM_TRANSIENT_FAILURE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.APPROVAL_PENDING,
   TEAM_FAILURE_REASONS.APPROVAL_UNAVAILABLE,
@@ -110,15 +124,15 @@ export const TEAM_TRANSIENT_FAILURE_REASONS = Object.freeze([
   // been confirmed about the signed material, so this defers rather than
   // hard-failing on what may be a transport blip.
   TEAM_FAILURE_REASONS.SIGNED_GRANT_UNCONFIRMED,
+  TEAM_FAILURE_REASONS.SIGNED_GRANT_INVALID,
 ]);
 
-// Never retryable, and only ever reported after the deterministic repair above
-// has run and failed. A signature that does not verify, a key ID that does not
-// match, claims bound to another audience, or permissions that differ from the
-// signed token is then a security event rather than a stale local view:
-// re-resolving against authoritative Remote state has already been tried and
-// changed nothing. Retrying further cannot clear it, and deferring would hide
-// the one indicator of tampering behind an ordinary "will retry" notice.
-export const TEAM_FATAL_FAILURE_REASONS = Object.freeze([
+// Deferrable, but never routine. These survived the deterministic repair, so a
+// stale local view is ruled out: the signed material itself does not verify.
+// That is a security-relevant condition and must be surfaced as its own
+// blocked state rather than folded into an ordinary "shared trunk busy"
+// retry notice. The work is still preserved and publication resumes the moment
+// a valid grant is issued -- what changes is that a human is told.
+export const TEAM_ATTENTION_FAILURE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.SIGNED_GRANT_INVALID,
 ]);

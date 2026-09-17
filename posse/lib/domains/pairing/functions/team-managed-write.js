@@ -6,6 +6,7 @@ import { getLivePairingState } from "./state.js";
 import { permitsGrantPath } from "./team-scope.js";
 import {
   TEAM_FILE_WRITE_TOOLS,
+  TEAM_GRANT_BOUND_TRANSPORTS,
   TEAM_READ_TOOLS,
 } from "../../../catalog/team.js";
 import { getVerifiedTeamGrantForWorkItem } from "./team-submissions.js";
@@ -28,16 +29,20 @@ export function teamManagedSynchronousToolDenied(toolName) {
     : null;
 }
 
-/** Admission for the MCP transport, which reaches the owner over JSON-RPC in a
- * separate process. A verified, path-bound write context cannot follow that
- * call, so a write arriving this way could never be grant-checked; refuse it
- * here rather than admitting it and failing at the write guard with a reason
- * that reads like a bug. Writes are admitted only on a grant-bound transport
- * (TEAM_GRANT_BOUND_TRANSPORTS), which runs them through
- * runWithTeamManagedToolGrant in the same process as the write. */
-export function teamManagedToolAdmitted(suite, name) {
+/** Admit only reads, plus the two file writes on a transport carrying a bound
+ * WI identity. The receiving process still has to run the fresh path-specific
+ * grant lookup; transport admission is not itself authorization. */
+export function teamManagedToolAdmitted(suite, name, {
+  transport = null,
+  workItemId = null,
+} = {}) {
   if (!teamApprovalModeActive()) return true;
-  return suite === "tools" && READ_TOOLS.has(name);
+  if (suite !== "tools") return false;
+  if (READ_TOOLS.has(name)) return true;
+  return FILE_WRITE_TOOLS.has(name)
+    && TEAM_GRANT_BOUND_TRANSPORTS.includes(transport)
+    && Number.isSafeInteger(Number(workItemId))
+    && Number(workItemId) > 0;
 }
 
 export function assertTeamManagedProvider(providerName) {
