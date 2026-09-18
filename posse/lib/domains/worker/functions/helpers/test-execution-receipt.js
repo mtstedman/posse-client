@@ -1418,6 +1418,7 @@ async function executeReceipt({
   policy = null,
   cleanupWorktree = null,
   baselineReceipt = null,
+  dependencyRepair = null,
 } = {}) {
   const effectivePolicy = policy || effectiveVerificationPolicy({ cwd });
   const toolchain = describeToolchain({ projectDir: cwd });
@@ -1666,6 +1667,9 @@ async function executeReceipt({
     stderr: result.stderr,
     stdout_truncated: result.stdout_truncated,
     stderr_truncated: result.stderr_truncated,
+    // A rerun after dependency repair records the repair on the stored
+    // artifact, not only on the in-memory receipt handed back to the caller.
+    ...(dependencyRepair ? { dependency_repair: dependencyRepair } : {}),
     created_at: new Date().toISOString(),
   };
   const delta = baselineReceipt ? testExecutionDelta(baselineReceipt, receiptData) : null;
@@ -1704,17 +1708,15 @@ async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
       },
     };
   }
-  const repairedReceipt = await rerun();
-  return {
-    ...repairedReceipt,
-    dependency_repair: {
-      ok: true,
-      status: repair.status || "ok",
-      ...(Array.isArray(repair.results) && repair.results.some((entry) => entry?.command === "link:primary_checkout")
-        ? { via: "primary_checkout_link" }
-        : {}),
-    },
+  const dependencyRepair = {
+    ok: true,
+    status: repair.status || "ok",
+    ...(Array.isArray(repair.results) && repair.results.some((entry) => entry?.command === "link:primary_checkout")
+      ? { via: "primary_checkout_link" }
+      : {}),
   };
+  const repairedReceipt = await rerun(dependencyRepair);
+  return { ...repairedReceipt, dependency_repair: dependencyRepair };
 }
 
 export async function ensurePreDevelopmentTestBaseline({
@@ -1774,13 +1776,14 @@ export async function ensurePreDevelopmentTestBaseline({
   // The first receipt remains an honest record of the unavailable toolchain.
   // Re-run at the same commit after repair so the frozen, reusable baseline is
   // the actual repository result rather than an infrastructure failure.
-  return retryAfterDependencyRepair(receipt, repairDependencies, () => executeReceipt({
+  return retryAfterDependencyRepair(receipt, repairDependencies, (dependencyRepair) => executeReceipt({
     job,
     plan,
     phase: "baseline",
     cwd,
     policy: effectivePolicy,
     cleanupWorktree,
+    dependencyRepair,
   }));
 }
 
@@ -1829,7 +1832,7 @@ export async function ensurePostChangeTestReceipt({
   const postChange = await retryAfterDependencyRepair(
     firstPostChange,
     repairDependencies,
-    () => executeReceipt({
+    (dependencyRepair) => executeReceipt({
       job,
       plan,
       phase: "post_change",
@@ -1839,6 +1842,7 @@ export async function ensurePostChangeTestReceipt({
       policy: effectivePolicy,
       cleanupWorktree,
       baselineReceipt: baseline,
+      dependencyRepair,
     }),
   );
   return {

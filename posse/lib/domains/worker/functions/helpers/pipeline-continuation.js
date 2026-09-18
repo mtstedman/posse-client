@@ -28,6 +28,7 @@ import { parseResearcherStructuredOutput } from "../../../handoff/functions/inde
 import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
 import { getMaxFileRequestDepth } from "../../../settings/functions/tunables.js";
+import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 import {
   getResearchFanoutMode,
   logFanoutChildCompleted,
@@ -1052,14 +1053,19 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
     return chain.synthJob;
   }
 
+  // Under planner dispatch the configured planner tier and effort apply to
+  // every plan job, not only the intake one.
+  const dispatchPolicy = readPlannerDispatchPolicy();
   const planJob = createContinuationJob({
     work_item_id: researchJob.work_item_id,
     job_type: "plan",
     title: researchPayload.replan_reason ? `Replan: ${wiTitle}` : `Plan: ${wiTitle}`,
     parent_job_id: researchJob.id,
     priority: researchJob.priority,
-    model_tier: "standard",
-    reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+    model_tier: dispatchPolicy.enabled ? dispatchPolicy.plannerModelTier : "standard",
+    reasoning_effort: dispatchPolicy.enabled
+      ? dispatchPolicy.plannerReasoningEffort
+      : researchBudgetToReasoningEffort(researchBudget, "medium"),
     payload_json: JSON.stringify(basePlanPayload),
   });
   if (terminalHumanGate) addDependency(planJob.id, terminalHumanGate.id, "hard");

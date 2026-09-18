@@ -30,6 +30,9 @@ function outcomeType(value = {}) {
   if (["infrastructure_error", "unavailable", "runner_unavailable"].includes(status)) {
     return "runner_unavailable";
   }
+  // Scoped checks that already fail at the pre-change commit are the same
+  // debt a failing frozen baseline is: not attributable to the change.
+  if (status === "baseline_debt") return "baseline_debt";
   if (status === "failed") return phase === "baseline" ? "baseline_debt" : "product_failed";
   return "runner_unavailable";
 }

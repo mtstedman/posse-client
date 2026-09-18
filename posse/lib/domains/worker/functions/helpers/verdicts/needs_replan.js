@@ -21,6 +21,7 @@ import { assessorEvidenceSelectors } from "./fail.js";
 import { cleanupArtifactDirs, wiScopeId } from "../../../../artifacts/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
 import { getMaxReplans } from "../../../../settings/functions/tunables.js";
+import { readPlannerDispatchPolicy } from "../../../../planning/functions/planner-dispatch-policy.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
@@ -160,16 +161,22 @@ export function handle(job, verdict, ctx) {
     const originalPayload = parseJobPayload(job);
     const originalScopedFiles = collectScopedFiles(originalPayload);
     const originalCommitHash = latestCommitHashForJob(job.id);
+    // An automatic replan is planner-led intake again: under planner
+    // dispatch it runs at the configured planner tier and effort and may
+    // dispatch research children, instead of the fixed standard/medium
+    // budget the router path uses.
+    const dispatchPolicy = readPlannerDispatchPolicy();
     const replanJob = spawnFromAssessor("failed", "plan", {
       work_item_id: job.work_item_id,
       title: `Replan: ${wiTitle}`,
       parent_job_id: job.id,
       priority: job.priority,
-      model_tier: "standard",
-      reasoning_effort: "medium",
+      model_tier: dispatchPolicy.enabled ? dispatchPolicy.plannerModelTier : "standard",
+      reasoning_effort: dispatchPolicy.enabled ? dispatchPolicy.plannerReasoningEffort : "medium",
       payload_json: JSON.stringify({
         _is_loopback: true,
         _assessment_replan: true,
+        ...(dispatchPolicy.enabled ? { planner_dispatch: true } : {}),
         replan_reason: verdict.reasons.join("\n"),
         // The assessor's cited selectors sit in this job's ancestry; naming
         // them lets the replan planner open the defect lines instead of

@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   getArtifacts,
@@ -151,6 +153,133 @@ function cachedReceipt(jobId, key) {
   if (!artifact) return null;
   const metadata = artifactJson(artifact);
   return { result: withVerificationOutcome(metadata.result) };
+}
+
+// Failure identity that survives the line shifts an edit introduces: check,
+// file, rule and message with positional coordinates removed. Typecheck
+// reports one output blob per root; each of its lines is an identity.
+function failureIdentities(failure) {
+  const message = String(failure?.message || "");
+  const strip = (text) => text
+    .replace(/\(\d+,\d+\)/gu, "")
+    .replace(/:\d+:\d+/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const prefix = `${failure?.check || "check"}|${failure?.file || ""}|${failure?.rule || ""}|`;
+  if (!failure?.file && message.includes("\n")) {
+    return message.split("\n")
+      .map((line) => ({ identity: `${prefix}${strip(line)}`, text: line }))
+      .filter((entry) => entry.identity !== prefix);
+  }
+  return [{ identity: `${prefix}${strip(message)}`, text: message }];
+}
+
+async function commitExists(cwd, commit) {
+  try {
+    await gitExecAsync(["cat-file", "-e", `${commit}^{commit}`], cwd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Failures the pre-change tree already produces are baseline debt, not a
+ * regression of the assessed change. A project-wide typecheck that fails
+ * before the change (an ungenerated gitignored module, an unrelated broken
+ * file) would otherwise fail every commit on the branch and spawn fix jobs
+ * no developer can satisfy. The same checks run at the base commit in the
+ * same worktree; only failures absent there are attributed to the change.
+ */
+async function attributeFailuresToBaseline({
+  cwd,
+  result,
+  baselineCommit,
+  files,
+  headRef,
+  actualCommit,
+  runChecks,
+}) {
+  const failedChecks = (result.checks || []).filter((check) => check.status === "failed");
+  if (failedChecks.length === 0) return result;
+  let baseline;
+  try {
+    await gitExecAsync(["checkout", "--detach", "--force", baselineCommit], cwd);
+    const baselineFiles = files.filter((file) => fs.existsSync(path.join(cwd, file)));
+    baseline = baselineFiles.length > 0 ? runChecks(baselineFiles) : null;
+  } catch (error) {
+    baseline = { error: error?.message || String(error) };
+  } finally {
+    await restoreGitHead(cwd, { commit: actualCommit, headRef });
+  }
+  const baselineChecks = new Map((baseline?.checks || []).map((check) => [check.name, check]));
+  const baselineIdentities = new Set(
+    (baseline?.failures || []).flatMap(failureIdentities).map((entry) => entry.identity),
+  );
+  const attribution = {
+    commit: baselineCommit,
+    ...(baseline?.error ? { error: baseline.error } : {}),
+    checks: {},
+  };
+  const novelFailures = [];
+  let suppressed = 0;
+  const unattributable = new Set();
+  for (const failure of result.failures || []) {
+    const baseCheck = baselineChecks.get(failure.check);
+    if (baseCheck?.status !== "failed") {
+      novelFailures.push(failure);
+      continue;
+    }
+    const identities = failureIdentities(failure);
+    const novel = identities.filter((entry) => !baselineIdentities.has(entry.identity));
+    if (novel.length === 0) {
+      suppressed += 1;
+      continue;
+    }
+    if (novel.length < identities.length) {
+      // Keep only the lines the baseline did not already report.
+      novelFailures.push({ ...failure, message: novel.map((entry) => entry.text).join("\n") });
+      suppressed += 1;
+    } else {
+      novelFailures.push(failure);
+    }
+  }
+  for (const check of failedChecks) {
+    const baseCheck = baselineChecks.get(check.name);
+    const novelCount = novelFailures.filter((failure) => failure.check === check.name).length;
+    attribution.checks[check.name] = {
+      baseline_status: baseCheck?.status || "not_run",
+      novel_failure_count: novelCount,
+      attributable: baseCheck?.status !== "failed" || novelCount > 0,
+    };
+    if (baseCheck?.status === "failed" && novelCount === 0) unattributable.add(check.name);
+  }
+  const remainingFailed = failedChecks.filter((check) => !unattributable.has(check.name));
+  const short = baselineCommit.slice(0, 12);
+  const checks = (result.checks || []).map((check) => (
+    unattributable.has(check.name)
+      ? { ...check, status: "baseline_debt", reason: `already failing at pre-change commit ${short}; no failure attributable to the assessed change` }
+      : check
+  ));
+  if (remainingFailed.length === 0) {
+    return {
+      ...result,
+      ok: null,
+      status: "baseline_debt",
+      reason: "scoped_checks_fail_at_baseline",
+      summary: `${[...unattributable].join(", ")} already fail at the pre-change commit ${short}; no failure is attributable to the assessed change (${suppressed} pre-existing failure(s) suppressed)`,
+      checks,
+      failures: [],
+      baseline_attribution: attribution,
+    };
+  }
+  return {
+    ...result,
+    summary: `${result.summary}${suppressed > 0 ? ` (${suppressed} pre-existing failure(s) at ${short} suppressed)` : ""}`,
+    checks,
+    failures: novelFailures,
+    baseline_attribution: attribution,
+  };
 }
 
 function checkStatusForFile(check, file) {
@@ -324,6 +453,35 @@ export async function ensureAssessmentScopedCheckEvidence({
         });
         if (dependencyRepair.ok) result = runOnce();
         result = { ...result, dependency_repair: dependencyRepair };
+      }
+      const baselineCommit = normalizedCommit(assessmentContext.commit_base_hash)
+        || normalizedCommit(assessmentContext.branch_net_diff_base);
+      if (result?.status === "failed" && baselineCommit && baselineCommit !== expectedCommit
+        && await commitExists(cwd, baselineCommit)) {
+        result = await attributeFailuresToBaseline({
+          cwd,
+          result,
+          baselineCommit,
+          files,
+          headRef,
+          actualCommit,
+          runChecks: (baselineFiles) => runScopedChecksImpl({
+            cwd,
+            args: { checks: [...REQUESTED_CHECKS], scope: { files: baselineFiles } },
+          }),
+        });
+        if (result.baseline_attribution) {
+          recordObservation({
+            work_item_id: job.work_item_id,
+            job_id: job.id,
+            attempt_id: attemptId,
+            observation_type: "assessment.scoped_check_baseline",
+            summary: result.status === "baseline_debt"
+              ? `Scoped-check failures already present at pre-change commit ${baselineCommit.slice(0, 12)}; not attributed to the change`
+              : `Scoped-check failures compared against pre-change commit ${baselineCommit.slice(0, 12)}`,
+            detail: result.baseline_attribution,
+          });
+        }
       }
       result = {
         ...result,
