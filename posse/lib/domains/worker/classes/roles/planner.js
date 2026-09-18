@@ -657,9 +657,13 @@ export class PlannerRole extends BaseRole {
       : researchSkipped && plannerPacket.planner_dispatch === true
       ? [
         "PLANNER-LED INTAKE:",
-        "  No upfront research ran. The routing record below is a starting point, not the complete input:",
-        "  triage the task with your own reads, dispatch bounded research children only for questions your",
-        "  reads cannot settle, and produce one terminal plan grounded in evidence you or your children read.",
+        "  No upfront research ran. The routing record below is a starting point, not the complete input.",
+        "  Your own reads are for orientation within the triage turn budget: confirm the entry points and",
+        "  the shape of the change. When settling the plan needs reads beyond that budget, or reads across",
+        "  several files or subsystems, dispatch bounded research children for those questions instead of",
+        "  reading on yourself; give each child one self-contained question and the paths you already know.",
+        "  Zero children is right only when the triage reads already settle every open question. Produce",
+        "  one terminal plan grounded in evidence you or your children read.",
         "  Do not call get_brief solely to reload the synthetic routing record.",
         promptLiteral("SYNTHETIC ROUTING RECORD", researchBrief || "(none)"),
         "",
@@ -743,7 +747,7 @@ export class PlannerRole extends BaseRole {
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
-    const researchBudget = researchPolicy ? `Research budgets: choose whether research is needed within ${researchPolicy.triageMaxTurns} triage turns. Zero children is valid. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, effort ${researchPolicy.effortCeiling}, result ${researchPolicy.resultChars} characters. Children run on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.` : null;
+    const researchBudget = researchPolicy ? `Research budgets: decide within ${researchPolicy.triageMaxTurns} triage turns which questions need research children. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.` : null;
     const remoteInstructions = [contract, researchBudget, contextText]
       .filter((part) => part != null && String(part) !== "")
       .join("\n");

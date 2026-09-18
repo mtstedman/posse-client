@@ -28,11 +28,21 @@ export function normalizePlannerDispatchPolicy(values = {}) {
   // the planner to dispatch research children.
   const enabled = mode === PLANNER_DISPATCH_MODES.PLANNER;
   const toolTimeoutSec = normalized[SETTING_KEYS.AGENT_DISPATCH_TOOL_TIMEOUT_SEC];
+  const effortCeiling = normalized[SETTING_KEYS.PLANNER_RESEARCH_EFFORT_CEILING];
+  const childEffortEntry = PLANNER_DISPATCH_SETTINGS.find((entry) => entry.key === SETTING_KEYS.PLANNER_RESEARCH_CHILD_REASONING_EFFORT);
+  const effortValues = childEffortEntry.options;
+  const childReasoningEffort = effortValues[Math.min(
+    effortValues.indexOf(normalized[SETTING_KEYS.PLANNER_RESEARCH_CHILD_REASONING_EFFORT]),
+    effortValues.indexOf(effortCeiling),
+  )];
   return Object.freeze({
     mode,
     enabled,
     inactiveReason: enabled ? null : "router",
-    effortCeiling: normalized[SETTING_KEYS.PLANNER_RESEARCH_EFFORT_CEILING],
+    effortCeiling,
+    // Children run at this effort unless the planner asks for another; the
+    // ceiling bounds both. The planner itself defaults to high.
+    childReasoningEffort,
     maxChildren: normalized[SETTING_KEYS.PLANNER_RESEARCH_MAX_CHILDREN],
     childTimeoutMs: Math.min(
       normalized[SETTING_KEYS.PLANNER_RESEARCH_CHILD_TIMEOUT_MS],

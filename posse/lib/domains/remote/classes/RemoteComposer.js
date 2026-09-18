@@ -64,10 +64,15 @@ function withoutRemoteMemoryContractFields(response) {
   return out;
 }
 
-function resolveFallbackReadBudget(policyFallbackReads, existingFallbackReads) {
+function resolveFallbackReadBudget(policyFallbackReads, existingFallbackReads, existingSource = null) {
   const localParsed = Number(existingFallbackReads);
   const hasLocal = Number.isFinite(localParsed);
   const localBudget = hasLocal ? Math.max(0, Math.floor(localParsed)) : null;
+  // The remote role policy carries a per-role default. The local harness
+  // escalates the assessor's allowance deliberately (model tier, scope size,
+  // retry step); clamping that to the remote default made every escalation
+  // a no-op, so an explicit harness budget stands as issued.
+  if (localBudget != null && existingSource === "harness") return localBudget;
   const remoteParsed = Number(policyFallbackReads);
   if (!Number.isFinite(remoteParsed)) return localBudget;
   const remoteBudget = Math.max(0, Math.floor(remoteParsed));
@@ -496,6 +501,7 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
       fallback_reads_remaining: resolveFallbackReadBudget(
         policy.fallback_reads,
         packet.budgets?.fallback_reads_remaining,
+        packet.budgets?.fallback_reads_source || null,
       ),
     };
   }

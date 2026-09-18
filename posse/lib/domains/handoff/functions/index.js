@@ -885,6 +885,10 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
 
   packet.budgets = {
     fallback_reads_remaining: _resolveFallbackReadBudget(recipient, base.fallback_reads, hints),
+    // A budget the harness set explicitly (tier bonus, scope raise, retry
+    // step) is a deliberate escalation; a role default is only a default.
+    // The remote composer clamps role defaults, never harness escalations.
+    fallback_reads_source: hints.allow_fallback_reads != null ? "harness" : "role_default",
   };
 
   const coordinationMode = String(readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "handoff")

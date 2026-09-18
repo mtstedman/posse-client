@@ -341,15 +341,14 @@ export class AssessmentHandoffAdapter {
     // Keep _assess_only set until acquireAssessmentBarrier atomically moves the
     // job into awaiting_assessment. Clearing it earlier opens an unprotected
     // window where a sibling writer can lease into this assessment.
+    // The planner's tier and effort hints stay on the payload: an assessment
+    // requeued after a harness budget error re-derives its tier from them,
+    // and dropping them sent the retry to the default tier and effort.
     if (cleanPayload && (
       Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_only") ||
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_tier") ||
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_reasoning_effort") ||
       Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_name")
     )) {
       delete cleanPayload._assess_only;
-      delete cleanPayload._assess_model_tier;
-      delete cleanPayload._assess_reasoning_effort;
       delete cleanPayload._assess_model_name;
       job.payload_json = JSON.stringify(cleanPayload);
       updateJobPayload(job.id, job.payload_json);

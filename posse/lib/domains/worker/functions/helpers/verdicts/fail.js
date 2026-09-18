@@ -171,6 +171,19 @@ function _fixSatisfiabilityFingerprint({
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
+// A deterministic verification failure (scoped checks, frozen test) is the
+// same failure whatever the assessor wrote after it. Its fingerprint uses the
+// deterministic summary alone, so a fix chain that reproduces the identical
+// failure is recognized as repeated instead of re-spawned on new prose.
+const DETERMINISTIC_VERIFICATION_STATUSES = new Set(["scoped_checks_failed"]);
+
+export function fixSatisfiabilityReasons(verdict = {}) {
+  const reasons = Array.isArray(verdict?.reasons) ? verdict.reasons : [];
+  const status = String(verdict?.verification_status || "").toLowerCase();
+  if (DETERMINISTIC_VERIFICATION_STATUSES.has(status) && reasons.length > 0) return [reasons[0]];
+  return reasons;
+}
+
 function _lineageHasFixFingerprint(job, fingerprint) {
   let cursor = job;
   const seen = new Set();
@@ -828,7 +841,7 @@ function _spawnRecoveryJobsForVerdict({
     }
 
     const fixFingerprint = _fixSatisfiabilityFingerprint({
-      reasons: verdict.reasons,
+      reasons: fixSatisfiabilityReasons(verdict),
       requiredPaths: requiredScopeExpansion,
       modify: mergedFixModify,
       create: mergedFixCreate,

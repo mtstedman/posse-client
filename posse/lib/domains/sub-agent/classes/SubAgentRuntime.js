@@ -1378,7 +1378,7 @@ export class SubAgentRuntime {
         }
         exactObject(request, ["id", "profile", "intent", "budget", "agent_type"], `requests[${requestIndex}]`);
         const budget = request.budget == null ? {} : exactObject(request.budget, ["timeout_ms", "max_turns", "reasoning_effort"], "research budget");
-        const effort = budget.reasoning_effort || "medium";
+        const effort = budget.reasoning_effort || policy.childReasoningEffort || "medium";
         if (!PLANNER_RESEARCH_EFFORT_VALUES.includes(effort)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research effort", { stage: "validation" });
         for (const field of ["timeout_ms", "max_turns"]) {
           if (budget[field] != null && (!Number.isSafeInteger(budget[field]) || budget[field] <= 0)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `Invalid ${field}`, { stage: "validation" });
