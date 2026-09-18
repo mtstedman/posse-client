@@ -219,10 +219,122 @@ export function validatePlannerPacketFileKinds(packet, projectDir) {
   return validateNodes(nodes, projectDir);
 }
 
+const FUZZY_SCAN_MAX_ENTRIES = 40000;
+const FUZZY_SCAN_MAX_DEPTH = 10;
+const FUZZY_SCAN_SKIP_DIRS = new Set([".git", "node_modules", ".posse", "dist", "build", "target", "vendor", ".cache"]);
+
+// Files in the checkout that share the requested path's basename. Bounded
+// walk; a repository too large to scan simply yields no fuzzy match.
+function filesMatchingBasename(projectDir, basename) {
+  const root = path.resolve(projectDir);
+  const matches = [];
+  let visited = 0;
+  const walk = (dir, depth) => {
+    if (depth > FUZZY_SCAN_MAX_DEPTH || visited > FUZZY_SCAN_MAX_ENTRIES) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (++visited > FUZZY_SCAN_MAX_ENTRIES) return;
+      if (entry.isDirectory()) {
+        if (!FUZZY_SCAN_SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name), depth + 1);
+      } else if (entry.isFile() && entry.name === basename) {
+        matches.push(path.relative(root, path.join(dir, entry.name)).replace(/\\/g, "/"));
+      }
+    }
+  };
+  walk(root, 0);
+  return matches;
+}
+
 /**
- * Legacy compiler guard. This intentionally does not repair planner scope: a
- * missing modify path may be a typo, and silently turning it into creation
- * authority can materialize an unrelated file. Callers must reject `issues`.
+ * A planner path that does not exist is often a near miss (wrong directory,
+ * stale rename). When exactly one file in the checkout shares its basename,
+ * or exactly one shares its last two segments, that file is what the planner
+ * meant. Anything else returns null: the caller trims instead of guessing.
+ */
+export function fuzzyResolveRepoScopePath(projectDir, requested) {
+  const normalized = String(requested || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized) return null;
+  const basename = path.posix.basename(normalized);
+  if (!basename || basename === "." || basename === "..") return null;
+  const matches = filesMatchingBasename(projectDir, basename);
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+  const segments = normalized.split("/");
+  if (segments.length >= 2) {
+    const tail = segments.slice(-2).join("/");
+    const byTail = matches.filter((candidate) => candidate === tail || candidate.endsWith(`/${tail}`));
+    if (byTail.length === 1) return byTail[0];
+  }
+  return null;
+}
+
+function scopeListWithout(list, filePath) {
+  const key = scopePathKey(filePath);
+  return (Array.isArray(list) ? list : []).filter((entry) => scopePathKey(entry) !== key);
+}
+
+/**
+ * Repair planner scope file kinds in place rather than rejecting the plan.
+ * A rejection sends the planner back for another full-context turn; the dev
+ * can request any scope it turns out to need, so a trimmed or re-pointed path
+ * is the cheaper outcome. Each repair is returned for the caller to record.
+ */
+export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3 } = {}) {
+  const repairs = [];
+  if (packet?.profile !== "planner.plan.v1" || packet?.outcome !== "success") return repairs;
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const issues = validatePlannerPacketFileKinds(packet, projectDir);
+    if (issues.length === 0) break;
+    let changed = false;
+    for (const issue of issues) {
+      const handoff = packet.handoffs[issue.taskIndex];
+      const scope = handoff?.report?.scope;
+      if (!scope) continue;
+      const exists = (() => {
+        const resolved = resolveRepoScopePath(projectDir, issue.path);
+        return Boolean(resolved && pathEntryExists(resolved));
+      })();
+      let action = null;
+      if (issue.declaredKind === "modify_and_create") {
+        if (exists) scope.files_to_create = scopeListWithout(scope.files_to_create, issue.path);
+        else scope.files_to_modify = scopeListWithout(scope.files_to_modify, issue.path);
+        action = exists ? "file_kind_kept_modify" : "file_kind_kept_create";
+      } else if (issue.declaredKind === "files_to_modify" && /does not exist/.test(issue.reason)) {
+        const resolved = fuzzyResolveRepoScopePath(projectDir, issue.path);
+        scope.files_to_modify = scopeListWithout(scope.files_to_modify, issue.path);
+        if (resolved && !scope.files_to_modify.some((entry) => scopePathKey(entry) === scopePathKey(resolved))) {
+          scope.files_to_modify = [...scope.files_to_modify, resolved];
+        }
+        action = resolved ? "file_kind_path_resolved" : "file_kind_path_trimmed";
+        if (resolved) repairs.push({ ...issue, action, resolved });
+        else repairs.push({ ...issue, action });
+        changed = true;
+        continue;
+      } else if (issue.declaredKind === "files_to_create" && /already exists/.test(issue.reason)) {
+        scope.files_to_create = scopeListWithout(scope.files_to_create, issue.path);
+        if (!(scope.files_to_modify || []).some((entry) => scopePathKey(entry) === scopePathKey(issue.path))) {
+          scope.files_to_modify = [...(scope.files_to_modify || []), issue.path];
+        }
+        action = "file_kind_moved_to_modify";
+      } else {
+        // Ignored paths cannot exist in an isolated worktree: trim them.
+        scope[issue.declaredKind] = scopeListWithout(scope[issue.declaredKind], issue.path);
+        action = "file_kind_path_trimmed";
+      }
+      repairs.push({ ...issue, action });
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return repairs;
+}
+
+/**
+ * Legacy compiler guard. This intentionally does not repair planner scope on
+ * the compiler path; `repairPlannerPacketFileKinds` does so at handoff time,
+ * where each repair is recorded for the planner and the dev. Callers here
+ * must still reject `issues`.
  */
 export function reconcilePlannerFileKinds(task, projectDir, { tasks = [task], taskIndex = 0 } = {}) {
   const allIssues = validatePlannerTaskFileKinds(tasks, projectDir);

@@ -40,7 +40,10 @@ import {
   normalizedEvidenceSourceWindow,
 } from "../../../shared/tools/functions/source-evidence.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
-import { validatePlannerPacketFileKinds } from "../../planning/functions/scope-reconciliation.js";
+import {
+  repairPlannerPacketFileKinds,
+  validatePlannerPacketFileKinds,
+} from "../../planning/functions/scope-reconciliation.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
   detectSensitiveAgentHandoffText,
@@ -2565,7 +2568,72 @@ function validateDependencyGraph(handoffs) {
   for (const id of ids) visit(id);
 }
 
-function validatePlannerPacketSemantics(packet) {
+const INFERRED_SCOPE_MAX_PATHS = 12;
+const INFERRED_SCOPE_RESEARCH_PACKETS = 4;
+const TASK_TEXT_PATH_PATTERN = /(?:^|[\s"'`(\[{,:<])((?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,8})(?=$|[\s"'`)\]},:;>])/g;
+
+// A dev task the planner left without writable scope is not worth a re-plan:
+// the dev can request more scope at any time, so a reasonable guess from the
+// context the planner already had (its cited evidence, the paths it named,
+// the research seeds for this work item) is enough to start the job.
+function inferWritableScopeForTask(handoff, context) {
+  const projectDir = String(context?.projectDir || "").trim();
+  const existsAsFile = (relative) => {
+    if (!projectDir) return true;
+    try { return fs.statSync(path.join(projectDir, relative)).isFile(); } catch { return false; }
+  };
+  const seen = new Set();
+  const inferred = [];
+  const add = (candidate, source, { requireExists = true } = {}) => {
+    if (inferred.length >= INFERRED_SCOPE_MAX_PATHS) return;
+    const canonical = canonicalSourcePath(candidate);
+    if (!canonical || seen.has(canonical)) return;
+    if (requireExists && !existsAsFile(canonical)) return;
+    seen.add(canonical);
+    inferred.push({ path: canonical, source });
+  };
+  const report = handoff.report || {};
+  for (const claim of report.claims || []) {
+    for (const evidence of claim?.[1]?.evidence || []) {
+      if (evidence?.path) add(evidence.path, "claim_evidence");
+    }
+  }
+  const text = [
+    handoff.intent,
+    report.summary,
+    ...(report.claims || []).map((claim) => claim?.[0]),
+    ...(report.constraints || []),
+    ...(report.success_criteria || []),
+  ].filter((entry) => typeof entry === "string").join("\n");
+  for (const match of text.matchAll(TASK_TEXT_PATH_PATTERN)) add(match[1], "task_text");
+  const workItemId = positiveInt(context?.workItemId ?? context?.work_item_id);
+  const db = context?.db;
+  if (workItemId && db) {
+    try {
+      const rows = db.prepare(`
+        SELECT materialized_packet_json FROM ${TABLE}
+        WHERE work_item_id = ? AND role = 'researcher' AND status = 'committed'
+        ORDER BY agent_call_id DESC LIMIT ${INFERRED_SCOPE_RESEARCH_PACKETS}
+      `).all(workItemId);
+      for (const row of rows) {
+        let packet;
+        try { packet = JSON.parse(row.materialized_packet_json); } catch { continue; }
+        for (const entry of packet?.handoffs || []) {
+          const priorities = Array.isArray(entry?.report?.research?.planner_file_priorities)
+            ? entry.report.research.planner_file_priorities
+            : [];
+          for (const priority of priorities) if (priority?.path) add(priority.path, "research_seed");
+          for (const keyFile of entry?.report?.scope?.key_files || []) add(keyFile, "research_seed");
+        }
+      }
+    } catch {
+      // Research seeds are a convenience; a lookup failure means no guess.
+    }
+  }
+  return inferred;
+}
+
+function validatePlannerPacketSemantics(packet, { context = null } = {}) {
   if (packet.profile !== "planner.plan.v1") return;
   if (packet.outcome !== "success") return;
   for (const [index, handoff] of packet.handoffs.entries()) {
@@ -2644,12 +2712,26 @@ function validatePlannerPacketSemantics(packet) {
         );
       }
     } else if (writablePaths.length === 0) {
-      fail(
-        "AGENT_HANDOFF_SEMANTIC_INVALID",
-        `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope; `
-          + "add at least one exact repository path to scope.files_to_modify, scope.files_to_create, "
-          + "scope.files_to_delete, or scope.create_roots, then retry agent_handoff",
-      );
+      const inferred = inferWritableScopeForTask(handoff, context);
+      if (inferred.length === 0) {
+        fail(
+          "AGENT_HANDOFF_SEMANTIC_INVALID",
+          `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope; `
+            + "add at least one exact repository path to scope.files_to_modify, scope.files_to_create, "
+            + "scope.files_to_delete, or scope.create_roots, then retry agent_handoff",
+        );
+      }
+      const sources = [...new Set(inferred.map((entry) => entry.source))].join(", ");
+      handoff.report.scope = { ...scope, files_to_modify: inferred.map((entry) => entry.path) };
+      handoff.report.constraints = [
+        ...(handoff.report.constraints || []),
+        `Writable scope was inferred by the harness from ${sources} because the plan declared none; `
+          + "use request_scope for any other file.",
+      ];
+      recordHandoffSoftening(`handoffs[${index}].report.scope.files_to_modify`, "scope_inferred", {
+        paths: inferred.map((entry) => entry.path),
+        sources: inferred.map((entry) => entry.source),
+      });
     }
   }
 }
@@ -4333,7 +4415,18 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   });
   validateDependencyGraph(handoffs);
   const semanticPacket = { profile, outcome, handoffs };
-  validatePlannerPacketSemantics(semanticPacket);
+  // File-kind repair runs before the semantic pass so a scope left empty by
+  // trimming can still be inferred from context.
+  if (materializationContext.projectDir) {
+    for (const repair of repairPlannerPacketFileKinds(semanticPacket, materializationContext.projectDir)) {
+      recordHandoffSoftening(`handoffs[${repair.taskIndex}].report.scope.${repair.declaredKind}`, repair.action, {
+        path: repair.path,
+        reason: repair.reason,
+        ...(repair.resolved ? { resolved: repair.resolved } : {}),
+      });
+    }
+  }
+  validatePlannerPacketSemantics(semanticPacket, { context: materializationContext });
   validatePlannerCompatibilityTasks(semanticPacket);
   validateCitationChildPacketSemantics({ profile, outcome, handoffs });
   const uniqueEvidence = packetEvidence({ handoffs });
