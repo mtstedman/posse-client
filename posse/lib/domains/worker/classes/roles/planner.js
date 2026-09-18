@@ -93,6 +93,11 @@ import {
 } from "../../../planning/functions/planner-helpers.js";
 import { listProjectDbWrites } from "../../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
 
+// A dispatch planner investigates the repository itself before it plans, so
+// it runs on the researcher's claude turn base rather than the plan-only one.
+// The plan-only budget killed attempts mid-investigation and re-ran the job.
+const PLANNER_DISPATCH_CLAUDE_MAX_TURNS = 30;
+
 const DEFAULT_DEPS = {
   classifyPlannerOutput: defaultClassifyPlannerOutput,
   getResearchBudget: defaultGetResearchBudget,
@@ -797,7 +802,10 @@ export class PlannerRole extends BaseRole {
       researchBudgetToReasoningEffort,
       shortJobTitle,
     } = this.roleDeps();
-    const maxTurns = researchBudgetToMaxTurnsOverride(ctx.researchBudget, "planner");
+    const budgetTurns = researchBudgetToMaxTurnsOverride(ctx.researchBudget, "planner");
+    const plannerDispatch = ctx.payload?.planner_dispatch === true || ctx.plannerPacket?.planner_dispatch === true;
+    const dispatchTurns = plannerDispatch && ctx.providerName === "claude" ? PLANNER_DISPATCH_CLAUDE_MAX_TURNS : 0;
+    const maxTurns = Math.max(budgetTurns || 0, dispatchTurns) || null;
     return {
       role: this.getRole(),
       roleMode: ctx.plannerRoleMode || "normal",
