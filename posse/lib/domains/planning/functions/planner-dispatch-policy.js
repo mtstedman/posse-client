@@ -23,13 +23,15 @@ export function normalizePlannerDispatchPolicy(values = {}) {
     }
   }
   const mode = normalized[SETTING_KEYS.PLANNER_DISPATCH_MODE];
-  const coordinationMode = String(values[SETTING_KEYS.AGENT_COORDINATION_MODE] ?? "handoff").trim().toLowerCase();
-  const enabled = mode === PLANNER_DISPATCH_MODES.PLANNER && coordinationMode === "subagents";
+  // The dispatch mode is the single switch. Coordination mode still governs
+  // citation sub-agents; it no longer has to be flipped per repository for
+  // the planner to dispatch research children.
+  const enabled = mode === PLANNER_DISPATCH_MODES.PLANNER;
   const toolTimeoutSec = normalized[SETTING_KEYS.AGENT_DISPATCH_TOOL_TIMEOUT_SEC];
   return Object.freeze({
     mode,
     enabled,
-    inactiveReason: mode !== PLANNER_DISPATCH_MODES.PLANNER ? "router" : enabled ? null : "coordination_mode",
+    inactiveReason: enabled ? null : "router",
     effortCeiling: normalized[SETTING_KEYS.PLANNER_RESEARCH_EFFORT_CEILING],
     maxChildren: normalized[SETTING_KEYS.PLANNER_RESEARCH_MAX_CHILDREN],
     childTimeoutMs: Math.min(
@@ -45,7 +47,7 @@ export function normalizePlannerDispatchPolicy(values = {}) {
 
 export function readPlannerDispatchPolicy({ projectDir = null, readSetting = getSetting } = {}) {
   const values = {};
-  for (const key of [SETTING_KEYS.AGENT_COORDINATION_MODE, ...PLANNER_DISPATCH_SETTINGS.map((entry) => entry.key)]) {
+  for (const key of PLANNER_DISPATCH_SETTINGS.map((entry) => entry.key)) {
     try {
       values[key] = readSetting(key, { projectDir });
     } catch {

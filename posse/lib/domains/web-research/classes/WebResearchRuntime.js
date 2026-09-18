@@ -1,4 +1,5 @@
 import { RESEARCH_AGENT_TYPES } from "../../../catalog/planner-dispatch.js";
+import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { RESEARCH_CHILD_PROFILE, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 // @ts-check
@@ -356,7 +357,10 @@ export class WebResearchRuntime {
       );
     }
     const question = boundedString(input.question, "dispatch_agent.question", WEB_RESEARCH_LIMITS.maxQuestionChars);
-    if (String(this.readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off").trim().toLowerCase() !== "subagents") {
+    const coordinationMode = String(this.readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off").trim().toLowerCase();
+    const dispatchEnabled = coordinationMode !== "subagents"
+      && readPlannerDispatchPolicy({ readSetting: (key, options) => this.readSetting(key, options) }).enabled;
+    if (coordinationMode !== "subagents" && !dispatchEnabled) {
       throw runtimeError(
         "WEB_RESEARCH_ADMIN_DISABLED",
         "dispatch_agent web research is disabled by the repository administrator",
