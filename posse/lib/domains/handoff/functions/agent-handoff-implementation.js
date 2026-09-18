@@ -57,6 +57,10 @@ import {
   filterKnownHandoffFields,
   runWithHandoffFieldDiagnostics,
 } from "./helpers/field-diagnostics.js";
+import {
+  normalizeAgentHandoffShape,
+  relativizeEvidenceSelector,
+} from "./helpers/shape-normalizer.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
 import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
@@ -104,6 +108,14 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
 const TABLE = "agent_handoff_packets";
 const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materialization_cache");
 const EVIDENCE_CLEANUP = Symbol("agent_handoff_evidence_cleanup");
+const SHAPE_NORMALIZATIONS = Symbol("agent_handoff_shape_normalizations");
+const MAX_SHAPE_NORMALIZATIONS = 64;
+
+function noteShapeNormalization(context, fieldPath, rule) {
+  const notes = context?.[SHAPE_NORMALIZATIONS];
+  if (!Array.isArray(notes) || notes.length >= MAX_SHAPE_NORMALIZATIONS) return;
+  notes.push({ path: String(fieldPath), rule: String(rule) });
+}
 const EVIDENCE_CLEANUP_OVERFLOW = Symbol("agent_handoff_evidence_cleanup_overflow");
 const READY_DBS = new WeakSet();
 
@@ -1367,7 +1379,40 @@ function existingArtifactEvidence(requested, context) {
     if (!canonical) continue;
     return { path: canonical, artifact_inspection: "artifact_exists", opened_ranges: [], source_refs: [] };
   }
-  return null;
+  return uniqueWorkItemArtifactByBasename(requested, projectRoot, context);
+}
+
+const ARTIFACT_BASENAME_SCAN_MAX_DEPTH = 4;
+const ARTIFACT_BASENAME_SCAN_MAX_ENTRIES = 4000;
+
+// An artificer cites its deliverable by name ("major-11-justice.png") while
+// the file sits under the work item's artifact area. A unique basename match
+// there is the same file; two matches stay ambiguous and fail as before.
+function uniqueWorkItemArtifactByBasename(requested, projectRoot, context) {
+  if (requested.includes("/") || !IMAGE_EVIDENCE_EXTENSIONS.has(path.posix.extname(requested).toLowerCase())) return null;
+  const workItemId = positiveInt(context?.workItemId ?? context?.work_item_id);
+  if (!workItemId) return null;
+  const root = path.join(projectRoot, ARTIFACT_EVIDENCE_ROOT, `wi-${workItemId}`);
+  const matches = [];
+  let visited = 0;
+  const walk = (dir, depth) => {
+    if (depth > ARTIFACT_BASENAME_SCAN_MAX_DEPTH || matches.length > 1) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (++visited > ARTIFACT_BASENAME_SCAN_MAX_ENTRIES || matches.length > 1) return;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(absolute, depth + 1);
+      else if (entry.isFile() && entry.name === requested) matches.push(absolute);
+    }
+  };
+  walk(root, 0);
+  if (matches.length !== 1) return null;
+  const relative = path.relative(projectRoot, matches[0]).replace(/\\/g, "/");
+  const canonical = canonicalSourcePath(relative);
+  if (!canonical) return null;
+  noteShapeNormalization(context, `evidence ${requested}`, "artifact_basename_resolved");
+  return { path: canonical, artifact_inspection: "artifact_exists", opened_ranges: [], source_refs: [] };
 }
 
 function resolveSurfacedEvidencePath(requestedPath, context) {
@@ -1712,7 +1757,14 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   const coordinateSpace = ["materialized", "source"].includes(expectedLineSemantics)
     ? expectedLineSemantics
     : null;
-  let selector = parseAgentHandoffEvidenceSelector(selectorValue);
+  const relativized = relativizeEvidenceSelector(selectorValue, {
+    projectDir: context?.projectDir || null,
+    cwd: context?.cwd || null,
+  });
+  if (relativized != null) {
+    noteShapeNormalization(context, `evidence ${evidenceSelectorText(selectorValue)}`, "absolute_path_relativized");
+  }
+  let selector = parseAgentHandoffEvidenceSelector(relativized ?? selectorValue);
   const selectorKind = selector.ref == null ? "path" : "ref";
   const selectedSourcePath = selector.ref == null
     ? null
@@ -3988,16 +4040,26 @@ function failCollectedAgentHandoffIssues(issues) {
   throw error;
 }
 
-function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHandoffs = null } = {}) {
+function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHandoffs = null, shapeNotes = null } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
   const materializationContext = {
     ...context,
     [EVIDENCE_MATERIALIZATION_CACHE]: new Map(),
     [EVIDENCE_CLEANUP]: [],
     [EVIDENCE_CLEANUP_OVERFLOW]: 0,
+    [SHAPE_NORMALIZATIONS]: Array.isArray(shapeNotes) ? shapeNotes : [],
   };
+  // Shape repair runs before every semantic rule: a list delivered as JSON
+  // text, a target named by role, or an absolute in-repo path is the same
+  // handoff the agent meant, and bouncing it costs a whole agent call.
+  const shaped = normalizeAgentHandoffShape(args, {
+    role: normalizedRole,
+    projectDir: context?.projectDir || null,
+    cwd: context?.cwd || null,
+  });
+  for (const note of shaped.normalizations) noteShapeNormalization(materializationContext, note.path, note.rule);
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
-    normalizePlannerAgentHandoffArgs(args, { role: normalizedRole }),
+    normalizePlannerAgentHandoffArgs(shaped.value, { role: normalizedRole }),
     { role: normalizedRole, context: materializationContext },
   );
   const serialized = JSON.stringify(normalizedArgs ?? null);
@@ -4289,11 +4351,32 @@ export function materializeAgentHandoff(args, options = {}) {
   if (Buffer.byteLength(serialized, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
     fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
   }
+  const shapeNotes = [];
   const {
     value: packet,
     ignoredFieldCount,
     ignoredFields,
-  } = runWithHandoffFieldDiagnostics(() => materializeAgentHandoffStrict(args, options));
+  } = runWithHandoffFieldDiagnostics(() => materializeAgentHandoffStrict(args, { ...options, shapeNotes }));
+  if (shapeNotes.length > 0) {
+    Object.defineProperty(packet, "shape_normalizations", {
+      value: Object.freeze(shapeNotes.map((note) => ({ ...note }))),
+      enumerable: false,
+    });
+    try {
+      const context = options?.context || {};
+      recordObservation({
+        ...(context.db ? { db: context.db } : {}),
+        work_item_id: context.work_item_id ?? context.workItemId ?? null,
+        job_id: context.job_id ?? context.jobId ?? null,
+        attempt_id: context.attempt_id ?? context.attemptId ?? null,
+        observation_type: "agent_handoff.shape_normalized",
+        summary: `Repaired ${shapeNotes.length} agent_handoff field shape(s) before validation`,
+        detail: { count: shapeNotes.length, normalizations: shapeNotes },
+      });
+    } catch {
+      // Shape telemetry must never turn an accepted handoff into a retry.
+    }
+  }
   if (ignoredFieldCount > 0) {
     Object.defineProperties(packet, {
       ignored_field_count: {
@@ -5161,6 +5244,10 @@ export function stageAgentHandoff(args, {
     ...(packet.ignored_field_count > 0 ? {
       ignored_field_count: packet.ignored_field_count,
       ignored_fields: packet.ignored_fields,
+    } : {}),
+    ...(Array.isArray(packet.shape_normalizations) && packet.shape_normalizations.length > 0 ? {
+      shape_normalization_count: packet.shape_normalizations.length,
+      shape_normalizations: packet.shape_normalizations,
     } : {}),
   };
   const hasDiagnostics = Object.keys(diagnostics).length > 0;
