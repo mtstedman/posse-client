@@ -48,7 +48,6 @@ import {
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import {
   isVerificationInfrastructureOutcome,
-  verificationInfrastructureError,
 } from "../../functions/helpers/verification-outcome.js";
 import {
   handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
@@ -279,9 +278,26 @@ export class WorkerExecutionCoordinator {
           );
         }
         if (isVerificationInfrastructureOutcome(baselineReceipt)) {
-          throw verificationInfrastructureError(
-            baselineReceipt,
-            "Pre-development test infrastructure unavailable",
+          // The frozen baseline could not run and the one-shot dependency
+          // repair did not make it runnable. Failing the job here would
+          // discard the work item over verification infrastructure, so the
+          // job proceeds without a baseline; assessment already treats a
+          // missing or infrastructure-unavailable baseline as not comparable
+          // and repairs the worktree again before its own post-change run.
+          const baselinePayload = worker.parsePayload(job);
+          baselinePayload._verification_baseline_unavailable = {
+            schema_version: 1,
+            command: baselineReceipt.command || null,
+            reason: baselineReceipt.reason || baselineReceipt.status || "verification_infrastructure",
+            dependency_repair: baselineReceipt.dependency_repair || null,
+            detected_phase: "baseline",
+            detected_at: baselineReceipt.created_at || new Date().toISOString(),
+          };
+          job.payload_json = JSON.stringify(baselinePayload);
+          updateJobPayload(job.id, job.payload_json);
+          worker.emit(
+            job.id,
+            `${C.yellow}[test-intake] WI#${job.work_item_id} job #${job.id}: frozen baseline unavailable (${baselinePayload._verification_baseline_unavailable.reason}); continuing without a baseline instead of failing the job${C.reset}`,
           );
         }
       }

@@ -8,7 +8,6 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
-import { managedInstallStateRoot } from "../../../shared/platform/functions/managed-install-state.js";
 
 export const VERIFICATION_DEPENDENCY_NETWORK_POLICIES = Object.freeze([
   "cache_only",
@@ -115,9 +114,113 @@ function selectedEcosystems({ projectDir, command, receipt }) {
   return [...selected];
 }
 
-function cacheRoot(projectDir, ecosystem, lockPath) {
-  const identity = lockPath && exists(lockPath) ? hashFile(lockPath) : "no-lock";
-  return path.join(managedInstallStateRoot(projectDir), "verification-deps", ecosystem, identity.slice(0, 16));
+// The primary checkout of a work-item worktree. A linked worktree's `.git`
+// is a file naming its private gitdir under `<common>/worktrees/<name>`;
+// that gitdir's `commondir` file (or its position) yields the shared `.git`.
+// Read directly so the probe needs neither a git binary nor the native
+// daemon; a standalone clone (real `.git` directory) has no primary.
+export function primaryCheckoutFor(root) {
+  try {
+    const dotGit = path.join(root, ".git");
+    if (!fs.statSync(dotGit).isFile()) return null;
+    const match = /^gitdir:\s*(.+?)\s*$/mu.exec(fs.readFileSync(dotGit, "utf8"));
+    if (!match) return null;
+    const gitDir = path.resolve(root, match[1]);
+    let commonDir;
+    const commonFile = path.join(gitDir, "commondir");
+    if (exists(commonFile)) {
+      commonDir = path.resolve(gitDir, fs.readFileSync(commonFile, "utf8").trim());
+    } else if (path.basename(path.dirname(gitDir)) === "worktrees") {
+      commonDir = path.dirname(path.dirname(gitDir));
+    } else {
+      return null;
+    }
+    if (path.basename(commonDir) !== ".git") return null;
+    const primary = path.dirname(commonDir);
+    if (path.resolve(primary) === path.resolve(root) || !directoryExists(primary)) return null;
+    return primary;
+  } catch {
+    return null;
+  }
+}
+
+const LINK_SCAN_SKIP = new Set(["node_modules", ".git", ".posse", ".posse-worktrees", "dist", "build", "vendor", "target", ".venv"]);
+
+// Package roots in the primary checkout that already carry installed
+// dependencies: the repository root plus workspace packages up to three
+// levels deep, which covers pnpm/yarn/npm workspaces without parsing globs.
+function installedNodeRoots(primary, { maxDepth = 3, maxRoots = 32 } = {}) {
+  const out = [];
+  const stack = [{ dir: primary, depth: 0 }];
+  while (stack.length > 0 && out.length < maxRoots) {
+    const { dir, depth } = stack.pop();
+    if (exists(path.join(dir, "package.json")) && directoryExists(path.join(dir, "node_modules"))) {
+      out.push(path.relative(primary, dir).replace(/\\/g, "/") || ".");
+    }
+    if (depth >= maxDepth) continue;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries = []; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || LINK_SCAN_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
+      stack.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
+    }
+  }
+  return out;
+}
+
+// A real `node_modules` directory whose entries link to the primary's. The
+// common ignore form `node_modules/` matches a directory but never a symlink,
+// and an unignored link is a commit hazard, so the directory itself is real.
+function linkNodeModulesEntries(source, target) {
+  fs.mkdirSync(target, { recursive: true });
+  const kind = process.platform === "win32" ? "junction" : "dir";
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    try { fs.lstatSync(to); continue; } catch { /* absent */ }
+    if (entry.isDirectory() || (entry.isSymbolicLink() && directoryExists(from))) {
+      fs.symlinkSync(from, to, kind);
+    } else {
+      // pnpm state files and similar are read, never written, by checks.
+      fs.symlinkSync(from, to, "file");
+    }
+  }
+}
+
+/**
+ * A work-item worktree starts with no installed dependencies, and an offline
+ * install cannot reproduce every lockfile entry (git-hosted packages are
+ * never store tarballs). The primary checkout already holds the exact
+ * install for this lockfile, so link its node_modules into the worktree
+ * when the lockfiles match. The caller's repository-state guard still fails
+ * closed if the repository does not ignore node_modules.
+ */
+export function linkNodeDependenciesFromPrimaryCheckout(root) {
+  const detected = nodeDetection(root);
+  if (!detected) return { ok: false, reason: "node_lockfile_missing" };
+  const primary = primaryCheckoutFor(root);
+  if (!primary) return { ok: false, reason: "no_primary_checkout" };
+  const primaryLock = path.join(primary, detected.lock);
+  const worktreeLock = path.join(root, detected.lock);
+  if (!exists(primaryLock) || hashFile(primaryLock) !== hashFile(worktreeLock)) {
+    return { ok: false, reason: "primary_lockfile_mismatch", primary };
+  }
+  const linked = [];
+  for (const rel of installedNodeRoots(primary)) {
+    const targetDir = rel === "." ? root : path.join(root, rel);
+    if (!directoryExists(targetDir)) continue;
+    const target = path.join(targetDir, "node_modules");
+    let present = false;
+    try { fs.lstatSync(target); present = true; } catch { present = false; }
+    if (present) continue;
+    const source = path.join(rel === "." ? primary : path.join(primary, rel), "node_modules");
+    linkNodeModulesEntries(source, target);
+    linked.push(rel === "." ? "node_modules" : `${rel}/node_modules`);
+  }
+  if (linked.length === 0 && !directoryExists(path.join(root, "node_modules"))) {
+    return { ok: false, reason: "primary_node_modules_missing", primary };
+  }
+  return { ok: true, primary, linked };
 }
 
 function commandSpec(ecosystem, projectDir, networkPolicy) {
@@ -126,25 +229,27 @@ function commandSpec(ecosystem, projectDir, networkPolicy) {
     const detected = nodeDetection(projectDir);
     if (!detected) return { ok: false, reason: "node_lockfile_missing" };
     const lockPath = path.join(projectDir, detected.lock);
-    const cache = cacheRoot(projectDir, "node", lockPath);
+    // Installs use the package manager's own store/cache: that is where the
+    // primary checkout's install came from, so an offline repair can be
+    // satisfied. A private empty cache could never be, so it is not used.
     if (detected.manager === "npm") return {
       ok: true,
       command: process.platform === "win32" ? "npm.cmd" : "npm",
-      args: ["ci", "--include=optional", "--ignore-scripts", "--cache", cache, ...(offline ? ["--offline"] : [])],
+      args: ["ci", "--include=optional", "--ignore-scripts", ...(offline ? ["--offline"] : [])],
       lockPath,
       generated: ["node_modules"],
     };
     if (detected.manager === "pnpm") return {
       ok: true,
       command: process.platform === "win32" ? "pnpm.cmd" : "pnpm",
-      args: ["install", "--frozen-lockfile", "--ignore-scripts", "--store-dir", cache, ...(offline ? ["--offline"] : [])],
+      args: ["install", "--frozen-lockfile", "--ignore-scripts", ...(offline ? ["--offline"] : [])],
       lockPath,
       generated: ["node_modules"],
     };
     if (detected.manager === "yarn") return {
       ok: true,
       command: process.platform === "win32" ? "yarn.cmd" : "yarn",
-      args: ["install", "--frozen-lockfile", "--ignore-scripts", "--cache-folder", cache, ...(offline ? ["--offline"] : [])],
+      args: ["install", "--frozen-lockfile", "--ignore-scripts", ...(offline ? ["--offline"] : [])],
       lockPath,
       generated: ["node_modules"],
     };
@@ -386,6 +491,7 @@ export async function repairVerificationPrerequisites({
   onProgress = null,
   runCommand = runVerificationPrerequisiteCommand,
   gitStatus = defaultGitStatus,
+  linkFromPrimary = true,
 } = {}) {
   const root = path.resolve(String(projectDir || process.cwd()));
   const policy = normalizedNetworkPolicy(networkPolicy);
@@ -417,6 +523,24 @@ export async function repairVerificationPrerequisites({
     const results = [];
     for (const ecosystem of ecosystems) {
       const adapter = VERIFICATION_PREREQUISITE_ADAPTERS[ecosystem];
+      if (ecosystem === "node" && linkFromPrimary) {
+        let link;
+        try { link = linkNodeDependenciesFromPrimaryCheckout(root); } catch (error) { link = { ok: false, reason: error?.code || error?.message || "link_failed" }; }
+        if (link.ok && adapter.verify({ projectDir: root })) {
+          onProgress?.(`node: linked ${link.linked.join(", ") || "node_modules"} from ${link.primary}`);
+          results.push(verificationResult(ecosystem, "passed", {
+            reason: null,
+            command: "link:primary_checkout",
+            linked: link.linked,
+            primary_checkout: link.primary,
+            lockfile: nodeDetection(root)?.lock || null,
+            lockfile_sha256: hashFile(path.join(root, nodeDetection(root)?.lock || "")),
+            network_policy: policy,
+          }));
+          continue;
+        }
+        if (link.reason) onProgress?.(`node: primary checkout link unavailable (${link.reason}); installing`);
+      }
       const spec = adapter.repair({ projectDir: root, networkPolicy: policy });
       if (!spec.ok) {
         results.push(verificationResult(ecosystem, "blocked", { reason: spec.reason }));

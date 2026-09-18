@@ -1699,6 +1699,7 @@ async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
       dependency_repair: {
         ok: false,
         status: repair?.status || null,
+        reason: repair?.reason || null,
         error: repair?.error || repair?.message || null,
       },
     };
@@ -1709,6 +1710,9 @@ async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
     dependency_repair: {
       ok: true,
       status: repair.status || "ok",
+      ...(Array.isArray(repair.results) && repair.results.some((entry) => entry?.command === "link:primary_checkout")
+        ? { via: "primary_checkout_link" }
+        : {}),
     },
   };
 }
