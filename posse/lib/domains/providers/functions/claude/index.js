@@ -5,6 +5,7 @@
 // live under the providers class/function split.
 
 import { execFile, spawn } from "child_process";
+import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -57,6 +58,7 @@ import {
   buildClaudeDeterministicReadMcpConfigPayloadAsync,
   __testBuildClaudeAtlasMcpConfigPayload,
   __testBuildClaudeDeterministicReadMcpConfigPayload,
+  claudeMcpDeadlineEnv,
 } from "./mcp-config.js";
 import {
   CLAUDE_EXECUTION_MODE_INTERACTIVE,
@@ -205,6 +207,7 @@ export const capabilities = Object.freeze({
   images: false,
   sessionResume: true,
   toolAttachment: "mcp",
+  mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
 });
 
 // ─── Model Tier Config ──────────────────────────────────────────────────────
@@ -752,7 +755,7 @@ export async function callProvider(promptText, {
     }
 
     const startTime = Date.now();
-    const childEnv = scrubClaudeChildEnv(buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env));
+    const childEnv = claudeMcpDeadlineEnv(mergedMcpServers, scrubClaudeChildEnv(buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env)));
     Object.assign(
       childEnv,
       deterministicReadMcp.providerChildEnv

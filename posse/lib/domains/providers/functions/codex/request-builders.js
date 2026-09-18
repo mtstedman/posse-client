@@ -1,7 +1,7 @@
 // lib/domains/providers/functions/codex/request-builders.js
 
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
-import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
+import { POSSE_MCP_GATEWAY_SERVER_NAME, mcpClientToolDeadlineSec } from "../../../../catalog/mcp.js";
 import { CODEX_CODE_MODE_ROLES, CODEX_NATIVE_BATCHING_ROLES, CODEX_TERMINAL_MCP_SERVER_SUFFIX, CODEX_DIRECT_RESEARCH_TOOLS, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp, releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
@@ -145,6 +145,18 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
   }
 
   appendCodexMcpServerLaunchOverrides(configOverrides, serverKey, serverConfig, { toolNames });
+  // Codex bounds every MCP tool call at 60 s unless told otherwise. Each
+  // Posse server receives the deadline the catalog derives from the tools it
+  // actually exposes (composed checks, live scope waits, citation children,
+  // agent dispatch), so the client never abandons a call the owner is still
+  // legitimately running.
+  const baseServerTools = [
+    ...toolNames.filter((name) => !lazyTools.includes(name)
+      && !(terminalServerKey && terminalTools.includes(name))
+      && !agentTools.includes(name)),
+    ...atlasTools,
+  ];
+  configOverrides.push(`mcp_servers.${serverKey}.tool_timeout_sec=${mcpClientToolDeadlineSec(baseServerTools)}`);
   const baseDisabledTools = [...lazyTools, ...(terminalServerKey ? terminalTools : []), ...agentTools].map(rawToolsMcpName);
   if (baseDisabledTools.length > 0) {
     configOverrides.push(
@@ -163,6 +175,7 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     appendCodexMcpServerLaunchOverrides(configOverrides, terminalServerKey, serverConfig, { toolNames: terminalTools });
     configOverrides.push(
       `mcp_servers.${terminalServerKey}.enabled_tools=${_toTomlLiteral(terminalTools.map(rawToolsMcpName))}`,
+      `mcp_servers.${terminalServerKey}.tool_timeout_sec=${mcpClientToolDeadlineSec(terminalTools)}`,
       `mcp_servers.${terminalServerKey}.required=true`,
     );
     if (codexNativeBatching) configOverrides.push(`mcp_servers.${terminalServerKey}.supports_parallel_tool_calls=false`);
@@ -172,7 +185,7 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     appendCodexMcpServerLaunchOverrides(configOverrides, agentsServerKey, serverConfig, { toolNames: agentTools });
     configOverrides.push(
       `mcp_servers.${agentsServerKey}.enabled_tools=${_toTomlLiteral(agentTools.map(rawToolsMcpName))}`,
-      `mcp_servers.${agentsServerKey}.tool_timeout_sec=${dispatchPolicy.toolTimeoutSec}`,
+      `mcp_servers.${agentsServerKey}.tool_timeout_sec=${mcpClientToolDeadlineSec(agentTools, { agentDispatchTimeoutMs: dispatchPolicy.toolTimeoutSec * 1000 })}`,
       `mcp_servers.${agentsServerKey}.supports_parallel_tool_calls=false`,
       `mcp_servers.${agentsServerKey}.required=true`,
     );
@@ -185,6 +198,7 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     });
     configOverrides.push(
       `mcp_servers.${lazyServerKey}.enabled_tools=${_toTomlLiteral(rawLazyTools)}`,
+      `mcp_servers.${lazyServerKey}.tool_timeout_sec=${mcpClientToolDeadlineSec(lazyTools)}`,
       `mcp_servers.${lazyServerKey}.required=true`,
     );
     if (codexNativeBatching) configOverrides.push(`mcp_servers.${lazyServerKey}.supports_parallel_tool_calls=false`);

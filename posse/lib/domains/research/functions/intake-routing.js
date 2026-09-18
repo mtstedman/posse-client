@@ -1,5 +1,5 @@
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
-import { PLANNER_DISPATCH_PROVIDERS } from "../../../catalog/planner-dispatch.js";
+import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
 import { getProviderForRole } from "../../settings/functions/repository-settings.js";
 // Outer wrapper around the pure routing classifier in ./routing.js.
 // Handles the "live" side effects: caching the project map onto the
@@ -736,12 +736,13 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
   });
   const dispatchPolicy = readPlannerDispatchPolicy({ projectDir });
   const plannerProvider = String(getProviderForRole("planner") || "").trim().toLowerCase();
-  const dispatchProviderSupported = PLANNER_DISPATCH_PROVIDERS.includes(plannerProvider);
+  const dispatchProviderSupported = providerHonorsMcpToolDeadline(plannerProvider);
   if (dispatchPolicy.enabled && !dispatchProviderSupported) {
-    // A planner on a provider without the dispatch gate configuration would
-    // skip research and then have no way to request it. Keep router intake.
+    // A blocking dispatch call can last the whole child budget. A provider
+    // whose MCP client cannot be told to wait that long would abandon it, so
+    // the planner keeps router intake instead of a dispatch it cannot use.
     logEvent({ work_item_id: workItem.id, event_type: EVENT_TYPES.PLANNER_DISPATCH_INACTIVE,
-      actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: provider ${plannerProvider || "unknown"} is not dispatch-capable` });
+      actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: provider ${plannerProvider || "unknown"} has no known MCP tool deadline` });
   }
   if (dispatchPolicy.enabled && dispatchProviderSupported && !["oneshot", "oneshot_candidate", "web_only_answer"].includes(effectiveRouting.bucket)) {
     // This route replaces a research job plus a standard-tier plan job, not the

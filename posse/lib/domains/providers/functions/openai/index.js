@@ -8,6 +8,7 @@
 // file/shell access matching Claude Code's tool set per role.
 
 import OpenAI from "openai";
+import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import { getSetting } from "../../../queue/functions/index.js";
 import { getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { composeRemoteAssessorPromptForProvider } from "../shared/remote-assessor-prompt.js";
@@ -127,6 +128,7 @@ export const capabilities = Object.freeze({
   images: true,
   sessionResume: true,
   toolAttachment: "function",
+  mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
 });
 
 export function getCredentialEnvVars() {

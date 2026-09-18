@@ -9,6 +9,32 @@ export const PROVIDER_OPTIONS = Object.freeze(["claude", "openai", "codex", "gro
 // has no such execution route; image model ownership is a separate catalog.
 export const IMAGE_TOOL_CHAT_PROVIDERS = Object.freeze(PROVIDER_OPTIONS.filter((provider) => provider !== "codex"));
 
+// How each provider adapter honors the MCP per-call deadline from
+// `catalog/mcp.js`: by writing it into its MCP client configuration, by
+// carrying it through its environment, by executing tools in-process (no
+// client-side timeout exists), or not at all ("unknown"). Roles whose tool
+// calls can block for a long time (agent dispatch) are only routed to
+// providers with a known mode. Each provider module's `capabilities.
+// mcpToolDeadline` must match this table; a test pins the parity.
+export const MCP_TOOL_DEADLINE_MODES = Object.freeze({
+  SERVER_CONFIG: "server_config",
+  ENV: "env",
+  IN_PROCESS: "in_process",
+  UNKNOWN: "unknown",
+});
+export const PROVIDER_MCP_TOOL_DEADLINE_MODE = Object.freeze({
+  claude: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
+  codex: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
+  openai: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
+  grok: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
+  "posse-local": MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
+  copilot: MCP_TOOL_DEADLINE_MODES.UNKNOWN,
+});
+export function providerHonorsMcpToolDeadline(providerName) {
+  const mode = PROVIDER_MCP_TOOL_DEADLINE_MODE[String(providerName || "").trim().toLowerCase()];
+  return mode != null && mode !== MCP_TOOL_DEADLINE_MODES.UNKNOWN;
+}
+
 export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
 export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
 

@@ -5,11 +5,6 @@ import { SUB_AGENT_LIMITS } from "./sub-agent.js";
 export const PLANNER_DISPATCH_MODES = Object.freeze({ ROUTER: "router", PLANNER: "planner" });
 export const PLANNER_DISPATCH_MODE_VALUES = Object.freeze(Object.values(PLANNER_DISPATCH_MODES));
 export const RESEARCH_AGENT_TYPES = Object.freeze(["code", "web"]);
-// Providers whose MCP client is configured with the dispatch gate's tool
-// timeout (a blocking dispatch_agent call can last the whole child budget).
-// Other providers keep router-mode intake until they carry the same
-// configuration and a gate test.
-export const PLANNER_DISPATCH_PROVIDERS = Object.freeze(["codex"]);
 export const PLANNER_RESEARCH_EFFORT_VALUES = Object.freeze(["low", "medium", "high", "xhigh"]);
 export const PLANNER_DISPATCH_RETURN_MARGIN_MS = 10_000;
 

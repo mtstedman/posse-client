@@ -34,6 +34,7 @@
 // through to the next provider in the provider_<role> account setting.
 
 import { spawn } from "child_process";
+import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import { buildRuntimeEnv } from "../../../runtime/functions/paths.js";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
@@ -47,7 +48,7 @@ import { buildCopilotArgs, buildCopilotChildEnv, buildCopilotSpawn } from "./lau
 import { classifyCopilotFailure, parseCopilotErrorBackoff } from "./failure-classification.js";
 import { buildCopilotCloseStats, resolveCopilotStallTimeoutMs } from "./close-stats.js";
 import { terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
-import { liveScopeWaitPausesProviderStall } from "../shared/stall-timeout.js";
+import { providerStallPaused } from "../shared/stall-timeout.js";
 import { buildDeterministicReadMcpServerConfigAsync } from "../../../integrations/functions/deterministic-mcp.js";
 import {
   consumeCopilotLine,
@@ -55,7 +56,9 @@ import {
   finalOutput as copilotFinalOutput,
 } from "./events.js";
 
-export const capabilities = Object.freeze({ images: false, sessionResume: false, toolAttachment: "mcp" });
+// The Copilot CLI documents no per-call MCP tool timeout, so long-blocking
+// tool calls (agent dispatch) are not routed to it until one is verified.
+export const capabilities = Object.freeze({ images: false, sessionResume: false, toolAttachment: "mcp", mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.UNKNOWN });
 
 const LINE_BUF_MAX = 16 * 1024 * 1024;
 
@@ -152,6 +155,7 @@ export async function callProvider(promptText, opts = {}) {
     maxOutputTokens = null,
     mcpGate = null,
     jobId = null,
+    agentCallId = null,
   } = opts || {};
 
   if (!mcpGate) {
@@ -266,7 +270,7 @@ export async function callProvider(promptText, opts = {}) {
       if (stallTimer) clearTimeout(stallTimer);
       if (stallTimeoutMs > 0) {
         stallTimer = setTimeout(() => {
-          if (liveScopeWaitPausesProviderStall(jobId)) {
+          if (providerStallPaused({ jobId, agentCallId })) {
             resetStallTimer();
             return;
           }

@@ -1,4 +1,6 @@
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
+import { mcpClientToolDeadlineMs } from "../../../../catalog/mcp.js";
+import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../../catalog/mcp.js";
 import {
   buildDisabledAtlasAttachment,
@@ -40,12 +42,13 @@ export async function buildClaudeAtlasMcpConfigPayloadAsync(role, cwd, { assignm
     return { attachment: { ...attachment, active: false, tools: [] }, payload: null };
   }
   const serverConfig = server.transport === "http"
-    ? { type: "http", url: server.url }
+    ? { type: "http", url: server.url, timeout: mcpClientToolDeadlineMs(server.atlasTools || []) }
     : {
       command: server.command,
       args: server.args || [],
       cwd: server.cwd || undefined,
       env: server.env || undefined,
+      timeout: mcpClientToolDeadlineMs(server.atlasTools || []),
     };
   const serverName = server.name || "atlas-v2";
   return {
@@ -143,6 +146,7 @@ export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
           args: server.args || [],
           cwd: server.cwd || undefined,
           env: mcpServerEnvWithProviderReferences(server),
+          timeout: claudeMcpServerTimeoutMs(toolNames, server, cwd),
         },
       },
     },
@@ -235,8 +239,47 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
           args: server.args || [],
           cwd: server.cwd || undefined,
           env: mcpServerEnvWithProviderReferences(server),
+          timeout: claudeMcpServerTimeoutMs(toolNames, server, cwd),
         },
       },
     },
   };
+}
+
+
+// Claude Code bounds each MCP tool call per server (`timeout`, ms) and also
+// aborts a stdio call that shows no progress for 30 minutes by default. Both
+// bounds come from the catalog deadline for the tools this server exposes, so
+// composed checks, live scope waits, and agent dispatch are never abandoned by
+// the client while the owner is still running them.
+export function claudeMcpServerTimeoutMs(toolNames = [], server = {}, cwd = null) {
+  const names = [
+    ...(Array.isArray(toolNames) ? toolNames : []),
+    ...(Array.isArray(server?.atlasTools) ? server.atlasTools : []),
+  ];
+  const dispatchIssued = names.some((name) => /^(tools[._])?dispatch_agent$/u.test(String(name || "")));
+  let agentDispatchTimeoutMs = null;
+  if (dispatchIssued) {
+    try {
+      agentDispatchTimeoutMs = readPlannerDispatchPolicy({ projectDir: server?.cwd || cwd || null }).toolTimeoutSec * 1000;
+    } catch {
+      agentDispatchTimeoutMs = null;
+    }
+  }
+  return mcpClientToolDeadlineMs(names, { agentDispatchTimeoutMs });
+}
+
+/**
+ * Environment the Claude child needs so its global MCP timeouts never undercut
+ * the per-server deadlines above. Explicit operator values are respected.
+ */
+export function claudeMcpDeadlineEnv(mcpServers = {}, env = {}) {
+  const timeouts = Object.values(mcpServers || {})
+    .map((server) => Number(server?.timeout))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (timeouts.length === 0) return env;
+  const ceiling = String(Math.max(...timeouts));
+  if (env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT === undefined) env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT = ceiling;
+  if (env.MCP_TOOL_TIMEOUT === undefined) env.MCP_TOOL_TIMEOUT = ceiling;
+  return env;
 }

@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from "node:fs";
+import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import os from "node:os";
 import path from "node:path";
 
@@ -411,6 +412,7 @@ export const capabilities = Object.freeze({
   sessionResume: false,
   toolAttachment: "function",
   localGeneration: true,
+  mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
 });
 
 export const MODEL_TIERS = Object.freeze({

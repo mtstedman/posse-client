@@ -1,6 +1,6 @@
 import { expireUnackedOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
 import { recordResearchDispatchAudit } from "../../planning/functions/research-dispatch-telemetry.js";
-import { PLANNER_DISPATCH_PROVIDERS } from "../../../catalog/planner-dispatch.js";
+import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
 import { runResearchChild } from "../../planning/functions/run-research-child.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 // lib/domains/worker/classes/TrackedProviderClient.js
@@ -1748,7 +1748,7 @@ export class TrackedProviderClient {
       const researchPolicy = readPlannerDispatchPolicy({ projectDir: cwd });
       const researchEnabled = opts.role === "planner" && effectiveCapabilityOpts.sessionPacket?.planner_dispatch === true
         && researchPolicy.enabled && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true
-        && PLANNER_DISPATCH_PROVIDERS.includes(String(providerName || "").toLowerCase());
+        && providerHonorsMcpToolDeadline(providerName);
       if (subAgentEnabled || researchEnabled) {
         unregisterSubAgentParent = subAgentRuntime.registerParent({
           agentCallId,
