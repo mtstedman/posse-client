@@ -2757,8 +2757,27 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
   if (normalizedRole !== "planner" || !candidate || !Object.hasOwn(candidate, "tasks")) return args;
 
   const source = exactKeys(candidate, ["shared_contracts", "tasks"], "agent_handoff");
+  // Providers sometimes deliver a deeply nested array as its JSON text, or as
+  // an object keyed by position. Both carry the tasks; recover them rather
+  // than failing the whole planner call over transport shape.
+  let tasks = source.tasks;
+  if (typeof tasks === "string") {
+    try { tasks = JSON.parse(tasks); } catch { /* reported below */ }
+  }
+  if (tasks && typeof tasks === "object" && !Array.isArray(tasks)) {
+    const values = Object.values(tasks);
+    if (values.length > 0 && values.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry))) tasks = values;
+  }
+  if (tasks !== source.tasks && Array.isArray(tasks) && tasks.length > 0) {
+    source.tasks = tasks;
+  }
   if (!Array.isArray(source.tasks) || source.tasks.length < 1) {
-    fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.tasks must contain at least one task");
+    const received = source.tasks == null
+      ? String(source.tasks)
+      : Array.isArray(source.tasks)
+        ? "an empty array"
+        : `${typeof source.tasks}${typeof source.tasks === "object" ? ` with keys ${Object.keys(source.tasks).slice(0, 6).join(",") || "(none)"}` : ` of ${String(source.tasks).length} chars`}`;
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", `agent_handoff.tasks must contain at least one task (received ${received})`);
   }
   if (source.tasks.length > 50) {
     fail("AGENT_HANDOFF_TOO_LARGE", "agent_handoff.tasks exceeds 50 entries");

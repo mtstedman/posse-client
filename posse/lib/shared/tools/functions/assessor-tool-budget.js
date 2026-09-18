@@ -25,6 +25,11 @@ export const ASSESSOR_TOOL_BUDGET_EXEMPT_TOOL_NAME = TOOL_AGENT_HANDOFF.name;
 
 export const ASSESSOR_TOOL_CALL_CEILING_REASON = "tool_call_ceiling";
 
+// Appended to a read served past the assessor's read allowance. The read
+// still executes: the allowance guides breadth, it does not withhold
+// evidence the assessor decided it needs.
+export const ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT =
+  "Advisory: this read is past the assessor read allowance. The scoped diff and the evidence already surfaced are sufficient for a verdict; render it now unless a specific unresolved criterion needs one more bounded read.";
 export const ASSESSOR_TOOL_CALL_BUDGET_EXHAUSTED_TEXT =
   "Assessor tool-call budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.";
 

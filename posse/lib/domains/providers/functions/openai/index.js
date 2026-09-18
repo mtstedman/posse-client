@@ -46,6 +46,7 @@ export { getUsageSummary };
 
 import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool-suites.js";
 import { createAssessorToolLoopBudget } from "../shared/assessor-tool-loop-budget.js";
+import { ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT } from "../../../../shared/tools/functions/assessor-tool-budget.js";
 const LIVE_CHANNEL_TURN_LIMIT = 12;
 
 function abortableThrottle(ms, signal = null) {
@@ -788,31 +789,27 @@ export async function callProvider(promptText, {
           continue;
         }
 
-        // -- Enforce read budget --
+        // -- Read allowance (advisory past the cap) --
+        let readAllowanceAdvisory = false;
         if (call.name === "read_file") {
           readCount++;
           if (readCount > maxReads) {
-            emit(`${C.yellow}  [budget] read_file denied - ${maxReads} fallback reads exhausted${C.reset}`);
-            const readBudgetText = `Error: Fallback read budget exhausted (max ${maxReads}). The file contents you need should already be in the prompt context. If critical context is missing, return MISSING_CONTEXT with the files you need.`;
-            recordedToolUse.blockedReason = "fallback_read_ceiling";
-            recordedToolUse.status = "rejected";
-            recordedToolUse.rejection = readBudgetText;
+            // Advisory: the read still executes; the note below tells the
+            // model the allowance is spent so it concludes rather than
+            // being denied evidence it decided it needs.
+            emit(`${C.yellow}  [budget] read_file past allowance (${readCount}/${maxReads}) - executing with advisory${C.reset}`);
+            readAllowanceAdvisory = true;
             recordedToolUse.observation_detail = {
-              assessment_budget_exhausted: true,
+              assessment_budget_advisory: true,
               assessment_budget_reason: "fallback_read_ceiling",
-              assessment_budget_used: maxReads,
+              assessment_budget_used: readCount,
               assessment_budget_cap: maxReads,
               tool_name: call.name,
               transport: "embedded_provider",
             };
-            toolResults.push({
-              type: "function_call_output",
-              call_id: call.call_id,
-              output: readBudgetText,
-            });
-            continue;
+          } else {
+            emit(`${C.yellow}  [fallback read ${readCount}/${maxReads}]${C.reset}`);
           }
-          emit(`${C.yellow}  [fallback read ${readCount}/${maxReads}]${C.reset}`);
         }
 
         const toolStart = Date.now();
@@ -835,7 +832,7 @@ export async function callProvider(promptText, {
         toolResults.push({
           type: "function_call_output",
           call_id: call.call_id,
-          output: truncated,
+          output: readAllowanceAdvisory ? `${truncated}\n\n${ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT}` : truncated,
         });
 
         emit(`${C.dim}  [done] ${displayToolName} (${toolMs}ms, ${result.length} chars)${C.reset}`);

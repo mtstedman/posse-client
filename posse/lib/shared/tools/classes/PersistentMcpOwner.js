@@ -5595,37 +5595,11 @@ export class PersistentMcpOwner {
             const fallbackReadCap = Number.isFinite(Number(session?.bootConfig?.fallbackReads))
               ? Math.max(0, Math.floor(Number(session.bootConfig.fallbackReads)))
               : 0;
-            session._assessorFallbackReadCount = Number(session._assessorFallbackReadCount || 0);
-            if (session._assessorFallbackReadCount >= fallbackReadCap) {
-              const budgetText = "Assessor read budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.";
-              recordOwnerAssessorBudgetExhaustion({
-                session,
-                toolName,
-                toolArgs,
-                reason: "fallback_read_ceiling",
-                text: budgetText,
-                used: session._assessorFallbackReadCount,
-                cap: fallbackReadCap,
-              });
-              sendJson(res, 200, {
-                ok: true,
-                bootId: this.bootId,
-                sessionId: id,
-                message: {
-                  jsonrpc: "2.0",
-                  id: message?.id ?? null,
-                  result: {
-                    content: [{
-                      type: "text",
-                      text: budgetText,
-                    }],
-                    isError: false,
-                  },
-                },
-              });
-              return;
-            }
-            session._assessorFallbackReadCount += 1;
+            // The read allowance is advisory: the read proceeds past it and
+            // the gateway records the advisory. Withholding the read pushed
+            // assessors into needs_review verdicts they did not mean.
+            session._assessorFallbackReadCount = Number(session._assessorFallbackReadCount || 0) + 1;
+            void fallbackReadCap;
           }
         }
         const routingState = subAgentRoutingEnabled(policy)

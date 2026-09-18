@@ -59,6 +59,7 @@ import {
 import {
   assessorToolBudgetApplies,
   assessorToolCallCeilingDecision,
+  ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT,
 } from "../../../shared/tools/functions/assessor-tool-budget.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
@@ -674,15 +675,19 @@ function assessorToolBudgetDecision(toolName, args = {}) {
   const fallbackReadCap = Number.isFinite(Number(bootConfig.fallbackReads))
     ? Math.max(0, Math.floor(Number(bootConfig.fallbackReads)))
     : 0;
-  if (state.assessorFallbackReadCount >= fallbackReadCap) {
+  state.assessorFallbackReadCount += 1;
+  if (state.assessorFallbackReadCount > fallbackReadCap) {
+    // Past the allowance the read still runs; the decision is advisory so
+    // an assessor that needs one more bounded read is never pushed into a
+    // needs_review it did not mean, nor into a harness "exhaustion" requeue.
     return {
+      advisory: true,
       reason: "fallback_read_ceiling",
-      text: "Assessor read budget exhausted. Render the verdict from the evidence already provided. If material evidence is genuinely missing, return needs_review; never fabricate a pass.",
+      text: ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT,
       used: state.assessorFallbackReadCount,
       cap: fallbackReadCap,
     };
   }
-  state.assessorFallbackReadCount += 1;
   return null;
 }
 
@@ -1342,6 +1347,18 @@ function dedupeReadFile(args = {}) {
     state.lastReadMeta = null;
   }
   return result;
+}
+
+// Shape of a planner handoff's `tasks` argument for telemetry: enough to
+// diagnose a schema rejection (string-encoded array, keyed object, empty)
+// without recording the tasks themselves.
+function describeTasksShape(tasks) {
+  if (tasks === undefined) return null;
+  if (tasks === null) return "null";
+  if (Array.isArray(tasks)) return `array[${tasks.length}]`;
+  if (typeof tasks === "string") return `string[${tasks.length}]`;
+  if (typeof tasks === "object") return `object{${Object.keys(tasks).slice(0, 6).join(",")}}`;
+  return typeof tasks;
 }
 
 async function generateImageWithinScope(args = {}) {
@@ -3813,12 +3830,41 @@ async function handleRequest(msg) {
             profile: args?.profile || null,
             outcome: args?.outcome || null,
             handoff_count: Array.isArray(args?.handoffs) ? args.handoffs.length : null,
+            tasks_shape: describeTasksShape(args?.tasks),
           }
         : sanitizeForLog(args),
     });
 
     const assessorBudget = assessorToolBudgetDecision(toolName, args);
-    if (assessorBudget) {
+    if (assessorBudget?.advisory) {
+      appendToolLog({
+        event: "assessor_read_allowance_advisory",
+        requestId: id ?? null,
+        tool: requestedToolName,
+        canonicalTool: toolName,
+        reason: assessorBudget.reason,
+        used: assessorBudget.used,
+        cap: assessorBudget.cap,
+      });
+      try {
+        _recordObservation({
+          work_item_id: mcpWorkItemId ?? null,
+          job_id: mcpJobId ?? null,
+          attempt_id: mcpAttemptId ?? null,
+          observation_type: "tool.budget_advisory",
+          summary: `Assessor read past allowance: ${toolName} (${assessorBudget.used}/${assessorBudget.cap})`,
+          detail: {
+            assessment_budget_advisory: true,
+            assessment_budget_reason: assessorBudget.reason,
+            assessment_budget_used: assessorBudget.used,
+            assessment_budget_cap: assessorBudget.cap,
+            tool_name: toolName,
+            transport: "deterministic_mcp",
+            agent_call_id: mcpAgentCallId ?? null,
+          },
+        });
+      } catch { /* advisory telemetry never blocks a tool */ }
+    } else if (assessorBudget) {
       appendToolLog({
         event: "assessor_tool_budget_exhausted",
         requestId: id ?? null,
@@ -4156,6 +4202,7 @@ async function handleRequest(msg) {
           profile: args?.profile || null,
           outcome: args?.outcome || null,
           handoff_count: Array.isArray(args?.handoffs) ? args.handoffs.length : null,
+          tasks_shape: describeTasksShape(args?.tasks),
         }
       : (toolName === "chain_verdict" && researchState?.currentlyReading?.path)
         ? { ...args, path: researchState.currentlyReading.path }
