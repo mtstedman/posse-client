@@ -267,6 +267,8 @@ export class RunSession {
   let resolveAtlasBootBackgroundRequest = null;
   let atlasBootBackgroundRequested = false;
   let atlasBootBackgroundReason = null;
+  let atlasBootViewsReady = false;
+  let atlasWarmupSoftTimedOut = false;
   const atlasBootBackgroundRequest = new Promise((resolve) => {
     resolveAtlasBootBackgroundRequest = resolve;
   });
@@ -1708,11 +1710,15 @@ export class RunSession {
         if (armHold && !atlasBootBackgroundRequested) {
           // Encoding starts only after SCIP intake + view merge have landed, so
           // this is the "SCIP + views ready" point — the embedding/ONNX layer is
-          // now warming. Hold boot here so the user can watch it warm, with Enter
-          // to drop it to the background at any point during the encode. A
-          // headless/non-interactive boot can't take that keypress, so it
-          // releases immediately and keeps encoding behind the run loop.
-          if (bootCanPromptForBackground()) {
+          // now warming. Before the soft timeout, hold boot here so the user can
+          // watch it warm and optionally press Enter. Once the timeout has
+          // elapsed, source readiness is satisfied, so release automatically
+          // instead of making a cold encode look like a boot hang. A headless
+          // boot releases immediately because it cannot take the keypress.
+          atlasBootViewsReady = true;
+          if (atlasWarmupSoftTimedOut) {
+            requestAtlasBootBackground("soft-timeout-views-ready");
+          } else if (bootCanPromptForBackground()) {
             setBootEnterAction(() => requestAtlasBootBackground("enter"));
             updateBootFooter("hit Enter to load ONNX in the background");
           } else {
@@ -1943,10 +1949,13 @@ export class RunSession {
               });
             }
             if (!atlasBootBackgroundRequested) {
-              // Same post-view hold point as encoding: hold through the
-              // minutes-long ML labeling pass with an Enter escape, but release
-              // immediately when there's no TTY to take the keypress.
-              if (bootCanPromptForBackground()) {
+              // Same post-view hold point as encoding: permit Enter before the
+              // soft timeout, then release automatically. Headless runs release
+              // immediately because they cannot take the keypress.
+              atlasBootViewsReady = true;
+              if (atlasWarmupSoftTimedOut) {
+                requestAtlasBootBackground("soft-timeout-views-ready");
+              } else if (bootCanPromptForBackground()) {
                 setBootEnterAction(() => requestAtlasBootBackground("tree-compression-enter"));
                 updateBootFooter("ML tree labeling — hit Enter to continue in the background");
               } else {
@@ -2287,13 +2296,19 @@ export class RunSession {
         !(atlasBoot?.attempted && atlasBoot.ok === false) &&
         !(atlasRuntime?.attempted && atlasRuntime.ok === false)
       ),
-      // The soft timeout settles the boot panel, not source readiness. Workers
-      // must wait for the real warm or its existing post-view background signal;
-      // elapsed time alone cannot make an unpublished source view usable.
+      // The soft timeout alone cannot make an unpublished source view usable.
+      // Once views are ready, it releases the remaining encode/compression tail
+      // automatically; before then workers continue waiting for that boundary.
       softTimeoutMs: Number.isFinite(Number(atlasWarmupBootConfig?.bootSoftTimeoutMs))
         ? Math.max(0, Number(atlasWarmupBootConfig.bootSoftTimeoutMs))
         : 33 * 60 * 1000,
       softTimeoutDetail: "waiting for source index readiness",
+      onSoftTimeout: () => {
+        atlasWarmupSoftTimedOut = true;
+        if (atlasBootViewsReady) {
+          requestAtlasBootBackground("soft-timeout-views-ready");
+        }
+      },
       // Keep the chip running until the pre-TUI gate consumes the background
       // request and marks it deferred. The late completion watcher can still
       // promote it to the real terminal outcome.
