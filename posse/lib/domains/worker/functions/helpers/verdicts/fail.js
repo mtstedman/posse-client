@@ -1,6 +1,7 @@
 // lib/domains/worker/functions/helpers/verdicts/fail.js
 
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import {
@@ -272,6 +273,106 @@ function _buildGenericArtifactRecoveryPayload({
 
 export function buildImageArtifactRecoveryPayload(options) {
   return _buildImageArtifactRecoveryPayload(options);
+}
+
+const IMAGE_FILE_NAME_RE = /[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.(?:png|jpe?g|gif|webp|svg|avif)\b/giu;
+
+export function imageFileBasenames(text) {
+  const names = new Set();
+  for (const match of String(text || "").matchAll(IMAGE_FILE_NAME_RE)) {
+    const base = path.posix.basename(match[0].replace(/\\/g, "/"));
+    if (base) names.add(base);
+  }
+  return names;
+}
+
+/**
+ * An image job whose assessor fails only some named files has delivered
+ * the rest. Failing the whole job held every good artifact behind the repair
+ * (and a dead letter lost them all). The named files go to a repair scoped
+ * to exactly those images and the job passes for the rest, so its promote
+ * fires now for the accepted artifacts and defers the named ones to the
+ * repair. Returns the pass verdict to apply, or null when the failure is
+ * not a partial image deliverable.
+ */
+export function acceptPartialImageDeliverable(job, verdict, ctx, { projectDir = null } = {}) {
+  if (!job || String(verdict?.verdict || "").toLowerCase() !== "fail") return null;
+  const payload = parseJobPayload(job);
+  const outputRoot = String(payload?.output_root || "").trim();
+  if (!_isImageArtifactRecovery({
+    taskMode: payload?.task_mode || "code",
+    needsImageGeneration: payload?.needs_image_generation === true,
+    outputRoot,
+  })) return null;
+  const spec = (Array.isArray(verdict.spawn_jobs) ? verdict.spawn_jobs : [])
+    .find((entry) => !entry?.job_type || entry.job_type === "fix");
+  if (!spec) return null;
+  const reasons = Array.isArray(verdict.reasons) ? verdict.reasons : [];
+  const instructions = String(spec.payload?.instructions || reasons.join("\n"));
+  // Only the fix instructions name the files to repair; the reasons also
+  // name the files that passed.
+  const named = imageFileBasenames(instructions);
+  if (named.size === 0) return null;
+  const rootAbs = path.isAbsolute(outputRoot) ? outputRoot : path.resolve(projectDir || process.cwd(), outputRoot);
+  let existing;
+  try {
+    existing = fs.readdirSync(rootAbs).filter((name) => imageFileBasenames(name).has(name)).sort();
+  } catch {
+    return null;
+  }
+  const accepted = existing.filter((name) => !named.has(name));
+  if (accepted.length === 0) return null;
+  const repairNames = [...named].sort();
+  const repairPayload = _buildImageArtifactRecoveryPayload({
+    job,
+    fixInstructions: [
+      instructions,
+      `Only these files need work: ${repairNames.join(", ")}. The other files in the output root are accepted deliverables; do not regenerate, rename or modify them.`,
+    ].join("\n"),
+    assessorFeedback: reasons,
+    originalCreateFiles: [],
+    originalCreateRoots: Array.isArray(payload.create_roots) ? payload.create_roots : [],
+    originalFiles: [],
+    originalOutputRoot: outputRoot,
+    originalSuccessCriteria: Array.isArray(payload.success_criteria) ? payload.success_criteria : [],
+    originalTaskSpec: payload.task_spec || payload.instructions || "",
+    specPayload: spec.payload || {},
+  });
+  const repairJob = ctx.spawnFromAssessor("failed", "artificer", {
+    work_item_id: job.work_item_id,
+    title: `Image artifact repair (${repairNames.length}): ${repairNames.slice(0, 3).join(", ")}${repairNames.length > 3 ? ", …" : ""}`.slice(0, 200),
+    parent_job_id: job.id,
+    priority: job.priority,
+    model_tier: job.model_tier,
+    reasoning_effort: job.reasoning_effort,
+    skills: job.skills || null,
+    payload_json: JSON.stringify({
+      ...repairPayload,
+      _repair_image_names: repairNames,
+      _partial_deliverable_repair_for: job.id,
+      ...(payload.oneshot_origin ? { oneshot_origin: true } : {}),
+    }),
+  });
+  if (Array.isArray(ctx.spawnedJobs)) ctx.spawnedJobs.push(repairJob);
+  logEvent({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    event_type: EVENT_TYPES.JOB_PARTIAL_DELIVERABLE_ACCEPTED,
+    actor_type: EVENT_ACTORS.ASSESSOR,
+    message: `Accepted ${accepted.length} delivered artifact(s); ${repairNames.length} routed to repair #${repairJob.id}: ${repairNames.join(", ")}`,
+    event_json: JSON.stringify({ accepted, repair_names: repairNames, repair_job_id: repairJob.id }),
+  });
+  ctx.emitLog?.(`${C.yellow}[assessor] PARTIAL${C.reset} WI#${job.work_item_id} job #${job.id}: ${accepted.length} artifact(s) accepted, ${repairNames.length} to repair #${repairJob.id}`);
+  return {
+    ...verdict,
+    verdict: "pass",
+    reasons: [
+      `Partial deliverable accepted: ${accepted.length} artifact(s) delivered; ${repairNames.length} routed to repair #${repairJob.id} (${repairNames.join(", ")}).`,
+      ...reasons,
+    ],
+    spawn_jobs: [],
+    _partial_deliverable: { accepted, repair_names: repairNames, repair_job_id: repairJob.id },
+  };
 }
 
 function _buildImageArtifactRecoveryPayload({

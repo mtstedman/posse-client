@@ -298,7 +298,9 @@ export function routePromoteTaskByOutputDir(task, index, tasks, artifactDirAbs) 
     } else {
       for (const depIdx of originalDeps) depSet.add(depIdx);
     }
-    if (offset > 0) depSet.add(index + offset - 1);
+    // Split promotes share a destination lane, which already serializes their
+    // writes; chaining them by dependency only made every later install wait
+    // on the repair of an earlier set's missing images.
     splitTasks.push({
       ...task,
       title: promoteSplitTitle(task.title, group, offset),

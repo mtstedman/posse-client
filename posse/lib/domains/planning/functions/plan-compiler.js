@@ -733,16 +733,18 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
         return [...new Set(roots)];
       };
-      const rewritePendingDependenciesAfterSplit = (splitIndex, splitTaskCount, finalIndex) => {
+      const rewritePendingDependenciesAfterSplit = (splitIndex, splitTaskCount, finalIndex, { fanOut = false } = {}) => {
         const offset = splitTaskCount - 1;
         if (offset <= 0) return;
         for (const link of pendingDependencyLinks) {
-          link.dependsOnIndexes = link.dependsOnIndexes.map((depIdx) => {
-            if (!Number.isInteger(depIdx)) return depIdx;
-            if (depIdx === splitIndex) return finalIndex;
-            if (depIdx > splitIndex) return depIdx + offset;
-            return depIdx;
-          });
+          link.dependsOnIndexes = [...new Set(link.dependsOnIndexes.flatMap((depIdx) => {
+            if (!Number.isInteger(depIdx)) return [depIdx];
+            if (depIdx === splitIndex) {
+              return fanOut ? Array.from({ length: splitTaskCount }, (_, piece) => splitIndex + piece) : [finalIndex];
+            }
+            if (depIdx > splitIndex) return [depIdx + offset];
+            return [depIdx];
+          }))];
         }
       };
       const wirePlannerDependencies = () => {
@@ -1675,8 +1677,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               dropSplitGroupAtCap(t, i, promoteOutputDirRoute.splitTasks, "promote_output_dir_split");
               continue;
             }
-            rewriteDependenciesAfterSplit(tasks, i, promoteOutputDirRoute.splitTasks.length, promoteOutputDirRoute.finalIndex);
-            rewritePendingDependenciesAfterSplit(i, promoteOutputDirRoute.splitTasks.length, promoteOutputDirRoute.finalIndex);
+            // Split promotes are not chained to each other, so anything that
+            // waited on the promote task waits on every piece.
+            rewriteDependenciesAfterSplit(tasks, i, promoteOutputDirRoute.splitTasks.length, promoteOutputDirRoute.finalIndex, { fanOut: true });
+            rewritePendingDependenciesAfterSplit(i, promoteOutputDirRoute.splitTasks.length, promoteOutputDirRoute.finalIndex, { fanOut: true });
             tasks.splice(i, 1, ...promoteOutputDirRoute.splitTasks);
             capExpandedTasks("promote_output_dir_split");
             worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: ${promoteOutputDirRoute.reason}`);

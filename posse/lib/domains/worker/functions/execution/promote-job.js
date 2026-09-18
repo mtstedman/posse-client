@@ -13,6 +13,7 @@ import {
   completeAttempt,
   createJob,
   getDependents,
+  getJob,
   getWorkItem,
   incrementAndCreateAttempt,
   listJobsByWorkItem,
@@ -28,6 +29,7 @@ import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { logBadInputFailure } from "./bad-input.js";
 import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { LEASE_HOLDING_STATUSES } from "../../../../catalog/job.js";
 import { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
 
 export { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
@@ -153,6 +155,47 @@ function findSourceArtificer(job, sourceDir, missingNames) {
   return candidates[0] || null;
 }
 
+// A repair that has not finished: waiting to run, or holding a lease.
+const PENDING_REPAIR_STATUSES = new Set(["queued", ...LEASE_HOLDING_STATUSES]);
+
+// Image names an unfinished repair job in this WI is regenerating into the
+// source directory: the assessor's partial-deliverable repair, or an earlier
+// promote's own repair. Those files are deferred to that job rather than
+// installed now (possibly defective) or regenerated twice.
+function pendingImageRepairs(job, sourceDir) {
+  const byName = new Map();
+  for (const sibling of listJobsByWorkItem(job.work_item_id)) {
+    if (sibling.job_type !== "artificer" || !PENDING_REPAIR_STATUSES.has(sibling.status)) continue;
+    const payload = parseJobPayload(sibling);
+    const names = Array.isArray(payload?._repair_image_names) ? payload._repair_image_names : [];
+    const outputRoot = String(payload?.output_root || "").trim();
+    if (names.length === 0 || !outputRoot || path.resolve(outputRoot) !== path.resolve(sourceDir)) continue;
+    for (const name of names) if (!byName.has(name)) byName.set(name, sibling);
+  }
+  return byName;
+}
+
+function spawnFollowupPromote(worker, job, payload, { mappings, repairJob, attemptId }) {
+  const followupJob = createJob({
+    work_item_id: job.work_item_id,
+    job_type: "promote",
+    title: `${job.title} (after repair #${repairJob.id})`.slice(0, 200),
+    parent_job_id: job.parent_job_id || job.id,
+    priority: job.priority,
+    model_tier: job.model_tier,
+    payload_json: JSON.stringify({ ...payload, mappings, _promote_followup_of: job.id }),
+  });
+  addDependency(followupJob.id, repairJob.id, "hard");
+  const rewired = [];
+  for (const dependent of getDependents(job.id)) {
+    if (dependent.job_id === followupJob.id || dependent.job_id === repairJob.id) continue;
+    if (String(getJob(dependent.job_id)?.job_type || "").toLowerCase() === "promote") continue;
+    if (addDependency(dependent.job_id, followupJob.id, dependent.kind || "hard")) rewired.push(dependent.job_id);
+  }
+  void attemptId;
+  return { followupJob, rewired };
+}
+
 /**
  * A promote whose explicit image mappings partly exist installs what is
  * there and hands the rest to a repair scoped to exactly the missing files:
@@ -192,23 +235,9 @@ function spawnMissingImageRepair(worker, job, payload, { sourceDir, missingMappi
     model_tier: source?.sibling?.model_tier || "standard",
     reasoning_effort: source?.sibling?.reasoning_effort || "medium",
     skills: source?.sibling?.skills || null,
-    payload_json: JSON.stringify({ ...repairPayload, _promote_missing_repair_for: job.id }),
+    payload_json: JSON.stringify({ ...repairPayload, _repair_image_names: missingNames, _promote_missing_repair_for: job.id }),
   });
-  const followupJob = createJob({
-    work_item_id: job.work_item_id,
-    job_type: "promote",
-    title: `${job.title} (missing ${missingNames.length})`.slice(0, 200),
-    parent_job_id: job.id,
-    priority: job.priority,
-    model_tier: job.model_tier,
-    payload_json: JSON.stringify({ ...payload, mappings: missingMappings, _promote_followup_of: job.id }),
-  });
-  addDependency(followupJob.id, repairJob.id, "hard");
-  const rewired = [];
-  for (const dependent of getDependents(job.id)) {
-    if (dependent.job_id === followupJob.id || dependent.job_id === repairJob.id) continue;
-    if (addDependency(dependent.job_id, followupJob.id, dependent.kind || "hard")) rewired.push(dependent.job_id);
-  }
+  const { followupJob, rewired } = spawnFollowupPromote(worker, job, payload, { mappings: missingMappings, repairJob, attemptId });
   logEvent({
     work_item_id: job.work_item_id,
     job_id: job.id,
@@ -284,10 +313,21 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
 
     const plannedCopies = [];
     const missingMappings = [];
+    const pendingRepairs = pendingImageRepairs(job, sourceDir);
+    const deferredByRepair = new Map();
     for (const mapping of mappings) {
       worker._throwIfKilled(job.id);
       const { pattern, dest } = mapping;
       const wildcard = pattern.startsWith("*.");
+      const pendingRepair = !wildcard && pendingRepairs.get(pattern);
+      if (pendingRepair) {
+        // Being regenerated by an unfinished repair: install it from the
+        // follow-up promote that waits on that repair, not now.
+        const group = deferredByRepair.get(pendingRepair.id) || { repairJob: pendingRepair, mappings: [] };
+        group.mappings.push(mapping);
+        deferredByRepair.set(pendingRepair.id, group);
+        continue;
+      }
       const explicitFileDest = mapping.destination_type === "file"
         || (!wildcard && looksLikeFileDestination(dest));
       const resolvedDest = normalizeRootRelativePromoteDest(dest, {
@@ -352,7 +392,20 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       }
     }
 
-    if (plannedCopies.length === 0 && missingMappings.length > 0) {
+    if (plannedCopies.length === 0 && (missingMappings.length > 0 || deferredByRepair.size > 0)) {
+      if (missingMappings.length === 0) {
+        // Everything this promote covers is still being repaired; the
+        // follow-ups will install it. Nothing to promote now.
+        for (const group of deferredByRepair.values()) {
+          spawnFollowupPromote(worker, job, payload, { mappings: group.mappings, repairJob: group.repairJob, attemptId: attempt.attempt.id });
+        }
+        worker.emit(job.id, `${C.yellow}[promote]${C.reset} WI#${job.work_item_id} job #${job.id}: every mapping awaits a pending repair; deferred to follow-up promote(s)`);
+        completeAttempt(attempt.attempt.id, { status: "succeeded", duration_ms: Date.now() - startTime, output_chars: 0 });
+        worker._releaseLease(job, leaseToken, "succeeded");
+        refreshAndExtractInsights(job.work_item_id);
+        worker._cleanupWorktreeIfDone(job.work_item_id);
+        return;
+      }
       logBadInputFailure(job, {
         layer: "promote",
         upstream: "artifact_output",
@@ -445,6 +498,20 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
     const partial = missingMappings.length > 0
       ? spawnMissingImageRepair(worker, job, payload, { sourceDir, missingMappings, attemptId: attempt.attempt.id })
       : null;
+    const deferred = [];
+    for (const group of deferredByRepair.values()) {
+      const { followupJob } = spawnFollowupPromote(worker, job, payload, { mappings: group.mappings, repairJob: group.repairJob, attemptId: attempt.attempt.id });
+      deferred.push({ repair_job_id: group.repairJob.id, followup_job_id: followupJob.id, names: group.mappings.map((mapping) => mapping.pattern) });
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.attempt.id,
+        event_type: EVENT_TYPES.JOB_PROMOTE_PARTIAL,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Deferred ${group.mappings.length} image(s) awaiting repair #${group.repairJob.id} to follow-up promote #${followupJob.id}: ${group.mappings.map((mapping) => mapping.pattern).join(", ")}`,
+        event_json: JSON.stringify({ deferred: group.mappings.map((mapping) => mapping.pattern), repair_job_id: group.repairJob.id, followup_job_id: followupJob.id }),
+      });
+    }
     storeArtifact({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -457,6 +524,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
           repair_job_id: partial.repairJob.id,
           followup_promote_job_id: partial.followupJob.id,
         } : {}),
+        ...(deferred.length > 0 ? { files_deferred: deferred } : {}),
       }),
     });
     completeAttempt(attempt.attempt.id, {

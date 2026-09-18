@@ -10,7 +10,7 @@ import {
   prepareVerdictForDispatch,
 } from "./verdict-shared.js";
 import { handle as handleBlocked } from "./verdicts/blocked.js";
-import { handle as handleFail } from "./verdicts/fail.js";
+import { acceptPartialImageDeliverable, handle as handleFail } from "./verdicts/fail.js";
 import {
   handle as handleNeedsReview,
   handleParseError,
@@ -117,6 +117,11 @@ export function processVerdict(job, verdict, {
     }),
   };
 
+  if (verdict.verdict === "fail") {
+    // An image job failed for some named files has delivered the rest.
+    const partial = acceptPartialImageDeliverable(job, verdict, ctx);
+    if (partial) verdict = partial;
+  }
   switch (verdict.verdict) {
     case "pass":
       handlePass(job, verdict, ctx);

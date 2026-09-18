@@ -608,6 +608,7 @@ export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapsh
   const allowJobIds = new Set([
     ...ancestorJobIdsForJob(job, db),
     ...queuedCohortJobIdsForJob(job, db),
+    ...queuedDependentJobIdsForJob(job, db),
   ]);
   const jobConflict = locksConflict(scope, sameWorkItemJobLocks, {
     allowJobId: job.id,
@@ -722,6 +723,34 @@ export function queuedCohortJobIdsForJob(job, db = getDb()) {
       AND job_type IN (${QUEUE_LOCKING_JOB_TYPES_SQL})
   `).all(job.parent_job_id, job.id, ...QUEUE_LOCKING_JOB_TYPES_LIST);
   return new Set(rows.map((row) => Number(row.id)));
+}
+
+// A queued job that hard-depends on `job`, directly or through other queued
+// jobs, cannot run before it. Its phantom (queued-status) lock therefore
+// must not block `job`: a retry promote spawned by dead-letter recovery had
+// its former dependents rewired onto it, and those dependents' queued locks
+// on the shared destination root then held the retry off the lane forever.
+export function queuedDependentJobIdsForJob(job, db = getDb()) {
+  const ids = new Set();
+  if (!job?.id) return ids;
+  const dependents = db.prepare(`
+    SELECT jd.job_id
+    FROM job_dependencies jd
+    JOIN jobs j ON j.id = jd.job_id
+    WHERE jd.depends_on_job_id = ?
+      AND j.status = 'queued'
+  `);
+  const frontier = [Number(job.id)];
+  while (frontier.length > 0) {
+    const current = frontier.pop();
+    for (const row of dependents.all(current)) {
+      const id = Number(row.job_id);
+      if (!Number.isFinite(id) || ids.has(id) || id === Number(job.id)) continue;
+      ids.add(id);
+      frontier.push(id);
+    }
+  }
+  return ids;
 }
 
 function insertMissingWiLocks(db, job, scope, ts, source = "scheduler_handoff") {
