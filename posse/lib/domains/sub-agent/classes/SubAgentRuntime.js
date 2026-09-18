@@ -27,7 +27,10 @@ import {
   parseAgentHandoffEvidenceSelector,
 } from "../../handoff/functions/agent-handoff.js";
 import {
+  fetchHashRefAcrossJobAttempts,
   fetchHashRefForContext,
+  issueHashRefTraversalForContext,
+  materializeHashRefEvidenceForContext,
   surfaceHashRefForContext,
 } from "../../queue/functions/hash-refs.js";
 import { canonicalAtlasActionName } from "../../../shared/tools/functions/mcp-surface.js";
@@ -225,8 +228,7 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
     return "ref" in selector ? selector.ref : null;
   }).filter(Boolean));
   for (const ref of refs) {
-    const fetched = fetchHashRefForContext(sourceContext, ref);
-    const source = fetched?.found ? fetched.entry : null;
+    const source = resolveChildEvidenceSource(sourceContext, ref);
     if (!source || source.entry_kind !== "materialized" || source.payload_text == null) {
       throw runtimeError(
         "SUB_AGENT_EVIDENCE_SURFACE_FAILED",
@@ -258,7 +260,51 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
         { stage: "terminal" },
       );
     }
+    // The compact report strips excerpts, and the parent is a bounded-traversal
+    // role, so the surfaced evidence row alone is citable but not readable.
+    // Issue the matching traversal capability so fetch_ref/traverse_ref on the
+    // returned selector opens the same text the child cited.
+    issueHashRefTraversalForContext(parentContext, {
+      ref: surfaced.entry.ref,
+      sourceRef: surfaced.entry.ref,
+      selector: { mode: "full" },
+      sourceContentHash: surfaced.entry.content_hash || null,
+    });
   }
+}
+
+// A child cites whatever ref its tool results returned. Refs copied from
+// read/atlas results are owner-payload rows, but every ref returned by a
+// fetch_ref/traverse_ref result is a capability identity (a promoted view or a
+// created evidence ref) with no owner row, which fetchHashRefForContext cannot
+// see. Resolve through the same capability path the child's terminal
+// validation used, then the job-ancestry recovery path, before the exact-scope
+// owner lookup.
+function resolveChildEvidenceSource(sourceContext, ref) {
+  const attempts = [
+    () => materializeHashRefEvidenceForContext(sourceContext, ref),
+    () => fetchHashRefAcrossJobAttempts(sourceContext, ref),
+    () => fetchHashRefForContext(sourceContext, ref),
+  ];
+  for (const attempt of attempts) {
+    let resolved = null;
+    try {
+      resolved = attempt();
+    } catch {
+      resolved = null;
+    }
+    const entry = resolved?.found ? resolved.entry : null;
+    if (entry && entry.entry_kind === "materialized" && entry.payload_text != null) return entry;
+  }
+  return null;
+}
+
+// Admission/control failures (a busy sibling lane, capacity, the parent
+// closing) never reached the model, so they must not spend the planner's
+// bounded research allowance; only children that actually ran count.
+function entryCountsTowardResearchLimit(entry) {
+  if (entry.status !== "failed") return true;
+  return !["admission", "control"].includes(String(entry.error?.stage || ""));
 }
 
 function delay(ms) {
@@ -901,6 +947,19 @@ export class SubAgentRuntime {
     return deregister;
   }
 
+  // True while this parent call is blocked inside a wait_all research batch.
+  // Provider stall detectors consult it so a silent parent waiting on its
+  // children is not killed before the children settle.
+  hasRunningBatchForParent(agentCallId) {
+    const id = positiveId(agentCallId);
+    if (!id) return false;
+    for (const batch of this.batches.values()) {
+      if (batch.parentCallId !== id || batch.parentClosed) continue;
+      if (batch.entries.some((entry) => ["admitted", "running"].includes(entry.status))) return true;
+    }
+    return false;
+  }
+
   bindChild({ agentCallId, batchId, dispatchId }) {
     const id = positiveId(agentCallId);
     const batch = this.batches.get(String(batchId || ""));
@@ -1281,7 +1340,7 @@ export class SubAgentRuntime {
     const existingBatch = researchRequest
       ? priorBatches.find((batch) => batch.requestDigest === digest)
       : existingBatchId ? this.batches.get(existingBatchId) : null;
-    if (researchRequest && !existingBatch && priorBatches.reduce((sum, batch) => sum + batch.entries.length, 0) + input.requests.length > (registration.researchPolicy?.maxChildren || 0)) {
+    if (researchRequest && !existingBatch && priorBatches.reduce((sum, batch) => sum + batch.entries.filter(entryCountsTowardResearchLimit).length, 0) + input.requests.length > (registration.researchPolicy?.maxChildren || 0)) {
       throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Planner research child limit reached", { stage: "admission" });
     }
     if (existingBatch) {
@@ -1449,6 +1508,7 @@ export class SubAgentRuntime {
       runtimeError("SUB_AGENT_TIMEOUT", `Child ${entry.id} exceeded ${entry.timeoutMs}ms`, { stage: "child" }),
     ), entry.timeoutMs);
     timeout.unref?.();
+    let result = null;
     try {
       const childRun = Promise.resolve().then(() => {
         if (entry.controller.signal.aborted) {
@@ -1471,7 +1531,7 @@ export class SubAgentRuntime {
           signal: entry.controller.signal,
         });
       });
-      const result = await Promise.race([childRun, hardSettlement]);
+      result = await Promise.race([childRun, hardSettlement]);
       const record = result?.webPacket ? { status: "committed", packet: result.webPacket } : getAgentHandoffRecord(result?.agentCallId);
       if (!record || record.status !== "committed" || record.packet?.profile !== entry.profile) {
         throw runtimeError("SUB_AGENT_TERMINAL_REPORT_MISSING", `Child ${entry.id} did not commit its terminal report`, { stage: "terminal" });
@@ -1498,6 +1558,7 @@ export class SubAgentRuntime {
       entry.error = safeError(failure);
       entry.coverage = coverageForEntry(entry);
       if (error?.stats) entry.usage = usageFromChild({ stats: error.stats, agentCallId: error.agentCallId });
+      else if (result) entry.usage = usageFromChild(result);
     } finally {
       clearTimeout(timeout);
       entry.hardSettle = null;

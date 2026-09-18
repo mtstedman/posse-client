@@ -1281,7 +1281,7 @@ export function __testBuildAssessmentProviderScope(options) {
  * @param {boolean} opts.autoApprove - Pass through to callProvider
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
-export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
+export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, projectDir = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
   const assessorProvider = String(
     routedProviderName
     || await agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
@@ -1638,6 +1638,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       {
         ...(remoteComposer ? { composer: remoteComposer } : {}),
         providerName: assessorProvider,
+        projectDir,
       },
     );
     if (assessorPacket.remote_prompt_composed) {
@@ -1836,7 +1837,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   if (Array.isArray(verdict) && verdict.length === 1 && _looksLikeAssessorVerdictObject(verdict[0])) verdict = verdict[0];
   verdict = _normalizeAssessorVerdictShape(verdict, response);
   verdict = applyImageVisualEvidencePolicy({
-    payload: parsedJobPayload,
+    payload: { ...parsedJobPayload, task_mode: effectiveArtifactTaskMode(job, parsedJobPayload) },
     verdict,
     toolUses: assessorToolUses,
     pixelEvidenceObserved: imagePixelEvidenceObserved,
@@ -2028,6 +2029,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       modelTier,
       reasoningEffort,
       cwd,
+      projectDir,
       routedProviderName: assessorProvider,
       agentDispatcher,
       assessmentContext,
@@ -2474,7 +2476,7 @@ export async function runPostExecutionAssessment(worker, {
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
-    const readiness = committedHash
+    const readiness = (committedHash || verifiedNoChange)
       ? await inspectAssessmentWorktreeReadiness(wtPath)
       : { ready: true };
     if (!readiness.ready) {
@@ -2584,12 +2586,16 @@ export async function runPostExecutionAssessment(worker, {
     let taskAbAssessmentEvidence = "";
     let deterministicTestRun = null;
     let assessorProvider = "";
+    let assessedCommitHash = committedHash || branchNetDiff?.head || null;
     try {
+      if (!assessedCommitHash && verifiedNoChange && wtPath) {
+        assessedCommitHash = String(await gitExecAsync(["rev-parse", "HEAD"], wtPath)).trim();
+      }
       deterministicTestRun = await ensurePostChangeTestReceipt({
         job,
         payload: currentPayload,
         cwd: wtPath,
-        commitHash: committedHash || branchNetDiff?.head || null,
+        commitHash: assessedCommitHash,
         attemptId: attempt.id,
         cleanupWorktree: wtPath
           ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
@@ -2657,7 +2663,7 @@ export async function runPostExecutionAssessment(worker, {
     const configuredVerification = await ensureConfiguredVerification(worker, {
       job,
       attemptId: attempt.id,
-      assessedCommitHash: committedHash,
+      assessedCommitHash,
       wtPath,
       preAssessAlreadyVerified,
     });
@@ -2838,7 +2844,7 @@ export async function runPostExecutionAssessment(worker, {
           return;
         }
         const emitFn = (msg) => worker.emit(job.id, msg);
-        const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+        const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
         log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
         jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence}) — ${passMsg.slice(0, 100)}` });
         recordObservation({
@@ -2946,6 +2952,7 @@ export async function runPostExecutionAssessment(worker, {
         routedProviderName: assessorProvider,
         abortSignal: jobAc?.signal || null,
         cwd: assessmentCwd,
+        projectDir: worker.projectDir,
         assessmentContext,
         attemptId: attempt.id,
         allowMutatingRunners: !!wtPath,
@@ -3143,6 +3150,12 @@ export async function runPostExecutionAssessment(worker, {
           confidence: "high",
           reasons: [overrideMsg],
         };
+        // Correcting file-presence evidence cannot supply missing visual
+        // evidence for a semantic image acceptance criterion.
+        verdict = applyImageVisualEvidencePolicy({
+          payload: { ...jobPayloadForAssess, task_mode: taskMode },
+          verdict,
+        });
       }
 
       if (!isLeaseValid(job.id, leaseToken)) {
@@ -3158,7 +3171,7 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const emitFn = (msg) => worker.emit(job.id, msg);
-      const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+      const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
       log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons?.slice(0, 3) });
       jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence || "?"})${verdict.reasons?.length ? ` — ${verdict.reasons[0].slice(0, 100)}` : ""}` });
 

@@ -1,5 +1,6 @@
 import { expireUnackedOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
 import { recordResearchDispatchAudit } from "../../planning/functions/research-dispatch-telemetry.js";
+import { PLANNER_DISPATCH_PROVIDERS } from "../../../catalog/planner-dispatch.js";
 import { runResearchChild } from "../../planning/functions/run-research-child.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 // lib/domains/worker/classes/TrackedProviderClient.js
@@ -1746,7 +1747,8 @@ export class TrackedProviderClient {
         && opts._subAgentChild !== true;
       const researchPolicy = readPlannerDispatchPolicy({ projectDir: cwd });
       const researchEnabled = opts.role === "planner" && effectiveCapabilityOpts.sessionPacket?.planner_dispatch === true
-        && researchPolicy.enabled && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true;
+        && researchPolicy.enabled && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true
+        && PLANNER_DISPATCH_PROVIDERS.includes(String(providerName || "").toLowerCase());
       if (subAgentEnabled || researchEnabled) {
         unregisterSubAgentParent = subAgentRuntime.registerParent({
           agentCallId,
@@ -1878,9 +1880,17 @@ export class TrackedProviderClient {
                 source: "web_research_child",
               },
             };
+            const budgetLine = [
+              Number.isSafeInteger(budget?.maxTurns) ? `at most ${budget.maxTurns} tool turns` : null,
+              Number.isSafeInteger(budget?.timeoutMs) ? `${Math.round(budget.timeoutMs / 1000)} seconds` : null,
+            ].filter(Boolean).join(" and ");
             const childPrompt = await this.deps.composePromptRemoteAware(
               childSessionPacket,
-              `WEB RESEARCH QUESTION:\n${question}`,
+              [
+                `WEB RESEARCH QUESTION:\n${question}`,
+                ...(budgetLine ? [`Budget: ${budgetLine}; if it runs low, submit partial findings and name the gap.`] : []),
+                ...(Number.isSafeInteger(budget?.resultChars) ? [`Compact report character limit: ${budget.resultChars} (web_research_handoff is rejected above it).`] : []),
+              ].join("\n"),
               { providerName },
             );
             const childSignal = combinedAbortSignal(abortSignal, signal);

@@ -300,16 +300,40 @@ function supersedePriorActiveNudges({ jobId, exceptId, agentCallId = null } = {}
   if (!normalizedJobId) return [];
   const keepId = normalizePositiveInt(exceptId, 0);
   const db = getDb();
+  // Retire every prior nudge that delivers to the same target as the new one.
+  // Delivery (feedbackMatchesCall) treats a NULL-scoped nudge and one scoped
+  // to a top-level call as the same target, so supersession must too, or a
+  // stale terminal nudge and a newer bridge nudge for the same agent both
+  // stay active and both get injected. A child-call scope stays exact.
+  const scopedCallId = normalizePositiveInt(agentCallId);
+  const topLevelCallIds = db.prepare(`
+    SELECT id FROM agent_calls WHERE job_id = ? AND parent_agent_call_id IS NULL
+  `).all(normalizedJobId).map((row) => normalizePositiveInt(row.id)).filter(Boolean);
+  const scopedIsTopLevel = scopedCallId != null && topLevelCallIds.includes(scopedCallId);
+  const targetCallIds = scopedCallId == null
+    ? topLevelCallIds
+    : scopedIsTopLevel ? [scopedCallId] : [];
+  const includeNullScope = scopedCallId == null || scopedIsTopLevel;
+  const exactOnly = scopedCallId != null && !scopedIsTopLevel;
   const priors = db.prepare(`
     SELECT id, work_item_id, job_id
     FROM agent_interactions
     WHERE job_id = ?
       AND id != ?
-      AND agent_call_id IS ?
       AND direction = 'user_to_agent'
       AND kind = 'nudge'
       AND status = 'active'
-  `).all(normalizedJobId, keepId, normalizePositiveInt(agentCallId)).map(normalizeRow);
+      AND (
+        (? = 1 AND agent_call_id IS ?)
+        OR (? = 1 AND agent_call_id IS NULL)
+        OR (agent_call_id IN (${targetCallIds.map(() => "?").join(",") || "NULL"}))
+      )
+  `).all(
+    normalizedJobId, keepId,
+    exactOnly ? 1 : 0, scopedCallId,
+    includeNullScope ? 1 : 0,
+    ...targetCallIds,
+  ).map(normalizeRow);
   if (priors.length === 0) return [];
 
   const nowIso = now();

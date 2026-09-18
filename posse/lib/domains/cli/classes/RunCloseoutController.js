@@ -87,6 +87,7 @@ export class RunCloseoutController {
     label = "Run wrap-up",
     shouldExitEarly = null,
     includeEmbeddings = false,
+    budgetMs = ATLAS_WRAPUP_DRAIN_BUDGET_MS,
   } = {}) {
     if (!this.wrapUpAtlasDrainEnabled()) return { ran: 0, remaining: 0 };
     const atlasDisabledForRun = (() => {
@@ -115,7 +116,7 @@ export class RunCloseoutController {
       try { return typeof shouldExitEarly === "function" && shouldExitEarly() === true; } catch { return false; }
     };
     const drainableWarm = (j) => includeEmbeddings || String(parseJobPayload(j)?.purpose || "wi") !== "embeddings";
-    const deadline = Date.now() + ATLAS_WRAPUP_DRAIN_BUDGET_MS;
+    const deadline = Date.now() + Math.max(1, Number(budgetMs) || ATLAS_WRAPUP_DRAIN_BUDGET_MS);
     let ran = 0;
     let announced = false;
     try {
@@ -150,12 +151,28 @@ export class RunCloseoutController {
         const purpose = String(parseJobPayload(job)?.purpose || "wi");
         this.emitStatus(`${label}: ATLAS warm (${purpose})...`, this.C.cyan);
         await this.flushStatus();
+        let interrupted = false;
+        const interrupt = () => {
+          if (interrupted) return;
+          interrupted = true;
+          worker.killJob?.(job.id, "post_merge_closeout_budget");
+        };
+        const budgetTimer = setTimeout(interrupt, Math.max(1, deadline - Date.now()));
+        const exitTimer = typeof shouldExitEarly === "function"
+          ? setInterval(() => { if (exitRequested()) interrupt(); }, 100)
+          : null;
         try {
+          // Worker registers cancellation synchronously before async setup.
+          // Even after an interrupt, keep ownership until its finalizer settles.
           await worker.execute({ ...job, _leaseToken: lease.leaseToken });
           ran += 1;
+          if (interrupted) break;
         } catch (err) {
           this.emitStatus(`${label}: ATLAS warm (${purpose}) failed — ${String(err?.message || err).slice(0, 160)}`, this.C.yellow);
           break;
+        } finally {
+          clearTimeout(budgetTimer);
+          clearInterval(exitTimer);
         }
       }
     } catch { /* drain is best-effort; never block exit */ }

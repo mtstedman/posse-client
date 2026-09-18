@@ -34,7 +34,7 @@ function nonNegativeInteger(value) {
   return Math.floor(parsed);
 }
 
-function capabilitiesFromPacket(packet = {}, providerName = null) {
+function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAvailable = false) {
   const explicit = packet?.capabilities || packet?.local_capabilities || {};
   const tools = explicit.tools || {};
   const atlas = packet?.atlas || {};
@@ -87,6 +87,9 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
       tests: narrowBoolCapability(tools.tests, packet?.tool_policy?.allow_tests === true),
       image_generation: narrowBoolCapability(tools.image_generation, imageGenerationAvailable),
       project_db: ["read", "write"].includes(projectDbCapability) ? projectDbCapability : "none",
+      // Only the local owner probe may establish availability; payload flags narrow it.
+      custom_tools_v1: narrowBoolCapability(tools.custom_tools_v1, customToolsAvailable),
+      custom_tools_available: narrowBoolCapability(tools.custom_tools_available, customToolsAvailable),
     },
     atlas: atlasCapabilities,
     coordination: {
@@ -116,6 +119,8 @@ function capabilitiesFromPacket(packet = {}, providerName = null) {
       tests: false,
       image_generation: false,
       project_db: "none",
+      custom_tools_v1: false,
+      custom_tools_available: false,
     },
     atlas: {
       available: false,
@@ -559,6 +564,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
   maxPromptChars = null,
   maxContextChars = null,
   includeFinalPrompt = true,
+  customToolsAvailable = false,
 } = {}) {
   const memoryEnabled = atlasMemoryEnabled() && packet?.memory_mode !== "off";
   const role = packet?.recipient || "dev";
@@ -645,7 +651,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       file_snippets: readOnlyFileSnippets(packet),
       insights: Array.isArray(packet?.run_insights) ? packet.run_insights.map(insightForRemote) : [],
     },
-    capabilities: capabilitiesFromPacket(packet, provider),
+    capabilities: capabilitiesFromPacket(packet, provider, customToolsAvailable),
     ...(fallbackReads == null ? {} : {
       tool_policy: { fallback_reads: fallbackReads },
     }),

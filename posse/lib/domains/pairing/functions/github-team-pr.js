@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { TEAM_PROTECTION_MODE_GITHUB_PR } from "../../../catalog/team.js";
 
 import { githubRepositoryName } from "./github-session.js";
 
@@ -229,7 +230,7 @@ export async function verifyProtectedTeamBranch(input, options = {}) {
     if (!protectedReviewPolicy(protection, noBypass)) return fail("github_pr_protection_insufficient");
     return {
       ok: true,
-      protection: { mode: "github_pr_protected", branch: parsed.branch, observedOid: branch.commit.sha },
+      protection: { mode: TEAM_PROTECTION_MODE_GITHUB_PR, branch: parsed.branch, observedOid: branch.commit.sha },
     };
   } catch {
     return fail("github_protection_unavailable");

@@ -2452,6 +2452,7 @@ export async function composePromptRemoteAware(packet, instructions, opts = {}) 
   const composer = await timeHandoffStep(packet, "prompt.remote_composer_init", () => opts.composer || getDefaultRemoteComposer());
   const remoteOpts = {
     providerName,
+    projectDir: opts.projectDir || null,
     maxPromptChars: Number(opts.maxPromptChars) > 0 ? Number(opts.maxPromptChars) : _maxPromptChars(),
     maxContextChars: Number(opts.maxContextChars) > 0 ? Number(opts.maxContextChars) : _maxContextChars(),
   };

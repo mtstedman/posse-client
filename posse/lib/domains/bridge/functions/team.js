@@ -8,6 +8,7 @@ import {
   TEAM_PUBLICATION_MODES,
   TEAM_SCOPE_LABEL_PATTERN,
   TEAM_SCOPE_LIMITS,
+  TEAM_PROTECTION_MODE_GITHUB_PR,
 } from "../../../catalog/team.js";
 
 import {
@@ -17,6 +18,9 @@ import {
   TEAM_PROVIDER_PUBLISH_PROTOCOL,
   TEAM_PROVIDER_PROTECTION_PROTOCOL,
   TEAM_PROMOTION_PROTOCOL,
+  TEAM_GRANT_ISSUE_PROTOCOL,
+  TEAM_GRANT_REQUEST_PROTOCOL,
+  TEAM_POLICY_PROTOCOL,
 } from "../../../catalog/bridge.js";
 
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -229,7 +233,7 @@ export async function setTeamPolicy(args = {}, context = {}) {
     action_id: actionId,
   });
   if (result?.ok === false) return result;
-  if (result?.protocol !== "posse.team_policy.v1"
+  if (result?.protocol !== TEAM_POLICY_PROTOCOL
       || result.repo_path !== repo.repoPath
       || result.action_id !== actionId
       || result.enabled !== args.enabled
@@ -260,7 +264,7 @@ export async function requestTeamGrant(args = {}, context = {}) {
     actor: context.actor || "bridge",
   });
   if (result?.ok === false) return result;
-  if (result?.protocol !== "posse.team_grant_request.v1"
+  if (result?.protocol !== TEAM_GRANT_REQUEST_PROTOCOL
       || result.repo_path !== repo.repoPath
       || result.session_id !== base.session_id
       || !textId(result.work_item_id)
@@ -301,7 +305,7 @@ export async function issueTeamGrant(args = {}, context = {}) {
   };
   const result = await owner.issueTeamGrant(request);
   if (result?.ok === false) return result;
-  if (result?.protocol !== "posse.team_grant_issue.v1"
+  if (result?.protocol !== TEAM_GRANT_ISSUE_PROTOCOL
       || result.repo_path !== repo.repoPath
       || result.session_id !== base.session_id
       || result.expected_revision !== base.expected_revision
@@ -340,7 +344,7 @@ function validProviderReceipt(result, pins, repoPath, protocol, publish) {
       || !OID_PATTERN.test(result.source_oid || "")
       || !OID_PATTERN.test(result.protection?.observedOid || "")
       || result.protection.observedOid !== pins.target_oid
-      || result.protection.mode !== "github_pr_protected"
+      || result.protection.mode !== TEAM_PROTECTION_MODE_GITHUB_PR
       || typeof result.protection.branch !== "string" || !result.protection.branch
       || !/^refs\/heads\/posse\/team\/[A-Za-z0-9._/-]{1,160}\/candidate$/u.test(result.candidate_ref || "")
       || !Number.isSafeInteger(result.pull_number) || result.pull_number <= 0
@@ -423,7 +427,7 @@ export async function configureTeamProviderProtection(args = {}, context = {}) {
       || result.session_id !== sessionId || result.target_oid !== targetOid
       || result.required_check_context !== checkContext || result.required_check_app_id !== appId
       || nonnegativeRevision(result.publication_revision) == null
-      || result.protection?.mode !== "github_pr_protected"
+      || result.protection?.mode !== TEAM_PROTECTION_MODE_GITHUB_PR
       || result.protection.observedOid !== targetOid || typeof result.protection.branch !== "string"
       || !result.protection.branch) {
     return { ok: false, reason: "invalid_team_provider_protection_receipt" };

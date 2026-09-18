@@ -179,12 +179,14 @@ export function parseWorkItemIdsFlagFromArgv(argv = process.argv) {
   const values = [];
   for (let i = 0; i < argv.length; i += 1) {
     const raw = String(argv[i] || "");
+    if (raw === "--") break;
     if (raw === "--work-item" || raw === "--wi") {
       const value = argv[i + 1];
-      if (value != null && !String(value).startsWith("-")) {
-        values.push(value);
-        i += 1;
+      if (value == null || String(value).startsWith("-")) {
+        throw new Error(`${raw} requires a positive work-item ID or comma-separated IDs`);
       }
+      values.push(value);
+      i += 1;
       continue;
     }
     if (raw.startsWith("--work-item=")) values.push(raw.slice("--work-item=".length));
@@ -192,8 +194,14 @@ export function parseWorkItemIdsFlagFromArgv(argv = process.argv) {
   }
   return [...new Set(values
     .flatMap((value) => String(value || "").split(","))
-    .map((value) => Number.parseInt(String(value).trim().replace(/^wi#?/i, ""), 10))
-    .filter((id) => Number.isSafeInteger(id) && id > 0))];
+    .map((value) => {
+      const token = String(value).trim();
+      const id = Number(token.replace(/^wi#?/i, ""));
+      if (!/^(?:wi#?)?\d+$/i.test(token) || !Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(`--work-item/--wi requires positive work-item IDs; invalid ID: ${JSON.stringify(token)}`);
+      }
+      return id;
+    }))];
 }
 
 // Single source of truth for every CLI flag the orchestrator accepts.

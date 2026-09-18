@@ -274,6 +274,9 @@ export class PlannerRole extends BaseRole {
     const workItem = getWorkItem(job.work_item_id);
     const payload = worker.parsePayload(job);
     const assessmentReplan = payload._assessment_replan === true;
+    const assessmentEvidenceSelectors = assessmentReplan && Array.isArray(payload.assessment_evidence_selectors)
+      ? payload.assessment_evidence_selectors.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
     const waitingLanePlannerRead = job._waitingLanePlannerRead || null;
     let plannerReadRoot = await resolveReadRoot(
       worker.projectDir,
@@ -607,13 +610,18 @@ export class PlannerRole extends BaseRole {
         title: workItem.title || "",
         project_context: (payload.task_spec || workItem.description || "").slice(0, 4000),
         research_continuity: researchContext.provenance,
-        research_evidence: structuredData ? {
+        research_evidence: structuredData || assessmentEvidenceSelectors.length > 0 ? {
           key_files: keyFiles,
           planner_file_priorities: plannerFilePriorities,
-          proof: Array.isArray(structuredData.proof) ? structuredData.proof : [],
-          support: Array.isArray(structuredData.support) ? structuredData.support : [],
-          decoy: Array.isArray(structuredData.decoy) ? structuredData.decoy : [],
-          completion_coverage: structuredData.completion_coverage || [],
+          proof: Array.isArray(structuredData?.proof) ? structuredData.proof : [],
+          // Assessor defect selectors ride the support lane so the compose
+          // path issues them as traversal refs for this planner call.
+          support: [
+            ...(Array.isArray(structuredData?.support) ? structuredData.support : []),
+            ...assessmentEvidenceSelectors,
+          ],
+          decoy: Array.isArray(structuredData?.decoy) ? structuredData.decoy : [],
+          completion_coverage: structuredData?.completion_coverage || [],
         } : null,
         files_to_modify: [],
         context_hints: {
@@ -646,6 +654,16 @@ export class PlannerRole extends BaseRole {
 
     const contextDirsBlock = assessmentReplan
       ? assessmentReplanContext
+      : researchSkipped && plannerPacket.planner_dispatch === true
+      ? [
+        "PLANNER-LED INTAKE:",
+        "  No upfront research ran. The routing record below is a starting point, not the complete input:",
+        "  triage the task with your own reads, dispatch bounded research children only for questions your",
+        "  reads cannot settle, and produce one terminal plan grounded in evidence you or your children read.",
+        "  Do not call get_brief solely to reload the synthetic routing record.",
+        promptLiteral("SYNTHETIC ROUTING RECORD", researchBrief || "(none)"),
+        "",
+      ].join("\n")
       : researchSkipped
       ? [
         "RESEARCH WAS SKIPPED:",
@@ -734,6 +752,7 @@ export class PlannerRole extends BaseRole {
     }
     const prompt = await composePromptRemoteAware(ctx.plannerPacket, remoteInstructions, {
       providerName: ctx.providerName,
+      projectDir: this.context?.projectDir || null,
       ...(this.deps?.remoteComposer ? { composer: this.deps.remoteComposer } : {}),
     });
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {

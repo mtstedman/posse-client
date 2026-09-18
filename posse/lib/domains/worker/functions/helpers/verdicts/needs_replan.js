@@ -17,6 +17,7 @@ import {
   updateJobStatus,
 } from "../../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../../queue/functions/payload.js";
+import { assessorEvidenceSelectors } from "./fail.js";
 import { cleanupArtifactDirs, wiScopeId } from "../../../../artifacts/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
 import { getMaxReplans } from "../../../../settings/functions/tunables.js";
@@ -170,6 +171,10 @@ export function handle(job, verdict, ctx) {
         _is_loopback: true,
         _assessment_replan: true,
         replan_reason: verdict.reasons.join("\n"),
+        // The assessor's cited selectors sit in this job's ancestry; naming
+        // them lets the replan planner open the defect lines instead of
+        // rediscovering them from prose.
+        assessment_evidence_selectors: assessorEvidenceSelectors(verdict._assessor_claims),
         original_job_id: job.id,
         original_job_type: job.job_type,
         original_task_mode: originalPayload.task_mode || "code",

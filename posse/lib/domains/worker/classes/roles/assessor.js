@@ -132,6 +132,7 @@ export class AssessorRole extends BaseRole {
     }
     return await composePromptRemoteAware(ctx.packet, remoteInstructions, {
       providerName: ctx.providerName,
+      projectDir: this.context?.projectDir || null,
     });
   }
 

@@ -548,6 +548,9 @@ async function monitorPairing(remoteClient, stateId, {
           if (handoff.handedOff && !json) {
             console.log(`  ${C.green}[session handoff]${C.reset} ${handoff.predecessorWorkItemId} -> ${handoff.successorWorkItemId} (${handoff.acceptedOid.slice(0, 8)})`);
           }
+          if (Array.isArray(handoff.expiredSuccessors) && handoff.expiredSuccessors.length && !json) {
+            console.log(`  ${C.yellow}[session handoff]${C.reset} expired stale file request(s) ${handoff.expiredSuccessors.join(", ")}; the member must request again`);
+          }
         }
         printPeerActivityChanges(C, status, seenPeerActivity, { json });
         consecutiveFailures = 0;
@@ -658,6 +661,13 @@ async function finishHostShutdown(root, remoteClient, state, {
   keepBranch = false,
   historyPreserving = false,
 } = {}) {
+  // Persist the chosen close action before the journal exists. Crash recovery
+  // recomputes the promotion strategy from this column, and a journal frozen
+  // with a strategy the column does not name can never be resumed.
+  const closeAction = keepBranch ? "keep-branch" : historyPreserving ? "integrate-fast-forward" : null;
+  if (closeAction && state.close_action !== closeAction) {
+    state = updatePairingEnrollment(state.id, { closeAction }) || { ...state, close_action: closeAction };
+  }
   let journal = keepBranch ? null : beginPairingPromotion(state, {
     projectDir: root, reason,
     strategy: historyPreserving || state.close_action === "integrate-fast-forward" ? "fast-forward" : "squash",
@@ -809,6 +819,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       configureRepositorySessionSsh(root, provisioned.identity.sshCommand);
       updatePairingEnrollment(state.id, {
         remoteName: sessionRemote,
+        remoteUrl: sessionUrl,
         addedRemoteName: sessionRemote,
         addedRemoteUrl: sessionUrl,
         originRemoteName: remote,
@@ -1530,6 +1541,11 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
     }
     if (state?.role === "host" && state.phase !== "left") {
       const client = remoteClientFactory();
+      // A journal frozen for this session already names its strategy; recovery
+      // must resume it rather than recompute one from a column the interrupted
+      // close may not have written.
+      const frozenStrategy = journal && journal.session_id === state.remote_session_id
+        ? (journal.strategy || "squash") : null;
       const promotion = await finishHostShutdown(root, client, state, {
         graceful: false,
         C,
@@ -1537,7 +1553,9 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
         reason: "host_crash_recovery",
         publish: false,
         keepBranch: !journal && state.close_action === "keep-branch",
-        historyPreserving: state.close_action === "integrate-fast-forward",
+        historyPreserving: frozenStrategy
+          ? frozenStrategy === "fast-forward"
+          : state.close_action === "integrate-fast-forward",
       });
       if (promotion.kept) return { ok: true, attempted: true, recovered: true, promotion };
       return {

@@ -443,6 +443,7 @@ export class Worker {
     this._releaseLeaseWithoutAttemptPenalty = opts.releaseLeaseWithoutAttemptPenalty || releaseLeaseWithoutAttemptPenalty;
     this.shuttingDown = false;
     this._abortControllers = new Map();
+    this._activeExecutions = new Set();
     this._killReasons = new Map(); // jobId -> reason string (e.g. "runtime_exceeded")
     this._activeWorktrees = new Map(); // jobId -> { wtPath, workItemId, branchName, sentinelPath }
     this._lastAtlasReindexKickAtByRepo = new Map(); // repo/worktree path -> ms
@@ -805,7 +806,21 @@ export class Worker {
   // --- Main Entry Point --------------------------------------------------
 
   async execute(job) {
-    return await this.executionCoordinator.execute(job);
+    let settled;
+    const execution = {
+      jobId: job.id,
+      workItemId: job.work_item_id,
+      done: new Promise((resolve) => { settled = resolve; }),
+    };
+    // Track invocations, not job IDs: a replacement execution must not hide
+    // an earlier invocation that is still unwinding its finalizer.
+    this._activeExecutions.add(execution);
+    try {
+      return await this.executionCoordinator.execute(job);
+    } finally {
+      this._activeExecutions.delete(execution);
+      settled();
+    }
   }
 
   async disposeAgents(reason = "worker_disposed") {
@@ -855,6 +870,27 @@ export class Worker {
   }
 
   // --- Kill Support -----------------------------------------------------
+
+  async abortWorkItemAndWait(workItemId, { timeoutMs = 30_000 } = {}) {
+    const active = () => [...this._activeExecutions]
+      .filter((execution) => Number(execution.workItemId) === Number(workItemId));
+    const executions = active();
+    for (const execution of executions) this.killJob(execution.jobId, "work_item_canceled");
+    if (executions.length === 0) return true;
+    let timer;
+    try {
+      const settled = await Promise.race([
+        Promise.all(executions.map((execution) => execution.done)).then(() => true),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(1, timeoutMs));
+        }),
+      ]);
+      // A new invocation while awaiting the old ones also prevents cleanup.
+      return settled && active().length === 0;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   killJob(jobId, reason) {
     if (reason) this._killReasons.set(jobId, reason);

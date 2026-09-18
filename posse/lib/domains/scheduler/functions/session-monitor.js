@@ -184,9 +184,22 @@ export class SessionMonitor {
         enrollmentOpen: status.enrollment_open,
         submissionApprovalEnabled: status.submission_approval_enabled ?? null,
         submissionPolicyRevision: status.submission_policy_revision ?? null,
+        // The publication gate compares these against Remote on every merge;
+        // a host mode change after scheduler handoff was otherwise never
+        // learned by scheduler-driven members.
+        ...(status.team_publication_mode != null ? { teamPublicationMode: status.team_publication_mode } : {}),
+        ...(Number.isSafeInteger(status.team_publication_revision) ? { teamPublicationRevision: status.team_publication_revision } : {}),
       });
+      const publicationChanged = (status.team_publication_mode != null && status.team_publication_mode !== state.team_publication_mode)
+        || (Number.isSafeInteger(status.team_publication_revision)
+          && status.team_publication_revision !== (Number(state.team_publication_revision) || 0));
+      // A relay that omits the policy revision leaves the local value in
+      // place, so an omitted field is not a change; comparing it against the
+      // coerced local number would clear authentication on every poll.
+      const policyRevisionChanged = status.submission_policy_revision != null
+        && status.submission_policy_revision !== priorPolicyRevision;
       if (scopeChanged || teamPolicyEnabled !== (state.submission_approval_enabled === 1)
-          || status.submission_policy_revision !== priorPolicyRevision) {
+          || policyRevisionChanged || publicationChanged) {
         this._tokenManager.clearAuthentication();
         const { invalidateVerifiedTeamGrantCache } = await import("../../pairing/functions/team-submissions.js");
         invalidateVerifiedTeamGrantCache();

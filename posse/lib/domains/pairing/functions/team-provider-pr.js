@@ -17,7 +17,9 @@ import {
   TEAM_GRANT_STATES,
   TEAM_PUBLICATION_MODE,
   TEAM_PUBLICATION_MODES,
+  TEAM_SUBMISSION_STATES,
 } from "../../../catalog/team.js";
+import { TEAM_PROVIDER_PR_PROTOCOL, TEAM_PROVIDER_PROTECTION_PROTOCOL, TEAM_PROVIDER_PUBLISH_PROTOCOL } from "../../../catalog/bridge.js";
 
 const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu;
 const TEAM_REF_RE = /^refs\/heads\/posse\/team\/[A-Za-z0-9._/-]{1,160}\/(?:source|candidate)$/u;
@@ -84,7 +86,7 @@ export async function configureHostTeamBranchProtection({
     }, providerOptions);
     if (!configured.ok) return configured;
     return {
-      ok: true, protocol: "posse.team_provider_protection.v1",
+      ok: true, protocol: TEAM_PROVIDER_PROTECTION_PROTOCOL,
       repo_path: path.resolve(projectDir), session_id: sessionId,
       target_oid: targetOid, publication_revision: state.team_publication_revision,
       required_check_context: requiredCheckContext,
@@ -147,7 +149,7 @@ export async function prepareTeamSubmissionPullRequest({
       return fail("team_provider_submission_invalid");
     }
     const row = listed.submissions.find((item) => (item?.id || item?.submission_id) === submissionId);
-    if (!row || !["pending", "approved"].includes(row.state)
+    if (!row || ![TEAM_SUBMISSION_STATES.PENDING, TEAM_SUBMISSION_STATES.APPROVED].includes(row.state)
       || row.work_item_id !== workItemId || row.target_oid !== targetOid
       || row.candidate_oid !== candidateOid || row.result_oid !== candidateOid
       || row.grant_revision !== grantRevision || row.policy_revision !== policyRevision
@@ -195,7 +197,7 @@ export async function prepareTeamSubmissionPullRequest({
     if (!result.ok) return result;
     return {
       ok: true,
-      protocol: "posse.team_provider_pr.v1",
+      protocol: TEAM_PROVIDER_PR_PROTOCOL,
       repo_path: path.resolve(projectDir),
       session_id: sessionId,
       submission_id: submissionId,
@@ -240,7 +242,7 @@ export async function publishApprovedTeamPullRequest(args = {}) {
       return fail("team_provider_submission_invalid");
     }
     const row = listed.submissions.find((item) => (item?.id || item?.submission_id) === args.submission_id);
-    if (!row || row.state !== "approved" || row.work_item_id !== args.work_item_id
+    if (!row || row.state !== TEAM_SUBMISSION_STATES.APPROVED || row.work_item_id !== args.work_item_id
       || row.target_oid !== args.target_oid || row.candidate_oid !== args.candidate_oid
       || row.grant_revision !== args.grant_revision || row.policy_revision !== args.policy_revision
       || row.candidate_ref !== prepared.candidate_ref || row.source_oid !== prepared.source_oid) {
@@ -296,12 +298,12 @@ export async function publishApprovedTeamPullRequest(args = {}) {
     if (located.merged) {
       const inspected = await inspectTeamPullRequestMerge(providerInput, args.providerOptions);
       if (!inspected.ok || !inspected.merged) return fail(inspected.reason || "github_merge_unverifiable");
-      return { ...prepared, protocol: "posse.team_provider_publish.v1",
+      return { ...prepared, protocol: TEAM_PROVIDER_PUBLISH_PROTOCOL,
         accepted_oid: inspected.mergeOid, branch_oid: inspected.branchOid, merged: true, recovered: true };
     }
     const merged = await mergeApprovedTeamPullRequest(providerInput, args.providerOptions);
     if (!merged.ok) return merged;
-    return { ...prepared, protocol: "posse.team_provider_publish.v1",
+    return { ...prepared, protocol: TEAM_PROVIDER_PUBLISH_PROTOCOL,
       accepted_oid: merged.mergeOid, branch_oid: merged.branchOid,
       merged: true, recovered: merged.recovered === true };
   } catch {

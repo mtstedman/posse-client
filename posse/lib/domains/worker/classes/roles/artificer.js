@@ -200,7 +200,7 @@ export class ArtificerRole extends BaseRole {
     const buildArtificerPrompt = async (extraSections = [], providerName = modelProviderName) => buildPromptAsync(
       projectPromptPacketForProvider(packet, providerName, modelProviderName),
       buildArtificerInstructions(extraSections),
-      { providerName },
+      { providerName, projectDir: this.context?.projectDir || null },
     );
     const promptInstructions = buildArtificerInstructions();
 
@@ -237,6 +237,7 @@ export class ArtificerRole extends BaseRole {
   async composePrompt({ contextText, job, ctx } = {}) {
     const prompt = await buildPromptAsync(ctx.packet, contextText, {
       providerName: ctx.providerName,
+      projectDir: this.context?.projectDir || null,
     });
     ctx.prompt = prompt;
     if (!ctx.promptArtifact?.stored) {

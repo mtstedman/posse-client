@@ -2779,6 +2779,9 @@ export class RunSession {
         assertFrozenResearchJob(job);
         verifyFrozenResearchFixture({ cwd: PROJECT_DIR });
       }
+      // Includes injected work handled after the boot snapshot, while keeping
+      // unrelated historical work out of the natural-completion verdict.
+      if (job.work_item_id != null) wiIds.add(job.work_item_id);
       return worker.execute(job);
     },
     schedulerCallbacks.callbacks(),

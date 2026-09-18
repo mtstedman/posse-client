@@ -9,7 +9,7 @@ import { automationDbPath, automationSocketPath, ensureAutomationOperatorToken, 
 import { definitionDigest, demand } from "../functions/policy.js";
 import { previewOccurrences } from "../functions/triggers.js";
 
-const MAX_FRAME_BYTES = 1024 * 1024;
+import { AUTOMATION_MAX_REQUEST_BYTES, AUTOMATION_MAX_RESPONSE_BYTES } from "../../../catalog/custom-tools.js";
 
 export class AutomationOwner {
   constructor({ store = null, service = null, socketPath = automationSocketPath(), operatorToken = null, tickMs = 1000 } = {}) {
@@ -43,13 +43,18 @@ export class AutomationOwner {
     socket.on("data", chunk => {
       if (done || framed) return;
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > MAX_FRAME_BYTES) return fail(Object.assign(new Error("Automation request is too large"), { code: "request_too_large" }));
+      if (buffer.length > AUTOMATION_MAX_REQUEST_BYTES) return fail(Object.assign(new Error("Automation request is too large"), { code: "request_too_large" }));
       const newline = buffer.indexOf(10);
       if (newline < 0) return;
       framed = true;
       try {
         const request = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-        Promise.resolve(this.dispatch(request)).then(result => { done = true; socket.end(JSON.stringify({ ok: true, result }) + "\n"); }, fail);
+        Promise.resolve(this.dispatch(request)).then(result => {
+          const response = JSON.stringify({ ok: true, result }) + "\n";
+          demand(Buffer.byteLength(response) <= AUTOMATION_MAX_RESPONSE_BYTES,
+            "Automation result exceeds the response limit; narrow the tool output or inspect the run locally", "response_too_large");
+          done = true; socket.end(response);
+        }).catch(fail);
       } catch (error) { fail(error); }
     });
     socket.on("error", () => {});
@@ -134,6 +139,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed"]);
+  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

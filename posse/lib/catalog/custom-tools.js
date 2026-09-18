@@ -1,5 +1,8 @@
 // Shared vocabulary for the optional Lazyload > Custom Tools surface.
 export const CUSTOM_TOOLS_PROTOCOL = "posse.custom_tools.v1";
+// Response frames include run metadata and JSON escaping of bounded file contents.
+export const AUTOMATION_MAX_REQUEST_BYTES = 1024 * 1024;
+export const AUTOMATION_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const CUSTOM_TOOLS_NAME = "custom_tools";
 export const CUSTOM_TOOLS_SOURCE_KINDS = Object.freeze(["skill", "builtin", "mcp"]);
 export const CUSTOM_TOOLS_OPERATIONS = Object.freeze(["search", "describe", "invoke", "status", "cancel"]);

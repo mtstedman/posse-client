@@ -21,7 +21,9 @@ export function shouldFastPassArtifactAssessment({
   outputRoot = null,
   expectedFiles = [],
 } = {}) {
-  if (!isArtifactMode(taskMode)) return false;
+  // A manifest proves file presence, not the visual criteria of an image.
+  // Keep image jobs on the assessor path where pixel evidence is enforced.
+  if (!isArtifactMode(taskMode) || taskMode === "image") return false;
   if (!outputRoot || !manifest || manifest.count <= 0) return false;
   if (Array.isArray(contractViolations) && contractViolations.length > 0) return false;
 

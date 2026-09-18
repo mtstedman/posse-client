@@ -197,7 +197,11 @@ export class ResourceSandbox {
       }
       return completed.map(item => `${item.resource}/${item.name}`);
     } catch (error) {
-      const signal = this.signal, checkAuthority = this.checkAuthority; this.signal = null; this.checkAuthority = () => {};
+      const signal = this.signal, checkAuthority = this.checkAuthority, bytesRead = this.bytesRead;
+      this.signal = null; this.checkAuthority = () => {};
+      // Restoration verifies only completed staged outputs (at most 8 MiB).
+      // An exhausted execution budget must not prevent undoing our own writes.
+      this.bytesRead = 0;
       try {
         for (const item of completed.reverse()) this.withParent(item.resource, item.name, "write", filename => {
           const current = fs.openSync(filename, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
@@ -207,7 +211,7 @@ export class ResourceSandbox {
           else { const temp = path.join(path.dirname(filename), `.posse-rollback-${randomUUID()}`); fs.writeFileSync(temp, item.original, { flag: "wx", mode: 0o600 }); fs.renameSync(temp, filename); }
         });
       } catch { error.code = "rollback_failed"; }
-      finally { this.signal = signal; this.checkAuthority = checkAuthority; }
+      finally { this.signal = signal; this.checkAuthority = checkAuthority; this.bytesRead = bytesRead; }
       throw error;
     }
   }

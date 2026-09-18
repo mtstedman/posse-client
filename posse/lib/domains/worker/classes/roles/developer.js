@@ -216,11 +216,27 @@ export class DeveloperRole extends BaseRole {
       worker.emit(job.id, `${C.cyan}[handoff]${C.reset} WI#${job.work_item_id} job #${job.id}: delete-only task satisfied without agent call`);
     }
 
+    // Plan compilation records planner-cited evidence it could not reissue
+    // to this job. Say so, or the developer hunts for refs that were never
+    // issued instead of reading the current source.
+    const withheldRefs = Array.isArray(payload.dropped_dev_brief_hash_refs) ? payload.dropped_dev_brief_hash_refs : [];
+    const withheldFiles = Array.isArray(payload.dropped_dev_brief_files) ? payload.dropped_dev_brief_files : [];
+    const withheldReasons = [...new Set([...withheldRefs, ...withheldFiles]
+      .map((entry) => String(entry?.reason || "").trim()).filter(Boolean))].slice(0, 4);
+    const withheldEvidenceNotice = withheldRefs.length + withheldFiles.length > 0
+      ? [
+        "PLANNER EVIDENCE WITHHELD:",
+        `  ${withheldRefs.length} planner-cited ref(s) and ${withheldFiles.length} brief file entr${withheldFiles.length === 1 ? "y" : "ies"} were not reissued to this job${withheldReasons.length ? ` (${withheldReasons.join(", ")})` : ""}.`,
+        "  Do not search for those refs; read the current source at the same locations instead.",
+        "",
+      ].join("\n")
+      : null;
     return [
       continuationContext ? continuationContext + "\n" : null,
       driftContext ? driftContext + "\n" : null,
       nudgeContext || null,
       atlasHandoffBlock || null,
+      withheldEvidenceNotice,
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
       "",
@@ -255,6 +271,7 @@ export class DeveloperRole extends BaseRole {
     if (ctx.promptState) ctx.promptState.taskInstructions = taskInstructions;
     const prompt = await buildPromptAsync(ctx.packet, taskInstructions, {
       providerName: ctx.providerName,
+      projectDir: this.context?.projectDir || null,
     });
     if (ctx.promptState) ctx.promptState.initialPrompt = prompt;
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {

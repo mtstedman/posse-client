@@ -993,7 +993,13 @@ function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}
     return { replay: result };
   }
   if (liveOwnerDeliveryHandler(existing.action.handler)) {
-    if (existing.action.state === "delivered" && completion.safeReasonCode === "owner_unavailable") {
+    // Only owner-delivery reservations have owner_action. A direct bridge
+    // transition uses the same handler and can still be running without a
+    // lease, so missing ownership alone must not retire that reservation.
+    const undeliveredOwnerReservation = existing.action.state === "reserved"
+      && existing.action.descriptor?.owner_action != null;
+    if ((existing.action.state === "delivered" || undeliveredOwnerReservation)
+      && completion.safeReasonCode === "owner_unavailable") {
       const observedAt = now();
       const result = {
         ...baseActionResult({
@@ -1002,7 +1008,7 @@ function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}
           target,
           outcome: "rejected",
           observedAt,
-          safeReasonCode: "owner_lost_after_delivery",
+          safeReasonCode: undeliveredOwnerReservation ? "reservation_owner_lost" : "owner_lost_after_delivery",
         }),
         question_state: completion.state,
         result_event_id: null,
@@ -1050,9 +1056,8 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
   }
 
   const db = getDb();
-  // A prior direct plan/push resolver may have crashed after reserving this
-  // question. Reconcile before looking for competing actions so headless
-  // bridge-only deployments recover without an attended relay poll.
+  // Reconcile both abandoned direct resolvers and undelivered answers whose
+  // attended owner disappeared before looking for competing actions.
   reconcileAbandonedHumanAnswerDeliveries();
   const reserved = runImmediateTransaction(db, () => {
     const existing = findActionById(db, actionId);
@@ -1309,7 +1314,13 @@ export function reconcileAbandonedHumanAnswerDeliveries() {
           OR j.status IN (${TERMINAL_JOB_STATUSES_SQL})
           OR hg.gate_state IN ('resolved','superseded')
           OR (
-            json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'delivered'
+            (
+              json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'delivered'
+              OR (
+                json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'
+                AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.descriptor.owner_action') IS NOT NULL
+              )
+            )
             AND (
               j.lease_token IS NULL
               OR j.lease_expires_at IS NULL

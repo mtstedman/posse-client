@@ -1300,6 +1300,8 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
   credential_directory TEXT,
   submission_approval_enabled INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_enabled IN (0,1)),
   submission_approval_revision INTEGER NOT NULL DEFAULT 0 CHECK (submission_approval_revision >= 0),
+  team_publication_mode TEXT NOT NULL DEFAULT 'direct' CHECK (team_publication_mode IN ('direct','github-pr')),
+  team_publication_revision INTEGER NOT NULL DEFAULT 0 CHECK (team_publication_revision >= 0),
   phase TEXT NOT NULL CHECK (phase IN ('enrolling','pending','active','leaving','restore_blocked','left')),
   process_pid INTEGER,
   last_error TEXT,

@@ -115,6 +115,10 @@ export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   const text = (primaryTextParts.length > 0 ? primaryTextParts : [errorDetails.summary || ""]).join("\n");
   if (errorDetails.classification === "invalid_client") return true;
   if (isPermanentProviderRuntimeBlock(text)) return true;
+  // A provider adapter refused by the Team approval boundary is a
+  // configuration fact: no retry, tier bump or runtime fallback of the same
+  // adapter can change which adapters may write files.
+  if (/\bPOSSE_TEAM_PROVIDER_WRITE_BOUNDARY_UNAVAILABLE\b|\bTeam approval mode requires a mediated tool-only provider\b/i.test(text)) return true;
   return [
     /\b401\b[^\n]{0,160}\b(?:incorrect\s+(?:api\s+)?key|invalid\s+(?:api\s+)?key|unauthorized|authentication)\b/i,
     /\binvalid[_\s-]+api[_\s-]+key\b/i,

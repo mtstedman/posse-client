@@ -291,13 +291,37 @@ export class WebResearchRuntime {
         { stage: "terminal" },
       );
     }
-    dispatch.packet = normalizeHandoff(args);
+    const packet = normalizeHandoff(args);
+    if (dispatch.resultChars != null) {
+      // The parent receives a compact report bounded by its research policy.
+      // Reject here, while the child can still shorten and resubmit, instead of
+      // discarding the whole child after it settles.
+      const compactChars = JSON.stringify(packet).length;
+      if (compactChars > dispatch.resultChars) {
+        throw runtimeError(
+          "WEB_RESEARCH_HANDOFF_TOO_LARGE",
+          `web_research_handoff is ${compactChars} characters; the compact report limit is ${dispatch.resultChars}. Shorten claims, summary, or gaps and resubmit.`,
+          { stage: "terminal" },
+        );
+      }
+    }
+    dispatch.packet = packet;
     return {
       ok: true,
       protocol: WEB_RESEARCH_PROTOCOL,
       status: "accepted",
       terminal: true,
     };
+  }
+
+  // True while a research-batch web child of this parent call is running.
+  hasRunningDispatchForParent(agentCallId) {
+    const parentId = positiveId(agentCallId);
+    if (!parentId) return false;
+    for (const dispatch of this.dispatches.values()) {
+      if (dispatch.parentAgentCallId === parentId && dispatch.status === "running") return true;
+    }
+    return false;
   }
 
   acknowledgeReceipt(agentCallId, detail = {}) {
@@ -312,7 +336,7 @@ export class WebResearchRuntime {
     return true;
   }
 
-  async execute(args, { context = {}, budget = null, signal = null } = {}) {
+  async execute(args, { context = {}, budget = null, signal = null, dispatchId = null } = {}) {
     const runtimeContext = /** @type {Record<string, any>} */ (context);
     const parentAgentCallId = positiveId(runtimeContext.agentCallId ?? runtimeContext.agent_call_id);
     if (!parentAgentCallId) {
@@ -354,7 +378,14 @@ export class WebResearchRuntime {
         { retryable: true, stage: "admission" },
       );
     }
-    const duplicate = [...this.dispatches.values()].find((dispatch) => (
+    // The direct tool path allows one web dispatch per parent call. Research
+    // batches arrive through the sub-agent runtime, which already bounds
+    // concurrency per parent and runs sibling entries at the same time, so a
+    // coordinated dispatch must not be refused because its sibling is running.
+    const coordinatedDispatchId = typeof dispatchId === "string" && dispatchId.trim()
+      ? dispatchId.trim()
+      : null;
+    const duplicate = coordinatedDispatchId ? null : [...this.dispatches.values()].find((dispatch) => (
       dispatch.parentAgentCallId === parentAgentCallId && dispatch.status === "running"
     ));
     if (duplicate) {
@@ -373,6 +404,8 @@ export class WebResearchRuntime {
       packet: null,
       childAgentCallId: null,
       controller: new AbortController(),
+      coordinatedDispatchId,
+      resultChars: Number.isSafeInteger(budget?.resultChars) && budget.resultChars > 0 ? budget.resultChars : null,
     };
     const forwardAbort = () => dispatch.controller.abort(signal.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });

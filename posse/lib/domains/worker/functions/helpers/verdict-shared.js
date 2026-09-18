@@ -660,7 +660,7 @@ function _shouldReplanForDesiredOutputs(job, verdict) {
   };
 }
 
-export function prepareVerdictForDispatch(job, verdict) {
+export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: currentAssessedCommitHash } = {}) {
   const workItem = getWorkItem(job.work_item_id);
   const desiredOutputs = _getDesiredOutputs(workItem);
   const payload = parseJobPayload(job);
@@ -716,8 +716,12 @@ export function prepareVerdictForDispatch(job, verdict) {
 
   // Scope the receipt lookup to the assessed commit: stale receipts from
   // earlier attempts must not describe this attempt's reworked code.
-  const assessedCommitHash = [...getAttempts(job.id)].reverse()
-    .find((attempt) => attempt.commit_hash)?.commit_hash || null;
+  // A no-change assessment verifies an existing HEAD without creating an
+  // implementation commit. Its caller supplies the exact state verified in
+  // this invocation; only legacy callers fall back to implementation history.
+  const assessedCommitHash = currentAssessedCommitHash !== undefined
+    ? currentAssessedCommitHash
+    : [...getAttempts(job.id)].reverse().find((attempt) => attempt.commit_hash)?.commit_hash || null;
   const assessedReceipt = latestTestReceiptDelta(job.id, { commitHash: assessedCommitHash });
   const scopedVerification = latestScopedCheckVerification(job.id, assessedCommitHash);
   const canonicalVerification = latestCanonicalVerification(job.id, assessedCommitHash);

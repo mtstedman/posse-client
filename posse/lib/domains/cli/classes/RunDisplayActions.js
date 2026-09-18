@@ -194,7 +194,9 @@ export class RunDisplayActions {
     this.display.onImage = (prompt) => this.image(prompt);
     this.display.onKill = (jobId) => this.kill(jobId);
     this.display.onNudge = (jobId, correction, agentCallId = null) => this.nudge(jobId, correction, agentCallId);
-    this.display.onKillWI = (wiId) => this.killWorkItem(wiId);
+    this.display.onKillWI = (wiId) => this.killWorkItem(wiId).catch((err) => {
+      this.display.addEvent(`${this.C.red}WI#${wiId} cancellation failed: ${String(err?.message || err)}${this.C.reset}`);
+    });
     this.display.onSkipJob = (jobId) => this.skip(jobId);
     this.display.onReviewPending = () => this.reviewPending();
     this.display.onAsk = (question) => this.ask(question);
@@ -497,7 +499,7 @@ export class RunDisplayActions {
   kill(jobId) {
     const killed = this.worker.killJob(jobId, "user_canceled");
     if (killed) {
-      this.display.addEvent(`${this.C.red}⚡ Killed worker for job #${jobId} — will retry${this.C.reset}`);
+      this.display.addEvent(`${this.C.red}⚡ Cancellation requested for job #${jobId} — use Retry to run it again${this.C.reset}`);
     } else {
       this.display.addEvent(`${this.C.yellow}No active process found for job #${jobId}${this.C.reset}`);
     }
@@ -528,15 +530,9 @@ export class RunDisplayActions {
     this.display.addEvent(`${this.C.cyan}✎ Feedback queued for ${agentCallId ? `child call #${agentCallId}` : `job #${jobId}`} — agent will retrieve it live${this.C.reset}`);
   }
 
-  killWorkItem(wiId) {
+  async killWorkItem(wiId) {
     const wi = this.getWorkItem(wiId);
     if (!wi) return;
-
-    for (const [jobId, w] of this.display.workers) {
-      if (w.workItemId === wiId) {
-        this.worker.killJob(jobId, "work_item_canceled");
-      }
-    }
 
     const canceled = this.cancelWorkItemJobs(wiId);
     this.updateWorkItemStatus(wiId, "canceled");
@@ -548,34 +544,43 @@ export class RunDisplayActions {
       message: `Work item canceled by user (${canceled.length} job(s) canceled)`,
     });
 
-    if (!wi.branch_name) {
-      this.display.addEvent(`${this.C.red}✗ WI#${wiId} canceled; ${canceled.length} job(s) stopped${this.C.reset}`);
-      return;
-    }
-
-    this.display.addEvent(`${this.C.red}✗ WI#${wiId} canceled; ${canceled.length} job(s) stopped, branch cleanup running${this.C.reset}`);
+    this.display.addEvent(`${this.C.red}✗ WI#${wiId} canceled; waiting for active workers to stop${this.C.reset}`);
     const cleanupRunner = typeof this.cleanupWiBranchAsync === "function"
       ? this.cleanupWiBranchAsync
       : null;
-    if (!cleanupRunner) {
-      this.display.addEvent(`${this.C.yellow}WI#${wiId} branch cleanup skipped: async cleanup unavailable${this.C.reset}`);
-      return;
-    }
-    void cleanupRunner(wi, { clearMergeState: true })
-      .then((cleanupOk) => {
-        if (!cleanupOk) {
-          this.display.addEvent(`${this.C.red}✗ WI#${wiId} branch cleanup failed${this.C.reset}`);
-          return;
+    try {
+      if (typeof this.worker.abortWorkItemAndWait !== "function") {
+        // Compatibility callers may lack the execution registry. Request
+        // cancellation, but never infer quiescence from the display alone.
+        for (const [jobId, w] of this.display.workers) {
+          if (Number(w.workItemId) === Number(wiId)) this.worker.killJob(jobId, "work_item_canceled");
         }
-        this.display.addEvent(`${this.C.green}✓ WI#${wiId} branch/worktree cleaned up${this.C.reset}`);
-      })
-      .catch((err) => {
-        this.display.addEvent(`${this.C.red}✗ WI#${wiId} branch cleanup failed: ${String(err?.message || err)}${this.C.reset}`);
-      })
-      .finally(() => {
-        this.refreshDisplaySnapshotsForQueue();
-        this.display.requestRender?.({ reason: "event" });
-      });
+        this.display.addEvent(`${this.C.yellow}WI#${wiId} cleanup deferred: worker completion unavailable${this.C.reset}`);
+        return;
+      }
+      if (!await this.worker.abortWorkItemAndWait(wiId)) {
+        this.display.addEvent(`${this.C.yellow}WI#${wiId} cleanup deferred: workers are still stopping; worktree retained${this.C.reset}`);
+        return;
+      }
+      if (!wi.branch_name) return;
+      const freshWi = this.getWorkItem(wiId);
+      if (!freshWi || freshWi.status !== "canceled" || freshWi.branch_name !== wi.branch_name) return;
+      if (!cleanupRunner) {
+        this.display.addEvent(`${this.C.yellow}WI#${wiId} branch cleanup skipped: async cleanup unavailable${this.C.reset}`);
+        return;
+      }
+      const cleanupOk = await cleanupRunner(freshWi, { clearMergeState: true });
+      if (!cleanupOk) {
+        this.display.addEvent(`${this.C.red}✗ WI#${wiId} branch cleanup failed${this.C.reset}`);
+        return;
+      }
+      this.display.addEvent(`${this.C.green}✓ WI#${wiId} branch/worktree cleaned up${this.C.reset}`);
+    } catch (err) {
+      this.display.addEvent(`${this.C.red}✗ WI#${wiId} branch cleanup failed: ${String(err?.message || err)}${this.C.reset}`);
+    } finally {
+      this.refreshDisplaySnapshotsForQueue();
+      this.display.requestRender?.({ reason: "event" });
+    }
   }
 
   skip(jobId) {

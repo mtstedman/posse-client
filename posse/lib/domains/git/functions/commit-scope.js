@@ -24,6 +24,7 @@ import { UNSCOPED_GIT_ADD_TASK_MODES } from "../../../catalog/artifact.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { runGitNativeMethod } from "./native/invoke.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeRoot, normalizeProjectDir } from "../../runtime/functions/paths.js";
 import {
   classifyScopedCommit,
   collectScopedCommitDiff,
@@ -314,8 +315,19 @@ async function withCommitBranchLockAsync(cwd, opts = {}, fn) {
   });
 }
 
+/** Whether the Team approval policy governs this commit. The async caller
+ * reads live session state on the main thread and hands the answer to its
+ * commit worker; the worker must not open a second database connection of its
+ * own to re-derive it (and, under a runtime path override, would open the
+ * wrong one). The flag is trusted only off the main thread, where it can only
+ * have come from that caller. */
+function teamApprovalGovernsCommit(opts) {
+  if (!isMainThread && typeof opts?.teamApprovalEnabled === "boolean") return opts.teamApprovalEnabled;
+  return getLivePairingState()?.submission_approval_enabled === 1;
+}
+
 export function gitCommitAll(message, cwd, scope = null, opts = {}) {
-  if (getLivePairingState()?.submission_approval_enabled === 1
+  if (teamApprovalGovernsCommit(opts)
       && (!opts?.verifiedTeamWorkItemContext || isMainThread)) {
     const error = new Error("Team approval requires a verified WI grant through the async commit worker");
     error.code = "TEAM_WI_GRANT_REQUIRED";
@@ -347,6 +359,7 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
     }
     opts = { ...opts, verifiedTeamWorkItemContext: verified.workItemContext };
   }
+  opts = { ...opts, teamApprovalEnabled: teamState?.submission_approval_enabled === 1 };
   const style = getGitCommitStyle(opts?.projectDir || cwd);
   const runWorker = async (workerOpts) => {
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
@@ -360,6 +373,12 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
       workerData: {
         message, cwd, scope, opts: workerOpts,
         nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime,
+        runtimePathOverrides: {
+          projectDir: normalizeProjectDir(opts?.projectDir || cwd),
+          runtimeRoot: getRuntimeRoot(opts?.projectDir || cwd),
+          dbPath: getRuntimeDbPath(opts?.projectDir || cwd),
+          resourcesDir: getRuntimeResourcesDir(opts?.projectDir || cwd),
+        },
         ...(workerOpts.verifiedTeamWorkItemContext ? { teamSessionContext: {
           instanceId: teamState.instance_id,
           sessionId: teamState.remote_session_id,

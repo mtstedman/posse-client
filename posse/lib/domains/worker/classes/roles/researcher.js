@@ -721,6 +721,7 @@ export class ResearcherRole extends BaseRole {
     }
     return await composePromptRemoteAware(ctx.researcherPacket, remoteInstructions, {
       providerName: ctx.providerName,
+      projectDir: this.context?.projectDir || null,
       ...(this.deps?.remoteComposer ? { composer: this.deps.remoteComposer } : {}),
     });
   }

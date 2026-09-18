@@ -18,8 +18,6 @@ import {
   rewireDependency,
   retireWaitingLanePlanning,
   setJobError,
-  setJobResult,
-  storeArtifact,
   updateJobPayload,
   updateJobStatus,
   updateWorkItemRouting,
@@ -84,7 +82,6 @@ import {
   jobNeedsMlDelegation as jobNeedsMlDelegationFromModule,
 } from "../../providers/functions/delegation-routing.js";
 import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
-import { planArtifactReuse as planArtifactReuseFromModule } from "./artifact-reuse.js";
 import {
   createPlanApprovalGate as createPlanApprovalGateFromModule,
   planApprovalRequirement,
@@ -686,13 +683,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         } else {
           eventJson.dependency_value = depIdx;
         }
-        worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dependency ${depLabel} for "${taskTitle}" ${reasonText} — continuing without it`);
+        worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dependency ${depLabel} for "${taskTitle}" ${reasonText} — dropping the dependent task`);
         logEvent({
           work_item_id: planJob.work_item_id,
           job_id: jobId,
           event_type: EVENT_TYPES.PLAN_DEPENDENCY_MISSING,
           actor_type: EVENT_ACTORS.SYSTEM,
-          message: `Dependency ${depLabel} for task "${taskTitle}" ${reasonText}; proceeding without it`,
+          message: `Dependency ${depLabel} for task "${taskTitle}" ${reasonText}; dropping the dependent task`,
           event_json: JSON.stringify(eventJson),
         });
       };
@@ -748,13 +745,15 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             const missingReason = dependencyMissingReason(depIdx, link.taskIndex);
             if (missingReason) {
               logMissingPlannerDependency({ ...link, depIdx, reason: missingReason });
-              continue;
+              cancelCompiledTaskForDroppedDependency(link.taskIndex, [depIdx]);
+              break;
             }
             const targetJobId = jobMap.get(depIdx);
             const dependencyAdded = addDependency(link.jobId, targetJobId, "hard");
             if (!dependencyAdded) {
               logMissingPlannerDependency({ ...link, depIdx, reason: "cycle_or_self_dependency" });
-              continue;
+              cancelCompiledTaskForDroppedDependency(link.taskIndex, [depIdx]);
+              break;
             }
             wiredPlannerDependencyEdges.push({
               upstreamTaskIndex: depIdx,
@@ -855,10 +854,27 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (droppedTaskIndexes.has(taskIndex)) return false;
         const title = taskTitleForLog(tasks[taskIndex], taskIndex);
         const blockedLabels = blockedDeps.map((idx) => idx + 1).join(", ");
-        droppedTaskIndexes.add(taskIndex);
-        const jobIds = compiledTaskJobIds.get(taskIndex) || new Set();
+        const droppedIndexes = new Set([taskIndex]);
+        const jobIds = new Set(compiledTaskJobIds.get(taskIndex));
         const targetJobId = jobMap.get(taskIndex);
         if (targetJobId != null) jobIds.add(targetJobId);
+
+        // Deduplicated tasks share a dependency target. Invalidate every alias
+        // before wiring consumers, including any jobs compiled for that alias.
+        let foundAlias = true;
+        while (foundAlias) {
+          foundAlias = false;
+          for (const [index, jobId] of jobMap) {
+            if (droppedIndexes.has(index) || !jobIds.has(jobId)) continue;
+            droppedIndexes.add(index);
+            for (const id of compiledTaskJobIds.get(index) || []) jobIds.add(id);
+            foundAlias = true;
+          }
+        }
+        for (const index of droppedIndexes) {
+          droppedTaskIndexes.add(index);
+          jobMap.delete(index);
+        }
 
         for (const jobId of jobIds) {
           releasePromoteClaimsForJob(jobId);
@@ -866,7 +882,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           updateJobStatus(jobId, "canceled", { expectedStatuses: ["queued"] });
           setJobError(jobId, `Dropped dependent planned task "${title}": prerequisite task(s) ${blockedLabels} were dropped`);
         }
-        jobMap.delete(taskIndex);
 
         worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped dependent task "${title}" — prerequisite task(s) ${blockedLabels} were dropped`);
         logEvent({
@@ -878,6 +893,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           event_json: JSON.stringify({
             reason: "dropped_dependency",
             task_index: taskIndex,
+            dropped_task_indexes: [...droppedIndexes],
             dropped_dependencies: blockedDeps,
             canceled_job_ids: [...jobIds],
           }),
@@ -1621,21 +1637,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             }
           }
 
-          const reusePlan = planArtifactReuseFromModule({ ...t, task_mode: taskMode }, worker.projectDir);
-          if (reusePlan && reusePlan.allExpectedReusable && reusePlan.validReusableOutputs) {
-            t._planner_reuse_existing_outputs = reusePlan.reusableFiles.map((file) => file.path);
-            worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: reusing existing artifact outputs for "${t.title}" (${reusePlan.reusableFiles.length} file(s))`);
-          } else if (reusePlan && reusePlan.missingCreateFiles.length < (t.files_to_create || []).length) {
-            const reusedCount = (t.files_to_create || []).length - reusePlan.missingCreateFiles.length;
-            t.files_to_create = reusePlan.missingCreateFiles;
-            t.task_spec = [
-              t.task_spec || t.instructions || "",
-              "",
-              `Planner note: ${reusedCount} deliverable(s) already exist in output_root and should be reused. Generate only these missing files:`,
-              ...reusePlan.missingCreateFiles.map((file) => `- ${path.basename(file)}`),
-            ].filter(Boolean).join("\n");
-            worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: narrowed artifact task "${t.title}" to ${reusePlan.missingCreateFiles.length} missing file(s)`);
-          }
+          // Existing files may be rejected, stale, or from a different task.
+          // Preserve the requested scope and execute/assess the new contract;
+          // file existence is not accepted provenance for completing a job.
         }
 
         if (finalJobType === "artificer") {
@@ -1795,6 +1799,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (finalJobType === "promote") {
           normalizedPromotePayload = normalizePromoteMappingsFromModule(t, artifactDirAbs, { projectDir: worker.projectDir });
           if (!Array.isArray(normalizedPromotePayload.mappings) || normalizedPromotePayload.mappings.length === 0) {
+            droppedTaskIndexes.add(i);
             const message = `Dropped promote task "${t.title}": no valid repo-relative or proven web-root destination`;
             worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: ${message}`);
             logEvent({
@@ -2059,32 +2064,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           });
         }
 
-        if (t._planner_reuse_existing_outputs?.length > 0) {
-          const reuseMsg = `Planner reused ${t._planner_reuse_existing_outputs.length} existing artifact output(s) in ${t.output_root}`;
-          updateJobStatus(job.id, "succeeded");
-          setJobResult(job.id, reuseMsg);
-          storeArtifact({
-            work_item_id: job.work_item_id,
-            job_id: job.id,
-            attempt_id: null,
-            artifact_type: "response",
-            content_long: [
-              "--- ARTIFICER RESULT START ---",
-              "status: COMPLETE",
-              `summary: ${reuseMsg}`,
-              "notes: none",
-              "--- ARTIFICER RESULT END ---",
-            ].join("\n"),
-          });
-          logEvent({
-            work_item_id: job.work_item_id,
-            job_id: job.id,
-            event_type: EVENT_TYPES.JOB_ARTIFACT_REUSED,
-            actor_type: EVENT_ACTORS.PLANNER,
-            message: reuseMsg,
-          });
-        }
-
         jobMap.set(i, job.id);
         createdCount++;
 
@@ -2225,6 +2204,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       // ── Spawn delegator if multi-provider is configured ──
       // Only include jobs that actually need provider assignment (dev/fix/artificer).
       // Promote is deterministic and does not need provider assignment.
+      // Finish the hard graph before publishing demand, scopes or delegation.
+      // A rejected edge invalidates its consumer and every transitive consumer.
+      wirePlannerDependencies();
       propagateDroppedPlannerDependencies();
 
       if (createdCount === 0) {
@@ -2288,8 +2270,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           reason: "planner_compiled_without_dev",
         });
       }
-
-      wirePlannerDependencies();
 
       deriveAndRecordAssessmentScopes({
         worker,

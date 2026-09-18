@@ -19,7 +19,12 @@ import {
   TEAM_PUBLICATION_MODES,
   TEAM_SCOPE_LABEL_PATTERN,
   TEAM_SCOPE_LIMITS,
+  TEAM_SUBMISSION_STATES,
+  TEAM_MANAGED_PROVIDERS,
 } from "../../../catalog/team.js";
+import { TEAM_GRANT_ISSUE_PROTOCOL, TEAM_GRANT_REQUEST_PROTOCOL, TEAM_POLICY_PROTOCOL } from "../../../catalog/bridge.js";
+import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
+import { getProviderForRole } from "../../settings/functions/repository-settings.js";
 import { readPairingPromotionJournal } from "./promotion.js";
 import { getLivePairingState, updatePairingEnrollment } from "./state.js";
 import { teamPolicyRegression } from "./team-policy.js";
@@ -36,6 +41,17 @@ const verifiedGrantCache = new Map();
 
 function fail(reason, message = null) {
   return { ok: false, reason, ...(message ? { message: String(message).slice(0, 240) } : {}) };
+}
+
+/** Role providers that cannot run under approval mode. Claude and Codex
+ * adapters can write files natively, outside the mediated tool runtime, so no
+ * per-call grant can bind those writes; the dispatch boundary refuses them for
+ * every role, and enabling the policy must say so up front instead of letting
+ * each job discover it and burn its retries. */
+export function unmanagedTeamRoleProviders() {
+  return PROVIDER_ROLE_NAMES
+    .map((role) => ({ role, provider: String(getProviderForRole(role) || "").toLowerCase() }))
+    .filter(({ provider }) => !TEAM_MANAGED_PROVIDERS.includes(provider));
 }
 
 function git(args, projectDir, options = {}) {
@@ -94,10 +110,10 @@ function provenOriginatorForGrant(state, grant, db = getDb()) {
 function requireGrant(response, workItemId, state) {
   if (response?.contract_version !== 1 || response.session_id !== state.remote_session_id
     || !Array.isArray(response.grants) || response.grants.length > MAX_TEAM_RECORDS) {
-    return fail("invalid_grant_response");
+    return fail(TEAM_FAILURE_REASONS.INVALID_GRANT_RESPONSE);
   }
   const grant = response.grants.find((row) => row?.work_item_id === workItemId);
-  if (!grant) return fail("team_grant_missing");
+  if (!grant) return fail(TEAM_FAILURE_REASONS.GRANT_MISSING);
   if (grant.executor_instance_id !== state.instance_id
     || !Number.isSafeInteger(grant.revision) || grant.revision <= 0
     || !Number.isSafeInteger(grant.claim_generation) || grant.claim_generation < 0
@@ -371,7 +387,7 @@ export async function requestTeamGrant({
       return fail("invalid_grant_request_receipt");
     }
     invalidateVerifiedTeamGrantCache();
-    return { ok: true, protocol: "posse.team_grant_request.v1", repo_path: path.resolve(projectDir),
+    return { ok: true, protocol: TEAM_GRANT_REQUEST_PROTOCOL, repo_path: path.resolve(projectDir),
       session_id: state.remote_session_id, work_item_id: workItemId,
       requested_revision: grant.requested_revision, state: grant.state };
   } catch (error) {
@@ -485,7 +501,7 @@ export async function issueTeamGrant({
     });
     if (!signed.ok) return signed;
     invalidateVerifiedTeamGrantCache();
-    return { ok: true, protocol: "posse.team_grant_issue.v1", repo_path: path.resolve(projectDir),
+    return { ok: true, protocol: TEAM_GRANT_ISSUE_PROTOCOL, repo_path: path.resolve(projectDir),
       session_id: state.remote_session_id, work_item_id: workItemId,
       executor_instance_id: executorInstanceId, originator_instance_id: originatorInstanceId,
       expected_revision: expectedRevision, policy_revision: policyRevision,
@@ -517,27 +533,35 @@ export async function gateTeamCandidateForPublication({
   const workItemId = teamWorkItemId(state, operation?.workItemId);
   if (!workItemId || !OID_RE.test(operation?.sourceSha || "")
     || !OID_RE.test(operation?.baseSha || "") || !OID_RE.test(operation?.candidateSha || "")) {
-    return fail("team_submission_identity_invalid");
+    return fail(TEAM_FAILURE_REASONS.SUBMISSION_IDENTITY_INVALID);
   }
   try {
     const client = remoteClientFactory();
     const status = await client.status(state.relay_token);
     if (status?.session_id !== state.remote_session_id
       || status.submission_approval_enabled !== true
-      || status.submission_policy_revision !== Number(state.submission_approval_revision)
       || !TEAM_PUBLICATION_MODES.includes(status.team_publication_mode)
-      || !Number.isSafeInteger(status.team_publication_revision)
-      || status.team_publication_mode !== state.team_publication_mode
-      || status.team_publication_revision !== Number(state.team_publication_revision)) {
-      return fail("team_publication_policy_stale");
+      || !Number.isSafeInteger(status.team_publication_revision)) {
+      return fail(TEAM_FAILURE_REASONS.PUBLICATION_POLICY_STALE);
     }
     // The member may have only an SSH deploy key. The host's provider
     // actuator, which holds GitHub API credentials, verifies protection and
     // exact PR pins before publication. This gate still submits the immutable
     // Git refs and parks rather than attempting a direct trunk push.
+    //
+    // Resolve the grant before comparing the local policy view: a moved policy
+    // revision fails grant verification with a repairable reason, and the
+    // repair refreshes the local session state. Comparing against the
+    // refreshed state lets a stale view heal here instead of parking the
+    // candidate until the next heartbeat.
     const resolved = await resolveGrant({ client, state, workItemId, projectDir });
     if (!resolved.ok) return resolved;
     state = resolved.state || state;
+    if (status.submission_policy_revision !== Number(state.submission_approval_revision)
+      || status.team_publication_mode !== state.team_publication_mode
+      || status.team_publication_revision !== Number(state.team_publication_revision)) {
+      return fail(TEAM_FAILURE_REASONS.PUBLICATION_POLICY_STALE);
+    }
     const scope = verifyTeamGitScope({
       projectDir,
       targetOid: operation.baseSha,
@@ -587,18 +611,23 @@ export async function gateTeamCandidateForPublication({
       || typeof checked.receipt?.decision_action_id !== "string") {
       return fail("invalid_approval_receipt");
     }
+    // The trunk push that follows is minted under this exact grant, which
+    // Remote re-validates at pulse time.
+    const workItemContext = Object.freeze({
+      workItemId, grantRevision: resolved.grant.revision, grantJti: resolved.claims.jti,
+    });
     if (status.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
-      return { ok: false, reason: "host_provider_merge_required", providerPending: true,
+      return { ok: false, reason: TEAM_FAILURE_REASONS.HOST_PROVIDER_MERGE_REQUIRED, providerPending: true,
         submissionId, grantRevision: pins.grant_revision, candidateOid: pins.candidate_oid,
-        candidateRef: refs.candidate_ref };
+        candidateRef: refs.candidate_ref, workItemContext };
     }
-    return { ok: true, submissionId, grantRevision: pins.grant_revision, candidateOid: pins.candidate_oid };
+    return { ok: true, submissionId, grantRevision: pins.grant_revision, candidateOid: pins.candidate_oid, workItemContext };
   } catch (error) {
     const code = String(error?.code || "");
-    if (code === "pairing_submission_pending") return fail("approval_pending");
-    if (code === "pairing_submission_denied") return fail("approval_denied");
-    if (code === "pairing_submission_stale") return fail("approval_stale");
-    return fail("approval_unavailable", error?.message || error);
+    if (code === "pairing_submission_pending") return fail(TEAM_FAILURE_REASONS.APPROVAL_PENDING);
+    if (code === "pairing_submission_denied") return fail(TEAM_FAILURE_REASONS.APPROVAL_DENIED);
+    if (code === "pairing_submission_stale") return fail(TEAM_FAILURE_REASONS.APPROVAL_STALE);
+    return fail(TEAM_FAILURE_REASONS.APPROVAL_UNAVAILABLE, error?.message || error);
   }
 }
 
@@ -642,7 +671,7 @@ export async function verifyTeamPublishedCandidate({
     const rows = listing.submissions.filter((row) => row.work_item_id === workItemId
       && row.source_oid === operation.sourceSha && row.target_oid === operation.baseSha
       && row.candidate_oid === operation.candidateSha && row.result_oid === operation.candidateSha
-      && row.state === "approved");
+      && row.state === TEAM_SUBMISSION_STATES.APPROVED);
     if (rows.length !== 1) return fail("team_approved_submission_missing");
     const row = rows[0];
     const grant = grantResponse.grants?.find((item) => item.work_item_id === workItemId);
@@ -695,6 +724,14 @@ export async function setTeamSubmissionApproval(enabled, {
   let state;
   try { state = activeState(projectDir); } catch { state = null; }
   if (!state || state.role !== "host") return fail("team_host_required");
+  if (enabled) {
+    const unmanaged = unmanagedTeamRoleProviders();
+    if (unmanaged.length) {
+      return fail("team_provider_write_boundary_unavailable",
+        `approval mode requires ${TEAM_MANAGED_PROVIDERS.join(" or ")} for every role; configured: `
+        + unmanaged.map(({ role, provider }) => `${role}=${provider}`).join(", "));
+    }
+  }
   if (!enabled && getDb().prepare(`
     SELECT 1 AS pending FROM shared_trunk_merge_operations
     WHERE phase IN ('intent','candidate','publish_unknown') LIMIT 1
@@ -738,7 +775,7 @@ export async function setTeamSubmissionApproval(enabled, {
       WHERE id = ? AND phase = 'active' AND role = 'host'
     `).run(Number(enabled), revision, state.id);
     invalidateVerifiedTeamGrantCache();
-    return { ok: true, protocol: "posse.team_policy.v1", repo_path: path.resolve(projectDir),
+    return { ok: true, protocol: TEAM_POLICY_PROTOCOL, repo_path: path.resolve(projectDir),
       session_id: state.remote_session_id, enabled, revision,
       ...(actionId ? { action_id: actionId } : {}) };
   } catch (error) {
@@ -810,11 +847,21 @@ function writeCoversFile(permissions, file) {
     file === root || file.startsWith(`${root.replace(/\/$/u, "")}/`));
 }
 
-function handoffMatch(grants, submissions, state) {
+/** A waiting successor whose own requested lifetime has elapsed. Its expiry is
+ * chosen by the member at request time and refreshed by nothing, so once it
+ * has passed the handoff can never issue a grant inside it. */
+function staleWaitingGrant(grant, nowSec) {
+  if (grant?.state !== TEAM_GRANT_STATES.WAITING_FOR_FILES) return false;
+  const requestedAt = Date.parse(grant.requested_expires_at || "");
+  return Number.isFinite(requestedAt) && Math.floor(requestedAt / 1000) <= nowSec;
+}
+
+function handoffMatch(grants, submissions, state, nowSec = Math.floor(Date.now() / 1000)) {
   if (!Array.isArray(grants) || !Array.isArray(submissions)
     || grants.length > MAX_TEAM_RECORDS || submissions.length > MAX_TEAM_RECORDS) return null;
+  grants = grants.filter((grant) => !staleWaitingGrant(grant, nowSec));
   for (const submission of submissions) {
-    if (submission?.state !== "approved" || !OID_RE.test(submission.candidate_oid || "")) continue;
+    if (submission?.state !== TEAM_SUBMISSION_STATES.APPROVED || !OID_RE.test(submission.candidate_oid || "")) continue;
     const predecessor = grants.find((grant) => grant.work_item_id === submission.work_item_id);
     const file = exactWriteFile(predecessor?.effective_permissions);
     if (!file || predecessor.state !== TEAM_GRANT_STATES.ACTIVE
@@ -865,8 +912,28 @@ export async function reconcileTeamFileHandoff({
       || submissionResponse?.contract_version !== 1 || submissionResponse.session_id !== state.remote_session_id) {
       return fail("team_handoff_policy_stale");
     }
-    const match = handoffMatch(grantResponse.grants, submissionResponse.submissions, state);
-    if (!match) return { ok: true, skipped: "no_unambiguous_one_file_handoff" };
+    // Expire successors whose requested lifetime has already elapsed. Remote
+    // never expires a waiting grant on its own, so left alone such a request
+    // would be matched on every poll and fail the same way each time while
+    // the member sees a grant that still looks pending. Expiring it lets the
+    // member's next lookup show the terminal state and re-request.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expiredSuccessors = [];
+    for (const grant of Array.isArray(grantResponse.grants) ? grantResponse.grants : []) {
+      if (!staleWaitingGrant(grant, nowSec) || !Number.isSafeInteger(grant.revision)) continue;
+      try {
+        await client.setTeamGrantState(state.relay_token, {
+          session_id: state.remote_session_id, work_item_id: grant.work_item_id,
+          expected_revision: grant.revision, state: TEAM_GRANT_STATES.EXPIRED,
+        });
+        expiredSuccessors.push(grant.work_item_id);
+      } catch {
+        // A revision conflict means the grant already moved; the next poll
+        // sees its current state.
+      }
+    }
+    const match = handoffMatch(grantResponse.grants, submissionResponse.submissions, state, nowSec);
+    if (!match) return { ok: true, skipped: "no_unambiguous_one_file_handoff", expiredSuccessors };
     const { submission, predecessor, successor } = match;
     const trunkRef = `refs/heads/${state.shared_branch}`;
     const observedTrunkOid = advertisedOid(projectDir, state.remote_name, trunkRef);
@@ -898,7 +965,6 @@ export async function reconcileTeamFileHandoff({
     } catch {
       return fail("team_candidate_not_accepted");
     }
-    const nowSec = Math.floor(Date.now() / 1000);
     const requestedAt = Date.parse(successor.requested_expires_at || "");
     const requestExpiry = Number.isFinite(requestedAt) ? Math.floor(requestedAt / 1000) : 0;
     const expiration = Math.min(requestExpiry, nowSec + 600);
@@ -1189,7 +1255,7 @@ export async function decideTeamSubmission(args = {}) {
     const submissions = projectionRecords(list, state);
     if (!submissions) return fail("invalid_submission_response");
     const row = submissions.find((item) => (item.id || item.submission_id) === args.submission_id);
-    const desiredState = args.decision === "approve" ? "approved" : "denied";
+    const desiredState = args.decision === "approve" ? TEAM_SUBMISSION_STATES.APPROVED : TEAM_SUBMISSION_STATES.DENIED;
     const alreadyDecidedByThisAction = row?.state === desiredState
       && row.decision_action_id === args.action_id
       && row.decision_actor_instance_id === state.instance_id;

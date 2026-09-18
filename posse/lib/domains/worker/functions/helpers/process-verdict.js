@@ -37,13 +37,14 @@ export function processVerdict(job, verdict, {
   autoApprove = false,
   leaseToken = null,
   humanApprovedReplan = false,
+  assessedCommitHash = undefined,
 } = {}) {
   const emitLog = emit || ((msg) => console.log(`  ${msg}`));
   const spawnedJobs = [];
   const spawnFromAssessor = (outcome, jobType, payload) =>
     spawnFromRole(ASSESSOR_SPAWN_ROLE, outcome, jobType, payload);
 
-  const prepared = prepareVerdictForDispatch(job, verdict);
+  const prepared = prepareVerdictForDispatch(job, verdict, { assessedCommitHash });
   verdict = prepared.verdict;
   const normalizedConfidence = normalizeAssessorConfidence(verdict.confidence, {
     fallback: verdict.verdict === "parse_error" ? null : "medium",

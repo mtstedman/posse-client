@@ -3,11 +3,34 @@ import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
 
+// The child receives only its question, so it needs its own budget line to
+// know when to wrap up with partial findings, and the planner's seed files so
+// its first read lands near the target instead of a cold search.
+export function researchChildInstructions(parent, request) {
+  const hints = parent?.packet?.context_hints || {};
+  const seeds = [
+    ...(Array.isArray(parent?.packet?.research_evidence?.key_files) ? parent.packet.research_evidence.key_files : []),
+    ...(Array.isArray(hints.atlas_seed_files) ? hints.atlas_seed_files : []),
+  ].map((entry) => (typeof entry === "string" ? entry : entry?.path)).filter((value) => typeof value === "string" && value.trim());
+  const symbols = (Array.isArray(hints.atlas_seed_symbols) ? hints.atlas_seed_symbols : [])
+    .map((entry) => (typeof entry === "string" ? entry : entry?.name)).filter((value) => typeof value === "string" && value.trim());
+  const uniqueSeeds = [...new Set(seeds)].slice(0, 12);
+  const uniqueSymbols = [...new Set(symbols)].slice(0, 12);
+  return [
+    `RESEARCH QUESTION:\n${request.intent}`,
+    `Budget: at most ${request.maxTurns} tool turns and ${Math.round(request.timeoutMs / 1000)} seconds; if either runs low, submit partial findings and name the gap instead of continuing.`,
+    `Compact report character limit: ${request.resultChars}.`,
+    ...(uniqueSeeds.length ? [`Starting points (planner seed files, verify before relying on them): ${uniqueSeeds.join(", ")}`] : []),
+    ...(uniqueSymbols.length ? [`Seed symbols: ${uniqueSymbols.join(", ")}`] : []),
+  ].join("\n");
+}
+
 export async function runResearchChild(client, parent, request) {
   const { agentType, intent, maxTurns, reasoningEffort, timeoutMs, signal, parentContext } = request;
   if (agentType === "web") {
     const result = await webResearchRuntime.execute({ route: "web", question: intent }, {
-      context: parentContext, signal, budget: { maxTurns, reasoningEffort, timeoutMs },
+      context: parentContext, signal, dispatchId: request.dispatchId,
+      budget: { maxTurns, reasoningEffort, timeoutMs, resultChars: request.resultChars },
     });
     return {
       agentCallId: result.usage.agent_call_id,
@@ -34,7 +57,7 @@ export async function runResearchChild(client, parent, request) {
       research_investigation_v1: true,
     },
   };
-  const prompt = await client.deps.composePromptRemoteAware(packet, `RESEARCH QUESTION:\n${intent}\nCompact report character limit: ${request.resultChars}.`, { providerName: parent.provider });
+  const prompt = await client.deps.composePromptRemoteAware(packet, researchChildInstructions(parent, request), { providerName: parent.provider });
   if (packet.remote_issuance?.coordination?.research_investigation_v1 !== true) {
     throw new Error("Remote does not support investigating research children; use the matching remote workbranch");
   }

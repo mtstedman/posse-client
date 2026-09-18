@@ -368,6 +368,7 @@ export class FixRole extends BaseRole {
     if (ctx.promptState) ctx.promptState.taskInstructions = instructions;
     const prompt = await buildPromptAsync(ctx.packet, instructions, {
       providerName: ctx.providerName,
+      projectDir: this.context?.projectDir || null,
     });
     if (ctx?.promptArtifact && !ctx.promptArtifact.stored && job) {
       storeArtifact({

@@ -280,7 +280,7 @@ export class AssessmentHandoffAdapter {
       return { handled: true };
     }
 
-    const readiness = assessmentSource.kind === "commit"
+    const readiness = (assessmentSource.kind === "commit" || assessmentSource.kind === "verified_no_change")
       ? await inspectAssessmentWorktreeReadiness(wtPath)
       : { ready: true };
     if (!readiness.ready) {
@@ -365,11 +365,15 @@ export class AssessmentHandoffAdapter {
       const assessmentCwd = (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
         : (wtPath || worker.projectDir);
+      const assessedCommitHash = assessmentSource.commitHash
+        || (assessmentSource.kind === "verified_no_change"
+          ? String(await gitExecAsync(["rev-parse", "HEAD"], assessmentCwd)).trim()
+          : null);
       const deterministicTestRun = await ensurePostChangeTestReceipt({
         job,
         payload: jobPayloadForAssess,
         cwd: assessmentCwd,
-        commitHash: assessmentSource.commitHash,
+        commitHash: assessedCommitHash,
         attemptId: assessAttempt.attempt.id,
         cleanupWorktree: wtPath
           ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
@@ -411,7 +415,7 @@ export class AssessmentHandoffAdapter {
       const configuredVerification = await ensureConfiguredVerification(worker, {
         job,
         attemptId: assessAttempt.attempt.id,
-        assessedCommitHash: assessmentSource.commitHash,
+        assessedCommitHash,
         // Configured repository verification has the same root-relative
         // contract in attached and recovery assessment paths. Artifact
         // inspection may use output_root, but the verifier must not.
@@ -522,6 +526,7 @@ export class AssessmentHandoffAdapter {
           priorAssessmentFindings,
           routedProviderName: providerName,
           cwd: assessmentCwd,
+          projectDir: worker.projectDir,
           assessmentContext,
         },
       });
@@ -538,7 +543,7 @@ export class AssessmentHandoffAdapter {
         return { handled: true, currentAttemptId: assessAttempt.attempt.id };
       }
       const emitFn = (msg) => worker.emit(job.id, msg);
-      processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+      processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
       const freshJob = getJob(job.id);
       if (freshJob?.status === "succeeded") {
         setAssessmentLifecycle(job.id, "assessment_passed", { completed: true });

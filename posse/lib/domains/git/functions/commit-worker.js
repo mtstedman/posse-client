@@ -1,5 +1,12 @@
 import { isMainThread, parentPort, workerData } from "worker_threads";
-import { gitCommitAll } from "./commit-scope.js";
+import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
+
+// The parent's runtime paths (including any database override an MCP server
+// process runs under) must be in place before any module in this worker can
+// open a database.
+if (!isMainThread) setRuntimePathOverrides(workerData?.runtimePathOverrides || null);
+
+const { gitCommitAll } = await import("./commit-scope.js");
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { GIT_MUTATE_ROUTE } from "../../../catalog/binary.js";
@@ -74,6 +81,10 @@ async function runCommit() {
   // The parent may terminate the worker immediately after its terminal frame,
   // so child-process teardown must finish before that frame is observable.
   try { await nativeBinaries.disposeAll(); } catch { /* teardown is best effort */ }
+  try {
+    const { closeDb } = await import("../../../shared/storage/functions/index.js");
+    closeDb();
+  } catch { /* the worker never opened a database */ }
   post(outcome);
 }
 

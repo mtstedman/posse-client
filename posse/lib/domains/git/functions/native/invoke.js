@@ -18,6 +18,7 @@ import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../sh
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 import { getLivePairingState } from "../../../pairing/functions/state.js";
+import { TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS, TEAM_GRANT_PINNED_GIT_METHODS } from "../../../../catalog/team.js";
 
 export { GIT_NATIVE_PROTOCOL } from "../../../../catalog/binary.js";
 
@@ -514,10 +515,27 @@ export function gitNativeMethodRoute(method, payload = null) {
   return GIT_READ_ONLY_METHODS.has(command) ? GIT_READ_ROUTE : GIT_MUTATE_ROUTE;
 }
 
-/** The local native boundary requires WI pins for every mutation in an
- * opted-in Session. Remote validates the revision/JTI and signed scope. */
+/** Whether a native method publishes or commits, and so must carry WI pins
+ * in an opted-in Session. Local coordination and sync mutations do not: they
+ * run under the Session's coordination-only pulse, whose empty write scope
+ * the binary enforces on exactly these methods. */
+function teamGrantPinnedMethod(method, payload) {
+  if (TEAM_GRANT_PINNED_GIT_METHODS.includes(method)) return true;
+  if (method !== "git.exec" && method !== "git.repo.exec") return false;
+  const args = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? /** @type {Record<string, unknown>} */ (payload).args : null;
+  return !Array.isArray(args)
+    || args.some((arg) => TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS.includes(String(arg)));
+}
+
+/** The local native boundary requires WI pins for every publishing mutation
+ * in an opted-in Session. Remote validates the revision/JTI and signed scope
+ * at pulse time, and the binary refuses the same methods under the
+ * coordination-only pulse, so this is the first of three gates, not the only
+ * one. */
 function assertTeamWorkItemContext(method, payload, opts) {
   if (gitNativeMethodRoute(method, payload) !== GIT_MUTATE_ROUTE) return;
+  if (!teamGrantPinnedMethod(method, payload)) return;
   const state = getLivePairingState();
   if (state?.phase !== "active" || state.submission_approval_enabled !== 1) return;
   const pins = opts?.workItemContext;

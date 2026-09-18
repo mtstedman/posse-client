@@ -484,6 +484,9 @@ export function createPairingRemoteClient({
     handoffTeamGrant: (token, body) => request("team_grant_handoff", {
       token, body, path: "grants/handoff",
     }),
+    setTeamGrantState: (token, body) => request("team_grant_state", {
+      token, body, path: "grants/state",
+    }),
     setTeamSubmissionPolicy: (token, body) => request("team_policy", {
       token, body, path: "submission-policy",
     }),

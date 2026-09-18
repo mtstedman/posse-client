@@ -79,10 +79,20 @@ export function permitsGrantPath(write, path) {
  * constrains nothing here either. The signed grant still has to name every
  * path explicitly, so this can widen no actual write. */
 export function permitsCeilingPath(write, path) {
-  if (!write || !cleanScopePath(path)) return false;
-  if (write.unknown === true) return true;
-  if (write.unknown !== false) return false;
+  if (!cleanScopePath(path)) return false;
+  if (!boundedCeiling(write)) return true;
   return writeSetPermits(write, path);
+}
+
+/** Only a ceiling that names its bounds constrains anything. A host's Remote
+ * principal never carries a scope set, the local column defaults to `{}`, and
+ * a member between enrollment and its first heartbeat has the same empty view;
+ * none of those is a ceiling of zero paths. Remote spells "unrestricted" as
+ * `unknown: true`, and both spellings must agree, or every host publication
+ * is denied as out of scope while the signed grant names each file. */
+export function boundedCeiling(write) {
+  return !!write && typeof write === "object" && write.unknown === false
+    && Array.isArray(write.files) && Array.isArray(write.roots);
 }
 
 /** The relay cannot see Git objects. Derive complete paths from both the source
@@ -111,7 +121,7 @@ export function verifyTeamGitScope({
     const grantWrite = effectivePermissions?.write;
     const memberWrite = memberScope?.write;
     const denied = paths.filter((path) => !permitsGrantPath(grantWrite, path)
-      || (memberScope && !permitsCeilingPath(memberWrite, path)));
+      || !permitsCeilingPath(memberWrite, path));
     return denied.length
       ? { ok: false, reason: "out_of_scope", paths: denied.slice(0, 20) }
       : { ok: true, paths };

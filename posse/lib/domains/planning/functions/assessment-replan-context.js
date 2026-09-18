@@ -89,6 +89,9 @@ export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", di
     "Preserve completed work and work awaiting assessment. Do not repeat it unless the reported defect requires a change there. Keep all remaining original requirements covered.",
     "Use the standard planner's read-only tools and terminal plan output. No researcher dispatch is available on this loopback.",
     buildAssessmentReplanEvidenceBlock(payload, { researchCwd: readRoot, diffBlock, cwdError, readerLabel: "Planner" }),
+    Array.isArray(payload.assessment_evidence_selectors) && payload.assessment_evidence_selectors.length > 0
+      ? "ASSESSOR EVIDENCE: the assessor's cited selectors are issued to you as traversal refs in the ref map; open them with traverse_ref before re-scoping the affected region."
+      : "",
     promptLiteral("ASSESSOR REASONS", payload.replan_reason || "(not recorded)"),
     promptLiteral("FAILED TASK", payload.original_task_spec || "(not recorded)"),
     promptLiteral("FAILED TASK SUCCESS CRITERIA", JSON.stringify(payload.original_success_criteria || [])),

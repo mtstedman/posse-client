@@ -501,7 +501,10 @@ function _extractOriginalPayloadContext(job) {
   };
 }
 
-function _assessorEvidenceSelectors(claims = []) {
+// Evidence selectors the assessor cited for its defect claims. The fix route
+// forwards them so the fixer opens the exact lines; the replan route forwards
+// the same set so the replanning planner does not rediscover them.
+export function assessorEvidenceSelectors(claims = []) {
   const selectors = [];
   const seen = new Set();
   for (const claim of Array.isArray(claims) ? claims : []) {
@@ -519,7 +522,7 @@ function _assessorEvidenceSelectors(claims = []) {
 }
 
 function _fixHashRefPacket(originalPacket, assessorClaims = []) {
-  const selectors = _assessorEvidenceSelectors(assessorClaims);
+  const selectors = assessorEvidenceSelectors(assessorClaims);
   if (selectors.length === 0) return originalPacket || null;
   const source = originalPacket && typeof originalPacket === "object" ? originalPacket : {};
   const normalized = normalizeHashRefHandoffPacket({

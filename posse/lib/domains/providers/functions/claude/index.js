@@ -49,7 +49,7 @@ import {
 } from "./session-handles.js";
 import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvider } from "../shared/turns.js";
 import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
-import { liveScopeWaitPausesProviderStall, resolveProviderStallTimeout } from "../shared/stall-timeout.js";
+import { providerStallPaused, resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { classifyProviderError } from "../shared/api-resilience.js";
 import {
@@ -785,7 +785,7 @@ export async function callProvider(promptText, {
             directOutput,
             color,
             startTime,
-            pauseTimeoutWhile: () => liveScopeWaitPausesProviderStall(jobId),
+            pauseTimeoutWhile: () => providerStallPaused({ jobId, agentCallId }),
           }).runProviderCall(finalPrompt);
           const mcpCleanup = cleanupSetupFiles({
             deterministicReadMcp,
@@ -1224,7 +1224,7 @@ export async function callProvider(promptText, {
     let heartbeat;
     if (directOutput) {
       heartbeat = setInterval(() => {
-        if (liveScopeWaitPausesProviderStall(jobId)) {
+        if (providerStallPaused({ jobId, agentCallId })) {
           lastActivity = Date.now();
           return;
         }
@@ -1245,7 +1245,7 @@ export async function callProvider(promptText, {
       }, 500);
     } else if (onLine) {
       heartbeat = setInterval(() => {
-        if (liveScopeWaitPausesProviderStall(jobId)) {
+        if (providerStallPaused({ jobId, agentCallId })) {
           lastActivity = Date.now();
           return;
         }
@@ -1262,7 +1262,7 @@ export async function callProvider(promptText, {
       // Silent mode (no display, no direct output) — still need stall detection
       // or the process can hang forever with no way to recover.
       heartbeat = setInterval(() => {
-        if (liveScopeWaitPausesProviderStall(jobId)) {
+        if (providerStallPaused({ jobId, agentCallId })) {
           lastActivity = Date.now();
           return;
         }

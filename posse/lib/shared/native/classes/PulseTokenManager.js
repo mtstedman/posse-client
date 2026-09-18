@@ -104,6 +104,26 @@ export class PulseTokenManager {
     this._refreshes.clear();
     for (const timer of this._routeHeartbeatTimers.values()) clearTimeout(timer);
     this._routeHeartbeatTimers.clear();
+    this.#pruneRouteHeartbeatSpecs();
+  }
+
+  /** Drop route specs the current session context can no longer mint: a
+   * WI-scoped spec is meaningless outside its Session, and would throw on
+   * every base refresh and, because the restore loop is sequential, take
+   * every later route's warm grant with it. */
+  #pruneRouteHeartbeatSpecs() {
+    for (const [key, spec] of this._routeHeartbeatSpecs) {
+      if (!this.#specMintableInSession(spec)) this._routeHeartbeatSpecs.delete(key);
+    }
+  }
+
+  #specMintableInSession(spec) {
+    if (spec.requiredRoute !== GIT_MUTATE_ROUTE) return true;
+    // A WI-scoped spec belongs to the Session that issued its grant; it is
+    // meaningless once the Session context is gone. Every other spec is
+    // mintable in any context.
+    if (spec.workItemContext) return !!this._sessionContext;
+    return true;
   }
 
   /**
@@ -131,12 +151,12 @@ export class PulseTokenManager {
       }
       return null;
     }
-    if (value == null) {
-      if (this._sessionContext?.requireWorkItemGrant) {
-        throw pulseError("POSSE_PULSE_WORK_ITEM_REQUIRED", "this Session requires a work-item grant for git mutation");
-      }
-      return null;
-    }
+    // A mutate pulse without a work-item grant is still minted in a
+    // grant-gated Session: Remote scopes it to coordination only (an empty
+    // write scope), so it can sync the trunk, set up worktrees and move claim
+    // refs, while the binary refuses every commit and publication path under
+    // it. Publication mints its own pulse under the verified grant.
+    if (value == null) return null;
     if (!this._sessionContext) {
       throw pulseError("POSSE_PULSE_WORK_ITEM_SESSION_REQUIRED", "work-item grants require a Session context");
     }
@@ -436,21 +456,34 @@ export class PulseTokenManager {
 
   async #restoreRouteHeartbeats() {
     if (!this._heartbeatRunning || this._routeHeartbeatSpecs.size === 0) return;
-    const specs = [...this._routeHeartbeatSpecs.values()];
-    for (const spec of specs) {
+    const specs = [...this._routeHeartbeatSpecs.entries()];
+    let firstFailure = null;
+    for (const [specKey, spec] of specs) {
       const cached = this._cache.get(spec.cacheKey);
       if (cached?.envelope && this.now() < cached.refreshAt && this.now() < cached.expiresAt) {
         this.#scheduleRouteHeartbeat(routeHeartbeatSpecKey(spec.requiredRoute, normalizedNativeIdentity(spec.nativePackage, spec.nativeVersion), spec.workItemContext), cached);
         continue;
       }
-      await this.getPulseEnvelope({
-        refresh: true,
-        requiredRoute: spec.requiredRoute,
-        nativePackage: spec.nativePackage,
-        nativeVersion: spec.nativeVersion,
-        workItemContext: spec.workItemContext,
-      });
+      try {
+        await this.getPulseEnvelope({
+          refresh: true,
+          requiredRoute: spec.requiredRoute,
+          nativePackage: spec.nativePackage,
+          nativeVersion: spec.nativeVersion,
+          workItemContext: spec.workItemContext,
+        });
+      } catch (error) {
+        // One route's failure must not skip the routes after it. A spec the
+        // session can no longer mint is retired here; anything else (a
+        // transport blip, a rejected grant) is retried with the base pulse.
+        if (NON_RETRYABLE_ROUTE_SPEC_CODES.has(error?.code)) {
+          this._routeHeartbeatSpecs.delete(specKey);
+          continue;
+        }
+        firstFailure ||= error;
+      }
     }
+    if (firstFailure) throw firstFailure;
   }
 
   /** @param {string} value @param {string} [operation] */
@@ -758,6 +791,15 @@ function normalizedNativeIdentity(nativePackage, nativeVersion) {
   }
   return Object.freeze({ package: packageName, version });
 }
+
+// Pulse errors that say the spec itself can never be minted in the current
+// session, as opposed to a heartbeat that failed this time.
+const NON_RETRYABLE_ROUTE_SPEC_CODES = new Set([
+  "POSSE_PULSE_WORK_ITEM_REQUIRED",
+  "POSSE_PULSE_WORK_ITEM_ROUTE_INVALID",
+  "POSSE_PULSE_WORK_ITEM_SESSION_REQUIRED",
+  "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED",
+]);
 
 function routeHeartbeatSpecKey(route, nativeIdentity, workItemContext = null) {
   return `${String(route || "").trim()}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}${workItemContextCacheKey(workItemContext)}`;

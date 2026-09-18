@@ -1,3 +1,5 @@
+import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
+import { repositoryID } from "../../automation/functions/paths.js";
 import { RemotePromptClient } from "./RemotePromptClient.js";
 import {
   getPromptBundleVersion,
@@ -76,6 +78,7 @@ export class RemoteComposer {
   constructor({
     client = null,
     clientOptions = {},
+    automationClient = null,
     renderEnrichment = renderLocalEnrichment,
     reloadPromptBundle = loadRemotePromptBundle,
     readSetting = getSetting,
@@ -90,6 +93,7 @@ export class RemoteComposer {
       maxRetries: 0,
       ...clientOptions,
     });
+    this.automationClient = automationClient || new AutomationOwnerClient({ timeoutMs: 250 });
     this.renderEnrichment = renderEnrichment;
     this.reloadPromptBundle = typeof reloadPromptBundle === "function" ? reloadPromptBundle : loadRemotePromptBundle;
     this.readSetting = typeof readSetting === "function" ? readSetting : getSetting;
@@ -101,15 +105,24 @@ export class RemoteComposer {
 
   async composePrompt(packet, instructions, {
     providerName = null,
+    projectDir = null,
     maxPromptChars = null,
     maxContextChars = null,
   } = {}) {
     const localPolicyBeforeRemote = localPolicyCeiling(packet?.tool_policy);
+    // Worker-owned root, not packet.cwd (which may be a worktree) or task capabilities.
+    // Gate creation runs concurrently and performs the same owner-scoped check.
+    const customToolsAvailable = !!projectDir
+      && String(providerName || "").toLowerCase().replaceAll("_", "-") !== "posse-local"
+      && await this.automationClient.hasAvailableTools({
+        scope: "repository", repo_id: repositoryID(projectDir), role: packet?.recipient,
+      });
     const request = buildRemoteCompileRequest(packet, instructions, {
       providerName,
       maxPromptChars,
       maxContextChars,
       includeFinalPrompt: true,
+      customToolsAvailable: customToolsAvailable === true,
     });
     const started = this.now();
     const compiledResponse = await this.client.compile(request);

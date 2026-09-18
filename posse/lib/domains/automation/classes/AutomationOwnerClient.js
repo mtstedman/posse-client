@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { automationSocketPath, ensureAutomationOperatorToken } from "../functions/paths.js";
 
+import { AUTOMATION_MAX_RESPONSE_BYTES } from "../../../catalog/custom-tools.js";
+
 const DEFAULT_TIMEOUT_MS = 5000;
 const testSupervisors = new Set();
 let testCleanupInstalled = false;
@@ -71,7 +73,7 @@ function requestFrame(socketPath, payload, timeoutMs) {
     socket.once("connect", () => socket.write(JSON.stringify(payload) + "\n"));
     socket.on("data", chunk => {
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > 1024 * 1024) return finish(Object.assign(new Error("Automation owner response is too large"), { code: "owner_protocol_error" }));
+      if (buffer.length > AUTOMATION_MAX_RESPONSE_BYTES) return finish(Object.assign(new Error("Automation owner response is too large"), { code: "owner_protocol_error" }));
       const newline = buffer.indexOf(10); if (newline < 0) return;
       try {
         const response = JSON.parse(buffer.subarray(0, newline).toString("utf8"));

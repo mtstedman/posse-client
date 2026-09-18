@@ -7,6 +7,7 @@ import { permitsGrantPath } from "./team-scope.js";
 import {
   TEAM_FILE_WRITE_TOOLS,
   TEAM_GRANT_BOUND_TRANSPORTS,
+  TEAM_MANAGED_PROVIDERS,
   TEAM_READ_TOOLS,
 } from "../../../catalog/team.js";
 import { getVerifiedTeamGrantForWorkItem } from "./team-submissions.js";
@@ -45,11 +46,20 @@ export function teamManagedToolAdmitted(suite, name, {
     && Number(workItemId) > 0;
 }
 
+export const TEAM_PROVIDER_WRITE_BOUNDARY_ERROR_CODE = "POSSE_TEAM_PROVIDER_WRITE_BOUNDARY_UNAVAILABLE";
+
+/** Refuse a provider adapter that can write files outside the mediated tool
+ * runtime. This is a configuration fact, not a transient condition: retrying
+ * the call, escalating the tier, or falling back to another runtime of the
+ * same adapter cannot change it, so the error is classified as a permanent
+ * provider configuration error and the policy setter refuses to enable
+ * approval mode while any role is configured this way. */
 export function assertTeamManagedProvider(providerName) {
   if (!teamApprovalModeActive()) return;
-  if (["openai", "grok"].includes(String(providerName || "").toLowerCase())) return;
-  const error = new Error("Team approval mode requires a mediated tool-only provider (OpenAI or Grok)");
-  error.code = "POSSE_TEAM_PROVIDER_WRITE_BOUNDARY_UNAVAILABLE";
+  const provider = String(providerName || "").toLowerCase();
+  if (TEAM_MANAGED_PROVIDERS.includes(provider)) return;
+  const error = new Error(`Team approval mode requires a mediated tool-only provider (${TEAM_MANAGED_PROVIDERS.join(" or ")}); configured provider ${provider || "(unset)"} can write files natively`);
+  error.code = TEAM_PROVIDER_WRITE_BOUNDARY_ERROR_CODE;
   throw error;
 }
 

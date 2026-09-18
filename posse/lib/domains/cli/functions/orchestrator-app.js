@@ -2726,6 +2726,7 @@ export async function main() {
   if (rejectUnknownFlags()) return;
   try {
     parseScopeMode();
+    parseWorkItemIdsFlagFromArgv();
   } catch (error) {
     console.error(error.message);
     process.exitCode = 2;

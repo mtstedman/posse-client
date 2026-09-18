@@ -7,6 +7,8 @@
 
 import {
   TEAM_ATTENTION_FAILURE_REASONS,
+  TEAM_FATAL_FAILURE_REASONS,
+  TEAM_PARKED_CANDIDATE_REASONS,
   TEAM_TRANSIENT_FAILURE_REASONS,
 } from "../../../catalog/team.js";
 import {
@@ -56,16 +58,43 @@ function sharedTrunkCapabilities(projectDir) {
   return (testOverrides?.capabilities || getSharedTrunkNativeCapabilities)(projectDir);
 }
 
-function sharedTrunkFetch(args) {
-  return (testOverrides?.fetch || fetchSharedTrunkNative)(args);
+/** Native options for one trunk call. In an approval-managed Session every
+ * trunk mutation is minted under the work item's verified grant; outside one
+ * the options stay empty and the call behaves exactly as before. */
+function nativeTrunkOptions(workItemContext) {
+  return workItemContext ? { workItemContext } : {};
 }
 
-function sharedTrunkFastForward(args) {
-  return (testOverrides?.fastForward || ffUpdateSharedTrunkNative)(args);
+function sharedTrunkFetch(args, workItemContext = null) {
+  return (testOverrides?.fetch || fetchSharedTrunkNative)(args, nativeTrunkOptions(workItemContext));
 }
 
-function sharedTrunkPush(args) {
-  return (testOverrides?.push || pushSharedTrunkNative)(args);
+function sharedTrunkFastForward(args, workItemContext = null) {
+  return (testOverrides?.fastForward || ffUpdateSharedTrunkNative)(args, nativeTrunkOptions(workItemContext));
+}
+
+function sharedTrunkPush(args, workItemContext = null) {
+  return (testOverrides?.push || pushSharedTrunkNative)(args, nativeTrunkOptions(workItemContext));
+}
+
+/** The verified grant pins for a work item's trunk publication, or null when
+ * the Session is not approval-managed. The native trunk methods are mutations
+ * on both sides of the boundary (posse-bin classifies git.trunk.* as Mutate,
+ * and Remote refuses a session-bound mutate pulse without a grant), so without
+ * these pins every fetch in an opted-in Session fails before the publication
+ * gate is reached. A grant that cannot be resolved is a Team deferral, not a
+ * thrown native error: the completed work is kept and the merge re-attempts
+ * once a valid grant exists. */
+async function teamMergeContext(args) {
+  if (testOverrides?.teamMergeContext) return testOverrides.teamMergeContext(args);
+  const { getLivePairingState } = await import("../../pairing/functions/state.js");
+  if (getLivePairingState()?.submission_approval_enabled !== 1) return { ok: true, workItemContext: null };
+  const { getVerifiedTeamGrantForWorkItem } = await import("../../pairing/functions/team-submissions.js");
+  const verified = await getVerifiedTeamGrantForWorkItem(args.workItemId, { projectDir: args.projectDir, fresh: true });
+  if (!verified?.ok) {
+    return { ok: false, team: true, reason: verified?.reason || "team_grant_unavailable", message: verified?.message };
+  }
+  return { ok: true, workItemContext: verified.workItemContext };
 }
 
 async function teamPublicationGate(args) {
@@ -199,6 +228,16 @@ async function runtimeSharedTrunkConfig(projectDir) {
  * the recovery arms must never read it as license to strict-reset a possibly
  * published candidate — so those throw a typed error instead.
  */
+function commitExists(projectDir, sha) {
+  if (!SHA_RE.test(String(sha || ""))) return false;
+  try {
+    execGit(["cat-file", "-e", `${sha}^{commit}`], projectDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isAncestor(projectDir, ancestor, descendant) {
   if (!SHA_RE.test(String(ancestor || "")) || !SHA_RE.test(String(descendant || ""))) return false;
   try {
@@ -421,6 +460,23 @@ function recordPublicationHealth(config, unresolved = []) {
  * its completed passes -- but must be reported as its own blocked state rather
  * than an ordinary "shared trunk busy" retry. It survived the deterministic
  * repair, so the signed material itself does not verify. */
+// The candidate already appears on the trunk but its Team publication could
+// not be proven this attempt. No proof reason means the work is bad: carry
+// the same ambiguity flags the ancestry path uses so the journal row retries
+// rather than finalizing a work item whose code is already published.
+function teamProofUnavailable(proof, operation) {
+  return {
+    ok: false,
+    team: true,
+    unavailable: true,
+    operational: true,
+    publishUnknown: operation.phase === "publish_unknown",
+    reason: proof?.reason || "team_publication_unverified",
+    ...(proof?.message ? { message: proof.message } : {}),
+    operation,
+  };
+}
+
 export function sharedTrunkTeamResultNeedsAttention(result) {
   if (!result || result.ok === true) return false;
   return TEAM_ATTENTION_FAILURE_REASONS.includes(String(result.reason || ""));
@@ -430,6 +486,10 @@ export function isTransientSharedTrunkMergeResult(result) {
   if (!result || result.ok === true || result.sharedTrunk !== true) return false;
   if (result.skipped || result.unavailable || result.publishUnknown || result.resetPending) return true;
   const reason = String(result.reason || "");
+  // Team gate and proof results defer by shape: only a reason registered as
+  // fatal means the candidate is wrong. A parked github-pr submission, a
+  // lagging policy view, or an unreachable Remote must not discard passes.
+  if (result.team === true) return !TEAM_FATAL_FAILURE_REASONS.includes(reason);
   return [
     "merge_in_progress",
     "unresolved_shared_trunk_operation",
@@ -490,7 +550,7 @@ export function handleSharedTrunkAdvance(projectDir, {
   return { advanced: true, atlas, paths };
 }
 
-async function fetchRemote(projectDir, config, { includeClaims = false, claimAfter = null } = {}) {
+async function fetchRemote(projectDir, config, { includeClaims = false, claimAfter = null, workItemContext = null } = {}) {
   let envelope;
   try {
     envelope = await sharedTrunkFetch({
@@ -499,7 +559,7 @@ async function fetchRemote(projectDir, config, { includeClaims = false, claimAft
       branch: config.branch,
       includeClaims: includeClaims === true,
       ...(includeClaims === true && claimAfter ? { claimAfter } : {}),
-    });
+    }, workItemContext);
   } catch (err) {
     return { ok: false, unavailable: true, operational: true, reason: err?.code || "fetch_failed", error: err };
   }
@@ -594,6 +654,21 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
           operations.push({ operation, recovered: "reset_failed" });
           continue;
         }
+        // A Team-parked candidate was submitted by OID and is awaiting the
+        // originator's decision or the host's provider merge. Free the trunk
+        // checkout for other operations, but keep the candidate identity so
+        // the next attempt pushes the approved OID rather than re-merging a
+        // new one that would need a new approval.
+        if (TEAM_PARKED_CANDIDATE_REASONS.includes(operation.lastErrorCode)
+          && operation.baseSha === observed.remoteSha) {
+          operation = transition(operation, {
+            phase: "deferred",
+            candidateSha: operation.candidateSha,
+            lastErrorCode: operation.lastErrorCode,
+          });
+          operations.push({ operation, recovered: "team_parked" });
+          continue;
+        }
         const resolvedCode = pendingMarker === "rejection_reset_pending"
           ? "push_rejected_retry"
           : pendingMarker === "candidate_gate_reset_pending"
@@ -666,9 +741,10 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   claimAfter = null,
   allowOperationId = null,
   provenance = null,
+  workItemContext = null,
 } = {}) {
   recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch) });
-  const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter });
+  const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter, workItemContext });
   if (!fetched.ok) {
     if (fetched.unavailable) {
       recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch), unavailable: true });
@@ -762,7 +838,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       remote: config.remote,
       branch: config.branch,
       expectedLocalOid: oldSha,
-    });
+    }, workItemContext);
   } catch (err) {
     recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha, unavailable: true });
     return { ok: false, unavailable: true, operational: true, config, fetchedClaims: fetched.fetchedClaims, reason: err?.code || "ff_update_failed", error: err };
@@ -892,7 +968,7 @@ function typedPushRejection(result) {
     || ["rejected", "rejected_nonff", "non_fast_forward", "stale_expected_remote"].includes(status);
 }
 
-async function strictResetRejected(projectDir, config, operation, remoteOid = operation.baseSha) {
+async function strictResetRejected(projectDir, config, operation, remoteOid = operation.baseSha, workItemContext = null) {
   let envelope;
   try {
     envelope = await (testOverrides?.resetRejected || resetRejectedSharedTrunkNative)({
@@ -901,7 +977,7 @@ async function strictResetRejected(projectDir, config, operation, remoteOid = op
       branch: config.branch,
       expectedCandidateOid: operation.candidateSha,
       remoteOid,
-    });
+    }, nativeTrunkOptions(workItemContext));
   } catch (err) {
     return { ok: false, reason: err?.code || "reset_rejected_candidate_failed", error: err };
   }
@@ -941,6 +1017,18 @@ export async function mergeToSharedTrunkAsync({
     return { ok: false, deferred: true, sharedTrunk: true, unavailable: true, reason: runtime.reason, message: "Shared-trunk native capability is unavailable" };
   }
   const config = runtime.config;
+  const team = await teamMergeContext({ projectDir, workItemId: Number(workItemId) });
+  if (!team.ok) {
+    const blocked = {
+      ...team,
+      ok: false,
+      sharedTrunk: true,
+      reason: team.reason || "team_grant_unavailable",
+      message: team.message || `Shared-trunk publication requires a verified Team work-item grant (${team.reason || "team_grant_unavailable"})`,
+    };
+    return { ...blocked, deferred: isTransientSharedTrunkMergeResult(blocked) };
+  }
+  const workItemContext = team.workItemContext || null;
 
   const coordinated = await underMergeLock(() => withWorktreeLockAsync(projectDir, projectDir, async () => {
     const sourceSha = refSha(projectDir, branch);
@@ -951,6 +1039,7 @@ export async function mergeToSharedTrunkAsync({
     let sync = await syncSharedTrunkAlreadyLocked(projectDir, {
       config,
       allowOperationId: existing?.operationId || null,
+      workItemContext,
     });
     if (!sync.ok) return { ...sync, message: `Shared trunk synchronization failed: ${sync.reason || "unknown synchronization error"}` };
     if (existing) {
@@ -978,6 +1067,24 @@ export async function mergeToSharedTrunkAsync({
     // synchronized head before creating a new candidate/trailer, and grant a
     // resumed deferral the full retry budget — the persisted attempt would
     // otherwise make push_retry_exhausted permanent for this branch tip.
+    // A deferred row that still carries a Team-parked candidate resumes that
+    // exact candidate when its base and source are unchanged and the object is
+    // still present: the trunk checkout no longer holds it, but the CAS push
+    // publishes by OID and the candidate content was validated before it was
+    // parked. Anything else drops the stale candidate before rebasing.
+    let reusedParkedCandidate = false;
+    if (operation.phase === "deferred" && operation.candidateSha) {
+      const reusable = TEAM_PARKED_CANDIDATE_REASONS.includes(operation.lastErrorCode)
+        && operation.baseSha === baseSha
+        && operation.sourceSha === sourceSha
+        && commitExists(projectDir, operation.candidateSha);
+      if (reusable) {
+        reusedParkedCandidate = true;
+        operation = transition(operation, { phase: "candidate", lastErrorCode: null });
+      } else {
+        operation = transition(operation, { phase: "deferred", candidateSha: null });
+      }
+    }
     if (["intent", "deferred"].includes(operation.phase)
       && !operation.candidateSha
       && (operation.baseSha !== baseSha || operation.attempt > 0)) {
@@ -1003,7 +1110,7 @@ export async function mergeToSharedTrunkAsync({
     const retries = Math.max(0, Number(config.pushRetryMax) || 0);
     for (let attempt = operation.attempt; attempt <= retries; attempt += 1) {
       if (operation.phase === "candidate" || operation.phase === "publish_unknown") {
-        const observed = await fetchRemote(projectDir, config);
+        const observed = await fetchRemote(projectDir, config, { workItemContext });
         if (!observed.ok) return { ...observed, operation, message: "Could not reconcile prior shared-trunk publication" };
         let landed = false;
         if (operation.candidateSha) {
@@ -1026,7 +1133,7 @@ export async function mergeToSharedTrunkAsync({
         }
         if (landed) {
           const proof = await teamPublishedProof({ projectDir, operation, observedOid: observed.remoteSha });
-          if (!proof?.ok) return { ok: false, reason: proof?.reason || "team_publication_unverified", operation };
+          if (!proof?.ok) return teamProofUnavailable(proof, operation);
           handleSharedTrunkAdvance(projectDir, {
             oldSha: operation.baseSha,
             newSha: observed.remoteSha,
@@ -1068,14 +1175,17 @@ export async function mergeToSharedTrunkAsync({
         operation = transition(operation, { phase: "candidate", candidateSha, attempt, lastErrorCode: null });
       }
 
-      const validation = await validateCandidate({ pushBranch: config.branch, effectiveRemote: config.remote });
+      const validation = reusedParkedCandidate
+        ? { ok: true, reusedParkedCandidate: true }
+        : await validateCandidate({ pushBranch: config.branch, effectiveRemote: config.remote });
+      reusedParkedCandidate = false;
       if (!validation?.ok) {
         const capturedCandidate = operation.candidateSha;
         operation = transition(operation, {
           phase: "candidate",
           lastErrorCode: "candidate_gate_reset_pending",
         });
-        const gateFetch = await fetchRemote(projectDir, config);
+        const gateFetch = await fetchRemote(projectDir, config, { workItemContext });
         if (!gateFetch.ok) {
           recordPublicationHealth(config, [operation]);
           return {
@@ -1095,7 +1205,7 @@ export async function mergeToSharedTrunkAsync({
         const reset = await strictResetRejected(projectDir, config, {
           ...operation,
           candidateSha: capturedCandidate,
-        }, gateFetch.remoteSha);
+        }, gateFetch.remoteSha, workItemContext);
         operation = transition(operation, reset.ok ? {
           phase: "deferred",
           candidateSha: null,
@@ -1118,7 +1228,7 @@ export async function mergeToSharedTrunkAsync({
       // rebuild locally on top of it before attempting a leased push. The CAS
       // rejection path below remains the final guard for the smaller race
       // between this fetch and the push itself.
-      const prePushFetch = await fetchRemote(projectDir, config);
+      const prePushFetch = await fetchRemote(projectDir, config, { workItemContext });
       if (!prePushFetch.ok) {
         recordPublicationHealth(config, [operation]);
         return { ...prePushFetch, operation, message: "Could not refresh shared trunk before publication" };
@@ -1142,7 +1252,7 @@ export async function mergeToSharedTrunkAsync({
         }
         if (landed) {
           const proof = await teamPublishedProof({ projectDir, operation, observedOid: prePushFetch.remoteSha });
-          if (!proof?.ok) return { ok: false, reason: proof?.reason || "team_publication_unverified", operation };
+          if (!proof?.ok) return teamProofUnavailable(proof, operation);
           handleSharedTrunkAdvance(projectDir, {
             oldSha: operation.baseSha,
             newSha: prePushFetch.remoteSha,
@@ -1176,7 +1286,7 @@ export async function mergeToSharedTrunkAsync({
         const reset = await strictResetRejected(projectDir, config, {
           ...operation,
           candidateSha: capturedCandidate,
-        }, prePushFetch.remoteSha);
+        }, prePushFetch.remoteSha, workItemContext);
         if (!reset.ok) {
           recordPublicationHealth(config, [operation]);
           return {
@@ -1198,7 +1308,7 @@ export async function mergeToSharedTrunkAsync({
           operation = transition(operation, { phase: "deferred", lastErrorCode: "push_retry_exhausted" });
           return { ok: false, deferred: true, reason: "push_retry_exhausted", operation };
         }
-        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId });
+        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId, workItemContext });
         if (!sync.ok) return { ...sync, operation };
         baseSha = sync.newSha || refSha(projectDir, config.branch);
         operation = transition(operation, {
@@ -1229,6 +1339,7 @@ export async function mergeToSharedTrunkAsync({
         return {
           ...approval,
           ok: false,
+          team: true,
           operation,
           sharedTrunk: true,
           message: approval?.message || "Team submission requires originator approval",
@@ -1243,7 +1354,7 @@ export async function mergeToSharedTrunkAsync({
           branch: config.branch,
           expectedRemoteOid: operation.expectedRemoteSha,
           newOid: operation.candidateSha,
-        });
+        }, approval?.workItemContext || workItemContext);
       } catch (err) {
         operation = transition(operation, { phase: "publish_unknown", lastErrorCode: err?.code || "push_operational_failure" });
         recordPublicationHealth(config, [operation]);
@@ -1261,7 +1372,7 @@ export async function mergeToSharedTrunkAsync({
           operation_id: operation.operationId,
           attempt,
         }, Number(workItemId));
-        const rejectedFetch = await fetchRemote(projectDir, config);
+        const rejectedFetch = await fetchRemote(projectDir, config, { workItemContext });
         if (!rejectedFetch.ok) {
           operation = transition(operation, { phase: "publish_unknown", lastErrorCode: rejectedFetch.reason || "rejection_fetch_failed" });
           recordPublicationHealth(config, [operation]);
@@ -1278,7 +1389,7 @@ export async function mergeToSharedTrunkAsync({
         const reset = await strictResetRejected(projectDir, config, {
           ...operation,
           candidateSha: capturedCandidate,
-        }, rejectedFetch.remoteSha);
+        }, rejectedFetch.remoteSha, workItemContext);
         if (!reset.ok) {
           operation = transition(operation, {
             phase: "publish_unknown",
@@ -1300,7 +1411,7 @@ export async function mergeToSharedTrunkAsync({
           recordPublicationHealth(config, []);
           return { ok: false, deferred: true, reason: "push_retry_exhausted", operation };
         }
-        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId });
+        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId, workItemContext });
         if (!sync.ok) return { ...sync, operation };
         baseSha = sync.newSha || refSha(projectDir, config.branch);
         operation = transition(operation, {

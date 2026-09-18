@@ -50,6 +50,10 @@ export const TEAM_PUBLICATION_MODE = Object.freeze({
   GITHUB_PR: "github-pr",
 });
 
+// Branch protection state the host's provider actuator reports for the
+// shared trunk in github-pr mode.
+export const TEAM_PROTECTION_MODE_GITHUB_PR = "github_pr_protected";
+
 export const TEAM_PUBLICATION_MODES = Object.freeze(
   Object.values(TEAM_PUBLICATION_MODE),
 );
@@ -89,7 +93,48 @@ export const TEAM_FAILURE_REASONS = Object.freeze({
   SIGNED_GRANT_UNCONFIRMED: "signed_grant_unconfirmed",
   SIGNED_GRANT_INVALID: "signed_grant_invalid",
   INVALID_GRANT_RESPONSE: "invalid_grant_response",
+  APPROVAL_DENIED: "approval_denied",
+  PUBLICATION_POLICY_STALE: "team_publication_policy_stale",
+  HOST_PROVIDER_MERGE_REQUIRED: "host_provider_merge_required",
+  SUBMISSION_IDENTITY_INVALID: "team_submission_identity_invalid",
 });
+
+// Submission lifecycle as Remote reports it. The host decides pending rows;
+// approved rows are the only ones a member may publish or a host may merge.
+export const TEAM_SUBMISSION_STATES = Object.freeze({
+  PENDING: "pending",
+  APPROVED: "approved",
+  DENIED: "denied",
+});
+
+// The only Team publication outcomes that mean the candidate itself is wrong
+// or the caller is broken, so re-attempting later cannot succeed. Every other
+// reason a gate or proof can return is a state of the session (approval not
+// yet given, a parked github-pr candidate, a lagging policy view, a Remote or
+// transport failure) and defers with the completed passes preserved. The
+// gate result is tagged `team: true` and classified by this set rather than
+// by an allowlist of transient spellings, so a new reason cannot silently
+// finalize a work item.
+// After these gate outcomes the candidate has already been submitted to
+// Remote (its refs are pushed and pinned by OID) and is waiting on a decision
+// or on the host's provider merge. Reconciliation must keep that candidate
+// OID instead of re-merging a new one on the next attempt: a new squash
+// commit has a new OID, which needs a new submission and a new approval, so
+// the approval that was just given would never converge.
+export const TEAM_PARKED_CANDIDATE_REASONS = Object.freeze([
+  TEAM_FAILURE_REASONS.APPROVAL_PENDING,
+  TEAM_FAILURE_REASONS.APPROVAL_UNAVAILABLE,
+  TEAM_FAILURE_REASONS.HOST_PROVIDER_MERGE_REQUIRED,
+]);
+
+export const TEAM_FATAL_FAILURE_REASONS = Object.freeze([
+  TEAM_FAILURE_REASONS.APPROVAL_DENIED,
+  TEAM_FAILURE_REASONS.SUBMISSION_IDENTITY_INVALID,
+  "out_of_scope",
+  "candidate_parent_mismatch",
+  "empty_submission",
+  "invalid_git_oid",
+]);
 
 // A grant is verified by comparing its signed claims against local session
 // state (branch, repository fingerprint, policy revision) and the local grant
@@ -136,3 +181,24 @@ export const TEAM_TRANSIENT_FAILURE_REASONS = Object.freeze([
 export const TEAM_ATTENTION_FAILURE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.SIGNED_GRANT_INVALID,
 ]);
+
+// Native Git methods that publish or commit and therefore run only under a
+// verified work-item grant in an approval-managed Session. These are exactly
+// the methods whose paths the posse-git binary checks against the pulse's
+// write scope. Every other mutation is local coordination or sync (worktree
+// setup, snapshot notes, trunk fetch and fast-forward, candidate reset, claim
+// and offer refs) and runs under the Session's coordination-only pulse, which
+// Remote mints with an empty write scope so none of those paths can be
+// used to publish. `git.exec` is pinned only when its argv commits or pushes.
+export const TEAM_GRANT_PINNED_GIT_METHODS = Object.freeze([
+  "git.commitScopedTransaction",
+  "git.trunk.push",
+]);
+export const TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS = Object.freeze(["commit", "push"]);
+
+// Provider adapters that execute file edits only through Posse's mediated tool
+// runtime, where a fresh per-call grant can be bound to the exact path. Claude
+// and Codex adapters can expose native shell/patch/file writes that no grant
+// check can follow, so approval mode refuses them for every role: the check
+// is about what the adapter *can* do, not what the role is expected to do.
+export const TEAM_MANAGED_PROVIDERS = Object.freeze(["openai", "grok"]);

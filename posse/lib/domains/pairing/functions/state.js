@@ -89,6 +89,7 @@ export function updatePairingEnrollment(id, {
   addedRemoteName = null,
   addedRemoteUrl = null,
   remoteName = null,
+  remoteUrl = null,
   phase = "active",
   instanceId = null,
   scopeSet = null,
@@ -114,6 +115,7 @@ export function updatePairingEnrollment(id, {
           added_remote_name = COALESCE(?, added_remote_name),
           added_remote_url = COALESCE(?, added_remote_url),
           remote_name = COALESCE(?, remote_name),
+          remote_url = COALESCE(?, remote_url),
           instance_id = COALESCE(?, instance_id),
           scope_set_json = COALESCE(?, scope_set_json),
           compute_policy = COALESCE(?, compute_policy),
@@ -134,7 +136,7 @@ export function updatePairingEnrollment(id, {
           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE id = ?
     `).run(
-      remoteSessionId, relayToken, addedRemoteName, addedRemoteUrl, remoteName,
+      remoteSessionId, relayToken, addedRemoteName, addedRemoteUrl, remoteName, remoteUrl,
       instanceId, scopeSet == null ? null : JSON.stringify(scopeSet), computePolicy,
       integrationPolicy, enrollmentOpen == null ? null : Number(Boolean(enrollmentOpen)),
       baselineOid, originRemoteName, originRemoteUrl, temporaryRepository, closeAction,
