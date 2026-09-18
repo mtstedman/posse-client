@@ -3787,6 +3787,10 @@ export function clearAll() {
       db.prepare(`DELETE FROM source_reaccess_authorizations`).run();
       db.prepare(`DELETE FROM shared_trunk_claim_deferrals`).run();
       db.prepare(`DELETE FROM shared_trunk_merge_operations`).run();
+      // Derived queue-state projection of the retained event log. Its owner
+      // cascades cannot fire while foreign keys are off, and the detached
+      // events above no longer re-project it, so it is dropped outright.
+      db.prepare(`DELETE FROM queue_event_state`).run();
       db.prepare(`DELETE FROM job_attempts`).run();
       db.prepare(`DELETE FROM job_dependencies`).run();
       db.prepare(`DELETE FROM jobs`).run();
