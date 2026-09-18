@@ -298,6 +298,19 @@ function parseEslintFindings(stdout, stderr, cwd) {
   return findings;
 }
 
+// A verifier whose runner binary is missing (no node_modules in a fresh
+// worktree, a package script whose tool is not installed) is a dependency
+// problem, not a product failure. Mirror the other runners' "unavailable"
+// contract so assessment can repair the worktree or defer, instead of
+// failing the change and spawning fix jobs for code that is correct.
+const MISSING_TOOLING_RE = /(?:^|\n)\s*(?:\/bin\/)?sh: (?:\d+: )?[\w@./-]+: (?:command )?not found|(?:^|\n)\s*[\w@./-]+: (?:command )?not found|\bENOENT\b|node_modules missing|Cannot find module ['"]?(?:eslint|typescript|tsc)\b/i;
+
+function missingToolingReason(result) {
+  const text = `${result?.stderr || ""}\n${result?.stdout || ""}\n${result?.error || ""}`;
+  const match = text.match(MISSING_TOOLING_RE);
+  return match ? `dependency_unavailable: ${compact(match[0].trim(), 200)}` : null;
+}
+
 function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   if (targets.length === 0) {
     return { name: "eslint", status: "skipped", reason: "no JS/TS lintable scoped files", targets: [] };
@@ -358,6 +371,19 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   const result = eslint
     ? runProcess(process.execPath, [eslint, "--format", "json", ...targets], cwd)
     : runProcess(invocation.command, invocation.args, cwd);
+  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
+  if (missingTooling) {
+    return {
+      name: "eslint",
+      status: "unavailable",
+      reason: missingTooling,
+      dependency_unavailable: true,
+      targets,
+      command: result.command,
+      durationMs: result.durationMs,
+      failures: [],
+    };
+  }
   const findings = parseEslintFindings(result.stdout, result.stderr, cwd)
     .filter((finding) => finding.severity === "error");
   return {
@@ -806,6 +832,9 @@ function runScopedLint(cwd, files, { typecheckFallback = null } = {}) {
   return {
     name: "lint",
     status,
+    ...(status === "unavailable" && unavailable.some((check) => check.dependency_unavailable === true)
+      ? { dependency_unavailable: true }
+      : {}),
     reason: status === "skipped"
       ? skipped.map((check) => check.reason).filter(Boolean).join("; ") || "all lint subchecks skipped"
       : skippedNote,
@@ -845,6 +874,17 @@ function runTypecheck(cwd, {
   }
   const invocation = packageManagerRun(packageManager, "typecheck");
   const result = runProcess(invocation.command, invocation.args, cwd, { timeoutMs: 180000 });
+  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
+  if (missingTooling) {
+    return {
+      name: "typecheck",
+      status: "unavailable",
+      reason: missingTooling,
+      dependency_unavailable: true,
+      command: result.command,
+      durationMs: result.durationMs,
+    };
+  }
   const failureOutput = compact(`${result.stdout}\n${result.stderr}`) || result.error || `typecheck exited ${result.exitCode}`;
   return {
     name: "typecheck",
@@ -891,6 +931,9 @@ function combineRootChecks(name, projectCwd, entries) {
     name,
     coverage: name === "typecheck" ? "project_root" : "file",
     status,
+    ...(status === "unavailable" && unavailable.some(({ check }) => check.dependency_unavailable === true)
+      ? { dependency_unavailable: true }
+      : {}),
     reason: status === "unavailable"
       ? unavailable.map(({ group, check }) => (
           `${group.root_relative}: ${check.reason || check.status}`
@@ -997,9 +1040,11 @@ export function runScopedChecks({
     .map((check) => ({ check: check.name, message: check.output }));
   const ok = failed.length === 0 && unavailable.length === 0;
   const status = failed.length > 0 ? "failed" : (unavailable.length > 0 ? "unavailable" : "passed");
+  const dependencyUnavailable = status === "unavailable" && unavailable.some((check) => check.dependency_unavailable === true);
   const result = {
     ok,
     status,
+    ...(dependencyUnavailable ? { reason: "dependency_unavailable" } : {}),
     executed_commit_hash: executedCommitHash,
     summary: status === "passed"
       ? "all requested checks passed"
@@ -1013,6 +1058,7 @@ export function runScopedChecks({
       coverage: check.coverage || "file",
       status: check.status,
       reason: check.reason || null,
+      ...(check.dependency_unavailable === true ? { dependency_unavailable: true } : {}),
       target_count: check.targets?.length ?? null,
       duration_ms: check.durationMs ?? null,
       command: check.command || null,

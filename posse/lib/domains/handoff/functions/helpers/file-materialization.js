@@ -202,9 +202,13 @@ function isWritingCodePacket(packet) {
 /**
  * Consume planner-owned files_to_create before a writing provider sees the
  * packet. Exact files are materialized with exclusive creation, recorded in
- * private provenance, then exposed only as files_to_modify. A missing modify
- * target is rejected as a planner/path error; it is never promoted to a new
- * empty file.
+ * private provenance, then exposed only as files_to_modify. A modify target
+ * that does not exist yet is treated exactly like a declared creation: the
+ * deterministic harness materializes it (empty, staged, with provenance)
+ * instead of rejecting the handoff, because the distinction between "modify"
+ * and "create" is a planner classification, not a safety boundary. The same
+ * path rules apply: it must be inside the worktree, not a symlink parent,
+ * and not ignored by repository policy.
  */
 export async function materializeWritingScope(packet) {
   if (!isWritingCodePacket(packet)) return { applied: false, materialized: [] };
@@ -212,6 +216,7 @@ export async function materializeWritingScope(packet) {
   const requestedModify = uniquePaths(packet.files_to_modify);
   const modify = [];
   const create = uniquePaths(packet.files_to_create);
+  const promotedToCreate = [];
   const createRoots = uniquePaths(packet.create_roots);
   if (createRoots.length > 0) {
     throw materializationError(
@@ -245,12 +250,10 @@ export async function materializeWritingScope(packet) {
     let stat;
     try { stat = fs.lstatSync(absPath); } catch { stat = null; }
     if (!stat) {
-      const error = materializationError(
-        `files_to_modify target does not exist; declare it in files_to_create or correct the path: ${relPath}`,
-        { path: relPath },
-      );
-      error.code = "HANDOFF_MODIFY_TARGET_MISSING";
-      throw error;
+      // Not on disk yet: materialize it the way a declared creation would be.
+      promotedToCreate.push(relPath);
+      if (!create.includes(relPath)) create.push(relPath);
+      continue;
     }
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw materializationError(
@@ -292,10 +295,12 @@ export async function materializeWritingScope(packet) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
       assertNoSymlinkParents(cwd, absPath, relPath);
       if (await isIgnoredPath(cwd, relPath)) {
-        throw materializationError(
-          `files_to_create target is ignored by repository policy: ${relPath}`,
+        const error = materializationError(
+          `${promotedToCreate.includes(relPath) ? "files_to_modify" : "files_to_create"} target is ignored by repository policy (gitignored, so it cannot be committed; use the real source path, not a generated artifact): ${relPath}`,
           { path: relPath },
         );
+        error.code = "HANDOFF_TARGET_IGNORED";
+        throw error;
       }
       const provenance = existingMaterialization(packet.job_id, generation, relPath);
       if (fs.existsSync(absPath)) {
@@ -369,11 +374,12 @@ export async function materializeWritingScope(packet) {
   packet.create_roots = [];
   packet.creatable_files = {};
   packet.materialized_files = materialized;
+  packet.promoted_modify_targets = promotedToCreate;
   packet._materialization_generation = generation;
   if (packet._raw_payload && typeof packet._raw_payload === "object") {
     packet._raw_payload = { ...packet._raw_payload, files_to_modify: editable };
     delete packet._raw_payload.files_to_create;
     delete packet._raw_payload.create_roots;
   }
-  return { applied: true, materialized, convertedToModify };
+  return { applied: true, materialized, convertedToModify, promotedToCreate };
 }

@@ -11,6 +11,8 @@ import {
   runScopedChecks,
 } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
 import { verificationOutcome } from "../../worker/functions/helpers/verification-outcome.js";
+import { repairVerificationPrerequisites } from "../../verification/functions/prerequisite-adapters.js";
+import { getSetting } from "../../settings/functions/repository-settings.js";
 
 const RECEIPT_KIND = "assessment_scoped_checks";
 const RECEIPT_SCHEMA_VERSION = 3;
@@ -214,6 +216,8 @@ export async function ensureAssessmentScopedCheckEvidence({
   assessmentContext = null,
   cleanupWorktree = null,
   runScopedChecksImpl = runScopedChecks,
+  repairPrerequisitesImpl = repairVerificationPrerequisites,
+  readSettingImpl = getSetting,
 } = {}) {
   if (!job?.id || !cwd || assessmentContext?.task_mode !== "code") return null;
   const expectedCommit = normalizedCommit(
@@ -273,13 +277,54 @@ export async function ensureAssessmentScopedCheckEvidence({
       result = cached.result;
       reused = true;
     } else {
-      result = runScopedChecksImpl({
+      const runOnce = () => runScopedChecksImpl({
         cwd,
         args: {
           checks: [...REQUESTED_CHECKS],
           scope: { files },
         },
       });
+      result = runOnce();
+      // A fresh worktree carries no installed dependencies, so the verifier
+      // binaries can be missing even though the code is correct. Repair the
+      // worktree once through the same adapter the frozen test path uses,
+      // then re-run; if repair cannot run, the result stays "dependency
+      // unavailable" rather than becoming a product failure.
+      const missing = Array.isArray(result?.checks)
+        ? result.checks.find((check) => check?.dependency_unavailable === true)
+        : null;
+      if (result?.status === "unavailable" && missing) {
+        let repair;
+        try {
+          let networkPolicy = "cache_only";
+          try { networkPolicy = String(readSettingImpl("verification_dependency_network_policy", { projectDir: cwd }) || "cache_only"); } catch { /* default */ }
+          repair = await repairPrerequisitesImpl({
+            projectDir: cwd,
+            command: missing.command || "npm",
+            receipt: { execution_command: missing.command || null, stdout: missing.reason || "" },
+            networkPolicy,
+          });
+        } catch (error) {
+          repair = { ok: false, status: "failed", reason: error?.code || error?.message || "dependency_repair_failed" };
+        }
+        const dependencyRepair = {
+          attempted: true,
+          ok: repair?.ok === true,
+          status: repair?.status || null,
+          reason: repair?.reason || null,
+          trigger: missing.reason || null,
+        };
+        recordObservation({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: attemptId,
+          observation_type: "assessment.dependency_repair",
+          summary: `Scoped-check dependency repair ${dependencyRepair.ok ? "succeeded" : `did not complete (${dependencyRepair.status || "unknown"})`}`,
+          detail: dependencyRepair,
+        });
+        if (dependencyRepair.ok) result = runOnce();
+        result = { ...result, dependency_repair: dependencyRepair };
+      }
       result = {
         ...result,
         assessed_commit_hash: expectedCommit,
