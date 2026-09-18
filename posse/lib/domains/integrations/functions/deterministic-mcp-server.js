@@ -1352,6 +1352,23 @@ function dedupeReadFile(args = {}) {
 // Shape of a planner handoff's `tasks` argument for telemetry: enough to
 // diagnose a schema rejection (string-encoded array, keyed object, empty)
 // without recording the tasks themselves.
+// The shape of each handoff's target, recorded on the way in so a rejection
+// like "target must be an object" leaves behind what was actually sent
+// (a value the normalizer can then learn to accept). Strings are kept
+// short; a target never carries source or secrets.
+function describeTargetShapes(handoffs) {
+  if (!Array.isArray(handoffs)) return null;
+  return handoffs.slice(0, 12).map((entry) => {
+    const target = entry && typeof entry === "object" ? entry.target : undefined;
+    if (target === undefined) return "missing";
+    if (target === null) return "null";
+    if (typeof target === "string") return `string:${target.slice(0, 80)}`;
+    if (Array.isArray(target)) return `array[${target.map((item) => typeof item).join(",")}]`;
+    if (typeof target === "object") return `object{${Object.keys(target).slice(0, 6).join(",")}}`;
+    return typeof target;
+  });
+}
+
 function describeTasksShape(tasks) {
   if (tasks === undefined) return null;
   if (tasks === null) return "null";
@@ -3831,6 +3848,7 @@ async function handleRequest(msg) {
             outcome: args?.outcome || null,
             handoff_count: Array.isArray(args?.handoffs) ? args.handoffs.length : null,
             tasks_shape: describeTasksShape(args?.tasks),
+            handoff_targets: describeTargetShapes(args?.handoffs),
           }
         : sanitizeForLog(args),
     });
@@ -4203,6 +4221,7 @@ async function handleRequest(msg) {
           outcome: args?.outcome || null,
           handoff_count: Array.isArray(args?.handoffs) ? args.handoffs.length : null,
           tasks_shape: describeTasksShape(args?.tasks),
+          handoff_targets: describeTargetShapes(args?.handoffs),
         }
       : (toolName === "chain_verdict" && researchState?.currentlyReading?.path)
         ? { ...args, path: researchState.currentlyReading.path }

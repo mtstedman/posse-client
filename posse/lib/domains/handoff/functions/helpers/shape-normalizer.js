@@ -102,36 +102,56 @@ export function coerceObject(value) {
   return undefined;
 }
 
+const TARGET_KINDS = new Set(["agent", "system", "pipeline", "result", "parent"]);
+const TARGET_KIND_ALIASES = Object.freeze(["kind", "type", "target_kind", "target_type"]);
+const TARGET_ROLE_ALIASES = Object.freeze(["role", "agent", "name", "to", "target_role", "role_name"]);
+
+function targetFromTokens(tokens, how) {
+  const cleaned = tokens.map((token) => String(token ?? "").trim()).filter(Boolean);
+  if (cleaned.length === 1) {
+    const named = TARGET_BY_NAME[cleaned[0].toLowerCase()];
+    return named ? { value: { ...named }, how } : undefined;
+  }
+  if (cleaned.length === 2) {
+    const [first, second] = cleaned;
+    if (TARGET_KINDS.has(first.toLowerCase())) return { value: { kind: first.toLowerCase(), role: second }, how };
+    if (TARGET_KINDS.has(second.toLowerCase())) return { value: { kind: second.toLowerCase(), role: first }, how };
+    const byRole = TARGET_BY_NAME[second.toLowerCase()] || TARGET_BY_NAME[first.toLowerCase()];
+    return byRole ? { value: { ...byRole }, how } : undefined;
+  }
+  return undefined;
+}
+
 export function coerceTarget(value) {
   if (plain(value)) {
-    // {kind: "dev"} or {role: "dev"} alone: fill the other half from the name.
-    const kind = typeof value.kind === "string" ? value.kind.trim().toLowerCase() : null;
-    const role = typeof value.role === "string" ? value.role.trim() : null;
-    if (kind && role == null && TARGET_BY_NAME[kind] && !["agent", "system", "pipeline", "result", "parent"].includes(kind)) {
+    const hasCanonical = Object.hasOwn(value, "kind") && Object.hasOwn(value, "role");
+    if (hasCanonical) return { value, how: null };
+    // {type: "agent", agent: "dev"} and friends: map alias keys onto kind/role.
+    const kindKey = TARGET_KIND_ALIASES.find((key) => typeof value[key] === "string" && value[key].trim());
+    const roleKey = TARGET_ROLE_ALIASES.find((key) => typeof value[key] === "string" && value[key].trim());
+    const kind = kindKey ? value[kindKey].trim().toLowerCase() : null;
+    const role = roleKey ? value[roleKey].trim() : null;
+    if (kind && role == null && TARGET_BY_NAME[kind] && !TARGET_KINDS.has(kind)) {
       return { value: { ...TARGET_BY_NAME[kind] }, how: "kind_as_role" };
     }
     if (role && kind == null && TARGET_BY_NAME[role.toLowerCase()]) {
       return { value: { ...TARGET_BY_NAME[role.toLowerCase()] }, how: "role_only" };
     }
+    if (kind && role && TARGET_KINDS.has(kind) && (kindKey !== "kind" || roleKey !== "role")) {
+      return { value: { kind, role }, how: "alias_keys" };
+    }
     return { value, how: null };
   }
+  if (Array.isArray(value)) return targetFromTokens(value.filter((entry) => typeof entry === "string"), "array_pair");
   if (typeof value !== "string") return undefined;
   const parsed = parseJsonText(value, "object");
-  if (parsed) return { value: parsed, how: "json_text" };
+  if (parsed) return coerceTarget(parsed) ?? { value: parsed, how: "json_text" };
   const text = value.trim();
   const named = TARGET_BY_NAME[text.toLowerCase()];
   if (named) return { value: { ...named }, how: "role_name" };
-  const split = text.match(/^\s*([a-z_$]+)\s*[:/]\s*([a-z_$]+)\s*$/i);
-  if (split) {
-    const kind = split[1].toLowerCase();
-    const role = split[2];
-    if (["agent", "system", "pipeline", "result", "parent"].includes(kind)) {
-      return { value: { kind, role }, how: "kind_role_text" };
-    }
-    const byRole = TARGET_BY_NAME[role.toLowerCase()];
-    if (byRole) return { value: { ...byRole }, how: "kind_role_text" };
-  }
-  return undefined;
+  // "agent:dev", "agent/dev", "agent.dev", "agent - dev", "dev (agent)"
+  const tokens = text.replace(/[()[\]{}"']/g, " ").split(/[\s:/.\-]+/).filter(Boolean);
+  return targetFromTokens(tokens, "kind_role_text");
 }
 
 function coerceEnumCase(value, allowed) {
