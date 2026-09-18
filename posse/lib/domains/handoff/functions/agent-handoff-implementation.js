@@ -1339,6 +1339,37 @@ function surfacedPathCandidates(context) {
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
+const IMAGE_EVIDENCE_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".avif",
+]);
+const ARTIFACT_EVIDENCE_ROOT = ".posse/resources/artifacts/";
+
+// Non-code deliverables cannot be "surfaced" the way source lines are: there
+// is no line range to open and no textual excerpt to pin. For an image, or
+// any file in the artifact area, the file existing is the evidence, so a
+// citation resolves to the file itself without a same-call inspection.
+function existingArtifactEvidence(requested, context) {
+  const projectDir = String(context?.projectDir || context?.cwd || "").trim();
+  if (!projectDir) return null;
+  const projectRoot = path.resolve(projectDir);
+  const bases = [projectRoot, String(context?.cwd || "").trim()].filter(Boolean);
+  for (const base of bases) {
+    const absolute = path.resolve(base, requested);
+    const relative = path.relative(projectRoot, absolute).replace(/\\/g, "/");
+    if (!relative || relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) continue;
+    const isArtifact = relative.startsWith(ARTIFACT_EVIDENCE_ROOT);
+    const isImage = IMAGE_EVIDENCE_EXTENSIONS.has(path.posix.extname(relative).toLowerCase());
+    if (!isArtifact && !isImage) continue;
+    let stat;
+    try { stat = fs.statSync(absolute); } catch { continue; }
+    if (!stat.isFile()) continue;
+    const canonical = canonicalSourcePath(relative);
+    if (!canonical) continue;
+    return { path: canonical, artifact_inspection: "artifact_exists", opened_ranges: [], source_refs: [] };
+  }
+  return null;
+}
+
 function resolveSurfacedEvidencePath(requestedPath, context) {
   const requested = canonicalSourcePath(requestedPath);
   if (!requested) {
@@ -1371,6 +1402,8 @@ function resolveSurfacedEvidencePath(requestedPath, context) {
     const byBasename = resolveUnique(candidates.filter((candidate) => path.posix.basename(candidate.path) === basename));
     if (byBasename) return byBasename;
   }
+  const artifact = existingArtifactEvidence(requested, context);
+  if (artifact) return artifact;
   fail(
     "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED",
     `Evidence path ${requested} was not surfaced to the current agent call`,

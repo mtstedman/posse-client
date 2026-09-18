@@ -49,6 +49,7 @@ import {
 } from "../../../catalog/native-tools.js";
 import { TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
+import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
@@ -514,7 +515,7 @@ const gatewayScopeStateByKey = new Map();
 const ownerAtlasGateEventSeqByScope = new Map();
 let imageGenerationMaxCalls = Number.isInteger(Number(bootConfig.imageGenerationMaxCalls)) && Number(bootConfig.imageGenerationMaxCalls) >= 0
   ? Number(bootConfig.imageGenerationMaxCalls)
-  : 12;
+  : IMAGE_GENERATION_MAX_CALLS_PER_JOB;
 let remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remoteCatalog === "object"
   ? bootConfig.remoteCatalog
   : {};

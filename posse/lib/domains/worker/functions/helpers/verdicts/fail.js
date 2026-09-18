@@ -270,6 +270,10 @@ function _buildGenericArtifactRecoveryPayload({
   };
 }
 
+export function buildImageArtifactRecoveryPayload(options) {
+  return _buildImageArtifactRecoveryPayload(options);
+}
+
 function _buildImageArtifactRecoveryPayload({
   job,
   fixInstructions,

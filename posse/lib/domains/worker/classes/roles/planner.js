@@ -75,6 +75,7 @@ import {
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../../catalog/artifact.js";
 import {
   emit,
   applyPlannerRoleModePolicy,
@@ -510,6 +511,7 @@ export class PlannerRole extends BaseRole {
         "",
         "PLANNING RULES:",
         "- Each image task should be ONE task: \"Generate [description]\"",
+        `- One artificer job may generate at most ${IMAGE_GENERATION_MAX_CALLS_PER_JOB} images; the harness rejects further calls. Split a larger set across jobs of at most ${IMAGE_GENERATION_MAX_CALLS_PER_JOB} images each, naming every file exactly.`,
         "- Do NOT plan tasks like \"write generation script\" or \"execute script\" - the tool handles this",
         "- Do NOT plan API setup, package installation, or script writing tasks",
         "- With terminal handoff, use role \"artificer\" and put task_mode \"image\" or \"content\" inside scope; fallback JSON keeps job_type/task_mode at the task top level",

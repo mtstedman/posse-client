@@ -256,6 +256,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_PARTIAL_WORK_REVERTED: "job.partial_work_reverted",
   JOB_PLACEHOLDER_QUESTION_IGNORED: "job.placeholder_question_ignored",
   JOB_PROMOTE_COMPLETE: "job.promote_complete",
+  JOB_PROMOTE_PARTIAL: "job.promote_partial",
   JOB_PROMOTE_CONFLICT_PREVIEW: "job.promote_conflict_preview",
   JOB_PROMOTE_CROSS_WI_SOURCE: "job.promote_cross_wi_source",
   JOB_PROVIDER_CIRCUIT_OPEN: "job.provider_circuit_open",

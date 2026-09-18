@@ -100,6 +100,10 @@ export function raiseAssessmentFallbackReadsForScope(baseReads, {
   for (const key of ["files_to_modify", "files_to_create", "files_to_delete", "must_modify"]) {
     add(payload?.[key]);
   }
+  // Artifact Jobs surface their output through the manifest, not a file
+  // scope; citing an artifact as evidence requires inspecting it in the same
+  // call, so the allowance covers every produced artifact.
+  add(assessmentContext?.manifest?.files);
   const base = Number.isFinite(Number(baseReads)) ? Math.max(0, Math.floor(Number(baseReads))) : 0;
   return exactPaths.size > 0 ? Math.max(base, exactPaths.size + 2) : base;
 }

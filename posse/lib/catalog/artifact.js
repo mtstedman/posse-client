@@ -6,6 +6,11 @@
 
 const sqlList = (values) => values.map((v) => `'${v}'`).join(", ");
 
+// Image generations one artificer Job may request. The deterministic MCP
+// server enforces it (env override for tests); the planner sizes image Jobs
+// by it so a larger set is split across Jobs instead of failing at the cap.
+export const IMAGE_GENERATION_MAX_CALLS_PER_JOB = 12;
+
 export const ARTIFACT_TYPES = Object.freeze([
   "prompt",
   "response",
