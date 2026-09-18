@@ -55,11 +55,13 @@ import {
 } from "./helpers/terminal-report-metadata.js";
 import {
   filterKnownHandoffFields,
+  recordHandoffSoftening,
   runWithHandoffFieldDiagnostics,
 } from "./helpers/field-diagnostics.js";
 import {
   normalizeAgentHandoffShape,
   relativizeEvidenceSelector,
+  truncateCompletionProse,
 } from "./helpers/shape-normalizer.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
@@ -216,6 +218,19 @@ const ADVISORY_RESEARCH_EVIDENCE_ERRORS = new Set([
   "AGENT_HANDOFF_EVIDENCE_PATH_AMBIGUOUS",
   "AGENT_HANDOFF_EVIDENCE_PATH_NOT_SURFACED",
   "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+  // Selector spelling or a stale/oversized source: the pointer is kept as an
+  // unverified annotation for the consumer; the producer is not re-run.
+  "AGENT_HANDOFF_SELECTOR_INVALID",
+  "AGENT_HANDOFF_EVIDENCE_PATH_INVALID",
+  "AGENT_HANDOFF_EVIDENCE_CHANGED",
+]);
+
+// Oversized refs are narrowed before they are ever dropped (see
+// researcherEvidenceSelector), so these stay out of the advisory set and are
+// only droppable once narrowing has had its chance.
+const DROPPABLE_AFTER_NARROWING_ERRORS = new Set([
+  "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
+  "AGENT_HANDOFF_CONTEXT_INVALID",
 ]);
 
 const STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES = new Set([
@@ -227,16 +242,15 @@ const CLAIM_EVIDENCE_DEMOTION = Symbol("claimEvidenceDemotion");
 const CLAIM_SUBMITTED_INDEX = Symbol("claimSubmittedIndex");
 
 function advisoryResearchEvidenceCleanupAction(error) {
-  return ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(String(error?.code || ""))
+  const code = String(error?.code || "");
+  return ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(code) || DROPPABLE_AFTER_NARROWING_ERRORS.has(code)
     ? "drop_advisory_research_selector"
     : null;
 }
 
 function strictClaimEvidenceCleanupAction(error) {
   const code = String(error?.code || "");
-  if (ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(code)
-    || code === "AGENT_HANDOFF_CONTEXT_INVALID"
-    || code === "AGENT_HANDOFF_EVIDENCE_TOO_LARGE") {
+  if (ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(code) || DROPPABLE_AFTER_NARROWING_ERRORS.has(code)) {
     return "drop_unverifiable_strict_claim_selector";
   }
   return null;
@@ -252,7 +266,10 @@ function evidenceFailureModeForProfile(profile) {
   if (profile === "researcher.pipeline.v1") return "annotate";
   if (profile === "researcher.report.v1") return "retain";
   if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) return "demote";
-  return null;
+  // Every other profile: a selector that cannot be materialized is dropped
+  // and kept as an unverified annotation on its claim. Rejecting the packet
+  // would re-run the producer on its full context to fix one pointer.
+  return "annotate";
 }
 
 export function isRetryableTerminalHandoffError(error) {
@@ -317,9 +334,14 @@ function exactKeys(value, allowed, label) {
 
 function boundedString(value, label, max, { required = true, lenient = false, context = null } = {}) {
   if (typeof value !== "string") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be a string`);
-  const text = value.trim();
+  let text = value.trim();
   if (required && !text) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} is required`);
-  if (text.length > max) fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${max} characters`);
+  if (text.length > max) {
+    // Caps are soft: keep the head and say so in the text rather than
+    // bouncing the whole handoff for another full-context turn.
+    recordHandoffSoftening(label, "text_truncated", { max, received: text.length });
+    text = truncateCompletionProse(text, max);
+  }
   const sensitiveLabel = detectSensitiveAgentHandoffText(text);
   if (sensitiveLabel) {
     if (lenient) {
@@ -347,8 +369,21 @@ function boundedString(value, label, max, { required = true, lenient = false, co
 
 function stringArray(value, label, maxItems = 50, maxChars = 1000, options = {}) {
   if (!Array.isArray(value)) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be an array`);
-  if (value.length > maxItems) fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${maxItems} items`);
-  return value.map((entry, index) => boundedString(entry, `${label}[${index}]`, maxChars, options));
+  return trimToCap(value, label, maxItems)
+    .map((entry, index) => boundedString(entry, `${label}[${index}]`, maxChars, options));
+}
+
+// Soft list cap: keep the leading entries and record the trim.
+function trimToCap(list, label, maxItems) {
+  if (!Array.isArray(list) || list.length <= maxItems) return list;
+  recordHandoffSoftening(label, "list_trimmed", { max: maxItems, received: list.length });
+  return list.slice(0, maxItems);
+}
+
+// Soft aggregate budget: the components are already individually bounded,
+// so an aggregate overrun is noted for the consumer rather than rejected.
+function noteBudgetOverrun(label, rule, max, received) {
+  recordHandoffSoftening(label, rule, { max, received });
 }
 
 function evidenceSourcePathSyntaxError(value) {
@@ -2130,6 +2165,7 @@ function normalizeScope(value, label, profile) {
 
 function normalizeClaimInput(value, claimIndex) {
   if (Array.isArray(value)) return value;
+  if (typeof value === "string") return [value];
   const label = `claims[${claimIndex}]`;
   const source = exactKeys(value, uniqueKeys(
     compatibilityAliasKeys("claimName"),
@@ -2364,7 +2400,7 @@ function materializeClaim(
     if (out.decoy.length === 0) delete out.decoy;
   }
   if (maxSelectorsPerClaim != null && selectors.size > maxSelectorsPerClaim) {
-    fail("AGENT_HANDOFF_TOO_LARGE", `claims[${claimIndex}] exceeds ${maxSelectorsPerClaim} selectors`);
+    noteBudgetOverrun(`claims[${claimIndex}]`, "selectors_over_cap", maxSelectorsPerClaim, selectors.size);
   }
   if (detail.prose != null) {
     out.prose = boundedString(
@@ -3652,14 +3688,13 @@ function materializeTerminalCompletion(args, role) {
   }
   const fileRequests = source.file_requests == null
     ? []
-    : source.file_requests.map((raw, index) => {
+    : trimToCap(source.file_requests, "file_requests", 16).map((raw, index) => {
         const request = exactKeys(raw, ["path", "reason"], `file_requests[${index}]`);
         return {
           path: boundedString(request.path, `file_requests[${index}].path`, 500),
           reason: boundedString(request.reason, `file_requests[${index}].reason`, 1000),
         };
       });
-  if (fileRequests.length > 16) fail("AGENT_HANDOFF_TOO_LARGE", "file_requests exceeds 16 items");
 
   if (status === "VERIFIED_NO_CHANGE" && !noChangeRationale) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", "VERIFIED_NO_CHANGE requires no_change_rationale");
@@ -3811,12 +3846,9 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
         message: "assessor confidence must be low, medium, or high",
       });
     }
-  } else if (source.confidence != null) {
-    issues.push({
-      code: "AGENT_HANDOFF_SCHEMA_INVALID",
-      message: `confidence is not valid for ${profile || "this profile"}`,
-    });
   }
+  // A stray confidence on a non-assessor profile is ignored (recorded by the
+  // strict pass), never a rejection.
 
   if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) {
     issues.push({ code: "AGENT_HANDOFF_SCHEMA_INVALID", message: "handoffs must contain at least one entry" });
@@ -3899,12 +3931,6 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       issues.push({
         code: "AGENT_HANDOFF_RESEARCH_CLAIM_EVIDENCE_REQUIRED",
         message: missingReportClaimsMessage(label, report.summary),
-      });
-    }
-    if (claimCountLimit != null && report.claims.length > claimCountLimit) {
-      issues.push({
-        code: "AGENT_HANDOFF_TOO_LARGE",
-        message: `${label}.report.claims exceeds ${claimCountLimit} claims`,
       });
     }
     const claimsToValidate = claimCountLimit == null
@@ -3994,14 +4020,8 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
           }
         }
       }
-      const selectorLimit = researcherLimits
-        ? researcherLimits.maxSelectorsPerClaim : AGENT_HANDOFF_LIMITS.maxSelectorsPerClaim;
-      if (selectorLimit != null && selectors.size > selectorLimit) {
-        issues.push({
-          code: "AGENT_HANDOFF_TOO_LARGE",
-          message: `${claimLabel} exceeds ${selectorLimit} selectors`,
-        });
-      }
+      // Selectors past the per-claim cap are a soft overrun (noted at
+      // materialization), not a rejection.
     }
   }
   return issues;
@@ -4092,7 +4112,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       fail("AGENT_HANDOFF_SCHEMA_INVALID", "assessor confidence must be low, medium, or high");
     }
   } else if (source.confidence != null) {
-    fail("AGENT_HANDOFF_SCHEMA_INVALID", `confidence is not valid for ${profile}`);
+    recordHandoffSoftening("confidence", "field_ignored", { reason: `not valid for ${profile}` });
   }
   if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) fail("AGENT_HANDOFF_SCHEMA_INVALID", "handoffs must contain at least one entry");
   const localLimit = Number.isInteger(maxHandoffs) && maxHandoffs > 0 ? maxHandoffs : policy.maxHandoffs;
@@ -4116,9 +4136,11 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     ? (researcherLimits.maxClaimSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
     : AGENT_HANDOFF_LIMITS.maxSummaryChars;
   const handoffs = source.handoffs.map((raw, index) => {
-    if (!researcherReport
-      && Buffer.byteLength(JSON.stringify(raw), "utf8") > AGENT_HANDOFF_LIMITS.maxEntryBytes) {
-      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}] exceeds ${AGENT_HANDOFF_LIMITS.maxEntryBytes} bytes`);
+    if (!researcherReport) {
+      const entryBytes = Buffer.byteLength(JSON.stringify(raw), "utf8");
+      if (entryBytes > AGENT_HANDOFF_LIMITS.maxEntryBytes) {
+        noteBudgetOverrun(`handoffs[${index}]`, "entry_bytes_over_cap", AGENT_HANDOFF_LIMITS.maxEntryBytes, entryBytes);
+      }
     }
     const entryCounters = { evidence: 0, narrative: 0 };
     const entry = exactKeys(raw, ["id", "depends_on", "target", "intent", "report"], `handoffs[${index}]`);
@@ -4153,7 +4175,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       );
     }
     if (claimCountLimit != null && report.claims.length > claimCountLimit) {
-      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}].report.claims exceeds ${claimCountLimit} claims`);
+      report.claims = trimToCap(report.claims, `handoffs[${index}].report.claims`, claimCountLimit);
     }
     let claims = report.claims.map((claim, claimIndex) => {
       const materialized = materializeClaim(
@@ -4220,9 +4242,12 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     }
     if (AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.profiles.includes(profile)
       && AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.outcomes.includes(outcome)) {
+      // A defect claim whose selector could not be materialized keeps its
+      // pointer as an unverified annotation; the assessor named a location,
+      // so the verdict stands rather than costing a re-assessment.
       const hasGroundedDefect = claims.some((claim) => (
-        Array.isArray(claim?.[1]?.evidence)
-        && claim[1].evidence.some(isGroundedClaimEvidence)
+        (Array.isArray(claim?.[1]?.evidence) && claim[1].evidence.some(isGroundedClaimEvidence))
+        || (Array.isArray(claim?.[1]?.unverified_evidence) && claim[1].unverified_evidence.length > 0)
       ));
       if (!hasGroundedDefect) {
         fail(
@@ -4268,9 +4293,11 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       + structuredStringLength(payload);
     if (!researcherReport
       && structuredMetadataLength > AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars) {
-      fail(
-        "AGENT_HANDOFF_TOO_LARGE",
-        `handoffs[${index}] exceeds the ${AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars}-character structured metadata limit`,
+      noteBudgetOverrun(
+        `handoffs[${index}]`,
+        "structured_metadata_over_cap",
+        AGENT_HANDOFF_LIMITS.maxStructuredMetadataChars,
+        structuredMetadataLength,
       );
     }
     let narrativeLimit = null;
@@ -4280,7 +4307,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         : AGENT_HANDOFF_LIMITS.maxNarrativeChars;
     }
     if (narrativeLimit != null && entryCounters.narrative > narrativeLimit) {
-      fail("AGENT_HANDOFF_TOO_LARGE", `handoffs[${index}] exceeds the ${narrativeLimit}-character narrative limit for role ${normalizedRole || "unknown"}`);
+      noteBudgetOverrun(`handoffs[${index}]`, "narrative_over_cap", narrativeLimit, entryCounters.narrative);
     }
     counters.narrative += entryCounters.narrative;
     counters.evidence += entryCounters.evidence;
@@ -4356,7 +4383,12 @@ export function materializeAgentHandoff(args, options = {}) {
     value: packet,
     ignoredFieldCount,
     ignoredFields,
+    softenings,
   } = runWithHandoffFieldDiagnostics(() => materializeAgentHandoffStrict(args, { ...options, shapeNotes }));
+  for (const softening of softenings) {
+    if (shapeNotes.length >= MAX_SHAPE_NORMALIZATIONS) break;
+    shapeNotes.push(softening);
+  }
   if (shapeNotes.length > 0) {
     Object.defineProperty(packet, "shape_normalizations", {
       value: Object.freeze(shapeNotes.map((note) => ({ ...note }))),
@@ -4741,13 +4773,7 @@ function compactResearcherCoverageInput(args) {
   if (!Array.isArray(coverage)) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", "coverage must be an array");
   }
-  if (coverage.length > AGENT_HANDOFF_LIMITS.maxCompletionRequirements) {
-    fail(
-      "AGENT_HANDOFF_TOO_LARGE",
-      `coverage exceeds ${AGENT_HANDOFF_LIMITS.maxCompletionRequirements} items`,
-    );
-  }
-  const normalized = coverage.map((raw, index) => {
+  const normalized = trimToCap(coverage, "coverage", AGENT_HANDOFF_LIMITS.maxCompletionRequirements).map((raw, index) => {
     const entry = plainObject(raw);
     if (!entry) fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}] must be an object`);
     const allowed = ["requirement_id", "status", "claim_indexes", "reason"];
@@ -4768,13 +4794,7 @@ function compactResearcherCoverageInput(args) {
       if (!Array.isArray(entry.claim_indexes) || entry.claim_indexes.length === 0) {
         fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].claim_indexes is required for supported status`);
       }
-      if (entry.claim_indexes.length > AGENT_HANDOFF_LIMITS.maxClaims) {
-        fail(
-          "AGENT_HANDOFF_TOO_LARGE",
-          `coverage[${index}].claim_indexes exceeds ${AGENT_HANDOFF_LIMITS.maxClaims} items`,
-        );
-      }
-      const claimIndexes = entry.claim_indexes.map((value, claimIndex) => {
+      const claimIndexes = trimToCap(entry.claim_indexes, `coverage[${index}].claim_indexes`, AGENT_HANDOFF_LIMITS.maxClaims).map((value, claimIndex) => {
         if (!Number.isInteger(value) || value < 1) {
           fail("AGENT_HANDOFF_SCHEMA_INVALID", `coverage[${index}].claim_indexes[${claimIndex}] must be a positive integer`);
         }

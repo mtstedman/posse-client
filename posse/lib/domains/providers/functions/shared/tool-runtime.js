@@ -468,6 +468,7 @@ export function createStandardToolHandlerMap({
           digest: receipt.digest,
           call_count: receipt.callCount,
           terminal: true,
+          ...(receipt.diagnostics ? { diagnostics: receipt.diagnostics } : {}),
         });
       } catch (error) {
         recordAgentHandoffRejection(ambient.agent_call_id, error);
