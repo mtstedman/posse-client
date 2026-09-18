@@ -200,6 +200,14 @@ function authorizedEvidenceContains(input, start, end, sourcePath = null) {
   return start >= Number(input?.lines?.start) && end <= Number(input?.lines?.end);
 }
 
+// A research finding cites evidence in any of the shapes the handoff
+// validator accepts: object lanes or a [text, detail] tuple with lanes.
+export function researchFindingHasEvidence(claim) {
+  const detail = Array.isArray(claim) ? claim[1] : claim;
+  if (!detail || typeof detail !== "object") return false;
+  return ["evidence", "proof", "support"].some((lane) => Array.isArray(detail[lane]) && detail[lane].length > 0);
+}
+
 function validateChildEvidenceScope(packet, authorizedEvidence) {
   const cited = packetEvidence(packet);
   if (cited.length === 0 && packet?.outcome !== "failed") {
@@ -1233,7 +1241,14 @@ export class SubAgentRuntime {
     if (entry.profile === RESEARCH_CHILD_PROFILE) {
       if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Research child must return a research report", { stage: "terminal" });
       const claims = packet?.handoffs?.[0]?.report?.claims || [];
-      if (packet.outcome !== "failed" && (claims.length === 0 || claims.some((claim) => !(claim.evidence?.length)))) {
+      // Findings arrive as {claim, evidence|proof|support} objects or as
+      // [text, {evidence|proof|support}] tuples. Reading only `.evidence` on
+      // the raw object bounced children that cited under another lane or in
+      // tuple form (live 2026-09-18: two rejections of a child that had made
+      // 17 Atlas reads). A report is refused only when no finding carries any
+      // selector; partially cited findings reach the planner marked as such.
+      const cited = claims.filter(researchFindingHasEvidence);
+      if (packet.outcome !== "failed" && cited.length === 0) {
         throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Each research finding requires visible evidence selectors", { stage: "terminal" });
       }
       if (JSON.stringify(packet).length > entry.resultChars) throw runtimeError("SUB_AGENT_RESULT_TOO_LARGE", `Compact research report must fit ${entry.resultChars} characters`, { stage: "terminal" });
