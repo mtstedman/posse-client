@@ -20,6 +20,9 @@ import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
 import { viewFingerprintForOptions } from "../../atlas/classes/v2/ViewBuilder.js";
 import { Warmer } from "../../atlas/classes/v2/Warmer.js";
+import { getSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
+import { getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
+import { reconcileWiSource } from "../../atlas/functions/v2/wi-source-proof.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { gitCurrentHashAsync, gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
@@ -1748,6 +1751,17 @@ async function v2JoinResultAsync(args = {}) {
         label: "atlas.forkBranch",
       });
     }
+    // Fork metadata is not source freshness. Reconcile against the actual WI
+    // checkout after any handoff/rebase, before publishing a readable view.
+    await ledger.closeNative();
+    ledger = null;
+    await reconcileWiSource({
+      repoRoot: ctx.repoRoot, worktreePath: args.worktreePath,
+      workItemId, ledgerPath: ctx.ledgerDbPath, viewPath: ctx.viewDbPath,
+      config: ctx.config, warm: (request) => getSharedConductor().warm(request),
+    });
+    getSharedAtlasToolExecutor().clearReadContext({ workItemId });
+    ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
     const warmer = new Warmer({
       ledger,
       repoRoot: ctx.repoRoot,
@@ -1784,7 +1798,7 @@ async function v2JoinResultAsync(args = {}) {
       attempted: true,
       skipped: "mount_failed",
       error: formatAtlasError(err),
-      disableAtlas: false,
+      disableAtlas: true,
       config: ctx.config,
       graphDbPath: ctx.graphDbPath,
       primaryGraphDbPath: ctx.primaryGraphDbPath,

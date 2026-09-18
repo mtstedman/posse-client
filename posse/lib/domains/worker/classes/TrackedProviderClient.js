@@ -2775,7 +2775,9 @@ export class TrackedProviderClient {
     if (this.worker.display && !opts.onLine) {
       opts = { ...opts, onLine: (line) => this.worker.display.workerLine(job_id, line) };
     }
-    if (this.worker.display && job_id) {
+    // Children share the parent's job ID, but have their own agent-call rows
+    // in the monitor. They must not replace the parent worker's role/model.
+    if (this.worker.display && job_id && !opts._parentAgentCallId) {
       this.worker.display.setWorker(job_id, {
         role: opts.role,
         activity: opts.activity,

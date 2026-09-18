@@ -1435,8 +1435,8 @@ export class AtlasToolExecutor {
   }
 
   async #readContextFor(request, conductor = null) {
-    let context = this.#readContexts.get(request.repoKey);
     const wiKey = workItemKeyForRequest(request);
+    let context = this.#readContexts.get(wiKey || request.repoKey);
     const requested = this.#requestReadContext(request);
     if (context) return context;
     if (!wiKey && !ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS.has(request.action)) return null;
@@ -1460,7 +1460,9 @@ export class AtlasToolExecutor {
         !requested?.readRoot
         || normalizeRepoKey(resolved.readRoot) === normalizeRepoKey(requested.readRoot)
       );
-    const effective = resolvedMatchesRequest ? resolved : requested;
+    const resolvedMatchesView = !requested?.viewPath
+      || normalizeRepoKey(resolved?.viewPath) === normalizeRepoKey(requested.viewPath);
+    const effective = resolvedMatchesRequest && resolvedMatchesView ? resolved : requested;
     if (!effective) return null;
     this.setReadContext({ workItemId: wiKey }, effective);
     context = this.#readContexts.get(wiKey);
@@ -1487,7 +1489,8 @@ export class AtlasToolExecutor {
       && normalizeRepoKey(readRoot) !== normalizeRepoKey(projectRoot);
     return {
       viewPath: String(
-        config.graphDbPath
+        (mountedWorktreeRead ? worktreeViewPath(readRoot) : null)
+        || config.graphDbPath
         || config.requestedGraphDbPath
         || atlas.graphDbPath
         || atlas.requestedGraphDbPath

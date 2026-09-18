@@ -1111,10 +1111,8 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
 
     await yieldNow({ signal });
     await withPhase("atlas_join", prepTrace, async () => {
-      if (job._waitingLaneAtlasJoined) {
-        worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} prepared graph mounted and prefetched${C.reset}`);
-        return;
-      }
+      // Prepared views may predate the rebase or cross-WI sync above. Always
+      // reconcile from this checkout before allowing agent reads.
       try {
         if (await isMergeInProgressAsync(wtPath, { signal })) {
           worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);

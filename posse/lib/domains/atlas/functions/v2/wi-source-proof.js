@@ -2,6 +2,27 @@
 import fs from "node:fs";
 import path from "node:path";
 import { gitExecAsync } from "../../../git/functions/utils.js";
+import { ledgerBranchForWi } from "./runtime-paths.js";
+
+/** Reconcile a mounted WI from its checkout, never from the storage root. */
+export async function reconcileWiSource({ repoRoot, worktreePath, workItemId, ledgerPath, viewPath, config, warm }) {
+  const commitSha = String(await gitExecAsync(["rev-parse", "HEAD"], worktreePath)).trim();
+  await verifyWiSource({ repoRoot, worktreePath, commitSha });
+  const branch = ledgerBranchForWi(workItemId);
+  const result = await warm({
+    repoRoot, ledgerPath, dbPath: viewPath, branch, config,
+    job: {
+      purpose: "wi", branch, work_item_id: workItemId,
+      worktree_path: worktreePath, commit_sha: commitSha,
+      out_view_path: viewPath,
+    },
+  });
+  if (result?.wi_source_verified !== true) {
+    throw new Error(`WI source reconciliation failed: ${JSON.stringify(result?.skipped || [])}`);
+  }
+  await verifyWiSource({ repoRoot, worktreePath, commitSha });
+  return result;
+}
 
 /** Verify that a post-commit refresh reads this repository's WI checkout. */
 export async function verifyWiSource({ repoRoot, worktreePath, commitSha }) {
