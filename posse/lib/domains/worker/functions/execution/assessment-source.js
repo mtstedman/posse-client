@@ -54,6 +54,20 @@ export function resolveAssessmentSource({
         commitBaseHash: null,
       };
     }
+    // An artifact producer commits nothing; its deliverables live in the
+    // output root and its result block is the evidence a re-assessment
+    // needs. Without this, an assess-only retry re-ran the producer.
+    if (completion.found && completion.kind === "artificer") {
+      return {
+        ok: true,
+        kind: "artifact_output",
+        attempt,
+        response,
+        output,
+        commitHash: null,
+        commitBaseHash: null,
+      };
+    }
   }
 
   return {

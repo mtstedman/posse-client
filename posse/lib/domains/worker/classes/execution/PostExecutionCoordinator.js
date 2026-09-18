@@ -1350,6 +1350,11 @@ export async function handlePostExecutionForWorker({
               if (hasPendingFileRequests()) {
                 this.emit(job.id, `${C.yellow}[idempotency] WI#${job.work_item_id} job #${job.id}: identical output, but file requests pending — allowing through${C.reset}`);
                 // Fall through to no-op guard / assessment with file-request spawning
+              } else if (isArtifactMode(this.parsePayload(job)?.task_mode || "code")) {
+                // An artifact producer re-run over deliverables that already
+                // exist reports the same result; that is idempotence, and the
+                // assessment of those deliverables is what the retry is for.
+                this.emit(job.id, `${C.yellow}[idempotency] WI#${job.work_item_id} job #${job.id}: identical artifact output — proceeding to assessment${C.reset}`);
               } else {
               // Don't dead-letter if the next attempt would escalate to a stronger
               // model — the different model may produce different output. Only

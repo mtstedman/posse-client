@@ -261,7 +261,9 @@ export class AssessmentHandoffAdapter {
 
     const sourceLabel = assessmentSource.kind === "commit"
       ? `prior commit ${assessmentSource.commitHash.slice(0, 8)}`
-      : `prior VERIFIED_NO_CHANGE result from attempt #${assessmentSource.attempt.id}`;
+      : assessmentSource.kind === "artifact_output"
+        ? `prior artifact output from attempt #${assessmentSource.attempt.id}`
+        : `prior VERIFIED_NO_CHANGE result from attempt #${assessmentSource.attempt.id}`;
     worker.emit(job.id, `${C.cyan}[assess-only]${C.reset} WI#${job.work_item_id} job #${job.id}: orphaned assessment — skipping dev, re-assessing ${sourceLabel}`);
 
     const barrier = acquireAssessmentBarrier(job.id, leaseToken);
@@ -365,8 +367,8 @@ export class AssessmentHandoffAdapter {
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
         : (wtPath || worker.projectDir);
       const assessedCommitHash = assessmentSource.commitHash
-        || (assessmentSource.kind === "verified_no_change"
-          ? String(await gitExecAsync(["rev-parse", "HEAD"], assessmentCwd)).trim()
+        || (assessmentSource.kind === "verified_no_change" || assessmentSource.kind === "artifact_output"
+          ? String(await gitExecAsync(["rev-parse", "HEAD"], wtPath || worker.projectDir)).trim()
           : null);
       const deterministicTestRun = await ensurePostChangeTestReceipt({
         job,

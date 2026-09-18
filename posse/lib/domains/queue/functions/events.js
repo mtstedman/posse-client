@@ -472,7 +472,13 @@ export function getEvents(jobId = null, limit = 100) {
   } else {
     dbRows = db.prepare(`SELECT * FROM events ORDER BY created_at DESC, id DESC LIMIT ?`).all(cappedLimit);
   }
-  return mergeEventRows([...fileRows, ...dbRows], "desc", cappedLimit);
+  // Inside an open transaction the drain above is deferred, so rows this
+  // caller just wrote are still pending. Read-after-write must still see
+  // them: a retry counter that misses its own retry event retries forever.
+  const pendingRows = _pendingEvents.filter((row) => (
+    jobId == null || Number(row.job_id) === Number(jobId)
+  ));
+  return mergeEventRows([...fileRows, ...dbRows, ...pendingRows], "desc", cappedLimit);
 }
 
 // Read the canonical activity stream from both the live DB tail and its JSONL

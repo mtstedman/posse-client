@@ -286,6 +286,7 @@ export {
   listActiveFileLocks,
   listFileLaneWaits,
   queuedCohortJobIdsForJob,
+  queuedDependentJobIdsForJob,
   reconcileFileLaneWaits,
   recordFileLaneConflict,
   recordFileLaneWait,
@@ -1422,10 +1423,29 @@ export function completionBlockersForWorkItem(workItemId) {
   if (jobs.length === 0) return [];
 
   const byParent = new Map();
+  const link = (originalId, job) => {
+    const id = Number(originalId);
+    if (!Number.isSafeInteger(id) || id <= 0 || id === Number(job.id)) return;
+    if (!byParent.has(id)) byParent.set(id, []);
+    byParent.get(id).push(job);
+  };
   for (const job of jobs) {
-    if (!job.parent_job_id) continue;
-    if (!byParent.has(job.parent_job_id)) byParent.set(job.parent_job_id, []);
-    byParent.get(job.parent_job_id).push(job);
+    if (job.parent_job_id) link(job.parent_job_id, job);
+    // Recovery work is not always a child of the job it replaces: a
+    // dead-letter retry, a partial-deliverable repair or a promote follow-up
+    // records the original in its payload. A succeeded one recovers the
+    // original just as a succeeded child does.
+    let payload = null;
+    try { payload = job.payload_json ? JSON.parse(job.payload_json) : null; } catch { payload = null; }
+    if (!payload || typeof payload !== "object") continue;
+    for (const originalId of [
+      payload._dead_letter_recovery?.original_job_id,
+      payload._promote_followup_of,
+      payload._partial_deliverable_repair_for,
+      payload._promote_missing_repair_for,
+    ]) {
+      if (originalId != null && Number(originalId) !== Number(job.parent_job_id)) link(originalId, job);
+    }
   }
 
   function hasSucceededDescendant(jobId) {

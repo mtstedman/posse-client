@@ -16,6 +16,7 @@ import {
   addCrossWiMergeDependency,
   ancestorJobIdsForJob,
   queuedCohortJobIdsForJob,
+  queuedDependentJobIdsForJob,
   findRunnableJobsBatch,
   getLeaseManager,
   cancelDeadlockedJobsAtomic,
@@ -2257,6 +2258,8 @@ export class Scheduler {
               const allowJobIds = new Set([
                 ...ancestorJobIdsForJob(job),
                 ...queuedCohortJobIdsForJob(job),
+                // Queued jobs that wait on this one cannot hold it off a lane.
+                ...queuedDependentJobIdsForJob(job),
               ]);
               if (jobScope.files.length > 0 || jobScope.createRoots.length > 0) {
                 // findFileConflict returns only the FIRST conflicting lock, so a

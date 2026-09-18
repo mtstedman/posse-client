@@ -1653,7 +1653,13 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let imagePixelEvidenceObserved = false;
   let toolBudgetExhaustion = null;
   let priorMatchingToolBudgetExhaustion = false;
-  const assessorMaxToolCalls = getAssessorMaxToolCalls();
+  // Two tool calls per file the assessor may need to inspect (metadata and
+  // text for an image, read and lens for source) plus list/validate/handoff
+  // slack; the configured value is a floor, not a ceiling on breadth.
+  const assessorMaxToolCalls = Math.max(
+    getAssessorMaxToolCalls(),
+    2 * (Number.isFinite(Number(effectiveFallbackReads)) ? Number(effectiveFallbackReads) : 0) + 4,
+  );
   const assessorDeepthink = !!parseJobPayload(job).deepthink;
   const assessmentInputKey = crypto.createHash("sha256").update(JSON.stringify({
     version: 1,

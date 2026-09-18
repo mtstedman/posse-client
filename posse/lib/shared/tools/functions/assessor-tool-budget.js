@@ -64,7 +64,8 @@ export function assessorToolCallCap(configuredMaxToolCalls) {
 
 /**
  * @typedef {object} AssessorToolCallCeilingDecision
- * @property {boolean} blocked
+ * @property {boolean} blocked   always false: the ceiling is advisory
+ * @property {boolean} advisory  true once `used > cap`
  * @property {string|null} reason
  * @property {string|null} text
  * @property {number} used
@@ -86,10 +87,15 @@ export function assessorToolCallCeilingDecision(input = {}) {
   const parsedUsed = Number(usedToolCalls);
   const used = Number.isFinite(parsedUsed) ? parsedUsed : 0;
   if (!assessorToolBudgetApplies(role, toolName) || used <= cap) {
-    return { blocked: false, reason: null, text: null, used, cap };
+    return { blocked: false, advisory: false, reason: null, text: null, used, cap };
   }
+  // The ceiling is advisory. Blocking past it turned a thorough assessor
+  // (two inspections per artifact) into a harness "exhaustion" that requeued
+  // the job and, for artifact work, re-ran the producer. The count and cap
+  // stay reported for telemetry; the provider's own turn limit bounds runaway.
   return {
-    blocked: true,
+    blocked: false,
+    advisory: true,
     reason: ASSESSOR_TOOL_CALL_CEILING_REASON,
     text: ASSESSOR_TOOL_CALL_BUDGET_EXHAUSTED_TEXT,
     used,
