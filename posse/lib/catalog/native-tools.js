@@ -360,6 +360,11 @@ const AGENT_HANDOFF_PLANNER_REPORT_FIELDS = {
   reasoning_effort: { type: "string", enum: ["low", "medium", "high"] },
   priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
   skip_assessment: { type: "boolean" },
+  executed_by_planner: {
+    type: "boolean",
+    description:
+      "Set true only on a db task that is the plan's only task, whose statements you already executed successfully yourself in this attempt and then confirmed with a read; Posse then records the task as complete without dispatching it.",
+  },
   test_command: { type: "string", minLength: 1, maxLength: 1000 },
 };
 
@@ -2804,14 +2809,12 @@ export const TOOL_GENERATE_IMAGE = {
 export const TOOL_PROJECT_DB_QUERY = {
   type: "function",
   name: "project_db_query",
+  // Scope-neutral base text. The description an agent actually receives names
+  // exactly the statements its job may run — see
+  // projectDbQuerySchemaForPermissions (toolkit/project-db/schema.js).
   description:
     "Run a single SQL statement against this project's configured application database " +
-    "(sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement " +
-    "types you may run depend on separate per-verb grants: READ enables SELECT, WRITE enables UPDATE, " +
-    "and INSERT, DELETE, CREATE, and ALTER each require their matching grant. Read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE) follows the read grant. " +
-    "Read-phase roles are capped to SELECT/inspection regardless of the grant. The capability " +
-    "accepts only granted statement families and excludes destructive DDL such as DROP and TRUNCATE. One statement " +
-    "per call; read results are row- and byte-capped.",
+    "(sqlite/postgres/mysql). One statement per call; read results are row- and byte-capped.",
   parameters: {
     type: "object",
     properties: {

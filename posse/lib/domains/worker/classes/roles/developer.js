@@ -249,6 +249,12 @@ export class DeveloperRole extends BaseRole {
           "- File tools are read-only for this job: do not attempt repo edits, file creation, or FILE_REQUESTs for this work.",
           "- Inspect the resulting state with SELECT when useful. The worker records issued-tool evidence; do not copy it into DEV RESULT.",
           "- A COMPLETE status with zero file changes is the expected success shape for this task.",
+          ...(Array.isArray(payload.planner_committed_writes) && payload.planner_committed_writes.length > 0
+            ? [
+              "- The planner ALREADY COMMITTED the statements below while planning this work item. They are applied; running them again can duplicate or fail. First read the current state, then complete only what is still missing:",
+              ...payload.planner_committed_writes.map((write) => `    ${write.statement}`),
+            ]
+            : []),
         ].join("\n")
         : null,
     ].filter((value) => value !== null).join("\n");

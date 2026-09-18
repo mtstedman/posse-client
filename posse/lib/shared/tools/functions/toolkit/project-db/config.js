@@ -21,11 +21,21 @@ import { getRuntimeDbPath } from "../../../../../domains/runtime/functions/paths
 
 export const PROJECT_DB_TYPES = Object.freeze(["sqlite", "postgres", "mysql"]);
 
-// Granular permissions the operator can grant, mapped to the leading SQL verb
-// the tool will allow. READ also implies the read-only inspection verbs
-// (PRAGMA/EXPLAIN/SHOW/DESCRIBE) — see permissions.js. CREATE/ALTER are the
-// only grantable DDL; DROP/TRUNCATE and the rest are always blocked in permissions.js.
-export const PROJECT_DB_PERMISSIONS = Object.freeze(["read", "write", "insert", "delete", "create", "alter"]);
+// The two permission scopes the operator can grant. READ covers SELECT and the
+// read-only inspection verbs (PRAGMA/EXPLAIN/SHOW/DESCRIBE); WRITE covers
+// UPDATE, INSERT, DELETE, CREATE, and ALTER — see permissions.js. WRITE does
+// not imply READ. DROP/TRUNCATE and the rest are always blocked in
+// permissions.js.
+export const PROJECT_DB_PERMISSIONS = Object.freeze(["read", "write"]);
+
+// Grant scheme version stamped on the row whenever the operator saves
+// permissions. Version 1 was the per-verb scheme, where `write` meant UPDATE
+// only and INSERT/DELETE/CREATE/ALTER were separate grants. Reading a version 1
+// `write` as today's broad `write` would widen authority the operator never
+// gave, so every version 1 mutating grant is SUSPENDED: the row keeps only
+// `read` until the operator saves permissions again under this scheme.
+export const PROJECT_DB_PERMISSIONS_VERSION = 2;
+const LEGACY_MUTATING_PERMISSIONS = Object.freeze(["write", "insert", "delete", "create", "alter"]);
 
 export const PROJECT_DB_CONFIG_TABLE = "project_db_config";
 
@@ -41,6 +51,7 @@ export const PROJECT_DB_CONFIG_DDL = `
     username TEXT,
     password TEXT,
     permissions TEXT NOT NULL DEFAULT '',
+    permissions_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
   );
@@ -63,6 +74,17 @@ function resolveDbPath(projectDir = null) {
 
 function ensureTable(db) {
   db.exec(PROJECT_DB_CONFIG_DDL);
+  // Rows created before grant versioning have no column; they default to the
+  // legacy scheme (version 1), which is exactly what they were saved under.
+  const columns = new Set(db.pragma(`table_info(${PROJECT_DB_CONFIG_TABLE})`).map((col) => col.name));
+  if (!columns.has("permissions_version")) {
+    db.exec(`ALTER TABLE ${PROJECT_DB_CONFIG_TABLE} ADD COLUMN permissions_version INTEGER NOT NULL DEFAULT 1`);
+  }
+}
+
+function legacyMutatingGrants(value) {
+  const tokens = new Set(String(value || "").split(",").map((entry) => entry.trim().toLowerCase()));
+  return LEGACY_MUTATING_PERMISSIONS.filter((perm) => tokens.has(perm));
 }
 
 export function normalizePermissions(value) {
@@ -93,8 +115,12 @@ function rowToConnection(row) {
       username: null,
       password: null,
       permissions: [],
+      suspendedLegacyGrants: [],
     };
   }
+  // A missing column (row never rewritten since versioning) is the legacy scheme.
+  const currentScheme = Number(row.permissions_version || 1) >= PROJECT_DB_PERMISSIONS_VERSION;
+  const permissions = normalizePermissions(row.permissions);
   return {
     enabled: !!row.enabled,
     dbType: row.db_type || null,
@@ -103,7 +129,9 @@ function rowToConnection(row) {
     database: row.database || null,
     username: row.username || null,
     password: row.password || null,
-    permissions: normalizePermissions(row.permissions),
+    permissions: currentScheme ? permissions : permissions.filter((perm) => perm === "read"),
+    // Legacy mutating grants withheld until the operator re-saves permissions.
+    suspendedLegacyGrants: currentScheme ? [] : legacyMutatingGrants(row.permissions),
   };
 }
 
@@ -142,6 +170,7 @@ export function readProjectDbConfig({ projectDir = null } = {}) {
     username: conn.username,
     hasPassword: !!conn.password,
     permissions: conn.permissions,
+    suspendedLegacyGrants: conn.suspendedLegacyGrants,
   };
 }
 
@@ -191,15 +220,20 @@ export function writeProjectDbConfig(patch = {}, { projectDir = null } = {}) {
       permissions: patch.permissions === undefined
         ? (current.permissions ?? "")
         : normalizePermissions(patch.permissions).join(","),
+      // Saving permissions is the operator's opt-in to the current scheme; any
+      // other edit leaves the row on the scheme it was granted under.
+      permissions_version: patch.permissions === undefined
+        ? Number(current.permissions_version || 1)
+        : PROJECT_DB_PERMISSIONS_VERSION,
     };
     if (next.db_type != null && !PROJECT_DB_TYPES.includes(next.db_type)) {
       throw new Error(`Unknown project DB type: ${next.db_type}`);
     }
     db.prepare(`
       INSERT INTO ${PROJECT_DB_CONFIG_TABLE}
-        (id, enabled, db_type, host, port, database, username, password, permissions, updated_at)
+        (id, enabled, db_type, host, port, database, username, password, permissions, permissions_version, updated_at)
       VALUES
-        (1, @enabled, @db_type, @host, @port, @database, @username, @password, @permissions,
+        (1, @enabled, @db_type, @host, @port, @database, @username, @password, @permissions, @permissions_version,
          strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       ON CONFLICT(id) DO UPDATE SET
         enabled = excluded.enabled,
@@ -210,6 +244,7 @@ export function writeProjectDbConfig(patch = {}, { projectDir = null } = {}) {
         username = excluded.username,
         password = excluded.password,
         permissions = excluded.permissions,
+        permissions_version = excluded.permissions_version,
         updated_at = excluded.updated_at
     `).run(next);
     return readProjectDbConfig({ projectDir });

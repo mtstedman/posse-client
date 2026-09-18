@@ -2,6 +2,7 @@ import { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/determin
 import { ToolCatalog } from "../classes/ToolCatalog.js";
 import { CLAUDE_NATIVE_TOOL_NAMES, ToolContract } from "../classes/ToolContract.js";
 import { projectDbEffectivePermissions } from "./toolkit/project-db/config.js";
+import { projectDbQuerySummaryForPermissions } from "./toolkit/project-db/schema.js";
 
 export { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 export { CLAUDE_NATIVE_TOOL_NAMES };
@@ -18,18 +19,33 @@ export function buildExecutionContract(opts = {}) {
 // the unfiltered role surface. projectDbWrite decouples the DB capability
 // lane from the file-write grant for db-mode dev jobs (task_mode:"db"), which
 // run with allowWrite:false but need the write-capable DB grant.
-function filterProjectDbTool(contract, { projectDir = null, allowWrite = false, projectDbWrite = false } = {}) {
+function filterProjectDbTool(contract, { projectDir = null, allowWrite = false, projectDbWrite = false, projectDbCapability = null } = {}) {
   if (!projectDir) return contract;
   const tools = Array.isArray(contract?.tools) ? contract.tools : [];
   if (!tools.some((tool) => tool?.name === "project_db_query")) return contract;
   let effective = [];
   try {
-    effective = projectDbEffectivePermissions({ projectDir, capability: (allowWrite || projectDbWrite) ? "write" : "read" });
+    // Same lane resolution the tool runtime enforces: an issued read/write
+    // capability wins; otherwise the job's write permission picks the lane.
+    const issued = String(projectDbCapability || "").toLowerCase();
+    const capability = issued === "read" || issued === "write"
+      ? issued
+      : ((allowWrite || projectDbWrite) ? "write" : "read");
+    effective = projectDbEffectivePermissions({ projectDir, capability });
   } catch {
     effective = [];
   }
-  if (effective.length > 0) return contract;
-  return { ...contract, tools: tools.filter((tool) => tool?.name !== "project_db_query") };
+  if (effective.length === 0) {
+    return { ...contract, tools: tools.filter((tool) => tool?.name !== "project_db_query") };
+  }
+  // Describe the tool for this job's scopes only; the embedded provider path
+  // renders its schema description from the same projectDbPermissions.
+  return {
+    ...contract,
+    tools: tools.map((tool) => (tool?.name === "project_db_query"
+      ? { ...tool, summary: projectDbQuerySummaryForPermissions(effective), projectDbPermissions: effective }
+      : tool)),
+  };
 }
 
 export function appendExecutionTools(contract = {}, toolNames = []) {

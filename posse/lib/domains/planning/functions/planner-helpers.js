@@ -31,13 +31,28 @@ export function emit(worker, jobId, message) {
   }
 }
 
+// The project database capability a planner job runs with: "write" only when
+// the repo grants the write scope AND this is an ordinary single-planner run,
+// so it may execute a database-only work item itself; "read" for inspection;
+// "none" when the repo has not opted in. Red-team planning stays read-only —
+// the primary plan must not change data before its critique exists.
+export function plannerProjectDbCapability(projectDir, { directExecution = true } = {}) {
+  let config = null;
+  try {
+    config = readProjectDbConfig({ projectDir });
+  } catch {
+    return "none";
+  }
+  if (!config?.enabled || !config.dbType) return "none";
+  if (directExecution && config.permissions.includes("write")) return "write";
+  return config.permissions.includes("read") ? "read" : "none";
+}
+
 // Conditional planner routing lines for the project database. Empty when the
 // repo has no enabled project-db config — the block must never add noise to
-// repos that haven't opted in. With a write-capable grant the planner is told
-// how to emit db-only tasks (task_mode:"db", empty file scope); with a
-// read-only grant it is told the tool exists for inspection but db tasks are
-// not plannable.
-export function buildProjectDbRoutingLines(projectDir) {
+// repos that haven't opted in. The lines describe only what this planner job
+// can do with its capability: inspect, or also execute database-only work.
+export function buildProjectDbRoutingLines(projectDir, { capability = null, committedWrites = [] } = {}) {
   let config = null;
   try {
     config = readProjectDbConfig({ projectDir });
@@ -45,19 +60,41 @@ export function buildProjectDbRoutingLines(projectDir) {
     return [];
   }
   if (!config?.enabled || !config.dbType || config.permissions.length === 0) return [];
-  const grants = config.permissions.join(", ");
+  const lane = capability || plannerProjectDbCapability(projectDir);
+  // An earlier attempt of this plan job changed the database and then failed.
+  // Those statements are committed and cannot be rolled back, so this attempt
+  // is a reconciliation: it is told exactly what ran and must not repeat it.
+  const reconciliationLines = Array.isArray(committedWrites) && committedWrites.length > 0
+    ? [
+        "- An earlier attempt at this plan ALREADY COMMITTED the statements below to the project database. They are applied; running them again can duplicate or fail. Read the current state first, then plan only what is still missing as a dev task with task_mode \"db\" that names these statements as already applied:",
+        ...committedWrites.map((write) => `    ${write.statement}`),
+      ]
+    : [];
   const label = `${config.dbType}${config.database ? ` "${config.database}"` : ""}`;
-  const writeCapable = config.permissions.some((perm) => perm !== "read");
-  if (!writeCapable) {
+  const dbTaskLines = config.permissions.includes("write")
+    ? [
+        "- For database work you do not execute yourself, emit ONE dev task with task_mode \"db\" and EMPTY file scope (no files_to_modify/files_to_create/files_to_delete/create_roots); state the intended statements/outcomes in task_spec and make success_criteria verifiable with SELECT.",
+        "- db tasks cannot touch repo files. If work needs both repo edits and database changes, plan separate tasks (code task + db task).",
+      ]
+    : [];
+  if (lane === "write") {
     return [
-      `- Project database: ${label} is queryable read-only via project_db_query (grants: ${grants}). Use it to inspect data while planning, but do NOT emit task_mode "db" tasks — no write grant is configured.`,
+      `- Project database: ${label} is available to you through project_db_query for reads and writes.`,
+      "- When the ENTIRE work item is a database change (rows or schema) and nothing in the repository must change, execute it yourself now: run the statements, confirm the end state with a SELECT, then emit ONE dev task with task_mode \"db\", EMPTY file scope, and executed_by_planner: true whose task_spec records the statements you ran and whose success_criteria state the verified end state. Posse records that task as complete without dispatching it.",
+      "- Set executed_by_planner only after your own write statements succeeded and you confirmed them with a SELECT, only when you finished all of the database work, and only on a plan whose single task is that db task; otherwise leave it unset and Posse dispatches the task to dev.",
+      ...dbTaskLines,
     ];
   }
-  return [
-    `- Project database: ${label} is writable via project_db_query (grants: ${grants}).`,
-    "- For work whose ENTIRE change is database rows/schema (within those grants), emit ONE dev task with task_mode \"db\" and EMPTY file scope (no files_to_modify/files_to_create/files_to_delete/create_roots). The dev's only write surface is project_db_query; state the intended statements/outcomes in task_spec and make success_criteria verifiable with SELECT.",
-    "- db tasks cannot touch repo files. If work needs both repo edits and database changes, plan separate tasks (code task + db task).",
-  ];
+  if (lane === "read") {
+    return [
+      `- Project database: ${label} is available to you through project_db_query for inspection while planning.`,
+      ...reconciliationLines,
+      ...dbTaskLines,
+    ];
+  }
+  return dbTaskLines.length > 0
+    ? [`- Project database: ${label} is writable by dev tasks.`, ...reconciliationLines, ...dbTaskLines]
+    : [];
 }
 
 export function normalizePlannerRoleMode(value) {

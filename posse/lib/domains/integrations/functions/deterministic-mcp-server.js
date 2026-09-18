@@ -78,6 +78,7 @@ import {
   submitWebResearchHandoff,
 } from "../../web-research/classes/WebResearchRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
+import { projectDbQuerySchemaForPermissions } from "../../../shared/tools/functions/toolkit/project-db/schema.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { researcherReportOnlyForSession } from "./deterministic-mcp/researcher-report-profile.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
@@ -1384,6 +1385,16 @@ function computeProjectDbAccessEnabled() {
   }
 }
 let projectDbAccessEnabled = computeProjectDbAccessEnabled();
+// The advertised description names only the statements this session's
+// capability lane may run against the operator grant.
+function projectDbQuerySchemaForCurrentBoot() {
+  try {
+    const cfg = readProjectDbConfig({ projectDir: workspaceCwd });
+    return projectDbQuerySchemaForPermissions(capProjectDbPermissions(cfg.permissions, projectDbCapability()));
+  } catch {
+    return TOOL_PROJECT_DB_QUERY;
+  }
+}
 const WRITE_TOOL_NAMES = new Set(DETERMINISTIC_WRITE_TOOLS);
 const IMAGE_HELPER_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_HELPER_TOOLS);
 const IMAGE_GENERATION_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_TOOLS);
@@ -1590,7 +1601,7 @@ addToolSchema(TOOL_AGENT_FEEDBACK);
 addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_GET_BRIEF);
-addToolSchema(TOOL_PROJECT_DB_QUERY);
+addToolSchema(projectDbQuerySchemaForCurrentBoot());
 addToolSchema(TOOL_CUSTOM_TOOLS);
 if (writeEnabled) {
   for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
@@ -2722,7 +2733,7 @@ if (ownerHotGateway || isResearcherRole) {
   mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
 }
 if (projectDbAccessEnabled) {
-  mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability() }));
+  mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability(), observationContext: { job_id: mcpJobId, work_item_id: mcpWorkItemId, attempt_id: mcpAttemptId } }));
 }
 
 let TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
@@ -2856,7 +2867,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_GET_OPERATOR_FEEDBACK);
   addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
   addToolSchema(TOOL_GET_BRIEF);
-  addToolSchema(TOOL_PROJECT_DB_QUERY);
+  addToolSchema(projectDbQuerySchemaForCurrentBoot());
   addToolSchema(TOOL_CUSTOM_TOOLS);
   if (writeEnabled) {
     for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
@@ -2941,7 +2952,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
   }
   if (projectDbAccessEnabled) {
-    mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability() }));
+    mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability(), observationContext: { job_id: mcpJobId, work_item_id: mcpWorkItemId, attempt_id: mcpAttemptId } }));
   }
 }
 

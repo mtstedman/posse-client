@@ -2492,6 +2492,23 @@ function validatePlannerPacketSemantics(packet) {
         `planner success handoffs[${index}] requires non-empty success criteria`,
       );
     }
+    if (handoff.report?.executed_by_planner === true) {
+      if (taskMode !== "db") {
+        fail(
+          "AGENT_HANDOFF_SEMANTIC_INVALID",
+          `planner success handoffs[${index}] executed_by_planner is valid only on a task_mode db task`,
+        );
+      }
+      // The claim covers a whole database-only work item, so the flagged task
+      // must be the entire plan: Posse completes it against this attempt's
+      // receipts and cannot apportion them across several tasks.
+      if (packet.handoffs.length !== 1 || (handoff.depends_on || []).length > 0) {
+        fail(
+          "AGENT_HANDOFF_SEMANTIC_INVALID",
+          `planner success handoffs[${index}] executed_by_planner requires that task to be the only task in the plan, with no dependencies`,
+        );
+      }
+    }
     if (taskMode === "db") {
       if (handoff.target?.role !== "dev") {
         fail(

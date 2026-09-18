@@ -2437,11 +2437,39 @@ export function getDb() {
         username TEXT,
         password TEXT,
         permissions TEXT NOT NULL DEFAULT '',
+        permissions_version INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
     `);
   }
+  // Migration: grant scheme version. Existing rows stay on version 1 (the
+  // per-verb scheme they were saved under) so their mutating grants are
+  // suspended, not widened, until the operator re-saves permissions.
+  const projectDbConfigColumns = new Set(_db.pragma("table_info(project_db_config)").map((col) => col.name));
+  if (!projectDbConfigColumns.has("permissions_version")) {
+    _db.exec(`ALTER TABLE project_db_config ADD COLUMN permissions_version INTEGER NOT NULL DEFAULT 1`);
+  }
+
+  // Migration: project_db_receipts (durable, attempt-bound record of the
+  // statements a job ran against the project database).
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS project_db_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_item_id INTEGER,
+      job_id INTEGER NOT NULL,
+      attempt_id INTEGER,
+      kind TEXT NOT NULL CHECK (kind IN ('write', 'read')),
+      verb TEXT NOT NULL,
+      tables_json TEXT NOT NULL DEFAULT '[]',
+      affected_rows INTEGER,
+      statement TEXT NOT NULL,
+      db_type TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_db_receipts_job
+      ON project_db_receipts(job_id, attempt_id, id);
+  `);
 
   // Migration: research skip fields on work_items.
   const workItemColumns = new Set(_db.pragma("table_info(work_items)").map((col) => col.name));

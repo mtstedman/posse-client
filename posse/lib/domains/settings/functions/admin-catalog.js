@@ -34,12 +34,8 @@ export const PROJECT_DB_TYPE_OPTIONS = Object.freeze([
   Object.freeze({ value: "mysql", label: "mysql" }),
 ]);
 export const PROJECT_DB_PERMISSION_OPTIONS = Object.freeze([
-  Object.freeze({ value: "read", label: "read (SELECT)" }),
-  Object.freeze({ value: "write", label: "write (UPDATE)" }),
-  Object.freeze({ value: "insert", label: "insert (INSERT)" }),
-  Object.freeze({ value: "delete", label: "delete (DELETE)" }),
-  Object.freeze({ value: "create", label: "create (CREATE)" }),
-  Object.freeze({ value: "alter", label: "alter (ALTER)" }),
+  Object.freeze({ value: "read", label: "read (SELECT, inspection)" }),
+  Object.freeze({ value: "write", label: "write (UPDATE, INSERT, DELETE, CREATE, ALTER)" }),
 ]);
 
 export const PROJECT_DB_SETTING_DEFS = Object.freeze([
@@ -266,7 +262,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   bridge_label: "Bridge name",
   project_db_enabled: "Agent database access",
   project_db_type: "Database type",
-  project_db_permissions: "Allowed database operations",
+  project_db_permissions: "Allowed database scopes",
   project_db_database: "Database name or file",
   project_db_host: "Database host",
   project_db_port: "Database port",
@@ -418,7 +414,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   bridge_label: "Optional name used to identify this repository's local bridge.",
   project_db_enabled: "Allow agents to query the project database using the permissions below.",
   project_db_type: "Database engine used by this repository: SQLite, PostgreSQL, or MySQL.",
-  project_db_permissions: "Database operations agents may use. Read-only roles can still only read.",
+  project_db_permissions: "Database scopes agents may use: read and/or write. DROP and TRUNCATE are never allowed. Read-only roles can still only read.",
   project_db_database: "SQLite file path relative to the repository, or the PostgreSQL/MySQL database name.",
   project_db_host: "Host name for PostgreSQL or MySQL. SQLite does not use this setting.",
   project_db_port: "Port for PostgreSQL or MySQL. SQLite does not use this setting.",

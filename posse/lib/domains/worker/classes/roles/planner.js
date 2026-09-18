@@ -87,8 +87,10 @@ import {
   latestPlanArtifactText,
   buildPlanSynthesisArtifact,
   buildProjectDbRoutingLines,
+  plannerProjectDbCapability,
   validatePlannerContextPreflight,
 } from "../../../planning/functions/planner-helpers.js";
+import { listProjectDbWrites } from "../../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
 
 const DEFAULT_DEPS = {
   classifyPlannerOutput: defaultClassifyPlannerOutput,
@@ -572,6 +574,17 @@ export class PlannerRole extends BaseRole {
           "",
         ].filter(Boolean).join("\n")
       : "";
+    // Direct database execution is reserved for an ordinary single-planner run
+    // that has not already changed the database. Writes to the application
+    // database survive a failed attempt, so a retry after committed writes is
+    // never a fresh attempt: it drops to the read lane and reconciles against
+    // the exact ledger of what ran.
+    const plannerCommittedWrites = listProjectDbWrites(job.id);
+    const plannerDbCapability = plannerProjectDbCapability(plannerReadRoot, {
+      directExecution: planningMode !== RED_TEAM_PLANNING_MODE
+        && !assessmentReplan
+        && plannerCommittedWrites.length === 0,
+    });
     const plannerRoutingContext = [
       "PLANNING CAPABILITIES (authoritative for this work item):",
       availableSkillsBlock,
@@ -590,7 +603,7 @@ export class PlannerRole extends BaseRole {
       "- Keep operational commands separate from verification: a migration or generator may require approval to execute, but its successful exit is never evidence that the resulting behavior is correct.",
       // Conditional: empty when this repo has no project-db config, so
       // unconfigured repos see no db-task guidance at all.
-      ...buildProjectDbRoutingLines(plannerReadRoot),
+      ...buildProjectDbRoutingLines(plannerReadRoot, { capability: plannerDbCapability, committedWrites: plannerCommittedWrites }),
       "",
     ].join("\n");
 
@@ -604,6 +617,7 @@ export class PlannerRole extends BaseRole {
         job_id: job.id,
         work_item_id: job.work_item_id,
         job_type: job.job_type,
+        project_db_capability: plannerDbCapability,
         disableAtlas: payload.disableAtlas === true || disableAtlasForReadRoot,
         disableAtlasReason: payload.disableAtlasReason
           || (disableAtlasForReadRoot ? `read_root_mount_failed: ${atlasReadMount.reason}` : null),
@@ -729,6 +743,7 @@ export class PlannerRole extends BaseRole {
       plannerReadRoot,
       plannerRoleMode,
       plannerRoutingContext,
+      plannerDbCapability,
       researchContinuity: researchContext.provenance,
       primaryPlanText,
       projectDir: worker.projectDir,
@@ -785,6 +800,9 @@ export class PlannerRole extends BaseRole {
       role: this.getRole(),
       roleMode: ctx.plannerRoleMode || "normal",
       allowWrite: false,
+      // File tools stay read-only; the project database lane is separate.
+      projectDbWrite: ctx.plannerDbCapability === "write",
+      projectDbCapability: ctx.plannerDbCapability || "none",
       modelTier: ctx.tier,
       reasoningEffort: researchBudgetToReasoningEffort(ctx.researchBudget, job.reasoning_effort || "medium"),
       deepthink: isResearchBudgetDeep(ctx.researchBudget) || isDeepthinkTask(ctx.workItem, ctx.payload),
@@ -1013,6 +1031,7 @@ export class PlannerRole extends BaseRole {
     worker.createJobsFromPlan(job, tasks, {
       atlasDevBriefsEnabled: !!ctx.plannerPacket?.atlas?.active,
       fileKindProjectDir: ctx.plannerReadRoot || worker.projectDir,
+      planAttemptId: ctx.attemptId || null,
       sourceHashRefContext: {
         work_item_id: job.work_item_id,
         job_id: job.id,

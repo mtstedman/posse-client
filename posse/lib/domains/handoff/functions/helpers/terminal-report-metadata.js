@@ -14,6 +14,7 @@ export const PLANNER_REPORT_METADATA_KEYS = Object.freeze([
   "reasoning_effort",
   "priority",
   "skip_assessment",
+  "executed_by_planner",
   "test_command",
 ]);
 
@@ -246,6 +247,10 @@ export function normalizePlannerReportMetadata(report, label, profile) {
   if (report.skip_assessment != null) {
     if (typeof report.skip_assessment !== "boolean") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.skip_assessment must be a boolean`);
     out.skip_assessment = report.skip_assessment;
+  }
+  if (report.executed_by_planner != null) {
+    if (typeof report.executed_by_planner !== "boolean") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.executed_by_planner must be a boolean`);
+    out.executed_by_planner = report.executed_by_planner;
   }
   if (report.test_command != null) out.test_command = boundedString(report.test_command, `${label}.test_command`, 1000);
   return out;

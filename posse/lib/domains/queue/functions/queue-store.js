@@ -1928,6 +1928,39 @@ export function skipJob(jobId) {
   return false;
 }
 
+/**
+ * Record a database-only dev job as done because the planner already executed
+ * it. Same shape as skipJob: the job succeeds without a worker attempt, so no
+ * dev run and no assessment follow. The caller must have verified the plan
+ * job's project_db write evidence first; `evidence` is kept on the event.
+ * Returns true if the job was completed.
+ */
+export function completeJobExecutedByPlanner(jobId, { planJobId = null, evidence = [] } = {}) {
+  const result = runInTransaction(() => {
+    const job = getJob(jobId);
+    if (!job || job.job_type !== "dev") return null;
+    if (TERMINAL_JOB_STATUS_SET.has(job.status) || ACTIVE_LEASE_STATUS_SET.has(job.status)) return null;
+
+    if (!updateJobStatus(jobId, "succeeded")) return null;
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: jobId,
+      event_type: EVENT_TYPES.JOB_EXECUTED_BY_PLANNER,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Database-only task already executed by planner job #${planJobId}; recorded complete without dispatch`,
+      event_json: JSON.stringify({ plan_job_id: planJobId, writes: evidence }),
+    });
+
+    return job.work_item_id;
+  });
+
+  if (result !== null) {
+    refreshWorkItemStatus(result);
+    return true;
+  }
+  return false;
+}
+
 export function decrementAttemptCount(id) {
   const db = getDb();
   db.prepare(`UPDATE jobs SET attempt_count = MAX(0, attempt_count - 1), updated_at = ? WHERE id = ?`).run(now(), id);

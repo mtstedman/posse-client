@@ -1379,6 +1379,26 @@ CREATE TABLE IF NOT EXISTS project_db_config (
   username TEXT,
   password TEXT,
   permissions TEXT NOT NULL DEFAULT '',
+  permissions_version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+
+-- Durable receipts for statements a job ran against the project database.
+-- Bound to job and attempt; the planner's direct completion of database-only
+-- work and its retry reconciliation gate on these, not on telemetry.
+CREATE TABLE IF NOT EXISTS project_db_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_item_id INTEGER,
+  job_id INTEGER NOT NULL,
+  attempt_id INTEGER,
+  kind TEXT NOT NULL CHECK (kind IN ('write', 'read')),
+  verb TEXT NOT NULL,
+  tables_json TEXT NOT NULL DEFAULT '[]',
+  affected_rows INTEGER,
+  statement TEXT NOT NULL,
+  db_type TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_db_receipts_job
+  ON project_db_receipts(job_id, attempt_id, id);

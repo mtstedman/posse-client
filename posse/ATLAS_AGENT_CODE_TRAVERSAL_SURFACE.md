@@ -786,7 +786,7 @@ Remote roles: `assessor`, `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Run a single SQL statement against this project's configured application database (sqlite/postgres/mysql). Opt-in and operator-configured per repository: the statement types you may run depend on separate per-verb grants: READ enables SELECT, WRITE enables UPDATE, and INSERT, DELETE, CREATE, and ALTER each require their matching grant. Read-only inspection (PRAGMA/EXPLAIN/SHOW/DESCRIBE) follows the read grant. Read-phase roles are capped to SELECT/inspection regardless of the grant. The capability accepts only granted statement families and excludes destructive DDL such as DROP and TRUNCATE. One statement per call; read results are row- and byte-capped.
+Run a single SQL statement against this project's configured application database (sqlite/postgres/mysql). One statement per call; read results are row- and byte-capped.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

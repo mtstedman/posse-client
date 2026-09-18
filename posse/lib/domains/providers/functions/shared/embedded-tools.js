@@ -9,6 +9,8 @@ import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { buildProviderToolDefinitions } from "../../../../shared/tools/functions/contract.js";
 import { getAtlasEmbeddedToolDefinitions } from "../../../integrations/functions/atlas-embedded.js";
 import { embeddedAdvertisedToolNames } from "../../../../shared/tools/functions/tool-suites.js";
+import { projectDbQuerySchemaForPermissions } from "../../../../shared/tools/functions/toolkit/project-db/schema.js";
+import { projectAgentToolDefinition } from "../../../../shared/tools/functions/agent-schema.js";
 
 // Deterministic tools advertised on the function-calling (embedded) transport
 // used by OpenAI and Grok. Sourced from the shared ToolRegistry metadata
@@ -47,6 +49,11 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
       continue;
     }
     if (!EMBEDDED_DETERMINISTIC_TOOLS.has(name)) continue;
+    if (name === "project_db_query" && Array.isArray(tool.projectDbPermissions)) {
+      // Describe only the statements this job's scopes allow.
+      map[name] = projectAgentToolDefinition(projectDbQuerySchemaForPermissions(tool.projectDbPermissions));
+      continue;
+    }
     const schema = ToolCatalog.getAgentSchema(name, {
       role: contract?.role,
       compactCompletion: contract?.agentHandoffCompactV1 === true,

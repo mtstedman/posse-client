@@ -10,6 +10,7 @@
 
 import { capProjectDbPermissions, readProjectDbConnection } from "./config.js";
 import { authorizeProjectDbStatement, isReadOnlyGrant } from "./permissions.js";
+import { recordProjectDbRead, recordProjectDbWrite } from "./write-evidence.js";
 import { executeProjectDbStatement, DEFAULT_MAX_ROWS } from "./drivers.js";
 
 const MAX_ROWS_CEILING = 1000;
@@ -197,7 +198,7 @@ function tableSuffix(tables = []) {
  *   matter what the operator granted; write-lane jobs use the full grant.
  * @returns {Promise<string>}
  */
-export async function execProjectDbQuery(args = {}, { projectDir = null, capability = "write" } = {}) {
+export async function execProjectDbQuery(args = {}, { projectDir = null, capability = "write", observationContext = null, loadDriver = undefined } = {}) {
   const conn = readProjectDbConnection({ projectDir });
   if (!conn.enabled || !conn.dbType || conn.permissions.length === 0) {
     return "Error: Project DB access is not enabled for this repository.";
@@ -217,12 +218,18 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
   const readOnly = isReadOnlyGrant(permissions);
   const tables = extractProjectDbTableNames(auth.statement);
 
+  // A data-modifying CTE is read-shaped but is a write: it must run as the
+  // top-level statement (the bounded read wrapper would nest it, which
+  // Postgres rejects) and is reported and receipted as a write.
+  const runAsRead = auth.isRead && !auth.mutates;
+
   let result;
   try {
     result = await executeProjectDbStatement({
       connection: conn,
       statement: auth.statement,
-      isRead: auth.isRead,
+      isRead: runAsRead,
+      ...(loadDriver ? { loadDriver } : {}),
       readOnly,
       maxRows,
       projectDir,
@@ -232,7 +239,32 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
     return `Error: project_db_query (${conn.dbType}) failed: ${message}`;
   }
 
-  if (auth.isRead) {
+  // The engine accepted a statement that changes data — by leading verb or, for
+  // a data-modifying CTE, inside a read-shaped statement. Leave a durable
+  // receipt before rendering anything. The application database has already
+  // committed, so a failed receipt cannot be treated as a failed statement:
+  // retrying could apply it twice. It is surfaced as its own state instead.
+  const isDdl = auth.verb === "CREATE" || auth.verb === "ALTER";
+  let receiptNotice = "";
+  if (auth.mutates) {
+    const receipt = recordProjectDbWrite({
+      verb: auth.mutatingVerbs.join("+"),
+      tables,
+      // A CTE's count is what its final SELECT returned, not what it changed.
+      affectedRows: isDdl || auth.isRead ? null : (result.affectedRows ?? 0),
+      statement: redact(auth.statement, conn.password),
+      dbType: conn.dbType,
+    }, observationContext);
+    if (receipt === "unrecorded") {
+      receiptNotice = "\nRECEIPT NOT RECORDED: this statement is COMMITTED in the project database, but Posse could not persist its receipt. "
+        + "Treat the change as already made: verify it with a read, and state in your result that it is already committed and must be verified rather than applied again.";
+    }
+  } else if (capability === "write") {
+    // A write-lane read is the verification half of the receipt trail.
+    recordProjectDbRead({ verb: auth.verb, tables, statement: redact(auth.statement, conn.password), dbType: conn.dbType }, observationContext);
+  }
+
+  if (runAsRead) {
     const body = renderRows(result.rows || [], result.columns || []);
     const header = `project_db_query (${conn.dbType}) — ${result.rowCount} row(s)`
       + tableSuffix(tables)
@@ -241,17 +273,20 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
     if (out.length > DEFAULT_MAX_BYTES) {
       out = `${out.slice(0, DEFAULT_MAX_BYTES)}\n… [output truncated at ${DEFAULT_MAX_BYTES} bytes; narrow the query]`;
     }
-    return out;
+    return `${out}${receiptNotice}`;
   }
 
   // DDL path (CREATE/ALTER): "rows affected" is meaningless for schema changes.
-  if (auth.verb === "CREATE" || auth.verb === "ALTER") {
-    return `project_db_query (${conn.dbType}) — ${auth.verb}: statement executed${tableSuffix(tables)}`;
+  if (isDdl) {
+    return `project_db_query (${conn.dbType}) — ${auth.verb}: statement executed${tableSuffix(tables)}${receiptNotice}`;
+  }
+  if (auth.isRead) {
+    return `project_db_query (${conn.dbType}) — ${auth.verb} (${auth.mutatingVerbs.join("+")}): statement executed${tableSuffix(tables)}${receiptNotice}`;
   }
 
   // Write path (UPDATE/INSERT/DELETE).
   const affected = result.affectedRows ?? 0;
   const extra = result.lastInsertRowid != null ? `, lastInsertRowid=${result.lastInsertRowid}`
     : (result.insertId != null && result.insertId !== 0 ? `, insertId=${result.insertId}` : "");
-  return `project_db_query (${conn.dbType}) — ${auth.verb}: ${affected} row(s) affected${extra}${tableSuffix(tables)}`;
+  return `project_db_query (${conn.dbType}) — ${auth.verb}: ${affected} row(s) affected${extra}${tableSuffix(tables)}${receiptNotice}`;
 }

@@ -432,7 +432,9 @@ export class AdminSettingsController {
     return [
       row("project_db_enabled", cfg.enabled ? "true" : "false", "Enable the opt-in project_db_query agent tool for this repo."),
       row("project_db_type", cfg.dbType || "", "Project database engine: sqlite, postgres, or mysql."),
-      row("project_db_permissions", (cfg.permissions || []).join(","), "Granted SQL ops: read, write, insert, delete, create, alter (DROP/TRUNCATE never allowed). Read-phase roles only ever use the read grant."),
+      row("project_db_permissions", (cfg.permissions || []).join(","), `${(cfg.suspendedLegacyGrants || []).length > 0
+        ? `SUSPENDED: this repo granted ${cfg.suspendedLegacyGrants.join(", ")} under the old per-statement scheme, where write meant UPDATE only. Those grants are withheld until you save this setting again. `
+        : ""}Granted SQL scopes: read (SELECT, inspection) and write (UPDATE, INSERT, DELETE, CREATE, ALTER); DROP/TRUNCATE never allowed. Read-phase roles only ever use the read scope.`),
       row("project_db_database", cfg.database || "", "sqlite: file path (relative to repo). postgres/mysql: database name."),
       row("project_db_host", cfg.host || "", "postgres/mysql host (ignored for sqlite)."),
       row("project_db_port", cfg.port != null ? String(cfg.port) : "", "postgres/mysql port (ignored for sqlite)."),

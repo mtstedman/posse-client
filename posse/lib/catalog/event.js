@@ -281,6 +281,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_SCOPE_VIOLATION: "job.scope_violation",
   JOB_SHUTDOWN_INTERRUPTED: "job.shutdown_interrupted",
   JOB_SHUTDOWN_REQUEUE: "job.shutdown_requeue",
+  JOB_EXECUTED_BY_PLANNER: "job.executed_by_planner",
   JOB_SKIPPED: "job.skipped",
   JOB_STALE_LEASE_RELEASE: "job.stale_lease_release",
   JOB_STALL_KILLED: "job.stall_killed",

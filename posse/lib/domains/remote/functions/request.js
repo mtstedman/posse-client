@@ -63,9 +63,14 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
     || packet?._raw_payload?.task_mode
     || "",
   ).trim().toLowerCase();
+  // The planner's lane is decided by its role (planner.js): write when it may
+  // execute database-only work itself, read for inspection.
+  const plannerProjectDbCapability = String(packet?._raw_payload?.project_db_capability || "").trim().toLowerCase();
   const localProjectDbCapability = taskMode === "db" && (role === "dev" || role === "fix")
     ? "write"
-    : (taskMode === "db" && role === "assessor" ? "read" : "none");
+    : (taskMode === "db" && role === "assessor"
+      ? "read"
+      : (role === "planner" && ["read", "write"].includes(plannerProjectDbCapability) ? plannerProjectDbCapability : "none"));
   const assertedProjectDbCapability = String(tools.project_db || tools.projectDb || localProjectDbCapability).trim().toLowerCase();
   const projectDbRanks = { none: 0, read: 1, write: 2 };
   const projectDbCapability = (projectDbRanks[assertedProjectDbCapability] ?? 0) < projectDbRanks[localProjectDbCapability]

@@ -322,7 +322,7 @@ export const TOOL_CATALOG = {
   project_db_query: {
     schema: TOOL_PROJECT_DB_QUERY,
     access: "read",
-    summary: "Run a single SQL statement against the project's configured application database; allowed statement types follow the operator-granted permissions.",
+    summary: "Run a single SQL statement against the project's configured application database.",
     observation: { type: "tool.project_db_query", label: "ProjectDbQuery", format: "generic", targetKeys: ["query"] },
   },
   list_files: {
@@ -578,9 +578,13 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       read: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
       write: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
+    // The planner never gets file-write tools, but it carries project_db_query
+    // so it can inspect data while planning and execute a database-only work
+    // item itself; the issued capability and operator grant decide whether
+    // that is read-only or read/write.
     planner: Object.freeze({
-      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool
@@ -931,11 +935,11 @@ export function getDeterministicMcpToolNames(role, {
   }
   if (TOOL_ROLE_LIBRARY.deterministicMcp.shellRoles.includes(role)) tools.push("bash");
   if (role === "planner") tools.push("get_brief");
-  // Opt-in project DB access: write-lane roles (dev/artificer) use the full
-  // operator grant, read-lane roles (researcher/planner) are capped to SELECT
-  // at execution. The MCP gateway's runtimeToolAvailable() hides the tool
+  // Opt-in project DB access for the roles that carry it. The job's issued
+  // capability lane caps the operator grant at execution (the assessor is
+  // always read-only). The MCP gateway's runtimeToolAvailable() hides the tool
   // unless this repo's admin config enables it with a usable grant.
-  if (["dev", "assessor"].includes(role)) tools.push("project_db_query");
+  if (["planner", "dev", "assessor"].includes(role)) tools.push("project_db_query");
   if (role === "researcher" && !atlasAvailable) {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);

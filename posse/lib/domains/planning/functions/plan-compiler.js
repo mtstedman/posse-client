@@ -10,6 +10,7 @@ import { getIntSetting } from "../../queue/functions/index.js";
 import {
   addDependency,
   applyDelegation,
+  completeJobExecutedByPlanner,
   getDependents,
   getJob,
   getSetting,
@@ -46,6 +47,7 @@ import {
 } from "../../handoff/functions/index.js";
 import { resolveResearchContextForWorkItem } from "../../research/functions/research-context.js";
 import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
+import { listProjectDbWrites, verifiedProjectDbExecution } from "../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
 import {
   normalizeRiskTags,
   resolveTaskExecutionPolicy,
@@ -322,8 +324,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   repairWebAssetCreateScope = repairWebAssetCreateScopeFromModule,
   retireWaitingLanePlanningDemand = retireWaitingLanePlanning,
   spawnFromRole = defaultSpawnFromRole,
+  planAttemptId = null,
 } = {}) {
       const plannerRole = worker?.roleRegistry?.get?.("plan");
+      // The plan as the planner submitted it, before compilation splits or
+      // drops tasks: a planner-executed claim is only valid as the whole plan.
+      const submittedTaskCount = Array.isArray(tasks) ? tasks.length : 0;
+      const currentPlanAttemptId = planAttemptId ?? sourceHashRefContext?.attempt_id ?? null;
       const planJobPayload = parseJobPayload(planJob);
       const pinnedTestCommand = planJobPayload._task_ab_test_command === true
         && typeof planJobPayload.test_command === "string"
@@ -2027,6 +2034,63 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         });
         allCreatedJobIds.add(job.id);
         recordCompiledTaskJob(i, job.id);
+        // ── Planner-executed db task ──
+        // The planner may run a database-only work item itself and report it
+        // as a db task flagged executed_by_planner. The claim alone is never
+        // enough, and neither is "this job wrote something once". It holds only
+        // when the flagged task IS the whole plan (one task, no dependencies)
+        // and THIS attempt's receipts show a write that changed something,
+        // followed by a verifying read. Anything less drops the flag and the
+        // task runs through dev and assessment like any other db task.
+        if (t.executed_by_planner === true && finalJobType === "dev" && taskMode === "db") {
+          const wholePlan = submittedTaskCount === 1
+            && (!Array.isArray(t.depends_on_index) || t.depends_on_index.length === 0);
+          const execution = wholePlan
+            ? verifiedProjectDbExecution(planJob.id, currentPlanAttemptId)
+            : { ok: false, reason: "not_the_whole_plan", writes: [] };
+          if (execution.ok) {
+            const executedPayload = parseJobPayload(job);
+            executedPayload.executed_by_planner = {
+              plan_job_id: planJob.id,
+              plan_attempt_id: currentPlanAttemptId,
+              writes: execution.writes,
+            };
+            updateJobPayload(job.id, JSON.stringify(executedPayload));
+            if (completeJobExecutedByPlanner(job.id, { planJobId: planJob.id, evidence: execution.writes })) {
+              worker.emit(planJob.id, `${C.green}[plan-validate]${C.reset} WI#${planJob.work_item_id}: db task "${t.title}" was executed by the planner (${execution.writes.length} receipted write statement(s), verified by read) — recorded complete without dispatch`);
+            }
+          } else {
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: db task "${t.title}" claims planner execution but it is not verified (${execution.reason}) — dispatching it to dev`);
+            logEvent({
+              work_item_id: planJob.work_item_id,
+              job_id: planJob.id,
+              event_type: EVENT_TYPES.PLAN_TASK_INVALID,
+              actor_type: EVENT_ACTORS.SYSTEM,
+              message: `Planner-executed claim on db task "${t.title}" is not verified (${execution.reason}); task dispatched to dev`,
+              event_json: JSON.stringify({
+                reason: "planner_execution_unverified",
+                detail: execution.reason,
+                task_index: i,
+                task_title: t.title,
+                job_id: job.id,
+                plan_attempt_id: currentPlanAttemptId,
+                // Statements this attempt did commit, so the dev reconciles instead of repeating them.
+                committed_writes: execution.writes,
+              }),
+            });
+          }
+        }
+        // Any db task still headed to dev must know what this plan job already
+        // committed — in this attempt or an earlier failed one — so the dev
+        // reconciles against that ledger instead of applying it again.
+        if (finalJobType === "dev" && taskMode === "db" && getJob(job.id)?.status !== "succeeded") {
+          const committedByPlanJob = listProjectDbWrites(planJob.id);
+          if (committedByPlanJob.length > 0) {
+            const reconcilePayload = parseJobPayload(getJob(job.id));
+            reconcilePayload.planner_committed_writes = committedByPlanJob;
+            updateJobPayload(job.id, JSON.stringify(reconcilePayload));
+          }
+        }
         let activeHashRefPacketDropped = [];
         if (activeHashRefPacket && sourceHashRefContext && finalJobType === "dev" && taskMode === "code") {
           const targetHashRefContext = {
