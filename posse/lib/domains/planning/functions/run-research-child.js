@@ -30,7 +30,7 @@ export async function runResearchChild(client, parent, request) {
   if (agentType === "web") {
     const result = await webResearchRuntime.execute({ route: "web", question: intent }, {
       context: parentContext, signal, dispatchId: request.dispatchId,
-      budget: { maxTurns, reasoningEffort, timeoutMs, resultChars: request.resultChars },
+      budget: { maxTurns, reasoningEffort, timeoutMs, resultChars: request.resultChars, modelTier: request.modelTier || null },
     });
     return {
       agentCallId: result.usage.agent_call_id,
@@ -61,8 +61,12 @@ export async function runResearchChild(client, parent, request) {
   if (packet.remote_issuance?.coordination?.research_investigation_v1 !== true) {
     throw new Error("Remote does not support investigating research children; use the matching remote workbranch");
   }
+  // Children run on the configured (cheaper) tier and let the provider pick
+  // that tier's model; the parent's exact model is only inherited when no
+  // child tier is configured.
+  const childTier = request.modelTier || parent.tier;
   return await client.call(prompt, {
-    role: "researcher", modelTier: parent.tier, modelName: parent.model,
+    role: "researcher", modelTier: childTier, modelName: request.modelTier ? null : parent.model,
     reasoningEffort, activity: intent, maxTurns, maxOutputTokens: 4096,
     allowWrite: false, allowShell: false, allowTests: false, projectDbCapability: "none", projectDbWrite: false,
     disableAtlas: parent.disableAtlas, disableSystemTools: true,

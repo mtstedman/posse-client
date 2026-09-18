@@ -745,13 +745,13 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
       actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: provider ${plannerProvider || "unknown"} has no known MCP tool deadline` });
   }
   if (dispatchPolicy.enabled && dispatchProviderSupported && !["oneshot", "oneshot_candidate", "web_only_answer"].includes(effectiveRouting.bucket)) {
-    // This route replaces a research job plus a standard-tier plan job, not the
-    // cheap direct-plan route for trivial items; the planner (and the research
-    // children that inherit its tier) must run at the tier the router would
-    // have used for the post-research plan.
+    // This route replaces a research job plus a plan job, not the cheap
+    // direct-plan route for trivial items. The planner runs on the configured
+    // dispatch tier (strong by default) and its research children on the
+    // cheaper child tier, which is the cost split planner-led intake is for.
     const job = createPlanAfterSkippedResearch(workItem, {
       routing: { ...effectiveRouting, reason: "Planner decides whether research is needed" },
-      budget: actualBudget, source, redTeamPlan, plannerDispatch: true, modelTier: "standard",
+      budget: actualBudget, source, redTeamPlan, plannerDispatch: true, modelTier: dispatchPolicy.plannerModelTier,
     });
     return { kind: "plan", job, routing: effectiveRouting };
   }

@@ -1391,6 +1391,7 @@ export class SubAgentRuntime {
           maxTurns: Math.min(policy.childMaxTurns, budget.max_turns || policy.childMaxTurns),
           reasoningEffort: PLANNER_RESEARCH_EFFORT_VALUES[Math.min(PLANNER_RESEARCH_EFFORT_VALUES.indexOf(effort), PLANNER_RESEARCH_EFFORT_VALUES.indexOf(policy.effortCeiling))],
           resultChars: policy.resultChars,
+          modelTier: policy.childModelTier || null,
           inputs: [], maxInputs: 0, parentContext: { ...context },
         };
       }
@@ -1526,6 +1527,7 @@ export class SubAgentRuntime {
           maxInputs: entry.maxInputs,
           maxTurns: entry.maxTurns,
           resultChars: entry.resultChars,
+          modelTier: entry.modelTier || null,
           reasoningEffort: entry.reasoningEffort,
           timeoutMs: entry.timeoutMs,
           signal: entry.controller.signal,

@@ -1899,8 +1899,8 @@ export class TrackedProviderClient {
               {
                 role: "researcher",
                 roleMode: "web",
-                modelTier: tier,
-                modelName,
+                modelTier: budget?.modelTier || tier,
+                modelName: budget?.modelTier ? null : modelName,
                 reasoningEffort: budget?.reasoningEffort || "low",
                 activity: question,
                 allowWrite: false,

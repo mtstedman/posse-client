@@ -743,7 +743,7 @@ export class PlannerRole extends BaseRole {
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
-    const researchBudget = researchPolicy ? `Research budgets: choose whether research is needed within ${researchPolicy.triageMaxTurns} triage turns. Zero children is valid. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, effort ${researchPolicy.effortCeiling}, result ${researchPolicy.resultChars} characters.` : null;
+    const researchBudget = researchPolicy ? `Research budgets: choose whether research is needed within ${researchPolicy.triageMaxTurns} triage turns. Zero children is valid. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, effort ${researchPolicy.effortCeiling}, result ${researchPolicy.resultChars} characters. Children run on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.` : null;
     const remoteInstructions = [contract, researchBudget, contextText]
       .filter((part) => part != null && String(part) !== "")
       .join("\n");

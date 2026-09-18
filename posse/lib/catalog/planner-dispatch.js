@@ -1,6 +1,7 @@
 import { MCP_TRANSPORT_TIMEOUT_MS } from "./mcp.js";
 import { SETTING_KEYS } from "./settings.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
+import { MODEL_TIERS } from "./model.js";
 
 export const PLANNER_DISPATCH_MODES = Object.freeze({ ROUTER: "router", PLANNER: "planner" });
 export const PLANNER_DISPATCH_MODE_VALUES = Object.freeze(Object.values(PLANNER_DISPATCH_MODES));
@@ -16,6 +17,10 @@ export const PLANNER_DISPATCH_SETTINGS = Object.freeze([
   { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MAX_TURNS, default: "24", numeric: { integer: true, min: 1, max: 64 }, description: "Maximum tool/reasoning turns assigned to a research child." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_RESULT_CHARS, default: "12000", numeric: { integer: true, min: 1000, max: 48000 }, description: "Maximum compact research result characters returned per child." },
   { key: SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS, default: "6", numeric: { integer: true, min: 1, max: 24 }, description: "Prompted planner triage turn budget before choosing whether to request research." },
+  // The point of planner-led intake is to spend the expensive model on
+  // planning and cheaper models on the bounded reads that feed it.
+  { key: SETTING_KEYS.PLANNER_DISPATCH_MODEL_TIER, default: "strong", options: MODEL_TIERS, description: "Model tier for the planner job on planner-led intake." },
+  { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MODEL_TIER, default: "standard", options: MODEL_TIERS, description: "Model tier for investigating research children dispatched by the planner (cheaper than the planner by default)." },
   { key: SETTING_KEYS.AGENT_DISPATCH_TOOL_TIMEOUT_SEC, default: "1500", numeric: { integer: true, min: 60, max: Math.floor((MCP_TRANSPORT_TIMEOUT_MS - 1) / 1000) }, description: "Timeout in seconds for the experimental agent-dispatch MCP gate; always below the owner transport deadline." },
 // Account-level: the dispatch mode and its budgets describe how this
 // operator wants planning to run everywhere, not a property of one clone.
