@@ -503,6 +503,45 @@ function cancelQueuedWiWarmJobs(db, workItemId, reason) {
  * @param {(err: Error) => void} [args.onError]
  * @returns {{ ok: boolean, eventId: number | null, warmJobId: number | null, skipped?: string, coalesced?: boolean, canceledWarmJobs?: number }}
  */
+const OUTBOX_BUSY_RETRY_DELAYS_MS = Object.freeze([250, 750, 1500]);
+
+function isSqliteBusyError(err) {
+  const code = String(err?.code || "");
+  const message = String(err?.message || "");
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /database is locked|database table is locked/i.test(message);
+}
+
+function blockFor(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* spin */ }
+  }
+}
+
+/**
+ * Run the outbox transaction, retrying a bounded number of times when another
+ * connection holds the write lock past the busy timeout. A merge that reaches
+ * this point has already landed on main; dropping its replay left main's WI
+ * partition unreplayed with only a single-shot attempt behind it.
+ * @param {() => void} run
+ */
+export function runOutboxWithBusyRetry(run, { delaysMs = OUTBOX_BUSY_RETRY_DELAYS_MS, onRetry = null } = {}) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return run();
+    } catch (err) {
+      if (!isSqliteBusyError(err) || attempt >= delaysMs.length) throw err;
+      const delay = delaysMs[attempt];
+      attempt += 1;
+      if (typeof onRetry === "function") onRetry({ attempt, delay, error: err });
+      blockFor(delay);
+    }
+  }
+}
+
 export function emitAtlasPipelineEvent({
   eventType,
   payload,
@@ -513,7 +552,7 @@ export function emitAtlasPipelineEvent({
   onError = undefined,
 }) {
   if (!eventType || !payload || typeof payload !== "object") {
-    return { ok: false, eventId: null, warmJobId: null, skipped: "invalid_args" };
+    return { ok: false, eventId: null, warmJobId: null, coalesced: false, canceledWarmJobs: 0, skipped: "invalid_args" };
   }
 
   const purpose = purposeForEvent(eventType);
@@ -598,7 +637,7 @@ export function emitAtlasPipelineEvent({
     let warmJobId = null;
     let coalesced = false;
     let canceledWarmJobs = 0;
-    db.transaction(() => {
+    runOutboxWithBusyRetry(db.transaction(() => {
       if (shouldRetireQueuedWiWarmJobs(eventType)) {
         canceledWarmJobs = cancelQueuedWiWarmJobs(db, workItemId, eventType);
       }
@@ -648,7 +687,7 @@ export function emitAtlasPipelineEvent({
         nowIso(),
       );
       warmJobId = Number(jobInfo.lastInsertRowid);
-    })();
+    }));
     if (CACHE_INVALIDATING_EVENTS.has(eventType)) {
       getRetrievalCache().invalidateAll();
     }
@@ -667,6 +706,8 @@ export function emitAtlasPipelineEvent({
       ok: false,
       eventId: null,
       warmJobId: null,
+      coalesced: false,
+      canceledWarmJobs: 0,
       skipped: "outbox_error",
     };
   }

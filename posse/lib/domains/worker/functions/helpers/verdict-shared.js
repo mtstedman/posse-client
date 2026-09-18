@@ -403,14 +403,25 @@ export function capVerdictForHighRiskVerificationGap(
     };
   }
 
+  // When the verification gap is structural (no runner for the changed files,
+  // no toolchain in the repository), a stronger assessor cannot close it: it
+  // would read the same source and reach the same unverifiable pass. Skip the
+  // paid tier escalation and go straight to the operator decision the policy
+  // asks for. Live case 2026-09-18: a plain PHP/JS site with no typecheck
+  // runner escalated a correct pass to a Fable re-assessment before gating.
+  const structuralGap = !command
+    && (scopedOutcome?.type === "runner_unavailable" || scopedOutcome?.actionability === "infrastructure");
   return {
     ...verdict,
     verdict: "needs_review",
     verification_status: command
       ? "declared_verification_unavailable"
       : "source_assessment_only",
+    ...(structuralGap ? { _disable_internal_retry: true, _assessment_confidence_review: true } : {}),
     reasons: [
-      "High-risk code cannot pass on source assessment alone; verification for the assessed commit or explicit human review is required.",
+      structuralGap
+        ? "High-risk code cannot pass on source assessment alone and no verification runner is available for the changed files; explicit human review is required."
+        : "High-risk code cannot pass on source assessment alone; verification for the assessed commit or explicit human review is required.",
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
