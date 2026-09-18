@@ -1566,6 +1566,7 @@ export class Worker {
             wi_id: Number(job.work_item_id),
             branch: branchName || "",
             commit_sha: String(commitHash),
+            worktree_path: job._worktreePath || null,
             paths,
             job_id: Number(job.id),
           },

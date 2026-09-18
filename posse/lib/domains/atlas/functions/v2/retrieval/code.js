@@ -26,6 +26,7 @@ import { readRepoFileResult } from "./repo-read.js";
 import { redactSecrets } from "./redaction.js";
 import { recoverIndexedPath } from "./path-recovery.js";
 import { selectSymbolTarget } from "./symbol-target.js";
+import { staleSymbolSource } from "./source-freshness.js";
 
 import {
   normalizedQualifiedIdentifier,
@@ -707,6 +708,8 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
   };
   const identifiers = normalizeIdentifiers(params.identifiersToFind);
   const { source, target, targetPath, symbolId } = resolved;
+  const stale = staleSymbolSource(target, source);
+  if (stale) return errorEnvelope({ action: "code.window", versionId, ...stale });
   if (policy.requireIdentifiers && identifiers.length === 0 && !target) {
     return errorEnvelope({
       action: "code.window",

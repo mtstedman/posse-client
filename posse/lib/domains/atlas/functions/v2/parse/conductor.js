@@ -15,6 +15,7 @@
 import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { log } from "../../../../../shared/telemetry/functions/logging/logger.js";
+import { worktreeViewPath } from "../runtime-paths.js";
 import {
   closeAtlasUsageTelemetry,
   createAtlasUsageTelemetryWorkerChannel,
@@ -238,6 +239,9 @@ export function createConductorDaemon(opts = {}) {
     const candidates = targetLocal
       ? [opts?.job?.out_view_path, opts?.viewPath]
       : [opts?.job?.out_view_path, opts?.viewPath, opts?.dbPath];
+    if (waitingLanePurpose === "wi" && opts?.job?.worktree_path) {
+      candidates.push(worktreeViewPath(opts.job.worktree_path));
+    }
     const seen = new Set();
     const targets = [];
     for (const candidate of candidates) {

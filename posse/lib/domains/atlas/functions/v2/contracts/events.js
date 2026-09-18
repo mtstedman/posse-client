@@ -117,6 +117,7 @@ export const ATLAS_EVENT_NAMES = Object.freeze(
 
 /**
  * @typedef {Object} DevCommittedPayload
+ * @property {string | null} [worktree_path] Exact source checkout for the committed WI.
  * @property {number} wi_id
  * @property {string} branch
  * @property {string} commit_sha

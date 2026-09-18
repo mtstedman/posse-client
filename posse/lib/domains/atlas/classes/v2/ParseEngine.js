@@ -84,6 +84,8 @@ import {
   shouldInspectSourceForMinification,
 } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
+import { verifyWiSource, wiTrackedPaths } from "../../functions/v2/wi-source-proof.js";
+import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
 import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
@@ -1117,8 +1119,35 @@ export class ParseEngine {
         await this.#runScipPhaseIfEnabled(base, purpose);
       }
       switch (purpose) {
-        case "wi":
-          return finalize(await this.#warmWi(payload, base), start);
+        case "wi": {
+          const refresh = payload.trigger_event === ATLAS_EVENTS.DEV_COMMITTED || Boolean(payload.commit_sha);
+          if (refresh) {
+            base.wi_source_verified = false;
+            if (!this.#parser) throw new Error("WI source refresh requires a parser adapter");
+            const branch = ledgerBranchForWi(payload.work_item_id);
+            if (payload.work_item_id == null || payload.branch !== branch || !this.#ledger.getBranch(branch)) {
+              throw new Error("Post-commit WI refresh requires its existing WI ledger branch");
+            }
+            const sourceRoot = await verifyWiSource({ repoRoot: this.#repoRoot,
+              worktreePath: payload.worktree_path, commitSha: payload.commit_sha });
+            const snapshot = this.#ledger.pathSnapshotAt(branch, this.#ledger.headSeq(branch));
+            const paths = [...new Set([...await wiTrackedPaths(sourceRoot), ...snapshot.keys()])];
+            base.paths_considered = paths.length;
+            await this.#indexPaths({ paths, branch, base, sourceRoot });
+            if (base.skipped.some((skip) => !ACCOUNTED_EXCLUSION_REASONS.has(skip.reason))) {
+              throw new Error("WI source refresh did not index every eligible path");
+            }
+            await verifyWiSource({ repoRoot: this.#repoRoot,
+              worktreePath: sourceRoot, commitSha: payload.commit_sha });
+            await this.#warmWi(payload, base);
+            const mounted = await this.mountForWorktreeAsync({ workItemId: payload.work_item_id, ledgerBranch: branch, worktreePath: sourceRoot });
+            base.view_written = mounted.viewPath;
+            base.wi_source_verified = true;
+          } else {
+            await this.#warmWi(payload, base);
+          }
+          return finalize(base, start);
+        }
         case "wi-cleanup":
           return finalize(await this.#cleanupFromJob(payload, base), start);
         case "main-merge":
@@ -2692,15 +2721,14 @@ export class ParseEngine {
    * Errors per-file do not abort the batch — failures are surfaced in
    * `base.skipped` so operators can see which files couldn't be indexed.
    *
-   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, documentIntake?: OrderedDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null }} args
+   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, sourceRoot?: string, documentIntake?: OrderedDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null }} args
    */
-  async #indexPaths({ paths, branch, base, documentIntake = null, stageScipPaths = null }) {
+  async #indexPaths({ paths, branch, base, sourceRoot = this.#repoRoot, documentIntake = null, stageScipPaths = null }) {
     if (!this.#parser) return;
     await this.#emitStage("snapshot", `loading ${branch} path snapshot`);
     const headSeq = this.#ledger.headSeq(branch);
-    const snapshot = headSeq > 0
-      ? this.#ledger.pathSnapshotAt(branch, headSeq)
-      : new Map();
+    // A newly forked branch at local seq 0 still inherits its parent's files.
+    const snapshot = this.#ledger.pathSnapshotAt(branch, headSeq);
     documentIntake?.registerPaths(paths);
     const scipWork = typeof stageScipPaths === "function"
       ? Promise.resolve().then(() => stageScipPaths(paths))
@@ -2882,7 +2910,7 @@ export class ParseEngine {
           continue;
         }
 
-        const absPath = path.join(this.#repoRoot, repo_rel_path);
+        const absPath = path.join(sourceRoot, repo_rel_path);
         let onDiskExists = false;
         try { onDiskExists = fs.existsSync(absPath); }
         catch { onDiskExists = false; }
@@ -3030,7 +3058,7 @@ export class ParseEngine {
           });
           parsed = fileBytes && typeof /** @type {any} */ (this.#parser).parseBuffer === "function"
             ? await /** @type {any} */ (this.#parser).parseBuffer({ bytes: fileBytes, repo_rel_path })
-            : await this.#parser.parseFile({ absPath, repoRoot: this.#repoRoot });
+            : await this.#parser.parseFile({ absPath, repoRoot: sourceRoot });
         } catch (err) {
           logAtlasError(`[Warmer.#indexPaths] parse failed for ${repo_rel_path}:`, err);
           base.skipped.push({
@@ -3128,16 +3156,16 @@ export class ParseEngine {
             /** @type {any} */ (base)._forceViewRebuild = true;
           }
           base.blobs_reused++;
-          base.paths_indexed++;
-          await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
-          await documentIntake?.markTreeSitter({
-            repo_rel_path,
-            content_hash: parsed.content_hash,
-          });
-          documentPublished = true;
-          continue;
-        }
-        if (this.#viewLayerMerge) {
+          if (before === parsed.content_hash) {
+            base.paths_indexed++;
+            await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
+            await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: parsed.content_hash });
+            documentPublished = true;
+            continue;
+          }
+          // A shared blob is not proof that THIS branch points at it.
+          // Fall through to append the branch-local path delta below.
+        } else if (this.#viewLayerMerge) {
           // Order-independent path: tree-sitter writes its OWN layer; the view
           // merge (buildFrom layerMerge) combines it with any SCIP layer.
           await this.#ledger.ingestBlobLayer({

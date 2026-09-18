@@ -79,7 +79,7 @@ export function getAtlasWarmJobCompletion(warmJobId) {
     return { ok: false, completed: false, skipped: "missing_warm_job_id", warmJobId: null };
   }
   const row = getDb().prepare(`
-    SELECT id, job_type, status, result_json, last_error
+    SELECT id, job_type, status, payload_json, result_json, last_error
     FROM jobs
     WHERE id = ?
   `).get(id);
@@ -87,12 +87,19 @@ export function getAtlasWarmJobCompletion(warmJobId) {
     return { ok: false, completed: false, skipped: "warm_job_missing", warmJobId: id };
   }
   const completed = ATLAS_WARM_TERMINAL_STATUS_SET.has(row.status);
+  let sourceVerified = true;
+  try {
+    const payload = JSON.parse(row.payload_json || "{}");
+    if (payload.purpose === "wi" && payload.commit_sha) {
+      sourceVerified = JSON.parse(row.result_json || "{}").wi_source_verified === true;
+    }
+  } catch { sourceVerified = false; }
   return {
-    ok: completed && row.status === "succeeded",
+    ok: completed && row.status === "succeeded" && sourceVerified,
     completed,
     status: row.status,
     resultJson: row.result_json || null,
-    error: row.last_error || null,
+    error: row.last_error || (completed && !sourceVerified ? "WI source refresh was not verified" : null),
     warmJobId: id,
   };
 }
@@ -519,6 +526,10 @@ export function emitAtlasPipelineEvent({
       trigger_event: eventType,
     };
     if (purpose === "wi") {
+      if (eventType === ATLAS_EVENTS.DEV_COMMITTED) {
+        constructed.worktree_path = /** @type {any} */ (payload).worktree_path;
+        constructed.commit_sha = /** @type {any} */ (payload).commit_sha;
+      }
       if (workItemId != null) constructed.work_item_id = Number(workItemId);
       if (workItemId != null) {
         constructed.branch = ledgerBranchForWi(workItemId);

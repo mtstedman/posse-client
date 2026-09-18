@@ -38,6 +38,7 @@ import {
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WAITING_LANE_ATLAS_PURPOSE_VALUES } from "../../../../catalog/waiting-lane.js";
+import { ATLAS_EVENTS } from "../../../atlas/functions/v2/contracts/events.js";
 import {
   isAtlasMainGenerationPurpose,
   withAtlasMainSourceProofLock,
@@ -374,6 +375,10 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       }
     }
     result.duration_ms = nowMs() - startTime;
+    if (purpose === "wi" && (payload.commit_sha || payload.trigger_event === ATLAS_EVENTS.DEV_COMMITTED)
+      && result.wi_source_verified !== true) {
+      throw new Error(`ATLAS WI source refresh was not verified: ${result.skipped?.[0]?.message || backend}`);
+    }
     if (WAITING_LANE_PURPOSE_SET.has(purpose)) {
       const createdAt = Date.parse(String(job?.created_at || ""));
       recordWaitingLaneTelemetry("atlas_execution_finished", {

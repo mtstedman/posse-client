@@ -9,6 +9,7 @@ import { resolveSymbolBodyTarget, symbolSourceText } from "./symbol-body-resolut
 import { selectSymbolRefTarget, selectSymbolTarget } from "./symbol-target.js";
 import { resolveRequestedIdentifierSymbols } from "./identifier-resolution.js";
 import { planSymbolGetBatch } from "./symbol-get-batch.js";
+import { staleSymbolSource } from "./source-freshness.js";
 
 const INTERNAL_SYMBOL_GET_REASON = "symbol.get exact indexed body";
 const MAX_SYMBOL_GET_AMBIGUITY_CHOICES = 20;
@@ -145,6 +146,8 @@ async function selectedBodyResolution({ view, target, readFile }) {
   } catch {
     return { target, bodyKind: null, implementationCandidates: [], source: null, symbols: [] };
   }
+  const stale = staleSymbolSource(target, source);
+  if (stale) return { target, source, symbols: [], bodyKind: null, implementationCandidates: [], stale };
   return { ...resolveSymbolBodyTarget(target, symbols, source), source, symbols };
 }
 
@@ -291,6 +294,7 @@ export async function symbolGet({
 
   if (selection.status === "selected") {
     const resolution = await selectedBodyResolution({ view, target: selection.target, readFile });
+    if (resolution.stale) return errorEnvelope({ action: "symbol.get", versionId, ...resolution.stale });
     const body = await readSelectedBody({
       target: resolution.target,
       source: resolution.source,
@@ -331,6 +335,10 @@ export async function symbolGet({
   for (const target of selection.targets) {
     try {
       const resolution = await selectedBodyResolution({ view, target, readFile });
+      if (resolution.stale) {
+        unavailable.push({ file: target.repo_rel_path, error: resolution.stale });
+        continue;
+      }
       const body = await readSelectedBody({
         target: resolution.target,
         source: resolution.source,

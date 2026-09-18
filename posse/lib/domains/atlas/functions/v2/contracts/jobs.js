@@ -65,7 +65,9 @@
  * @property {boolean} [resume_paths_truncated] Internal marker that the durable retry path set overflowed and requires a repository freshness scan.
  * @property {number} [from_seq]              For "main-incremental": only consider deltas after this ledger seq.
  * @property {string} [out_view_path]         Absolute filesystem path where the resulting view file should be written. Required for "wi" purpose; optional for main-* (defaults to <repo>/.posse/atlas/views/main.view.db).
- * @property {string} [trigger_event]         Originating event name (one of ATLAS_EVENTS values). Informational only.
+ * @property {string} [trigger_event]         Originating event name (one of ATLAS_EVENTS values).
+ * @property {string} [worktree_path]         Source checkout for a post-commit WI refresh.
+ * @property {string} [commit_sha]            Exact committed source revision for a WI refresh.
  * @property {string} [language]              Optional SCIP language filter for purpose === "scip-restage".
  * @property {boolean} [force]                Force SCIP restage for purpose === "scip-restage".
  * @property {number} [max_symbols]           For purpose === "embeddings": encode at most this many missing symbols in one slice (defaults to ATLAS_EMBEDDINGS_WARM_SLICE_SYMBOLS). Resume state lives in keys.db/inflight.json, so each slice picks up where the last stopped.
@@ -88,6 +90,7 @@
  * @property {number} ledger_entries_appended
  * @property {string | null} view_written     Absolute path of the produced view file, or null if no view was materialized.
  * @property {string | null} view_etag        ViewMeta.built_at or a derived ETag.
+ * @property {boolean} [wi_source_verified]  Post-commit WI source and mounted view were refreshed successfully.
  * @property {boolean} [view_reused]          True when an idempotent main merge proved the existing destination view current and reused it.
  * @property {string[]} [redundant_phases_skipped] Expensive phases omitted after a current-view proof.
  * @property {string} [embeddings_provider]   Encoder/index provider used for best-effort vector ingest.
