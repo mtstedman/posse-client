@@ -73,3 +73,96 @@ export function findCopiedAgentHandoffEvidence(
   }
   return null;
 }
+
+export const AGENT_HANDOFF_COPIED_EVIDENCE_MARKER = "[evidence excerpt omitted: cited by selector]";
+
+// Normalize the way normalizeAgentHandoffOverlapText does, but one code point at
+// a time so every normalized character keeps the span of original text it came
+// from. Stripping needs that map; detection alone never did.
+function normalizeWithSourceSpans(value) {
+  const source = String(value ?? "");
+  let text = "";
+  const starts = [];
+  const ends = [];
+  let index = 0;
+  for (const codePoint of source) {
+    const start = index;
+    index += codePoint.length;
+    for (const char of codePoint.normalize("NFKC").toLowerCase()) {
+      if (/\s/u.test(char)) {
+        if (text.length === 0 || text.endsWith(" ")) continue;
+        text += " ";
+      } else {
+        text += char;
+      }
+      while (starts.length < text.length) {
+        starts.push(start);
+        ends.push(index);
+      }
+    }
+  }
+  return { source, text, starts, ends };
+}
+
+function copiedEvidenceWindows(evidenceExcerpts, threshold) {
+  const windows = new Set();
+  for (const excerpt of evidenceExcerpts || []) {
+    const { text } = normalizeWithSourceSpans(excerpt);
+    for (let index = 0; index + threshold <= text.length; index += 1) {
+      windows.add(text.slice(index, index + threshold));
+    }
+  }
+  return windows;
+}
+
+// Replace each run of narrative text that repeats selected evidence with a
+// short marker. The evidence already travels verified through its selector, so
+// the copy carries nothing the consumer lacks; rejecting the handoff instead
+// costs the producer a whole extra turn to delete it by hand.
+export function stripCopiedAgentHandoffEvidence(
+  value,
+  evidenceExcerpts,
+  { minChars = AGENT_HANDOFF_COPIED_EVIDENCE_MIN_CHARS, windows = null } = {},
+) {
+  const threshold = Number.isInteger(minChars) && minChars > 0
+    ? minChars
+    : AGENT_HANDOFF_COPIED_EVIDENCE_MIN_CHARS;
+  const original = String(value ?? "");
+  const evidenceWindows = windows || copiedEvidenceWindows(evidenceExcerpts, threshold);
+  if (evidenceWindows.size === 0) return { text: original, removedChars: 0, spans: 0 };
+  const { text, starts, ends } = normalizeWithSourceSpans(original);
+  const ranges = [];
+  let index = 0;
+  while (index + threshold <= text.length) {
+    if (!evidenceWindows.has(text.slice(index, index + threshold))) {
+      index += 1;
+      continue;
+    }
+    let last = index;
+    while (last + 1 + threshold <= text.length
+      && evidenceWindows.has(text.slice(last + 1, last + 1 + threshold))) {
+      last += 1;
+    }
+    const normalizedEnd = last + threshold;
+    ranges.push([starts[index], ends[normalizedEnd - 1]]);
+    index = normalizedEnd;
+  }
+  if (ranges.length === 0) return { text: original, removedChars: 0, spans: 0 };
+  let out = "";
+  let cursor = 0;
+  let removedChars = 0;
+  for (const [start, end] of ranges) {
+    out += original.slice(cursor, start) + AGENT_HANDOFF_COPIED_EVIDENCE_MARKER;
+    removedChars += end - start;
+    cursor = end;
+  }
+  out += original.slice(cursor);
+  return { text: out, removedChars, spans: ranges.length };
+}
+
+export function copiedAgentHandoffEvidenceWindows(
+  evidenceExcerpts,
+  minChars = AGENT_HANDOFF_COPIED_EVIDENCE_MIN_CHARS,
+) {
+  return copiedEvidenceWindows(evidenceExcerpts, minChars);
+}

@@ -45,6 +45,20 @@ function exactObject(value, keys, label) {
   return value;
 }
 
+// dispatch_agent arguments arrive from a model: an extra key is ignored rather
+// than rejected, because a rejection costs the planner a whole turn and the
+// keys the runtime needs are validated on their own.
+function knownKeysObject(value, keys, label) {
+  const prototype = value && typeof value === "object" ? Object.getPrototypeOf(value) : null;
+  if (!value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || (prototype !== Object.prototype && prototype !== null)) {
+    throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `${label} must be an object`, { stage: "validation" });
+  }
+  return Object.fromEntries(Object.entries(value).filter(([key]) => keys.includes(key)));
+}
+
 function boundedString(value, label, max, { optional = false } = {}) {
   const text = typeof value === "string" ? value.trim() : "";
   if (!text) {
@@ -487,14 +501,24 @@ export async function executeDispatchAgent(args, options = {}) {
   options = { ...options, context };
   const parentId = Number(context.agentCallId ?? context.agent_call_id);
   const research = subAgentRuntime.parents.get(parentId)?.researchPolicy?.enabled;
+  // A one-entry batch is the single dispatch written the long way: unwrap it
+  // instead of bouncing the planner for the shape.
+  if (Array.isArray(args?.requests) && args.requests.length === 1
+    && args.requests[0] && typeof args.requests[0] === "object" && !Array.isArray(args.requests[0])) {
+    const only = args.requests[0];
+    args = {
+      agent_type: only.agent_type,
+      question: only.question,
+      ...(only.budget == null ? {} : { budget: only.budget }),
+    };
+  }
   if (Object.hasOwn(args || {}, "requests")) {
     if (!research) throw runtimeError("RESEARCH_BATCH_DISABLED", "Research batches require an eligible planner", { stage: "admission" });
-    exactObject(args, ["requests"], "dispatch_agent");
     if (!Array.isArray(args.requests) || args.requests.length < 2 || args.requests.length > 3) {
-      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain two or three entries", { stage: "validation" });
+      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain one to three entries", { stage: "validation" });
     }
     const requests = args.requests.map((raw, index) => {
-      const request = exactObject(raw, ["id", "agent_type", "question", "budget"], `requests[${index}]`);
+      const request = knownKeysObject(raw, ["id", "agent_type", "question", "budget"], `requests[${index}]`);
       if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) {
         throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
       }
@@ -512,7 +536,7 @@ export async function executeDispatchAgent(args, options = {}) {
   }
   if (research && args?.agent_type == null) throw runtimeError("RESEARCH_AGENT_TYPE_REQUIRED", "dispatch_agent requires agent_type code or web", { stage: "validation" });
   if (args?.agent_type != null && research) {
-    exactObject(args, ["agent_type", "question", "budget"], "dispatch_agent");
+    args = knownKeysObject(args, ["agent_type", "question", "budget"], "dispatch_agent");
     if (!RESEARCH_AGENT_TYPES.includes(args.agent_type)) throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
     return await subAgentRuntime.execute({
       protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" },
@@ -520,7 +544,7 @@ export async function executeDispatchAgent(args, options = {}) {
     }, options);
   }
   if (args?.agent_type != null) {
-    exactObject(args, ["agent_type", "question"], "dispatch_agent");
+    args = knownKeysObject(args, ["agent_type", "question"], "dispatch_agent");
     if (args.agent_type !== "web") throw runtimeError("RESEARCH_AGENT_TYPE_DISABLED", "Code research requires the gated planner", { stage: "admission" });
     return await webResearchRuntime.execute({ route: "web", question: args.question }, options);
   }

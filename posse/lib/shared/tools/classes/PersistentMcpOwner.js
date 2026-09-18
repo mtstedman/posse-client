@@ -5846,10 +5846,15 @@ export class PersistentMcpOwner {
               job_id: session?.bootConfig?.jobId ?? null,
               attempt_id: session?.bootConfig?.attemptId ?? null,
               observation_type: `tool.${requested.name}.error`,
-              summary: `Sub-agent ${toolArgs?.op || "operation"} rejected`,
+              summary: `Sub-agent ${toolArgs?.op || "operation"} rejected (${errorCode})`,
               detail: {
                 op: toolArgs?.op || null,
                 code: errorCode,
+                // Without the message and the argument shape a rejection cannot
+                // be diagnosed afterwards; key names only, never their content.
+                message: String(error?.message || "").slice(0, 300),
+                arg_keys: toolArgs && typeof toolArgs === "object" ? Object.keys(toolArgs).slice(0, 12) : [],
+                request_count: Array.isArray(toolArgs?.requests) ? toolArgs.requests.length : null,
                 stage: String(error?.stage || "runtime").slice(0, 40),
                 retryable: error?.retryable === true,
                 ...(errorCode === "SUB_AGENT_INPUT_TOOL_FORBIDDEN" && error?.inputTool

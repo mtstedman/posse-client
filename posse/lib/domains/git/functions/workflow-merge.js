@@ -13,6 +13,7 @@ import {
   updateWorkItemMetadata,
 } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
+import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { runHook } from "./hooks.js";
 import { warmAtlasMergedToMainNow } from "../../integrations/functions/atlas.js";
 import {
@@ -1467,7 +1468,7 @@ export function createMergeWorkflowHelpers(context, {
       },
       { onPhase, signal, timeoutMs },
     );
-    return mergeToSharedTrunkAsync({
+    const result = await mergeToSharedTrunkAsync({
       projectDir,
       branch,
       workItemId: wiId,
@@ -1477,6 +1478,20 @@ export function createMergeWorkflowHelpers(context, {
       validateCandidate: validatePushCandidateAsync,
       mergeLockAlreadyHeld,
     });
+    // Every merge route ends here, so the runtime log records the outcome even
+    // when the events table is later purged.
+    try {
+      const outcome = result?.ok ? "merged" : (result?.deferred ? "deferred" : "failed");
+      log[result?.ok || result?.deferred ? "info" : "warn"]("git", `Merge ${outcome}: ${branch}`, {
+        wiId,
+        purpose,
+        outcome,
+        mergeHash: result?.mergeHash || null,
+        sharedTrunk: !!result?.sharedTrunk,
+        message: result?.ok ? null : String(result?.message || "").slice(0, 300),
+      });
+    } catch { /* logging is observational */ }
+    return result;
   }
 
   async function mergeIterativePassToTarget(wi, {

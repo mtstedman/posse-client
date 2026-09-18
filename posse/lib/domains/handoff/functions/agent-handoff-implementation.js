@@ -47,7 +47,9 @@ import {
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
   detectSensitiveAgentHandoffText,
+  copiedAgentHandoffEvidenceWindows,
   findCopiedAgentHandoffEvidence,
+  stripCopiedAgentHandoffEvidence,
 } from "./agent-handoff-boundaries.js";
 import { redactString } from "../../bridge/functions/redaction.js";
 import {
@@ -2526,7 +2528,19 @@ function plannerPromoteMappings(handoff) {
   }));
 }
 
+// Say what a target looks like when it is absent: "must be an object" left the
+// producer guessing at a field it had simply omitted, and cost another turn.
+function expectedTargetShapes(policy, profile) {
+  if (profile === "planner.plan.v1") {
+    return '{"kind":"agent","role":"dev"|"artificer"} or {"kind":"system","role":"human_input"|"promote"}';
+  }
+  return (policy.targetKinds || []).map((kind) => `{"kind":"${kind}"}`).join(" or ");
+}
+
 function validateTarget(target, policy, profile, label) {
+  if (target == null) {
+    fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} is required: ${expectedTargetShapes(policy, profile)}`);
+  }
   const out = exactKeys(target, ["kind", "role"], label);
   const kind = boundedString(out.kind, `${label}.kind`, 20);
   if (!policy.targetKinds.includes(kind)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} does not allow target kind ${kind}`);
@@ -2736,52 +2750,88 @@ function validatePlannerPacketSemantics(packet, { context = null } = {}) {
   }
 }
 
+// Every model-authored text field of one handoff, each with a setter so a
+// repair can rewrite the field in place.
 function narrativeFragmentsForHandoff(handoff, handoffIndex) {
   const report = handoff.report || {};
   const fragments = [
-    { label: `handoffs[${handoffIndex}].intent`, text: handoff.intent },
-    { label: `handoffs[${handoffIndex}].report.summary`, text: report.summary },
+    { label: `handoffs[${handoffIndex}].intent`, text: handoff.intent, set: (text) => { handoff.intent = text; } },
+    { label: `handoffs[${handoffIndex}].report.summary`, text: report.summary, set: (text) => { report.summary = text; } },
   ];
   for (const [claimIndex, claim] of (report.claims || []).entries()) {
-    fragments.push({ label: `handoffs[${handoffIndex}].report.claims[${claimIndex}]`, text: claim[0] });
+    fragments.push({
+      label: `handoffs[${handoffIndex}].report.claims[${claimIndex}]`,
+      text: claim[0],
+      set: (text) => { claim[0] = text; },
+    });
     const detail = claim[1] || {};
     if (detail.prose) {
-      fragments.push({ label: `handoffs[${handoffIndex}].report.claims[${claimIndex}].prose`, text: detail.prose });
+      fragments.push({
+        label: `handoffs[${handoffIndex}].report.claims[${claimIndex}].prose`,
+        text: detail.prose,
+        set: (text) => { detail.prose = text; },
+      });
     }
     for (const [decoyIndex, decoy] of (detail.decoy || []).entries()) {
-      fragments.push({ label: `handoffs[${handoffIndex}].report.claims[${claimIndex}].decoy[${decoyIndex}].reason`, text: decoy[1] });
+      fragments.push({
+        label: `handoffs[${handoffIndex}].report.claims[${claimIndex}].decoy[${decoyIndex}].reason`,
+        text: decoy[1],
+        set: (text) => { decoy[1] = text; },
+      });
     }
   }
   for (const key of ["constraints", "success_criteria", "questions"]) {
-    for (const [index, text] of (report[key] || []).entries()) {
-      fragments.push({ label: `handoffs[${handoffIndex}].report.${key}[${index}]`, text });
+    const list = report[key] || [];
+    for (const [index, text] of list.entries()) {
+      fragments.push({
+        label: `handoffs[${handoffIndex}].report.${key}[${index}]`,
+        text,
+        set: (next) => { list[index] = next; },
+      });
     }
   }
   for (const [key, values] of Object.entries(report.scope || {})) {
     for (const [index, text] of (Array.isArray(values) ? values : [values]).entries()) {
-      fragments.push({ label: `handoffs[${handoffIndex}].report.scope.${key}[${index}]`, text });
+      fragments.push({
+        label: `handoffs[${handoffIndex}].report.scope.${key}[${index}]`,
+        text,
+        set: (next) => {
+          if (Array.isArray(values)) values[index] = next;
+          else report.scope[key] = next;
+        },
+      });
     }
   }
-  const appendStructuredFragments = (value, label) => {
+  const appendStructuredFragments = (value, label, set) => {
     if (typeof value === "string") {
-      fragments.push({ label, text: value });
+      fragments.push({ label, text: value, set });
       return;
     }
     if (Array.isArray(value)) {
-      value.forEach((entry, index) => appendStructuredFragments(entry, `${label}[${index}]`));
+      value.forEach((entry, index) => appendStructuredFragments(entry, `${label}[${index}]`, (next) => { value[index] = next; }));
       return;
     }
     if (plainObject(value)) {
-      for (const [key, entry] of Object.entries(value)) appendStructuredFragments(entry, `${label}.${key}`);
+      for (const [key, entry] of Object.entries(value)) {
+        appendStructuredFragments(entry, `${label}.${key}`, (next) => { value[key] = next; });
+      }
     }
   };
-  if (report.research) appendStructuredFragments(report.research, `handoffs[${handoffIndex}].report.research`);
+  if (report.research) {
+    appendStructuredFragments(report.research, `handoffs[${handoffIndex}].report.research`, (next) => { report.research = next; });
+  }
   for (const key of PLANNER_REPORT_METADATA_KEYS) {
-    if (report[key] != null) appendStructuredFragments(report[key], `handoffs[${handoffIndex}].report.${key}`);
+    if (report[key] != null) {
+      appendStructuredFragments(report[key], `handoffs[${handoffIndex}].report.${key}`, (next) => { report[key] = next; });
+    }
   }
   return fragments;
 }
 
+// Evidence text reaches the consumer verified through its selector, so a
+// narrative field that repeats it is trimmed to a marker and the trim is
+// recorded. Rejecting made the producer spend a whole turn deleting the copy.
+// The reject stays only as a backstop for a copy the trim could not remove.
 function validateNarrativeEvidenceBoundary(handoff, handoffIndex) {
   const evidence = [];
   for (const claim of handoff.report?.claims || []) {
@@ -2790,6 +2840,22 @@ function validateNarrativeEvidenceBoundary(handoff, handoffIndex) {
       evidence.push(...(detail[lane] || []).map((entry) => entry.excerpt));
     }
     evidence.push(...(detail.decoy || []).map(([entry]) => entry.excerpt));
+  }
+  if (!findCopiedAgentHandoffEvidence(narrativeFragmentsForHandoff(handoff, handoffIndex), evidence)) return;
+  const windows = copiedAgentHandoffEvidenceWindows(evidence);
+  for (const fragment of narrativeFragmentsForHandoff(handoff, handoffIndex)) {
+    if (typeof fragment.text !== "string" || typeof fragment.set !== "function") continue;
+    const stripped = stripCopiedAgentHandoffEvidence(fragment.text, evidence, { windows });
+    if (stripped.spans === 0) continue;
+    try {
+      fragment.set(stripped.text);
+    } catch {
+      continue; // a frozen field falls through to the backstop below
+    }
+    recordHandoffSoftening(fragment.label, "evidence_copy_removed", {
+      removed_chars: stripped.removedChars,
+      spans: stripped.spans,
+    });
   }
   const overlap = findCopiedAgentHandoffEvidence(
     narrativeFragmentsForHandoff(handoff, handoffIndex),

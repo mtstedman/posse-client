@@ -21,6 +21,7 @@ import {
   setJobResult,
 } from "./index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import {
@@ -65,8 +66,22 @@ export function closePushOfferGate(jobId, status, result, {
     }
     return true;
   };
-  if (db.inTransaction) return execute();
-  return runImmediateTransaction(db, execute);
+  const closed = db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+  // The push decision otherwise lives only in tables an admin purge clears.
+  if (closed) {
+    try {
+      log.info("git", `Push offer #${jobId} closed: ${result?.pushed ? "pushed" : (result?.declined ? "declined" : status)}`, {
+        jobId,
+        status,
+        pushed: result?.pushed === true,
+        declined: result?.declined === true,
+        remote: result?.remote || null,
+        branch: result?.branch || null,
+        via: result?.via || null,
+      });
+    } catch { /* logging is observational */ }
+  }
+  return closed;
 }
 
 /** Latest open push-offer gate job, or null. */

@@ -315,6 +315,12 @@ function _collapseToolInvocationRows(rows) {
   return out;
 }
 
+// A terminal handoff is how a job exits, not a tool the operator watches. Its
+// rows stay in telemetry; only a failed or rejected one earns a feed row.
+function _isQuietAgentHandoffRow(row) {
+  return String(row?.observation_type || "") === "tool.agent_handoff" && row?._ok !== false;
+}
+
 function enrichToolInvocationRows(db, rows, { includeUnscoped = true } = {}) {
   const jobStmt = db.prepare(`SELECT job_type, provider, status, work_item_id FROM jobs WHERE id = ?`);
   const workItemStmt = db.prepare(`SELECT id FROM work_items WHERE id = ?`);
@@ -1474,6 +1480,42 @@ export function atlasSummaryHint(input = {}, action = null) {
     }
   }
 
+  if (a === "symbol.get" || a === "symbol.callers") {
+    // Name the symbols being pulled, not just the action: a bare "symbol.get"
+    // hides which bodies a job actually read.
+    const refs = Array.isArray(args.symbolRefs) ? args.symbolRefs
+      : (args.symbolRef ? [args.symbolRef] : []);
+    const ids = Array.isArray(args.symbolIds) ? args.symbolIds
+      : (args.symbolId ? [args.symbolId] : []);
+    const labels = refs
+      .map((ref) => {
+        if (typeof ref === "string") return ref.trim();
+        const name = String(ref?.name || "").trim();
+        const file = String(ref?.file || ref?.path || "").trim();
+        return name && file ? `${name} @ ${file}` : (name || file);
+      })
+      .filter(Boolean);
+    const total = labels.length + ids.length;
+    if (labels.length > 0) {
+      const tail = total > 1 ? ` +${total - 1}` : "";
+      return _truncate(`${labels[0]}${tail}`, 120);
+    }
+    if (ids.length > 0) return `${ids.length} symbol target${ids.length === 1 ? "" : "s"}`;
+  }
+
+  if (a === "traverse_ref" || a === "create_ref") {
+    const raw = args.traversal_refs ?? args.traversal_ref ?? args.refs ?? args.ref;
+    const refs = (Array.isArray(raw) ? raw : [raw])
+      .map((ref) => String(ref ?? "").trim())
+      .filter(Boolean);
+    if (refs.length > 0) {
+      const tail = refs.length > 3 ? ` +${refs.length - 3}` : "";
+      return _truncate(`${refs.slice(0, 3).join(", ")}${tail}`, 80);
+    }
+    const target = args.file || args.path || args.symbolRef?.name || null;
+    if (target) return _truncate(String(target), 80);
+  }
+
   if (a === "slice.build" || a === "slice.refresh") {
     const entries = firstArrayEntry(args.entrySymbols);
     if (entries) return `entries: ${_truncate(entries, 60)}`;
@@ -2446,7 +2488,8 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
     db,
     _collapseToolInvocationRows(mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)
       .filter((row) => !isInternalBackgroundObservationType(row.observation_type)
-        && !isToolSurfaceRecordObservationType(row.observation_type))),
+        && !isToolSurfaceRecordObservationType(row.observation_type)))
+      .filter((row) => !_isQuietAgentHandoffRow(row)),
     { includeUnscoped },
   ).slice(0, cappedLimit);
 }

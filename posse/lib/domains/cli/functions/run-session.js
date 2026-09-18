@@ -21,7 +21,7 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
-import { closeLog } from "../../../shared/telemetry/functions/logging/logger.js";
+import { closeLog, log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { closeOutputLog } from "../../../shared/telemetry/functions/logging/output-log.js";
 import { closePromptLog } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { closeObservationLog } from "../../observability/functions/observations.js";
@@ -226,6 +226,8 @@ export function closeRuntimeStateForExit() {
   // Record the clean shutdown FIRST (needs the DB open) so the bridge
   // derives `offline` instead of `stalled` once the heartbeat ages out.
   try { markCleanShutdown(); } catch { /* best effort */ }
+  // Last line of a run: without it a clean exit and a crash look the same.
+  try { log.info("run", "Clean shutdown recorded", { exitCode: process.exitCode ?? 0 }); } catch { /* best effort */ }
   try { flushEventsNow(); } catch { /* best effort */ }
   try { closePromptLog(); } catch { /* best effort */ }
   try { closeOutputLog(); } catch { /* best effort */ }

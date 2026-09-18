@@ -3,7 +3,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { statusIcon as paletteStatusIcon } from "../../functions/display/status-palette.js";
 import { fit, stripAnsi, _sanitizeDisplayLine } from "../../functions/display/helpers/formatters.js";
 import { roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/brand.js";
-import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
+import { jobLabel, jobDisplayStatus, jobIsBackgroundAtlasWarm } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { normalizeAgentActivitySummary } from "../../../../catalog/event.js";
@@ -780,7 +780,11 @@ export class DisplayRightPanelRenderer {
         inFlightTool: !!newestToolRow?.in_flight,
       };
     };
-    const agents = [...this.workers.entries()].map(([jobId, worker], idx) => {
+    // ATLAS warm jobs are harness work, not agents: they report through the
+    // system log and never take an agent row or a digit-key slot.
+    const isAtlasWarmWorker = (jobId, worker) => jobIsBackgroundAtlasWarm(jobsById.get(Number(jobId)))
+      || jobIsBackgroundAtlasWarm({ job_type: worker?.jobType ?? worker?.job_type ?? worker?.role });
+    const agents = [...this.workers.entries()].filter(([jobId, worker]) => !isAtlasWarmWorker(jobId, worker)).map(([jobId, worker], idx) => {
       const numericJobId = Number(jobId);
       const job = jobsById.get(numericJobId) || {};
       const wiRow = wiById.get(Number(worker?.workItemId ?? job.work_item_id)) || {};
@@ -838,6 +842,7 @@ export class DisplayRightPanelRenderer {
     for (const job of queueData.jobs || []) {
       const numericJobId = Number(job.id);
       if (!Number.isFinite(numericJobId) || seen.has(numericJobId)) continue;
+      if (jobIsBackgroundAtlasWarm(job)) continue;
       const status = String(job.status || "").toLowerCase();
       const humanGateOpen = monitorHumanGateIsOpen(job);
       const isHumanWait = humanGateOpen && MONITOR_HUMAN_GATE_STATUSES.has(status);

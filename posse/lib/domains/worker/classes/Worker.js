@@ -820,7 +820,39 @@ export class Worker {
     } finally {
       this._activeExecutions.delete(execution);
       settled();
+      this._logJobOutcome(job);
     }
+  }
+
+  // One line per execution with the status the queue actually holds. The
+  // verdict line alone misleads: an assessed pass can still end failed, and
+  // that ending otherwise reaches no log at all.
+  _logJobOutcome(job) {
+    try {
+      const current = getJob(job.id);
+      const status = String(current?.status || "unknown");
+      const detail = {
+        jobId: job.id,
+        wiId: job.work_item_id,
+        type: job.job_type,
+        status,
+        attempts: current?.attempt_count ?? null,
+        verdict: current?.assessor_verdict ?? null,
+        assessment: current?.assessment_state ?? null,
+        error: current?.last_error ? String(current.last_error).slice(0, 200) : null,
+      };
+      const failed = ["failed", "dead_letter", "canceled"].includes(status);
+      // ATLAS warms run several per work item; only a bad ending is worth a line.
+      if (!failed && job.job_type === "atlas_warm") return;
+      log[failed ? "warn" : "info"]("worker", `Job end: ${job.job_type} #${job.id} -> ${status}`, detail);
+      if (failed) {
+        jobLog(status === "canceled" ? "CANCELED" : "FAILED", {
+          wi: job.work_item_id,
+          job: job.id,
+          detail: `${job.job_type} ended ${status}${detail.verdict ? ` (verdict ${detail.verdict})` : ""}${detail.error ? ` - ${detail.error}` : ""}`,
+        });
+      }
+    } catch { /* outcome logging is observational */ }
   }
 
   async disposeAgents(reason = "worker_disposed") {

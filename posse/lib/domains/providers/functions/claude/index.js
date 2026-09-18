@@ -1173,7 +1173,10 @@ export async function callProvider(promptText, {
       toolUses.push(normalized);
       updateProviderBatch(normalized);
 
-      if (onLine && normalized.tool) {
+      // A terminal handoff is the job's exit, not activity worth a live line;
+      // a rejected one still surfaces through its error.
+      const isTerminalHandoffCall = stripPosseMcpGatewayPrefix(normalized.tool || "") === "agent_handoff";
+      if (onLine && normalized.tool && !isTerminalHandoffCall) {
         // Strip MCP server prefixes so the live log shows the bare tool
         // name (e.g. "chain_read" instead of "mcp__posse-gateway__chain_read").
         const gatewayDisplayName = normalized.tool
