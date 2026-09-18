@@ -1310,7 +1310,16 @@ export class SubAgentRuntime {
       throw runtimeError("SUB_AGENT_PROTOCOL_INVALID", `protocol must be ${SUB_AGENT_PROTOCOL}`, { stage: "validation" });
     }
     if (input.op === "dispatch") {
-      if (String(this.readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off").trim().toLowerCase() !== "subagents") {
+      // The coordination mode gates citation sub-agents. A planner registered
+      // under planner-led dispatch is admitted for its research children on
+      // the dispatch mode alone: that mode is the single switch, and refusing
+      // here left every planner to fall back to reading on itself.
+      const coordinationMode = String(this.readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off").trim().toLowerCase();
+      const plannerResearchBatch = Array.isArray(input.requests)
+        && input.requests.length > 0
+        && input.requests.every((item) => item?.profile === RESEARCH_CHILD_PROFILE)
+        && this.parents.get(parentCallId)?.researchPolicy?.enabled === true;
+      if (coordinationMode !== "subagents" && !plannerResearchBatch) {
         throw runtimeError("SUB_AGENT_ADMIN_DISABLED", "sub_agent is disabled by the repository administrator", { stage: "admission" });
       }
       return await this.#dispatch(input, parentCallId, context);

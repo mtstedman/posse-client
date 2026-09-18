@@ -3578,7 +3578,19 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
   const conditions = [
     "j.status = 'queued'",
     "j.ready_at <= ?",
-    "NOT EXISTS (SELECT 1 FROM work_items wi WHERE wi.id = j.work_item_id AND wi.status = 'canceled')",
+    // A canceled work item's remaining jobs never lease — except the ATLAS
+    // cleanup warm that cancellation itself enqueues, which must run so the
+    // WI view is disposed and the run can close out instead of reporting
+    // "1 queued, 0 active" forever.
+    `NOT EXISTS (
+      SELECT 1 FROM work_items wi
+      WHERE wi.id = j.work_item_id AND wi.status = 'canceled'
+        AND NOT (
+          j.job_type = 'atlas_warm'
+          AND j.payload_json IS NOT NULL AND json_valid(j.payload_json)
+          AND json_extract(j.payload_json, '$.purpose') = 'wi-cleanup'
+        )
+    )`,
   ];
   const params = [ts];
 
