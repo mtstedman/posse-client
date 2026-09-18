@@ -1,4 +1,13 @@
 // Canonical deterministic filesystem mutation schemas.
+// Paths whose indexed state changes after a successful mutation. A move must
+// reconcile the missing source as well as the new (or overwritten) destination.
+export const ATLAS_MUTATION_PATH_FIELDS = Object.freeze({
+  write_file: ["path"],
+  edit_file: ["path"],
+  move_file: ["source", "destination"],
+  copy_file: ["destination"],
+});
+
 export const TOOL_MOVE_FILE = {
   type: "function",
   name: "move_file",

@@ -9,6 +9,7 @@ import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains
 // and owns session lifecycle for the parent Posse process.
 
 import crypto from "node:crypto";
+import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -7404,7 +7405,7 @@ export class PersistentMcpOwner {
     const toolArgs = message?.params?.arguments || {};
     const requested = requestedToolPolicyName(toolName, toolArgs);
     if (requested.suite !== "tools") return null;
-    if (requested.name !== "write_file" && requested.name !== "edit_file") return null;
+    if (!ATLAS_MUTATION_PATH_FIELDS[requested.name]) return null;
     const startedAt = Date.now();
     const executor = getSharedAtlasToolExecutor();
     const scheduled = await executor.scheduleDeterministicWriteRefresh({
@@ -7431,6 +7432,7 @@ export class PersistentMcpOwner {
         action: scheduled.action || null,
         via: scheduled.via || null,
         branch: scheduled.branch || null,
+        paths: scheduled.paths || null,
         queue: scheduled.queue || null,
       } : null,
     });

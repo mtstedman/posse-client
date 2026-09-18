@@ -3587,8 +3587,9 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
       WHERE wi.id = j.work_item_id AND wi.status = 'canceled'
         AND NOT (
           j.job_type = 'atlas_warm'
-          AND j.payload_json IS NOT NULL AND json_valid(j.payload_json)
-          AND json_extract(j.payload_json, '$.purpose') = 'wi-cleanup'
+          AND CASE WHEN json_valid(j.payload_json)
+            THEN COALESCE(json_extract(j.payload_json, '$.purpose') = 'wi-cleanup', 0)
+            ELSE 0 END
         )
     )`,
   ];

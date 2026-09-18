@@ -5,6 +5,7 @@
 // queueing, dedupe, telemetry, and conductor ownership stay in one place.
 
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
+import { ATLAS_MUTATION_PATH_FIELDS } from "../../../../catalog/tools/filesystem-mutations.js";
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
@@ -861,17 +862,17 @@ export class AtlasToolExecutor {
    */
   async scheduleDeterministicWriteRefresh(request = /** @type {AtlasToolRequest & { result?: any }} */ ({})) {
     const toolName = String(request.toolName || "").trim();
-    if (toolName !== "write_file" && toolName !== "edit_file") return null;
+    const pathFields = ATLAS_MUTATION_PATH_FIELDS[toolName];
+    if (!pathFields) return null;
     const args = request.args && typeof request.args === "object" ? request.args : {};
     const boot = request.session?.bootConfig || request.session || {};
     const atlas = boot?.atlas || {};
     const liveBuffers = String(atlas.liveBuffers || "off").trim().toLowerCase();
     if (!["1", "true", "deterministic-writes"].includes(liveBuffers)) return null;
-    if (!args.path) return null;
+    if (pathFields.some((field) => typeof args[field] !== "string" || !args[field].trim())) return null;
 
     const cwd = String(boot.cwd || request.config?.cwd || process.cwd());
     const repoRoot = String(request.config?.repoRoot || atlas.repoPath || cwd);
-    const absPath = path.resolve(cwd, String(args.path));
     const repoKey = normalizeRepoKey(repoRoot);
     const requestRepoKey = this.#repoKeyFor({
       ...request,
@@ -912,8 +913,10 @@ export class AtlasToolExecutor {
         )
       : mainViewPath(repoRoot);
     if (!refreshLedgerPath || !refreshViewPath) return null;
-    const relPath = path.relative(refreshRoot, absPath).replace(/\\/g, "/");
-    if (!relPath || relPath.startsWith("..") || path.isAbsolute(relPath)) return null;
+    const paths = [...new Set(pathFields.map((field) =>
+      path.relative(refreshRoot, path.resolve(cwd, args[field])).replace(/\\/g, "/"),
+    ))];
+    if (paths.some((p) => !p || p === ".." || p.startsWith("../") || path.isAbsolute(p))) return null;
     const gateKey = workItemKey || repoKey;
     this.#clearRecentDedupeForRepo(repoKey);
     if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
@@ -933,7 +936,7 @@ export class AtlasToolExecutor {
           job: {
             purpose: "main-incremental",
             branch,
-            paths: [relPath],
+            paths,
             trigger_event: "atlas.executor.deterministic_write",
             out_view_path: refreshViewPath,
           },
@@ -943,7 +946,8 @@ export class AtlasToolExecutor {
         return {
           ok: result?.ok !== false,
           action: "index.refresh",
-          path: relPath,
+          path: paths[0],
+          paths,
           via: "AtlasToolExecutor",
           branch,
           queue: {

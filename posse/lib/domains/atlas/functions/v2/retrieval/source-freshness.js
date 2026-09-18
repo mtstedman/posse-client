@@ -1,9 +1,15 @@
 // @ts-check
 import { sha256Hex } from "../hash.js";
 
-/** Never apply indexed ranges to different source bytes. */
+/**
+ * Never apply indexed ranges to different source bytes. A target that carries
+ * no indexed content hash (a synthetic or file-only target) has nothing to
+ * compare against and is not drift; only a recorded hash that disagrees with
+ * the bytes on disk is.
+ */
 export function staleSymbolSource(target, source) {
   if (!target || source == null) return null;
+  if (typeof target.content_hash !== "string" || !target.content_hash) return null;
   const actualHash = sha256Hex(source);
   if (target.content_hash === actualHash) return null;
   return {
