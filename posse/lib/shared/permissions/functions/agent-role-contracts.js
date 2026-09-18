@@ -5,6 +5,7 @@ import { atlasMemoryEnabled } from "../../policies/functions/memory-mode.js";
 
 const PROVIDER_ROLE_SET = new Set(PROVIDER_ROLE_NAMES);
 const WRITE_ROLES = new Set(["dev", "artificer"]);
+const WRITE_DB_ROLES = new Set(["dev", "planner"]);
 const READ_DB_ROLES = new Set(["assessor"]);
 const HANDOFF_ROLES = new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
 
@@ -22,9 +23,14 @@ export function resolveAgentRoleContract({ role, providerName = null, agentHando
     throw new Error(`Unknown provider agent role: ${normalizedRole || "<empty>"}`);
   }
   const child = coordinationChild === true;
+  // This contract is the role's maximum; the per-Job remote issuance narrows
+  // it at attach time. The remote planner role carries a "requested" project
+  // DB policy (it may execute a database-only work item itself), so its
+  // maximum is write: a reusable gate minted at "none" refused every planner
+  // Job in a DB-mode repository as exceeding the gate.
   const projectDbCapability = child
     ? "none"
-    : normalizedRole === "dev"
+    : WRITE_DB_ROLES.has(normalizedRole)
     ? "write"
     : (READ_DB_ROLES.has(normalizedRole) ? "read" : "none");
   return Object.freeze({
