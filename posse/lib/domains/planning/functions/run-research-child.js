@@ -63,10 +63,14 @@ export async function runResearchChild(client, parent, request) {
   }
   // Children run on the configured (cheaper) tier and let the provider pick
   // that tier's model; the parent's exact model is only inherited when no
-  // child tier is configured.
+  // child tier is configured. The job-level model name must follow the same
+  // rule: model selection prefers it over the tier's model, so passing the
+  // parent's model there ran every "standard" child on the planner's model
+  // at the planner's price (live 2026-09-18: a Fable child on tier standard).
   const childTier = request.modelTier || parent.tier;
+  const inheritedModel = request.modelTier ? null : parent.model;
   return await client.call(prompt, {
-    role: "researcher", modelTier: childTier, modelName: request.modelTier ? null : parent.model,
+    role: "researcher", modelTier: childTier, modelName: inheritedModel,
     reasoningEffort, activity: intent, maxTurns, maxOutputTokens: 4096,
     allowWrite: false, allowShell: false, allowTests: false, projectDbCapability: "none", projectDbWrite: false,
     disableAtlas: parent.disableAtlas, disableSystemTools: true,
@@ -77,6 +81,6 @@ export async function runResearchChild(client, parent, request) {
     _subAgentCursor: { batchId: request.batchId, dispatchId: request.dispatchId },
   }, {
     job_id: parent.jobId, work_item_id: parent.workItemId, attempt_id: parent.attemptId,
-    cwd: parent.cwd, jobProvider: parent.provider, jobModelName: parent.model,
+    cwd: parent.cwd, jobProvider: parent.provider, jobModelName: inheritedModel,
   });
 }
