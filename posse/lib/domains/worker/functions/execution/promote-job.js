@@ -348,16 +348,34 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
         if (pattern.startsWith("*.")) return name.endsWith(pattern.slice(1));
         return name === pattern;
       };
+      if (wildcard && explicitFileDest) {
+        throw new Error(`Wildcard promote mapping "${pattern}" cannot target file destination "${resolvedDest}"`);
+      }
+      let deferredWildcard = false;
+      if (wildcard) {
+        // Include missing repair outputs too: a wildcard must eventually
+        // install them even if the repair has not created the file yet.
+        for (const [name, repairJob] of pendingRepairs) {
+          if (!matchFile(name)) continue;
+          const group = deferredByRepair.get(repairJob.id) || { repairJob, mappings: [] };
+          group.mappings.push({ ...mapping, pattern: name, dest: path.posix.join(resolvedDest, name), destination_type: "file" });
+          deferredByRepair.set(repairJob.id, group);
+          deferredWildcard = true;
+        }
+      }
       const sourceFiles = [];
       const walk = (dir) => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           if (entry.isDirectory()) walk(path.join(dir, entry.name));
-          else if (entry.isFile() && matchFile(entry.name)) sourceFiles.push({ name: entry.name, full: path.join(dir, entry.name) });
+          else if (entry.isFile() && matchFile(entry.name) && !(wildcard && pendingRepairs.has(entry.name))) {
+            sourceFiles.push({ name: entry.name, full: path.join(dir, entry.name) });
+          }
         }
       };
       walk(sourceDir);
 
       if (sourceFiles.length === 0) {
+        if (deferredWildcard) continue;
         // An explicit image file that was never produced is a gap in the
         // set, not a reason to discard the files that were: it is promoted
         // partially below and the gap goes to a scoped repair.
@@ -373,9 +391,6 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
           detail: `Promote mapping "${pattern}" matched no files in ${sourceDir}`,
         });
         throw new Error(`No files matching "${pattern}" in ${sourceDir}`);
-      }
-      if (wildcard && explicitFileDest) {
-        throw new Error(`Wildcard promote mapping "${pattern}" cannot target file destination "${resolvedDest}"`);
       }
       if (explicitFileDest && sourceFiles.length > 1) {
         throw new Error(`Promote mapping "${pattern}" matched ${sourceFiles.length} files but destination is a single file: ${resolvedDest}`);

@@ -61,7 +61,6 @@ export function processVerdict(job, verdict, {
   // Map parse_error to valid DB values (CHECK constraint only allows
   // pass/fail/blocked/needs_replan/needs_review/not_assessed).
   const validDbVerdicts = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
-  const dbVerdict = validDbVerdicts.has(verdict.verdict) ? verdict.verdict : "needs_review";
   const dbConfidence = normalizedConfidence;
 
   let verdictRecorded = false;
@@ -69,7 +68,7 @@ export function processVerdict(job, verdict, {
     if (verdictRecorded) return true;
     const changed = setAssessorVerdict(
       job.id,
-      dbVerdict,
+      validDbVerdicts.has(verdict.verdict) ? verdict.verdict : "needs_review",
       dbConfidence,
       leaseToken != null ? { leaseToken, allowReleasedLease: true } : {},
     );
@@ -92,6 +91,7 @@ export function processVerdict(job, verdict, {
 
   const isFromSuggestion = !!parseJobPayload(job).from_suggestion;
 
+  let partialStatusClaimed = false;
   const ctx = {
     autoApprove,
     desiredOutputs: prepared.desiredOutputs,
@@ -103,8 +103,14 @@ export function processVerdict(job, verdict, {
     recordAssessorVerdict,
     spawnedJobs,
     spawnFromAssessor,
+    // Called inside the dispatch transaction before any partial repair is
+    // spawned. Recording waits until the effective partial verdict is known.
+    claimPartialDeliverable: () => {
+      partialStatusClaimed = updateJobStatus(job.id, "succeeded", leaseToken != null ? { leaseToken } : {});
+      return partialStatusClaimed;
+    },
     updateJobStatus: (status) => runInTransaction(() => {
-      const changed = updateJobStatus(
+      const changed = (partialStatusClaimed && status === "succeeded") || updateJobStatus(
         job.id,
         status,
         leaseToken != null ? { leaseToken } : {},
@@ -117,34 +123,36 @@ export function processVerdict(job, verdict, {
     }),
   };
 
-  if (verdict.verdict === "fail") {
-    // An image job failed for some named files has delivered the rest.
-    const partial = acceptPartialImageDeliverable(job, verdict, ctx);
-    if (partial) verdict = partial;
-  }
-  switch (verdict.verdict) {
-    case "pass":
-      handlePass(job, verdict, ctx);
-      break;
-    case "fail":
-      handleFail(job, verdict, ctx);
-      break;
-    case "blocked":
-      handleBlocked(job, verdict, ctx);
-      break;
-    case "needs_review":
-      handleNeedsReview(job, verdict, ctx);
-      break;
-    case "needs_replan":
-      handleNeedsReplan(job, verdict, ctx);
-      break;
-    case "parse_error":
-      handleParseError(job, verdict, ctx);
-      break;
-    default:
-      handleUnknownVerdict(job, verdict, ctx);
-      break;
-  }
+  runInTransaction(() => {
+    if (verdict.verdict === "fail") {
+      // An image job failed for some named files has delivered the rest.
+      const partial = acceptPartialImageDeliverable(job, verdict, ctx);
+      if (partial) verdict = partial;
+    }
+    switch (verdict.verdict) {
+      case "pass":
+        handlePass(job, verdict, ctx);
+        break;
+      case "fail":
+        handleFail(job, verdict, ctx);
+        break;
+      case "blocked":
+        handleBlocked(job, verdict, ctx);
+        break;
+      case "needs_review":
+        handleNeedsReview(job, verdict, ctx);
+        break;
+      case "needs_replan":
+        handleNeedsReplan(job, verdict, ctx);
+        break;
+      case "parse_error":
+        handleParseError(job, verdict, ctx);
+        break;
+      default:
+        handleUnknownVerdict(job, verdict, ctx);
+        break;
+    }
+  });
 
   return { action: verdict.verdict, spawnedJobs, effectiveVerdict: verdict };
 }

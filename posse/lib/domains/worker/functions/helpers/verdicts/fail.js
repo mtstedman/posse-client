@@ -320,7 +320,13 @@ export function acceptPartialImageDeliverable(job, verdict, ctx, { projectDir = 
   } catch {
     return null;
   }
-  const accepted = existing.filter((name) => !named.has(name));
+  const repairScope = Array.isArray(payload._repair_image_names)
+    ? new Set(payload._repair_image_names)
+    : null;
+  // Legacy repairs without a recorded scope cannot prove incremental progress.
+  if (payload._image_artifact_recovery && !repairScope) return null;
+  if (repairScope && [...named].some((name) => !repairScope.has(name))) return null;
+  const accepted = existing.filter((name) => !named.has(name) && (!repairScope || repairScope.has(name)));
   if (accepted.length === 0) return null;
   const repairNames = [...named].sort();
   const repairPayload = _buildImageArtifactRecoveryPayload({
@@ -338,6 +344,7 @@ export function acceptPartialImageDeliverable(job, verdict, ctx, { projectDir = 
     originalTaskSpec: payload.task_spec || payload.instructions || "",
     specPayload: spec.payload || {},
   });
+  if (ctx.claimPartialDeliverable && !ctx.claimPartialDeliverable()) return null;
   const repairJob = ctx.spawnFromAssessor("failed", "artificer", {
     work_item_id: job.work_item_id,
     title: `Image artifact repair (${repairNames.length}): ${repairNames.slice(0, 3).join(", ")}${repairNames.length > 3 ? ", …" : ""}`.slice(0, 200),
@@ -390,6 +397,7 @@ function _buildImageArtifactRecoveryPayload({
   const safeFeedback = Array.isArray(assessorFeedback) ? assessorFeedback : [];
   const safeInstructions = String(fixInstructions || safeFeedback.join("\n") || "Repair the image artifact output.");
   const outputRootLine = originalOutputRoot ? `Output root: ${originalOutputRoot}` : "Output root: use the configured output_root.";
+  const repairNames = parseJobPayload(job)._repair_image_names;
   return {
     original_job_id: job.id,
     original_title: job.title,
@@ -427,6 +435,7 @@ function _buildImageArtifactRecoveryPayload({
       ? specPayload.success_criteria
       : originalSuccessCriteria,
     _image_artifact_recovery: true,
+    ...(Array.isArray(repairNames) ? { _repair_image_names: repairNames } : {}),
   };
 }
 
