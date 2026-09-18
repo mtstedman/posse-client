@@ -386,7 +386,7 @@ export function classifyResearchForRouting({
   return routing;
 }
 
-export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null, plannerDispatch = false, modelTier = "cheap" } = {}) {
+export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null, plannerDispatch = false, modelTier = "cheap", reasoningEffort = null } = {}) {
   const deepthinkBudget = normalizeResearchBudget(budget);
   const reason = routing?.reason || "deterministic no_research route";
   updateWorkItemResearchSkip(workItem.id, { skipped: true, reason });
@@ -433,7 +433,7 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
     parent_job_id: parentJob?.id || null,
     priority: workItem.priority,
     model_tier: modelTier,
-    reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
+    reasoning_effort: reasoningEffort || researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
     payload_json: JSON.stringify(researchPayload({
       research_skipped: true,
         ...(plannerDispatch ? { planner_dispatch: true } : {}),
@@ -751,7 +751,8 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
     // cheaper child tier, which is the cost split planner-led intake is for.
     const job = createPlanAfterSkippedResearch(workItem, {
       routing: { ...effectiveRouting, reason: "Planner decides whether research is needed" },
-      budget: actualBudget, source, redTeamPlan, plannerDispatch: true, modelTier: dispatchPolicy.plannerModelTier,
+      budget: actualBudget, source, redTeamPlan, plannerDispatch: true,
+      modelTier: dispatchPolicy.plannerModelTier, reasoningEffort: dispatchPolicy.plannerReasoningEffort,
     });
     return { kind: "plan", job, routing: effectiveRouting };
   }

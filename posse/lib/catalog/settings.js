@@ -60,6 +60,7 @@ export const SETTING_KEYS = Object.freeze({
   PLANNER_RESEARCH_RESULT_CHARS: "planner_research_result_chars",
   PLANNER_DISPATCH_TRIAGE_MAX_TURNS: "planner_dispatch_triage_max_turns",
   PLANNER_DISPATCH_MODEL_TIER: "planner_dispatch_model_tier",
+  PLANNER_DISPATCH_REASONING_EFFORT: "planner_dispatch_reasoning_effort",
   PLANNER_RESEARCH_CHILD_MODEL_TIER: "planner_research_child_model_tier",
   AGENT_DISPATCH_TOOL_TIMEOUT_SEC: "agent_dispatch_tool_timeout_sec",
   AUTO_MERGE_COMPLETED: "auto_merge_completed",

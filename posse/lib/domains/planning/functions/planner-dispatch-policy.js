@@ -42,6 +42,7 @@ export function normalizePlannerDispatchPolicy(values = {}) {
     resultChars: normalized[SETTING_KEYS.PLANNER_RESEARCH_RESULT_CHARS],
     triageMaxTurns: normalized[SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS],
     plannerModelTier: normalized[SETTING_KEYS.PLANNER_DISPATCH_MODEL_TIER],
+    plannerReasoningEffort: normalized[SETTING_KEYS.PLANNER_DISPATCH_REASONING_EFFORT],
     childModelTier: normalized[SETTING_KEYS.PLANNER_RESEARCH_CHILD_MODEL_TIER],
     toolTimeoutSec,
   });
