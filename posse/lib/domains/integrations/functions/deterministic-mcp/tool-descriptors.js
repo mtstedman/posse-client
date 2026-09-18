@@ -1,4 +1,5 @@
 import { TOOL_INSPECT_FILE } from "../../../worker/functions/helpers/file-inspector.js";
+import { ATLAS_REPLACED_NATIVE_TOOLS } from "../../../../catalog/tools/source-navigation.js";
 import { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
 import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
 import { atlasBackendLabel } from "../atlas-label.js";
@@ -687,12 +688,13 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
 ]);
 
 // The ATLAS-first gate covers ONLY non-ATLAS read/discovery tools: it forces a
-// role to attempt ATLAS retrieval before falling back to raw reads/listings for
+// role to attempt ATLAS retrieval before falling back to raw reads for
 // context discovery. It deliberately does NOT gate:
 //   - write tools (write_file, edit_file, move/copy/make_dir, bash) — mutation
 //     is governed by scope/policy, never by ATLAS-first ordering, and
 //   - git_history — Git state/history is not mirrored in ATLAS, so ATLAS
 //     retrieval cannot substitute for it, and
+//   - list_files — directory browsing remains available before ATLAS reads,
 //   - ack_operator_feedback — direct feedback delivery must remain
 //     acknowledgeable regardless of ATLAS readiness. The recovery getter is
 //     internal and never issued. Outbound status uses native commentary.
@@ -700,7 +702,6 @@ export const MEANINGFUL_ATLAS_ACTIONS = new Set([
 export const GATED_NATIVE_TOOLS = new Set([
   "chain_read",
   "chain_verdict",
-  "list_files",
   "search_files",
   "inspect_file",
   "hash_file",
@@ -739,10 +740,8 @@ function roleAllowlistForTool(toolName) {
     ]);
     if (names.has(toolName)) roles.push(role);
   }
-  // Researcher switches between read_file (when Atlas is available) and the
-  // audited chain protocol (when it is not). The static catalog records the
-  // union; runtime availability performs the mode-specific narrowing.
-  if (toolName === "read_file" && !roles.includes("researcher")) roles.push("researcher");
+  // The researcher never holds read_file: ATLAS replaces it when available and
+  // the audited chain protocol replaces it when not.
   return new Set(roles);
 }
 
@@ -945,16 +944,20 @@ export function getDeterministicMcpToolNames(role, {
     if (readIdx !== -1) tools.splice(readIdx, 1);
     tools.push("chain_read", "chain_verdict");
   }
-  if (role === "researcher" && atlasAvailable && disableSystemTools) {
-    // An Atlas-only researcher must not retain a second, unbudgeted repository
-    // discovery lane. Keep the non-source coordination tools, but physically
-    // remove the generic file surface from both the signed allowlist and the
-    // provider declaration. Atlas-unavailable runs keep the audited chain
-    // fallback above.
-    for (const toolName of ["read_file", "list_files", "search_files"]) {
+  if (atlasAvailable) {
+    // Remove redundant source tools from every role's issued surface. Keep
+    // directory browsing available without an ATLAS-first round trip.
+    for (const toolName of ATLAS_REPLACED_NATIVE_TOOLS) {
       const index = tools.indexOf(toolName);
       if (index !== -1) tools.splice(index, 1);
     }
+  }
+  if (role === "researcher" && atlasAvailable && disableSystemTools) {
+    // An Atlas-only researcher must not retain a second, unbudgeted repository
+    // discovery lane: directory browsing goes too, from both the signed
+    // allowlist and the provider declaration.
+    const index = tools.indexOf("list_files");
+    if (index !== -1) tools.splice(index, 1);
   }
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     tools.unshift("agent_handoff");

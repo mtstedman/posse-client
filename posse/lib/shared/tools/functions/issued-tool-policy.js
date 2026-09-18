@@ -8,6 +8,7 @@
 // authority above the remote response.
 
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
+import { ATLAS_REPLACED_NATIVE_TOOLS } from "../../../catalog/tools/source-navigation.js";
 import { isRemotePromptClientIssuance } from "../../../domains/remote/classes/RemotePromptClient.js";
 
 const KNOWN_ISSUED_ROLES = new Set([
@@ -235,9 +236,12 @@ export function normalizeIssuedToolSurface(value, {
   webResearchHandoffAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
+  const hasAtlasSurface = atlasAvailable === true
+    && entries.some((entry) => canonicalToolEntry(entry)?.suite === "atlas");
   const out = [];
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
+    if (hasAtlasSurface && tool?.suite === "tools" && ATLAS_REPLACED_NATIVE_TOOLS.includes(tool.name)) continue;
     if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,
