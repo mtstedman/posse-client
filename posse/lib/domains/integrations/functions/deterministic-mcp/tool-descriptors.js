@@ -66,6 +66,7 @@ import {
   TOOL_AGENT_HANDOFF_PLANNER,
   TOOL_AGENT_HANDOFF_RESEARCHER,
   TOOL_AGENT_HANDOFF_REPORT,
+  TOOL_REPORT_CLAIMS,
   getAgentHandoffToolSchemaForRole,
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
@@ -116,6 +117,7 @@ export {
   TOOL_AGENT_HANDOFF_PLANNER,
   TOOL_AGENT_HANDOFF_RESEARCHER,
   TOOL_AGENT_HANDOFF_REPORT,
+  TOOL_REPORT_CLAIMS,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_SUB_AGENT,
   TOOL_DISPATCH_AGENT,
@@ -261,6 +263,13 @@ export const TOOL_CATALOG = {
     access: "coordination",
     summary: "Submit the terminal structured handoff report; any selected evidence is materialized backend-side.",
     observation: { type: "tool.agent_handoff", label: "AgentHandoff", format: "generic", targetKeys: ["profile", "outcome"] },
+  },
+  report_claims: {
+    schema: TOOL_REPORT_CLAIMS,
+    access: "coordination",
+    summary: "Save, revise, retract, or list evidence-backed claims for the current nonterminal researcher report draft.",
+    budgetExempt: true,
+    observation: { type: "tool.report_claims", label: "ReportClaims", format: "generic", targetKeys: ["op"] },
   },
   sub_agent: {
     schema: TOOL_SUB_AGENT,
@@ -723,6 +732,7 @@ function roleAllowlistForTool(toolName) {
   if (toolName === "custom_tools") return new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
   if (toolName === "sub_agent_next_input") return new Set(["subagent"]);
   if (toolName === "web_research_handoff") return new Set(["researcher"]);
+  if (toolName === "report_claims") return new Set(["researcher"]);
   if (toolName === "dispatch_agent") return new Set(["researcher", "planner"]);
   if (toolName === "agent_handoff") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
@@ -815,7 +825,6 @@ export function getToolSchemaForRole(name, role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
-  researcherReportOnly = false,
   requireResearcherCoverage = false,
   researchInvestigation = false,
 } = {}) {
@@ -827,7 +836,6 @@ export function getToolSchemaForRole(name, role, {
     compactCompletion,
     compactV3,
     compactV4,
-    researcherReportOnly,
     requireResearcherCoverage,
     researchInvestigation,
   });
@@ -868,6 +876,7 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     names.unshift("agent_handoff");
   }
+  if (agentHandoff && role === "researcher") names.unshift("report_claims");
   if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     names.unshift("sub_agent");
   }
@@ -946,8 +955,11 @@ export function getDeterministicMcpToolNames(role, {
   }
   if (atlasAvailable) {
     // Remove redundant source tools from every role's issued surface. Keep
-    // directory browsing available without an ATLAS-first round trip.
+    // directory browsing available without an ATLAS-first round trip. A
+    // researcher also keeps bounded text search because literal/configuration
+    // discovery is not equivalent to ATLAS symbol retrieval.
     for (const toolName of ATLAS_REPLACED_NATIVE_TOOLS) {
+      if (role === "researcher" && toolName === "search_files") continue;
       const index = tools.indexOf(toolName);
       if (index !== -1) tools.splice(index, 1);
     }
@@ -962,6 +974,7 @@ export function getDeterministicMcpToolNames(role, {
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     tools.unshift("agent_handoff");
   }
+  if (agentHandoff && role === "researcher") tools.unshift("report_claims");
   if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     tools.unshift("sub_agent");
   }

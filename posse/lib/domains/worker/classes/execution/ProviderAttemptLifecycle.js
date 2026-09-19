@@ -1,6 +1,7 @@
 import fs from "fs";
 import {
   completeAttempt,
+  getJob,
   incrementAndCreateAttempt,
   setAttemptModelName,
   updateJobProvider,
@@ -70,10 +71,35 @@ export class ProviderAttemptLifecycle {
       job._imageRoute = { provider: imageRoute.provider, model: imageRoute.model || null };
     }
     const configuredProviderPool = getAvailableProviders(role);
-    const providerResolution = resolveExecutionProviderFromModule(job.provider || null, configuredProviderPool, role);
+    const recovery = executionPayload?._dead_letter_recovery;
+    const recoveryProvider = String(recovery?.provider_override || "").trim().toLowerCase();
+    const recoveryJobId = Number(recovery?.recovery_job_id);
+    const recoveryJob = Number.isInteger(recoveryJobId) && recoveryJobId > 0 ? getJob(recoveryJobId) : null;
+    let recoveryJobPayload = null;
+    try {
+      recoveryJobPayload = JSON.parse(recoveryJob?.payload_json || "{}");
+    } catch {
+      recoveryJobPayload = null;
+    }
+    const explicitRecoveryProvider = recoveryProvider
+      && recoveryProvider === String(job.provider || "").trim().toLowerCase()
+      && recoveryJob?.job_type === "human_input"
+      && ["running", "succeeded"].includes(recoveryJob.status)
+      && Number(recoveryJobPayload?.original_job_id) === Number(job.parent_job_id)
+      && Array.isArray(recoveryJobPayload?.choices)
+      && recoveryJobPayload.choices.includes(`retry:${recoveryProvider}`)
+      ? recoveryProvider
+      : null;
+    // A provider-specific human recovery decision is a bounded authorization
+    // for this replacement job. Keep its pool exact so later routing cannot
+    // silently substitute the role default and violate the operator's choice.
+    const executionProviderPool = explicitRecoveryProvider
+      ? [explicitRecoveryProvider]
+      : configuredProviderPool;
+    const providerResolution = resolveExecutionProviderFromModule(job.provider || null, executionProviderPool, role);
     let executionProvider = providerResolution.provider;
     if (worker._isProviderCircuitOpen(executionProvider)) {
-      const circuitFallback = worker._selectHealthyProviderFromPool(configuredProviderPool, executionProvider);
+      const circuitFallback = worker._selectHealthyProviderFromPool(executionProviderPool, executionProvider);
       if (circuitFallback) {
         worker.emit(job.id, `${C.yellow}[circuit]${C.reset} WI#${job.work_item_id} job #${job.id}: ${executionProvider} is circuit-open this run; routing to ${circuitFallback}`);
         executionProvider = circuitFallback;
@@ -92,7 +118,7 @@ export class ProviderAttemptLifecycle {
     }
     const providerReadiness = isProviderReady(executionProvider);
     if (!providerReadiness.ready) {
-      const readinessFallback = worker._selectHealthyProviderFromPool(configuredProviderPool, executionProvider);
+      const readinessFallback = worker._selectHealthyProviderFromPool(executionProviderPool, executionProvider);
       if (readinessFallback) {
         worker.emit(job.id, `${C.yellow}[provider]${C.reset} WI#${job.work_item_id} job #${job.id}: ${executionProvider} unavailable (${providerReadiness.reason || "not ready"}); routing to ${readinessFallback}`);
         executionProvider = readinessFallback;
@@ -117,7 +143,8 @@ export class ProviderAttemptLifecycle {
       }
     }
     job._executionProvider = executionProvider;
-    job._allowedProviders = [...new Set((configuredProviderPool || []).filter(Boolean))];
+    job._allowedProviders = [...new Set((executionProviderPool || []).filter(Boolean))];
+    job._explicitRecoveryProvider = explicitRecoveryProvider;
 
     const provider = getProvider(role, executionProvider || undefined);
     const resolveTierModel = (tier) => tierModelName(tier, { role, providerName: executionProvider || undefined });

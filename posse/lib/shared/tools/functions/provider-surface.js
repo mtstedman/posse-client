@@ -56,10 +56,6 @@ export function projectFunctionToolSurface(contract = {}, toolDefinitions = []) 
   };
 }
 
-function pushUnique(values, value) {
-  if (value && !values.includes(value)) values.push(value);
-}
-
 export function renderAtlasGuidance(contract = {}) {
   const tools = Array.isArray(contract?.tools) ? contract.tools : [];
   const hasAtlas = tools
@@ -87,31 +83,9 @@ export function renderAtlasGuidance(contract = {}) {
 export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
   if (!toolRenderer || typeof toolRenderer.tryRenderIssued !== "function") return [];
 
-  const parallelAtlas = [];
-  const parallelDeterministic = [];
-  const nativeBatch = [];
-  for (const tool of Array.isArray(contract?.tools) ? contract.tools : []) {
-    const rendered = toolRenderer.tryRenderIssued(tool);
-    if (!rendered) continue;
-    if (tool?.batching === "parallel-read") {
-      const destination = String(tool?.suite || "").trim() === "atlas"
-        || String(tool?.access || "").trim() === "atlas"
-        ? parallelAtlas
-        : parallelDeterministic;
-      pushUnique(destination, rendered);
-    } else if (tool?.batching === "native-batch") {
-      pushUnique(nativeBatch, rendered);
-    }
-  }
-
-  if (parallelAtlas.length + parallelDeterministic.length + nativeBatch.length === 0) return [];
-
-  const lines = [];
-  if (parallelAtlas.length + parallelDeterministic.length > 0) {
-    lines.push("Turn batching: Issue every independent, ready read only tool call together in the same assistant response. Prefer one batched turn whenever the calls are already determined; a single-call turn fits a call whose target depends on the previous result. All read only tools issued this run, Atlas and standard, support turn batching.");
-  }
-  if (nativeBatch.length > 0) {
-    lines.push("Schema batching: Tools with schema defined batch fields can combine items in one call within their declared limits.");
-  }
-  return lines;
+  const hasNativeBatch = (Array.isArray(contract?.tools) ? contract.tools : [])
+    .some((tool) => tool?.batching === "native-batch" && toolRenderer.tryRenderIssued(tool));
+  return hasNativeBatch
+    ? ["Schema batching: Tools with schema defined batch fields can combine items in one call within their declared limits."]
+    : [];
 }

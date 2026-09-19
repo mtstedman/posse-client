@@ -420,7 +420,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     items: a(o({
       symbolId: symbolId(), symbolRef: symbolRef(), file: s({ minLength: 1, maxLength: 4000 }),
       identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
-      maxTokens: i({ minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokens }),
+      maxTokens: i({ minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol }),
     }, [], { anyOf: [{ required: ["symbolId"] }, { required: ["symbolRef"] }] }), { minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems }),
     symbolId: symbolId(),
     symbolRef: symbolRef(),

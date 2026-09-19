@@ -540,6 +540,64 @@ const RESEARCHER_COMPLETION_COVERAGE = {
   },
 };
 
+export const TOOL_REPORT_CLAIMS = {
+  type: "function",
+  name: "report_claims",
+  description:
+    "Maintain the current research report's nonterminal claim draft while leaving the turn open. Save an evidence-backed finding when its exact condition is established; reuse its stable id to correct it, remove it if later evidence disproves it, or list the compact draft. Saved claims are automatically appended to the terminal researcher report and undergo the normal final evidence validation.",
+  parameters: {
+    type: "object",
+    properties: {
+      op: { type: "string", enum: ["put", "remove", "list"] },
+      claims: {
+        type: "array",
+        minItems: 1,
+        maxItems: 12,
+        description: "One or more findings to add or update. Valid only for put.",
+        items: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              pattern: "^[a-z][a-z0-9._-]{0,63}$",
+              description: "Stable semantic id; reuse it to revise the finding.",
+            },
+            claim: {
+              type: "string",
+              minLength: 1,
+              maxLength: 1000,
+              description: "One self-contained finding preserving exact conditions and exceptions.",
+            },
+            evidence: {
+              type: "array",
+              minItems: 1,
+              maxItems: 16,
+              items: { type: "string", minLength: 2, maxLength: 500 },
+              description: "Visible #refs or surfaced path ranges supporting this finding.",
+            },
+          },
+          required: ["id", "claim", "evidence"],
+          additionalProperties: false,
+        },
+      },
+      ids: {
+        type: "array",
+        minItems: 1,
+        maxItems: 12,
+        items: { type: "string", pattern: "^[a-z][a-z0-9._-]{0,63}$" },
+        description: "Draft ids to retract. Valid only for remove.",
+      },
+    },
+    required: ["op"],
+    oneOf: [
+      { properties: { op: { const: "put" } }, required: ["op", "claims"], not: { required: ["ids"] } },
+      { properties: { op: { const: "remove" } }, required: ["op", "ids"], not: { required: ["claims"] } },
+      { properties: { op: { const: "list" } }, required: ["op"], not: { anyOf: [{ required: ["claims"] }, { required: ["ids"] }] } },
+    ],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_AGENT_HANDOFF = {
   type: "function",
   name: "agent_handoff",
@@ -614,11 +672,11 @@ export const TOOL_AGENT_HANDOFF = {
                 summary: {
                   type: "string",
                   description:
-                    "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
+                    "For researcher.report.v1, concise connective prose that orders the claims without repeating them. Preserve every material condition and exception in claims rather than dropping it for compactness; claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis. Other profiles target 2000 characters or fewer and have a 4000-character safety ceiling.",
                 },
                 claims: {
                   type: "array",
-                  maxItems: 12,
+                  maxItems: 24,
                   description:
                     "In researcher.report.v1, evidence-backed claims are the primary answer: put one self-contained finding in each claim and claim N supplies [EN]. Prefer the narrowest implementation-code evidence over documentation or inference when code is available. " +
                     'Exact tuple form: [["self-contained finding", {"evidence":["#ref:1-3", "src/x.js:23-40"], "decoy":[["#ref","reason"]]}]]. ' +
@@ -699,6 +757,7 @@ export const TOOL_AGENT_HANDOFF = {
                       report: {
                         properties: {
                           summary: { maxLength: 4000 },
+                          claims: { maxItems: 12 },
                         },
                       },
                     },
@@ -718,7 +777,7 @@ export const TOOL_AGENT_HANDOFF = {
                   items: {
                     properties: {
                       report: {
-                        required: ["summary", "claims"],
+                        required: ["summary"],
                         properties: { claims: { minItems: 1 } },
                       },
                     },
@@ -1194,7 +1253,7 @@ const V2_RESEARCHER_REPORT = exactReport({
   claims: V2_HANDOFF_CLAIMS,
   summaryMaxLength: null,
   summaryDescription:
-    "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
+    "For researcher.report.v1, concise connective prose that orders the claims without repeating them. Preserve material conditions and exceptions in claims rather than dropping them for compactness; claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
 });
 
 const V2_PLANNER_COMPACT_TASK = {
@@ -1269,7 +1328,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
             items: {
               properties: {
                 report: {
-                  required: ["summary", "claims"],
+                  required: ["summary"],
                   properties: { claims: { minItems: 1 } },
                 },
               },
@@ -1365,12 +1424,12 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
         type: "string",
         minLength: 1,
         description:
-          "For researcher.report.v1, a compact wireframe that orders or connects the claims. Use as little prose as possible; claim detail and source excerpts stay in claims and evidence, while claim order supplies [E1], [E2], ... evidence labels. For researcher.pipeline.v1, the pipeline synthesis.",
+          "For researcher.report.v1, concise connective prose that orders the claims without repeating them. Preserve material conditions and exceptions in claims rather than dropping them for compactness; saved claim drafts are appended automatically. For researcher.pipeline.v1, the pipeline synthesis.",
       },
       claims: {
         ...RESEARCHER_PIPELINE_HANDOFF_CLAIMS,
         description:
-          "For researcher.report.v1, this array is required and must contain at least one finding; put each self-contained finding here with its visible evidence selectors. Summary prose and [EN] labels refer to these claims. Posse expands the selectors and assembles the report. For researcher.pipeline.v1, claims are optional advisory planner input and evidence may be omitted.",
+          "For researcher.report.v1, supply unsaved findings here with their visible evidence selectors; revise a saved finding through its stable draft id before finalization. Saved claim drafts are appended before validation, and the combined report must contain at least one finding. Summary prose and [EN] labels refer to the combined claims. Posse expands the selectors and assembles the report. For researcher.pipeline.v1, claims are optional advisory planner input and evidence may be omitted.",
       },
       key_files: {
         type: "array",
@@ -1474,7 +1533,6 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
           required: ["profile"],
         },
         then: {
-          required: ["claims"],
           properties: { claims: { minItems: 1 } },
         },
       },
@@ -1491,7 +1549,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with a compact report. Put each self-contained finding in claims and cite visible stored refs or surfaced file ranges. Prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note with no retry. The receipt ends generation.",
+    "Finish research with a complete evidence-backed report. Supply unsaved findings in claims and preserve their material conditions and exceptions; revise a saved finding through its stable draft id before finalization. Saved claim drafts are appended automatically before validation. Prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note with no retry. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1500,7 +1558,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
       summary: {
         type: "string",
         minLength: 1,
-        description: "A compact wireframe that orders or connects the claims.",
+        description: "Concise connective prose that orders the claims without repeating them; retain material conditions even when keeping the summary compact.",
       },
       claims: {
         type: "array",
@@ -1526,40 +1584,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
       },
       coverage: RESEARCHER_COMPLETION_COVERAGE,
     },
-    required: ["profile", "outcome", "summary", "claims"],
-    additionalProperties: false,
-  },
-};
-
-// Ordinary standalone report sessions use the report branch of compact v3.
-// Keep its evidence selector contract intact; the schema-diet experiment's
-// string-only selectors are a separate projection.
-export const TOOL_AGENT_HANDOFF_RESEARCHER_REPORT = {
-  ...TOOL_AGENT_HANDOFF_RESEARCHER_V3,
-  description: TOOL_AGENT_HANDOFF_RESEARCHER_V4.description,
-  parameters: {
-    type: "object",
-    properties: {
-      profile: { type: "string", enum: ["researcher.report.v1"] },
-      outcome: { type: "string", enum: ["complete"] },
-      summary: TOOL_AGENT_HANDOFF_RESEARCHER_V4.parameters.properties.summary,
-      claims: {
-        ...RESEARCHER_HANDOFF_CLAIMS,
-        minItems: 1,
-        description:
-          "Ordered findings with their visible evidence selectors. State each finding once, preserving its conditions, ordering and failure behavior. Posse expands the selectors and assembles the report; claim order supplies [E1], [E2], ... labels.",
-        items: {
-          ...RESEARCHER_HANDOFF_CLAIM,
-          properties: {
-            claim: RESEARCHER_HANDOFF_CLAIM.properties.claim,
-            evidence: RESEARCHER_HANDOFF_CLAIM.properties.evidence,
-            decoy: RESEARCHER_HANDOFF_CLAIM.properties.decoy,
-          },
-        },
-      },
-      coverage: RESEARCHER_COMPLETION_COVERAGE,
-    },
-    required: ["profile", "outcome", "summary", "claims"],
+    required: ["profile", "outcome", "summary"],
     additionalProperties: false,
   },
 };
@@ -1701,7 +1726,6 @@ export function getAgentHandoffToolSchemaForRole(role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
-  researcherReportOnly = false,
   requireResearcherCoverage = false,
   researchInvestigation = false,
 } = {}) {
@@ -1718,9 +1742,7 @@ export function getAgentHandoffToolSchemaForRole(role, {
   if (normalizedRole === "researcher") {
     const schema = compactV3 && compactV4
       ? TOOL_AGENT_HANDOFF_RESEARCHER_V4
-      : (compactV3
-        ? (researcherReportOnly ? TOOL_AGENT_HANDOFF_RESEARCHER_REPORT : TOOL_AGENT_HANDOFF_RESEARCHER_V3)
-        : TOOL_AGENT_HANDOFF_RESEARCHER);
+      : (compactV3 ? TOOL_AGENT_HANDOFF_RESEARCHER_V3 : TOOL_AGENT_HANDOFF_RESEARCHER);
     if (!schema.parameters?.properties?.coverage) return schema;
     if (!requireResearcherCoverage) {
       const properties = { ...schema.parameters.properties };

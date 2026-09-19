@@ -670,7 +670,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.get": {
     type: "function",
     name: "atlas_symbol_get",
-    description: "Read an exact symbol body, or batch up to three independent selectors in items. Batch maxTokens is a shared cap (default and maximum 8000), divided across items; errors remain per item. Scalar ID/name lookup and file disambiguation are unchanged.",
+    description: "Read an exact symbol body, or batch up to three independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.",
     parameters: {
       type: "object",
       properties: {
@@ -681,7 +681,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
             symbolId: {type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN},
             symbolRef: {type: "object", properties: {name: {type: "string"}, file: {type: "string"}, kind: {type: "string"}, exportedOnly: {type: "boolean"}}, required: ["name"], additionalProperties: false},
             file: {type: "string"}, identifiersToFind: {type: "array", items: {type: "string"}, maxItems: 50},
-            maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokens},
+            maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol},
           }, anyOf: [{required: ["symbolId"]}, {required: ["symbolRef"]}], additionalProperties: false},
         },
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact symbol ID returned by Atlas." },

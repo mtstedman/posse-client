@@ -24,7 +24,6 @@ export const CODEX_NATIVE_BATCHING_ROLES = Object.freeze(["researcher", "planner
 // Composed reads need matching executor and history ceilings. The ceiling does
 // not change the gateway's physical read or source-window budgets.
 export const CODEX_RESEARCHER_TRANSPORT_LIMITS = Object.freeze({
-  maxReadBatch: 4,
   outputTokens: 131072,
 });
 

@@ -262,6 +262,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_PROMOTE_CONFLICT_PREVIEW: "job.promote_conflict_preview",
   JOB_PROMOTE_CROSS_WI_SOURCE: "job.promote_cross_wi_source",
   JOB_PROVIDER_CIRCUIT_OPEN: "job.provider_circuit_open",
+  JOB_RECOVERY_CAP_REACHED: "job.recovery_cap_reached",
   JOB_PROVIDER_ERROR: "job.provider_error",
   JOB_RATE_LIMITED: "job.rate_limited",
   JOB_REBASE_ABORT_FAILED: "job.rebase_abort_failed",

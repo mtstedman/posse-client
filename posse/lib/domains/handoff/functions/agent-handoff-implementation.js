@@ -75,6 +75,7 @@ import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
 import { renderClaimEvidenceReferences } from "./helpers/evidence-references.js";
 import { missingReportClaimsMessage } from "./helpers/missing-report-claims.js";
 import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
+import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -5394,13 +5395,16 @@ export function stageAgentHandoff(args, {
     db: database,
   };
   const effectiveRole = String(call.role || role || "");
-  const serializedArgs = JSON.stringify(args ?? null);
+  const mergedArgs = effectiveRole === "researcher"
+    ? mergeResearchReportDraftClaims(args, agentCallId, database)
+    : args;
+  const serializedArgs = JSON.stringify(mergedArgs ?? null);
   if (Buffer.byteLength(serializedArgs, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
     fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
   }
   const completionInput = effectiveRole === "researcher"
-    ? compactResearcherCoverageInput(args)
-    : { args, coverage: null };
+    ? compactResearcherCoverageInput(mergedArgs)
+    : { args: mergedArgs, coverage: null };
   const packet = materializeAgentHandoff(completionInput.args, { context: resolvedContext, role: effectiveRole, maxHandoffs });
   if (effectiveRole === "researcher") {
     enforceResearcherTraversalCompletion(

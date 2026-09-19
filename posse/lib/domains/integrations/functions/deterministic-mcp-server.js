@@ -68,6 +68,7 @@ import {
   stageAgentHandoff,
   getTraversalCompletionSnapshotForCall,
 } from "../../handoff/functions/agent-handoff.js";
+import { executeResearchReportClaims } from "../../handoff/functions/research-report-claim-drafts.js";
 import {
   assertSubAgentParentReady,
   executeSubAgent,
@@ -82,7 +83,6 @@ import {
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { projectDbQuerySchemaForPermissions } from "../../../shared/tools/functions/toolkit/project-db/schema.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
-import { researcherReportOnlyForSession } from "./deterministic-mcp/researcher-report-profile.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
@@ -1604,7 +1604,6 @@ addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   compactCompletion: compactAgentHandoffIssued(),
   compactV3: compactAgentHandoffV3Issued(),
   compactV4: compactAgentHandoffV4Issued(),
-  researcherReportOnly: researcherReportOnlyForSession({ role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId }),
   requireResearcherCoverage: researcherTraversalCoverageRequired(),
   researchInvestigation: bootConfig.researchInvestigation === true,
 }));
@@ -2648,6 +2647,18 @@ function executeAgentHandoff(args = {}) {
   });
 }
 
+function executeReportClaims(args = {}) {
+  return JSON.stringify(executeResearchReportClaims(args, {
+    context: {
+      workItemId: mcpWorkItemId,
+      jobId: mcpJobId,
+      attemptId: mcpAttemptId,
+      agentCallId: mcpAgentCallId,
+    },
+    role: roleName,
+  }));
+}
+
 async function executeSubAgentTool(args = {}) {
   const result = await executeSubAgent(args, {
     context: {
@@ -2713,6 +2724,7 @@ let mcpToolRegistry = declareToolSuites(new ToolRegistry());
 mcpToolRegistry.attach("custom_tools", (args) => executeCustomToolsTool(args || {}));
 mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
 mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
+mcpToolRegistry.attach("report_claims", (args) => executeReportClaims(args || {}));
 mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
 mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
 mcpToolRegistry.attach("dispatch_agent", (args) => executeDispatchAgentTool(args || {}));
@@ -2875,7 +2887,6 @@ function rebuildNativeToolSchemas() {
     compactCompletion: compactAgentHandoffIssued(),
     compactV3: compactAgentHandoffV3Issued(),
     compactV4: compactAgentHandoffV4Issued(),
-    researcherReportOnly: researcherReportOnlyForSession({ role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId }),
     requireResearcherCoverage: researcherTraversalCoverageRequired(),
     researchInvestigation: bootConfig.researchInvestigation === true,
   }));
@@ -2933,6 +2944,7 @@ function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry.attach("custom_tools", (args) => executeCustomToolsTool(args || {}));
   mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
   mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
+  mcpToolRegistry.attach("report_claims", (args) => executeReportClaims(args || {}));
   mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
   mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
   mcpToolRegistry.attach("dispatch_agent", (args) => executeDispatchAgentTool(args || {}));
@@ -3243,6 +3255,7 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "move_file",
   "optimize_image",
   "prune_artifact_output",
+  "report_claims",
   "reencode_image",
   "resize_image",
   "run_scoped_checks",
@@ -4148,6 +4161,16 @@ async function handleRequest(msg) {
       const gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
       if (gateDecision.allowed) {
         args = applyNativeReadLineLimit(args, gateDecision);
+        if (gateDecision.reason === "search_discovery" && shouldForwardAtlasResearcherEscapeHatch(toolName)) {
+          atlasEscapeHatchForwarded = true;
+          appendToolLog({
+            event: "atlas_escape_hatch_forwarded",
+            requestId: id ?? null,
+            tool: requestedToolName,
+            canonicalTool: toolName,
+            reason: gateDecision.reason,
+          });
+        }
         // Continue to the native handler below.
       } else if (shouldForwardAtlasResearcherEscapeHatch(toolName)) {
         args = boundForwardedReadArgs(toolName, args);

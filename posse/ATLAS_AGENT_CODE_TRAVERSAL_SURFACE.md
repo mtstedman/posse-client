@@ -55,7 +55,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `researcher`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.report_claims`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -865,6 +865,28 @@ Read basic image metadata (format, dimensions, byte size).
 |---|---|---|---|---|
 | `path` | `string` | Required |  | Image file path. |
 
+### `tools.report_claims`
+
+Remote roles: `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `report_claims` |
+| Tool reference token | `tools.report_claims` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `coordination` |
+| Batchable input | No |
+| Parallel calls | Yes |
+| System-prefetch capable | No |
+
+Maintain the current research report's nonterminal claim draft while leaving the turn open. Save an evidence-backed finding when its exact condition is established; reuse its stable id to correct it, remove it if later evidence disproves it, or list the compact draft. Saved claims are automatically appended to the terminal researcher report and undergo the normal final evidence validation.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `claims` | `array<object>` | Conditional | min items 1; max items 12 | One or more findings to add or update. Valid only for put. |
+| `ids` | `array<string>` | Conditional | min items 1; max items 12 | Draft ids to retract. Valid only for remove. |
+| `op` | `literal "put" | literal "remove" | literal "list"` | Required |  |  |
+
 ### `tools.request_scope`
 
 Remote roles: `dev`.
@@ -1092,7 +1114,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read an exact symbol body, or batch up to three independent selectors in items. Batch maxTokens is a shared cap (default and maximum 8000), divided across items; errors remain per item. Scalar ID/name lookup and file disambiguation are unchanged.
+Read an exact symbol body, or batch up to three independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

@@ -19,16 +19,16 @@ const EXCLUDED_ACTIONS = new Set([
 const ACTION_CARDS = Object.freeze({
   traverse_ref: "requires traversal_ref; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,searchMode,reaccessAuthorization",
   create_ref: "fields text or source_ref+lines/offset/limit or chunks, plus object_type,note,owner_scope",
-  "symbol.search": "requires query; for a known exact name call symbol.get with symbolRef{name,file?,kind?} directly; search only an unknown, ambiguous, or missed target, using scope=name, semantic=false, and limit at most 10 for an exact name; never repeat case or scope variants after a usable hit; a hit is an address, not a source body; batch independent searches and reuse returned IDs; fields query,scope,limit,semantic",
+  "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; list compact incoming caller or reference symbols grouped by file; fields symbolId,mode,limit,offset",
-  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; batch maxTokens is shared, at most 8000; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; fields symbolId,kind,minConfidence,limit,includeUnresolved",
   "code.skeleton": "fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
   "code.survey": "requires paths; fields paths,identifiersToFind,limit",
   "code.structure": "requires paths; exact inventory of one small directory or file set (default 12 files) with stable symbol handles, or an explicit relationship query when edgeKinds such as implements, extends, calls, or imports are supplied; imports is the default edge kind; use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
   "code.lens": "requires identifiersToFind and either symbolId or file; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires reason+symbolId or reason+file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; fields symbolId,file,reason,identifiersToFind,granularity,maxTokens",
+  "code.window": "requires reason+symbolId or reason+file+identifiersToFind; returns a coherent source region for related declarations and surrounding same-file control flow; fields symbolId,file,reason,identifiersToFind,granularity,maxTokens",
   "memory.feedback": "requires memoryId,verdict; fields memoryId,verdict,detail",
   "memory.surface": "fields domains,paths,symbolIds",
   "memory.get": "fields domains,paths,symbolIds",
@@ -39,16 +39,16 @@ const ACTION_CARDS = Object.freeze({
 // tool, closed-argument surface and canonical execution path unchanged.
 const TYPED_ACTION_CARDS = Object.freeze({
   traverse_ref: "requires traversal_ref; retrieve only content omitted behind an explicit traversal_ref or nextTraversalRef, batching every independently needed ref; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,searchMode,reaccessAuthorization",
-  "symbol.search": "requires query; for a known exact name call symbol.get with symbolRef{name,file?,kind?} directly; search only an unknown, ambiguous, or missed target, using scope=name, semantic=false, and limit at most 10 for an exact name; never repeat case or scope variants after a usable hit; a hit is an address, not a source body; batch independent searches, then reuse returned IDs; fields query,scope,limit,semantic",
+  "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; get a compact relationship summary for one or several identified symbols; fields symbolId,symbolRef",
-  "symbol.callers": "requires symbolId; list compact incoming resolved callers, references, or both by file, then use symbol.get on a returned ID; fields symbolId,mode,limit,offset",
-  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; batch maxTokens is shared, at most 8000; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.callers": "requires symbolId; returns compact incoming resolved callers, references, or both, grouped by file; fields symbolId,mode,limit,offset",
+  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; inspect concrete call and reference sites when relationships are the missing fact; fields symbolId,kind,minConfidence,limit,includeUnresolved",
   "code.skeleton": "orient within one known file or symbol using a compact body-free outline before exact source; fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
-  "code.survey": "requires paths; use when the exact target is unknown or behavior spans files, returning a ranked multi-file symbol preview and call map; fields paths,identifiersToFind,limit",
+  "code.survey": "requires paths; returns a ranked multi-file symbol preview and call map; fields paths,identifiersToFind,limit",
   "code.structure": "requires paths; read the exact inventory of one small directory or file set (default 12 files, paged beyond that) with stable symbol handles, or answer who-implements, who-extends, who-calls, or who-imports inside it in one call by naming edgeKinds explicitly (imports is the default; without edges it is a symbol list, not a relationship proof); use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
-  "code.lens": "requires identifiersToFind and either symbolId or file; use when relevant identifiers or branches are scattered in one known target, batching all known same-target identifiers; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; the facade supplies reason; fields file,identifiersToFind,granularity,maxTokens",
+  "code.lens": "requires identifiersToFind and either symbolId or file; returns focused locations and enclosing-symbol context for identifiers in one target; fields symbolId,file,identifiersToFind,contextLines",
+  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; the facade supplies reason; fields file,identifiersToFind,granularity,maxTokens",
   "memory.surface": "probe memory presence for exact file or symbol anchors without returning bodies; fields domains,paths,symbolIds",
   "memory.get": "retrieve memory bodies for exact file or symbol anchors; fields domains,paths,symbolIds",
 });
@@ -58,15 +58,12 @@ const TYPED_ACTION_CARDS = Object.freeze({
 // prompt pressure: native validation still rejects every malformed window.
 const TYPED_TERSE_ACTION_CARDS = Object.freeze({
   ...ACTION_CARDS,
-  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; batch maxTokens is shared, at most 8000; use symbolRef{name,file?,kind?} directly for a known exact name without symbol.search; search only if unknown or ambiguous; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
-  "code.window": "requires file+identifiersToFind; prefer symbol granularity for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; fields file,identifiersToFind,granularity,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; fields file,identifiersToFind,granularity,maxTokens",
 });
 
-const TYPED_READY_CALL_BATCHING =
-  "Put every currently ready independent atlas.query call in the same model turn.";
-
 const TYPED_DIRECT_SYMBOL_CARD =
-  "requires symbolId or symbolRef; for one exact symbol name, use symbolRef and include file or kind when known to get a bounded exact-source excerpt plus caller/callee addresses without a separate symbol.search; use symbol.search for concepts or ambiguous names; fields symbolId,symbolRef";
+  "requires symbolId or symbolRef; returns a bounded exact-source excerpt plus caller and callee addresses for one identified symbol; fields symbolId,symbolRef";
 
 // Task-blind language-specific experimental levers. Keep every language in
 // one table so a treatment can be tuned by ecosystem rather than repository,
@@ -152,10 +149,6 @@ export function researcherTypedLanguageLeversForRootEntries(entries = []) {
       .filter((value) => Number.isInteger(value) && value > 0)
       .reduce((minimum, value) => (minimum == null ? value : Math.min(minimum, value)), null),
   });
-}
-
-export function buildResearcherTypedReadyCallBatchingText() {
-  return `ATLAS BATCHING: ${TYPED_READY_CALL_BATCHING}`;
 }
 
 const WORKFLOW_ACTIONS = Object.freeze([
@@ -329,7 +322,7 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
       items: {type: "object", properties: {
         symbolId, symbolRef: symbolRefItem, file: {type: "string"}, path: {type: "string"},
         identifiersToFind: {type: "array", items: {type: "string"}, maxItems: 50},
-        maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokens},
+        maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol},
       }, anyOf: [{required: ["symbolId"]}, {required: ["symbolRef"]}], additionalProperties: false}},
     query: { type: "string", minLength: 1 },
     scope: { type: "string", enum: ["name", "body", "either"] },
@@ -364,7 +357,7 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     granularity: {
       type: "string",
       enum: ["symbol", "block", "fileWindow"],
-      description: "Prefer symbol for a declared implementation anchor; use fileWindow only for surrounding same-file control flow; block selects the enclosing control-flow block.",
+      description: "symbol selects declaration bodies, block selects enclosing control flow, and fileWindow returns a coherent source region in the file.",
     },
     contextLines: { type: "integer", minimum: 0, maximum: 200000, description: "Requested surrounding lines; values above 8 are clamped to 8." },
     maxTokens: { type: "integer", minimum: 1, maximum: 200000 },
@@ -608,7 +601,7 @@ export function buildResearcherTypedDispatcherTool(atlasTools = [], {
   const cards = actions.map((action) => `${action}: ${actionCards[action]}.`).join(" ");
   return {
     name: DISPATCHER_TOOL_NAME,
-    description: `Run one canonical Atlas repository read. Put only the selected action's fields in args. Batch independent atlas.query calls; reuse returned symbolId values for dependent reads. symbolHandle is a compatibility input alias. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
+    description: `Run one canonical Atlas repository read. Put only the selected action's fields in args. Reuse returned symbolId values for dependent reads. symbolHandle is a compatibility input alias. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
     inputSchema: {
       type: "object",
       properties: {

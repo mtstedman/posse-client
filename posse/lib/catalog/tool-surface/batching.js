@@ -2,6 +2,9 @@
 // lookup; it deliberately has no provider-registry dependency.
 export const TOOL_BATCHING_CLASSES = Object.freeze({
   PARALLEL_READ: "parallel-read",
+  // Codex may emit these calls together with other ready work. The native
+  // write gate still serializes their durable mutations during execution.
+  PARALLEL_WRITE: "parallel-write",
   NATIVE_BATCH: "native-batch",
   SERIAL_PROTOCOL: "serial-protocol",
   ORDERED: "ordered",
@@ -13,6 +16,10 @@ const PARALLEL_READ_TOOLS = new Set([
   "manual", "symbol.search", "symbol.overview", "symbol.callers", "tree.branch", "tree.expand", "code.skeleton",
   "code.lens", "code.window", "code.structure", "review.delta", "review.analyze", "review.risk",
   "file.read",
+]);
+
+const PARALLEL_WRITE_TOOLS = new Set([
+  "report_claims",
 ]);
 
 const NATIVE_BATCH_TOOLS = new Set([
@@ -45,6 +52,7 @@ export function canonicalToolNameForBatching(name) {
 export function getToolBatchingClass(name) {
   const canonicalName = String(name || "").trim();
   if (PARALLEL_READ_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.PARALLEL_READ;
+  if (PARALLEL_WRITE_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.PARALLEL_WRITE;
   if (NATIVE_BATCH_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.NATIVE_BATCH;
   if (SERIAL_PROTOCOL_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.SERIAL_PROTOCOL;
   return TOOL_BATCHING_CLASSES.ORDERED;

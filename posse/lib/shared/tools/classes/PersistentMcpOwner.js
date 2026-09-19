@@ -71,7 +71,6 @@ import {
 } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
 import {
   researcherDispatcherIssuedActions,
-  buildResearcherTypedReadyCallBatchingText,
   normalizeResearcherTypedActionArgs,
   normalizeResearcherWorkflowFacadeArgs,
   researcherTypedLanguageLeversForRootEntries,
@@ -3025,32 +3024,6 @@ function appendOwnerResearchEarlyFetchNotice(result, session, args, admission) {
     });
   }
   return next;
-}
-
-function appendOwnerResearcherTypedReadyCallBatchingNotice(result, session) {
-  const boot = session?.bootConfig || {};
-  if (
-    result?.isError === true
-    || !resolveAtlasResearchRuntimeGuidance()
-    || String(boot.role || "").toLowerCase() !== "researcher"
-    || String(boot.providerName || "").toLowerCase() !== "codex"
-    || !resolveAtlasResearcherTypedDispatcher()
-  ) {
-    return result;
-  }
-  const languageLevers = researcherTypedLanguageLeversForSession(session);
-  if (!languageLevers.readyCallBatching) return result;
-  const flags = researchNoticeFlagsFor(session);
-  if (flags.typedReadyCallBatching) return result;
-  flags.typedReadyCallBatching = true;
-  return appendOwnerModelControlNotice(
-    result,
-    `\n\n${buildResearcherTypedReadyCallBatchingText()}`,
-    {
-      kind: "research_typed_ready_call_batching",
-      trigger: `language:${languageLevers.primaryLanguage}`,
-    },
-  );
 }
 
 function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) {
@@ -7252,7 +7225,6 @@ export class PersistentMcpOwner {
       // feedback at its next result boundary.
       this._refundResearchInfrastructureFailure(session, synthesisAdmission, result);
       result = composed("operator_feedback", appendOwnerOperatorFeedbackDelivery(result, session, toolName));
-      result = composed("batching_notice", appendOwnerResearcherTypedReadyCallBatchingNotice(result, session));
       result = composed("synthesis_notice", appendOwnerResearchSynthesisNotice(
         result,
         session,

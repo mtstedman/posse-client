@@ -974,6 +974,8 @@ export async function runHumanInputJob(worker, job, {
         const origPayload = worker.parsePayload(origJob);
         const retryPayload = buildDeadLetterRetryPayload(origJob, origPayload, lastAnswer, job.id, worker.projectDir, {
           recoveryType: payload.review_type,
+          providerOverride: decision.provider || null,
+          failureRepeatKey: payload.failure_repeat_key || null,
         });
         const { job: retryJob, reused: reusedRetryJob } = createHumanGateEffectJob({
           gateJobId: job.id,

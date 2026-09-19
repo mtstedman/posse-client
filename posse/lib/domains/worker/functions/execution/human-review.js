@@ -228,7 +228,11 @@ export function classifyPartialWorkRecoveryAnswer(answer) {
   return "unknown";
 }
 
-export function buildDeadLetterRetryPayload(origJob, origPayload, humanAnswer, recoveryJobId, projectDir = process.cwd(), { recoveryType = "dead_letter_recovery" } = {}) {
+export function buildDeadLetterRetryPayload(origJob, origPayload, humanAnswer, recoveryJobId, projectDir = process.cwd(), {
+  recoveryType = "dead_letter_recovery",
+  providerOverride = null,
+  failureRepeatKey = null,
+} = {}) {
   const retryPayload = { ...(origPayload || {}) };
   const previousRecovery = retryPayload._dead_letter_recovery && typeof retryPayload._dead_letter_recovery === "object"
     ? retryPayload._dead_letter_recovery
@@ -240,11 +244,17 @@ export function buildDeadLetterRetryPayload(origJob, origPayload, humanAnswer, r
     "Do not repeat the previous failure mode. If the prior issue involved a gitignored runtime/local file, keep that file out of committed files_to_create and use tracked examples or operator setup notes instead.",
   ].join("\n");
   const previousStallCount = Number(previousRecovery?.stall_recovery_count || 0);
+  const previousRecoveryCount = Number(previousRecovery?.recovery_count || 0);
   const recoveryMetadata = {
     original_job_id: origJob.id,
     ...(previousRecovery?.original_job_id ? { prior_original_job_id: previousRecovery.original_job_id } : {}),
     recovery_job_id: recoveryJobId,
     human_answer: String(humanAnswer || ""),
+    recovery_count: (Number.isFinite(previousRecoveryCount) && previousRecoveryCount > 0
+      ? Math.floor(previousRecoveryCount)
+      : 0) + 1,
+    ...(providerOverride ? { provider_override: String(providerOverride) } : {}),
+    ...(failureRepeatKey ? { failure_repeat_key: String(failureRepeatKey).slice(0, 320) } : {}),
   };
   if (Number.isFinite(previousStallCount) && previousStallCount > 0) {
     recoveryMetadata.stall_recovery_count = Math.floor(previousStallCount);

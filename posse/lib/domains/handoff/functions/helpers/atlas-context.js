@@ -853,6 +853,19 @@ function _surfaceAtlasSurveyRef(packet, data) {
       ? "work_item"
       : null;
   if (!ownerScope || !data || typeof data !== "object") return null;
+  const existingRef = String(data?.traversal_ref?.ref || "").trim();
+  if (existingRef) {
+    const fetched = fetchHashRefForContext(context, existingRef);
+    if (fetched?.ok && fetched?.found && fetched.entry) {
+      return {
+        ref: existingRef,
+        objectType: fetched.entry.object_type || "atlas.code.survey",
+        sizeChars: Number(fetched.entry.size_chars || 0),
+        note: fetched.entry.note || "survey page 1",
+        cursor: data?.pagination?.cursor || null,
+      };
+    }
+  }
   return materializeCodeSurveyPages(data, {
     context,
     ownerScope,
@@ -860,6 +873,30 @@ function _surfaceAtlasSurveyRef(packet, data) {
     objectType: "atlas.code.survey",
     pageSize: SURVEY_REF_PAGE_FILES,
   });
+}
+
+function _surveySnapshotFiles(packet, data) {
+  if (Array.isArray(data?._snapshotFiles) && data._snapshotFiles.length > 0) {
+    return data._snapshotFiles;
+  }
+  const ref = String(data?.traversal_ref?.ref || "").trim();
+  if (ref) {
+    const fetched = fetchHashRefForContext(_hashRefContextForPacket(packet), ref);
+    if (fetched?.ok && fetched?.found && fetched.entry?.payload_text) {
+      try {
+        const payload = JSON.parse(fetched.entry.payload_text);
+        if (Array.isArray(payload?.files) && payload.files.length > 0) return payload.files;
+      } catch {
+        // Fall back to the public survey preview below.
+      }
+    }
+  }
+  return Array.isArray(data?.files) ? data.files : [];
+}
+
+export function __testSurveySnapshotFiles(packet, data) {
+  assertTestContext("__testSurveySnapshotFiles");
+  return _surveySnapshotFiles(packet, data);
 }
 
 function _issueAtlasTraversalRefForCurrentCall(packet, ref) {
@@ -2449,10 +2486,11 @@ async function _prefetchAtlasSurvey(packet, {
         retryReason,
       }, startedAt);
     }
+    const surveyFiles = _surveySnapshotFiles(packet, data);
     const traversalRef = _surfaceAtlasSurveyRef(packet, data);
     const lifecycleExpansion = await _prefetchLifecycleSurveyBodies(packet, {
       taskText,
-      files: data.files,
+      files: surveyFiles,
       focusAdmission,
     });
     const dependencyBoundaries = detectUnavailableDependencySources({
@@ -2464,7 +2502,7 @@ async function _prefetchAtlasSurvey(packet, {
       attempted: true,
       scope: effectiveScope,
       symbols: effectiveScope.symbols || null,
-      files: data.files,
+      files: surveyFiles,
       callMap: data.callMap || null,
       metrics: data.metrics || null,
       granularity: data.granularity || null,
@@ -2644,7 +2682,7 @@ function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
 const MAX_SURVEY_BRIEF_FILES = 10;
 const MAX_SURVEY_BRIEF_EDGES = 8;
 const MAX_SURVEY_BRIEF_SYMBOLS = 8;
-const MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE = 4;
+const MAX_SURVEY_MANIFEST_CHARS_PER_FILE = 1200;
 const SURVEY_REF_PAGE_FILES = 10;
 
 function _surveyBriefEdgeLimit(packet) {
@@ -2662,23 +2700,29 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
   const fileCount = Number.isFinite(Number(metrics.fileCount))
     ? Number(metrics.fileCount)
     : files.length;
-  const fileSummaries = files.slice(0, MAX_SURVEY_BRIEF_FILES).map((file) => ({
-    path: String(file?.path || "").trim(),
-    symbolCount: Number.isFinite(Number(file?.symbolCount))
-      ? Number(file.symbolCount)
-      : (Array.isArray(file?.symbols) ? file.symbols.length : 0),
-    truncated: !!file?.truncated,
-    symbols: (Array.isArray(file?.symbols) ? file.symbols : [])
-      .slice(0, MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE)
-      .map((symbol) => ({
-        name: String(symbol?.qualifiedName || symbol?.name || "").trim(),
-        kind: String(symbol?.kind || "symbol").trim(),
-        line: Number.isFinite(Number(symbol?.line ?? symbol?.startLine))
-          ? Number(symbol.line ?? symbol.startLine)
-          : null,
-      }))
-      .filter((symbol) => symbol.name),
-  })).filter((file) => file.path);
+  const fileSummaries = files.slice(0, MAX_SURVEY_BRIEF_FILES).map((file) => {
+    const allNames = [...new Set((Array.isArray(file?.symbols) ? file.symbols : [])
+      .map((symbol) => String(symbol?.qualifiedName || symbol?.name || symbol || "").trim())
+      .filter(Boolean))];
+    const names = [];
+    let chars = 0;
+    for (const name of allNames) {
+      const addedChars = name.length + (names.length > 0 ? 2 : 0);
+      if (names.length > 0 && chars + addedChars > MAX_SURVEY_MANIFEST_CHARS_PER_FILE) break;
+      names.push(name);
+      chars += addedChars;
+    }
+    const symbolCount = Number.isFinite(Number(file?.symbolCount))
+      ? Math.max(Number(file.symbolCount), allNames.length)
+      : allNames.length;
+    return {
+      path: String(file?.path || "").trim(),
+      symbolCount,
+      symbolsOmitted: Math.max(0, symbolCount - names.length),
+      truncated: !!file?.truncated || names.length < symbolCount,
+      symbols: names,
+    };
+  }).filter((file) => file.path);
   return {
     ok: true,
     attempted: !!result.attempted,
@@ -2704,6 +2748,11 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
       : null,
     fullPayloadOmitted: true,
   };
+}
+
+export function __testCompactAtlasSurveyPrefetchResult(result) {
+  assertTestContext("__testCompactAtlasSurveyPrefetchResult");
+  return _compactAtlasSurveyPrefetchResult(result);
 }
 
 function _compactSurveyCallMap(callMap, metrics = {}, { edgeLimit = MAX_SURVEY_BRIEF_EDGES } = {}) {
@@ -3622,24 +3671,22 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     lines.push(`  top files in survey scope: ${topFiles.join(", ")}`);
   }
   const fileCap = trim >= 2 ? 4 : trim >= 1 ? 6 : MAX_SURVEY_BRIEF_FILES;
-  const symbolCap = trim >= 2 ? 2 : trim >= 1 ? 3 : MAX_SURVEY_BRIEF_SYMBOLS_PER_FILE;
   const fileSummaries = allFileSummaries.slice(0, fileCap);
   if (fileSummaries.some((file) => Array.isArray(file?.symbols) && file.symbols.length > 0)) {
-    lines.push("  surveyed symbols by file (`path#symbol` means `symbol` in repo-relative `path`):");
+    lines.push("  surveyed symbol names by file:");
     for (const file of fileSummaries) {
-      const symbols = (Array.isArray(file?.symbols) ? file.symbols : []).slice(0, symbolCap);
-      if (symbols.length === 0) continue;
-      const total = Number(file?.symbolCount || symbols.length);
-      const remainder = Math.max(0, total - symbols.length);
-      const rendered = symbols.map((symbol) => {
-        const name = String(symbol?.qualifiedName || symbol?.name || "(anonymous)");
-        const kind = String(symbol?.kind || "symbol");
-        const line = Number.isFinite(Number(symbol?.line ?? symbol?.startLine))
-          ? `:${Number(symbol.line ?? symbol.startLine)}`
+      const names = (Array.isArray(file?.symbols) ? file.symbols : [])
+        .map((symbol) => String(symbol?.qualifiedName || symbol?.name || symbol || "").trim())
+        .filter(Boolean);
+      if (names.length === 0) continue;
+      const total = Number(file?.symbolCount || names.length);
+      const remainder = Math.max(Number(file?.symbolsOmitted || 0), total - names.length);
+      const continuation = remainder > 0 && traversalRef?.ref
+        ? ` (+${remainder} in ${traversalRef.ref}; search this file path)`
+        : remainder > 0
+          ? ` (+${remainder} in survey ref)`
           : "";
-        return `${name} [${kind}]${line}`;
-      });
-      lines.push(`    - ${file.path}: ${rendered.join(", ")}${remainder > 0 ? ` (+${remainder} more in survey ref)` : ""}`);
+      lines.push(`    - ${file.path}: ${names.join(", ")}${continuation}`);
     }
   }
   return lines;

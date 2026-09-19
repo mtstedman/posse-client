@@ -853,6 +853,25 @@ export function createAgentHandoffPacketTable(db) {
   }
 }
 
+export function createResearchReportClaimDraftTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS research_report_claim_drafts (
+      agent_call_id INTEGER NOT NULL,
+      claim_id TEXT NOT NULL,
+      attempt_id INTEGER,
+      position INTEGER NOT NULL,
+      claim_json TEXT NOT NULL CHECK (json_valid(claim_json)),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (agent_call_id, claim_id),
+      FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_report_claim_drafts_attempt
+      ON research_report_claim_drafts(attempt_id, agent_call_id, position);
+  `);
+}
+
 export function copyCompatibleColumns(db, fromTable, toTable, aliases = {}) {
   const oldCols = new Set(getTableColumnNames(db, fromTable));
   const newCols = getTableColumnNames(db, toTable);
@@ -2910,6 +2929,7 @@ export function getDb() {
 
   createHashRefStoreTables(_db);
   createAgentHandoffPacketTable(_db);
+  createResearchReportClaimDraftTable(_db);
   installJsonValidityTriggers(_db);
   installTerminalTransitionTracking(_db);
   installEventState(_db);

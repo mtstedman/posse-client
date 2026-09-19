@@ -24,6 +24,7 @@ const TOOLS_SUITE = [
   { name: "custom_tools", mutatesWorktree: false, advertise: ["mcp"] },
   // Shared by both runtimes (function + mcp transports).
   { name: "agent_handoff", mutatesWorktree: false, advertise: ["function", "mcp"] },
+  { name: "report_claims", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "sub_agent", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "sub_agent_next_input", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "dispatch_agent", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },

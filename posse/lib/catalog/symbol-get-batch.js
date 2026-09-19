@@ -1,2 +1,3 @@
-// Source batches share one transport bound; scalar repository limits still apply.
-export const SYMBOL_GET_BATCH_POLICY = Object.freeze({ maxItems: 3, maxTokens: 8000 });
+// Each requested symbol receives its own bounded source allowance. Oversized
+// bodies continue through the normal traversal-ref paging path.
+export const SYMBOL_GET_BATCH_POLICY = Object.freeze({ maxItems: 3, maxTokensPerSymbol: 8000 });

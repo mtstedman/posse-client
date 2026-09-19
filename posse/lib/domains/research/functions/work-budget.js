@@ -18,14 +18,11 @@ export function researchWorkBudget(admission) {
 export function appendResearchWorkBudget(result, admission) {
   const budget = researchWorkBudget(admission);
   if (!budget || !Array.isArray(result?.content)) return result;
-  // Append a distinct control block: source block indices and JSON headers
-  // remain untouched, including in native multi-symbol responses.
+  // Keep the live count available to telemetry without exposing a countdown
+  // in every successful tool result. The enforcement path independently
+  // blocks work at the ceiling and emits its explicit closeout notice.
   return {
     ...result,
-    content: [...result.content, {
-      type: "text",
-      text: `[${RESEARCH_WORK_BUDGET_NOTICE}] ${JSON.stringify(budget)}`,
-    }],
     _meta: { ...result._meta, researchWorkBudget: budget },
   };
 }

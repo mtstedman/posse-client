@@ -45,7 +45,6 @@ const RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS = new Set([
   "chain_read",
   "chain_verdict",
   "list_files",
-  "search_files",
 ]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
 const TRUSTED_REMOTE_SURFACE_OBJECTS = new WeakSet();
@@ -216,6 +215,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  * @param {unknown} value
  * @param {{
  *   policy?: Readonly<IssuedToolPolicy>,
+ *   role?: string,
  *   projectDbCapability?: string,
  *   atlasAvailable?: boolean,
  *   coordinationAvailable?: boolean,
@@ -227,6 +227,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  */
 export function normalizeIssuedToolSurface(value, {
   policy = EMPTY_TOOL_POLICY,
+  role = "",
   projectDbCapability = "none",
   atlasAvailable = true,
   coordinationAvailable = false,
@@ -241,7 +242,11 @@ export function normalizeIssuedToolSurface(value, {
   const out = [];
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
-    if (hasAtlasSurface && tool?.suite === "tools" && ATLAS_REPLACED_NATIVE_TOOLS.includes(tool.name)) continue;
+    const researcherSearch = normalizeIssuedRole(role) === "researcher"
+      && tool?.suite === "tools"
+      && tool.name === "search_files";
+    if (hasAtlasSurface && !researcherSearch
+      && tool?.suite === "tools" && ATLAS_REPLACED_NATIVE_TOOLS.includes(tool.name)) continue;
     if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,
@@ -422,6 +427,7 @@ export function normalizeRemoteIssuedPolicy(value, {
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
     {
       policy: toolPolicy,
+      role,
       projectDbCapability,
       atlasAvailable,
       coordinationAvailable: coordination.agentHandoffV1,

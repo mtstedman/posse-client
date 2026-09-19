@@ -36,7 +36,7 @@ import {
 import { refreshAndExtractInsights } from "./insights.js";
 import { spawnResearchAfterPreflight } from "./pipeline-continuation.js";
 import { RetryPolicy } from "../../../../shared/policies/classes/RetryPolicy.js";
-import { isProviderSelectable, tierModelName } from "../../../providers/functions/provider.js";
+import { isProviderReady, isProviderSelectable, tierModelName } from "../../../providers/functions/provider.js";
 import { escalateModelTier } from "../../../providers/functions/shared/turns.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
@@ -45,6 +45,7 @@ import { isBridgePresenceFresh } from "../../../queue/functions/runtime-status.j
 import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 
 const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
+const MAX_DEAD_LETTER_RECOVERY_RETRIES = 2;
 
 // Network faults whose error text repeats byte-identically while the fault is
 // still transient. Scoped to the pre-attempt repeat guard: the shared
@@ -53,11 +54,53 @@ const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
 // read as "retry cannot change the outcome".
 const PRE_ATTEMPT_TRANSIENT_ERROR_RE = /\bECONNREFUSED\b|\bECONNRESET\b|\bEAI_AGAIN\b|\bENETUNREACH\b|\bEHOSTUNREACH\b|\bEPIPE\b/;
 
-function deadLetterRecoveryChoices() {
-  const providerChoices = ["claude", "openai", "codex", "grok"]
-    .filter((provider) => isProviderSelectable(provider))
-    .map((provider) => `retry:${provider}`);
+function deadLetterRecoveryProviders(job = null) {
+  // A failure before the first provider attempt cannot be repaired by changing
+  // providers. Do not offer a choice whose only effect is to obscure the same
+  // setup/worktree failure behind a different label.
+  if (job && getAttempts(job.id).length === 0) return [];
+  return ["claude", "openai", "codex", "grok"]
+    .filter((provider) => isProviderSelectable(provider) && isProviderReady(provider).ready);
+}
+
+function deadLetterRecoveryChoices(job = null) {
+  const providerChoices = deadLetterRecoveryProviders(job).map((provider) => `retry:${provider}`);
   return ["retry", ...providerChoices, "skip", "fail"];
+}
+
+function deadLetterProviderPrompt(job = null) {
+  const providers = deadLetterRecoveryProviders(job);
+  return providers.length > 0 ? `\n- Retry with a different provider (${providers.join("/")})` : "";
+}
+
+function deadLetterRecoverySuppression(job, failureRepeatKey = null) {
+  const recovery = parseJobPayload(job)?._dead_letter_recovery;
+  const recoveryCount = Math.max(0, Math.floor(Number(recovery?.recovery_count || 0) || 0));
+  const previousRepeatKey = String(recovery?.failure_repeat_key || "");
+  const currentRepeatKey = String(failureRepeatKey || "");
+  if (recoveryCount > 0 && previousRepeatKey && currentRepeatKey && previousRepeatKey === currentRepeatKey) {
+    return { suppressed: true, reason: "same_error_across_recovery", recoveryCount };
+  }
+  if (recoveryCount >= MAX_DEAD_LETTER_RECOVERY_RETRIES) {
+    return { suppressed: true, reason: "recovery_retry_cap", recoveryCount };
+  }
+  return { suppressed: false, reason: null, recoveryCount };
+}
+
+function emitRecoveryCapReached(worker, job, suppression) {
+  worker?.emit?.(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} recovery chain stopped (${suppression.reason}, ${suppression.recoveryCount}/${MAX_DEAD_LETTER_RECOVERY_RETRIES} retries)${C.reset}`);
+  logEvent({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    event_type: EVENT_TYPES.JOB_RECOVERY_CAP_REACHED,
+    actor_type: EVENT_ACTORS.WORKER,
+    message: `Dead-letter recovery chain stopped: ${suppression.reason}`,
+    event_json: JSON.stringify({
+      reason: suppression.reason,
+      recovery_count: suppression.recoveryCount,
+      max_recoveries: MAX_DEAD_LETTER_RECOVERY_RETRIES,
+    }),
+  });
 }
 
 function shortJobTitle(job) {
@@ -130,7 +173,7 @@ function emitUnattendedRecoverySkipped(worker, job, label, details = {}) {
   const attemptHistory = details.attempt_history || buildAttemptSummary(job.id);
   const choices = Array.isArray(details.choices) && details.choices.length > 0
     ? details.choices
-    : deadLetterRecoveryChoices();
+    : deadLetterRecoveryChoices(job);
   const providerHint = details.provider_hint ?? buildFastFailureProviderHint(job, getAttempts(job.id));
   worker?.emit?.(
     job.id,
@@ -250,14 +293,23 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
   providerHint = null,
   context = null,
   suppressHumanRecovery = false,
+  failureRepeatKey = null,
 } = {}) {
   const dependents = getDependents(job.id);
   const isRecoveryJob = job.job_type === "human_input" || (job.title && job.title.startsWith("Dead-letter recovery:"));
-  if (dependents.length === 0 || isRecoveryJob) {
-    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: false };
+  if (isRecoveryJob) {
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: false, capReached: false };
   }
   if (suppressHumanRecovery) {
-    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true };
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true, capReached: false };
+  }
+  const recoverySuppression = deadLetterRecoverySuppression(job, failureRepeatKey);
+  if (recoverySuppression.suppressed) {
+    emitRecoveryCapReached(worker, job, recoverySuppression);
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true, capReached: true };
+  }
+  if (dependents.length === 0) {
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: false, capReached: false };
   }
   if (recoveryIsUnattended(worker)) {
     emitUnattendedRecoverySkipped(worker, job, "Dependent job", {
@@ -265,7 +317,7 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
       recovery_kind: "dead_letter_recovery",
       provider_hint: providerHint,
     });
-    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true };
+    return { spawned: false, recoveryJob: null, dependents, isRecoveryJob, suppressed: true, capReached: false };
   }
 
   const attemptHistory = buildAttemptSummary(job.id);
@@ -282,9 +334,10 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
       original_job_id: job.id,
       review_type: "dead_letter_recovery",
       question_kind: "dead_letter_recovery",
-      choices: deadLetterRecoveryChoices(),
+      choices: deadLetterRecoveryChoices(job),
+      failure_repeat_key: failureRepeatKey || null,
       questions: [
-        `Job #${job.id} "${job.title}" ${reasonText}.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\n${dependents.length} downstream job(s) depend on this. What should we do?\n- Provide specific instructions for a retry\n- Retry with a different provider (claude/openai/codex/grok)\n- Skip this job and unblock dependents\n- Simplify the task scope${resolvedProviderHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${resolvedProviderHint}` : ""}`,
+        `Job #${job.id} "${job.title}" ${reasonText}.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\n${dependents.length} downstream job(s) depend on this. What should we do?\n- Provide specific instructions for a retry${deadLetterProviderPrompt(job)}\n- Skip this job and unblock dependents\n- Simplify the task scope${resolvedProviderHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${resolvedProviderHint}` : ""}`,
       ],
       context: context || `This job has been dead-lettered after ${attemptCount} attempts. Its ${dependents.length} downstream dependent(s) are temporarily gated on this recovery job. A retry answer will spawn a replacement job and rewire dependents to that retry; only an explicit skip/unblock answer lets dependents proceed without a retry.`,
     }),
@@ -301,7 +354,7 @@ export function spawnDeadLetterRecoveryForDependents(worker, job, freshJob = nul
     message: `Dead-letter recovery: spawned human_input #${recoveryJob.id}, rewired ${dependents.length} dependent(s)`,
   });
 
-  return { spawned: true, recoveryJob, dependents, isRecoveryJob, suppressed: false };
+  return { spawned: true, recoveryJob, dependents, isRecoveryJob, suppressed: false, capReached: false };
 }
 
 function isTurnBudgetExhaustedError(errorDetails = null) {
@@ -466,6 +519,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   stallExhausted = false,
   suppressHumanRecovery = false,
   providerErrorExhausted = false,
+  durableProviderCapacity = false,
 } = {}) {
   const freshJob = getJob(job.id);
   const errorDetails = getErrorDetails(errorOrMsg);
@@ -584,12 +638,14 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: repeated transient git/native infrastructure fault — allowing bounded retry${C.reset}`);
   }
 
-  if (permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {
+  if (durableProviderCapacity || permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {
     const reason = stallExhausted
       ? "stall retries exhausted"
-      : (deterministicPolicyConflict
+      : (durableProviderCapacity
+        ? "provider capacity exhausted"
+        : (deterministicPolicyConflict
         ? "deterministic policy conflict"
-        : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`)));
+        : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`))));
     log.error("worker", `Dead letter: ${job.job_type} #${job.id}`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, attempts: freshJob.attempt_count, error: errSummary, reason });
     jobLog("DEAD_LETTER", { wi: job.work_item_id, job: job.id, detail: `${job.job_type} "${shortJobTitle(job).slice(0, 50)}" — ${reason}: ${errSummary}` });
     recordObservation({
@@ -649,6 +705,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     const recovery = spawnDeadLetterRecoveryForDependents(worker, job, freshJob, {
       providerHint,
       suppressHumanRecovery: suppressOperatorRecovery,
+      failureRepeatKey: errRepeatKey,
     });
     const { dependents, isRecoveryJob } = recovery;
     const deadLetterPayload = parseJobPayload(job);
@@ -657,7 +714,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     // branch at all: the dead letter silently flipped the work item to failed.
     // Stall-exhausted dead letters keep their own capped recovery branch below.
     const isMutatingLeaf = !isOneshotLeaf && !stallExhausted && ["dev", "fix", "artificer", "promote", "plan", "delegate", "summarize"].includes(job.job_type);
-    if (!suppressOperatorRecovery && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
+    if (!suppressOperatorRecovery && !recovery.capReached && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
       if (recoveryIsUnattended(worker)) {
         emitUnattendedRecoverySkipped(worker, job, isMutatingLeaf ? (job.job_type === "fix" ? "Fix" : "Dev") : (isOneshotLeaf ? "One-shot" : "Research"), {
           recovery_kind: isMutatingLeaf ? "dead_letter_recovery" : (isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery"),
@@ -677,9 +734,10 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
             original_job_id: job.id,
             review_type: "dead_letter_recovery",
             question_kind: "dead_letter_recovery",
-            choices: deadLetterRecoveryChoices(),
+            choices: deadLetterRecoveryChoices(job),
+            failure_repeat_key: errRepeatKey,
             questions: [
-              `${jobLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nWithout recovery the work item fails. Should we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
+              `${jobLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nWithout recovery the work item fails. Should we retry with different parameters${deadLetterProviderPrompt(job).replace(/^\n- /, ", ")}, simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
             ],
             context: `This ${jobLabel.toLowerCase()} has no downstream dependents, so the work item fails without operator guidance. The attempt history shows what went wrong on each try.`,
           }),
@@ -706,9 +764,10 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
             original_job_id: job.id,
             review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
             question_kind: "dead_letter_recovery",
-            choices: deadLetterRecoveryChoices(),
+            choices: deadLetterRecoveryChoices(job),
+            failure_repeat_key: errRepeatKey,
             questions: [
-              `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters, retry with a different provider (claude/openai/codex/grok), simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
+              `${pipelineHeadLabel} #${job.id} "${job.title}" failed all attempts and was dead-lettered.\n\n--- ATTEMPT HISTORY ---\n${attemptHistory}\n\nThis is the pipeline head — nothing else can proceed until this is resolved.\nShould we retry with different parameters${deadLetterProviderPrompt(job).replace(/^\n- /, ", ")}, simplify the scope, replan, or fix config/access first?${providerHint ? `\n\n--- PROVIDER DIAGNOSTICS ---\n${providerHint}` : ""}`,
             ],
             context: `This ${isOneshotLeaf ? "one-shot dev" : "research"} job is the pipeline head for the work item. No downstream jobs exist yet. The attempt history shows what went wrong on each try.`,
           }),
@@ -761,7 +820,8 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
               context: `This job repeatedly stalled and exhausted the stall retry budget. It has no downstream dependents, so explicit operator guidance is needed before retrying.`,
               review_type: "stall_exhausted_recovery",
               question_kind: "dead_letter_recovery",
-              choices: deadLetterRecoveryChoices(),
+              choices: deadLetterRecoveryChoices(job),
+              failure_repeat_key: errRepeatKey,
             }),
           });
           worker.emit(job.id, `${C.yellow}[recovery] WI#${job.work_item_id} stalled out — spawned human_input #${recoveryJob.id}${C.reset}`);

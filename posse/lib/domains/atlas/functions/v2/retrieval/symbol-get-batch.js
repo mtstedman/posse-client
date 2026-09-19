@@ -8,15 +8,18 @@ export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForI
   if (["symbolId", "symbolHandle", "symbolRef", "file", "path", "identifiersToFind"].some(key => args[key] != null)) {
     return { error: "symbol.get batch cannot be combined with scalar selector fields" };
   }
-  const budget = args.maxTokens ?? SYMBOL_GET_BATCH_POLICY.maxTokens;
-  if (!Number.isSafeInteger(budget) || budget < args.items.length || budget > SYMBOL_GET_BATCH_POLICY.maxTokens) {
-    return { error: `symbol.get batch maxTokens must be between item count and ${SYMBOL_GET_BATCH_POLICY.maxTokens}` };
+  const perSymbolBudget = args.maxTokens ?? SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol;
+  if (!Number.isSafeInteger(perSymbolBudget) || perSymbolBudget < 1 || perSymbolBudget > SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol) {
+    return { error: `symbol.get batch maxTokens must be between 1 and ${SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol} per symbol` };
   }
-  const share = Math.floor(budget / args.items.length);
   return { items: args.items.map(item => {
     if (!item || typeof item !== "object" || Array.isArray(item) || item.items != null) return { invalid: true };
-    if (item.maxTokens != null && (!Number.isSafeInteger(item.maxTokens) || item.maxTokens < 1)) return { invalid: true };
-    const selected = { ...item, maxTokens: Math.min(item.maxTokens ?? share, share) };
+    if (item.maxTokens != null && (
+      !Number.isSafeInteger(item.maxTokens)
+      || item.maxTokens < 1
+      || item.maxTokens > SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol
+    )) return { invalid: true };
+    const selected = { ...item, maxTokens: item.maxTokens ?? perSymbolBudget };
     if (selected.symbolId && resolveSymbolId) {
       const resolved = resolveSymbolId(selected.symbolId);
       if (!resolved.ok) return {invalid: true, error: "Unknown session-bound symbol handle in batch item"};
@@ -27,7 +30,7 @@ export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForI
       }
     }
     return selected;
-  }), maxTokens: budget };
+  }), maxTokensPerSymbol: perSymbolBudget };
 }
 
 // Each child passed through normal admission, custody, paging and projection.

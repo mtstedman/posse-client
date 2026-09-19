@@ -23,6 +23,7 @@ import {
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { getProviderBackoff, getProviderName } from "../../../providers/functions/provider.js";
+import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
 import {
@@ -741,6 +742,26 @@ export async function handleExecuteAttemptError(worker, {
     && isProviderError(err)
     && !isPermanentProviderConfigError(err)
   ) {
+    const providerRole = typeof worker._roleFor === "function"
+      ? worker._roleFor(job.job_type)
+      : (providerRoleForJobType(job.job_type) || "dev");
+    const jobProvider = job.provider || getProviderName(providerRole);
+    const providerBackoff = getProviderBackoff(jobProvider, err);
+    if (providerBackoff.source === "usage_limit") {
+      completeAttempt(attempt.id, {
+        status: "failed",
+        duration_ms: Date.now() - startTime,
+        error_text: err.message,
+      });
+      setJobError(job.id, err.message);
+      await stashWorktreeForFailure(job, wtPath, worker?.projectDir);
+      worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id} ${jobProvider} subscription capacity exhausted — stopping automatic retries${C.reset}`);
+      worker._retryOrFail(job, leaseToken, err.message, {
+        durableProviderCapacity: true,
+        attemptId: attempt.id,
+      });
+      return;
+    }
     // Cap consecutive penalty-free provider-error requeues. Without an attempt
     // penalty, a persistently failing provider (common with a single configured
     // provider and no working fallback) loops forever — no scheduler/queue-side
@@ -775,8 +796,7 @@ export async function handleExecuteAttemptError(worker, {
       // already flagged for resume in helper
     }
 
-    const jobProvider = job.provider || getProviderName(worker._roleFor(job.job_type));
-    const { backoffSec, isRateLimit, source } = getProviderBackoff(jobProvider, err);
+    const { backoffSec, isRateLimit, source } = providerBackoff;
     const transientSummary = getErrorDetails(err).summary;
     const firstErrorLine = String(err?.message || "")
       .split(/\r?\n/)

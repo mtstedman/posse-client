@@ -19,6 +19,7 @@ import {
   rejectAgentHandoffForLaterTool,
   stageAgentHandoff,
 } from "../../../handoff/functions/agent-handoff.js";
+import { executeResearchReportClaims } from "../../../handoff/functions/research-report-claim-drafts.js";
 import {
   assertSubAgentParentReady,
   executeSubAgent,
@@ -82,6 +83,7 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "move_file",
   "optimize_image",
   "prune_artifact_output",
+  "report_claims",
   "request_scope",
   "reencode_image",
   "resize_image",
@@ -446,6 +448,13 @@ export function createStandardToolHandlerMap({
     return lastResult;
   };
   const handlers = {
+    report_claims(args, ctx) {
+      const ambient = getObservationContext() || {};
+      return JSON.stringify(executeResearchReportClaims(args || {}, {
+        context: ambient,
+        role: ctx?.role || ctx?.declaredScope?.role || "",
+      }));
+    },
     agent_handoff(args, ctx) {
       const ambient = getObservationContext() || {};
       try {

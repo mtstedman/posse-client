@@ -198,6 +198,12 @@ export class ToolGate {
     if (!this.isActive() || !this.isGatedTool(toolName)) {
       return { allowed: true, reason: "not_gated" };
     }
+    // Text search discovers addresses; it does not deliver a governing body.
+    // Keep it on the evidence/telemetry rails while allowing it before an
+    // ATLAS call. Exact source reads remain subject to the ATLAS-first gate.
+    if (toolName === "search_files") {
+      return { allowed: true, reason: "search_discovery" };
+    }
     if (toolName === "chain_verdict") {
       return { allowed: true, reason: "audit_verdict" };
     }
