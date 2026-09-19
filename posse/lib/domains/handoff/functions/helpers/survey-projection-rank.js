@@ -68,7 +68,7 @@ function surveySymbolCatalog(files) {
     for (const symbol of Array.isArray(file?.symbols) ? file.symbols : []) {
       const full = symbolName(symbol);
       if (!full || byFull.has(full)) continue;
-      const entry = { full, terminal: terminalName(full), order: order++ };
+      const entry = { full, terminal: terminalName(full), path: String(file?.path || "").trim(), order: order++ };
       byFull.set(full, entry);
       const key = entry.terminal.toLowerCase();
       if (key) byTerminal.set(key, [...(byTerminal.get(key) || []), entry]);
@@ -104,12 +104,12 @@ export function thinSurveyDirection(files, { taskText = "", callMap = null, maxR
     .sort((a, b) => b.terminal.length - a.terminal.length || a.order - b.order)
     .slice(0, Math.max(0, maxRoots))
     .map((entry) => entry.full);
-  if (roots.length === 0) return { roots: [], edges: [] };
+  if (roots.length === 0) return { treePaths: [], roots: [], edges: [] };
 
   const rootSet = new Set(roots);
   const edges = [];
   const seen = new Set();
-  for (const group of [callMap?.inbound, callMap?.outbound, callMap?.edges]) {
+  edgeGroups: for (const group of [callMap?.inbound, callMap?.outbound, callMap?.edges]) {
     for (const edge of Array.isArray(group) ? group : []) {
       const from = resolveUniqueSymbol(edge?.from, catalog);
       const to = resolveUniqueSymbol(edge?.to, catalog);
@@ -118,10 +118,14 @@ export function thinSurveyDirection(files, { taskText = "", callMap = null, maxR
       if (seen.has(key)) continue;
       seen.add(key);
       edges.push({ from, to });
-      if (edges.length >= Math.max(0, maxEdges)) return { roots, edges };
+      if (edges.length >= Math.max(0, maxEdges)) break edgeGroups;
     }
   }
-  return { roots, edges };
+  const mapSymbols = new Set([...roots, ...edges.flatMap((edge) => [edge.from, edge.to])]);
+  const treePaths = [...new Set([...mapSymbols]
+    .map((symbol) => catalog.byFull.get(symbol)?.path)
+    .filter(Boolean))].slice(0, 8);
+  return { treePaths, roots, edges };
 }
 
 function publicSurfaceWeight(filePath) {

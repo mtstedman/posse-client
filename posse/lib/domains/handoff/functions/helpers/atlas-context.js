@@ -3724,11 +3724,12 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     const direction = slice?.surveyContext?.thinDirection;
     const roots = Array.isArray(direction?.roots) ? direction.roots.filter(Boolean).slice(0, 3) : [];
     const edges = Array.isArray(direction?.edges) ? direction.edges.filter((edge) => edge?.from && edge?.to).slice(0, 6) : [];
-    if (roots.length === 0) return "";
+    const treePaths = Array.isArray(direction?.treePaths) ? direction.treePaths.filter(Boolean).slice(0, 8) : [];
+    if (treePaths.length === 0 && roots.length === 0) return "";
     return [
       atlasHeading("ATLAS CODE MAP"),
-      "Roots:",
-      ...roots.map((symbol) => `- ${symbol}`),
+      ...(treePaths.length > 0 ? ["Tree:", ...treePaths.map((treePath) => `- ${treePath}`)] : []),
+      ...(roots.length > 0 ? ["Roots:", ...roots.map((symbol) => `- ${symbol}`)] : []),
       ...(edges.length > 0 ? ["Edges:", ...edges.map((edge) => `- ${edge.from} -> ${edge.to}`)] : []),
     ].join("\n");
   }
