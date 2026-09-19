@@ -102,7 +102,12 @@ export class AgentDispatcher {
     ]);
   }
 
-  async selectProvider({ role, providerName = null, excludeProviders = [] } = /** @type {any} */ ({})) {
+  async selectProvider({
+    role,
+    providerName = null,
+    providerAllowlist = null,
+    excludeProviders = [],
+  } = /** @type {any} */ ({})) {
     const normalizedRole = String(role || "").trim().toLowerCase();
     if (!normalizedRole) throw new TypeError("AgentDispatcher.selectProvider requires a role");
     const requested = String(providerName || "").trim().toLowerCase();
@@ -111,7 +116,19 @@ export class AgentDispatcher {
         .map((provider) => String(provider || "").trim().toLowerCase())
         .filter(Boolean),
     );
-    const configured = this.providersForRole(normalizedRole);
+    // A nested provider call may carry a narrower, already-authorized pool
+    // than the repository's ambient role setting. Research children use this
+    // to inherit the planner's provider without silently widening to every
+    // provider configured for the researcher role. Calls without an explicit
+    // pool remain bound to the repository role configuration.
+    const explicitPool = Array.isArray(providerAllowlist)
+      ? providerAllowlist
+        .map((provider) => String(provider || "").trim().toLowerCase())
+        .filter(Boolean)
+      : [];
+    const configured = Object.freeze([
+      ...new Set(explicitPool.length > 0 ? explicitPool : this.providersForRole(normalizedRole)),
+    ]);
     const eligible = configured.filter((provider) => !excluded.has(provider));
     if (requested && configured.length > 0 && !configured.includes(requested)) {
       throw dispatchError(
@@ -141,8 +158,18 @@ export class AgentDispatcher {
     return selected;
   }
 
-  async providerFor({ role, providerName = null, excludeProviders = [] } = /** @type {any} */ ({})) {
-    const selected = await this.selectProvider({ role, providerName, excludeProviders });
+  async providerFor({
+    role,
+    providerName = null,
+    providerAllowlist = null,
+    excludeProviders = [],
+  } = /** @type {any} */ ({})) {
+    const selected = await this.selectProvider({
+      role,
+      providerName,
+      providerAllowlist,
+      excludeProviders,
+    });
     const provider = this.providerFactory
       ? await this.providerFactory(String(role || "").trim().toLowerCase(), selected)
       : null;
@@ -187,7 +214,10 @@ export class AgentDispatcher {
     const gateContract = agent.mcpGate?.contractBootConfig || null;
     return Object.freeze({
       ...agent.status(),
-      eligibleProviders: this.providersForRole(agent.role),
+      eligibleProviders: Array.isArray(preparation.providerAllowlist)
+        && preparation.providerAllowlist.length > 0
+        ? [...preparation.providerAllowlist]
+        : this.providersForRole(agent.role),
       provider: {
         name: agent.providerName || null,
         linked: !!agent.provider,
@@ -237,6 +267,7 @@ export class AgentDispatcher {
     atlasAvailable = true,
     coordinationChildPermitId = null,
     remoteToolSurface = null,
+    providerAllowlist = null,
     handoffRequest = null,
     handoffFactory = null,
     excludeProviders = [],
@@ -289,6 +320,9 @@ export class AgentDispatcher {
       atlasAvailable: atlasAvailable !== false,
       coordinationChildPermitId,
       remoteToolSurface,
+      providerAllowlist: Array.isArray(providerAllowlist)
+        ? [...new Set(providerAllowlist.map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean))]
+        : null,
       handoffRequest,
       handoffFactory,
       retainHandoff: false,
@@ -379,6 +413,7 @@ export class AgentDispatcher {
     atlasAvailable = true,
     coordinationChildPermitId = null,
     remoteToolSurface = null,
+    providerAllowlist = null,
     handoffRequest = null,
     handoffFactory = null,
     excludeProviders = [],
@@ -431,6 +466,7 @@ export class AgentDispatcher {
       atlasAvailable,
       coordinationChildPermitId,
       remoteToolSurface,
+      providerAllowlist,
       handoffRequest,
       handoffFactory,
       excludeProviders,
@@ -524,6 +560,7 @@ export class AgentDispatcher {
     const providerPromise = this.providerFor({
       role: preparation.role,
       providerName: preparation.providerName,
+      providerAllowlist: preparation.providerAllowlist,
       excludeProviders: preparation.excludeProviders,
     });
     const handoffPromise = preparation.retainHandoff === true

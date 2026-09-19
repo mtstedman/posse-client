@@ -25,7 +25,21 @@ export function listRejectedDispatchAttempts(jobId, agentCallId) {
 export function recordResearchDispatchAudit({ jobId, workItemId, agentCallId, requests = [] }) {
   const children = getAgentCalls(jobId).filter((call) => Number(call.parent_agent_call_id) === agentCallId && ["research", "web_research"].includes(call.child_kind));
   const requested = Math.max(requests.length, children.length);
-  const rejected = listRejectedDispatchAttempts(jobId, agentCallId);
+  const requestRejections = requests.flatMap((entry) => (
+    entry?.status === "failed" && !entry?.childAgentCallId
+      ? [{
+          code: String(entry?.error?.code || "SUB_AGENT_ERROR"),
+          stage: entry?.error?.stage || null,
+          at: null,
+        }]
+      : []
+  ));
+  // Once a batch exists it is the authoritative one-entry-per-request view.
+  // Tool-error observations remain the fallback for failures rejected before
+  // the runtime could create a batch at all.
+  const rejected = requestRejections.length > 0
+    ? requestRejections
+    : listRejectedDispatchAttempts(jobId, agentCallId);
   const rejectionCodes = [...new Set(rejected.map((entry) => entry.code))];
   const rejectionNote = rejected.length > 0
     ? `; ${rejected.length} dispatch attempt(s) rejected before a child started (${rejectionCodes.join(", ")})`
@@ -39,7 +53,7 @@ export function recordResearchDispatchAudit({ jobId, workItemId, agentCallId, re
       requests: requests.map((entry) => ({ agent_type: entry.agentType, question: entry.intent, status: entry.status, error_code: entry.error?.code || null })),
       children: children.map((call) => ({ agent_call_id: call.id, agent_type: call.child_kind === "web_research" ? "web" : "code", question: call.activity, status: call.status, effort: call.reasoning_effort, duration_ms: call.duration_ms })) },
   });
-  if (rejected.length > 0 && requested === 0) {
+  if (rejected.length > 0 && children.length === 0) {
     // The planner asked for help and got none: say so where the operator
     // looks, because the fallback is the planner reading on itself at full
     // price.

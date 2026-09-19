@@ -693,6 +693,9 @@ function providerAgentIdentity(opts = {}, {
   const remoteToolSurface = coordinationChild
     ? opts._coordinationChildRemoteToolSurface
     : opts._remoteToolSurface;
+  const providerAllowlist = Array.isArray(opts.allowedProviders)
+    ? [...new Set(opts.allowedProviders.map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean))]
+    : null;
   if (laneId != null) {
     return {
       key: `session-lane:${laneId}:${lane}:coord-${coordinationKey}:surface-${surfaceKey}`,
@@ -711,6 +714,7 @@ function providerAgentIdentity(opts = {}, {
       ...(remoteToolSurface
         ? { remoteToolSurface }
         : {}),
+      ...(providerAllowlist?.length ? { providerAllowlist } : {}),
     };
   }
   return {
@@ -730,6 +734,7 @@ function providerAgentIdentity(opts = {}, {
     ...(remoteToolSurface
       ? { remoteToolSurface }
       : {}),
+    ...(providerAllowlist?.length ? { providerAllowlist } : {}),
   };
 }
 
@@ -2734,7 +2739,11 @@ export class TrackedProviderClient {
         return preparedAgent.provider;
       }
       if (typeof dispatcher?.providerFor === "function") {
-        const binding = await dispatcher.providerFor({ role: opts.role, providerName });
+        const binding = await dispatcher.providerFor({
+          role: opts.role,
+          providerName,
+          providerAllowlist: configuredPool,
+        });
         if (binding?.provider) return binding.provider;
       }
       return getProvider(opts.role, providerName);
@@ -3020,6 +3029,7 @@ export class TrackedProviderClient {
               fbProvider = (await dispatcher.providerFor({
                 role: opts.role,
                 providerName: fallbackName,
+                providerAllowlist: configuredPool,
               })).provider;
             }
             if (!fbProvider) fbProvider = getProvider(opts.role, fallbackName);
