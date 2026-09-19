@@ -892,13 +892,17 @@ export function createMergeWorkflowHelpers(context, {
         isIgnorableStatusLine: (line) => isRuntimePorcelainLine(line, resyncWorktreeDir),
       });
       if (resync.resynced) {
-        log(`Rebased ${branch} onto ${targetBranch} after upstream handoff source merge`, {
+        const refreshAction = resync.syncMode === "merge" ? "Refreshed" : "Rebased";
+        log(`${refreshAction} ${branch} onto ${targetBranch} after upstream handoff source merge`, {
           json: {
             branch,
             target: targetBranch,
             old_base: resync.mergeBase,
             old_head: resync.branchHead,
             rebased_head: resync.rebasedHead,
+            refreshed_head: resync.rebasedHead,
+            sync_mode: resync.syncMode,
+            fallback_reason: resync.fallbackReason,
             dropped_handoff_files: resync.files?.slice(0, 50) || [],
           },
         });

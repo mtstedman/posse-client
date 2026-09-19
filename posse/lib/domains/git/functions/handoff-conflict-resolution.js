@@ -234,17 +234,29 @@ export function resyncHandoffBranchOntoTarget({
   if (mergeBase === targetHead) {
     return { attempted: false, resynced: false, reason: "branch_already_on_target", mergeBase, targetHead, branchHead };
   }
+  let syncMode = "rebase";
+  let fallbackReason = null;
   if (handoffFiles.size === 0) {
-    return { attempted: false, resynced: false, reason: "branch_has_no_handoff_sync_commits", mergeBase, targetHead, branchHead };
+    // Some handoffs are folded into the dependent DEV commit instead of a
+    // separately titled sync commit. The dependency metadata is still
+    // authoritative, so refresh the completed branch by merging the advanced
+    // target into it. A clean merge makes the target an ancestor and prevents
+    // the later squash merge from replaying a stale tree; a content conflict
+    // is aborted and surfaced before the target checkout is touched.
+    syncMode = "merge";
+    fallbackReason = "branch_has_no_handoff_sync_commits";
   }
   const normalizedDependencies = (Array.isArray(dependencyPaths) ? dependencyPaths : [])
     .filter((value) => normPath(value && typeof value === "object" ? value.path : value));
   if (
+    syncMode === "rebase"
+    &&
     normalizedDependencies.length > 0
     && ![...handoffFiles].some((file) =>
       normalizedDependencies.some((dependency) => handoffDependencyCoversFile(dependency, file)))
   ) {
-    return { attempted: false, resynced: false, reason: "handoff_files_do_not_match_dependencies", mergeBase, targetHead, branchHead };
+    syncMode = "merge";
+    fallbackReason = "handoff_files_do_not_match_dependencies";
   }
 
   let checkedOutBranch;
@@ -308,20 +320,26 @@ export function resyncHandoffBranchOntoTarget({
   }
 
   try {
-    exec(["rebase", "--onto", targetBranch, mergeBase, "--empty=drop"], worktreePath, { trim: false });
+    if (syncMode === "merge") {
+      exec(["merge", "--no-edit", targetBranch], worktreePath, { trim: false });
+    } else {
+      exec(["rebase", "--onto", targetBranch, mergeBase, "--empty=drop"], worktreePath, { trim: false });
+    }
   } catch (error) {
     const conflictSummary = mergeConflictSummary(error);
     let hasUnmergedFiles = false;
     try {
       hasUnmergedFiles = exec(["diff", "--name-only", "--diff-filter=U"], worktreePath).trim().length > 0;
     } catch { /* the rebase error remains authoritative */ }
-    try { exec(["rebase", "--abort"], worktreePath); } catch { /* best-effort cleanup */ }
+    try {
+      exec(syncMode === "merge" ? ["merge", "--abort"] : ["rebase", "--abort"], worktreePath);
+    } catch { /* best-effort cleanup */ }
     if (!conflictSummary && !hasUnmergedFiles) {
       return {
         attempted: false,
         resynced: false,
         infrastructureFailure: true,
-        reason: `handoff_resync_rebase_failed: ${error?.message || error}`,
+        reason: `handoff_resync_${syncMode}_failed: ${error?.message || error}`,
         mergeBase,
         targetHead,
         branchHead,
@@ -336,6 +354,8 @@ export function resyncHandoffBranchOntoTarget({
       conflict: true,
       reason: "handoff_resync_conflict",
       error: conflict.trim(),
+      syncMode,
+      fallbackReason,
       mergeBase,
       targetHead,
       branchHead,
@@ -351,6 +371,8 @@ export function resyncHandoffBranchOntoTarget({
       targetHead,
       branchHead,
       rebasedHead,
+      syncMode,
+      fallbackReason,
       files: [...handoffFiles],
     };
   } catch (error) {
