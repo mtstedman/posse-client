@@ -955,11 +955,8 @@ export function getDeterministicMcpToolNames(role, {
   }
   if (atlasAvailable) {
     // Remove redundant source tools from every role's issued surface. Keep
-    // directory browsing available without an ATLAS-first round trip. A
-    // researcher also keeps bounded text search because literal/configuration
-    // discovery is not equivalent to ATLAS symbol retrieval.
+    // directory browsing available without an ATLAS-first round trip.
     for (const toolName of ATLAS_REPLACED_NATIVE_TOOLS) {
-      if (role === "researcher" && toolName === "search_files") continue;
       const index = tools.indexOf(toolName);
       if (index !== -1) tools.splice(index, 1);
     }
