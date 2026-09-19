@@ -458,7 +458,7 @@ command under a declared time policy instead of a fixed 120-second cap:
 | `verification_wall_timeout_ms` | repository | 120000 | Wall-clock limit for a frozen test or canonical verify run. Set it to the window this table documents for the repository's own harness (for Posse itself, 900000). |
 | `verification_idle_timeout_ms` | repository | disabled | Kill a run that produces no output for this long. Enable only for harnesses that print progress while healthy; `npm test` here prints a heartbeat every 30s when headless, so it qualifies. |
 | `verification_wall_timeout_max_ms` | account | 1800000 | Administrator ceiling. Repository values above it are clamped, so a repository cannot pin a worker indefinitely. |
-| `verification_dependency_network_policy` | repository | cache_only | Dependency repair may use only existing caches, may use the network (`allow`), or is disabled. Repairs always require a repository lock and frozen/no-script flags. |
+| `verification_dependency_network_policy` | repository | allow | Dependency repair may fetch exact locked artifacts (`allow`, the default), use only existing caches (`cache_only`), or be disabled. Repairs always require a repository lock, frozen/no-script flags, and a clean-tree check. |
 
 Every receipt records normalized argv/cwd, the limits that applied, clean-tree
 identity, the policy fingerprint, runtime versions, lockfile digests, and the

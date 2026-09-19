@@ -15,6 +15,10 @@ import {
 import { verificationOutcome } from "../../worker/functions/helpers/verification-outcome.js";
 import { repairVerificationPrerequisites } from "../../verification/functions/prerequisite-adapters.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
+import {
+  DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
+  VERIFICATION_DEPENDENCY_LOCK_INVALID,
+} from "../../../catalog/verification.js";
 
 const RECEIPT_KIND = "assessment_scoped_checks";
 const RECEIPT_SCHEMA_VERSION = 3;
@@ -425,8 +429,13 @@ export async function ensureAssessmentScopedCheckEvidence({
       if (result?.status === "unavailable" && missing) {
         let repair;
         try {
-          let networkPolicy = "cache_only";
-          try { networkPolicy = String(readSettingImpl("verification_dependency_network_policy", { projectDir: cwd }) || "cache_only"); } catch { /* default */ }
+          let networkPolicy = DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY;
+          try {
+            networkPolicy = String(
+              readSettingImpl("verification_dependency_network_policy", { projectDir: cwd })
+              || DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
+            );
+          } catch { /* default */ }
           repair = await repairPrerequisitesImpl({
             projectDir: cwd,
             command: missing.command || "npm",
@@ -452,6 +461,23 @@ export async function ensureAssessmentScopedCheckEvidence({
           detail: dependencyRepair,
         });
         if (dependencyRepair.ok) result = runOnce();
+        else if (dependencyRepair.reason === VERIFICATION_DEPENDENCY_LOCK_INVALID) {
+          result = {
+            ...result,
+            ok: false,
+            status: "failed",
+            summary: "The dependency lockfile is missing required package data or is out of sync with its manifest.",
+            reason: VERIFICATION_DEPENDENCY_LOCK_INVALID,
+            checks: (result.checks || []).map((check) => check === missing
+              ? {
+                  ...check,
+                  status: "failed",
+                  reason: VERIFICATION_DEPENDENCY_LOCK_INVALID,
+                  dependency_unavailable: false,
+                }
+              : check),
+          };
+        }
         result = { ...result, dependency_repair: dependencyRepair };
       }
       const baselineCommit = normalizedCommit(assessmentContext.commit_base_hash)

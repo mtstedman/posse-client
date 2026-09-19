@@ -34,7 +34,10 @@ import {
   verificationOutcome,
 } from "./verification-outcome.js";
 import { resolveRepositoryVerificationPlan } from "../../../verification/functions/verification-plan.js";
-import { TEST_SCRIPT_NO_VERIFICATION_REASON } from "../../../../catalog/verification.js";
+import {
+  TEST_SCRIPT_NO_VERIFICATION_REASON,
+  VERIFICATION_DEPENDENCY_LOCK_INVALID,
+} from "../../../../catalog/verification.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
 const RECEIPT_MIME_TYPE = "application/vnd.posse.test-execution+json";
@@ -1698,14 +1701,28 @@ async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
     repair = { ok: false, error: error?.message || String(error) };
   }
   if (repair?.ok !== true) {
+    const dependencyRepair = {
+      ok: false,
+      status: repair?.status || null,
+      reason: repair?.reason || null,
+      error: repair?.error || repair?.message || null,
+    };
+    if (dependencyRepair.reason === VERIFICATION_DEPENDENCY_LOCK_INVALID) {
+      const failedReceipt = {
+        ...receipt,
+        status: "failed",
+        ok: false,
+        reason: VERIFICATION_DEPENDENCY_LOCK_INVALID,
+        dependency_repair: dependencyRepair,
+      };
+      return {
+        ...failedReceipt,
+        verification_outcome: verificationOutcome(failedReceipt),
+      };
+    }
     return {
       ...receipt,
-      dependency_repair: {
-        ok: false,
-        status: repair?.status || null,
-        reason: repair?.reason || null,
-        error: repair?.error || repair?.message || null,
-      },
+      dependency_repair: dependencyRepair,
     };
   }
   const dependencyRepair = {
@@ -1717,6 +1734,10 @@ async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
   };
   const repairedReceipt = await rerun(dependencyRepair);
   return { ...repairedReceipt, dependency_repair: dependencyRepair };
+}
+
+export async function __testRetryAfterDependencyRepair(receipt, repairDependencies, rerun) {
+  return retryAfterDependencyRepair(receipt, repairDependencies, rerun);
 }
 
 export async function ensurePreDevelopmentTestBaseline({

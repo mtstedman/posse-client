@@ -1,4 +1,5 @@
 import { C } from "../../../../shared/format/functions/colors.js";
+import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY } from "../../../../catalog/verification.js";
 import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { repairVerificationPrerequisites } from "../../../verification/functions/prerequisite-adapters.js";
 
@@ -13,7 +14,7 @@ export async function repairTestDependencies(worker, job, worktreePath, {
   );
   const networkPolicy = String(getSetting("verification_dependency_network_policy", {
     projectDir: worktreePath,
-  }) || "cache_only");
+  }) || DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY);
   return repairVerificationPrerequisites({
     projectDir: worktreePath,
     command: receipt?.execution_command || receipt?.command || "",

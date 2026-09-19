@@ -15,6 +15,7 @@
 
 import { RESEARCH_CLAIM_REVIEW } from "../../../catalog/research-claim-review.js";
 import { PLANNER_DISPATCH_SETTINGS } from "../../../catalog/planner-dispatch.js";
+import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY } from "../../../catalog/verification.js";
 import {
   IMAGE_PROVIDER_OPTIONS,
   MODEL_TIERS as MODEL_TIER_NAMES,
@@ -301,7 +302,7 @@ export const SETTINGS_CATALOG = [
   { key: "verification_wall_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a frozen test or canonical verification command may run before Posse stops it (empty = 120000). Set it to the window the repository's own harness documents." },
   { key: "verification_idle_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a verification command may stay silent before Posse treats it as hung (empty = disabled). Enable only for harnesses that print progress while healthy." },
   { key: "verification_wall_timeout_max_ms", default: "1800000", numeric: { integer: true, min: 1000 }, description: "Administrator ceiling on any repository verification timeout (default 30 minutes)" },
-  { key: "verification_dependency_network_policy", default: "cache_only", scope: "repo", options: Object.freeze(["cache_only", "allow", "disabled"]), description: "Network policy for lock-backed verification dependency repair: cache_only (default), allow, or disabled" },
+  { key: "verification_dependency_network_policy", default: DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, scope: "repo", options: Object.freeze(["cache_only", "allow", "disabled"]), description: "Network policy for lock-backed verification dependency repair: allow (default), cache_only, or disabled" },
   { key: "posse_log_scrub_secrets", default: "true", valueType: "boolean", description: "Scrub secret-looking values from prompt and output logs" },
   { key: "posse_log_level",        default: "info", options: LOG_LEVEL_VALUES, description: "Minimum runtime file-log level: debug, info, warn, or error" },
   { key: "skip_hooks",           default: "false", valueType: "boolean", description: "Skip all deterministic safety hooks" },

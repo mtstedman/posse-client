@@ -8,6 +8,10 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import {
+  DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
+  VERIFICATION_DEPENDENCY_LOCK_INVALID,
+} from "../../../catalog/verification.js";
 
 export const VERIFICATION_DEPENDENCY_NETWORK_POLICIES = Object.freeze([
   "cache_only",
@@ -42,8 +46,10 @@ function combinedOutput(receipt = {}) {
 }
 
 function normalizedNetworkPolicy(value) {
-  const policy = String(value || "cache_only").trim().toLowerCase();
-  return VERIFICATION_DEPENDENCY_NETWORK_POLICIES.includes(policy) ? policy : "cache_only";
+  const policy = String(value || DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY).trim().toLowerCase();
+  return VERIFICATION_DEPENDENCY_NETWORK_POLICIES.includes(policy)
+    ? policy
+    : DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY;
 }
 
 function nodeDetection(projectDir) {
@@ -445,8 +451,16 @@ function classifyRepairFailure(run, networkPolicy) {
   const credentialsRequired = /\b(?:401|403|unauthorized|forbidden|authentication required|invalid token|credentials?)\b/i.test(output);
   const cacheCorrupt = /\b(?:integrity|checksum|corrupt|unexpected end of (?:file|data)|invalid tar|bad archive)\b/i.test(output);
   const cacheMiss = networkPolicy === "cache_only" && /\b(?:offline|cache miss|not in cache|no cached|could not resolve|network is disabled|goproxy=off)\b/i.test(output);
+  const lockInvalid = (
+    /npm ci[^\n]*can only install with an existing package-lock\.json/i.test(output)
+    || /(?:missing|invalid):[^\n]+from lock file/i.test(output)
+    || /ERR_PNPM_OUTDATED_LOCKFILE/i.test(output)
+    || /(?:frozen[- ]lockfile|lockfile)[^\n]*(?:outdated|needs to be updated|would have changed|not up to date)/i.test(output)
+  );
   return {
-    reason: credentialsRequired
+    reason: lockInvalid
+      ? VERIFICATION_DEPENDENCY_LOCK_INVALID
+      : credentialsRequired
       ? "verification_dependency_credentials_required"
       : cacheCorrupt
         ? "verification_dependency_cache_corrupt"
@@ -455,6 +469,7 @@ function classifyRepairFailure(run, networkPolicy) {
           : run?.reason || "dependency_repair_failed",
     network_required: cacheMiss,
     credentials_required: credentialsRequired,
+    implementation_required: lockInvalid,
   };
 }
 
@@ -485,7 +500,7 @@ export async function repairVerificationPrerequisites({
   projectDir,
   command,
   receipt = null,
-  networkPolicy = "cache_only",
+  networkPolicy = DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
   signal = null,
   timeoutMs = 10 * 60 * 1000,
   onProgress = null,
@@ -554,10 +569,15 @@ export async function repairVerificationPrerequisites({
         timeoutMs,
       });
       const failure = classifyRepairFailure(run, policy);
-      results.push(verificationResult(ecosystem, run.status === "passed" ? "passed" : run.status, {
+      const repairStatus = failure.implementation_required
+        ? "failed"
+        : run.status === "passed" ? "passed" : run.status;
+      results.push(verificationResult(ecosystem, repairStatus, {
         reason: failure.reason,
         network_required: failure.network_required,
         credentials_required: failure.credentials_required,
+        actionability: failure.implementation_required ? "implementation" : "infrastructure",
+        retry_class: failure.implementation_required ? "none" : "verification_infrastructure",
         command: [spec.command, ...spec.args].join(" "),
         lockfile: path.relative(root, spec.lockPath).replace(/\\/g, "/"),
         lockfile_sha256: hashFile(spec.lockPath),
@@ -588,7 +608,11 @@ export async function repairVerificationPrerequisites({
     const ok = results.length > 0 && results.every((result) => result.ok);
     return {
       ok,
-      status: ok ? "passed" : results.some((result) => result.status === "cancelled") ? "cancelled" : "blocked",
+      status: ok
+        ? "passed"
+        : results.some((result) => result.status === "cancelled")
+          ? "cancelled"
+          : results.some((result) => result.status === "failed") ? "failed" : "blocked",
       reason: ok ? null : results.find((result) => !result.ok)?.reason || "dependency_repair_failed",
       network_policy: policy,
       results,

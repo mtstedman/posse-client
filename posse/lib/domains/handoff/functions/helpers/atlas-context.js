@@ -20,6 +20,7 @@ import {
   surfaceHashRefForContext,
 } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
+import { rankSurveyFilesForProjection } from "./survey-projection-rank.js";
 import {
   planLifecycleSurveyExpansion,
   resolveLifecycleSurveyTargetSymbolIds,
@@ -2513,6 +2514,7 @@ async function _prefetchAtlasSurvey(packet, {
       retries,
       retryReason,
       warnings,
+      taskText,
     }, startedAt);
   } catch (err) {
     return _finishAtlasSurveyPrefetch(packet, {
@@ -2693,13 +2695,17 @@ function _surveyBriefEdgeLimit(packet) {
 
 function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIEF_EDGES } = {}) {
   if (!result?.ok) return result;
-  const files = Array.isArray(result.files) ? result.files : [];
   const callMap = result.callMap && typeof result.callMap === "object" ? result.callMap : null;
+  const originalFiles = Array.isArray(result.files) ? result.files : [];
+  const files = rankSurveyFilesForProjection(originalFiles, {
+    taskText: result.taskText,
+    callMap,
+  });
   const metrics = result.metrics && typeof result.metrics === "object" ? result.metrics : {};
   const summary = _compactSurveyCallMap(callMap, metrics, { edgeLimit });
   const fileCount = Number.isFinite(Number(metrics.fileCount))
     ? Number(metrics.fileCount)
-    : files.length;
+    : originalFiles.length;
   const fileSummaries = files.slice(0, MAX_SURVEY_BRIEF_FILES).map((file) => {
     const allNames = [...new Set((Array.isArray(file?.symbols) ? file.symbols : [])
       .map((symbol) => String(symbol?.qualifiedName || symbol?.name || symbol || "").trim())
