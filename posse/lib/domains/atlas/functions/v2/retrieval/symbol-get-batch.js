@@ -40,9 +40,13 @@ export function combineSymbolGetBatchResults(results) {
   const items = results.map((result, index) => {
     const offset = content.length;
     const blocks = Array.isArray(result?.content) ? result.content : [];
-    for (const block of blocks) {
-      if (block?.type !== "text" || typeof block.text !== "string") { content.push(block); continue; }
-      const at = block.text.indexOf("\n\n[");
+    for (const [blockIndex, block] of blocks.entries()) {
+      // The first child block is the structured header. Later blocks contain
+      // literal source; even JSON-shaped source must remain byte-identical.
+      if (blockIndex !== 0 || block?.type !== "text" || typeof block.text !== "string") { content.push(block); continue; }
+      // Owner notices and ref stubs follow the compact JSON header. Both must
+      // survive, but neither is part of the object whose pointers we rebase.
+      const at = block.text.indexOf("\n\n");
       const head = at < 0 ? block.text : block.text.slice(0, at);
       try {
         const parsed = JSON.parse(head);

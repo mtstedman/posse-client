@@ -6,8 +6,6 @@ import {
 } from "../../../shared/storage/functions/index.js";
 
 const TABLE = "research_report_claim_drafts";
-export const RESEARCH_REPORT_DRAFT_MAX_CLAIMS = 24;
-const MAX_PUT_CLAIMS = 12;
 const CLAIM_ID_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
 
 function fail(code, message) {
@@ -30,7 +28,7 @@ function exactKeys(value, allowed, label) {
   return source;
 }
 
-function boundedString(value, label, maxLength) {
+function boundedString(value, label, maxLength = Infinity) {
   const text = String(value ?? "").trim();
   if (!text) fail("RESEARCH_REPORT_DRAFT_INVALID", `${label} is required`);
   if (text.length > maxLength) {
@@ -78,7 +76,7 @@ function resolveCall(context, role, db) {
 }
 
 function normalizeSelector(value, label) {
-  const selector = boundedString(value, label, 500);
+  const selector = boundedString(value, label);
   if (!selector.startsWith("#") && !selector.includes(":")) {
     fail("RESEARCH_REPORT_DRAFT_INVALID", `${label} must be a visible #ref or surfaced path range`);
   }
@@ -92,9 +90,9 @@ function normalizeDraftClaim(value, index) {
   if (!CLAIM_ID_PATTERN.test(id)) {
     fail("RESEARCH_REPORT_DRAFT_INVALID", `${label}.id must match ${CLAIM_ID_PATTERN}`);
   }
-  const claim = boundedString(source.claim, `${label}.claim`, 1000);
-  if (!Array.isArray(source.evidence) || source.evidence.length < 1 || source.evidence.length > 16) {
-    fail("RESEARCH_REPORT_DRAFT_INVALID", `${label}.evidence must contain 1 to 16 selectors`);
+  const claim = boundedString(source.claim, `${label}.claim`);
+  if (!Array.isArray(source.evidence) || source.evidence.length < 1) {
+    fail("RESEARCH_REPORT_DRAFT_INVALID", `${label}.evidence must contain at least one selector`);
   }
   const evidence = source.evidence.map((selector, selectorIndex) => (
     normalizeSelector(selector, `${label}.evidence[${selectorIndex}]`)
@@ -155,8 +153,8 @@ export function executeResearchReportClaims(args = {}, {
     return { ok: true, op, removed, count: listRows(call.agentCallId, database).length };
   }
 
-  if (source.ids != null || !Array.isArray(source.claims) || source.claims.length < 1 || source.claims.length > MAX_PUT_CLAIMS) {
-    fail("RESEARCH_REPORT_DRAFT_INVALID", `report_claims put requires 1 to ${MAX_PUT_CLAIMS} claims and no ids`);
+  if (source.ids != null || !Array.isArray(source.claims) || source.claims.length < 1) {
+    fail("RESEARCH_REPORT_DRAFT_INVALID", "report_claims put requires at least one claim and no ids");
   }
   const claims = source.claims.map(normalizeDraftClaim);
   if (new Set(claims.map((claim) => claim.id)).size !== claims.length) {
@@ -170,16 +168,9 @@ export function executeResearchReportClaims(args = {}, {
       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
   `);
   database.transaction(() => {
-    const existingCount = Number(database.prepare(`
-      SELECT COUNT(*) AS count FROM ${TABLE} WHERE agent_call_id = ?
-    `).get(call.agentCallId)?.count || 0);
     const existingIds = new Set(database.prepare(`
       SELECT claim_id FROM ${TABLE} WHERE agent_call_id = ?
     `).all(call.agentCallId).map((row) => row.claim_id));
-    const additions = claims.filter((claim) => !existingIds.has(claim.id)).length;
-    if (existingCount + additions > RESEARCH_REPORT_DRAFT_MAX_CLAIMS) {
-      fail("RESEARCH_REPORT_DRAFT_TOO_LARGE", `report_claims cannot exceed ${RESEARCH_REPORT_DRAFT_MAX_CLAIMS} saved claims`);
-    }
     let position = Number(database.prepare(`
       SELECT COALESCE(MAX(position), 0) + 1 AS position FROM ${TABLE} WHERE agent_call_id = ?
     `).get(call.agentCallId)?.position || 1);

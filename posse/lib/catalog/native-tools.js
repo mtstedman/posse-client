@@ -544,7 +544,7 @@ export const TOOL_REPORT_CLAIMS = {
   type: "function",
   name: "report_claims",
   description:
-    "Record evidence-backed research claims while the investigation remains open. Use this tool immediately when you have enough visible evidence to support a finding. Batch findings discovered together. Reuse each claim's stable id to revise it, or remove it if later evidence disproves it. Saved claims are automatically included in the terminal report and undergo normal final evidence validation.",
+    "Optionally save completed, evidence-backed findings during research. Aim for a complete answer to the section addressed, rather than partial notes. Prefer preserving substantive detail over shortening a finding. Reuse a stable lowercase id to revise a finding, or remove it if later evidence disproves it. Saved claims are included in the terminal report and undergo normal final evidence validation. Findings can also be supplied directly at terminal handoff; a separate save call is not required.",
   parameters: {
     type: "object",
     properties: {
@@ -552,7 +552,6 @@ export const TOOL_REPORT_CLAIMS = {
       claims: {
         type: "array",
         minItems: 1,
-        maxItems: 12,
         description: "One or more findings to add or update. Valid only for put.",
         items: {
           type: "object",
@@ -565,14 +564,12 @@ export const TOOL_REPORT_CLAIMS = {
             claim: {
               type: "string",
               minLength: 1,
-              maxLength: 1000,
-              description: "One self-contained finding preserving exact conditions and exceptions.",
+              description: "Aim for a complete, self-contained finding; preserve substantive detail regardless of length.",
             },
             evidence: {
               type: "array",
               minItems: 1,
-              maxItems: 16,
-              items: { type: "string", minLength: 2, maxLength: 500 },
+              items: { type: "string", minLength: 2 },
               description: "Visible #refs or surfaced path ranges supporting this finding.",
             },
           },

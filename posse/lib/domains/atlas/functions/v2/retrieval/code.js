@@ -842,7 +842,10 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
       searchedRepository: true,
       nextAction: "code.window",
     };
-  } else if (oversizedFileMode || result._sizeCapFallback === true) {
+  } else if ((fileMode && identifiers.length > 0) || oversizedFileMode || result._sizeCapFallback === true) {
+    // Even a natively complete file can be paged by the display layer. Carry
+    // requested definition coordinates so that paging can keep those bodies
+    // inline instead of delivering an unrelated file prefix.
     codeMap = buildCodeWindowMap({
       source,
       symbols: fileSymbols,

@@ -12,6 +12,7 @@ import { ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS } from "../../functions/v2
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
 import { normalizeCodeLensContextLines } from "../../functions/v2/retrieval/code.js";
+import { codeSurveyPathError } from "../../functions/v2/retrieval/survey.js";
 import { recordAtlasUsageEvent } from "../../functions/v2/retrieval/usage.js";
 import {
   ledgerBranchForWi,
@@ -784,6 +785,12 @@ export class AtlasToolExecutor {
     const baseAction = resolveAtlasAction(toolName);
     const action = gatewayEffectiveAction(baseAction, rawArgs);
     const args = nativeCompleteToolArgs(action, rawArgs);
+    const pathError = action === "code.survey" ? codeSurveyPathError(args.paths ?? args.path) : null;
+    if (pathError) {
+      return conductorEnvelopeToToolResult({
+        ok: false, action, error: { code: "invalid_params", message: pathError },
+      });
+    }
     const repoKey = this.#repoKeyFor(request);
     // A previous write succeeded on disk but its index refresh failed. Retry
     // that exact dirty path set once before admitting another source read.

@@ -263,18 +263,6 @@ export function buildResearchEarlyFetchBatchingText() {
   ].join("\n");
 }
 
-export function buildResearchPartialIdentifierRepairText({ identifiersMissing = [] } = {}) {
-  const identifiers = [...new Set((Array.isArray(identifiersMissing) ? identifiersMissing : [])
-    .map((value) => String(value || "").trim().slice(0, 180))
-    .filter(Boolean))]
-    .slice(0, 20);
-  if (identifiers.length === 0) return "";
-  return [
-    `IDENTIFIER MISS REPAIR: code.window did not resolve requested identifier${identifiers.length === 1 ? "" : "s"}: ${identifiers.join(", ")}.`,
-    "Before coverage or handoff, run an exact symbol.search for each missing name, then fetch the governing implementation body through the chosen hit's returned symbolId at symbol granularity. If that body is already model-visible, cite its visible lines; do not reopen a previously delivered file through a broad multi-identifier fileWindow. Nearby or same-named evidence does not resolve the miss.",
-  ].join("\n");
-}
-
 export function buildResearchFinalFetchBatchText() {
   return [
     "FINAL TRAVERSAL BATCH COMPLETE.",
@@ -287,7 +275,6 @@ export function buildResearchCurtainCallText({
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   callSteps = 0,
   maxPhysicalCalls = null,
-  requirements = [],
 } = {}) {
   // Logical exploration units and physical calls have independent ceilings.
   // Passing a physical count as explorationSteps can announce zero remaining
@@ -301,36 +288,13 @@ export function buildResearchCurtainCallText({
       effectiveMaxPhysicalCalls(maxPhysicalCalls) - Number(callSteps || 0),
     ),
   );
-  // Atlas335 showed that a provider interprets a loose six-call allowance as
-  // multiple four-wide turns, allowing the last turn to cross the physical
-  // rail. Express the remaining allowance in provider-turn units: siblings
-  // already in flight finish, then at most one bounded final batch may run.
-  // Keep one physical slot available when the coverage batch still needs an
-  // exact discovery call. Atlas371 found the right Fastify terminal symbol in
-  // the last batch but could not fetch its body before closeout.
-  const finalBatchCalls = Math.min(3, Math.max(1, remainingCalls - 1));
-  const coverageLedger = (Array.isArray(requirements) ? requirements : [])
-    .filter((entry) => /^R[0-9]{2}$/.test(String(entry?.id || "")) && String(entry?.text || "").trim())
-    .slice(0, 24)
-    .map((entry) => `- ${entry.id}: ${String(entry.text).replace(/\s+/gu, " ").trim().slice(0, 180)}`);
-  return [
-    `RESEARCH TOOL WINDOW: ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} remain before required closeout.`,
-    `After the current parallel batch finishes, issue no more than ${finalBatchCalls} call${finalBatchCalls === 1 ? "" : "s"}, only for unresolved coverage-ledger IDs. Reserve at least one remaining slot if any call is discovery-only.`,
-    ...(coverageLedger.length > 0 ? [
-      "FINAL COVERAGE LEDGER (recheck every task-authored obligation before choosing that batch):",
-      ...coverageLedger,
-    ] : []),
-    "After that response—or immediately if every requirement is already supported—call agent_handoff. Exception: if that batch discovered an exact required implementation and a slot remains, use one body-only follow-up batch, then hand off. Do not start another discovery batch; further discovery calls will be rejected.",
-  ].join("\n");
+  return `RESEARCH TOOL WINDOW: ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} remain within the current retrieval limits.`;
 }
 
 export function buildResearchFinalSlotLimitText({ remainingCalls = 0 } = {}) {
   const remaining = Math.max(0, Math.min(3, Number(remainingCalls) || 0));
   if (remaining <= 0) return "";
-  return [
-    `RESEARCH FINAL SLOT LIMIT: ${remaining} physical work-call slot${remaining === 1 ? "" : "s"} remain.`,
-    `On the next turn issue at most ${remaining} total call${remaining === 1 ? "" : "s"}; use them only for exact bodies already identified, then call agent_handoff. Do not issue another search or broad discovery call.`,
-  ].join("\n");
+  return `RESEARCH FINAL SLOT LIMIT: ${remaining} physical work-call slot${remaining === 1 ? "" : "s"} remain.`;
 }
 
 export function buildResearchSynthesisRequiredText({

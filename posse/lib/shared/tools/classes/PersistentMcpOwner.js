@@ -117,7 +117,6 @@ import {
   RESEARCH_INFRASTRUCTURE_REFUND_LIMIT,
   researchExplorationObservationStatus,
   researchChildBudgetCallId,
-  researchSurveyCoverageStatus,
 } from "../../../domains/observability/functions/observations.js";
 import {
   fetchHashRefEvidenceForContext,
@@ -137,7 +136,6 @@ import {
   buildResearchEarlyFetchBatchingText,
   buildResearchFinalFetchBatchText,
   buildResearchFinalSlotLimitText,
-  buildResearchPartialIdentifierRepairText,
   buildResearchSynthesisRequiredText,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
@@ -230,13 +228,14 @@ function researcherStructureExecutorArgs(session, requestedName, args = {}) {
 
 /** @param {any} session */
 function researcherStructureProjection(session) {
-  return sessionToolPolicy(session)?.atlasResearcherTypedDispatcher === true
+  return String(session?.bootConfig?.role || "") === "researcher"
     ? COMPACT_STRUCTURE_PROJECTION
     : null;
 }
 
 export const __testCompactCallerExecutorArgs = compactCallerExecutorArgs;
 export const __testResearcherStructureExecutorArgs = researcherStructureExecutorArgs;
+export const __testResearcherStructureProjection = researcherStructureProjection;
 export const __testRememberCompactCallerPageVersion = rememberCompactCallerPageVersion;
 const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set(MCP_CONCURRENT_ATLAS_ACTIONS);
 const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 2;
@@ -2245,8 +2244,8 @@ function ownerAtlasPartialResultDiagnostic(result, toolArgs = {}) {
     if (!payload || Array.isArray(payload) || typeof payload !== "object") continue;
     // A request such as file=index.ts + identifiersToFind=["index"] is file
     // orientation, not a claim that the module declares a symbol named index.
-    // The source was delivered successfully, so do not create a bogus exact-
-    // symbol repair obligation. Limit this normalization to conventional
+    // The source was delivered successfully, so do not record a bogus symbol
+    // miss in the diagnostic. Limit this normalization to conventional
     // entry filenames; arbitrary stems can still be real declared symbols.
     const identifiersMissing = ownerPartialIdentifierList(payload.identifiersMissing)
       .filter((identifier) => !filenameAnchors.has(identifier.toLowerCase()));
@@ -2264,19 +2263,7 @@ function ownerAtlasPartialResultDiagnostic(result, toolArgs = {}) {
   return null;
 }
 
-function appendOwnerPartialIdentifierRepairNotice(result, toolArgs = {}) {
-  const partialResult = ownerAtlasPartialResultDiagnostic(result, toolArgs);
-  const text = buildResearchPartialIdentifierRepairText({
-    identifiersMissing: partialResult?.identifiers_missing || [],
-  });
-  if (!text) return result;
-  return appendOwnerModelControlNotice(result, `\n\n${text}`, {
-    kind: "research_identifier_miss_repair",
-    trigger: "code_window_identifier_miss",
-  });
-}
-
-export const __testAppendOwnerPartialIdentifierRepairNotice = appendOwnerPartialIdentifierRepairNotice;
+export const __testOwnerAtlasPartialResultDiagnostic = ownerAtlasPartialResultDiagnostic;
 
 function ownerExactSourceEvidence(result) {
   for (const part of result?.content || []) {
@@ -2912,71 +2899,6 @@ function admissionMaxPhysicalCalls(admission) {
   return Number.isSafeInteger(value) && value > 0 ? value : RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
 }
 
-function surveyAwareSkeletonRedirect(session, requested, toolArgs = {}) {
-  const boot = session?.bootConfig || {};
-  if (String(boot.role || "") !== "researcher") return null;
-  if (!resolveAtlasResearchRuntimeGuidance()) return null;
-  if (effectiveAtlasResearchAction(requested) !== "code.skeleton") return null;
-  const file = String(toolArgs.file || "").trim();
-  if (!file || String(toolArgs.surveyGap || "").trim()) return null;
-  const coverage = researchSurveyCoverageStatus({
-    jobId: boot.jobId ?? null,
-    attemptId: boot.attemptId ?? null,
-    file,
-  });
-  if (!coverage) return null;
-  const result = mcpToolTextPayload(JSON.stringify({
-    action: "code.skeleton",
-    status: "redirected",
-    code: "structure_already_visible",
-    structureAlreadyVisible: true,
-    file: coverage.file,
-    evidence_ref: evidenceRefSurface(coverage.surveyRef),
-    surveyBounded: coverage.surveyTruncated || coverage.fileTruncated,
-    message: "The prefetched code.survey already supplied this file's structural outline. Use that survey evidence and request exact unresolved code with code.window.",
-    nextAction: {
-      action: "code.window",
-      // RH-1: `code.window` is scalar-only. Naming `items` here advertised a
-      // call form the schema omits and the owner and native executor reject.
-      instruction: "Request the exact unresolved identifier or branch; issue independent scalar calls together in one response when several targets are known.",
-    },
-    escapeHatch: {
-      field: "surveyGap",
-      instruction: "Retry code.skeleton only when the survey omitted or bounded a named structural fact, and put that fact in surveyGap.",
-    },
-  }));
-  return annotateOwnerResultTransform(result, {
-    kind: "survey_aware_skeleton_redirect",
-    action: "code.skeleton",
-    file: coverage.file,
-    survey_ref: coverage.surveyRef,
-    survey_bounded: coverage.surveyTruncated || coverage.fileTruncated,
-  });
-}
-
-function recordSurveyAwareSkeletonRedirect(session, toolName, toolArgs, result) {
-  const boot = session?.bootConfig || {};
-  const parsed = (() => {
-    try { return JSON.parse(result?.content?.[0]?.text || "{}"); } catch { return {}; }
-  })();
-  recordObservation({
-    work_item_id: boot.workItemId ?? null,
-    job_id: boot.jobId ?? null,
-    attempt_id: boot.attemptId ?? null,
-    observation_type: "atlas.skeleton_after_survey",
-    summary: `Redirected redundant code.skeleton for ${String(toolArgs?.file || "surveyed file").slice(0, 180)}`,
-    detail: {
-      kind: "survey_aware_skeleton_redirect",
-      action: "code.skeleton",
-      tool: toolName || null,
-      file: toolArgs?.file || null,
-      survey_ref: parsed?.evidence_ref?.ref || parsed?.surveyRef || null,
-      survey_bounded: parsed?.surveyBounded === true,
-      redirected: true,
-    },
-  });
-}
-
 function appendOwnerResearchFinalFetchNotice(result, admission) {
   if (!resolveAtlasResearchRuntimeGuidance()) return result;
   if (result?.isError === true || !admission?.citationFetch || admission.researchPhase !== "synthesis") return result;
@@ -3080,13 +3002,10 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
   });
 }
 
-function appendOwnerResearchSynthesisNotice(result, session, toolName, admission, toolArgs = {}) {
+function appendOwnerResearchSynthesisNotice(result, session, toolName, admission) {
   if (!admission?.physicalBatchId) result = preserveOwnerModelControlNotices(result, appendResearchWorkBudget(result, admission));
   if (result?.isError === true || !admission?.tracked) return result;
   const guidanceEnabled = resolveAtlasResearchRuntimeGuidance();
-  let next = guidanceEnabled
-    ? appendOwnerPartialIdentifierRepairNotice(result, toolArgs)
-    : result;
   const explorationSteps = admission.explorationUnitWeight === 0
     ? admission.explorationSteps
     : (admission.assignedExplorationStep ?? admission.explorationSteps + 1);
@@ -3094,7 +3013,7 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     ?? admission.callSteps + 1;
   const maxPhysicalCalls = admissionMaxPhysicalCalls(admission);
   const remainingPhysicalCalls = Math.max(0, maxPhysicalCalls - callSteps);
-  if (admission.citationFetch && callSteps < maxPhysicalCalls && remainingPhysicalCalls > 3) return next;
+  if (admission.citationFetch && callSteps < maxPhysicalCalls && remainingPhysicalCalls > 3) return result;
   const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
   const physicalCurtainStart = maxPhysicalCalls
@@ -3147,7 +3066,7 @@ function appendOwnerResearchSynthesisNotice(result, session, toolName, admission
     });
     noticeKind = "research_curtain";
   }
-  let controlled = next;
+  let controlled = result;
   if (notice) {
     controlled = appendOwnerModelControlNotice(controlled, `\n\n${notice}`, {
       kind: noticeKind,
@@ -6806,44 +6725,6 @@ export class PersistentMcpOwner {
       return mcpToolResultMessage(message, result);
     }
     try {
-      const skeletonRedirect = surveyAwareSkeletonRedirect(session, requested, toolArgs || {});
-      if (skeletonRedirect) {
-        let result = appendOwnerOperatorFeedbackDelivery(skeletonRedirect, session, toolName);
-        result = appendOwnerResearchSynthesisNotice(
-          result,
-          session,
-          toolName,
-          synthesisAdmission,
-          toolArgs,
-        );
-        session.noteAtlasGateEvent?.({
-          action: "code.skeleton",
-          args: toolArgs,
-          ok: true,
-          empty: false,
-        });
-        recordSurveyAwareSkeletonRedirect(session, toolName, toolArgs, result);
-        recordOwnerToolObservation({
-          session,
-          toolName,
-          toolArgs,
-          result,
-          durationMs: Date.now() - startedAt,
-          queueWaitMs,
-          executor: { via: "survey_aware_skeleton_redirect" },
-          synthesisAdmission,
-        });
-        appendRunTelemetry("diagnostics", {
-          kind: "mcp.owner.atlas_skeleton_after_survey",
-          ...context,
-          outcome: "redirected",
-          tool_name: toolName,
-          file: toolArgs?.file || null,
-          duration_ms: Date.now() - startedAt,
-          queue_wait_ms: queueWaitMs,
-        });
-        return mcpToolResultMessage(message, result);
-      }
       if (isAtlasFetchRefTool(toolName, toolArgs) || isAtlasCreateHashTool(toolName, toolArgs)) {
         const createRef = isAtlasCreateHashTool(toolName, toolArgs);
         const hashContext = { context: hashRefToolContext(session) };

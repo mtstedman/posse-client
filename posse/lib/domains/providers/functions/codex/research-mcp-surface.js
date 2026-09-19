@@ -109,6 +109,21 @@ export async function prepareCodexResearchMcpSurface(attachment, { mcpGate = nul
   if (attachment.atlasTools.length > 0 && atlasNames.length === 0) {
     throw catalogError("Issued Atlas callable declarations are absent");
   }
+  const query = byName.get(formatToolReference(TOOL_REFS.atlas.query));
+  if (attachment.atlasTools.length > 0 && typeof attachment.atlasResearcherDispatcher === "boolean") {
+    if (attachment.atlasResearcherDispatcher && !query) {
+      throw catalogError("Configured Atlas dispatcher is absent from the issued MCP surface");
+    }
+    if (!attachment.atlasResearcherDispatcher && query && atlasNames.length === 1) {
+      throw catalogError("Configured direct Atlas tools were replaced by a dispatcher in the issued MCP surface");
+    }
+  }
+  const issuedActions = new Set(attachment.atlasTools.map(name => name.replace(/^atlas\./, "")));
+  for (const action of query?.inputSchema?.properties?.action?.enum || []) {
+    if (action !== "workflow" && !issuedActions.has(action)) {
+      throw catalogError(`Atlas dispatcher advertises an action outside the issued session: ${action}`);
+    }
+  }
   const reads = attachment.codexNativeBatching
     ? attachment.tools.filter(name => !attachment.directTools.includes(name) && !attachment.lazyTools.includes(name))
     : attachment.nestedTools;

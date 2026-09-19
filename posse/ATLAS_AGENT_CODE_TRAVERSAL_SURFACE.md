@@ -348,9 +348,9 @@ Use only when exact source is needed for a known symbol or anchored file region.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Approximate total line count as an integer for a file-mode slice, for example 220. |
+| `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds. |
 | `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. |
-| `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Region shape: exact indexed symbol, enclosing block, or bounded file window. |
+| `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Region shape: symbol (default) reads the named definition, block its enclosing block, fileWindow a broader anchored file slice. |
 | `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice, each a non-empty exact name. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. Submit anchored reads with at least one exact name. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped. |
 | `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
@@ -879,11 +879,11 @@ Remote roles: `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Record evidence-backed research claims while the investigation remains open. Use this tool immediately when you have enough visible evidence to support a finding. Batch findings discovered together. Reuse each claim's stable id to revise it, or remove it if later evidence disproves it. Saved claims are automatically included in the terminal report and undergo normal final evidence validation.
+Optionally save completed, evidence-backed findings during research. Aim for a complete answer to the section addressed, rather than partial notes. Prefer preserving substantive detail over shortening a finding. Reuse a stable lowercase id to revise a finding, or remove it if later evidence disproves it. Saved claims are included in the terminal report and undergo normal final evidence validation. Findings can also be supplied directly at terminal handoff; a separate save call is not required.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `claims` | `array<object>` | Conditional | min items 1; max items 12 | One or more findings to add or update. Valid only for put. |
+| `claims` | `array<object>` | Conditional | min items 1 | One or more findings to add or update. Valid only for put. |
 | `ids` | `array<string>` | Conditional | min items 1; max items 12 | Draft ids to retract. Valid only for remove. |
 | `op` | `literal "put" | literal "remove" | literal "list"` | Required |  |  |
 

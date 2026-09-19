@@ -30,9 +30,16 @@ export function applyResearcherSchemaDiet(tool) {
   const normalizedName = String(tool?.name || "");
   const compactDescription = RESEARCHER_SCHEMA_DIET_DESCRIPTIONS[normalizedName];
   const { annotations: _annotations, ...withoutAnnotations } = tool;
+  const inputSchema = stripAgentSchemaDescriptions(tool.inputSchema);
+  // Keep selection semantics that constraints alone cannot communicate.
+  // Enum values and validation limits survive the generic projection already.
+  for (const field of ["expectedLines", "granularity"]) {
+    const description = tool.inputSchema?.properties?.[field]?.description;
+    if (description && inputSchema?.properties?.[field]) inputSchema.properties[field].description = description;
+  }
   return {
     ...withoutAnnotations,
     ...(compactDescription ? { description: compactDescription } : {}),
-    inputSchema: stripAgentSchemaDescriptions(tool.inputSchema),
+    inputSchema,
   };
 }

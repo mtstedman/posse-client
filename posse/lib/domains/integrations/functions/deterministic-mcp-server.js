@@ -1229,8 +1229,8 @@ async function resolveNativeAllowedToolNames() {
 }
 
 async function resolveAtlasAllowedActions() {
-  if (ownerHotGateway && atlasAvailable) return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
   if (hasTokenToolAllowlist()) return tokenToolAllowlistForSuite("atlas");
+  if (ownerHotGateway && atlasAvailable) return new Set(ATLAS_TOOL_ACTIONS.filter(isExternallyRoutedAtlasTool));
   if (!atlasAvailable || !roleName) return _atlasAllowedActions;
   const catalog = await fetchRemoteToolCatalog();
   if (catalog && Array.isArray(catalog.tools)) return new Set(remoteAtlasRouteTools(catalog));

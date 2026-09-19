@@ -70,6 +70,13 @@ export function symbolBodyKind(symbol, source) {
     return "declaration";
   }
   if (["ts", "tsx", "js", "jsx"].includes(lang)) {
+    // An import binding is an address, not the implementation it refers to.
+    // In particular, namespace aliases often have a one-line indexed span.
+    // Do not confuse dynamic import expressions with static declarations.
+    if (/^\s*import\s+(?!\()[^;"']+?\bfrom\s*["'][^"']+["']\s*;?\s*$/u.test(text)
+      || /^\s*import\s+[\w$]+\s*=\s*require\s*\(\s*["'][^"']+["']\s*\)\s*;?\s*$/u.test(text)) {
+      return "declaration";
+    }
     if (/^\s*(?:export\s+)?(?:declare\s+|abstract\s+)?(?:interface|type)\b/u.test(text)) {
       return "declaration";
     }

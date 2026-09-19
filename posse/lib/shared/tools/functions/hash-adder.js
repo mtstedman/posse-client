@@ -902,7 +902,7 @@ function exactAnchoredWindowTarget(args, data) {
   const requests = data.map.requested.filter((entry) => (
     String(entry?.identifier || "").trim().toLowerCase() === wanted
   ));
-  if (requests.length !== 1) return null;
+  if (requests.length !== 1 || requests[0].targetsOmitted > 0) return null;
   const targets = (Array.isArray(requests[0]?.targets) ? requests[0].targets : [])
     .map((target) => {
       const lines = target?.lines !== undefined
@@ -915,7 +915,14 @@ function exactAnchoredWindowTarget(args, data) {
         : null;
     })
     .filter(Boolean);
-  return targets.length === 1 ? targets[0] : null;
+  // One requested name can legitimately resolve to several overload spans.
+  // Preserve all candidates together when their enclosing range fits; never
+  // pick one candidate as the presumed implementation. The caller below
+  // declines the focus if this range exceeds the display budget.
+  return targets.length > 0 ? {
+    startLine: Math.min(...targets.map((target) => target.startLine)),
+    endLine: Math.max(...targets.map((target) => target.endLine)),
+  } : null;
 }
 
 function focusedAnchoredWindow(lines, startLine, target, budget) {
@@ -1120,6 +1127,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     let nativeContinuation = Array.isArray(data._continuationWindows)
       ? data._continuationWindows
       : [];
+    const continuationSources = { nativeWindows: nativeContinuation.length, displayWindows: 0, ownerBudgetWindows: 0 };
     const carriedNativeContinuation = Array.isArray(data._continuationWindows);
     delete data._continuationWindows;
     let displayPrefix = null;
@@ -1133,6 +1141,7 @@ export function compactCodeWindowLensResult(toolName, result, {
       && data.additionalWindows.length > 0
     ) {
       const deferredAdditional = data.additionalWindows;
+      continuationSources.displayWindows += deferredAdditional.length;
       nativeContinuation = dedupeCodeWindowContinuationWindows([
         ...nativeContinuation,
         ...deferredAdditional,
@@ -1153,11 +1162,14 @@ export function compactCodeWindowLensResult(toolName, result, {
     }
     const originalContent = typeof data.content === "string" ? data.content : "";
     let inlineContentBudget = min;
+    let inlineDefinitionBudget = min;
     if (tool === "code.window" && originalContent) {
       data.content = "";
       const structuralChars = JSON.stringify(envelope).length;
       data.content = originalContent;
       inlineContentBudget = Math.max(1000, min - structuralChars - 1200);
+      const hardCap = boundingPolicyFor(requestedTool, requestedTool)?.capChars || min;
+      inlineDefinitionBudget = Math.max(inlineContentBudget, hardCap - structuralChars - 2048);
     }
     if (
       tool === "code.window" && windowDisplayPaging
@@ -1181,7 +1193,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         const originalEndLine = contentEndLine;
         const target = exactAnchoredWindowTarget(args, data);
         const focused = target && target.endLine > startLine + splitAt - 1
-          ? focusedAnchoredWindow(lines, startLine, target, inlineContentBudget)
+          ? focusedAnchoredWindow(lines, startLine, target, inlineDefinitionBudget)
           : null;
         displayOriginal = {
           startLine,
@@ -1209,8 +1221,10 @@ export function compactCodeWindowLensResult(toolName, result, {
         data.content = lines.slice(inlineFrom, inlineTo).join("");
         data.startLine = startLine + inlineFrom;
         data.endLine = startLine + inlineTo - 1;
-        data.outputTruncated = true;
-        data.truncated = true;
+        if (displayPrefix || displayTail) {
+          data.outputTruncated = true;
+          data.truncated = true;
+        }
       }
     }
     // This owner cap also applies when optional paging is off or an exact
@@ -1219,6 +1233,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     if (tool === "code.window" && hardPolicy && hasHashRefScope(hashContext)) {
       const overflow = boundSourceWindowEnvelope(envelope, hardPolicy.capChars);
       if (overflow.length > 0) {
+        continuationSources.ownerBudgetWindows += overflow.length;
         nativeContinuation = [...nativeContinuation, ...overflow];
         compacted = true;
       }
@@ -1228,6 +1243,7 @@ export function compactCodeWindowLensResult(toolName, result, {
       ...(displayPrefix ? [displayPrefix] : []),
       ...(displayTail ? [displayTail] : []),
     ]);
+    continuationSources.displayWindows += Number(Boolean(displayPrefix)) + Number(Boolean(displayTail));
     const lensTail = tool === "code.lens"
       && pagingEnabled
       && result.length > min
@@ -1317,6 +1333,7 @@ export function compactCodeWindowLensResult(toolName, result, {
         });
         data.continuationWindows = continuation.length;
         data.continuationRanges = continuation.map((entry) => `${entry.startLine}-${entry.endLine}`);
+        data.continuationSources = continuationSources;
         if (lensTail.length > 0) {
           data.matches = data.matches.slice(0, LENS_INLINE_MATCHES);
           data.inlineMatchCount = data.matches.length;

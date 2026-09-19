@@ -20,6 +20,23 @@ const MAX_SURVEY_FILES = 64;
 const MAX_RAW_EDGES = 20_000;
 const MAX_DIG_TERMS = 16;
 
+export function surveyPaths(raw) {
+  return (Array.isArray(raw) ? raw : [raw])
+    .map((value) => String(value ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, ""))
+    .filter(Boolean);
+}
+
+export function codeSurveyPathError(raw) {
+  const requested = surveyPaths(raw);
+  if (!requested.length) return "code.survey requires paths naming repository-relative directories or files.";
+  const unusable = requested.find((entry) =>
+    entry.startsWith("/") || /^[A-Za-z]:/.test(entry)
+    || entry.split("/").some((segment) => segment === "." || segment === ".."));
+  return unusable
+    ? `code.survey paths must name repository-relative directories or files without "." or ".." segments (got ${JSON.stringify(unusable)}). Supply a directory or file from the repository map; the repository-root shorthand "." is not supported.`
+    : null;
+}
+
 /**
  * @param {{
  *   view: import("../contracts/api.js").View,
@@ -33,25 +50,14 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   // `paths` accepts one string or an array; each entry may be an indexed file
   // or a directory prefix (resolved in that order). `path` stays as an alias.
   const raw = params.paths ?? params.path;
-  const requested = (Array.isArray(raw) ? raw : [raw])
-    .map((value) => String(value ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, ""))
-    .filter(Boolean);
-  if (requested.length === 0) {
+  const requested = surveyPaths(raw);
+  const pathError = codeSurveyPathError(raw);
+  if (pathError) {
     return errorEnvelope({
       action,
       versionId,
       code: "invalid_params",
-      message: "code.survey requires `paths`: a directory prefix or file path, or an array of them.",
-    });
-  }
-  const unusable = requested.find((entry) =>
-    entry.startsWith("/") || entry.split("/").some((segment) => segment === "." || segment === ".."));
-  if (unusable) {
-    return errorEnvelope({
-      action,
-      versionId,
-      code: "invalid_params",
-      message: `code.survey paths must be repo-relative prefixes without "." or ".." segments (got ${JSON.stringify(unusable)}); use repo.overview for the whole repository.`,
+      message: pathError,
     });
   }
 
