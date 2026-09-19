@@ -98,7 +98,7 @@ export function thinSurveyDirection(files, { taskText = "", callMap = null, maxR
   const catalog = surveySymbolCatalog(files);
   const task = String(taskText || "");
   const roots = [...catalog.byFull.values()]
-    .filter((entry) => containsIdentifier(task, entry.full)
+    .filter((entry) => (entry.full !== entry.terminal && containsIdentifier(task, entry.full))
       || (isDistinctiveIdentifier(entry.terminal) && containsIdentifier(task, entry.terminal)))
     .filter((entry) => (catalog.byTerminal.get(entry.terminal.toLowerCase()) || []).length === 1)
     .sort((a, b) => b.terminal.length - a.terminal.length || a.order - b.order)
