@@ -33,6 +33,7 @@ import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logg
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
+import { renderTestFailureSummary } from "./test-failure-evidence.js";
 import { verificationOutcome } from "./verification-outcome.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
@@ -139,12 +140,13 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     .filter(Boolean)
     .join("\n")
     .slice(-1600);
+  const failureSummary = renderTestFailureSummary(postChange);
   return {
     ...verdict,
     verdict: "fail",
     _disable_internal_retry: true,
     reasons: [
-      `The automatic post-change test ${testRun.delta === "regression" ? "regressed from passing at baseline" : "has an unverified failure"} (${postChange.status}); the change must be repaired before it can pass.${outputTail ? `\nTest output tail:\n${outputTail}` : ""}`,
+      `The automatic post-change test ${testRun.delta === "regression" ? "regressed from passing at baseline" : "has an unverified failure"} (${postChange.status}); the change must be repaired before it can pass.${failureSummary ? `\nTest failure summary:\n${failureSummary}` : ""}${outputTail ? `\nTest output tail:\n${outputTail}` : ""}`,
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
