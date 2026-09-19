@@ -55,7 +55,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `researcher`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.report_claims`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.report_claims`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -821,7 +821,7 @@ Remove non-deliverable sidecar files from a scoped artifact output directory whi
 
 ### `tools.read_file`
 
-Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
+Remote roles: `artificer`, `assessor`, `dev`, `planner`.
 
 | Contract field | Value |
 |---|---|

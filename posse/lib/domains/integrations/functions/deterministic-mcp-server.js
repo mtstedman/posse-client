@@ -43,6 +43,7 @@ import {
 import {
   TOOL_AGENT_HANDOFF,
   TOOL_PROJECT_DB_QUERY,
+  TOOL_REPORT_CLAIMS,
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
@@ -1448,6 +1449,7 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "sub_agent_next_input",
   "dispatch_agent",
   "agent_handoff",
+  "report_claims",
   "read_file",
   "chain_read",
   "chain_verdict",
@@ -1607,6 +1609,7 @@ addToolSchema(getToolSchemaForRole("agent_handoff", roleName, {
   requireResearcherCoverage: researcherTraversalCoverageRequired(),
   researchInvestigation: bootConfig.researchInvestigation === true,
 }));
+addToolSchema(TOOL_REPORT_CLAIMS);
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
 addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
@@ -2890,6 +2893,7 @@ function rebuildNativeToolSchemas() {
     requireResearcherCoverage: researcherTraversalCoverageRequired(),
     researchInvestigation: bootConfig.researchInvestigation === true,
   }));
+  addToolSchema(TOOL_REPORT_CLAIMS);
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
   addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
