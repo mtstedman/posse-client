@@ -1761,6 +1761,7 @@ async function v2JoinResultAsync(args = {}) {
       config: ctx.config, warm: (request) => getSharedConductor().warm(request),
     });
     getSharedAtlasToolExecutor().clearReadContext({ workItemId });
+    getSharedAtlasToolExecutor().clearWriteRefreshFailure({ workItemId });
     ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
     const warmer = new Warmer({
       ledger,

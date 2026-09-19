@@ -8,6 +8,7 @@ import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncG
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../../catalog/tools/filesystem-mutations.js";
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
+import { ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS } from "../../functions/v2/contracts/jobs.js";
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
 import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
 import { normalizeCodeLensContextLines } from "../../functions/v2/retrieval/code.js";
@@ -725,6 +726,9 @@ export class AtlasToolExecutor {
   #readContextVersions = new Map();
   /** @type {Map<string, { repoKey: string, atMs: number }>} */
   #semanticRepeats = new Map();
+  #writeEpochs = new Map();
+  /** @type {Map<string, { paths: string[], retry: () => Promise<any> }>} */
+  #failedRefreshes = new Map();
   #now;
 
   constructor({
@@ -781,8 +785,13 @@ export class AtlasToolExecutor {
     const action = gatewayEffectiveAction(baseAction, rawArgs);
     const args = nativeCompleteToolArgs(action, rawArgs);
     const repoKey = this.#repoKeyFor(request);
+    // A previous write succeeded on disk but its index refresh failed. Retry
+    // that exact dirty path set once before admitting another source read.
+    const failedRefresh = this.#failedRefreshes.get(repoKey);
+    if (failedRefresh) await failedRefresh.retry();
     this.#invalidateMismatchedReadContext(request, repoKey);
-    const dedupeRepoKey = this.#dedupeRepoKeyForRequest(request, repoKey);
+    const writeEpoch = this.#writeEpochs.get(repoKey) || 0;
+    const dedupeRepoKey = `${this.#dedupeRepoKeyForRequest(request, repoKey)}|writeEpoch=${writeEpoch}`;
     const dispatchCachePolicy = dispatchCachePolicyFor(action);
     const dispatchKeyParts = this.#dispatchCacheKeyParts({ policy: dispatchCachePolicy });
     const dispatchCacheKey = dispatchCacheEnabledFor(request) && dispatchKeyParts
@@ -791,7 +800,7 @@ export class AtlasToolExecutor {
         action,
         args,
         selectorKeys: gatewaySelectorKeysFor(baseAction, args),
-        keyParts: dispatchKeyParts,
+        keyParts: { ...dispatchKeyParts, writeEpoch },
       })
       : null;
     const dispatchCacheTtlMs = dispatchCacheKey ? dispatchCacheTtlFor(request) : 0;
@@ -918,49 +927,88 @@ export class AtlasToolExecutor {
     ))];
     if (paths.some((p) => !p || p === ".." || p.startsWith("../") || path.isAbsolute(p))) return null;
     const gateKey = workItemKey || repoKey;
+    this.#writeEpochs.set(gateKey, (this.#writeEpochs.get(gateKey) || 0) + 1);
     this.#clearRecentDedupeForRepo(repoKey);
     if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
     const branch = workItemId != null
       ? ledgerBranchForWi(workItemId)
       : await this.#branchForRepo(repoRoot);
-    return this.#gate.write(
-      gateKey,
-      async (queueInfo) => {
-        const conductor = this.#conductorFactory();
-        const result = await conductor.warm({
-          ledgerPath: refreshLedgerPath,
-          dbPath: refreshViewPath,
-          repoRoot: refreshRoot,
-          branch,
-          config,
-          job: {
-            purpose: "main-incremental",
-            branch,
-            paths,
-            trigger_event: "atlas.executor.deterministic_write",
-            out_view_path: refreshViewPath,
-          },
-        }, { timeoutMs: request.waitMs || this.#waitMs });
-        this.#clearRecentDedupeForRepo(repoKey);
-        if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
-        return {
-          ok: result?.ok !== false,
-          action: "index.refresh",
-          path: paths[0],
-          paths,
-          via: "AtlasToolExecutor",
-          branch,
-          queue: {
-            key: queueInfo.key,
-            waitMs: queueInfo.waitMs,
-            depthAtEnqueue: queueInfo.depthAtEnqueue,
-            inFlightAtEnqueue: queueInfo.inFlightAtEnqueue,
-          },
-          result,
-        };
-      },
-      { label: "atlas.deterministic_write.refresh", waitMs: request.waitMs || this.#waitMs },
-    );
+    let failureRecorded = false;
+    const recordFailure = () => {
+      failureRecorded = true;
+      this.#failedRefreshes.set(gateKey, {
+        paths: [...new Set([...paths, ...(this.#failedRefreshes.get(gateKey)?.paths || [])])],
+        retry: () => this.scheduleDeterministicWriteRefresh(request),
+      });
+    };
+    try {
+      return await this.#gate.write(
+        gateKey,
+        async (queueInfo) => {
+          try {
+            // A later edit must also repair paths left stale by an earlier edit.
+            for (const dirtyPath of this.#failedRefreshes.get(gateKey)?.paths || []) {
+              if (!paths.includes(dirtyPath)) paths.push(dirtyPath);
+            }
+            const conductor = this.#conductorFactory();
+            const result = await conductor.warm({
+              ledgerPath: refreshLedgerPath,
+              dbPath: refreshViewPath,
+              repoRoot: refreshRoot,
+              branch,
+              config,
+              job: {
+                purpose: "main-incremental",
+                branch,
+                paths,
+                trigger_event: "atlas.executor.deterministic_write",
+                out_view_path: refreshViewPath,
+              },
+            }, { timeoutMs: request.waitMs || this.#waitMs });
+            if (result?.ok === false || result?.rebuild_required || result?.truncated
+              || !result?.view_written
+              || path.resolve(result.view_written) !== path.resolve(refreshViewPath)
+              || !Array.isArray(result?.skipped)
+              || result.skipped.some((row) => !ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS.includes(row.reason))) {
+              throw Object.assign(new Error("ATLAS live refresh failed; the edited paths have not been reconciled"), {
+                code: "ATLAS_REFRESH_FAILED", result,
+              });
+            }
+            this.#failedRefreshes.delete(gateKey);
+            this.#clearRecentDedupeForRepo(repoKey);
+            if (requestRepoKey !== repoKey) this.#clearRecentDedupeForRepo(requestRepoKey);
+            return {
+              ok: true,
+              action: "index.refresh",
+              path: paths[0],
+              paths,
+              via: "AtlasToolExecutor",
+              branch,
+              queue: {
+                key: queueInfo.key,
+                waitMs: queueInfo.waitMs,
+                depthAtEnqueue: queueInfo.depthAtEnqueue,
+                inFlightAtEnqueue: queueInfo.inFlightAtEnqueue,
+              },
+              result,
+            };
+          } catch (error) {
+            // Publish failure before releasing the writer gate to queued reads.
+            recordFailure();
+            throw error;
+          }
+        },
+        { label: "atlas.deterministic_write.refresh", waitMs: request.waitMs || this.#waitMs },
+      );
+    } catch (error) {
+      if (!failureRecorded) recordFailure();
+      throw error;
+    }
+  }
+
+  /** Only call after a full, source-verified reconciliation of this scope. */
+  clearWriteRefreshFailure(scope) {
+    this.#failedRefreshes.delete(readContextKeyFor(scope));
   }
 
   setReadContext(scope, context = null) {
@@ -1017,6 +1065,8 @@ export class AtlasToolExecutor {
   }
 
   async close() {
+    this.#failedRefreshes.clear();
+    this.#writeEpochs.clear();
     this.#inflightDedupe.clear();
     this.#recentDedupe.clear();
     this.#dispatchCache?.clear?.();
@@ -1044,6 +1094,11 @@ export class AtlasToolExecutor {
     const mode = ATLAS_BLOCKING_ACTIONS.has(String(request.action || ""));
     const label = `atlas.tool.${request.action || request.toolName}`;
     const runner = async (queueInfo) => {
+      if (this.#failedRefreshes.has(request.repoKey)) {
+        throw Object.assign(new Error("ATLAS refresh failed while this read was queued; retry the read to reconcile the edited paths"), {
+          code: "ATLAS_REFRESH_FAILED",
+        });
+      }
       const runnerStartedAt = this.#now();
       const conductor = this.#conductorFactory();
       const payload = {

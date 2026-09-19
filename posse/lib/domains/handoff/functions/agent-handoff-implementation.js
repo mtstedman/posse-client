@@ -14,6 +14,7 @@ import {
   AGENT_HANDOFF_PROFILE_POLICY,
   AGENT_HANDOFF_PROTOCOL,
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
+  AGENT_HANDOFF_RESEARCH_PROSE_FIELDS,
   AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
 } from "../../../catalog/handoff.js";
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
@@ -2750,8 +2751,7 @@ function validatePlannerPacketSemantics(packet, { context = null } = {}) {
   }
 }
 
-// Every model-authored text field of one handoff, each with a setter so a
-// repair can rewrite the field in place.
+// Narrative only: structured commands, paths and identifiers must remain exact.
 function narrativeFragmentsForHandoff(handoff, handoffIndex) {
   const report = handoff.report || {};
   const fragments = [
@@ -2790,18 +2790,6 @@ function narrativeFragmentsForHandoff(handoff, handoffIndex) {
       });
     }
   }
-  for (const [key, values] of Object.entries(report.scope || {})) {
-    for (const [index, text] of (Array.isArray(values) ? values : [values]).entries()) {
-      fragments.push({
-        label: `handoffs[${handoffIndex}].report.scope.${key}[${index}]`,
-        text,
-        set: (next) => {
-          if (Array.isArray(values)) values[index] = next;
-          else report.scope[key] = next;
-        },
-      });
-    }
-  }
   const appendStructuredFragments = (value, label, set) => {
     if (typeof value === "string") {
       fragments.push({ label, text: value, set });
@@ -2817,12 +2805,16 @@ function narrativeFragmentsForHandoff(handoff, handoffIndex) {
       }
     }
   };
-  if (report.research) {
-    appendStructuredFragments(report.research, `handoffs[${handoffIndex}].report.research`, (next) => { report.research = next; });
-  }
-  for (const key of PLANNER_REPORT_METADATA_KEYS) {
-    if (report[key] != null) {
-      appendStructuredFragments(report[key], `handoffs[${handoffIndex}].report.${key}`, (next) => { report[key] = next; });
+  for (const [section, fields] of Object.entries(AGENT_HANDOFF_RESEARCH_PROSE_FIELDS)) {
+    const value = report.research?.[section];
+    const entries = Array.isArray(value) ? value : (value ? [value] : []);
+    for (const [index, entry] of entries.entries()) {
+      for (const field of fields) {
+        if (entry[field] != null) {
+          appendStructuredFragments(entry[field], `handoffs[${handoffIndex}].report.research.${section}[${index}].${field}`,
+            (next) => { entry[field] = next; });
+        }
+      }
     }
   }
   return fragments;

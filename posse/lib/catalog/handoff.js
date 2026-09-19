@@ -3,6 +3,18 @@
 export const AGENT_HANDOFF_RECEIPT_NOTIFICATION = "notifications/posse/agent_handoff_receipt";
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 
+// Only narrative fields may be rewritten when they repeat selected evidence.
+// Commands, paths, symbols, queries and other structured values stay exact.
+export const AGENT_HANDOFF_RESEARCH_PROSE_FIELDS = Object.freeze({
+  memories: ["title", "content"],
+  planner_file_priorities: ["reason"],
+  patterns: ["description"],
+  scope_estimate: ["unknowns", "scope_reasons"],
+  absence_checks: ["claim"],
+  question_details: ["question", "context", "impact"],
+  verification_targets: ["reason"],
+});
+
 // Terminal prose may name an auth scheme or use a placeholder noun. This
 // vocabulary never changes credential detection for bridge payloads or logs.
 export const AGENT_HANDOFF_BEARER_PROSE_TERMS = Object.freeze([

@@ -625,6 +625,12 @@ function deferTerminalCleanupIfActiveWork(wi, wtDir) {
   return true;
 }
 
+export function disableWorkItemAtlas(job) {
+  job._atlasConfig = null;
+  job._atlasGraphDbPath = null;
+  job._atlasDisabledForWorkItem = true;
+}
+
 export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal = null } = {}) {
   // The catalog is the authoritative coarse boundary. Avoid invoking the
   // key-gated native Git policy for jobs that can never own a worktree; the
@@ -1115,6 +1121,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       // reconcile from this checkout before allowing agent reads.
       try {
         if (await isMergeInProgressAsync(wtPath, { signal })) {
+          disableWorkItemAtlas(job);
           worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
         } else {
           worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} preparing worktree graph before dev join${C.reset}`);
@@ -1163,8 +1170,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         }
       } catch (atlasErr) {
         if (isAbortError(atlasErr)) throw atlasErr;
-        job._atlasConfig = null;
-        job._atlasDisabledForWorkItem = true;
+        disableWorkItemAtlas(job);
         worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree join skipped: ${atlasErr.message.split("\n")[0]}${C.reset}`);
       }
     });

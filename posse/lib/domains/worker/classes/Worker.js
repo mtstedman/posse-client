@@ -152,6 +152,7 @@ import {
 } from "../../planning/functions/plan-compiler.js";
 import {
   ASSESSABLE_JOB_TYPES,
+  FAILED_JOB_STATUSES,
   MUTATING_JOB_TYPES,
 } from "../../../catalog/job.js";
 import {
@@ -841,7 +842,7 @@ export class Worker {
         assessment: current?.assessment_state ?? null,
         error: current?.last_error ? String(current.last_error).slice(0, 200) : null,
       };
-      const failed = ["failed", "dead_letter", "canceled"].includes(status);
+      const failed = FAILED_JOB_STATUSES.includes(status) || status === "canceled";
       // ATLAS warms run several per work item; only a bad ending is worth a line.
       if (!failed && job.job_type === "atlas_warm") return;
       log[failed ? "warn" : "info"]("worker", `Job end: ${job.job_type} #${job.id} -> ${status}`, detail);
