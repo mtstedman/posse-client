@@ -51,7 +51,13 @@ function terminalName(value) {
 function containsIdentifier(text, identifier) {
   if (identifier.length < 4) return false;
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}([^A-Za-z0-9_$]|$)`, "i").test(text);
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}([^A-Za-z0-9_$]|$)`).test(text);
+}
+
+function isDistinctiveIdentifier(identifier) {
+  return identifier.includes("_")
+    || /[a-z][A-Z]/.test(identifier)
+    || /^[A-Z][A-Za-z0-9_$]{3,}$/.test(identifier);
 }
 
 function surveySymbolCatalog(files) {
@@ -92,7 +98,8 @@ export function thinSurveyDirection(files, { taskText = "", callMap = null, maxR
   const catalog = surveySymbolCatalog(files);
   const task = String(taskText || "");
   const roots = [...catalog.byFull.values()]
-    .filter((entry) => containsIdentifier(task, entry.terminal))
+    .filter((entry) => containsIdentifier(task, entry.full)
+      || (isDistinctiveIdentifier(entry.terminal) && containsIdentifier(task, entry.terminal)))
     .filter((entry) => (catalog.byTerminal.get(entry.terminal.toLowerCase()) || []).length === 1)
     .sort((a, b) => b.terminal.length - a.terminal.length || a.order - b.order)
     .slice(0, Math.max(0, maxRoots))
