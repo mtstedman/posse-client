@@ -20,7 +20,7 @@ import {
   surfaceHashRefForContext,
 } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
-import { rankSurveyFilesForProjection } from "./survey-projection-rank.js";
+import { rankSurveyFilesForProjection, thinSurveyDirection } from "./survey-projection-rank.js";
 import {
   planLifecycleSurveyExpansion,
   resolveLifecycleSurveyTargetSymbolIds,
@@ -2703,6 +2703,10 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
   });
   const metrics = result.metrics && typeof result.metrics === "object" ? result.metrics : {};
   const summary = _compactSurveyCallMap(callMap, metrics, { edgeLimit });
+  const thinDirection = thinSurveyDirection(originalFiles, {
+    taskText: result.taskText,
+    callMap,
+  });
   const fileCount = Number.isFinite(Number(metrics.fileCount))
     ? Number(metrics.fileCount)
     : originalFiles.length;
@@ -2745,6 +2749,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     fileSummaries,
     topFiles: fileSummaries.map((file) => file.path),
     callMapSummary: summary,
+    thinDirection,
     traversalRef: result.traversalRef || null,
     dependencyBoundaries: Array.isArray(result.dependencyBoundaries)
       ? result.dependencyBoundaries.slice(0, 6)
@@ -3715,6 +3720,18 @@ function _renderAtlasSurveyMissSection(sc, packet) {
 
 function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   const slice = packet.atlas_slice_context;
+  if (packet.recipient === "researcher") {
+    const direction = slice?.surveyContext?.thinDirection;
+    const roots = Array.isArray(direction?.roots) ? direction.roots.filter(Boolean).slice(0, 3) : [];
+    const edges = Array.isArray(direction?.edges) ? direction.edges.filter((edge) => edge?.from && edge?.to).slice(0, 6) : [];
+    if (roots.length === 0) return "";
+    return [
+      atlasHeading("ATLAS CODE MAP"),
+      "Roots:",
+      ...roots.map((symbol) => `- ${symbol}`),
+      ...(edges.length > 0 ? ["Edges:", ...edges.map((edge) => `- ${edge.from} -> ${edge.to}`)] : []),
+    ].join("\n");
+  }
   const label = atlasBackendLabel(packet?.atlas);
   const isTreeSourced = slice.source === "tree.scope" || slice.source === "tree.expand";
   const lines = [

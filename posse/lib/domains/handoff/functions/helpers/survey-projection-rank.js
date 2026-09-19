@@ -44,6 +44,79 @@ function symbolName(symbol) {
   return String(symbol?.qualifiedName || symbol?.qualified_name || symbol?.name || symbol || "").trim();
 }
 
+function terminalName(value) {
+  return String(value || "").split(/[.#:/\\]/).filter(Boolean).at(-1) || "";
+}
+
+function containsIdentifier(text, identifier) {
+  if (identifier.length < 4) return false;
+  const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}([^A-Za-z0-9_$]|$)`, "i").test(text);
+}
+
+function surveySymbolCatalog(files) {
+  const byFull = new Map();
+  const byTerminal = new Map();
+  let order = 0;
+  for (const file of Array.isArray(files) ? files : []) {
+    for (const symbol of Array.isArray(file?.symbols) ? file.symbols : []) {
+      const full = symbolName(symbol);
+      if (!full || byFull.has(full)) continue;
+      const entry = { full, terminal: terminalName(full), order: order++ };
+      byFull.set(full, entry);
+      const key = entry.terminal.toLowerCase();
+      if (key) byTerminal.set(key, [...(byTerminal.get(key) || []), entry]);
+    }
+  }
+  return { byFull, byTerminal };
+}
+
+function resolveUniqueSymbol(value, catalog) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (catalog.byFull.has(raw)) return raw;
+  const exactFolded = [...catalog.byFull.keys()].filter((name) => name.toLowerCase() === raw.toLowerCase());
+  if (exactFolded.length === 1) return exactFolded[0];
+  const matches = catalog.byTerminal.get(terminalName(raw).toLowerCase()) || [];
+  return matches.length === 1 ? matches[0].full : null;
+}
+
+/**
+ * Produce an intentionally tiny, abstaining researcher orientation surface.
+ * Roots must be uniquely resolved survey symbols explicitly named by the task;
+ * arrows must be exact repository call-map edges whose endpoints both resolve
+ * to full survey symbol names. No file, line, kind, score, or prose metadata is
+ * admitted to this projection.
+ */
+export function thinSurveyDirection(files, { taskText = "", callMap = null, maxRoots = 3, maxEdges = 6 } = {}) {
+  const catalog = surveySymbolCatalog(files);
+  const task = String(taskText || "");
+  const roots = [...catalog.byFull.values()]
+    .filter((entry) => containsIdentifier(task, entry.terminal))
+    .filter((entry) => (catalog.byTerminal.get(entry.terminal.toLowerCase()) || []).length === 1)
+    .sort((a, b) => b.terminal.length - a.terminal.length || a.order - b.order)
+    .slice(0, Math.max(0, maxRoots))
+    .map((entry) => entry.full);
+  if (roots.length === 0) return { roots: [], edges: [] };
+
+  const rootSet = new Set(roots);
+  const edges = [];
+  const seen = new Set();
+  for (const group of [callMap?.inbound, callMap?.outbound, callMap?.edges]) {
+    for (const edge of Array.isArray(group) ? group : []) {
+      const from = resolveUniqueSymbol(edge?.from, catalog);
+      const to = resolveUniqueSymbol(edge?.to, catalog);
+      if (!from || !to || (!rootSet.has(from) && !rootSet.has(to))) continue;
+      const key = `${from}\u0000${to}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ from, to });
+      if (edges.length >= Math.max(0, maxEdges)) return { roots, edges };
+    }
+  }
+  return { roots, edges };
+}
+
 function publicSurfaceWeight(filePath) {
   const parts = String(filePath || "").replace(/\\/g, "/").split("/").filter(Boolean);
   const basename = parts.at(-1) || "";
