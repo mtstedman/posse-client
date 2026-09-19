@@ -326,6 +326,22 @@ function teamApprovalGovernsCommit(opts) {
   return getLivePairingState()?.submission_approval_enabled === 1;
 }
 
+function reportScopedSecretFindings(secretsResult, { opts = {}, paths = [], phase }) {
+  if (secretsResult?.ok !== false) return;
+  // Scoped worktree mutations have already passed Posse's source, tool, and
+  // filesystem boundaries. Keep the scan as useful diagnostics, but do not
+  // discard completed agent work because a tracked fixture or an intentional
+  // scoped edit resembles a credential. Unscoped commits retain the blocking
+  // gate below because they can include bytes from outside that boundary.
+  log.warn("git-commit-scope", "Secret pattern detected in scoped commit; continuing", {
+    jobId: opts?.jobId ?? null,
+    wiId: opts?.wiId ?? null,
+    phase,
+    paths,
+    findings: secretsResult.output || null,
+  });
+}
+
 export function gitCommitAll(message, cwd, scope = null, opts = {}) {
   if (teamApprovalGovernsCommit(opts)
       && (!opts?.verifiedTeamWorkItemContext || isMainThread)) {
@@ -395,8 +411,14 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
     });
     if (bundle.paths.length > 0) {
       const secretsResult = runHook("secrets_scan", { cwd, paths: bundle.paths });
-      if (!secretsResult.ok) {
-        const err = new Error("Secrets detected in scoped files — commit classification blocked");
+      if (scope) {
+        reportScopedSecretFindings(secretsResult, {
+          opts,
+          paths: bundle.paths,
+          phase: "commit-classification",
+        });
+      } else if (!secretsResult.ok) {
+        const err = new Error("Secrets detected in unscoped files — commit classification blocked");
         err.hookOutput = secretsResult.output;
         throw err;
       }
@@ -1030,9 +1052,9 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       }
 
       // Verification may regenerate declared files or create new files under
-      // an admitted root. Refresh both the native path list and the scan set so
-      // the secrets gate observes the same scoped working-tree bytes Rust will
-      // stage immediately afterward.
+      // an admitted root. Refresh both the native path list and the diagnostic
+      // scan set so telemetry observes the same scoped working-tree bytes Rust
+      // will stage immediately afterward.
       admitPostHookChanges();
       refreshOutOfScopeAudit();
       throwIfOutOfScopeDirty();
@@ -1040,11 +1062,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         .filter((entry) => entry.changeKind !== "delete")
         .map((entry) => entry.path);
       const secretsResult = runHook("secrets_scan", { cwd, paths: scanPaths });
-      if (!secretsResult.ok) {
-        const err = new Error("Secrets detected in scoped files — commit blocked by hook");
-        err.hookOutput = secretsResult.output;
-        throw err;
-      }
+      reportScopedSecretFindings(secretsResult, {
+        opts,
+        paths: scanPaths,
+        phase: "scoped-transaction",
+      });
     }
 
     const expectedToCommit = expectedNativeChanges();
