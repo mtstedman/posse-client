@@ -1287,7 +1287,7 @@ const V2_ASSESSOR_CLAIMS = {
 
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
-    "Before handing off, make sure you have fully answered every aspect of the research question. Finish research with the active profile and target. Staged report claims remain assessment-grade and evidence-backed, while an unsupported submitted claim moves into a clearly marked summary note with no retry. Pipeline claims are advisory and may omit evidence; invalid pipeline selectors are dropped so the planner can inspect the claim itself. Preserve exact existing verification commands in research.verification_targets. Use outcome input_required when an unresolved choice would materially change security, authentication, data handling, or user-facing semantics and leave that choice to the human. The receipt ends generation.",
+    "Finish research with the active profile and target. Staged report claims remain assessment-grade and evidence-backed, while an unsupported submitted claim moves into a clearly marked summary note with no retry. Pipeline claims are advisory and may omit evidence; invalid pipeline selectors are dropped so the planner can inspect the claim itself. Preserve exact existing verification commands in research.verification_targets. Use outcome input_required when an unresolved choice would materially change security, authentication, data handling, or user-facing semantics and leave that choice to the human. The receipt ends generation.",
   profile: "researcher.pipeline.v1",
   profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
   outcomes: ["success", "gap", "input_required", "complete"],
@@ -1408,7 +1408,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Before handing off, make sure you have fully answered every aspect of the research question. Finish research using the active profile. Staged report claims require exact evidence, but unsupported submitted claims are moved into a marked summary note without a retry. Pipeline claims are advisory and may omit evidence; the planner can inspect them directly. Preserve exact existing test commands in verification_targets. Use input_required for unresolved choices that materially change security, authentication, data handling, or user-facing semantics. The receipt ends generation.",
+    "Finish research using the active profile. Staged report claims require exact evidence, but unsupported submitted claims are moved into a marked summary note without a retry. Pipeline claims are advisory and may omit evidence; the planner can inspect them directly. Preserve exact existing test commands in verification_targets. Use input_required for unresolved choices that materially change security, authentication, data handling, or user-facing semantics. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1549,7 +1549,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Before handing off, make sure you have fully answered every aspect of the research question. Finish research with a complete evidence-backed report. Saved claims are included automatically. The optional claims field is for complete findings that have not already been saved through report_claims. Preserve material conditions and exceptions and prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note without a retry. The receipt ends generation.",
+    "Finish research with a complete evidence-backed report. Saved claims are included automatically. The optional claims field is for complete findings that have not already been saved through report_claims. Preserve material conditions and exceptions and prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note without a retry. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
