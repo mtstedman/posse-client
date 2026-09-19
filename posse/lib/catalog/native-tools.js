@@ -544,7 +544,7 @@ export const TOOL_REPORT_CLAIMS = {
   type: "function",
   name: "report_claims",
   description:
-    "Maintain the current research report's nonterminal claim draft while leaving the turn open. Save an evidence-backed finding when its exact condition is established; reuse its stable id to correct it, remove it if later evidence disproves it, or list the compact draft. Saved claims are automatically appended to the terminal researcher report and undergo the normal final evidence validation.",
+    "Record evidence-backed research claims while the investigation remains open. Use this tool immediately when you have enough visible evidence to support a finding. Batch findings discovered together. Reuse each claim's stable id to revise it, or remove it if later evidence disproves it. Saved claims are automatically included in the terminal report and undergo normal final evidence validation.",
   parameters: {
     type: "object",
     properties: {
@@ -1549,7 +1549,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with a complete evidence-backed report. Supply unsaved findings in claims and preserve their material conditions and exceptions; revise a saved finding through its stable draft id before finalization. Saved claim drafts are appended automatically before validation. Prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note with no retry. The receipt ends generation.",
+    "Finish research with a complete evidence-backed report. Saved claims are included automatically. The optional claims field is for complete findings that have not already been saved through report_claims. Preserve material conditions and exceptions and prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note without a retry. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1563,7 +1563,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
       claims: {
         type: "array",
         minItems: 1,
-        description: "Ordered candidate findings; evidence-backed claims supply [EN], while unsupported candidates are moved into a marked summary note.",
+        description: "Optional ordered findings not already saved through report_claims.",
         items: {
           type: "object",
           properties: {

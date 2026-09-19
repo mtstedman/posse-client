@@ -879,7 +879,7 @@ Remote roles: `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Maintain the current research report's nonterminal claim draft while leaving the turn open. Save an evidence-backed finding when its exact condition is established; reuse its stable id to correct it, remove it if later evidence disproves it, or list the compact draft. Saved claims are automatically appended to the terminal researcher report and undergo the normal final evidence validation.
+Record evidence-backed research claims while the investigation remains open. Use this tool immediately when you have enough visible evidence to support a finding. Batch findings discovered together. Reuse each claim's stable id to revise it, or remove it if later evidence disproves it. Saved claims are automatically included in the terminal report and undergo normal final evidence validation.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
