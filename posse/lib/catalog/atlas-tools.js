@@ -670,7 +670,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.get": {
     type: "function",
     name: "atlas_symbol_get",
-    description: "Read an exact symbol body, or batch up to three independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.",
+    description: "Read an exact symbol body, or batch independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.",
     parameters: {
       type: "object",
       properties: {

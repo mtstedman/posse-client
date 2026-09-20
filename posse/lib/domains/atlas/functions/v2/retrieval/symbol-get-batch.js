@@ -2,8 +2,8 @@ import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch
 
 export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForId = null} = {}) {
   if (!Array.isArray(args?.items)) return { error: "symbol.get items must be an array" };
-  if (args.items.length < 1 || args.items.length > SYMBOL_GET_BATCH_POLICY.maxItems) {
-    return { error: `symbol.get items requires 1-${SYMBOL_GET_BATCH_POLICY.maxItems} selectors` };
+  if (args.items.length < 1) {
+    return { error: "symbol.get items requires at least one selector" };
   }
   if (["symbolId", "symbolHandle", "symbolRef", "file", "path", "identifiersToFind"].some(key => args[key] != null)) {
     return { error: "symbol.get batch cannot be combined with scalar selector fields" };
@@ -12,7 +12,7 @@ export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForI
   if (!Number.isSafeInteger(perSymbolBudget) || perSymbolBudget < 1 || perSymbolBudget > SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol) {
     return { error: `symbol.get batch maxTokens must be between 1 and ${SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol} per symbol` };
   }
-  return { items: args.items.map(item => {
+  return { items: args.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems).map(item => {
     if (!item || typeof item !== "object" || Array.isArray(item) || item.items != null) return { invalid: true };
     if (item.maxTokens != null && (
       !Number.isSafeInteger(item.maxTokens)
@@ -30,12 +30,27 @@ export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForI
       }
     }
     return selected;
-  }), maxTokensPerSymbol: perSymbolBudget };
+  }), maxTokensPerSymbol: perSymbolBudget, overflow: symbolGetBatchOverflow(args.items) };
+}
+
+function symbolGetBatchOverflow(items) {
+  const cap = SYMBOL_GET_BATCH_POLICY.maxItems;
+  if (items.length <= cap) return {};
+  const excluded = items.slice(cap).map((item, offset) => ({
+    index: cap + offset,
+    selector: Object.fromEntries(["symbolId", "symbolHandle", "symbolRef", "file"]
+      .filter(key => item && typeof item === "object" && Object.hasOwn(item, key))
+      .map(key => [key, item[key]])),
+  }));
+  return {
+    note: `Batch cap applied: processed the first ${cap} of ${items.length} requested items. Excluded selectors are listed in excluded with zero-based indexes; they were not executed.`,
+    excluded,
+  };
 }
 
 // Each child passed through normal admission, custody, paging and projection.
 // Preserve raw source blocks; lift their indexes into the combined MCP response.
-export function combineSymbolGetBatchResults(results) {
+export function combineSymbolGetBatchResults(results, overflow = {}) {
   const content = [{ type: "text", text: "" }];
   const items = results.map((result, index) => {
     const offset = content.length;
@@ -63,6 +78,6 @@ export function combineSymbolGetBatchResults(results) {
     }
     return { index, isError: result?.isError === true, contentBlocks: blocks.map((_, i) => offset + i) };
   });
-  content[0].text = JSON.stringify({ action: "symbol.get", items });
+  content[0].text = JSON.stringify({ action: "symbol.get", items, ...overflow });
   return { content, isError: items.every(item => item.isError), _meta: { symbolGetBatch: { count: items.length, failed: items.filter(item => item.isError).length } } };
 }

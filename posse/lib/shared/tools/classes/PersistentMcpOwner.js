@@ -6405,7 +6405,7 @@ export class PersistentMcpOwner {
           message: { ...args.message, id: `${args.message?.id ?? "symbols"}:${index}` },
         }).catch(() => ({result: mcpToolErrorPayload("symbol.get batch item execution failed")}))));
       return mcpToolResultMessage(args.message, appendResearchWorkBudget(
-        combineSymbolGetBatchResults(responses.map(response => response.result)),
+        combineSymbolGetBatchResults(responses.map(response => response.result), plan.overflow),
         { tracked: String(boot.role || "") === "researcher", assignedPhysicalCallStep: physicalStep,
           maxPhysicalCalls: researchSynthesisPolicyFor(args.session).maxPhysicalCalls,
           reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(boot)) },

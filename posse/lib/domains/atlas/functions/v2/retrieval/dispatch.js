@@ -129,7 +129,7 @@ function dispatchImpl(call, ctx) {
       })
     );
   }
-  const validation = validateAtlasToolCall(call);
+  const validation = validateAtlasToolCall(call, { allowSymbolGetBatchOverflow: true });
   if (validation.ok === false) {
     const validationCode = validationErrorCodeForAction(action, validation.errors);
     const failure = validationFailureForAction(action, call, validation.errors);

@@ -294,7 +294,7 @@ export async function symbolGet({
       ? errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: "Invalid symbol.get batch item"})
       : symbolGet({view, versionId, params: item, readFile, repoRoot, ledger, repoId, config,
         hashRefContext, readSymbolBody, storeSourceTraversalRef})));
-    return {ok: true, action: "symbol.get", versionId, data: {items}};
+    return {ok: true, action: "symbol.get", versionId, data: {items, ...plan.overflow}};
   }
   const selection = params.symbolId
     ? await selectSymbolTarget({

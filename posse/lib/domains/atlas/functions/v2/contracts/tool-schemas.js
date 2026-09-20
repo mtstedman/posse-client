@@ -785,9 +785,10 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
 
 /**
  * @param {import("./tool-params.js").ToolCall} call
+ * @param {{ allowSymbolGetBatchOverflow?: boolean }} [options]
  * @returns {{ ok: true } | { ok: false, errors: ValidationError[] }}
  */
-export function validateAtlasToolCall(call) {
+export function validateAtlasToolCall(call, { allowSymbolGetBatchOverflow = false } = {}) {
   if (!call || typeof call !== "object" || Array.isArray(call)) {
     return {
       ok: false,
@@ -799,6 +800,11 @@ export function validateAtlasToolCall(call) {
   if (!schema) return { ok: true };
   const params = { .../** @type {Record<string, unknown>} */ (call) };
   delete params.action;
+  // Dispatch executes only the accepted prefix and reports the untouched tail.
+  // Keep the advertised schema and strict recovery-call admission unchanged.
+  if (allowSymbolGetBatchOverflow && action === "symbol.get" && Array.isArray(params.items)) {
+    params.items = params.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems);
+  }
   if (action === "traverse_ref" && params.traversal_ref == null) {
     params.traversal_ref = params.traversal_refs ?? params.ref ?? params.refs ?? params.hashes;
   }

@@ -22,9 +22,9 @@ const ACTION_CARDS = Object.freeze({
   "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; list compact incoming caller or reference symbols grouped by file; fields symbolId,mode,limit,offset",
-  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": "requires symbolId or symbolRef, or items with independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
   "symbol.overview": "requires symbolId; fields symbolId,kind,minConfidence,limit,includeUnresolved",
-  "code.skeleton": "fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
+  "code.skeleton": "scan one file for declarations and class members, with source ranges, short symbolId handles for symbol.get (reuse the returned symbolId), and explicit completeness; fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
   "code.survey": "requires paths; fields paths,identifiersToFind,limit",
   "code.structure": "requires paths; exact inventory of one small directory or file set (default 12 files) with stable symbol handles, or an explicit relationship query when edgeKinds such as implements, extends, calls, or imports are supplied; imports is the default edge kind; use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
   "code.lens": "requires identifiersToFind and either symbolId or file; fields symbolId,file,identifiersToFind,contextLines",
@@ -42,9 +42,9 @@ const TYPED_ACTION_CARDS = Object.freeze({
   "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; get a compact relationship summary for one or several identified symbols; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; returns compact incoming resolved callers, references, or both, grouped by file; fields symbolId,mode,limit,offset",
-  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": ACTION_CARDS["symbol.get"],
   "symbol.overview": "requires symbolId; inspect concrete call and reference sites when relationships are the missing fact; fields symbolId,kind,minConfidence,limit,includeUnresolved",
-  "code.skeleton": "scan one file for declarations and class members, with source ranges, short symbolId handles for symbol.get (reuse the returned symbolId), and explicit completeness; fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
+  "code.skeleton": ACTION_CARDS["code.skeleton"],
   "code.survey": "requires paths; returns a ranked multi-file symbol preview and call map; fields paths,identifiersToFind,limit",
   "code.structure": "requires paths; read the exact inventory of one small directory or file set (default 12 files, paged beyond that) with stable symbol handles, or answer who-implements, who-extends, who-calls, or who-imports inside it in one call by naming edgeKinds explicitly (imports is the default; without edges it is a symbol list, not a relationship proof); use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
   "code.lens": "requires identifiersToFind and either symbolId or file; returns focused locations and enclosing-symbol context for identifiers in one target; fields symbolId,file,identifiersToFind,contextLines",
@@ -58,7 +58,7 @@ const TYPED_ACTION_CARDS = Object.freeze({
 // prompt pressure: native validation still rejects every malformed window.
 const TYPED_TERSE_ACTION_CARDS = Object.freeze({
   ...ACTION_CARDS,
-  "symbol.get": "requires symbolId or symbolRef, or items with up to three independent selectors; returns complete exact symbol bodies; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; exact bodies do not establish surrounding file-level branch order or caller precedence; fields items,symbolId,symbolHandle,symbolRef,file,identifiersToFind,maxTokens",
+  "symbol.get": ACTION_CARDS["symbol.get"],
   "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; fields file,identifiersToFind,granularity,maxTokens",
 });
 
@@ -426,13 +426,15 @@ export function normalizeResearcherTypedActionArgs(action, args = {}) {
   const normalized = { ...args };
   const aliases = [];
   if (action === "symbol.get" && Array.isArray(normalized.items)) {
-    if (normalized.items.some(item => !item || typeof item !== "object" || item.items != null)) {
+    const selected = normalized.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems);
+    if (selected.some(item => !item || typeof item !== "object" || item.items != null)) {
       return {args: normalized, aliases, error: "symbol.get batch items must be scalar selectors"};
     }
-    const children = normalized.items.map(item => normalizeResearcherTypedActionArgs(action, item));
+    const children = selected.map(item => normalizeResearcherTypedActionArgs(action, item));
     const invalid = children.find(child => child.error);
     if (invalid) return {args: normalized, aliases, error: invalid.error};
-    normalized.items = children.map(child => child.args);
+    // Preserve the excluded tail for the batch result notice, without resolving it.
+    normalized.items = [...children.map(child => child.args), ...normalized.items.slice(SYMBOL_GET_BATCH_POLICY.maxItems)];
   }
   const move = (from, to) => {
     if (!Object.prototype.hasOwnProperty.call(normalized, from)) return null;

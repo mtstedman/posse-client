@@ -1114,13 +1114,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read an exact symbol body, or batch up to three independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.
+Read an exact symbol body, or batch independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `file` | `string` | Optional | min length 1; max length 4000 | Optional exact repository-relative path for duplicate-body disambiguation. |
 | `identifiersToFind` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 50 | Optional exact identifiers whose in-body coverage should be reported. |
-| `items` | `array<any>` | Conditional | min items 1; max items 3 | Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode. |
+| `items` | `array<any>` | Conditional | min items 1; max items 10 | Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap; the repository code-window policy still applies. |
 | `symbolId` | `string` | Conditional |  | Exact symbol ID returned by Atlas. |
 | `symbolRef` | `object` | Conditional |  | Exact symbol reference used when no symbol ID is needed. |
