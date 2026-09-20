@@ -272,17 +272,17 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use for compact orientation within one known file or symbol. Returns a body-free structural outline of signatures, declarations, and containment relationships.
+Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, with source ranges, compact signatures, and compact symbolRef names for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with symbolRef:{name:<row symbolRef>,file:<repo_rel_path>}. Rows without a symbolRef can be read with code.window using their file and range.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `exportedOnly` | `boolean` | Optional |  | Prefer exported symbols only when possible. |
 | `file` | `string` | Optional | min length 1 | Optional relative file path to inspect. |
 | `identifiersToFind` | `array | string` | Optional | max length 5000; max items 50 | Optional identifier names used to focus the outline, up to 50. |
-| `maxLines` | `integer` | Optional | min 1; max 5000 | Maximum rendered outline lines. Minimum 1, maximum 5000. |
-| `maxTokens` | `integer` | Optional | min 1; max 200000 | Maximum rendered outline tokens. Minimum 1, maximum 200000. |
+| `maxLines` | `integer` | Optional | min 1; max 5000 | Maximum declaration rows. Default 200; minimum 1, maximum 5000. |
+| `maxTokens` | `integer` | Optional | min 1; max 200000 | Approximate rendered map token budget. Default 4000; minimum 1, maximum 200000. |
 | `surveyGap` | `string` | Optional | min length 3; max length 1000 | Named structural fact absent from the delivered orientation. This justifies bypassing the survey-first redirect; it does not otherwise change skeleton retrieval. |
-| `symbolId` | `string` | Optional |  | Opaque ATLAS symbol ID selecting one indexed symbol. The file field selects a path. |
+| `symbolId` | `string` | Optional |  | Opaque ATLAS symbol ID selecting its containing file. Use identifiersToFind to focus declarations. |
 
 ### `atlas.code.structure`
 

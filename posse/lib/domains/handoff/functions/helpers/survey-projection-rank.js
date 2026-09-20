@@ -3,6 +3,32 @@
 // data. This module never sees benchmark keys, grades, expected answers, or
 // historical outcomes.
 
+import { SURVEY_DEPENDENCY_DISPLAY, SURVEY_OUTLINE_KINDS } from "../../../../catalog/source-display.js";
+
+/** Preserve source availability facts without copying prefetch instructions. */
+export function surveyDependencyOutline(boundaries) {
+  const lines = [];
+  const seen = new Set();
+  let chars = 0;
+  const singleLine = value => String(value || "").replace(/[\r\n\t]+/g, " ").trim();
+  for (const boundary of Array.isArray(boundaries) ? boundaries : []) {
+    const name = singleLine(boundary?.dependency);
+    if (!name) continue;
+    const version = singleLine(boundary.version);
+    const manifest = singleLine(boundary.manifest);
+    const labels = SURVEY_DEPENDENCY_DISPLAY.statusLabels;
+    const status = Object.hasOwn(labels, boundary.sourceStatus) ? labels[boundary.sourceStatus] : "unknown";
+    const line = `- ${name}${version ? ` (${version})` : ""}: ${status}${manifest ? `; manifest=${manifest}` : ""}`;
+    if (seen.has(line) || line.length > SURVEY_DEPENDENCY_DISPLAY.maxLineChars) continue;
+    if (chars + line.length + 1 > SURVEY_DEPENDENCY_DISPLAY.maxChars) break;
+    seen.add(line);
+    lines.push(line);
+    chars += line.length + 1;
+    if (lines.length >= SURVEY_DEPENDENCY_DISPLAY.maxItems) break;
+  }
+  return lines;
+}
+
 const TOKEN_STOP = new Set([
   "across", "behavior", "code", "concrete", "deliverable", "deliverables",
   "distinguish", "enumerate", "evidence", "explain", "false", "file",
@@ -85,6 +111,64 @@ function resolveUniqueSymbol(value, catalog) {
   if (exactFolded.length === 1) return exactFolded[0];
   const matches = catalog.byTerminal.get(terminalName(raw).toLowerCase()) || [];
   return matches.length === 1 ? matches[0].full : null;
+}
+
+/** Select real declarations before imports/container aliases, using survey metadata. */
+export function surveyOutlineSymbols(file, { taskText = "" } = {}) {
+  const requested = taskTokens(taskText);
+  const seen = new Set();
+  return (Array.isArray(file?.symbols) ? file.symbols : [])
+    .map((symbol, index) => {
+      const name = symbolName(symbol);
+      const kind = String(symbol?.kind || "").toLowerCase();
+      const callable = SURVEY_OUTLINE_KINDS.callables.includes(kind);
+      const declaration = SURVEY_OUTLINE_KINDS.declarations.includes(kind);
+      const container = SURVEY_OUTLINE_KINDS.containers.includes(kind);
+      const matches = normalizedTokens(name).filter(token => requested.has(token)).length;
+      const canonicalName = name.replace(/::|[\\/#]/g, ".");
+      return { name, index, canonicalName, symbolId: symbol?.symbolId,
+        rank: callable ? 3 : declaration ? 2 : container ? 0 : 1, matches };
+    })
+    .filter(entry => entry.name)
+    .sort((a, b) => b.rank - a.rank || b.matches - a.matches || a.index - b.index)
+    .filter(entry => {
+      const nameKey = `name:${entry.canonicalName}`;
+      const symbolKey = entry.symbolId ? `id:${entry.symbolId}` : null;
+      if (seen.has(nameKey) || (symbolKey && seen.has(symbolKey))) return false;
+      seen.add(nameKey);
+      if (symbolKey) seen.add(symbolKey);
+      return true;
+    })
+    .map(entry => entry.name);
+}
+
+/** Render bounded orientation from already-ranked survey files, not source evidence. */
+export function surveyFileOutline(files) {
+  const lines = [];
+  const seen = new Set();
+  let chars = 0;
+  for (const file of Array.isArray(files) ? files : []) {
+    const filePath = String(file?.path || "").trim();
+    if (!filePath || seen.has(filePath)) continue;
+    seen.add(filePath);
+    let line = `- ${filePath}`;
+    if (line.length > 480) continue;
+    const names = [...new Set((Array.isArray(file.outlineSymbols) ? file.outlineSymbols : Array.isArray(file.symbols) ? file.symbols : [])
+      .map(symbolName).filter(Boolean))];
+    let shown = 0;
+    for (const name of names) {
+      const suffix = `${shown ? ", " : ": "}${name}`;
+      if (shown >= 6) break;
+      if (line.length + suffix.length > 480) continue;
+      line += suffix;
+      shown += 1;
+    }
+    if (chars + line.length + 1 > 4000) break;
+    lines.push(line);
+    chars += line.length + 1;
+    if (lines.length === 8) break;
+  }
+  return lines;
 }
 
 /**

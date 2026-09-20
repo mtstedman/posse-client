@@ -801,16 +801,18 @@
 
 /**
  * @typedef {Object} CodeSkeletonData
- * @property {SymbolId} [symbolId]
  * @property {string} repo_rel_path
- * @property {string} content                 The deterministic skeleton text.
- * @property {string} [contentKind]           Source, summary, indexed signatures, or unknown legacy provenance. Only source permits original-source line interpretation.
- * @property {number} startLine
- * @property {number} endLine
+ * @property {string} content                 One declaration per row: source range, compact signature, and optional [symbolRef=qualifiedName]; call symbol.get with symbolRef:{name:qualifiedName,file:repo_rel_path}. Indentation groups members under containers; no bodies or local functions.
+ * @property {number} totalSymbols            Declaration count after filtering, before output limits.
+ * @property {number} returnedSymbols         Complete rows returned.
+ * @property {number} omittedSymbols          Rows omitted by output limits; raise maxLines/maxTokens to retrieve more.
+ * @property {boolean} complete               No omitted declarations or source/parse degradation.
+ * @property {string} [contentKind]           Summary or indexed signatures; map rows are not citable original source.
+ * @property {number} startLine               First materialized map row, not a source coordinate.
+ * @property {number} endLine                 Last materialized map row; per-declaration source ranges are in content.
  * @property {boolean} truncated
  * @property {string} matchStatus             Whether identifier matching was exact, fallback, or absent.
  * @property {string} [degradedReason]         Stable degradation reason; omitted when the result is complete.
- * @property {CalledFromBreadcrumb[]} [calledFrom]  Top definitions here by distinct calling files.
  * @property {string} [etag]
  */
 

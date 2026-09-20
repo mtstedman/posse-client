@@ -885,15 +885,15 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Use for compact orientation within one known file or symbol. Returns a body-free structural outline of signatures, declarations, and containment relationships.",
+    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, with source ranges, compact signatures, and compact symbolRef names for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with symbolRef:{name:<row symbolRef>,file:<repo_rel_path>}. Rows without a symbolRef can be read with code.window using their file and range.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID selecting one indexed symbol. The file field selects a path." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID selecting its containing file. Use identifiersToFind to focus declarations." },
         file: { type: "string", description: "Optional relative file path to inspect." },
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
-        maxLines: { type: "integer", description: "Maximum rendered outline lines. Minimum 1, maximum 5000." },
-        maxTokens: { type: "integer", description: "Maximum rendered outline tokens. Minimum 1, maximum 200000." },
+        maxLines: { type: "integer", description: "Maximum declaration rows. Default 200; minimum 1, maximum 5000." },
+        maxTokens: { type: "integer", description: "Approximate rendered map token budget. Default 4000; minimum 1, maximum 200000." },
         identifiersToFind: { type: "array", items: { type: "string" }, description: "Optional identifier names used to focus the outline, up to 50." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },

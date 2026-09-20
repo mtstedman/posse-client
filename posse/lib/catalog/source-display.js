@@ -2,6 +2,27 @@
 export const SOURCE_LINE_DISPLAY_FORMAT = "source_number_tab";
 export const RAW_SOURCE_LINES_ENCODING = "raw_source_lines";
 
+export const SKELETON_PAGE_POLICY = Object.freeze({
+  kind: "skeleton_page",
+  objectType: "atlas.code.skeleton.page",
+  reserveChars: 512,
+  maxPages: 256,
+});
+
+// Survey orientation priorities; these do not change retrieval or source kinds.
+export const SURVEY_OUTLINE_KINDS = Object.freeze({
+  callables: Object.freeze(["function", "method", "constructor"]),
+  declarations: Object.freeze(["class", "interface", "type", "enum", "struct", "trait", "property", "field"]),
+  containers: Object.freeze(["namespace", "module", "file", "package"]),
+});
+
+export const SURVEY_DEPENDENCY_DISPLAY = Object.freeze({
+  maxItems: 6,
+  maxLineChars: 480,
+  maxChars: 1600,
+  statusLabels: Object.freeze({ absent: "absent from checkout", present: "present in checkout" }),
+});
+
 // Model-facing file-mode code.window header. Every delivered window is one
 // `displayed` row and every requested declaration that is not fully inline is
 // one `omitted` row; the native map, additionalWindows and the identifier

@@ -1,5 +1,6 @@
 import crypto from "crypto";
-import { CODE_CONTENT_KINDS, RAW_SOURCE_LINES_ENCODING } from "../../../catalog/source-display.js";
+import { CODE_CONTENT_KINDS, RAW_SOURCE_LINES_ENCODING, SKELETON_PAGE_POLICY } from "../../../catalog/source-display.js";
+import { retainSkeletonPages } from "./skeleton-pages.js";
 
 import {
   getObservationContext,
@@ -71,7 +72,7 @@ import {
   projectCompactCodeStructure,
 } from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
 import { sourceLineDisplay } from "./source-line-display.js";
-import { boundSourceWindowEnvelope } from "./source-window-budget.js";
+import { boundSourceWindowEnvelope, packAdditionalSourceWindows } from "./source-window-budget.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -1140,25 +1141,26 @@ export function compactCodeWindowLensResult(toolName, result, {
       && Array.isArray(data.additionalWindows)
       && data.additionalWindows.length > 0
     ) {
-      const deferredAdditional = data.additionalWindows;
-      continuationSources.displayWindows += deferredAdditional.length;
-      nativeContinuation = dedupeCodeWindowContinuationWindows([
-        ...nativeContinuation,
-        ...deferredAdditional,
-      ]);
-      const deferredIdentifiers = new Set(deferredAdditional.flatMap((entry) => (
-        Array.isArray(entry?.identifiers) ? entry.identifiers.map(String) : []
-      )));
-      data.identifiersReturned = (Array.isArray(data.identifiersReturned) ? data.identifiersReturned : [])
-        .filter((identifier) => !deferredIdentifiers.has(String(identifier)));
-      data.identifiersOmitted = [...new Set([
-        ...(Array.isArray(data.identifiersOmitted) ? data.identifiersOmitted.map(String) : []),
-        ...deferredIdentifiers,
-      ])];
-      data.outputTruncated = true;
-      data.truncated = true;
-      delete data.additionalWindows;
-      compacted = true;
+      const deferredAdditional = packAdditionalSourceWindows(envelope, min);
+      if (deferredAdditional.length > 0) {
+        continuationSources.displayWindows += deferredAdditional.length;
+        nativeContinuation = dedupeCodeWindowContinuationWindows([
+          ...nativeContinuation,
+          ...deferredAdditional,
+        ]);
+        const deferredIdentifiers = new Set(deferredAdditional.flatMap((entry) => (
+          Array.isArray(entry?.identifiers) ? entry.identifiers.map(String) : []
+        )));
+        data.identifiersReturned = (Array.isArray(data.identifiersReturned) ? data.identifiersReturned : [])
+          .filter((identifier) => !deferredIdentifiers.has(String(identifier)));
+        data.identifiersOmitted = [...new Set([
+          ...(Array.isArray(data.identifiersOmitted) ? data.identifiersOmitted.map(String) : []),
+          ...deferredIdentifiers,
+        ])];
+        data.outputTruncated = true;
+        data.truncated = true;
+        compacted = true;
+      }
     }
     const originalContent = typeof data.content === "string" ? data.content : "";
     let inlineContentBudget = min;
@@ -1173,7 +1175,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     }
     if (
       tool === "code.window" && windowDisplayPaging
-      && result.length > min
+      && JSON.stringify(envelope).length > min
       && hasHashRefScope(hashContext)
       && typeof data.content === "string"
       && data.content.length > inlineContentBudget
@@ -1877,7 +1879,7 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
   let parsed;
   try { parsed = JSON.parse(payload); } catch { parsed = null; }
   const envelope = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
-  if (isSkeleton && envelope?.contentKind !== CODE_CONTENT_KINDS.SOURCE) {
+  if (isSkeleton && (envelope?.contentKind !== CODE_CONTENT_KINDS.SOURCE || envelope?.citable === false)) {
     return {
       line_semantics: "materialized",
       citable: false,
@@ -2030,6 +2032,34 @@ export function appendHashRefIfMajor(toolName, result, {
   const originalSizeChars = text.length;
   const effectiveObjectType = normalizeObjectType(objectType || toolName || "tool_result") || "tool_result";
   const boundPolicy = boundingPolicyFor(toolName, effectiveObjectType, { searchPaging });
+  if (String(toolName).endsWith("code.skeleton") && boundPolicy && text.length > boundPolicy.capChars) {
+    try {
+      text = retainSkeletonPages(JSON.parse(text), {
+        maxChars: Math.min(boundPolicy.capChars, CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS),
+        storePage: (payloadText, page, pages) => {
+          const retained = surfaceHashRefForContext(hashContext, {
+            entryKind: "materialized", payloadText,
+            objectType: SKELETON_PAGE_POLICY.objectType,
+            source: "tool:code.skeleton",
+            note: `skeleton page ${page} of ${pages}`,
+            sizeChars: payloadText.length,
+            metadata: {
+              ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
+              bounded_ingress: true, fetch_class: "cursor_page",
+              line_semantics: "materialized", citable: false,
+              tool: "code.skeleton", page, pages,
+            },
+          }, { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : "work_item") });
+          return retained?.ok && retained?.entry?.ref
+            ? traversalRefSurface(retained.model_ref || retained.entry.ref, { kind: SKELETON_PAGE_POLICY.kind })
+            : null;
+        },
+      });
+    } catch (err) {
+      recordHashSurfaceFailure(hashContext, toolName, originalSizeChars, err?.message || err);
+      return JSON.stringify({ ok: false, action: "code.skeleton", error: "Skeleton could not be paged within the response limit; request a smaller outline." });
+    }
+  }
   const sourceWindow = /(?:^|\.)(?:code\.window|symbol\.get)$/.test(String(toolName));
   if (sourceWindow && boundPolicy && text.length > boundPolicy.capChars) {
     text = compactCodeWindowLensResult(toolName, text, { args, context, ownerScope }).result;

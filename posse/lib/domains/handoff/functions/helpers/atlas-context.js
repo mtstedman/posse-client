@@ -20,7 +20,7 @@ import {
   surfaceHashRefForContext,
 } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
-import { rankSurveyFilesForProjection, thinSurveyDirection } from "./survey-projection-rank.js";
+import { rankSurveyFilesForProjection, surveyDependencyOutline, surveyFileOutline, surveyOutlineSymbols, thinSurveyDirection } from "./survey-projection-rank.js";
 import {
   planLifecycleSurveyExpansion,
   resolveLifecycleSurveyTargetSymbolIds,
@@ -2731,6 +2731,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
       symbolsOmitted: Math.max(0, symbolCount - names.length),
       truncated: !!file?.truncated || names.length < symbolCount,
       symbols: names,
+      outlineSymbols: surveyOutlineSymbols(file, { taskText: result.taskText }),
     };
   }).filter((file) => file.path);
   return {
@@ -3431,6 +3432,8 @@ function renderAtlasContextSection(packet) {
     atlasHeading(`${label} CONTEXT`),
     hasCallableTools
       ? `${label} is active for this handoff; use the listed ${label} tools when they can answer the task.`
+      : packet.recipient === "researcher"
+        ? `${label} is active for this handoff.`
       : `${label} context prefetch is active for this handoff. Use the prefetched context and its backed cursor pages as the initial code map.`,
     atlasField("Phase", packet.atlas.phase),
     atlasField("Repo target", packet.atlas.repo?.repoPath),
@@ -3725,9 +3728,15 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
     const roots = Array.isArray(direction?.roots) ? direction.roots.filter(Boolean).slice(0, 3) : [];
     const edges = Array.isArray(direction?.edges) ? direction.edges.filter((edge) => edge?.from && edge?.to).slice(0, 6) : [];
     const treePaths = Array.isArray(direction?.treePaths) ? direction.treePaths.filter(Boolean).slice(0, 8) : [];
-    if (treePaths.length === 0 && roots.length === 0) return "";
+    const files = surveyFileOutline(slice?.surveyContext?.fileSummaries?.length
+      ? slice.surveyContext.fileSummaries
+      : (slice?.filePaths || []).map((filePath) => ({ path: filePath })));
+    const dependencies = surveyDependencyOutline(slice?.surveyContext?.dependencyBoundaries);
+    if (treePaths.length === 0 && roots.length === 0 && files.length === 0 && dependencies.length === 0) return "";
     return [
       atlasHeading("ATLAS CODE MAP"),
+      ...(dependencies.length > 0 ? ["Dependency sources:", ...dependencies] : []),
+      ...(files.length > 0 ? ["Selected files and symbols (orientation only; not exhaustive):", ...files] : []),
       ...(treePaths.length > 0 ? ["Tree:", ...treePaths.map((treePath) => `- ${treePath}`)] : []),
       ...(roots.length > 0 ? ["Roots:", ...roots.map((symbol) => `- ${symbol}`)] : []),
       ...(edges.length > 0 ? ["Edges:", ...edges.map((edge) => `- ${edge.from} -> ${edge.to}`)] : []),

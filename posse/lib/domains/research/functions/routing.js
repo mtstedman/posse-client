@@ -31,8 +31,9 @@ const SCOPED_CONTRACT_ELIGIBILITY_REASONS = new Set([
 ]);
 const SCOPED_CONTRACT_SIGNAL_RE = /\b(?:allows?|converts?|discards?|emits?|exactly|must|preserves?|rejects?|renders?|requires?|resolves?|returns?|throws?|when|while|without)\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
+const WEB_LOOKUP_INTENT_RE = /\b(?:browse|website|webpage|online|internet|documentation|docs|published|latest|pricing|look\s+up|search\s+(?:for|the\s+web)|summari[sz]e)\b/i;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
-const LOCAL_REPOSITORY_SCOPE_RE = /\b(?:this|current|local)\s+(?:(?:[a-z0-9_.-]+)\s+){0,2}(?:codebase|project|repo(?:sitory)?)\b|\b(?:codebase|project|repo(?:sitory)?)\s+(?:implementation|source)\b/i;
+const LOCAL_REPOSITORY_SCOPE_RE = /\b(?:this|current|local|our)\s+(?:(?:[a-z0-9_.-]+)\s+){0,2}(?:codebase|project|repo(?:sitory)?|checkout|(?:working|source)\s+tree)\b|\b(?:codebase|project|repo(?:sitory)?|checkout|(?:working|source)\s+tree)\s+(?:implementation|source)\b/i;
 
 const WEB_VENDOR_HINTS = {
   anthropic: ["docs.anthropic.com", "anthropic.com"],
@@ -584,6 +585,10 @@ export function classifyResearchTask({
   const mentionedModules = extractMentionedModules(text, projectMap, fileMentions, dirMentions);
   const webBranches = extractWebBranches(text, intakeHints);
   const localRepositoryScope = LOCAL_REPOSITORY_SCOPE_RE.test(text);
+  // A URL alone may be a literal parser/request input. Dedicated web routing
+  // needs lookup intent or an independent domain/vendor/hint signal as well.
+  const webLookupRequested = WEB_LOOKUP_INTENT_RE.test(text)
+    || extractWebBranches(text.replace(URL_RE, ""), intakeHints).length > 0;
   const listItems = extractListItems(taskDescription || taskTitle);
   const noResearchText = taskDescription || taskTitle;
   const protectedFileMention = hasProtectedFileMention(fileMentions);
@@ -601,7 +606,9 @@ export function classifyResearchTask({
   const oneshotSimple = oneshotAllowed && (ONESHOT_SIMPLE_RE.test(text) || simpleUiControlSubstitution) && noResearchText.length < 200 && !COMPLEX_RE.test(text) && !RENAME_RE.test(text) && !FORMAT_RE.test(text);
   const simpleNoResearch = !protectedFileMention && SIMPLE_NO_RESEARCH_RE.test(text) && fileMentions.length === 1 && noResearchText.length < 200 && !COMPLEX_RE.test(text);
   const renameMultiNoResearch = !protectedFileMention && RENAME_RE.test(text) && filesAllInSameModule(fileMentions) && noResearchText.length < 400 && !COMPLEX_RE.test(text);
-  const webFanoutCandidate = webBranches.length >= 2 && WEB_FANOUT_RE.test(text) && mentionedModules.length === 0 && fileMentions.length === 0;
+  // URLs and vendor names can be data in a repository question. Repository
+  // scope must protect both web-only and multi-site web routing.
+  const webFanoutCandidate = !localRepositoryScope && webLookupRequested && webBranches.length >= 2 && WEB_FANOUT_RE.test(text) && mentionedModules.length === 0 && fileMentions.length === 0;
   const lowBlastSingleFileEdit = isLowBlastRadiusSingleFileEdit({
     text,
     noResearchText,
@@ -663,7 +670,7 @@ export function classifyResearchTask({
       reason: "question compares clear external web branches",
       branches: webBranches.slice(0, 3),
     };
-  } else if (lowerMode === "question" && webBranches.length > 0 && mentionedModules.length === 0 && fileMentions.length === 0 && !localRepositoryScope) {
+  } else if (lowerMode === "question" && webLookupRequested && webBranches.length > 0 && mentionedModules.length === 0 && fileMentions.length === 0 && !localRepositoryScope) {
     result = {
       bucket: "web_only_answer",
       reason: "question mode has external web signal and no repo scope",

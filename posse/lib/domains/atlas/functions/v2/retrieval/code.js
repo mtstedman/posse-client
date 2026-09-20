@@ -433,10 +433,6 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     });
   }
 
-  const filtered = params.exportedOnly
-    ? symbols.filter((s) => s.visibility !== "private" && s.visibility !== "protected")
-    : symbols;
-  const calledFrom = await calledFromBreadcrumbs(view, filtered);
   const source = targetPath ? readFile(targetPath) : null;
   if (source == null && explicitFileRequest) {
     const failure = await repoReadFailureWithSuggestions({
@@ -483,7 +479,10 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     ...(typeof result.degradedReason === "string" && result.degradedReason
       ? { degradedReason: result.degradedReason }
       : {}),
-    ...(calledFrom.length > 0 ? { calledFrom } : {}),
+    totalSymbols: Number(result.totalSymbols || 0),
+    returnedSymbols: Number(result.returnedSymbols || 0),
+    omittedSymbols: Number(result.omittedSymbols || 0),
+    complete: result.complete === true,
     etag,
   };
   return okEnvelope({

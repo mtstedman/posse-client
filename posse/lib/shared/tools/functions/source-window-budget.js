@@ -1,5 +1,27 @@
 import { sourceRows } from "./source-continuation.js";
 
+// Keep an ordered prefix of complete additional windows within the soft display
+// budget. The primary window is left intact for the existing focus/split logic.
+// Native continuations must already be detached from the envelope by the caller.
+export function packAdditionalSourceWindows(envelope, capChars) {
+  const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : envelope;
+  const windows = data?.additionalWindows;
+  if (!Array.isArray(windows) || windows.length === 0 || JSON.stringify(envelope).length <= capChars) return [];
+  const budget = Math.max(0, capChars - 1200 - windows.length * 32);
+  delete data.additionalWindows;
+  const kept = [];
+  for (const [index, window] of windows.entries()) {
+    data.additionalWindows = [...kept, window];
+    if (JSON.stringify(envelope).length > budget) {
+      if (kept.length) data.additionalWindows = kept;
+      else delete data.additionalWindows;
+      return windows.slice(index);
+    }
+    kept.push(window);
+  }
+  return [];
+}
+
 // Partition a source envelope by its serialized size. Source rows are never
 // clipped: a single oversized row moves wholly to the unseen continuation.
 // Mutates the parsed, caller-owned envelope and returns the omitted windows.

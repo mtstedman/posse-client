@@ -32,15 +32,6 @@ function hasLeadingPythonOverloadDecorator(text) {
   return false;
 }
 
-function isPythonDeclaration(text) {
-  if (hasLeadingPythonOverloadDecorator(text)) return true;
-  if (/:\s*\.\.\.\s*$/u.test(text)) return true;
-  const lines = text.split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("@") && !line.startsWith("#"));
-  return lines.length > 0 && /^(?:\.\.\.|pass)$/u.test(lines.at(-1) || "");
-}
-
 function pythonTargetIsOverload(target, source) {
   const text = symbolSourceText(source, target);
   if (hasLeadingPythonOverloadDecorator(text)) return true;
@@ -89,10 +80,11 @@ export function symbolBodyKind(symbol, source) {
     }
   }
   if (lang === "python" || lang === "py") {
-    // Class ranges can contain nested overloads or abstract methods. Those do
-    // not make the class itself a declaration-only body.
+    // pass and ellipsis are executable no-ops in ordinary Python, including
+    // after side effects or within a final branch. Only explicit overloads
+    // (or the .pyi file contract above) prove a declaration-only body.
     if (CALLABLE_KINDS.has(kind)
-      && (isPythonDeclaration(text) || pythonTargetIsOverload(symbol, source))) {
+      && pythonTargetIsOverload(symbol, source)) {
       return "declaration";
     }
   }

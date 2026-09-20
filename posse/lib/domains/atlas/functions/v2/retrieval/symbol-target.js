@@ -135,7 +135,11 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   if (requestedFile && !isCanonicalRepoPath(requestedFile)) {
     return { status: "invalid_path", requestedFile, targets: [] };
   }
-  const opts = { fuzzy: false, limit: 500 };
+  // Apply the file selector before the backend limit so other files cannot
+  // crowd a requested declaration out of an otherwise exact name lookup.
+  /** @type {import("../contracts/api.js").SymbolSearchOptions} */
+  const opts = { fuzzy: false, limit: 500, scope: "name",
+    ...(requestedFile ? { pathPrefix: requestedFile } : {}) };
   if (symbolRef.kind) opts.kinds = [String(symbolRef.kind)];
   const found = [];
   for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name)])]) {
@@ -150,25 +154,34 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   const exported = pathExact;
   const resolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(exported), name);
   if (resolution.ambiguousBearers.length > 0) {
-    return { status: "ambiguous_symbol_ref", bearers: resolution.ambiguousBearers, targets: [] };
+    const names = new Set(resolution.ambiguousBearers.map(normalizedQualifiedIdentifier));
+    return { status: "ambiguous_symbol_ref", bearers: resolution.ambiguousBearers,
+      targets: uniqueResolutionSymbols(exported).filter(symbol => names.has(
+        normalizedQualifiedIdentifier(symbol.qualified_name || symbol.name),
+      )).sort(compareSymbolTargets) };
   }
   const matches = uniqueResolutionSymbols(resolution.matches).sort(compareSymbolTargets);
   if (matches.length === 0) {
     const recovery = [...eligible];
-    if (symbolRef.kind) {
+    if (symbolRef.kind || requestedFile) {
       for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name)])]) {
-        recovery.push(...await view.query.findSymbol(candidate, { fuzzy: false, limit: 500 }));
+        recovery.push(...await view.query.findSymbol(candidate, { fuzzy: false, limit: 500, scope: "name" }));
       }
     }
     const visibleRecovery = symbolRef.exportedOnly === true
       ? recovery.filter(symbol => !["private", "protected"].includes(String(symbol.visibility || "").toLowerCase()))
       : recovery;
     const fallbackResolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(visibleRecovery), name);
+    const recoveryNames = new Set(fallbackResolution.ambiguousBearers.map(normalizedQualifiedIdentifier));
+    const recoveryTargets = fallbackResolution.matches.length > 0 ? fallbackResolution.matches
+      : uniqueResolutionSymbols(visibleRecovery).filter(symbol => recoveryNames.has(
+        normalizedQualifiedIdentifier(symbol.qualified_name || symbol.name),
+      ));
     return {
       status: "symbol_ref_not_found",
       requestedFile,
       bearers: symbolRefRecoveryBearers(fallbackResolution.matches || []),
-      targets: [],
+      targets: recoveryTargets.sort(compareSymbolTargets),
     };
   }
   const bearers = distinctQualifiedBearers(matches);

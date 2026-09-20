@@ -293,6 +293,7 @@ function displayWindows(value, blockOffset) {
 // Run after source custody, ref materialization and admission. This function
 // never writes to the stored evidence or changes which ranges are citable.
 export function sourceLineDisplay(parsed, blockOffset = 0, resolveEvidence = null) {
+  if (parsed?.citable === false) return null;
   if ([parsed?.tool, parsed?.action].some((name) => String(name || "").endsWith("code.skeleton"))
     && parsed?.contentKind !== CODE_CONTENT_KINDS.SOURCE) return null;
   if (parsed?.evidence_ref?.citable === false

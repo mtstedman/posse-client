@@ -60,8 +60,27 @@ async function readSelectedBody({
 
 function targetSelectionError(selection, selector, versionId) {
   const action = "symbol.get";
+  // These are existing indexed addresses, not automatically selected fallbacks.
+  // Keep complete candidate objects visible to text-only MCP consumers too.
+  const candidates = [];
+  for (const target of selection.targets || []) {
+    const id = symbolIdOf(target);
+    const candidate = {
+      name: target.qualified_name || target.name,
+      file: target.repo_rel_path,
+      symbolId: id,
+      kind: target.kind,
+      startLine: target.range_start_line,
+    };
+    if (JSON.stringify([...candidates, candidate]).length > MAX_SYMBOL_GET_AMBIGUITY_PATH_CHARS) break;
+    candidates.push(candidate);
+    if (candidates.length >= MAX_SYMBOL_GET_AMBIGUITY_CHOICES) break;
+  }
+  const candidateDetails = candidates.length > 0 ? { candidates } : {};
   // Some MCP clients show text only, not structuredContent/error.details.
-  const recovery = selection.bearers?.length > 0
+  const recovery = candidates.length > 0
+    ? ` Indexed candidates: ${JSON.stringify(candidates)}`
+    : selection.bearers?.length > 0
     ? ` Exact candidates: ${JSON.stringify(selection.bearers).slice(0, MAX_SYMBOL_GET_AMBIGUITY_PATH_CHARS)}`
     : "";
   if (selection.status === "invalid_symbol_id") {
@@ -106,8 +125,9 @@ function targetSelectionError(selection, selector, versionId) {
       action,
       versionId,
       code: "symbol_file_mismatch",
-      message: `Symbol ${selector} is not indexed at ${selection.requestedFile}`,
+      message: `Symbol ${selector} is not indexed at ${selection.requestedFile}.${recovery}`,
       details: {
+        ...candidateDetails,
         requestedFile: selection.requestedFile,
         availableFiles: selection.targets.map((target) => target.repo_rel_path),
       },
@@ -119,7 +139,7 @@ function targetSelectionError(selection, selector, versionId) {
       versionId,
       code: "ambiguous_symbol",
       message: `Symbol ${selector} matches multiple exact bearers.${recovery}`,
-      details: { requested: selector, bearers: selection.bearers || [] },
+      details: { requested: selector, bearers: selection.bearers || [], ...candidateDetails },
     });
   }
   return errorEnvelope({
@@ -127,8 +147,8 @@ function targetSelectionError(selection, selector, versionId) {
     versionId,
     code: "symbol_not_found",
     message: `No symbol found for ${selector}${selection.requestedFile ? ` at ${selection.requestedFile}` : ""}${recovery ? ` with the requested constraints.${recovery}` : ""}`,
-    details: selection.bearers?.length > 0
-      ? { requested: selector, requestedFile: selection.requestedFile || null, bearers: selection.bearers }
+    details: selection.bearers?.length > 0 || candidates.length > 0
+      ? { requested: selector, requestedFile: selection.requestedFile || null, bearers: selection.bearers || [], ...candidateDetails }
       : undefined,
   });
 }
