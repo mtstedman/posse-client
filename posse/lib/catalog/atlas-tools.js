@@ -885,7 +885,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, with source ranges, compact signatures, and compact symbolRef names for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with symbolRef:{name:<row symbolRef>,file:<repo_rel_path>}. Rows without a symbolRef can be read with code.window using their file and range.",
+    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with code.window using their file and range.",
     parameters: {
       type: "object",
       properties: {

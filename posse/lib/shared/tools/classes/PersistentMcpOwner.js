@@ -43,6 +43,7 @@ import {
   assessorToolCallCeilingDecision,
 } from "../functions/assessor-tool-budget.js";
 import {
+  compactSkeletonSymbolHandles,
   compactResearcherTypedAtlasText,
   normalizeResearcherTypedAtlasFieldNames,
 } from "../functions/researcher-typed-result-compaction.js";
@@ -957,14 +958,26 @@ function resolveAtlasSymbolHandle(session, value) {
   return { ok: true, value };
 }
 
-function appendResearcherSymbolHandles(result, session) {
+function appendResearcherSymbolHandles(result, session, action) {
   if (sessionToolPolicy(session)?.atlasResearcherTypedDispatcher !== true || result?.isError === true) {
     return result;
   }
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   let issued = 0;
-  let text = first.text.replace(
+  let text = first.text;
+  if (action === "code.skeleton") {
+    const skeleton = compactSkeletonSymbolHandles(text, (symbolId, file) => {
+      const handle = atlasSymbolHandleForId(session, symbolId);
+      if (handle) rememberAtlasSymbolSourcePaths(session, [{ symbol_id: symbolId, repo_rel_path: file }]);
+      return handle;
+    });
+    if (skeleton) {
+      text = skeleton.text;
+      issued += skeleton.issued;
+    }
+  }
+  text = text.replace(
     /("symbolId"\s*:\s*")([0-9a-f]{64}:[0-9]+)(")/g,
     (match, prefix, symbolId, suffix) => {
       const handle = atlasSymbolHandleForId(session, symbolId);
@@ -979,7 +992,7 @@ function appendResearcherSymbolHandles(result, session) {
     issued += 1;
     return `"${handle}":`;
   });
-  if (issued === 0 || text === first.text) return result;
+  if (text === first.text) return result;
   return annotateOwnerResultTransform({
     ...result,
     content: [{ ...first, text }, ...result.content.slice(1)],
@@ -7050,7 +7063,7 @@ export class PersistentMcpOwner {
       if (String(session?.bootConfig?.role || "") === "researcher" && requested.name === "symbol.search") {
         result = composed("search_presentation", compactResearchSearchResult(result));
       }
-      result = composed("symbol_handles", appendResearcherSymbolHandles(result, session));
+      result = composed("symbol_handles", appendResearcherSymbolHandles(result, session, requested.name));
       result = composed("hash_ref_surface", appendHashRefToMcpTextResult(result, toolName, toolArgs, session));
       noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);
       if (coverageOwner) {

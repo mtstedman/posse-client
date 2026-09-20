@@ -1,7 +1,39 @@
 // @ts-check
 
+import { CODE_CONTENT_KINDS } from "../../../catalog/source-display.js";
+
 const CANONICAL_SYMBOL_ID = /^[0-9a-f]{64}:[0-9]+$/u;
 const SYMBOL_HANDLE = /^s[1-9][0-9]{0,5}$/u;
+
+/**
+ * Replace internal skeleton row addresses with the owner's existing session
+ * handles. Only generated maps are eligible; source text stays byte-for-byte.
+ * @param {string} text
+ * @param {(symbolId: string, file: string) => string | null} issueHandle
+ * @returns {{text: string, issued: number} | null}
+ */
+export function compactSkeletonSymbolHandles(text, issueHandle) {
+  const suffixAt = text.indexOf("\n\n[");
+  const jsonText = suffixAt >= 0 ? text.slice(0, suffixAt) : text;
+  const suffix = suffixAt >= 0 ? text.slice(suffixAt) : "";
+  let parsed;
+  try { parsed = JSON.parse(jsonText); } catch { return null; }
+  const map = parsed?.data || parsed;
+  if (!map || typeof map.content !== "string"
+    || ![CODE_CONTENT_KINDS.SUMMARY, CODE_CONTENT_KINDS.INDEXED_SIGNATURES].includes(map.contentKind)) return null;
+  const file = String(map.repo_rel_path || map.path || "");
+  let issued = 0;
+  const content = map.content.replace(/  \[symbolId=([0-9a-f]{64}:[0-9]+)\]$/gmu, (_match, id) => {
+    const handle = issueHandle(id, file);
+    // Exhausted sessions omit the selector rather than exposing an internal ID.
+    if (!handle || !SYMBOL_HANDLE.test(handle)) return "";
+    issued += 1;
+    return `  [symbolId=${handle}]`;
+  });
+  if (content === map.content) return null;
+  map.content = content;
+  return { text: `${JSON.stringify(parsed)}${suffix}`, issued };
+}
 
 /**
  * Remove transport-only or invariant fields from one typed Atlas JSON result.
