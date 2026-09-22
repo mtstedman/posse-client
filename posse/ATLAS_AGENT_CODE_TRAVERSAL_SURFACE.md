@@ -55,7 +55,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `researcher`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.report_claims`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_claim`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -88,6 +88,28 @@ Acknowledge one operator feedback item attached directly to a tool result. The d
 | `decision` | `string` | Optional | values "accepted", "rejected", "deferred" | Acknowledgement decision. Defaults to accepted. |
 | `interaction_id` | `integer` | Required |  | The item id in the direct operator-feedback delivery. |
 | `reason` | `string` | Conditional | min length 1; max length 500 | Required for rejected or deferred; optional for accepted. |
+
+### `tools.agent_claim`
+
+Remote roles: `researcher`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `agent_claim` |
+| Tool reference token | `tools.agent_claim` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `coordination` |
+| Batchable input | No |
+| Parallel calls | Yes |
+| System-prefetch capable | No |
+
+Reserve agent_claim for a completed, evidence-backed finding saved before research on other findings continues. Once research is complete, put new, unsaved findings directly in agent_handoff.claims. agent_handoff includes saved claims automatically and validates their evidence; include only new, unsaved findings there. Aim for a complete answer to the section rather than partial notes, and preserve substantive detail. Reuse a stable lowercase id to revise a saved finding, or remove it if later evidence disproves it. Independent saves can run alongside already-needed research reads when their evidence has already been delivered.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `claims` | `array<object>` | Conditional | min items 1 | One or more findings to add or update. Valid only for put. |
+| `ids` | `array<string>` | Conditional | min items 1; max items 12 | Draft ids to retract. Valid only for remove. |
+| `op` | `literal "put" | literal "remove" | literal "list"` | Required |  |  |
 
 ### `tools.agent_handoff`
 
@@ -326,7 +348,7 @@ Use when the exact target is unknown or behavior spans files or owners. Returns 
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `maxFiles` | `integer` | Optional | min 1; max 64 | Optional. Cap on files surveyed. Default 64. |
+| `maxFiles` | `integer` | Optional | min 1; max 64 | Optional. Cap on files surveyed. Default 64, minimum 1, maximum 64. |
 | `paths` | `string | array` | Required | min length 1; max items 64 | Repository-relative directory prefix or file path — one string or an array of them, e.g. "src/billing" or ["lib/a.js", "lib/b.js"]. Resolves up to 64 indexed files. |
 | `symbols` | `array | string` | Optional | max length 5000; max items 16 | Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16). |
 
@@ -348,6 +370,7 @@ Use only when exact source is needed for a known symbol or anchored file region.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
+| `autoFill` | `boolean` | Optional |  | Keep a partially new window contiguous when dedupe would split it into fragments. Default true; false omits all already-visible lines. Preserves the selected window bounds. |
 | `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds. |
 | `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. |
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Region shape: symbol (default) reads the named definition, block its enclosing block, fileWindow a broader anchored file slice. |
@@ -821,7 +844,7 @@ Remove non-deliverable sidecar files from a scoped artifact output directory whi
 
 ### `tools.read_file`
 
-Remote roles: `artificer`, `assessor`, `dev`, `planner`.
+Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 
 | Contract field | Value |
 |---|---|
@@ -864,28 +887,6 @@ Read basic image metadata (format, dimensions, byte size).
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `path` | `string` | Required |  | Image file path. |
-
-### `tools.report_claims`
-
-Remote roles: `researcher`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `report_claims` |
-| Tool reference token | `tools.report_claims` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `coordination` |
-| Batchable input | No |
-| Parallel calls | Yes |
-| System-prefetch capable | No |
-
-Optionally save completed, evidence-backed findings during research. Aim for a complete answer to the section addressed, rather than partial notes. Prefer preserving substantive detail over shortening a finding. Reuse a stable lowercase id to revise a finding, or remove it if later evidence disproves it. Saved claims are included in the terminal report and undergo normal final evidence validation. Findings can also be supplied directly at terminal handoff; a separate save call is not required.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `claims` | `array<object>` | Conditional | min items 1 | One or more findings to add or update. Valid only for put. |
-| `ids` | `array<string>` | Conditional | min items 1; max items 12 | Draft ids to retract. Valid only for remove. |
-| `op` | `literal "put" | literal "remove" | literal "list"` | Required |  |  |
 
 ### `tools.request_scope`
 
@@ -1114,16 +1115,17 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read an exact symbol body, or batch independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.
+Read exact symbol bodies with file and symbols (an array of exact names or qualified names sharing that file), a single ID/name, or independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `file` | `string` | Optional | min length 1; max length 4000 | Optional exact repository-relative path for duplicate-body disambiguation. |
+| `file` | `string` | Conditional | min length 1; max length 4000 | Shared repository-relative path for symbols, or optional exact path for scalar duplicate-body disambiguation. |
 | `identifiersToFind` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 50 | Optional exact identifiers whose in-body coverage should be reported. |
 | `items` | `array<any>` | Conditional | min items 1; max items 10 | Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap; the repository code-window policy still applies. |
 | `symbolId` | `string` | Conditional |  | Exact symbol ID returned by Atlas. |
 | `symbolRef` | `object` | Conditional |  | Exact symbol reference used when no symbol ID is needed. |
+| `symbols` | `array<string>` | Conditional | min items 1; max items 10 | Exact names or qualified names in the shared file. Use file+symbols to share one path across the requested symbols. |
 
 ### `atlas.symbol.search`
 
@@ -1139,12 +1141,12 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Repository symbol discovery when the target or its location is unknown. Returns a bounded address-only hit list with stable symbol IDs, locations, and short signatures. Reuse returned IDs exactly as issued.
+Repository discovery when the target or its location is unknown. Returns bounded symbol addresses. Multiword concepts and code-fragment queries can also return bounded, redacted sourceTextMatches from indexed files after an empty symbol-name lookup. Reuse returned IDs and evidence refs exactly as issued.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 500 | Maximum number of results to return. |
-| `query` | `string` | Required | min length 1; max length 20000 | One unresolved symbol name or concept; retain returned symbol IDs for later reasoning. |
+| `query` | `string` | Required | min length 1; max length 20000 | One unresolved symbol, concept, or code fragment. Code punctuation uses a case-insensitive literal source match; multiword concepts require all significant words on a source line. |
 | `scope` | `string` | Optional | default "either"; values "name", "body", "either" | Search symbol names, symbol-body identifier tokens, or both. Default either. |
 | `semantic` | `boolean` | Optional |  | Enable semantic reranking when supported. |
 

@@ -235,18 +235,25 @@ export function createNativeExplorationNoveltyTracker({ maxEntries = 1024, scope
   };
 }
 
-export function buildResearchCitationFetchGateText({ reason = "before_synthesis" } = {}) {
+// Guided texts name the handoff tool as the provider exposes it; callers pass
+// the rendered name and the canonical name remains the fallback.
+function handoffName(handoffToolName) {
+  return String(handoffToolName || "").trim() || "agent_handoff";
+}
+
+export function buildResearchCitationFetchGateText({ reason = "before_synthesis", handoffToolName = "" } = {}) {
+  const handoff = handoffName(handoffToolName);
   if (reason === "physical_call_ceiling") {
     return [
       "RESEARCH TOOL GATE CLOSED.",
       "The deterministic physical work-call ceiling has been reached; stored-result traversal is not exempt.",
-      "Do not call another tool. Call agent_handoff with the terminal researcher report.",
+      `Do not call another tool. Call ${handoff} with the terminal researcher report.`,
     ].join("\n");
   }
   if (reason === "budget_exhausted") {
     return [
       "FINAL TRAVERSAL BATCH ALREADY USED: the one synthesis-phase atlas.traverse_ref batch has completed.",
-      "Do not call another tool. Call agent_handoff with the terminal researcher report.",
+      `Do not call another tool. Call ${handoff} with the terminal researcher report.`,
     ].join("\n");
   }
   return [
@@ -256,6 +263,20 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
   ].join("\n");
 }
 
+// Unguided runs suppress research advice, not admission state. This states
+// the exhaustion fact once, on the result that consumed the last slot, and
+// never discloses the total budget or a countdown. It names the handoff tool
+// exactly as the provider exposes it (Codex: tools_agent_handoff), because a
+// bare "agent_handoff" left one Atlas497 researcher ending its turn in prose.
+export const RESEARCH_WORK_BUDGET_EXHAUSTED_PREFIX = "RESEARCH WORK BUDGET EXHAUSTED:";
+
+export function buildResearchWorkBudgetExhaustedText({ handoffToolName = "" } = {}) {
+  const fact = `${RESEARCH_WORK_BUDGET_EXHAUSTED_PREFIX} the retrieval work budget is fully used. Further retrieval and traversal calls will return blocked without executing.`;
+  const tool = String(handoffToolName || "").trim();
+  if (!tool) return fact;
+  return `${fact} Next step: call the ${tool} tool with your terminal researcher report. Do not end the turn with prose alone.`;
+}
+
 export function buildResearchEarlyFetchBatchingText() {
   return [
     "TRAVERSAL BATCHING CHECKPOINT: this exploration traversal contained one ref.",
@@ -263,10 +284,10 @@ export function buildResearchEarlyFetchBatchingText() {
   ].join("\n");
 }
 
-export function buildResearchFinalFetchBatchText() {
+export function buildResearchFinalFetchBatchText({ handoffToolName = "" } = {}) {
   return [
     "FINAL TRAVERSAL BATCH COMPLETE.",
-    "No further discovery or stored-result traversal calls are available. Call agent_handoff now with the terminal researcher report; do not end the turn with prose alone.",
+    `No further discovery or stored-result traversal calls are available. Call ${handoffName(handoffToolName)} now with the terminal researcher report; do not end the turn with prose alone.`,
   ].join("\n");
 }
 
@@ -275,26 +296,23 @@ export function buildResearchCurtainCallText({
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
   callSteps = 0,
   maxPhysicalCalls = null,
+  handoffToolName = "",
 } = {}) {
   // Logical exploration units and physical calls have independent ceilings.
   // Passing a physical count as explorationSteps can announce zero remaining
   // while admission still permits targeted reads (for example, 7/18 and 28/30).
   // The physical ceiling is the session's snapshot, never a module constant,
   // so a raised experimental rail reports the same window it enforces.
-  const remainingCalls = Math.max(
-    0,
-    Math.min(
-      RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS - Number(explorationSteps || 0),
-      effectiveMaxPhysicalCalls(maxPhysicalCalls) - Number(callSteps || 0),
-    ),
-  );
-  return `RESEARCH TOOL WINDOW: ${remainingCalls} exploration call${remainingCalls === 1 ? "" : "s"} remain within the current retrieval limits.`;
+  void explorationSteps;
+  void callSteps;
+  void maxPhysicalCalls;
+  return `RESEARCH CLOSEOUT: Remaining capacity is a safety margin, not a target. If every requested conclusion has controlling evidence, call ${handoffName(handoffToolName)} now. Otherwise identify the specific unsupported fact and issue all independent reads needed for it together in one turn.`;
 }
 
-export function buildResearchFinalSlotLimitText({ remainingCalls = 0 } = {}) {
+export function buildResearchFinalSlotLimitText({ remainingCalls = 0, handoffToolName = "" } = {}) {
   const remaining = Math.max(0, Math.min(3, Number(remainingCalls) || 0));
   if (remaining <= 0) return "";
-  return `RESEARCH FINAL SLOT LIMIT: ${remaining} physical work-call slot${remaining === 1 ? "" : "s"} remain.`;
+  return `RESEARCH FINAL CLOSEOUT: Finish the specific unsupported conclusion, then call ${handoffName(handoffToolName)}. Do not use remaining capacity as a reading target.`;
 }
 
 export function buildResearchSynthesisRequiredText({
@@ -304,8 +322,10 @@ export function buildResearchSynthesisRequiredText({
   explorationCeiling = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
   finalTraversalAvailable = true,
   coverage = {},
+  handoffToolName = "",
 } = {}) {
   void coverage;
+  const handoff = handoffName(handoffToolName);
   void explorationSteps;
   void explorationCeiling;
   void staleSteps;
@@ -318,7 +338,7 @@ export function buildResearchSynthesisRequiredText({
       ? "The deterministic discovery-call ceiling has been reached."
       : "The deterministic no-novelty gate has closed discovery.",
     finalTraversalAvailable
-      ? `No further discovery calls are available. If eligible unseen traversal refs remain, one final batched atlas.traverse_ref call is available. After that response—or immediately if no eligible refs remain—call agent_handoff with the terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`
-      : `The physical work-call ceiling is reached, so no further discovery or traversal call is available. Call agent_handoff now with the terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
+      ? `No further discovery calls are available. If eligible unseen traversal refs remain, one final batched atlas.traverse_ref call is available. After that response—or immediately if no eligible refs remain—call ${handoff} with the terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`
+      : `The physical work-call ceiling is reached, so no further discovery or traversal call is available. Call ${handoff} now with the terminal researcher report and stop_reason=${stopReason}; do not end the turn with prose alone.`,
   ].join("\n");
 }

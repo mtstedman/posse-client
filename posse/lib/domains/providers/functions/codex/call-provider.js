@@ -331,7 +331,7 @@ export async function callProvider(promptText, {
       role,
       disableSystemTools,
       disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
-      disableResearcherUtilities: deterministicReadMcp.atlasResearcherDispatcher === true,
+      disableResearcherUtilities: role === "researcher" && atlasReadyForMcp,
       codexCodeMode: deterministicReadMcp.codexCodeMode === true,
       codexNativeBatching: deterministicReadMcp.codexNativeBatching === true,
       webToolsActive: webTools.active,

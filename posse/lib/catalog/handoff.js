@@ -3,6 +3,15 @@
 export const AGENT_HANDOFF_RECEIPT_NOTIFICATION = "notifications/posse/agent_handoff_receipt";
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 
+const RESEARCHER_REPORT_PROMPT_PROFILES = new Set([
+  "researcher_report",
+  "researcher_report_tight",
+]);
+
+export function usesResearcherReportOnlyHandoff(promptProfile) {
+  return RESEARCHER_REPORT_PROMPT_PROFILES.has(String(promptProfile || "").trim().toLowerCase());
+}
+
 // Only narrative fields may be rewritten when they repeat selected evidence.
 // Commands, paths, symbols, queries and other structured values stay exact.
 export const AGENT_HANDOFF_RESEARCH_PROSE_FIELDS = Object.freeze({

@@ -285,9 +285,10 @@
 /**
  * @typedef {Object} SymbolGetParams
  * @property {SymbolGetParams[]} [items] Bounded independent selectors; nesting is rejected.
+ * @property {string[]} [symbols] Exact names or qualified names sharing the required file; exclusive with items and scalar selectors.
  * @property {string} [symbolId]
  * @property {SymbolRef} [symbolRef] Exact name lookup; file narrows to one repository path.
- * @property {string} [file] Exact repository-relative path for duplicate-content disambiguation.
+ * @property {string} [file] Shared path for symbols, or exact path for scalar duplicate-content disambiguation.
  * @property {string[]} [identifiersToFind] Optional exact in-body anchors retained in the coverage map.
  * @property {number} [maxTokens] Optional bounded source token cap.
  */
@@ -465,6 +466,7 @@
  * @property {number} [expectedLines]          Integer.
  * @property {string[]} [identifiersToFind]   Required with file; 1..50.
  * @property {CodeGranularity} [granularity]
+ * @property {boolean} [autoFill] Preserve a selected window across scattered dedupe gaps; defaults to true.
  * @property {number} [maxTokens]             Exact selection cap.
  * @property {SliceContextHint} [sliceContext]
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.

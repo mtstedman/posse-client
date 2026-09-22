@@ -10,6 +10,7 @@ import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.
 import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
 import { normalizeAtlasIdentifierList } from "../../atlas/functions/v2/contracts/identifiers.js";
 import { contiguousSourceReuse } from "../functions/contiguous-source-reuse.js";
+import { redactSecrets } from "../../atlas/functions/v2/retrieval/redaction.js";
 import {
   normalizeResearchEvidenceReuseMode,
   recordSourceCoverageReuseShadow,
@@ -713,18 +714,20 @@ export class SourceCoverageOwner {
   }
 
   prepareData(data, args = {}, { tool = "code.window" } = {}) {
+    return this.#prepareData(data, args, tool, this.#freshSource(data?.repo_rel_path));
+  }
+
+  #prepareData(data, args, tool, fresh) {
     if (!this.attemptId || !data || typeof data !== "object" || typeof data.content !== "string" || !data.content) {
       return null;
     }
-    const fresh = this.#freshSource(data.repo_rel_path);
     if (!fresh) return null;
     const startLine = Math.max(1, Math.floor(Number(data.startLine) || 1));
     const requestedEndLine = Math.max(startLine, Math.floor(Number(data.endLine) || startLine));
     const sourceLines = splitEditableLines(fresh.source).lines;
     if (startLine > sourceLines.length) return null;
     const endLine = Math.min(requestedEndLine, sourceLines.length);
-    const content = data.content.replace(/\r\n/g, "\n");
-    const contentSha256 = sha256(content);
+    let content = data.content.replace(/\r\n/g, "\n");
     const sourceSlice = sourceLines.slice(startLine - 1, endLine).join("\n");
     // Paging retains the separator after the last inline source line. That
     // newline is byte-exact even when the following line stays in a cursor.
@@ -733,6 +736,14 @@ export class SourceCoverageOwner {
       ? `${sourceSlice}\n`
       : null;
     if (sourceSlice !== content && sourceSliceWithFinalEol !== content) return null;
+    // A joined slice ending on a blank row drops that row's real separator.
+    // Restore it only after exact source validation and never invent an EOF
+    // newline or replace redacted/mismatched bytes with the original source.
+    if (content === sourceSlice && sourceSlice.endsWith("\n") && sourceSliceWithFinalEol !== null) {
+      data.content += data.content.includes("\r\n") ? "\r\n" : "\n";
+      content = sourceSliceWithFinalEol;
+    }
+    const contentSha256 = sha256(content);
     const selectorFingerprint = sourceSelectorFingerprint(args, { tool });
     const completeFile = !args.symbolId
       && normalizePath(args.file) === fresh.relative
@@ -747,6 +758,28 @@ export class SourceCoverageOwner {
     return { fresh, startLine, endLine, content, contentSha256, selectorFingerprint, completeFile };
   }
 
+  // Citation custody can retain verified redacted bytes. Raw-source range
+  // reconstruction still uses prepareData's strict byte-equality gate.
+  async materializeDisplayedData(data, args = {}, options = {}) {
+    let prepared = this.prepareData(data, args, options);
+    if (!prepared && this.attemptId && typeof data?.content === "string" && data.content) {
+      const fresh = this.#freshSource(data.repo_rel_path);
+      if (!fresh) return null;
+      const key = `${fresh.relative}:${fresh.sourceVersion}`;
+      const cache = options.redactedSources || new Map();
+      if (!cache.has(key)) cache.set(key, redactSecrets(fresh.source, {
+        repoRelPath: fresh.relative, source: fresh.source, startLine: 1,
+      }));
+      let safe;
+      try { safe = await cache.get(key); } catch { return null; }
+      if (typeof safe !== "string"
+        || splitEditableLines(safe).lines.length !== splitEditableLines(fresh.source).lines.length
+        || this.#freshSource(fresh.relative)?.sourceVersion !== fresh.sourceVersion) return null;
+      prepared = this.#prepareData(data, args, options.tool || "code.window", { ...fresh, source: safe });
+    }
+    return this.#materializePreparedData(data, args, options, prepared);
+  }
+
   materializeData(data, args = {}, {
     origin = "primary",
     deliveryState = "delivered",
@@ -754,6 +787,12 @@ export class SourceCoverageOwner {
     tool = "code.window",
   } = {}) {
     const prepared = this.prepareData(data, args, { tool });
+    return this.#materializePreparedData(data, args, { origin, deliveryState, completeSymbolSelector, tool }, prepared);
+  }
+
+  #materializePreparedData(data, args, {
+    origin = "primary", deliveryState = "delivered", completeSymbolSelector = null, tool = "code.window",
+  }, prepared) {
     if (!prepared) return null;
     const { fresh, startLine, endLine, content, contentSha256, selectorFingerprint } = prepared;
     const completeFile = origin === "primary" && prepared.completeFile;

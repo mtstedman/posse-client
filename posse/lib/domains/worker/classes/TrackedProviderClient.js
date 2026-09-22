@@ -11,7 +11,7 @@ import { readPlannerDispatchPolicy } from "../../planning/functions/planner-disp
 
 import crypto from "crypto";
 import path from "path";
-import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PROTOCOL, usesResearcherReportOnlyHandoff } from "../../../catalog/handoff.js";
 import {
   completeAgentCall,
   createAgentCall,
@@ -173,9 +173,11 @@ function issuedAtlasAvailable(options = {}) {
 export function sessionContractFingerprint(options = {}, providerName = "") {
   const effective = narrowProviderOptionsToRemoteIssuance(options);
   const coordination = effective?._remoteIssuedPolicy?.coordination || {};
-  const researcherSchemaDiet = String(effective.role || "").trim().toLowerCase() === "researcher"
+  const researcherReportOnly = String(effective.role || "").trim().toLowerCase() === "researcher"
     && coordination.agentHandoffCompactV3 === true
-    && resolveAtlasResearcherSchemaDiet();
+    && usesResearcherReportOnlyHandoff(
+      effective.promptProfile || effective.sessionPacket?.prompt_profile,
+    );
   const researcherWorkflow = String(effective.role || "").trim().toLowerCase() === "researcher"
     && String(providerName || "").trim().toLowerCase() === "codex"
     && coordination.agentHandoffCompactV3 === true
@@ -192,7 +194,7 @@ export function sessionContractFingerprint(options = {}, providerName = "") {
     effective.role,
     coordination.agentHandoffCompactV1 === true,
     coordination.agentHandoffCompactV3 === true,
-    researcherSchemaDiet || researcherDispatcher,
+    researcherReportOnly,
   );
   const packet = effective.sessionPacket || {};
   const remoteSystemPrompt = String(effective.remoteSystemPrompt || "");
@@ -223,7 +225,7 @@ export function sessionContractFingerprint(options = {}, providerName = "") {
     compactV1: coordination.agentHandoffCompactV1 === true,
     compactV2: coordination.agentHandoffCompactV2 === true,
     compactV3: coordination.agentHandoffCompactV3 === true,
-    researcherSchemaDiet,
+    researcherReportOnly,
     ...(researcherDispatcher ? { researcherDispatcher: true } : {}),
     ...(researcherTypedDispatcher ? { researcherTypedDispatcher: true } : {}),
     ...(researcherWorkflow ? { researcherWorkflow: true } : {}),
@@ -1466,11 +1468,9 @@ export class TrackedProviderClient {
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
       String(opts.role || "").trim().toLowerCase() === "researcher"
         && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true
-        && (resolveAtlasResearcherSchemaDiet()
-          || (providerName === "codex"
-            && (resolveAtlasResearcherDispatcher()
-              || resolveAtlasResearcherTypedDispatcher()
-              || resolveAtlasResearcherWorkflow()))),
+        && usesResearcherReportOnlyHandoff(
+          opts.promptProfile || effectiveCapabilityOpts?.sessionPacket?.prompt_profile,
+        ),
       this.deps.getTraversalCompletionSnapshotForCall({
         jobId: job_id,
         attemptId: observationContext?.attempt_id ?? null,

@@ -14,9 +14,9 @@ const HANDOFF_ROLES = new Set(["researcher", "planner", "dev", "artificer", "ass
  * No Job/WI values are accepted here: those belong exclusively to the live
  * owner-side scope binding and may only narrow this role contract.
  *
- * @param {{ role?: string, providerName?: string | null, agentHandoff?: boolean, subAgent?: boolean, dispatchAgent?: boolean, webResearchHandoff?: boolean, researchInvestigation?: boolean, coordinationChild?: boolean, atlasAvailable?: boolean }} [identity]
+ * @param {{ role?: string, providerName?: string | null, agentHandoff?: boolean, agentHandoffReportOnly?: boolean, subAgent?: boolean, dispatchAgent?: boolean, webResearchHandoff?: boolean, researchInvestigation?: boolean, coordinationChild?: boolean, atlasAvailable?: boolean }} [identity]
  */
-export function resolveAgentRoleContract({ role, providerName = null, agentHandoff = false, subAgent = false, dispatchAgent = false, webResearchHandoff = false, researchInvestigation = false, coordinationChild = false, atlasAvailable = true } = {}) {
+export function resolveAgentRoleContract({ role, providerName = null, agentHandoff = false, agentHandoffReportOnly = false, subAgent = false, dispatchAgent = false, webResearchHandoff = false, researchInvestigation = false, coordinationChild = false, atlasAvailable = true } = {}) {
   const normalizedRole = String(role || "").trim().toLowerCase();
   const normalizedProvider = String(providerName || "").trim().toLowerCase();
   if (!PROVIDER_ROLE_SET.has(normalizedRole)) {
@@ -45,6 +45,9 @@ export function resolveAgentRoleContract({ role, providerName = null, agentHando
     disableSystemTools: child,
     memoryEnabled: !child && atlasMemoryEnabled(),
     agentHandoff: agentHandoff === true && HANDOFF_ROLES.has(normalizedRole),
+    agentHandoffReportOnly: agentHandoff === true
+      && agentHandoffReportOnly === true
+      && normalizedRole === "researcher",
     subAgent: !child && subAgent === true && HANDOFF_ROLES.has(normalizedRole),
     dispatchAgent: !child && dispatchAgent === true && ["researcher", "planner"].includes(normalizedRole),
     webResearchHandoff: !child && webResearchHandoff === true && normalizedRole === "researcher",

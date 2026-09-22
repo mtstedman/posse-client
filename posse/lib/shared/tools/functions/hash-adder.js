@@ -537,8 +537,8 @@ function surfaceMinCharsFor(toolName, { ambient = null } = {}) {
 
 // ---- code.survey snapshot paging -------------------------------------------
 // A survey is materialized once as ordinary hash-map pages. Page 1 owns the
-// survey-wide call map/metrics and the first ten file records; every page owns
-// at most ten files and carries a backed traversal_ref cursor to the next page.
+// survey-wide call map/metrics and the first bounded file page; every page owns
+// a small file set and carries a backed traversal_ref cursor to the next page.
 // There is deliberately no second, monolithic copy of the full survey.
 const SURVEY_PAGE_FILES = 10;
 
@@ -550,7 +550,7 @@ function surveyFetchCursor(page) {
     count: page.count,
   });
   return {
-    label: "next 10",
+    label: `next ${page.count}`,
     call: "atlas.traverse_ref",
     args: { traversal_ref: page.ref },
     traversal_ref: traversalRef,
@@ -699,6 +699,23 @@ export function compactCodeSurveyResult(toolName, result, {
   const snapshotFiles = Array.isArray(data?._snapshotFiles) ? data._snapshotFiles : null;
   if (!files || (!snapshotFiles && files.length <= SURVEY_PAGE_FILES)) {
     return { result, compacted: false };
+  }
+
+  // A backed snapshot can be identical to the visible inventory. Its mere
+  // presence must not advertise a traversal that only repeats visible rows.
+  // Compare identities rather than signatures: snapshots deliberately omit
+  // display detail, and symbol counts may describe a wider input population.
+  if (snapshotFiles && files.length <= SURVEY_PAGE_FILES) {
+    const symbolKey = (symbol) => JSON.stringify([symbol.name, symbol.kind, symbol.line]);
+    const visible = new Map(files.map((file) => [file.path, new Set((file.symbols || []).map(symbolKey))]));
+    const hasMissingRows = snapshotFiles.some((file) => {
+      const symbols = visible.get(file.path);
+      return !symbols || (file.symbols || []).some((symbol) => !symbols.has(symbolKey(symbol)));
+    });
+    if (!hasMissingRows) {
+      delete data._snapshotFiles;
+      return { result: JSON.stringify(envelope), compacted: true };
+    }
   }
 
   const snapshot = materializeCodeSurveyPages(data, {
@@ -886,6 +903,17 @@ function isDirectSymbolWindow(args, data) {
     && identifiers.every((identifier) => found.has(String(identifier).toLowerCase())));
 }
 
+function isCompleteFileWindow(data) {
+  return data.selectionBounded === false && data.startLine === 1
+    && typeof data.content === "string" && data.content.length > 0
+    && !data.truncated && !data.outputTruncated && !data.redirect && !data.degradedReason
+    && !(data.additionalWindows?.length > 0) && !(data._continuationWindows?.length > 0)
+    // Native maps count the empty split after a final newline. Coverage
+    // preparation uses physical source lines and removes only that EOF row.
+    && (data.map?.fileLines == null || data.map.fileLines === data.endLine
+      || (data.content.endsWith("\n") && data.map.fileLines === data.endLine + 1));
+}
+
 function exactAnchoredWindowTarget(args, data) {
   const selection = ["code.window", "symbol.get"].includes(args?.action)
     && args.args && typeof args.args === "object"
@@ -995,9 +1023,10 @@ export function compactCodeWindowLensResult(toolName, result, {
   const scope = { ownerScope: ownerScope || (hashContext.job_id != null ? "job" : null) };
   const pagingEnabled = enabled ?? resultRefPagingEnabled();
   // Native retrieval already enforces the token/line ceiling. A requested
-  // definition takes precedence over the softer display threshold; preserve
-  // any native budget continuation without splitting the admitted body again.
-  const windowDisplayPaging = pagingEnabled && !isDirectSymbolWindow(args, data);
+  // definition or explicitly complete file takes precedence over the softer
+  // display threshold. The owner hard cap below still bounds either result.
+  const windowDisplayPaging = pagingEnabled
+    && !isDirectSymbolWindow(args, data) && !isCompleteFileWindow(data);
   let compacted = false;
 
   // Optional syntax navigation must not trigger paging or consume the inline

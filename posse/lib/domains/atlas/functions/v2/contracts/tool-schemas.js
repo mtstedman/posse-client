@@ -417,6 +417,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     indexVersion: s({ minLength: 1, maxLength: 512 }),
   }, ["symbolId"]),
   "symbol.get": o({
+    symbols: a(s({ minLength: 1 }), { minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems }),
     items: a(o({
       symbolId: symbolId(), symbolRef: symbolRef(), file: s({ minLength: 1, maxLength: 4000 }),
       identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
@@ -429,6 +430,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
   }, [], {
     anyOf: [
+      { required: ["file", "symbols"] },
       { required: ["items"] },
       { required: ["symbolId"] },
       { required: ["symbolRef"] },
@@ -588,6 +590,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     expectedLines: { type: ["integer", "string"], minimum: 1, maximum: 20_000, maxLength: 20, pattern: "^[0-9]+$" },
     identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
     granularity: s({ enum: CODE_GRANULARITIES, default: "symbol" }),
+    autoFill: b(),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
     sliceContext: sliceContextHint(),
     sessionId: s({ maxLength: 256 }),
@@ -802,8 +805,10 @@ export function validateAtlasToolCall(call, { allowSymbolGetBatchOverflow = fals
   delete params.action;
   // Dispatch executes only the accepted prefix and reports the untouched tail.
   // Keep the advertised schema and strict recovery-call admission unchanged.
-  if (allowSymbolGetBatchOverflow && action === "symbol.get" && Array.isArray(params.items)) {
-    params.items = params.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems);
+  if (allowSymbolGetBatchOverflow && action === "symbol.get") {
+    for (const field of ["items", "symbols"]) {
+      if (Array.isArray(params[field])) params[field] = params[field].slice(0, SYMBOL_GET_BATCH_POLICY.maxItems);
+    }
   }
   if (action === "traverse_ref" && params.traversal_ref == null) {
     params.traversal_ref = params.traversal_refs ?? params.ref ?? params.refs ?? params.hashes;

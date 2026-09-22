@@ -7,6 +7,7 @@
 import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { nativePathEvidence } from "./native-evidence.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
+import { codeSurveyPathError, surveyPaths } from "./survey.js";
 
 const MAX_STRUCTURE_FILES = 128;
 
@@ -20,7 +21,8 @@ const MAX_STRUCTURE_FILES = 128;
  */
 export async function codeStructure({ view, versionId, params = {}, repoRoot }) {
   const action = "code.structure";
-  const requested = requestedPaths(params.paths ?? params.path);
+  const raw = params.paths ?? params.path;
+  const requested = surveyPaths(raw);
   if (requested.length === 0) {
     return errorEnvelope({
       action,
@@ -29,6 +31,9 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
       message: "code.structure requires `paths`: a directory prefix or file path, or an array of them.",
     });
   }
+
+  const pathError = codeSurveyPathError(raw, action);
+  if (pathError) return errorEnvelope({ action, versionId, code: "invalid_params", message: pathError });
 
   const maxFiles = clampInt(params.maxFiles, 64, 1, MAX_STRUCTURE_FILES);
   const indexedPaths = await materializedIndexedPaths(view);
@@ -85,12 +90,6 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
   if (negativeEvidence) data.negativeEvidence = negativeEvidence;
 
   return okEnvelope({ action, versionId, data });
-}
-
-function requestedPaths(raw) {
-  return (Array.isArray(raw) ? raw : [raw])
-    .map((value) => String(value ?? "").trim())
-    .filter(Boolean);
 }
 
 function arrayValue(value) {

@@ -291,7 +291,7 @@ export async function presentSymbolGetAmbiguityChoices(candidates, options) {
 
 export const COMPACT_STRUCTURE_PROJECTION = "compact-structure-v1";
 export const COMPACT_STRUCTURE_DEFAULT_MAX_FILES = 12;
-export const COMPACT_STRUCTURE_DEFAULT_MAX_CHARS = 6_000;
+export const COMPACT_STRUCTURE_DEFAULT_MAX_CHARS = 4_000;
 // Space reserved on the inline page for the evidence/traversal stamps and the
 // owner envelope that wrap the model-visible payload after projection.
 export const COMPACT_STRUCTURE_ENVELOPE_RESERVE_CHARS = 700;

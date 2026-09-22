@@ -46,7 +46,9 @@ function hasUnseenSourceContinuation(data = {}) {
 function exactSourceWindow(fresh, { startLine, endLine }) {
   const sourceLines = splitEditableLines(fresh.source).lines;
   let content = sourceLines.slice(startLine - 1, endLine).join("\n");
-  if (endLine === sourceLines.length && fresh.source.endsWith("\n")) content += "\n";
+  // Interior rows have a real separator too. Without it, a final blank row
+  // collapses into the previous row's terminator and loses display/custody.
+  if (endLine < sourceLines.length || fresh.source.endsWith("\n")) content += "\n";
   return { startLine, endLine, content };
 }
 
@@ -102,7 +104,10 @@ async function suppressCoveredInlineWindows({
       endLine: prepared.endLine,
       additionalCoveredRanges: locallyVisibleRanges,
     });
-    if (!plan?.covered && !plan?.partial) {
+    if ((!plan?.covered && !plan?.partial)
+      || (toolArgs.autoFill !== false && plan?.partial && plan.uncoveredRanges?.length > 1)) {
+      // Keep this already-bounded source window coherent. Never bridge gaps
+      // between separate executor windows or fetch additional source.
       retainedWindows.push(exactSourceWindow(prepared.fresh, prepared));
     } else {
       const uncovered = plan.uncoveredRanges || [];
@@ -263,6 +268,10 @@ export async function suppressCoveredSourceInterval(result, coverageOwner, toolA
     return { result, admission: null, resolvedChars: 0, reservation: admission?.reservation || null };
   }
 
+  if (toolArgs.autoFill !== false && admission.partial && admission.uncoveredRanges?.length > 1) {
+    return { result, admission: null, resolvedChars: prepared.content.length, reservation: admission.reservation };
+  }
+
   if (admission.partial) {
     const [primary, ...additional] = admission.uncoveredRanges
       .map((range) => exactSourceWindow(admission.fresh, range));
@@ -324,6 +333,11 @@ function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } =
   if (!parsed) return result;
   const envelope = parsed.value;
   const data = envelope?.data && typeof envelope.data === "object" ? envelope.data : envelope;
+  const pending = [];
+  const applyVisit = (...args) => {
+    const value = visit(...args);
+    if (value && typeof value.then === "function") pending.push(value);
+  };
   if (data && typeof data === "object" && data.status !== "covered") {
     if (toolName === "code.skeleton") {
       // A skeleton can contain summaries or exact source. Only its explicitly
@@ -331,23 +345,48 @@ function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } =
       // the bytes against current source before custody is granted.
       if (result.isError !== true && envelope?.ok !== false
         && data.contentKind === CODE_CONTENT_KINDS.SOURCE) {
-        visit(data, toolArgs, "primary", toolName);
+        applyVisit(data, toolArgs, "primary", toolName);
       }
     } else if (toolName === "symbol.card") {
       const cards = Array.isArray(data.cards) ? data.cards : [data];
       for (const card of cards) {
         const source = card?.sourceExcerpt || (typeof card?.source === "object" ? card.source : null);
         if (!source) continue;
-        visit(source, { ...toolArgs, symbolId: card.symbolId || toolArgs.symbolId }, "primary", toolName);
+        applyVisit(source, { ...toolArgs, symbolId: card.symbolId || toolArgs.symbolId }, "primary", toolName);
       }
+    } else if (toolName === "symbol.search") {
+      const matches = Array.isArray(data.sourceTextMatches?.matches)
+        ? data.sourceTextMatches.matches
+        : [];
+      for (const match of matches) applyVisit(match, toolArgs, "search", toolName);
     } else {
-      visit(data, toolArgs, "primary", toolName);
+      applyVisit(data, toolArgs, "primary", toolName);
       for (const additional of Array.isArray(data.additionalWindows) ? data.additionalWindows : []) {
-        visit({ ...additional, repo_rel_path: data.repo_rel_path }, toolArgs, "additional", toolName);
+        if (!additional || typeof additional !== "object" || Array.isArray(additional)) continue;
+        const hadPath = Object.hasOwn(additional, "repo_rel_path");
+        const originalPath = additional.repo_rel_path;
+        additional.repo_rel_path = data.repo_rel_path;
+        const restorePath = () => {
+          if (hadPath) additional.repo_rel_path = originalPath;
+          else delete additional.repo_rel_path;
+        };
+        try {
+          // Mutations, including removal of stale proof, belong to the actual
+          // emitted window rather than a disposable copy. Keep its inherited
+          // path until asynchronous redaction verification has finished too.
+          const value = visit(additional, toolArgs, "additional", toolName);
+          if (value && typeof value.then === "function") pending.push(value.finally(restorePath));
+          else restorePath();
+        } catch (error) {
+          restorePath();
+          throw error;
+        }
       }
     }
   }
-  return replaceMcpTextResult(result, parsed, envelope);
+  return pending.length
+    ? Promise.all(pending).then(() => replaceMcpTextResult(result, parsed, envelope))
+    : replaceMcpTextResult(result, parsed, envelope);
 }
 
 export function prepareSourceCoverage(result, coverageOwner, toolArgs = {}, options = {}) {
@@ -403,6 +442,16 @@ export function materializeSourceCoverage(result, coverageOwner, toolArgs = {}, 
       origin,
       completeSymbolSelector: tool === "code.skeleton" ? null : liveCompleteSymbolSelector(data, args, origin),
       tool,
+    })
+  ), options);
+}
+
+export async function materializeDisplayedSourceCoverage(result, coverageOwner, toolArgs = {}, options = {}) {
+  const redactedSources = new Map();
+  return visitSourceData(result, toolArgs, (data, args, origin, tool) => (
+    coverageOwner.materializeDisplayedData(data, args, {
+      origin, tool, redactedSources,
+      completeSymbolSelector: tool === "code.skeleton" ? null : liveCompleteSymbolSelector(data, args, origin),
     })
   ), options);
 }

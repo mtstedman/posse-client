@@ -8,7 +8,7 @@
 // authority above the remote response.
 
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
-import { ATLAS_REPLACED_NATIVE_TOOLS } from "../../../catalog/tools/source-navigation.js";
+import { atlasReplacesNativeTool } from "../../../catalog/tools/source-navigation.js";
 import { isRemotePromptClientIssuance } from "../../../domains/remote/classes/RemotePromptClient.js";
 
 const KNOWN_ISSUED_ROLES = new Set([
@@ -41,11 +41,9 @@ const WRITE_TOOL_NAMES = new Set([
 ]);
 const INTERNAL_DETERMINISTIC_TOOL_NAMES = new Set(["copy_file"]);
 const RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS = new Set([
-  "read_file",
   "chain_read",
   "chain_verdict",
   "list_files",
-  "search_files",
 ]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
 const TRUSTED_REMOTE_SURFACE_OBJECTS = new WeakSet();
@@ -216,6 +214,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  * @param {unknown} value
  * @param {{
  *   policy?: Readonly<IssuedToolPolicy>,
+ *   role?: string,
  *   projectDbCapability?: string,
  *   atlasAvailable?: boolean,
  *   coordinationAvailable?: boolean,
@@ -227,6 +226,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  */
 export function normalizeIssuedToolSurface(value, {
   policy = EMPTY_TOOL_POLICY,
+  role = "",
   projectDbCapability = "none",
   atlasAvailable = true,
   coordinationAvailable = false,
@@ -242,7 +242,7 @@ export function normalizeIssuedToolSurface(value, {
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
     if (hasAtlasSurface
-      && tool?.suite === "tools" && ATLAS_REPLACED_NATIVE_TOOLS.includes(tool.name)) continue;
+      && tool?.suite === "tools" && atlasReplacesNativeTool(tool.name, normalizeIssuedRole(role))) continue;
     if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,
@@ -423,6 +423,7 @@ export function normalizeRemoteIssuedPolicy(value, {
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
     {
       policy: toolPolicy,
+      role,
       projectDbCapability,
       atlasAvailable,
       coordinationAvailable: coordination.agentHandoffV1,

@@ -1,5 +1,5 @@
 import { TOOL_INSPECT_FILE } from "../../../worker/functions/helpers/file-inspector.js";
-import { ATLAS_REPLACED_NATIVE_TOOLS } from "../../../../catalog/tools/source-navigation.js";
+import { ATLAS_REPLACED_NATIVE_TOOLS, atlasReplacesNativeTool } from "../../../../catalog/tools/source-navigation.js";
 import { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
 import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
 import { atlasBackendLabel } from "../atlas-label.js";
@@ -66,6 +66,7 @@ import {
   TOOL_AGENT_HANDOFF_PLANNER,
   TOOL_AGENT_HANDOFF_RESEARCHER,
   TOOL_AGENT_HANDOFF_REPORT,
+  TOOL_AGENT_CLAIM,
   TOOL_REPORT_CLAIMS,
   getAgentHandoffToolSchemaForRole,
   TOOL_SUB_AGENT,
@@ -117,7 +118,7 @@ export {
   TOOL_AGENT_HANDOFF_PLANNER,
   TOOL_AGENT_HANDOFF_RESEARCHER,
   TOOL_AGENT_HANDOFF_REPORT,
-  TOOL_REPORT_CLAIMS,
+  TOOL_AGENT_CLAIM,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_SUB_AGENT,
   TOOL_DISPATCH_AGENT,
@@ -264,10 +265,18 @@ export const TOOL_CATALOG = {
     summary: "Submit the terminal structured handoff report; any selected evidence is materialized backend-side.",
     observation: { type: "tool.agent_handoff", label: "AgentHandoff", format: "generic", targetKeys: ["profile", "outcome"] },
   },
+  agent_claim: {
+    schema: TOOL_AGENT_CLAIM,
+    access: "coordination",
+    summary: "Save, revise, retract, or list evidence-backed claims for the current nonterminal researcher report draft.",
+    budgetExempt: true,
+    observation: { type: "tool.agent_claim", label: "AgentClaim", format: "generic", targetKeys: ["op"] },
+  },
   report_claims: {
     schema: TOOL_REPORT_CLAIMS,
     access: "coordination",
-    summary: "Save, revise, retract, or list evidence-backed claims for the current nonterminal researcher report draft.",
+    surfaced: false,
+    summary: "Compatibility name for saved researcher findings in existing sessions.",
     budgetExempt: true,
     observation: { type: "tool.report_claims", label: "ReportClaims", format: "generic", targetKeys: ["op"] },
   },
@@ -585,8 +594,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
     }),
     researcher: Object.freeze({
-      read: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
-      write: ["ack_operator_feedback", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      read: ["ack_operator_feedback", "read_file", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
+      write: ["ack_operator_feedback", "read_file", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
     }),
     // The planner never gets file-write tools, but it carries project_db_query
     // so it can inspect data while planning and execute a database-only work
@@ -732,7 +741,7 @@ function roleAllowlistForTool(toolName) {
   if (toolName === "custom_tools") return new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
   if (toolName === "sub_agent_next_input") return new Set(["subagent"]);
   if (toolName === "web_research_handoff") return new Set(["researcher"]);
-  if (toolName === "report_claims") return new Set(["researcher"]);
+  if (toolName === "agent_claim" || toolName === "report_claims") return new Set(["researcher"]);
   if (toolName === "dispatch_agent") return new Set(["researcher", "planner"]);
   if (toolName === "agent_handoff") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
@@ -750,8 +759,8 @@ function roleAllowlistForTool(toolName) {
     ]);
     if (names.has(toolName)) roles.push(role);
   }
-  // The researcher never holds read_file: ATLAS replaces it when available and
-  // the audited chain protocol replaces it when not.
+  // Protocol selection retains bounded native reads with Atlas and the audited
+  // chain protocol without Atlas. This is the role ceiling, not an issued grant.
   return new Set(roles);
 }
 
@@ -876,7 +885,7 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     names.unshift("agent_handoff");
   }
-  if (agentHandoff && role === "researcher") names.unshift("report_claims");
+  if (agentHandoff && role === "researcher") names.unshift("agent_claim");
   if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     names.unshift("sub_agent");
   }
@@ -957,21 +966,21 @@ export function getDeterministicMcpToolNames(role, {
     // Remove redundant source tools from every role's issued surface. Keep
     // directory browsing available without an ATLAS-first round trip.
     for (const toolName of ATLAS_REPLACED_NATIVE_TOOLS) {
+      if (!atlasReplacesNativeTool(toolName, role)) continue;
       const index = tools.indexOf(toolName);
       if (index !== -1) tools.splice(index, 1);
     }
   }
   if (role === "researcher" && atlasAvailable && disableSystemTools) {
-    // An Atlas-only researcher must not retain a second, unbudgeted repository
-    // discovery lane: directory browsing goes too, from both the signed
-    // allowlist and the provider declaration.
+    // Lock down generic browsing while retaining signed, budget-accounted
+    // literal search alongside Atlas retrieval.
     const index = tools.indexOf("list_files");
     if (index !== -1) tools.splice(index, 1);
   }
   if (agentHandoff && ["researcher", "planner", "dev", "artificer", "assessor"].includes(role)) {
     tools.unshift("agent_handoff");
   }
-  if (agentHandoff && role === "researcher") tools.unshift("report_claims");
+  if (agentHandoff && role === "researcher") tools.unshift("agent_claim");
   if (subAgent && ["researcher", "dev", "artificer"].includes(role)) {
     tools.unshift("sub_agent");
   }

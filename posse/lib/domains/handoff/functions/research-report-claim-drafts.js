@@ -51,17 +51,17 @@ function ensureSchema(db) {
 function resolveCall(context, role, db) {
   const agentCallId = positiveInt(context?.agentCallId ?? context?.agent_call_id);
   if (!agentCallId) {
-    fail("RESEARCH_REPORT_DRAFT_CONTEXT_INVALID", "report_claims requires an active agent call");
+    fail("RESEARCH_REPORT_DRAFT_CONTEXT_INVALID", "agent_claim requires an active agent call");
   }
   const call = db.prepare(`
     SELECT id, attempt_id, role
     FROM agent_calls
     WHERE id = ?
   `).get(agentCallId);
-  if (!call) fail("RESEARCH_REPORT_DRAFT_CONTEXT_INVALID", "report_claims agent call does not exist");
+  if (!call) fail("RESEARCH_REPORT_DRAFT_CONTEXT_INVALID", "agent_claim agent call does not exist");
   const effectiveRole = String(call.role || role || "").trim().toLowerCase();
   if (effectiveRole !== "researcher") {
-    fail("RESEARCH_REPORT_DRAFT_ROLE_INVALID", "report_claims is available only to the researcher role");
+    fail("RESEARCH_REPORT_DRAFT_ROLE_INVALID", "agent_claim is available only to the researcher role");
   }
   const staged = db.prepare(`
     SELECT status FROM agent_handoff_packets WHERE agent_call_id = ?
@@ -120,15 +120,15 @@ export function executeResearchReportClaims(args = {}, {
 } = {}) {
   const database = ensureSchema(db);
   const call = resolveCall(context, role, database);
-  const source = exactKeys(args, ["op", "claims", "ids"], "report_claims");
-  const op = boundedString(source.op, "report_claims.op", 12);
+  const source = exactKeys(args, ["op", "claims", "ids"], "agent_claim");
+  const op = boundedString(source.op, "agent_claim.op", 12);
   if (!new Set(["put", "remove", "list"]).has(op)) {
-    fail("RESEARCH_REPORT_DRAFT_INVALID", "report_claims.op must be put, remove, or list");
+    fail("RESEARCH_REPORT_DRAFT_INVALID", "agent_claim.op must be put, remove, or list");
   }
 
   if (op === "list") {
     if (source.claims != null || source.ids != null) {
-      fail("RESEARCH_REPORT_DRAFT_INVALID", "report_claims list accepts no claims or ids");
+      fail("RESEARCH_REPORT_DRAFT_INVALID", "agent_claim list accepts no claims or ids");
     }
     const drafts = listRows(call.agentCallId, database);
     return { ok: true, op, count: drafts.length, drafts };
@@ -136,12 +136,12 @@ export function executeResearchReportClaims(args = {}, {
 
   if (op === "remove") {
     if (source.claims != null || !Array.isArray(source.ids) || source.ids.length < 1 || source.ids.length > 12) {
-      fail("RESEARCH_REPORT_DRAFT_INVALID", "report_claims remove requires 1 to 12 ids and no claims");
+      fail("RESEARCH_REPORT_DRAFT_INVALID", "agent_claim remove requires 1 to 12 ids and no claims");
     }
     const ids = [...new Set(source.ids.map((value, index) => {
-      const id = boundedString(value, `report_claims.ids[${index}]`, 64);
+      const id = boundedString(value, `agent_claim.ids[${index}]`, 64);
       if (!CLAIM_ID_PATTERN.test(id)) {
-        fail("RESEARCH_REPORT_DRAFT_INVALID", `report_claims.ids[${index}] is invalid`);
+        fail("RESEARCH_REPORT_DRAFT_INVALID", `agent_claim.ids[${index}] is invalid`);
       }
       return id;
     }))];
@@ -154,11 +154,11 @@ export function executeResearchReportClaims(args = {}, {
   }
 
   if (source.ids != null || !Array.isArray(source.claims) || source.claims.length < 1) {
-    fail("RESEARCH_REPORT_DRAFT_INVALID", "report_claims put requires at least one claim and no ids");
+    fail("RESEARCH_REPORT_DRAFT_INVALID", "agent_claim put requires at least one claim and no ids");
   }
   const claims = source.claims.map(normalizeDraftClaim);
   if (new Set(claims.map((claim) => claim.id)).size !== claims.length) {
-    fail("RESEARCH_REPORT_DRAFT_INVALID", "report_claims put contains duplicate ids");
+    fail("RESEARCH_REPORT_DRAFT_INVALID", "agent_claim put contains duplicate ids");
   }
   const upsert = database.prepare(`
     INSERT INTO ${TABLE} (agent_call_id, claim_id, attempt_id, position, claim_json)

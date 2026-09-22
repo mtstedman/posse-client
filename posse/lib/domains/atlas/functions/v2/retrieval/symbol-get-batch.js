@@ -1,19 +1,37 @@
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch.js";
 
+export function isSymbolGetBatch(args) {
+  return args?.items != null || args?.symbols != null;
+}
+
 export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForId = null} = {}) {
-  if (!Array.isArray(args?.items)) return { error: "symbol.get items must be an array" };
-  if (args.items.length < 1) {
-    return { error: "symbol.get items requires at least one selector" };
+  const sharedFile = args?.symbols != null;
+  const field = sharedFile ? "symbols" : "items";
+  if (!Array.isArray(args?.[field])) return { error: `symbol.get ${field} must be an array` };
+  if (args[field].length < 1) {
+    return { error: `symbol.get ${field} requires at least one selector` };
   }
-  if (["symbolId", "symbolHandle", "symbolRef", "file", "path", "identifiersToFind"].some(key => args[key] != null)) {
+  if (sharedFile && (typeof args.file !== "string" || !args.file.trim())) {
+    return { error: "symbol.get symbols requires a shared file" };
+  }
+  const incompatible = ["symbolId", "symbolHandle", "symbolRef", "path", "identifiersToFind",
+    ...(sharedFile ? ["items"] : ["file"])];
+  if (incompatible.some(key => args[key] != null)) {
     return { error: "symbol.get batch cannot be combined with scalar selector fields" };
   }
+  // Expand names locally, without lookup or IO. Only the accepted prefix below
+  // is resolved/executed; the excluded tail is retained for the existing notice.
+  const items = sharedFile ? args.symbols.map(name => (
+    typeof name === "string" && name.trim()
+      ? { symbolRef: { name, file: args.file } }
+      : { invalid: true }
+  )) : args.items;
   const perSymbolBudget = args.maxTokens ?? SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol;
   if (!Number.isSafeInteger(perSymbolBudget) || perSymbolBudget < 1 || perSymbolBudget > SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol) {
     return { error: `symbol.get batch maxTokens must be between 1 and ${SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol} per symbol` };
   }
-  return { items: args.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems).map(item => {
-    if (!item || typeof item !== "object" || Array.isArray(item) || item.items != null) return { invalid: true };
+  return { items: items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems).map(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item) || item.items != null || item.symbols != null || item.invalid) return { invalid: true };
     if (item.maxTokens != null && (
       !Number.isSafeInteger(item.maxTokens)
       || item.maxTokens < 1
@@ -30,7 +48,7 @@ export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForI
       }
     }
     return selected;
-  }), maxTokensPerSymbol: perSymbolBudget, overflow: symbolGetBatchOverflow(args.items) };
+  }), maxTokensPerSymbol: perSymbolBudget, overflow: symbolGetBatchOverflow(items) };
 }
 
 function symbolGetBatchOverflow(items) {
@@ -76,8 +94,28 @@ export function combineSymbolGetBatchResults(results, overflow = {}) {
         content.push({ ...block, text: JSON.stringify(parsed) + (at < 0 ? "" : block.text.slice(at)) });
       } catch { content.push(block); }
     }
-    return { index, isError: result?.isError === true, contentBlocks: blocks.map((_, i) => offset + i) };
+    const isError = result?.isError === true;
+    return {
+      index,
+      isError,
+      ...(isError ? { errorCode: batchItemErrorCode(result) } : {}),
+      contentBlocks: blocks.map((_, i) => offset + i),
+    };
   });
   content[0].text = JSON.stringify({ action: "symbol.get", items, ...overflow });
   return { content, isError: items.every(item => item.isError), _meta: { symbolGetBatch: { count: items.length, failed: items.filter(item => item.isError).length } } };
+}
+
+function batchItemErrorCode(result) {
+  const direct = result?._meta?.atlasError?.code ?? result?.structuredContent?.error?.code;
+  if (direct) return String(direct);
+  const first = result?.content?.[0];
+  if (first?.type === "text" && typeof first.text === "string") {
+    try {
+      const parsed = JSON.parse(first.text.split("\n\n", 1)[0]);
+      const code = parsed?.error?.code ?? parsed?.code;
+      if (code) return String(code);
+    } catch { /* unstructured child error */ }
+  }
+  return "unknown";
 }

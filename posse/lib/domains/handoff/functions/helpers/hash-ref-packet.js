@@ -791,7 +791,7 @@ export function renderAutoExpandedDevBriefEvidence(input, {
       expansion.object_type ? `type=${expansion.object_type}` : "",
     ].filter(Boolean).join("; ");
     const block = [
-      `=== ${String(expansion.lane || "support").toUpperCase()} [evidence_ref ${expansion.ref} usage=cite_or_handoff]${details ? ` (${details})` : ""} ===`,
+      `=== ${String(expansion.lane || "support").toUpperCase()} [evidence_ref ${expansion.ref}]${details ? ` (${details})` : ""} ===`,
       String(expansion.text || "") || "(empty evidence payload)",
     ].join("\n");
     const addedChars = block.length + 2;
@@ -1077,8 +1077,12 @@ export function renderHashRefHandoffPacket(input, opts = {}) {
         && packet.proof_expansions?.some((candidate) => candidate.ref === entry.ref);
       const visiblePreview = lane !== "proof" && entry.preview;
       const renderedRef = expanded || visiblePreview
-        ? `[evidence_ref ${selector} usage=cite_or_handoff]`
-        : renderTraversalRefStub({ ref: entry.ref, kind: entry.object_type || lane }).trim();
+        ? `[evidence_ref ${selector}]`
+        : renderTraversalRefStub({
+            ref: entry.ref,
+            kind: entry.object_type || lane,
+            sizeChars: entry.size_chars,
+          }).trim();
       lines.push(`- ${renderedRef}${details.length > 0 ? ` - ${details.join("; ")}` : ""}`);
       const previewLines = lane === "proof" ? [] : renderPreview(entry.preview);
       for (const previewLine of previewLines) {

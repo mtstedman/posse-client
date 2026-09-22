@@ -2,19 +2,25 @@ import { CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surf
 import { WEB_TOOL_ROLES } from "../../../../shared/tools/functions/contract.js";
 import { TOOL_REFS, formatToolReference } from "../../../../catalog/tool-references.js";
 import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
+import { researcherAtlasBatchGuidance } from "../../../integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 
 export function buildCodexResearchMcpGuidance(executionContract, coreDeclarations = [], { nativeBatching = false } = {}) {
   const renderer = new ProviderToolRenderer({ providerName: "codex", issuedSurface: executionContract });
   const queryAction = executionContract?.tools?.find(tool => tool.mcpName === formatToolReference(TOOL_REFS.atlas.query));
   const atlas = renderer.tryRender(TOOL_REFS.atlas.query) || (queryAction && renderer.tryRenderIssued(queryAction));
   const handoff = renderer.tryRender(TOOL_REFS.tools.agentHandoff);
+  const directAtlas = executionContract?.tools?.some(tool => tool.suite === "atlas"
+    && tool.mcpName !== formatToolReference(TOOL_REFS.atlas.query));
+  const directResearcherAtlas = directAtlas && executionContract?.role === "researcher";
   return [
     nativeBatching
       ? "CODEX MCP TRANSPORT: Core retrieval tools are declared upfront. Call them directly with structured arguments; no registry lookup is needed. Tool results deliver source and evidence/continuation headers directly. Preserve truncation and error notices; recover missing source before citing it."
       : "CODEX MCP TRANSPORT: Core retrieval declarations are provided below before research begins. Call their exact names as tools.<name> inside functions.exec; no registry lookup is needed. Emit every returned text content block verbatim, including source and evidence/continuation headers. Do not JSON-stringify the enclosing MCP result or discard blocks. Preserve truncation and error notices; recover missing source before citing it. Use this executor output ceiling for source batches:",
     nativeBatching ? null : `// @exec: ${JSON.stringify({ max_output_tokens: CODEX_RESEARCHER_TRANSPORT_LIMITS.outputTokens })}`,
-    nativeBatching ? "Batch calls only when their arguments and authorization are already known. Planner, assessor, and developer batches execute in order, including writes; wait for results before choosing dependent operations. Keep scope requests, sub-agent control, and terminal handoff separate from other calls." : null,
-    atlas ? `Atlas actions such as code.window are action values passed to ${atlas}; put the selected action's fields in args. They are not separate callable tools.` : null,
+    nativeBatching && !directResearcherAtlas ? "Run independent, already-needed tool calls in parallel in the same turn when their arguments and authorization are known. Keep dependent operations sequential. A tool's multi-item form follows its own declared execution and error contract. Keep scope requests, sub-agent control, and terminal handoff separate from other calls." : null,
+    atlas && !directAtlas ? `Atlas actions such as code.window are action values passed to ${atlas}; put the selected action's fields in args. They are not separate callable tools.` : null,
+    directAtlas ? "Atlas reads are individually declared tools. Call the issued tool name with its structured parameters, without an action/args wrapper." : null,
+    directResearcherAtlas ? researcherAtlasBatchGuidance({ direct: true }) : null,
     handoff ? `Submit the completed report directly through ${handoff} with structured arguments, without preparation acknowledgements or an executor wrapper. Keep terminal submission separate from other tool calls. If validation rejects it, repair the reported fields using delivered evidence and preserve unchanged claims.` : null,
     nativeBatching ? null : `CORE MCP RETRIEVAL DECLARATIONS (name, description, parameters):\n${JSON.stringify(coreDeclarations)}`,
   ].filter(Boolean).join("\n");

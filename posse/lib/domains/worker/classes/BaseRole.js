@@ -4,6 +4,7 @@
 // provider-call template; role classes own context assembly and output handling.
 
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import { usesResearcherReportOnlyHandoff } from "../../../catalog/handoff.js";
 
 const SLOW_ROLE_PHASE_MS = 1000;
 const SLOW_PROVIDER_CALL_MS = 45000;
@@ -141,6 +142,8 @@ export class BaseRole {
           providerName: ctx.providerName,
           reusable: true,
           agentHandoff: packet?.agent_coordination?.agent_handoff_v1 === true,
+          agentHandoffReportOnly: role === "researcher"
+            && usesResearcherReportOnlyHandoff(packet?.prompt_profile),
           subAgent: packet?.agent_coordination?.sub_agent_v1 === true,
           dispatchAgent: packet?.agent_coordination?.dispatch_agent_v1 === true,
           researchInvestigation: packet?.agent_coordination?.research_investigation_v1 === true,

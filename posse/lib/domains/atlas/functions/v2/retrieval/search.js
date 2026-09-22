@@ -346,7 +346,7 @@ async function buildEnvelope({ view, result, versionId, limit, query, semanticRe
     data,
     meta,
   });
-  if (scopeBeamEnabled && symbolSearchHasUnusedSlots(envelope, limit)) {
+  if (scopeBeamEnabled && visibleItems.length > 0 && symbolSearchHasUnusedSlots(envelope, limit)) {
     await attachNodeScopeBeam({
       envelope,
       view,

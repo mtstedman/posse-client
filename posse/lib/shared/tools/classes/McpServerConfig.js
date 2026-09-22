@@ -1,6 +1,7 @@
 import path from "path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "url";
+import { withToolExecutionAliases } from "../../../catalog/tool-surface/compatibility.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   POSSE_MCP_GATEWAY_SERVER_NAME,
@@ -645,6 +646,7 @@ function buildDeterministicMcpBootPayload(role, {
   projectDbWrite = false,
   projectDbCapability = null,
   agentHandoff = false,
+  agentHandoffReportOnly = false,
   subAgent = false,
   dispatchAgent = false,
   webResearchHandoff = false,
@@ -702,6 +704,7 @@ function buildDeterministicMcpBootPayload(role, {
       allowImageHelpers: roleUsesDeterministicImageHelpers(role),
       allowImageGeneration,
       agentHandoff: agentHandoff === true,
+      agentHandoffReportOnly: agentHandoff === true && agentHandoffReportOnly === true && role === "researcher",
       subAgent: subAgent === true,
       dispatchAgent: dispatchAgent === true,
       webResearchHandoff: webResearchHandoff === true,
@@ -752,7 +755,7 @@ function buildDeterministicMcpBootPayload(role, {
       toolAllowlist: {
         tools: coordinationChild === true
           ? ["sub_agent_next_input", "agent_handoff"]
-          : expectedTools,
+          : withToolExecutionAliases(expectedTools),
         ...(coordinationChild === true ? { atlas: [] } : {}),
       },
       remoteCatalog: {
@@ -1335,6 +1338,7 @@ export class McpServerConfig {
       // provider-side projection and telemetry aligned with the signed role
       // contract instead of requiring every adapter to copy this flag.
       agentHandoff: opts.mcpGate?.contractBootConfig?.agentHandoff === true,
+      agentHandoffReportOnly: opts.mcpGate?.contractBootConfig?.agentHandoffReportOnly === true,
       subAgent: opts.mcpGate?.contractBootConfig?.subAgent === true,
       dispatchAgent: opts.mcpGate?.contractBootConfig?.dispatchAgent === true,
       webResearchHandoff: opts.mcpGate?.contractBootConfig?.webResearchHandoff === true,

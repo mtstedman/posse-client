@@ -11,28 +11,10 @@ function normalizedRef(value) {
   return normalizeHashRefAlias(value);
 }
 
-function boundedText(value, maxChars) {
-  return String(value || "")
-    .replace(/["\\\]\r\n]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, maxChars);
-}
-
-export function evidenceRefSurface(ref, {
-  exactField = null,
-  chars = null,
-  lines = null,
-} = {}) {
+export function evidenceRefSurface(ref, _options = {}) {
   const normalized = normalizedRef(ref);
   if (!normalized) return null;
-  return {
-    ref: normalized,
-    usage: "cite_or_handoff",
-    ...(exactField ? { exact_field: String(exactField) } : {}),
-    ...(chars != null && Number.isFinite(Number(chars)) ? { chars: Math.max(0, Number(chars)) } : {}),
-    ...(lines != null && Number.isFinite(Number(lines)) ? { lines: Math.max(0, Number(lines)) } : {}),
-  };
+  return { ref: normalized };
 }
 
 export function traversalRefSurface(ref, {
@@ -48,7 +30,6 @@ export function traversalRefSurface(ref, {
   if (!normalized) return null;
   return {
     ref: normalized,
-    usage: "fetch_missing_content",
     kind: String(kind || "continuation"),
     ...(offset != null && Number.isFinite(Number(offset)) ? { offset: Math.max(0, Number(offset)) } : {}),
     ...(limit != null && Number.isFinite(Number(limit)) ? { limit: Math.max(1, Number(limit)) } : {}),
@@ -59,31 +40,19 @@ export function traversalRefSurface(ref, {
   };
 }
 
-export function renderEvidenceRefStub({
-  ref,
-  objectType = "tool_result",
-  sizeChars = 0,
-  note = "",
-} = {}) {
+export function renderEvidenceRefStub({ ref } = {}) {
   const surface = evidenceRefSurface(ref);
   if (!surface) return "";
-  const type = boundedText(objectType, 80).replace(/[^0-9A-Za-z_.:-]+/g, "_") || "tool_result";
-  const noteText = boundedText(note, 140);
-  return `\n\n[evidence_ref ${surface.ref} usage=cite_or_handoff object_type=${type} chars=${Math.max(0, Number(sizeChars) || 0)}${noteText ? ` note="${noteText}"` : ""}]`;
+  return `\n\n[evidence_ref ${surface.ref}]`;
 }
 
-export function renderTraversalRefStub({
-  ref,
-  kind = "continuation",
-  objectType = "tool_result.continuation",
-  sizeChars = 0,
-  note = "",
-} = {}) {
+export function renderTraversalRefStub({ ref, kind = "continuation", sizeChars = null } = {}) {
   const surface = traversalRefSurface(ref, { kind });
   if (!surface) return "";
-  const type = boundedText(objectType, 80).replace(/[^0-9A-Za-z_.:-]+/g, "_") || "tool_result.continuation";
-  const noteText = boundedText(note, 140);
-  return `\n\n[traversal_ref ${surface.ref} usage=fetch_missing_content kind=${boundedText(kind, 40) || "continuation"} object_type=${type} chars=${Math.max(0, Number(sizeChars) || 0)}${noteText ? ` note="${noteText}"` : ""}]`;
+  const size = sizeChars != null && Number.isFinite(Number(sizeChars))
+    ? ` chars=${Math.max(0, Number(sizeChars))}`
+    : "";
+  return `\n\n[traversal_ref ${surface.ref} kind=${String(kind || "continuation").replace(/[^0-9A-Za-z_.:-]+/g, "_")}${size}]`;
 }
 
 export function stripHashRefSurfaceSuffix(value) {

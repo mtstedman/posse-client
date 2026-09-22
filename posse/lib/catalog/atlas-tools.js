@@ -497,11 +497,11 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Repository symbol discovery when the target or its location is unknown. Returns a bounded address-only hit list with stable symbol IDs, locations, and short signatures. Reuse returned IDs exactly as issued.",
+    description: "Repository discovery when the target or its location is unknown. Returns bounded symbol addresses. Multiword concepts and code-fragment queries can also return bounded, redacted sourceTextMatches from indexed files after an empty symbol-name lookup. Reuse returned IDs and evidence refs exactly as issued.",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string", description: "One unresolved symbol name or concept; retain returned symbol IDs for later reasoning." },
+        query: { type: "string", description: "One unresolved symbol, concept, or code fragment. Code punctuation uses a case-insensitive literal source match; multiword concepts require all significant words on a source line." },
         limit: { type: "integer", description: "Maximum number of results to return." },
         semantic: { type: "boolean", description: "Enable semantic reranking when supported." },
         vectorCandidateLimit: { type: "integer", minimum: 1, maximum: 1000, description: "Experimental exact ANN candidate delivery depth.", internalOnly: true },
@@ -670,10 +670,15 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.get": {
     type: "function",
     name: "atlas_symbol_get",
-    description: "Read an exact symbol body, or batch independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.",
+    description: "Read exact symbol bodies with file and symbols (an array of exact names or qualified names sharing that file), a single ID/name, or independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.",
     parameters: {
       type: "object",
       properties: {
+        symbols: {
+          type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
+          items: { type: "string", minLength: 1 },
+          description: "Exact names or qualified names in the shared file. Use file+symbols to share one path across the requested symbols.",
+        },
         items: {
           type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
           description: "Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode.",
@@ -697,7 +702,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           additionalProperties: false,
           description: "Exact symbol reference used when no symbol ID is needed.",
         },
-        file: { type: "string", description: "Optional exact repository-relative path for duplicate-body disambiguation." },
+        file: { type: "string", minLength: 1, description: "Shared repository-relative path for symbols, or optional exact path for scalar duplicate-body disambiguation." },
         identifiersToFind: {
           type: "array",
           minItems: 1,
@@ -708,6 +713,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Optional inline token cap; the repository code-window policy still applies." },
       },
       anyOf: [
+        { required: ["file", "symbols"] },
         { required: ["items"] },
         { required: ["symbolId"] },
         { required: ["symbolRef"] },
@@ -912,7 +918,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path — one string or an array of them, e.g. \"src/billing\" or [\"lib/a.js\", \"lib/b.js\"]. Resolves up to 64 indexed files." },
         symbols: { type: "array", items: { type: "string" }, description: "Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16)." },
-        maxFiles: { type: "integer", description: "Optional. Cap on files surveyed. Default 64." },
+        maxFiles: { type: "integer", minimum: 1, maximum: 64, description: "Optional. Cap on files surveyed. Default 64, minimum 1, maximum 64." },
         sessionId: { type: "string", description: "Optional session namespace shared with related code retrieval calls.", internalOnly: true },
       },
       required: ["paths"],
@@ -984,6 +990,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         reason: { type: "string", description: "Why exact source is needed for this known symbol or anchored file region." },
         identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All known same-file anchors for one bounded file-mode slice, each a non-empty exact name. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. Submit anchored reads with at least one exact name." },
         expectedLines: { type: "integer", description: "Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds." },
+        autoFill: { type: "boolean", description: "Keep a partially new window contiguous when dedupe would split it into fragments. Default true; false omits all already-visible lines. Preserves the selected window bounds." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Region shape: symbol (default) reads the named definition, block its enclosing block, fileWindow a broader anchored file slice." },
         maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped." },
         sliceContext: { type: "object", description: "Task-slice accounting context supplied by orchestration.", internalOnly: true },

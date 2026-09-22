@@ -8,7 +8,7 @@ import { symbolIdOf } from "./cards.js";
 import { resolveSymbolBodyTarget, symbolSourceText } from "./symbol-body-resolution.js";
 import { selectSymbolRefTarget, selectSymbolTarget } from "./symbol-target.js";
 import { resolveRequestedIdentifierSymbols } from "./identifier-resolution.js";
-import { planSymbolGetBatch } from "./symbol-get-batch.js";
+import { isSymbolGetBatch, planSymbolGetBatch } from "./symbol-get-batch.js";
 import { staleSymbolSource } from "./source-freshness.js";
 
 const INTERNAL_SYMBOL_GET_REASON = "symbol.get exact indexed body";
@@ -287,7 +287,7 @@ export async function symbolGet({
   readSymbolBody = codeNeedWindow,
   storeSourceTraversalRef = null,
 }) {
-  if (params.items != null) {
+  if (isSymbolGetBatch(params)) {
     const plan = planSymbolGetBatch(params);
     if (plan.error) return errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: plan.error});
     const items = await Promise.all(plan.items.map(item => item.invalid

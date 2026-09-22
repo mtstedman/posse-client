@@ -19,7 +19,8 @@ const PARALLEL_READ_TOOLS = new Set([
 ]);
 
 const PARALLEL_WRITE_TOOLS = new Set([
-  "report_claims",
+  "agent_claim",
+  "report_claims", // Existing sessions retain the same execution semantics.
 ]);
 
 const NATIVE_BATCH_TOOLS = new Set([

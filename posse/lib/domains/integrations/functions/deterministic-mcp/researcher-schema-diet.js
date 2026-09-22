@@ -14,7 +14,7 @@ const RESEARCHER_SCHEMA_DIET_DESCRIPTIONS = Object.freeze({
   "atlas.symbol.search": "Find ranked symbol addresses by exact or semantic query; use returned IDs or locations for focused reads.",
   "atlas.symbol.card": "Inspect one known symbol's compact signature and relationships.",
   "atlas.symbol.callers": "List compact incoming caller or reference symbols for one exact symbol ID, grouped by file.",
-  "atlas.symbol.get": "Read one exact indexed symbol body by ID, optionally selecting a duplicate by file.",
+  "atlas.symbol.get": "Read exact bodies with file+symbols (exact names), a single ID/name, or independent items. Shared maxTokens applies per symbol; errors remain per item.",
   "atlas.symbol.overview": "Inspect a known symbol's bounded relationship overview.",
   "atlas.code.skeleton": "Inspect a body-free outline for one known file or symbol.",
   "atlas.code.lens": "Locate all named identifiers within one known file or symbol before an exact source read.",
@@ -26,20 +26,20 @@ const RESEARCHER_SCHEMA_DIET_DESCRIPTIONS = Object.freeze({
   "atlas.memory.feedback": "Record whether one surfaced repository memory was useful.",
 });
 
-export function applyResearcherSchemaDiet(tool) {
+export function applyResearcherSchemaDiet(tool, { preserveDescription = false } = {}) {
   const normalizedName = String(tool?.name || "");
   const compactDescription = RESEARCHER_SCHEMA_DIET_DESCRIPTIONS[normalizedName];
   const { annotations: _annotations, ...withoutAnnotations } = tool;
   const inputSchema = stripAgentSchemaDescriptions(tool.inputSchema);
   // Keep selection semantics that constraints alone cannot communicate.
   // Enum values and validation limits survive the generic projection already.
-  for (const field of ["expectedLines", "granularity"]) {
+  for (const field of ["expectedLines", "granularity", "autoFill"]) {
     const description = tool.inputSchema?.properties?.[field]?.description;
     if (description && inputSchema?.properties?.[field]) inputSchema.properties[field].description = description;
   }
   return {
     ...withoutAnnotations,
-    ...(compactDescription ? { description: compactDescription } : {}),
+    ...(!preserveDescription && compactDescription ? { description: compactDescription } : {}),
     inputSchema,
   };
 }

@@ -153,6 +153,30 @@ export function renderMcpSurfaceName({ providerName = "generic", serverName, too
   return `mcp__${server}__${renderedTool}`;
 }
 
+// The research terminal tool as the provider exposes it, by the same rule as
+// the prompt's issued-surface names: Codex always attaches handoff tools as
+// direct (flattened) tools, Claude namespaces them under the gateway server,
+// and other providers call the canonical name. Real sessions carry issuance
+// only in the signed tools-suite allowlist (there is no agentHandoff claim);
+// agentHandoff covers unsigned local boot configs. agent_handoff wins; a web
+// specialty researcher issued only web_research_handoff gets that tool.
+// Empty when no terminal tool was issued.
+export function renderAgentHandoffCallableName({
+  providerName = "",
+  agentHandoff = false,
+  issuedTools = null,
+  serverName,
+} = {}) {
+  const issued = new Set([...(issuedTools || [])].map((name) => String(name || "").trim()));
+  const canonical = agentHandoff === true || issued.has("agent_handoff")
+    ? "agent_handoff"
+    : (issued.has("web_research_handoff") ? "web_research_handoff" : "");
+  if (!canonical) return "";
+  const provider = normalizeProviderName(providerName);
+  if (!["codex", "claude"].includes(provider)) return canonical;
+  return renderMcpSurfaceName({ providerName: provider, serverName, toolName: `tools.${canonical}` });
+}
+
 function buildMcpSurfaceDescriptor({
   canonicalName,
   mcpName,

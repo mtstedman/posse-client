@@ -26,14 +26,14 @@ export function surveyPaths(raw) {
     .filter(Boolean);
 }
 
-export function codeSurveyPathError(raw) {
+export function codeSurveyPathError(raw, action = "code.survey") {
   const requested = surveyPaths(raw);
-  if (!requested.length) return "code.survey requires paths naming repository-relative directories or files.";
+  if (!requested.length) return `${action} requires paths naming repository-relative directories or files.`;
   const unusable = requested.find((entry) =>
-    entry.startsWith("/") || /^[A-Za-z]:/.test(entry)
-    || entry.split("/").some((segment) => segment === "." || segment === ".."));
+    entry.startsWith("/") || /^[A-Za-z]:/.test(entry) || entry.includes("\0")
+    || entry.split("/").some((segment) => !segment || segment === "." || segment === ".."));
   return unusable
-    ? `code.survey paths must name repository-relative directories or files without "." or ".." segments (got ${JSON.stringify(unusable)}). Supply a directory or file from the repository map; the repository-root shorthand "." is not supported.`
+    ? `${action} paths must name repository-relative directories or files without empty, "." or ".." segments (got ${JSON.stringify(unusable)}). Supply a directory or file from the repository map; the repository-root shorthand "." is not supported.`
     : null;
 }
 

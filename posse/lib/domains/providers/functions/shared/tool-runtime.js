@@ -83,6 +83,7 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "move_file",
   "optimize_image",
   "prune_artifact_output",
+  "agent_claim",
   "report_claims",
   "request_scope",
   "reencode_image",
@@ -448,7 +449,7 @@ export function createStandardToolHandlerMap({
     return lastResult;
   };
   const handlers = {
-    report_claims(args, ctx) {
+    agent_claim(args, ctx) {
       const ambient = getObservationContext() || {};
       return JSON.stringify(executeResearchReportClaims(args || {}, {
         context: ambient,
@@ -746,6 +747,7 @@ export function createStandardToolHandlerMap({
   // suite metadata, so the embedded runtime's handler set flows through the
   // single registry the deterministic MCP server also builds from.
   const registry = declareToolSuites(new ToolRegistry());
+  handlers.report_claims = handlers.agent_claim;
   for (const [name, execute] of Object.entries(handlers)) {
     if (!registry.has(name)) {
       registry.declare({

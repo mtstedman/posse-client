@@ -6,6 +6,7 @@ import {
 } from "../../../catalog/source-display.js";
 import { canonicalEvidenceSourcePath, normalizedEvidenceSourceWindows } from "./source-evidence.js";
 import { sourceRows } from "./source-continuation.js";
+import { codeLensDisplay } from "./code-lens-display.js";
 
 function numberedWindow(window, fallbackPath) {
   if (window?.contentKind != null && window.contentKind !== CODE_CONTENT_KINDS.SOURCE) return null;
@@ -127,7 +128,7 @@ function displayedCoverage(range, displayedRanges) {
 // visible stub after proving that the header ref covers every delivered window.
 export function compactSourceEvidenceSuffix(value, suffix, resolveEvidence) {
   const ref = value?.evidence_ref;
-  if (!resolveEvidence || ref?.usage !== "cite_or_handoff" || !ref.ref) return suffix;
+  if (!resolveEvidence || !ref?.ref || ref.usage === "inspect_only" || ref.citable === false) return suffix;
   const entry = resolveEvidence(ref.ref);
   if (!entry || entry.metadata?.line_semantics !== "source" || entry.metadata?.citable === false) return suffix;
   const proof = normalizedEvidenceSourceWindows(entry.metadata.source_windows);
@@ -181,6 +182,8 @@ function fileWindowDisplay(header, windows, value) {
     return {
       [SOURCE_WINDOW_DISPLAY_FIELDS.LINES]: range,
       ...(symbols.length > 0 ? { [SOURCE_WINDOW_DISPLAY_FIELDS.SYMBOLS]: symbols } : {}),
+      ...(window.evidence_ref?.ref && window.evidence_ref.ref !== value.evidence_ref?.ref
+        ? { evidence_ref: window.evidence_ref } : {}),
       // A window whose bytes did not number cleanly against its declared range
       // is still delivered, inline, so the reshape never hides source.
       ...(shown ? { content_block: shown.content_block } : { content: window.content }),
@@ -299,6 +302,9 @@ export function sourceLineDisplay(parsed, blockOffset = 0, resolveEvidence = nul
   if (parsed?.evidence_ref?.citable === false
     || parsed?.evidence_ref?.usage === "inspect_only"
     || parsed?.page?.mode === "search") return null;
+  if (Array.isArray(parsed?.matches) || Array.isArray(parsed?.data?.matches)) {
+    return codeLensDisplay(parsed, blockOffset);
+  }
   // A multi-ref read has one shared header. Block indices in every nested
   // source window must refer to the blocks after that header, not restart at 1.
   if (Array.isArray(parsed?.refs)) {

@@ -540,11 +540,11 @@ const RESEARCHER_COMPLETION_COVERAGE = {
   },
 };
 
-export const TOOL_REPORT_CLAIMS = {
+export const TOOL_AGENT_CLAIM = {
   type: "function",
-  name: "report_claims",
+  name: "agent_claim",
   description:
-    "Optionally save completed, evidence-backed findings during research. Aim for a complete answer to the section addressed, rather than partial notes. Prefer preserving substantive detail over shortening a finding. Reuse a stable lowercase id to revise a finding, or remove it if later evidence disproves it. Saved claims are included in the terminal report and undergo normal final evidence validation. Findings can also be supplied directly at terminal handoff; a separate save call is not required.",
+    "Reserve agent_claim for a completed, evidence-backed finding saved before research on other findings continues. Once research is complete, put new, unsaved findings directly in agent_handoff.claims. agent_handoff includes saved claims automatically and validates their evidence; include only new, unsaved findings there. Aim for a complete answer to the section rather than partial notes, and preserve substantive detail. Reuse a stable lowercase id to revise a saved finding, or remove it if later evidence disproves it. Independent saves can run alongside already-needed research reads when their evidence has already been delivered.",
   parameters: {
     type: "object",
     properties: {
@@ -593,6 +593,13 @@ export const TOOL_REPORT_CLAIMS = {
     ],
     additionalProperties: false,
   },
+};
+
+// Execution-only compatibility for sessions issued the previous name.
+export const TOOL_REPORT_CLAIMS = {
+  ...TOOL_AGENT_CLAIM,
+  name: "report_claims",
+  description: TOOL_AGENT_CLAIM.description.replaceAll("agent_claim", "report_claims"),
 };
 
 export const TOOL_AGENT_HANDOFF = {
@@ -1405,7 +1412,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research using the active profile. Staged report claims require exact evidence, but unsupported submitted claims are moved into a marked summary note without a retry. Pipeline claims are advisory and may omit evidence; the planner can inspect them directly. Preserve exact existing test commands in verification_targets. Use input_required for unresolved choices that materially change security, authentication, data handling, or user-facing semantics. The receipt ends generation.",
+    "Finish research using the active profile. Saved report findings from agent_claim are included automatically; supply only new, unsaved findings in claims. Staged report claims require exact evidence, but unsupported submitted claims are moved into a marked summary note without a retry. Pipeline claims are advisory and may omit evidence; the planner can inspect them directly. Preserve exact existing test commands in verification_targets. Use input_required for unresolved choices that materially change security, authentication, data handling, or user-facing semantics. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1546,7 +1553,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   type: "function",
   name: "agent_handoff",
   description:
-    "Finish research with a complete evidence-backed report. Saved claims are included automatically. The optional claims field is for complete findings that have not already been saved through report_claims. Preserve material conditions and exceptions and prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note without a retry. The receipt ends generation.",
+    "Finish research with a complete evidence-backed report. Saved findings from agent_claim are included automatically; leave them out of this call. Supply only new, unsaved findings in the optional claims field, omitting it when all findings are saved. Use summary to connect the findings without restating them. Preserve material conditions and exceptions and prefer implementation-code evidence. If evidence is unavailable, submit the finding once; Posse moves it into a marked summary note without a retry. The receipt ends generation.",
   parameters: {
     type: "object",
     properties: {
@@ -1560,7 +1567,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
       claims: {
         type: "array",
         minItems: 1,
-        description: "Optional ordered findings not already saved through report_claims.",
+        description: "Optional ordered findings not already saved through agent_claim.",
         items: {
           type: "object",
           properties: {

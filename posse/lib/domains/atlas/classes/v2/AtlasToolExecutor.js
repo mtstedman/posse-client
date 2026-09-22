@@ -1333,6 +1333,7 @@ export class AtlasToolExecutor {
 
   async #attachNativeScopeBeam({ envelope, request, readPayload, repoRoot, deadline, searchVectorBridge }) {
     const limit = symbolSearchLimit(request.args?.limit, 12);
+    if (!Array.isArray(envelope?.data?.items) || envelope.data.items.length === 0) return envelope;
     if (!symbolSearchHasUnusedSlots(envelope, limit)) return envelope;
     if (this.#now() >= deadline) return markScopeBeamDegraded(envelope);
     const beamConfig = scopeBeamConfig(readPayload.config);

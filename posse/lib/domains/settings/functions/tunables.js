@@ -27,7 +27,7 @@ const TUNABLE_DEFAULTS = Object.freeze({
   posse_display_event_rate_limit_per_sec: 300,
   posse_log_level: "info",
   atlas_v2_boot_timeout_ms: 5400000,
-  atlas_handoff_prefetch_timeout_ms: 60000,
+  atlas_handoff_prefetch_timeout_ms: 90000,
   atlas_parse_per_lang_tandem: true,
   atlas_parse_file_progress_throttle_ms: 100,
   atlas_parse_band_max_rows: 8,
