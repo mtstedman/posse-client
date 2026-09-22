@@ -5,6 +5,7 @@ import path from "path";
 import { inspect } from "util";
 import { atlasNativeToolIsComplementary } from "../../../catalog/tools/source-navigation.js";
 import { redactComplementaryReadResult } from "./deterministic-mcp/read-file-redaction.js";
+import { redactComplementarySearchRows } from "./deterministic-mcp/search-file-redaction.js";
 import {
   TOOL_HASH_FILE,
   TOOL_LIST_FILES,
@@ -1282,7 +1283,15 @@ const {
   execRunTest,
   execRunTestSuite,
   execGetBrief,
-} = createDeterministicToolkit({ safePath, skipObservationLogging: true });
+} = createDeterministicToolkit({
+  safePath,
+  skipObservationLogging: true,
+  transformSearchRows: (rows, context) => (atlasAvailable && atlasNativeToolIsComplementary("search_files", roleName)
+    ? redactComplementarySearchRows(rows, context, {
+      onFallback: (error) => appendToolLog({ event: "search_files_redaction_fallback", error }),
+    })
+    : rows),
+});
 
 function _normalizeReadRange(argVal, fallback) {
   const n = Number.parseInt(String(argVal ?? ""), 10);

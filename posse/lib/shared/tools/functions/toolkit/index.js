@@ -47,6 +47,7 @@ import {
 } from "./path-policy.js";
 import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
+import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
 import {
   buildStructuredReadResult as buildStructuredReadResultFromModule,
@@ -78,7 +79,6 @@ import {
   TOOL_WRITE_FILE,
 } from "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
-import { CONTEXT_SEARCH_FILES_SELF_BOUND_CHARS } from "../../../../catalog/context.js";
 import {
   buildManifest,
   getArtifactProtocol,
@@ -323,24 +323,6 @@ function isSuccessfulToolResult(result) {
   return !/^(?:Error:|AUDIT ERROR:)/i.test(text);
 }
 
-function boundedSearchRows(rows, { offset, headLimit, maxChars = CONTEXT_SEARCH_FILES_SELF_BOUND_CHARS } = {}) {
-  const total = rows.length;
-  const candidates = rows.slice(offset, offset + headLimit);
-  if (candidates.length === 0) return "No matches found.";
-  const output = [];
-  for (const candidate of candidates) {
-    const next = [...output, candidate].join("\n");
-    if (next.length > maxChars - 160) break;
-    output.push(candidate);
-  }
-  if (output.length === 0) output.push(String(candidates[0]).slice(0, Math.max(1, maxChars - 180)));
-  const returned = output.length;
-  const nextOffset = offset + returned;
-  const truncated = nextOffset < total;
-  output.push(`[search_files matchesTotal=${total} returned=${returned} truncated=${truncated}]`);
-  return output.join("\n").slice(0, maxChars);
-}
-
 function readLargeFilePage(filePath, { offset, limit, maxBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES }) {
   const firstLine = offset + 1;
   const endLine = firstLine + limit;
@@ -417,6 +399,7 @@ export function createDeterministicToolkit({
   ripgrepCommand = resolveRipgrepCommand(),
   spawnSyncImpl = spawnSync,
   gitNativeParity = {},
+  transformSearchRows = null,
 } = {}) {
   if (typeof safePathImpl !== "function") {
     throw new Error("createDeterministicToolkit requires a safePath function");
@@ -865,18 +848,7 @@ export function createDeterministicToolkit({
         return boundedSearchRows(rows, { offset, headLimit });
       }
 
-      const rows = contentRows
-        .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.text.localeCompare(b.text))
-        .map((entry) => {
-          const out = [`${entry.file}:${entry.line}:${entry.text}`];
-          if (entry.before.length > 0 || entry.after.length > 0) {
-            for (const before of entry.before) out.push(`${entry.file}:${before.line}-${before.text}`);
-            for (const after of entry.after) out.push(`${entry.file}:${after.line}+${after.text}`);
-            out.push("--");
-          }
-          return out.join("\n");
-        });
-      return boundedSearchRows(rows, { offset, headLimit });
+      return renderSearchContentRows(contentRows, { offset, headLimit }, transformSearchRows, { cwd, scopePredicates });
     } catch (err) {
       return `Error: search_files failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
     }

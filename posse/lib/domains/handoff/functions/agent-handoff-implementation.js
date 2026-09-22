@@ -5464,10 +5464,43 @@ export function stageAgentHandoff(args, {
         ...(hasDiagnostics ? { diagnostics } : {}),
       };
     }
+    // A staged (uncommitted) report is superseded by the agent's later valid
+    // resubmission. Rejecting both used to fail the whole job: a handoff whose
+    // response was lost (transport timeout, Atlas502) leaves the model to
+    // resubmit, and a regenerated report never matches the staged digest.
+    // Concurrent handoffs are rejected earlier by the owner's sibling-call
+    // guard, so this only sees sequential resubmissions. Committed packets stay
+    // immutable.
     if (existing.status === "staged") {
-      database.prepare(`UPDATE ${TABLE} SET status='rejected', rejection_code='duplicate_conflict', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_call_id=? AND status='staged'`).run(agentCallId);
+      const superseded = database.prepare(`
+        UPDATE ${TABLE}
+        SET profile=?, outcome=?, materialized_packet_json=?, packet_digest=?, evidence_chars=?,
+            stage_count=stage_count+1, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE agent_call_id=? AND status='staged' AND packet_digest=?
+      `).run(
+        packet.profile,
+        packet.outcome,
+        materializedJson,
+        digest,
+        packet.evidence_chars,
+        agentCallId,
+        existing.packet_digest,
+      );
+      if (superseded.changes === 1) {
+        recordAtlasTrunkHitRate(packet, resolvedContext);
+        return {
+          ok: true,
+          status: "staged",
+          digest,
+          idempotent: false,
+          superseded: true,
+          supersededDigest: existing.packet_digest,
+          callCount: Number(existing.stage_count || 1) + 1,
+          ...(hasDiagnostics ? { diagnostics } : {}),
+        };
+      }
     }
-    fail("AGENT_HANDOFF_DUPLICATE_CONFLICT", "A different agent_handoff is already staged for this agent call");
+    fail("AGENT_HANDOFF_DUPLICATE_CONFLICT", "A different agent_handoff is already committed for this agent call");
   }
   database.prepare(`
     INSERT INTO ${TABLE} (

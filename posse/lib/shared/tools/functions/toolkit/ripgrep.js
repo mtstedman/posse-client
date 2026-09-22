@@ -389,6 +389,7 @@ export function parseRipgrepJsonMatches(stdout, rootPath, outputMode, beforeCont
     }
 
     contentRows.push({
+      sourcePath: filePath,
       file: displayPath,
       line: lineNo,
       text: firstMatchedLine(data.lines?.text),
