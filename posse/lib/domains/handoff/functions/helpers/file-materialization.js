@@ -4,6 +4,7 @@ import path from "node:path";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import {
+  isSensitiveEnvRepoPath,
   normalizeRepoRelativePath,
   validateMutableRepoPath,
 } from "../../../runtime/functions/protected-paths.js";
@@ -199,6 +200,68 @@ function isWritingCodePacket(packet) {
     && taskMode === "code";
 }
 
+const MUTABLE_SCOPE_FIELDS = Object.freeze([
+  "files_to_modify",
+  "files_to_create",
+  "files_to_delete",
+  "create_roots",
+  "must_modify",
+]);
+
+function normalizedProtectedScopeOmissions(values = []) {
+  const seen = new Set();
+  const normalized = [];
+  for (const entry of Array.isArray(values) ? values : []) {
+    const path = normalizeRepoRelativePath(entry?.path);
+    const field = MUTABLE_SCOPE_FIELDS.includes(entry?.field) ? entry.field : null;
+    if (!path || !field || !isSensitiveEnvRepoPath(path)) continue;
+    const key = `${field}\0${path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ path, field, reason: "sensitive_env_path" });
+  }
+  return normalized;
+}
+
+/** Remove secret-bearing env paths before any mutation or provider context step. */
+export function stripSensitiveEnvMutationScope(packet) {
+  if (!packet || typeof packet !== "object") return [];
+  const raw = packet._raw_payload && typeof packet._raw_payload === "object"
+    ? packet._raw_payload
+    : null;
+  const omissions = normalizedProtectedScopeOmissions([
+    ...(packet.protected_scope_omissions || []),
+    ...(raw?.protected_scope_omissions || []),
+  ]);
+  const seen = new Set(omissions.map((entry) => `${entry.field}\0${entry.path}`));
+
+  for (const field of MUTABLE_SCOPE_FIELDS) {
+    const source = Array.isArray(packet[field])
+      ? packet[field]
+      : (Array.isArray(raw?.[field]) ? raw[field] : []);
+    const kept = [];
+    for (const value of source) {
+      const normalized = normalizeRepoRelativePath(value);
+      if (!normalized) continue;
+      if (!isSensitiveEnvRepoPath(normalized)) {
+        if (!kept.includes(normalized)) kept.push(normalized);
+        continue;
+      }
+      const key = `${field}\0${normalized}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        omissions.push({ path: normalized, field, reason: "sensitive_env_path" });
+      }
+    }
+    packet[field] = kept;
+    if (raw) raw[field] = [...kept];
+  }
+
+  packet.protected_scope_omissions = omissions;
+  if (raw) raw.protected_scope_omissions = omissions.map((entry) => ({ ...entry }));
+  return omissions;
+}
+
 /**
  * Consume planner-owned files_to_create before a writing provider sees the
  * packet. Exact files are materialized with exclusive creation, recorded in
@@ -211,6 +274,7 @@ function isWritingCodePacket(packet) {
  * and not ignored by repository policy.
  */
 export async function materializeWritingScope(packet) {
+  stripSensitiveEnvMutationScope(packet);
   if (!isWritingCodePacket(packet)) return { applied: false, materialized: [] };
   const cwd = path.resolve(packet.cwd || process.cwd());
   const requestedModify = uniquePaths(packet.files_to_modify);

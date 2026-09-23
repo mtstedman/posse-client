@@ -31,6 +31,13 @@ function pathParts(normalized) {
   return normalized.split("/").filter(Boolean);
 }
 
+const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
+
+export function isSensitiveEnvRepoPath(value) {
+  const normalized = normalizeRepoRelativePath(value);
+  return !!normalized && pathParts(normalized).some((part) => SENSITIVE_ENV_BASENAME_RE.test(part));
+}
+
 const POSSE_ROLE_PROMPT_FILES = new Set([
   "artificer.md",
   "assessor.md",

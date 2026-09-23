@@ -114,6 +114,20 @@ export const ATLAS_BLOCKING_ACTIONS = new Set([
 ]);
 
 const ATLAS_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_REPO_PATH_SCALAR_FIELDS = new Set([
+  "file",
+  "filePath",
+  "path",
+  "failingTestPath",
+]);
+const ATLAS_REPO_PATH_LIST_FIELDS = new Set([
+  "directories",
+  "editedFiles",
+  "fileRelPaths",
+  "focusPaths",
+  "paths",
+  "targetFiles",
+]);
 const ATLAS_NATIVE_COMPLETE_TOOL_ACTIONS = new Set([
   "symbol.search",
   "tree.scope",
@@ -606,6 +620,88 @@ function normalizeRepoKey(value) {
   return text || "global";
 }
 
+function requestRepoPathRoots(request = {}) {
+  const config = request.config && typeof request.config === "object" ? request.config : {};
+  const session = request.session && typeof request.session === "object" ? request.session : {};
+  const boot = session.bootConfig && typeof session.bootConfig === "object"
+    ? session.bootConfig
+    : session;
+  const candidates = [
+    config.readRoot,
+    boot.cwd,
+    config.cwd,
+    config.projectRoot,
+    boot.projectRoot,
+  ];
+  return [...new Set(candidates
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .map((value) => path.resolve(value)))]
+    .sort((left, right) => right.length - left.length);
+}
+
+function canonicalizeAbsoluteRepoPath(value, roots, field) {
+  if (typeof value !== "string") return value;
+  const candidate = value.trim();
+  if (!path.isAbsolute(candidate)) return value;
+  const resolved = path.resolve(candidate);
+  for (const root of roots) {
+    const relative = path.relative(root, resolved);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    return relative.replace(/\\/g, "/");
+  }
+  throw new Error(`ATLAS ${field} absolute path is outside the active repository roots.`);
+}
+
+function canonicalizeAtlasRepoPaths(args, roots) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  let changed = false;
+  const normalized = { ...args };
+  for (const field of ATLAS_REPO_PATH_SCALAR_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(normalized, field)) continue;
+    const next = canonicalizeAbsoluteRepoPath(normalized[field], roots, field);
+    if (next !== normalized[field]) {
+      normalized[field] = next;
+      changed = true;
+    }
+  }
+  for (const field of ATLAS_REPO_PATH_LIST_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(normalized, field)) continue;
+    const current = normalized[field];
+    if (Array.isArray(current)) {
+      const next = current.map((value) => canonicalizeAbsoluteRepoPath(value, roots, field));
+      if (next.some((value, index) => value !== current[index])) {
+        normalized[field] = next;
+        changed = true;
+      }
+    } else {
+      const next = canonicalizeAbsoluteRepoPath(current, roots, field);
+      if (next !== current) {
+        normalized[field] = next;
+        changed = true;
+      }
+    }
+  }
+  for (const field of ["sliceContext", "symbolRef"]) {
+    if (!normalized[field] || typeof normalized[field] !== "object" || Array.isArray(normalized[field])) continue;
+    const next = canonicalizeAtlasRepoPaths(normalized[field], roots);
+    if (next !== normalized[field]) {
+      normalized[field] = next;
+      changed = true;
+    }
+  }
+  for (const field of ["items", "symbolRefs"]) {
+    if (!Array.isArray(normalized[field])) continue;
+    const current = normalized[field];
+    const next = current.map((value) => canonicalizeAtlasRepoPaths(value, roots));
+    if (next.some((value, index) => value !== current[index])) {
+      normalized[field] = next;
+      changed = true;
+    }
+  }
+  return changed ? normalized : args;
+}
+
 function normalizeWorkItemKey(value) {
   if (value == null) return null;
   const text = String(value || "").trim();
@@ -781,7 +877,8 @@ export class AtlasToolExecutor {
   async executeTool(request = /** @type {AtlasToolRequest} */ ({})) {
     const toolName = String(request.toolName || "").trim();
     if (!toolName) throw new Error("AtlasToolExecutor.executeTool requires toolName");
-    const rawArgs = request.args && typeof request.args === "object" ? request.args : {};
+    const suppliedArgs = request.args && typeof request.args === "object" ? request.args : {};
+    const rawArgs = canonicalizeAtlasRepoPaths(suppliedArgs, requestRepoPathRoots(request));
     const baseAction = resolveAtlasAction(toolName);
     const action = gatewayEffectiveAction(baseAction, rawArgs);
     const args = nativeCompleteToolArgs(action, rawArgs);

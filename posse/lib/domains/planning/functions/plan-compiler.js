@@ -127,10 +127,40 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
 import { correctInferredRoutingToRepo } from "../../intake/functions/objective-contract.js";
 import { evaluatePlanModality } from "./plan-modality.js";
+import {
+  isSensitiveEnvRepoPath,
+  normalizeRepoRelativePath,
+} from "../../runtime/functions/protected-paths.js";
 
 const FRONTEND_DESIGN_SKILL_ID = "frontend-design";
 const REPORT_DELIVERABLE_EXTENSIONS = "md|txt|json|csv|html";
 const REPORT_DELIVERABLE_PATH = String.raw`[A-Za-z0-9][A-Za-z0-9._/-]*\.(?:${REPORT_DELIVERABLE_EXTENSIONS})`;
+const MUTABLE_SCOPE_FIELDS = Object.freeze([
+  "files_to_modify",
+  "files_to_create",
+  "files_to_delete",
+  "create_roots",
+  "must_modify",
+]);
+
+function stripSensitiveEnvTaskScope(task) {
+  const omissions = [];
+  for (const field of MUTABLE_SCOPE_FIELDS) {
+    if (!Array.isArray(task?.[field])) continue;
+    const kept = [];
+    for (const value of task[field]) {
+      const normalized = normalizeRepoRelativePath(value);
+      if (!normalized) continue;
+      if (isSensitiveEnvRepoPath(normalized)) {
+        omissions.push({ path: normalized, field, reason: "sensitive_env_path" });
+      } else if (!kept.includes(normalized)) {
+        kept.push(normalized);
+      }
+    }
+    task[field] = kept;
+  }
+  return omissions;
+}
 
 function inferNamedReportDeliverables(task = {}) {
   const taskText = [task.task_spec, task.instructions]
@@ -959,6 +989,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (!t || !t.title) {
           droppedTaskIndexes.add(i);
           continue;
+        }
+        const protectedScopeOmissions = stripSensitiveEnvTaskScope(t);
+        if (protectedScopeOmissions.length > 0) {
+          worker.emit(
+            planJob.id,
+            `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: removed ${protectedScopeOmissions.length} protected .env scope target(s) from task "${t.title}"`,
+          );
         }
         const fileKindValidation = reconcilePlannerFileKinds(t, fileKindProjectDir, {
           tasks,
@@ -1954,6 +1991,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               files_to_delete: t.files_to_delete || [],
               create_roots: t.create_roots || [],
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
+              ...(protectedScopeOmissions.length > 0 ? { protected_scope_omissions: protectedScopeOmissions } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),

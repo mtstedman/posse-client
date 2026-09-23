@@ -1064,6 +1064,9 @@ export function buildHandoffPacket(job, opts) {
     files_to_create: sanitizedPayload.files_to_create || [],
     files_to_delete: sanitizedPayload.files_to_delete || [],
     create_roots: sanitizedPayload.create_roots || [],
+    protected_scope_omissions: Array.isArray(sanitizedPayload.protected_scope_omissions)
+      ? sanitizedPayload.protected_scope_omissions
+      : [],
     related_files: relatedFiles,
     success_criteria: Array.isArray(sanitizedPayload.success_criteria) ? sanitizedPayload.success_criteria : sanitizedPayload.success_criteria ? [sanitizedPayload.success_criteria] : [],
     test_command: sanitizedPayload.test_command || null,
@@ -1441,6 +1444,9 @@ export async function handoff(input, { providerName = null } = {}) {
       files_to_create: input.data.files_to_create || [],
       files_to_delete: input.data.files_to_delete || [],
       create_roots: input.data.create_roots || [],
+      protected_scope_omissions: Array.isArray(input.data.protected_scope_omissions)
+        ? input.data.protected_scope_omissions
+        : [],
       related_files: input.data.related_files || [],
       success_criteria: Array.isArray(input.data.success_criteria) ? input.data.success_criteria : input.data.success_criteria ? [input.data.success_criteria] : [],
       test_command: input.data.test_command || null,

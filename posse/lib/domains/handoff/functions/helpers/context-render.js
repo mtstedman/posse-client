@@ -287,6 +287,19 @@ function renderPacketContextString(packet, {
     });
   }
 
+  if (includeStable && Array.isArray(packet.protected_scope_omissions) && packet.protected_scope_omissions.length > 0) {
+    addSection(
+      [
+        "PROTECTED SCOPE OMISSIONS (system policy):",
+        ...packet.protected_scope_omissions.map((entry) => (
+          `- ${entry.path} (removed from ${entry.field}: .env paths cannot be read or mutated)`
+        )),
+        "Do not create, edit, read, delete, or retry these paths. Complete the remaining scoped work; criteria requiring an omitted path are not applicable.",
+      ].join("\n"),
+      { required: true, key: "protected_scope_omissions" },
+    );
+  }
+
   if (includeStable && Array.isArray(packet.skill_sections) && packet.skill_sections.length > 0) {
     const skillBlocks = packet.skill_sections.map((skill) => [
       `=== SKILL: ${skill.id}${skill.name ? ` (${skill.name})` : ""} ===`,
