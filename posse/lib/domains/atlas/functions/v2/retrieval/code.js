@@ -451,22 +451,39 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
       details: failure.details,
     });
   }
-  const result = await buildSkeleton({
+  const requestedIdentifiers = normalizeIdentifiers(params.identifiersToFind);
+  const skeletonFor = (identifiers) => buildSkeleton({
     repo_rel_path: targetPath,
     source,
     symbols,
-    identifiersToFind: normalizeIdentifiers(params.identifiersToFind),
+    identifiersToFind: identifiers,
     exportedOnly: params.exportedOnly === true,
     maxLines: params.maxLines,
     maxTokens: params.maxTokens,
-    fileScope: explicitFileRequest && normalizeIdentifiers(params.identifiersToFind).length === 0,
+    fileScope: explicitFileRequest && identifiers.length === 0,
   });
+  let result = await skeletonFor(requestedIdentifiers);
+  // identifiersToFind matches indexed declaration names, so a decorator, a
+  // usage or a phrase filters every row away and the caller is charged a full
+  // retrieval call for an empty outline. Fall back to the file's own outline
+  // and name the identifiers that were not declarations here.
+  let identifiersNotDeclared = [];
+  if (requestedIdentifiers.length > 0 && !String(result.content || "").trim()) {
+    const unfiltered = await skeletonFor([]);
+    if (String(unfiltered.content || "").trim()) {
+      result = unfiltered;
+      identifiersNotDeclared = requestedIdentifiers;
+    }
+  }
   const etag = String(result.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
     return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
   }
   /** @type {CodeSkeletonData} */
   const data = {
+    ...(identifiersNotDeclared.length > 0
+      ? { identifiers_not_declared_here: identifiersNotDeclared }
+      : {}),
     repo_rel_path: targetPath,
     content: String(result.content || ""),
     contentKind: Object.values(CODE_CONTENT_KINDS).includes(result.contentKind)

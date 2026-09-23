@@ -24,6 +24,96 @@ export function githubRepositoryName(remoteUrl) {
   return parts.join("/");
 }
 
+// Hosting creates a throwaway repository and grants per-member deploy keys,
+// which only the GitHub API can do; git over SSH cannot grant access.
+const REQUIRED_GITHUB_SCOPES = Object.freeze(["repo", "delete_repo"]);
+const GH_EXIT_AUTH_REQUIRED = 4;
+
+function githubCliError(code, lines) {
+  return Object.assign(new Error(lines.join("\n")), { code });
+}
+
+function firstLine(value) {
+  return String(value || "").split(/\r?\n/u).map((line) => line.trim()).find(Boolean)?.slice(0, 300) || "";
+}
+
+function parseIncludedResponse(text) {
+  const [head = "", ...rest] = String(text || "").split(/\r?\n\r?\n/u);
+  let body = null;
+  try { body = JSON.parse(rest.join("\n\n")); } catch { body = null; }
+  const header = (name) => {
+    const match = head.match(new RegExp(`^${name}:[ \\t]*(.*)$`, "imu"));
+    return match ? match[1].trim() : null;
+  };
+  return { header, body };
+}
+
+// Verifies the GitHub CLI can act for the host before any session state
+// exists, so a missing install, login, or scope becomes a how-to message.
+export function assertGitHubCliReady(projectDir, options = {}) {
+  const env = options.env || process.env;
+  const tokenSource = env.GH_TOKEN ? "GH_TOKEN" : env.GITHUB_TOKEN ? "GITHUB_TOKEN" : null;
+  const scopeList = REQUIRED_GITHUB_SCOPES.join(",");
+  let output;
+  try {
+    output = run("gh", ["api", "user", "--include"], { cwd: projectDir, ...options });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw githubCliError("pairing_github_cli_missing", [
+        "Hosting a session needs the GitHub CLI (gh), which is not installed.",
+        "Posse uses it only to create the private throwaway session repository and its member deploy keys.",
+        "  1. Install it: https://cli.github.com/",
+        `  2. Sign in:    gh auth login --scopes ${scopeList}`,
+        "Then run the host command again.",
+      ]);
+    }
+    const detail = `${error?.stdout || ""}\n${error?.stderr || ""}`;
+    if (Number(error?.status) === GH_EXIT_AUTH_REQUIRED || /\b401\b|gh auth login/u.test(detail)) {
+      throw githubCliError("pairing_github_cli_unauthenticated", tokenSource ? [
+        `Hosting a session needs GitHub API access, but GitHub rejected the token in ${tokenSource}.`,
+        `Replace it with a token that has the ${scopeList} scopes, or unset ${tokenSource} and run:`,
+        `  gh auth login --scopes ${scopeList}`,
+        "Then run the host command again.",
+      ] : [
+        "Hosting a session needs the GitHub CLI signed in; gh is installed but not logged in.",
+        "Posse uses it only to create the private throwaway session repository and its member deploy keys.",
+        `  Run: gh auth login --scopes ${scopeList}`,
+        `  (or export GH_TOKEN with the ${scopeList} scopes)`,
+        "Then run the host command again.",
+      ]);
+    }
+    throw githubCliError("pairing_github_api_unreachable", [
+      `Hosting a session could not reach the GitHub API through gh: ${firstLine(error?.stderr) || firstLine(error?.message) || "unknown error"}`,
+      "Check your network connection and `gh auth status`, then run the host command again.",
+    ]);
+  }
+  const response = parseIncludedResponse(output);
+  const owner = String(response.body?.login || "");
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
+    throw githubCliError("pairing_github_identity_unavailable", [
+      "GitHub CLI did not return a valid authenticated owner.",
+      "Check `gh auth status`, then run the host command again.",
+    ]);
+  }
+  // Classic OAuth tokens report their scopes; fine-grained tokens omit the
+  // header, so their repository permissions surface on first use instead.
+  const scopesHeader = response.header("x-oauth-scopes");
+  if (scopesHeader !== null) {
+    const granted = new Set(scopesHeader.split(",").map((scope) => scope.trim()).filter(Boolean));
+    const missing = REQUIRED_GITHUB_SCOPES.filter((scope) => !granted.has(scope));
+    if (missing.length) {
+      throw githubCliError("pairing_github_cli_scopes_missing", [
+        `GitHub CLI is signed in as ${owner} but is missing the ${missing.join(", ")} scope(s) session hosting needs.`,
+        tokenSource
+          ? `  Replace ${tokenSource} with a token that also has: ${missing.join(", ")}`
+          : `  Run: gh auth refresh --hostname github.com --scopes ${missing.join(",")}`,
+        "Then run the host command again.",
+      ]);
+    }
+  }
+  return { owner };
+}
+
 export function readLocalSshCommand(projectDir, options = {}) {
   try {
     return run("git", ["config", "--local", "--get", "core.sshCommand"], {
@@ -90,18 +180,14 @@ export function provisionGitHubSessionRepository({
   sessionId,
   originRemoteUrl,
   defaultBranch,
+  owner: verifiedOwner = null,
 }, options = {}) {
   if (!githubRepositoryName(originRemoteUrl)) {
     throw Object.assign(new Error("Automatic session provisioning currently supports GitHub remotes only"), {
       code: "pairing_provisioning_provider_unsupported",
     });
   }
-  const owner = run("gh", ["api", "user", "--jq", ".login"], { cwd: projectDir, ...options });
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
-    throw Object.assign(new Error("GitHub CLI did not return a valid authenticated owner"), {
-      code: "pairing_github_identity_unavailable",
-    });
-  }
+  const owner = verifiedOwner || assertGitHubCliReady(projectDir, options).owner;
   const repository = `${owner}/posse-session-${safeSessionPart(sessionId).toLowerCase()}`;
   run("gh", [
     "repo", "create", repository, "--private", "--disable-issues", "--disable-wiki",

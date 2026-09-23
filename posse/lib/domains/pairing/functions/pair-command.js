@@ -62,6 +62,7 @@ import {
 } from "./team-policy.js";
 import {
   addGitHubMemberDeployKey,
+  assertGitHubCliReady,
   cleanupGitHubSessionRepository,
   configureRepositorySessionSsh,
   githubRepositoryName,
@@ -113,6 +114,12 @@ function safeError(error) {
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, "$1***@")
     .replace(/\b(authorization|token|password)=([^\s&]+)/giu, "$1=***")
     .slice(0, 1600);
+}
+
+function reportRepositoryCleanupFailure(C, cleanup) {
+  if (!cleanup || cleanup.ok) return;
+  console.error(`  ${C.yellow}Temporary repository ${cleanup.repository} was not deleted:${C.reset} ${safeError(cleanup.message)}`);
+  console.error(`  ${cleanup.remediation}\n`);
 }
 
 function sessionChanged(message) {
@@ -759,6 +766,7 @@ async function finishHostShutdown(root, remoteClient, state, {
   if (!json && publish) {
     console.log(`  ${C.green}Integrated and published${C.reset} ${promoted.sourceBranch} -> ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
   }
+  if (!json) reportRepositoryCleanupFailure(C, cleanup);
   return { ...promoted, cleanup };
 }
 
@@ -789,6 +797,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       "Session hosting currently requires a GitHub origin so Posse can isolate members in a private throwaway repository",
     ), { code: "pairing_provider_unsupported" });
   }
+  const { owner: githubOwner } = assertGitHubCliReady(root);
   const state = createPairingState({
     role: "host",
     remoteName: remote,
@@ -812,6 +821,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         sessionId: state.id,
         originRemoteUrl: url,
         defaultBranch,
+        owner: githubOwner,
       });
       sessionRemote = pairingTemporaryRemoteName(root, state.id);
       sessionUrl = provisioned.remoteUrl;
@@ -915,8 +925,16 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       relay_token: started.host_token,
     });
     const restored = await restoreLocalPairing(root, getPairingState(state.id));
-    if (provisioned) cleanupGitHubSessionRepository(provisioned.repository, { cwd: root });
-    if (!restored.ok) error.message = `${safeError(error)}; automatic restore blocked: ${restored.message}`;
+    const cleanup = provisioned
+      ? cleanupGitHubSessionRepository(provisioned.repository, { cwd: root })
+      : null;
+    // Report whatever rollback could not undo, with the command to finish it.
+    const unfinished = [];
+    if (!restored.ok) unfinished.push(`automatic restore blocked: ${restored.message}`);
+    if (cleanup && !cleanup.ok) {
+      unfinished.push(`temporary repository ${cleanup.repository} was not deleted (${safeError(cleanup.message)}). ${cleanup.remediation}`);
+    }
+    if (unfinished.length) error.message = [safeError(error), ...unfinished].join("\n  ");
     throw error;
   }
 }
@@ -1361,6 +1379,7 @@ async function runPendingIntegration({ projectDir, action, C, json, approval = n
   const result = { ...promoted, restored, cleanup };
   if (!silent && json) console.log(JSON.stringify(result));
   else if (!silent) console.log(`\n  ${C.green}Session integration published${C.reset} ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
+  if (!silent && !json) reportRepositoryCleanupFailure(C, cleanup);
   return result;
 }
 

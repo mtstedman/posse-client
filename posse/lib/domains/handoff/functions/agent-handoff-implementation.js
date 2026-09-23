@@ -1169,6 +1169,28 @@ function evidenceProvenance(entry, context, seen = new Set()) {
   };
 }
 
+/**
+ * Delivered line regions, with overlapping and adjacent regions merged so a
+ * citation spanning two consecutive reads is judged against the source that
+ * actually arrived rather than against one call's window.
+ *
+ * @param {Array<{start: number, end: number}>} ranges
+ * @returns {Array<{start: number, end: number}>}
+ */
+function mergeDeliveredRanges(ranges) {
+  const sorted = (Array.isArray(ranges) ? ranges : [])
+    .filter((range) => Number.isInteger(range?.start) && Number.isInteger(range?.end) && range.end >= range.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end + 1) last.end = Math.max(last.end, range.end);
+    else merged.push({ start: range.start, end: range.end });
+  }
+  return merged;
+}
+
+
 function deliveredSourceCoverageCandidates(context) {
   const attemptId = Number(context?.attemptId ?? context?.attempt_id) || null;
   if (!attemptId) return [];
@@ -1607,15 +1629,20 @@ function materializeWorktreeEvidenceSelector(selector, context) {
       `Evidence ${resolved.path}:${selector.start}-${endLine} exceeds ${AGENT_HANDOFF_LIMITS.maxSelectorLines} lines`,
     );
   }
+  // Reads arrive one region at a time, so a citation that spans two regions
+  // delivered back to back is still wholly delivered source. Merge touching
+  // and overlapping regions before the containment test; a line that was never
+  // delivered still falls outside every merged region.
+  const openedRanges = mergeDeliveredRanges(resolved.opened_ranges);
   if (resolved.restrict_to_opened_ranges
-    && !resolved.opened_ranges.some((range) => selector.start >= range.start && endLine <= range.end)) {
-    const delivered = resolved.opened_ranges
+    && !openedRanges.some((range) => selector.start >= range.start && endLine <= range.end)) {
+    const delivered = openedRanges
       .filter((range) => range.end >= selector.start && range.start <= endLine)
       .slice(0, 8)
       .map((range) => `${resolved.path}:${Math.max(selector.start, range.start)}-${Math.min(endLine, range.end)}`);
     fail(
       "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
-      `Evidence ${resolved.path}:${selector.start}-${endLine} was not opened by read_file in the current agent call`
+      `Evidence ${resolved.path}:${selector.start}-${endLine} was not delivered to the current agent call`
         + (delivered.length > 0
           ? `; delivered ranges within the request: ${delivered.join(", ")}. Cite them separately if they support the claim, or read the missing source.`
           : "; read the requested source before citing it."),
