@@ -885,6 +885,18 @@ export function getAgentCallsWithToolCountsByWorkItem(workItemId) {
           AND o.observation_type LIKE 'tool.%'
           AND o.observation_type != 'tool.chain_read'
           AND o.observation_type != 'tool.response_transform'
+          AND o.observation_type != 'tool.surface.issued'
+          AND o.observation_type NOT LIKE '%.started'
+          AND (
+            COALESCE(
+              json_extract(o.detail_json, '$.agent_call_id'),
+              json_extract(o.detail_json, '$.parent_agent_call_id')
+            ) IS NULL
+            OR CAST(COALESCE(
+              json_extract(o.detail_json, '$.agent_call_id'),
+              json_extract(o.detail_json, '$.parent_agent_call_id')
+            ) AS INTEGER) = ac.id
+          )
           AND o.created_at >= ac.started_at
           AND (
             ac.finished_at IS NULL
@@ -926,6 +938,16 @@ export function getToolInvocationsForAgentCall(agentCallId) {
       AND observation_type LIKE 'tool.%'
       AND observation_type != 'tool.chain_read'
       AND observation_type != 'tool.response_transform'
+      AND (
+        COALESCE(
+          json_extract(detail_json, '$.agent_call_id'),
+          json_extract(detail_json, '$.parent_agent_call_id')
+        ) IS NULL
+        OR CAST(COALESCE(
+          json_extract(detail_json, '$.agent_call_id'),
+          json_extract(detail_json, '$.parent_agent_call_id')
+        ) AS INTEGER) = ?
+      )
       AND julianday(created_at) >= julianday(?) - (${TOOL_LOG_BOUNDARY_GRACE_SECONDS} / 86400.0)
       AND (
         ? IS NULL
@@ -937,5 +959,5 @@ export function getToolInvocationsForAgentCall(agentCallId) {
         )
       )
     ORDER BY id ASC
-  `).all(call.job_id, call.started_at, call.finished_at, call.finished_at, call.finished_at, call.finished_at);
+  `).all(call.job_id, call.id, call.started_at, call.finished_at, call.finished_at, call.finished_at, call.finished_at);
 }

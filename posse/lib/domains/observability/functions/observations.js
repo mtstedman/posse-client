@@ -1745,7 +1745,15 @@ function _summarizeToolUse(toolUse, cwd = null) {
     };
   }
   if (atlasAction) {
-    const hint = _atlasSummaryHint(input, atlasAction);
+    // atlas.query carries the selected action's arguments under `args`, while
+    // the owner records the canonical action with those arguments at the top
+    // level. Summarize both shapes from the same payload so close-time replay
+    // reconciliation does not invent a second call merely because its label
+    // lost the file, symbol, or query.
+    const atlasInput = input.args && typeof input.args === "object" && !Array.isArray(input.args)
+      ? input.args
+      : input;
+    const hint = _atlasSummaryHint(atlasInput, atlasAction);
     const displayName = formatAtlasToolDisplayName(atlasAction) || `atlas ${atlasAction}`;
     const status = String(toolUse.status || "").trim().toLowerCase();
     const rejectedStatus = ["rejected", "denied", "cancelled", "canceled"].includes(status);
@@ -1772,7 +1780,7 @@ function _summarizeToolUse(toolUse, cwd = null) {
         kind: "atlas",
         origin: "agent",
         action: atlasAction,
-        args: _summarizeAtlasArgs(input),
+        args: _summarizeAtlasArgs(atlasInput),
         cwd: cwdNorm || null,
         tool_name: tool,
         transport: toolLower.startsWith("mcp__") ? "mcp" : null,
@@ -2045,7 +2053,8 @@ export function reconcileProviderToolUseReplay({
     if (isToolSurfaceRecordObservationType(row?.observation_type)) return [];
     try {
       const detail = JSON.parse(String(row.detail_json || "{}"));
-      if (Number(detail?.agent_call_id) !== callId) return [];
+      const ownerCallId = detail?.agent_call_id ?? detail?.parent_agent_call_id;
+      if (Number(ownerCallId) !== callId) return [];
       return [{
         observation_type: String(row.observation_type),
         summary: String(row.summary || ""),
@@ -2078,13 +2087,12 @@ export function reconcileProviderToolUseReplay({
         && row.observation_type === summary.observation_type
         && reconciliationSummaryMatches(row.summary, summary.summary)
       ))
-      // finishToolInvocation intentionally permits a result-specific summary.
-      // Agent-call identity, canonical type, and an unconsumed finish record
-      // are the durable proof that the toolkit already logged the call.
+      // Owner-routed tools may emit a result-specific summary without the
+      // begin/finish wrapper. Agent-call identity, canonical type, and an
+      // unconsumed completion record are durable proof of the physical call.
       || persisted.find((row) => (
         !row.consumed
         && row.observation_type === summary.observation_type
-        && row.phase === "finish"
       ))
     );
     if (matching) {
