@@ -2028,7 +2028,7 @@ export const TOOL_SEARCH_FILES = {
   name: "search_files",
   description:
     "Search file contents deterministically with ripgrep (rg), using regex or literal modes. " +
-    "Returns a self-bounded ranked result with at most one context line, matchesTotal, and file/count output modes; it does not return continuation pages.",
+    "Returns a self-bounded ranked result with at most one context line, matchesTotal, and file/count output modes; it does not return continuation pages. Content matches are grouped under one `File: path` header, then `line:match`, `line-before` and `line+after` rows.",
   parameters: {
     type: "object",
     properties: {

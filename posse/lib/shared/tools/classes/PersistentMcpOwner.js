@@ -164,6 +164,8 @@ import {
 } from "../../../domains/research/functions/context-headroom.js";
 import {
   materializeDisplayedSourceCoverage,
+  numberedReadCoverageHunks,
+  sourceCoverageIsSuppressive,
   prepareSourceCoverage,
   sourceCoverageOwnerForSession,
   suppressCoveredSourceInterval,
@@ -1076,20 +1078,51 @@ function normalizeResearcherTypedAtlasResultFieldNames(result, session, toolName
     action: requested.suite === "atlas" ? requested.name : null,
   });
   if (!normalized) return result;
-  const projected = {
-    ...result,
-    content: [{ ...first, text: normalized.text }, ...result.content.slice(1)],
-  };
+  const content = [{ ...first, text: normalized.text }, ...result.content.slice(1)];
+  let renamedFields = normalized.renamedFields;
+  // A batched result carries one child header per item in its own block. Those
+  // headers are model-visible facade payload too; every other block is source
+  // custody and is left byte-identical.
+  for (const index of batchChildHeaderBlocks(normalized.text)) {
+    const block = content[index];
+    if (!block || block.type !== "text" || typeof block.text !== "string") continue;
+    const childNormalized = normalizeResearcherTypedAtlasFieldNames(block.text, {
+      action: requested.suite === "atlas" ? requested.name : null,
+    });
+    if (!childNormalized) continue;
+    content[index] = { ...block, text: childNormalized.text };
+    renamedFields += childNormalized.renamedFields;
+  }
+  const projected = { ...result, content };
   return annotateOwnerResultTransform(
     preserveOwnerModelControlNotices(result, projected),
     {
       kind: "atlas_typed_field_names",
       action: requested.name || toolName,
-      renamed_fields: normalized.renamedFields,
+      renamed_fields: renamedFields,
       before_chars: first.text.length,
       after_chars: normalized.text.length,
     },
   );
+}
+
+/**
+ * Block indexes holding a batched result's per-item headers.
+ *
+ * @param {string} headerText
+ * @returns {number[]}
+ */
+function batchChildHeaderBlocks(headerText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(headerText.split("\n\n")[0]);
+  } catch {
+    return [];
+  }
+  if (!parsed || !Array.isArray(parsed.items)) return [];
+  return parsed.items
+    .map(item => (Array.isArray(item?.content_blocks) ? item.content_blocks[0] : item?.contentBlocks?.[0]))
+    .filter(index => Number.isSafeInteger(index) && index > 0);
 }
 
 const TYPED_FLAT_WINDOW_FIELDS = new Set([
@@ -6035,6 +6068,12 @@ export class PersistentMcpOwner {
             ));
           }
         }
+        // A native read delivers exact source too. Record what it showed in the
+        // same coverage ledger the Atlas reads use, so a later Atlas read over
+        // those lines is recognised as already delivered.
+        if (requested.suite === "tools" && requested.name === "read_file" && mcpToolCallSuccess(response)) {
+          await this._recordNativeReadCoverage(session, message?.params?.arguments || {}, response.result);
+        }
         const physicalCallCeiling = researchSynthesisPolicyFor(session).maxPhysicalCalls;
         if (gatewayAdmission.tracked && response?.result && !resolveAtlasResearchRuntimeGuidance()) {
           const priorResult = response.result;
@@ -6260,6 +6299,30 @@ export class PersistentMcpOwner {
     ) + 1;
     this._researchCallReservations.set(reservationKey, assigned);
     return assigned;
+  }
+
+  // Native reads are not Atlas admissions: they own no selector suppression and
+  // no context-headroom reservation. Custody only records the delivered lines,
+  // and SourceCoverageOwner verifies every byte against the current file, so a
+  // stale, clipped, or non-source read simply records nothing.
+  async _recordNativeReadCoverage(session, toolArgs, result) {
+    const boot = session?.bootConfig || {};
+    if (String(boot.role || "") !== "researcher" || !Number.isSafeInteger(Number(boot.attemptId))) return;
+    const text = (Array.isArray(result?.content) ? result.content : [])
+      .filter((part) => part?.type === "text" && typeof part.text === "string")
+      .map((part) => part.text).join("\n");
+    const hunks = numberedReadCoverageHunks(text, { path: toolArgs?.path });
+    if (hunks.length === 0) return;
+    const owner = sourceCoverageOwnerForSession(session, boot);
+    const redactedSources = new Map();
+    for (const hunk of hunks) {
+      try {
+        await owner.materializeDisplayedData(hunk, { file: hunk.repo_rel_path }, {
+          origin: "native_read", tool: "read_file", redactedSources, completeSymbolSelector: null,
+          suppressive: sourceCoverageIsSuppressive("read_file"),
+        });
+      } catch { /* Custody is best-effort: a read must never fail on accounting. */ }
+    }
   }
 
   _refundResearchInfrastructureFailure(session, admission, result, error = null) {
@@ -6576,7 +6639,12 @@ export class PersistentMcpOwner {
         maxPhysicalCalls: batchMaxPhysicalCalls,
         reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(boot)) };
       const batchResult = appendResearchWorkBudget(
-        combineSymbolGetBatchResults(responses.map(response => response.result), plan.overflow),
+        projectAtlasModelResult(
+          combineSymbolGetBatchResults(responses.map(response => response.result), plan.overflow),
+          args.session,
+          "atlas.symbol.get",
+          args.toolArgs || {},
+        ),
         batchAdmission,
       );
       const noticedBatchResult = appendResearchBudgetExhaustedNotice(batchResult, batchAdmission, args.session);
@@ -6996,7 +7064,7 @@ export class PersistentMcpOwner {
         return mcpToolResultMessage(message, result);
       }
       const sourceAdmissionOwner = ["code.window", "symbol.get"].includes(requested.name);
-      const coverageOwner = sourceAdmissionOwner || requested.name === "symbol.card" || requested.name === "code.skeleton"
+      const coverageOwner = sourceAdmissionOwner || ["symbol.card", "code.skeleton", "code.lens"].includes(requested.name)
         ? sourceCoverageOwnerForSession(session, binding?.bootConfig)
         : null;
       activeCoverageOwner = coverageOwner;

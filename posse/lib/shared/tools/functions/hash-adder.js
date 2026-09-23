@@ -456,7 +456,7 @@ export function compactTreeScopeResult(toolName, result, {
         ranks: { start: rankStart, end: rankEnd },
         candidateFiles: pageCandidates,
         ...(nextPage ? {
-          next_traversal_ref: traversalRefSurface(nextPage.ref, {
+          traversal_ref: traversalRefSurface(nextPage.ref, {
             kind: "tree_scope_page",
             ranks: nextPage.ranks,
             count: nextPage.count,
@@ -501,7 +501,7 @@ export function compactTreeScopeResult(toolName, result, {
   if (!nextPage) return { result, compacted: false };
 
   envelope.data.candidateFiles = candidates.slice(0, TREE_SCOPE_INLINE_CANDIDATES);
-  envelope.data.next_traversal_ref = traversalRefSurface(nextPage.ref, {
+  envelope.data.traversal_ref = traversalRefSurface(nextPage.ref, {
     kind: "tree_scope_page",
     ranks: nextPage.ranks,
     count: nextPage.count,
@@ -2496,7 +2496,7 @@ function attachFetchedCapabilityRefs(renderedText, {
       selector: nextSelector,
       sourceContentHash: sourceEntry?.content_hash || null,
     });
-    if (issued?.ok) rendered.next_traversal_ref = traversalRefSurface(issued.capability.ref, {
+    if (issued?.ok) rendered.traversal_ref = traversalRefSurface(issued.capability.ref, {
       kind: rendered.page.mode === "search" ? "search_page" : "offset_page",
     });
   }
@@ -3409,7 +3409,7 @@ export const __testHashAdderInternals = Object.freeze({
 // Researcher-only presentation of the exact structure inventory. The full
 // native payload is projected (compact-presentation.js), split into pages that
 // each fit the wire bound, and every page after the first is stored as a
-// frozen hash entry chained through `next_traversal_ref`. Page 1 stays inline.
+// frozen hash entry chained through `traversal_ref`. Page 1 stays inline.
 // Storage failure never drops rows: the whole compact projection is returned
 // inline instead, with `pagination: null`, so the model is never promised a
 // continuation the store cannot serve.
@@ -3493,7 +3493,7 @@ export function compactCodeStructureResult(toolName, result, {
         ok: true,
         action: "code.structure.page",
         ...page,
-        ...(cursor ? { next_traversal_ref: cursor } : {}),
+        ...(cursor ? { traversal_ref: cursor } : {}),
       };
       const payloadText = JSON.stringify(payload, null, 1);
       const rankStart = index + 1;
@@ -3551,7 +3551,7 @@ export function compactCodeStructureResult(toolName, result, {
       omittedFiles,
       omittedPathPreview,
     },
-    next_traversal_ref: structurePageCursor(nextPage),
+    traversal_ref: structurePageCursor(nextPage),
   };
   return {
     result: replace(inline),

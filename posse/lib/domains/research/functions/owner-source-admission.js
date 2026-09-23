@@ -328,6 +328,92 @@ export async function suppressCoveredSourceInterval(result, coverageOwner, toolA
   };
 }
 
+// A lens delivers exact source as its match rows plus their context lines, in
+// the native payload the display layer later renders as hunks. Rebuild the
+// contiguous line ranges so that source enters the coverage inventory like any
+// other delivered window; prepareData still verifies every byte against the
+// current file, so a clipped or altered row simply earns no custody. Rows that
+// two matches report differently are dropped rather than reconciled.
+// Coverage classes. A full citable source read (code.window, symbol.get, a
+// source-kind skeleton window, symbol.card, a traversal continuation) is
+// SUPPRESSIVE: its lines are already visible, so a later read may hand back
+// only the uncovered remainder. Everything else is evidence-only or not
+// citable at all — one-line lens matches, bounded native reads, search hits —
+// and must never subtract from a later read, or a coherent region comes back
+// as fragments around lines the agent saw once in passing.
+export const NON_SUPPRESSIVE_SOURCE_TOOLS = new Set([
+  "code.lens", "read_file", "chain_read", "inspect_file", "search_files", "symbol.search",
+]);
+
+export function sourceCoverageIsSuppressive(tool) {
+  return !NON_SUPPRESSIVE_SOURCE_TOOLS.has(String(tool || "").trim());
+}
+
+export function codeLensSourceHunks(data = {}) {
+  const matches = Array.isArray(data?.matches) ? data.matches : [];
+  const files = new Map();
+  for (const match of matches) {
+    const repoRelPath = match?.repo_rel_path || match?.path || data?.repo_rel_path || data?.path;
+    const before = match?.context?.before ?? [];
+    const after = match?.context?.after ?? [];
+    if (!repoRelPath || !Number.isSafeInteger(match?.line) || match.line < 1
+      || typeof match.text !== "string" || !Array.isArray(before) || !Array.isArray(after)
+      || before.length >= match.line) continue;
+    const texts = [...before, match.text, ...after];
+    if (texts.some((text) => typeof text !== "string" || /[\r\n]/u.test(text))) continue;
+    const rows = files.get(repoRelPath) || new Map();
+    files.set(repoRelPath, rows);
+    for (const [index, text] of texts.entries()) {
+      const line = match.line - before.length + index;
+      if (!Number.isSafeInteger(line)) continue;
+      const prior = rows.get(line);
+      if (prior === null) continue;
+      if (prior !== undefined && prior !== text) { rows.set(line, null); continue; }
+      rows.set(line, text);
+    }
+  }
+  const hunks = [];
+  for (const [repoRelPath, rows] of files) {
+    let current = null;
+    for (const [line, text] of [...rows.entries()].sort(([left], [right]) => left - right)) {
+      if (text === null) { current = null; continue; }
+      if (current && current.endLine + 1 === line) {
+        current.endLine = line;
+        current.lines.push(text);
+        continue;
+      }
+      current = { repo_rel_path: repoRelPath, startLine: line, endLine: line, lines: [text] };
+      hunks.push(current);
+    }
+  }
+  return hunks.map(({ lines, ...hunk }) => ({ ...hunk, content: lines.join("\n") }));
+}
+
+// Native reads deliver a contiguous numbered block (`%6d\tline`), optionally
+// followed by a truncation marker. Recover the exact line range and raw text so
+// a native read enters the same coverage ledger as an Atlas read; prepareData
+// still verifies the bytes, and redacted rows verify against redacted source.
+export function numberedReadCoverageHunks(text, { path } = {}) {
+  const repoRelPath = String(path || "").trim();
+  if (!repoRelPath || typeof text !== "string" || !text) return [];
+  const hunks = [];
+  let current = null;
+  for (const row of text.split("\n")) {
+    const match = /^\s*(\d+)\t([\s\S]*)$/u.exec(row);
+    if (!match) { current = null; continue; }
+    const line = Number(match[1]);
+    if (!Number.isSafeInteger(line) || line < 1) { current = null; continue; }
+    if (current && current.endLine + 1 === line) {
+      current.endLine = line;
+      current.lines.push(match[2]);
+      continue;
+    }
+    current = { repo_rel_path: repoRelPath, startLine: line, endLine: line, lines: [match[2]] };
+    hunks.push(current);
+  }
+  return hunks.map(({ lines, ...hunk }) => ({ ...hunk, content: lines.join("\n") }));
+}
+
 function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } = {}) {
   const parsed = parsedMcpTextResult(result);
   if (!parsed) return result;
@@ -354,6 +440,8 @@ function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } =
         if (!source) continue;
         applyVisit(source, { ...toolArgs, symbolId: card.symbolId || toolArgs.symbolId }, "primary", toolName);
       }
+    } else if (toolName === "code.lens") {
+      for (const hunk of codeLensSourceHunks(data)) applyVisit(hunk, toolArgs, "lens", toolName);
     } else if (toolName === "symbol.search") {
       const matches = Array.isArray(data.sourceTextMatches?.matches)
         ? data.sourceTextMatches.matches
@@ -451,6 +539,7 @@ export async function materializeDisplayedSourceCoverage(result, coverageOwner, 
   return visitSourceData(result, toolArgs, (data, args, origin, tool) => (
     coverageOwner.materializeDisplayedData(data, args, {
       origin, tool, redactedSources,
+      suppressive: sourceCoverageIsSuppressive(tool),
       completeSymbolSelector: tool === "code.skeleton" ? null : liveCompleteSymbolSelector(data, args, origin),
     })
   ), options);

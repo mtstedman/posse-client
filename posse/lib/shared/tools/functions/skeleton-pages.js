@@ -60,7 +60,7 @@ export function retainSkeletonPages(envelope, { maxChars, storePage }) {
   for (let index = pages.length - 1; index >= 0; index--) {
     const page = pages[index];
     const data = page.data || page;
-    if (next) data.next_traversal_ref = next;
+    if (next) data.traversal_ref = next;
     const text = JSON.stringify(page);
     if (text.length > maxChars) throw new Error("Skeleton page exceeds the response limit");
     if (index === 0) return text;

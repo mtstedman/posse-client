@@ -62,19 +62,33 @@ export function renderAtlasGuidance(contract = {}) {
     .some((tool) => String(tool?.suite || "").trim() === "atlas"
       || String(tool?.access || "").trim() === "atlas");
   if (!hasAtlas) return [];
+  const issued = new Set(tools.map((tool) => canonicalToolName(tool)));
   const lines = [
     "Atlas symbol tracing: Choose retrieval by the unresolved fact and the location already known, not by a need to switch tools. Use search or survey to locate unknown targets; use lens for scattered details and callers/structure only for a needed relationship, selecting the relevant relation kinds instead of all kinds.",
     "Atlas evidence refs: evidence_ref identifies content already visible in this context. Use it directly for citation, slicing, or handoff; do not call it for the same content.",
-    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref or next_traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Omit limit for normal source traversal: limit measures characters per ref, not source lines. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different next_traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.",
+    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Omit limit for normal source traversal: limit measures characters per ref, not source lines. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.",
   ];
   const hasCodeWindow = tools.some((tool) => canonicalToolName(tool) === "code.window");
   const policy = contract?.atlasCodeWindowPolicy;
+  // Describe what each read returns, not when to call it: prescriptive routing
+  // invites checklist tool use. The earlier line routed every known read to
+  // code.window and discouraged mapping; 37% of HARD-40 file reads reopened a
+  // file already read, mostly for names the previous window had revealed.
   if (hasCodeWindow) {
-    lines[0] += " Read a known file and identifier directly with code.window; a symbolId lookup is not a prerequisite. Prefer granularity: symbol for known definitions; use fileWindow when surrounding file context is needed. Group known identifiers in that file into one anchored body read. Do not map or preview a target before a body read whose location is already known.";
+    const reads = [];
+    if (issued.has("code.skeleton")) {
+      reads.push("code.skeleton returns a compact list of a file's declarations with symbol handles");
+    }
+    if (issued.has("symbol.get")) {
+      reads.push("symbol.get returns complete bodies of named declarations, several in one file through file+symbols or independent ones through items");
+    }
+    reads.push("code.window returns a source region around named declarations including the same-file control flow between them; granularity symbol covers the named declarations' regions, and fileWindow covers most of the file and is the largest read");
+    if (issued.has("code.lens")) reads.push("code.lens returns the locations of an identifier's uses with their enclosing symbols");
+    lines[0] += ` Atlas reads: ${reads.join("; ")}. None of these requires a prior symbol_id lookup.`;
   }
   if (hasCodeWindow && policy) {
     lines.push(
-      `Atlas code window limit: code.window is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit maxTokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,
+      `Atlas code window limit: code.window is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit max_tokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,
     );
   }
   return lines;

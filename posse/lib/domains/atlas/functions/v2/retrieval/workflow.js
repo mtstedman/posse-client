@@ -6,6 +6,7 @@
 
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
+import { snakeToCamelKey } from "../../../../../catalog/field-case.js";
 
 /** @typedef {import("../contracts/tool-params.js").ToolCall} ToolCall */
 /** @typedef {import("../contracts/tool-params.js").WorkflowParams} WorkflowParams */
@@ -482,7 +483,11 @@ function valueAtPath(input, rawPath) {
     }
     if (typeof current !== "object") return undefined;
     if (BLOCKED_PATH_PROPS.has(part)) return undefined;
-    current = /** @type {Record<string, unknown>} */ (current)[part];
+    // Steps name result fields the way the agent surface advertises them
+    // (snake_case), while a step reads the native envelope directly.
+    const native = Object.hasOwn(current, part) ? part : snakeToCamelKey(part);
+    if (BLOCKED_PATH_PROPS.has(native)) return undefined;
+    current = /** @type {Record<string, unknown>} */ (current)[native];
     if (current === undefined && segment.optional) return undefined;
   }
   return current;

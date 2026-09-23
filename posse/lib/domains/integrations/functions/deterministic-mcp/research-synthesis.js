@@ -257,7 +257,7 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
     ].join("\n");
   }
   return [
-    "TRAVERSAL_REF NOT ELIGIBLE: early stored-result traversal is limited to explicit traversal_ref or next_traversal_ref capabilities for omitted, bounded, cursor, survey, or otherwise unseen payloads.",
+    "TRAVERSAL_REF NOT ELIGIBLE: early stored-result traversal is limited to explicit traversal_ref capabilities for omitted, bounded, cursor, survey, or otherwise unseen payloads.",
     "Do not traverse evidence_ref content already delivered in full. Evidence refs are usable for citation or handoff in the current context; only an explicit traversal capability advertises unseen content. A successful traversal promotes that same ref to evidence and returns a different opaque continuation only if more remains.",
     "During exploration, wait to accumulate at least two eligible traversal refs before traversing. Use a singleton only when one required cursor or omitted region blocks the next traversal step.",
   ].join("\n");

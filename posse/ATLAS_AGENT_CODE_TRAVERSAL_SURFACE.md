@@ -1016,7 +1016,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Search file contents deterministically with ripgrep (rg), using regex or literal modes. Returns a self-bounded ranked result with at most one context line, matchesTotal, and file/count output modes; it does not return continuation pages.
+Search file contents deterministically with ripgrep (rg), using regex or literal modes. Returns a self-bounded ranked result with at most one context line, matchesTotal, and file/count output modes; it does not return continuation pages. Content matches are grouped under one `File: path` header, then `line:match`, `line-before` and `line+after` rows.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1164,12 +1164,12 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.
+Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
-| `offset` | `integer` | Optional | min 0 | Compatibility selector for an initial or legacy traversal. Opaque next_traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent. |
+| `offset` | `integer` | Optional | min 0 | Compatibility selector for an initial or legacy traversal. Opaque traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent. |
 | `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. Valid only when traversal_ref is one scalar string; arrays require separate calls because the authorization applies to exactly one ref. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto. |

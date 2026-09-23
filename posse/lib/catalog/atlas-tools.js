@@ -200,7 +200,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           items: {
             type: "object",
             properties: {
-              id: { type: "string", description: "Optional step id for later references like $search.items[0].symbolId." },
+              id: { type: "string", description: "Optional step id for later references like $search.items[0].symbol_id." },
               fn: { type: "string", description: "CamelCase ATLAS function alias or transform name such as dataPick." },
               action: { type: "string", description: "Canonical ATLAS action name such as symbol.search or code.skeleton." },
               args: { type: "object", description: "Step arguments. Exact string refs like $0.items[0].symbolId are resolved before execution." },
@@ -254,7 +254,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "traverse_ref": {
     type: "function",
     name: "atlas_traverse_ref",
-    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref or next_traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.",
+    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.",
     parameters: {
       type: "object",
       properties: {
@@ -263,7 +263,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         ref: { type: ["string", "array"], items: { type: "string" }, description: "Legacy fetch_ref input alias.", internalOnly: true },
         refs: { type: "array", items: { type: "string" }, description: "Legacy fetch_ref batch alias.", internalOnly: true },
         hashes: { type: "array", items: { type: "string" }, description: "Legacy hash alias.", internalOnly: true },
-        offset: { type: "integer", description: "Compatibility selector for an initial or legacy traversal. Opaque next_traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent." },
+        offset: { type: "integer", description: "Compatibility selector for an initial or legacy traversal. Opaque traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent." },
         limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs." },
         search: { type: "string", description: "Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists." },
         search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto." },
@@ -789,7 +789,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "tree.scope": {
     type: "function",
     name: "atlas_tree_scope",
-    description: "Ranked task-scope discovery. Returns the ten highest-ranked candidate files inline and stores additional ranked pages in next_traversal_ref.",
+    description: "Ranked task-scope discovery. Returns the ten highest-ranked candidate files inline and stores additional ranked pages in traversal_ref.",
     parameters: {
       type: "object",
       properties: {

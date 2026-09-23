@@ -1,6 +1,7 @@
 // @ts-check
 
 import { CODE_CONTENT_KINDS } from "../../../catalog/source-display.js";
+import { camelToSnakeKey } from "../../../catalog/field-case.js";
 
 const CANONICAL_SYMBOL_ID = /^[0-9a-f]{64}:[0-9]+$/u;
 const SYMBOL_HANDLE = /^s[1-9][0-9]{0,5}$/u;
@@ -87,7 +88,7 @@ function compactResultCardinality(parsed, action) {
     const hiddenSymbols = files.some((file) => file.truncated === true || file.symbolCount > (file.symbols?.length || 0));
     if (!hiddenSymbols && data.traversal_ref?.kind === "survey_page") drop(data, "traversal_ref");
     const cursor = data.pagination?.cursor;
-    if (cursor?.traversal_ref) data.next_traversal_ref = cursor.traversal_ref;
+    if (cursor?.traversal_ref) data.traversal_ref = cursor.traversal_ref;
     if (data.pagination && Array.isArray(data.files)) {
       const total = data.pagination.totalFiles;
       const end = Number(String(data.pagination.current?.ranks || "").split("-").at(-1));
@@ -136,7 +137,7 @@ export function compactSkeletonSymbolHandles(text, issueHandle) {
     // Exhausted sessions omit the selector rather than exposing an internal ID.
     if (!handle || !SYMBOL_HANDLE.test(handle)) return "";
     issued += 1;
-    return `  [symbolId=${handle}]`;
+    return `  [symbol_id=${handle}]`;
   });
   if (content === map.content) return null;
   map.content = content;
@@ -207,7 +208,7 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
       const truncated = map.truncated === true || map.outputTruncated === true
         || map.omittedSymbols > 0
         || (map.complete === false && !map.degradedReason)
-        || !!map.next_traversal_ref || !!map.nextTraversalRef;
+        || !!map.next_traversal_ref || !!map.nextTraversalRef;  // legacy stored payloads
       for (const field of [
         "contentKind", "startLine", "endLine", "matchStatus", "complete",
         "totalSymbols", "returnedSymbols", "etag", "outputTruncated",
@@ -324,6 +325,9 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
   };
 }
 
+// Result keys that belong to the MCP envelope rather than the payload.
+const PROTOCOL_FIELDS = new Set(["isError", "structuredContent", "_meta"]);
+
 const TYPED_OUTPUT_FIELD_ALIASES = Object.freeze([
   ["repo_rel_path", "path"],
   ["repoRelPath", "path"],
@@ -332,7 +336,6 @@ const TYPED_OUTPUT_FIELD_ALIASES = Object.freeze([
   ["content_line_format", "contentLineFormat"],
   ["content_next_block", "contentInNextBlock"],
   ["source_blocks_follow", "sourceBlocksFollow"],
-  ["next_traversal_ref", "nextTraversalRef"],
   ["object_type", "objectType"],
   ["content_hash", "contentHash"],
   ["size_chars", "sizeChars"],
@@ -458,6 +461,17 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
       delete value.caller;
       delete value.reference;
       value.calledFrom = calledFrom;
+      renamedFields += 1;
+    }
+    // One convention on the agent surface: every remaining camelCase key
+    // becomes snake_case after the explicit aliases run. MCP protocol fields
+    // are not payload data and keep their wire spelling.
+    for (const key of Object.keys(value)) {
+      if (PROTOCOL_FIELDS.has(key)) continue;
+      const snake = camelToSnakeKey(key);
+      if (snake === key) continue;
+      value[snake] = mergeFacadeField(value[snake], value[key]);
+      delete value[key];
       renamedFields += 1;
     }
   };

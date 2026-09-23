@@ -1,4 +1,5 @@
 // @ts-check
+import { camelToSnakeKey } from "../../../../catalog/field-case.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../catalog/symbol-get-batch.js";
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
 
@@ -22,7 +23,7 @@ const EXCLUDED_ACTIONS = new Set([
 ]);
 
 const ACTION_CARDS = Object.freeze({
-  traverse_ref: "requires traversal_ref; accepts multiple already-known refs when each is needed; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,searchMode,reaccessAuthorization",
+  traverse_ref: "requires traversal_ref; returns the withheld remainder of reads already made; one call carries up to 24 already-known refs sharing 32000 characters, where re-reading those regions costs one call each; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
   create_ref: "fields text or source_ref+lines/offset/limit or chunks, plus object_type,note,owner_scope",
   "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
@@ -43,7 +44,7 @@ const ACTION_CARDS = Object.freeze({
 // as its name. Restore that task-blind selection signal while keeping the one-
 // tool, closed-argument surface and canonical execution path unchanged.
 const TYPED_ACTION_CARDS = Object.freeze({
-  traverse_ref: "requires traversal_ref; retrieve only content omitted behind an explicit traversal_ref or nextTraversalRef; accepts multiple already-known refs when each is needed; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,searchMode,reaccessAuthorization",
+  traverse_ref: "requires traversal_ref; returns content omitted behind an explicit traversal_ref, which is the remainder of a read already made; one call carries up to 24 already-known refs sharing 32000 characters, where re-reading those regions costs one call each; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
   "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; get a compact relationship summary for one or several identified symbols; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; returns compact incoming resolved callers, references, or both, grouped by file; fields symbolId,mode,limit,offset",
@@ -53,7 +54,7 @@ const TYPED_ACTION_CARDS = Object.freeze({
   "code.survey": "requires paths; returns a ranked multi-file symbol preview and call map; fields paths,identifiersToFind,limit",
   "code.structure": "requires paths; read the exact inventory of one small directory or file set (default 12 files, paged beyond that) with stable symbol handles, or answer who-implements, who-extends, who-calls, or who-imports inside it in one call by naming edgeKinds explicitly (imports is the default; without edges it is a symbol list, not a relationship proof); use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
   "code.lens": "requires identifiersToFind and either symbolId or file; returns focused locations and enclosing-symbol context for identifiers in one target; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; the runtime supplies reason; fields file,identifiersToFind,granularity,maxTokens,autoFill",
+  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; granularity symbol returns the named declarations' regions, fileWindow returns most of the file up to the window cap and is the largest read; the runtime supplies reason; fields file,identifiersToFind,granularity,maxTokens,autoFill",
   "memory.surface": "probe memory presence for exact file or symbol anchors without returning bodies; fields domains,paths,symbolIds",
   "memory.get": "retrieve memory bodies for exact file or symbol anchors; fields domains,paths,symbolIds",
 });
@@ -64,7 +65,7 @@ const TYPED_ACTION_CARDS = Object.freeze({
 const TYPED_TERSE_ACTION_CARDS = Object.freeze({
   ...ACTION_CARDS,
   "symbol.get": ACTION_CARDS["symbol.get"],
-  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; fields file,identifiersToFind,granularity,maxTokens,autoFill",
+  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; granularity symbol returns the named declarations' regions, fileWindow returns most of the file up to the window cap and is the largest read; fields file,identifiersToFind,granularity,maxTokens,autoFill",
 });
 
 const TYPED_DIRECT_SYMBOL_CARD =
@@ -258,7 +259,7 @@ function researcherTypedActionRequirementSchema(action) {
   return {
     properties: {
       action: { type: "string", enum: [action] },
-      args: TYPED_ACTION_ARG_REQUIREMENTS[action] || {},
+      args: advertisedSchema(TYPED_ACTION_ARG_REQUIREMENTS[action] || {}),
     },
   };
 }
@@ -426,6 +427,90 @@ function researcherReadActionArgsSchema(options = {}) {
 
 // One mapping drives both the advertised direct fields and execution on either
 // surface. Native names remain compatibility inputs, not a second agent API.
+// The agent surface advertises snake_case argument names, matching the result
+// keys it reads back. Execution keeps the native contract, so every advertised
+// name maps home here and the camelCase spelling stays accepted.
+function advertisedArgName(name) {
+  return camelToSnakeKey(name);
+}
+
+// Nested selectors (symbol_ref, symbol.get items) advertise the same way.
+function advertisedNestedSchema(definition) {
+  if (!definition || typeof definition !== "object" || Array.isArray(definition)) return definition;
+  const nested = { ...definition };
+  if (nested.properties && typeof nested.properties === "object") {
+    nested.properties = Object.fromEntries(Object.entries(nested.properties)
+      .map(([name, child]) => [advertisedArgName(name), advertisedNestedSchema(child)]));
+  }
+  if (Array.isArray(nested.required)) nested.required = nested.required.map(advertisedArgName);
+  if (Array.isArray(nested.anyOf)) {
+    nested.anyOf = nested.anyOf.map((entry) => (entry?.required
+      ? { ...entry, required: entry.required.map(advertisedArgName) }
+      : advertisedNestedSchema(entry)));
+  }
+  if (nested.items) nested.items = advertisedNestedSchema(nested.items);
+  return nested;
+}
+
+export function advertisedArgNameMap() {
+  const properties = researcherActionArgsSchema().properties;
+  const map = new Map();
+  for (const name of Object.keys(properties)) {
+    const advertised = advertisedArgName(name);
+    // A field whose snake spelling is already an accepted argument name
+    // (searchMode beside the native search_mode) keeps both names: renaming
+    // would erase the native one and hide a conflict between the spellings.
+    if (advertised === name || Object.hasOwn(properties, advertised)
+      || WORKFLOW_ARG_FIELDS.has(advertised)) continue;
+    map.set(advertised, name);
+  }
+  return map;
+}
+
+function advertisedSchema(schema = {}) {
+  const source = schema.properties || {};
+  const properties = Object.fromEntries(Object.entries(source)
+    .map(([name, definition]) => [
+      Object.hasOwn(source, advertisedArgName(name)) ? name : advertisedArgName(name),
+      advertisedNestedSchema(definition),
+    ]));
+  const mapNames = (names) => (Array.isArray(names) ? names.map(advertisedArgName) : names);
+  return {
+    ...schema,
+    properties,
+    ...(schema.required ? { required: mapNames(schema.required) } : {}),
+    ...(Array.isArray(schema.anyOf)
+      ? { anyOf: schema.anyOf.map((entry) => (entry?.required ? { ...entry, required: mapNames(entry.required) } : entry)) }
+      : {}),
+  };
+}
+
+// Advertised snake_case names resolve to the native contract before anything
+// else runs; a native name that is already snake (traversal_ref) is untouched
+// because it never appears in the map.
+const ADVERTISED_TO_NATIVE = advertisedArgNameMap();
+const ADVERTISED_TEXT_PAIRS = [...ADVERTISED_TO_NATIVE]
+  .sort(([, left], [, right]) => right.length - left.length);
+
+// Cards name arguments the way the schema advertises them, so the prose and
+// the callable fields never disagree.
+export function advertiseCardText(text) {
+  let rendered = String(text || "");
+  for (const [advertised, native] of ADVERTISED_TEXT_PAIRS) {
+    rendered = rendered.replace(new RegExp(`\\b${native}\\b`, "g"), advertised);
+  }
+  return rendered;
+}
+function nativeArgNames(value) {
+  if (Array.isArray(value)) return value.map(nativeArgNames);
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    out[ADVERTISED_TO_NATIVE.get(key) || key] = nativeArgNames(child);
+  }
+  return out;
+}
+
 function researcherActionFieldAliases(action) {
   if (action === "traverse_ref") return { searchMode: "search_mode" };
   if (action === "code.survey") return { identifiersToFind: "symbols", limit: "maxFiles" };
@@ -445,7 +530,7 @@ function researcherActionFieldAliases(action) {
  * @returns {{ args: Record<string, any>, aliases: Array<{from: string, to: string, requested?: number, applied?: number, normalization?: string}>, error?: string }}
  */
 export function normalizeResearcherTypedActionArgs(action, args = {}) {
-  const normalized = { ...args };
+  const normalized = nativeArgNames({ ...args });
   const aliases = [];
   if (action === "symbol.get" && Array.isArray(normalized.items)) {
     const selected = normalized.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems);
@@ -499,7 +584,7 @@ export function normalizeResearcherTypedActionArgs(action, args = {}) {
 }
 
 function researcherWorkflowStepSchema(workflowActions = []) {
-  const actionArgs = researcherReadActionArgsSchema({ actions: workflowActions });
+  const actionArgs = advertisedSchema(researcherReadActionArgsSchema({ actions: workflowActions }));
   return {
     type: "object",
     properties: {
@@ -549,8 +634,12 @@ export function normalizeResearcherWorkflowFacadeArgs(toolArgs = {}) {
     if (!step || typeof step !== "object" || Array.isArray(step)) {
       return { ok: false, error: `workflow ${key} must be an object` };
     }
+    // Steps carry the advertised snake_case field names; both spellings map
+    // to the same native field, so the allowlist accepts either.
     const unknownStep = Object.keys(step).find((field) => (
-      field !== "id" && field !== "action" && !WORKFLOW_ARG_FIELDS.has(field)
+      field !== "id" && field !== "action"
+      && !WORKFLOW_ARG_FIELDS.has(field)
+      && !WORKFLOW_ARG_FIELDS.has(ADVERTISED_TO_NATIVE.get(field) || "")
     ));
     if (unknownStep) return { ok: false, error: `workflow ${key} field is not allowed: ${unknownStep}` };
     const action = String(step.action || "").trim();
@@ -593,7 +682,7 @@ function dispatcherActions(atlasTools = []) {
 export function buildResearcherDispatcherTool(atlasTools = []) {
   const actions = dispatcherActions(atlasTools);
   if (actions.length === 0) return null;
-  const cards = actions.map((action) => `${action}: ${ACTION_CARDS[action]}.`).join(" ");
+  const cards = actions.map((action) => `${action}: ${advertiseCardText(ACTION_CARDS[action])}.`).join(" ");
   return {
     name: DISPATCHER_TOOL_NAME,
     description: `Read repository evidence with Atlas. ${QUERY_BATCH_GUIDANCE} Set action and put only its listed fields in args; do not invent fields. Runtime validates the selected action exactly. ${cards}`,
@@ -620,19 +709,19 @@ export function buildResearcherTypedDispatcherTool(atlasTools = [], {
     ...(purposeGuidance ? TYPED_ACTION_CARDS : TYPED_TERSE_ACTION_CARDS),
     ...(symbolCardGuidance ? { "symbol.card": TYPED_DIRECT_SYMBOL_CARD } : {}),
   };
-  const cards = actions.map((action) => `${action}: ${actionCards[action]}.`).join(" ");
+  const cards = actions.map((action) => `${action}: ${advertiseCardText(actionCards[action])}.`).join(" ");
   return {
     name: DISPATCHER_TOOL_NAME,
-    description: `Read repository evidence with Atlas. ${QUERY_BATCH_GUIDANCE} Put only the selected action's fields in args. Reuse returned symbolId values for dependent reads. symbolHandle is a compatibility input alias. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
+    description: `Read repository evidence with Atlas. ${QUERY_BATCH_GUIDANCE} Put only the selected action's fields in args. Reuse returned symbol_id values for dependent reads. symbol_handle is a compatibility input alias. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
     inputSchema: {
       type: "object",
       properties: {
         action: { type: "string", enum: actions },
-        args: researcherReadActionArgsSchema({
+        args: advertisedSchema(researcherReadActionArgsSchema({
           allowSymbolHandles: true,
           includeWindowReason: false,
           actions,
-        }),
+        })),
       },
       required: ["action", "args"],
       additionalProperties: false,
@@ -668,8 +757,8 @@ export function buildResearcherDirectTools(atlasTools = [], {
     return {
       ...original,
       name: `atlas.${action}`,
-      description: cards[action],
-      inputSchema: { ...shared, ...requirements, properties },
+      description: advertiseCardText(cards[action]),
+      inputSchema: advertisedSchema({ ...shared, ...requirements, properties }),
     };
   });
 }
@@ -679,16 +768,16 @@ export function buildResearcherWorkflowTool(atlasTools = []) {
   if (actions.length === 0) return null;
   const workflowActions = WORKFLOW_ACTIONS.filter((action) => actions.includes(action));
   const advertisedActions = workflowActions.length > 0 ? [...actions, "workflow"] : actions;
-  const cards = actions.map((action) => `${action}: ${ACTION_CARDS[action]}.`).join(" ");
+  const cards = actions.map((action) => `${action}: ${advertiseCardText(ACTION_CARDS[action])}.`).join(" ");
   const workflowStep = researcherWorkflowStepSchema(workflowActions);
   return {
     name: DISPATCHER_TOOL_NAME,
-    description: `Run one typed Atlas read with action+args, or action workflow with args:{} plus step1+step2 and optional step3. ${QUERY_BATCH_GUIDANCE} Each step puts id/action and its action fields directly in the step object. Use exact refs such as $search.items[0].symbolId or $window.traversal_ref.ref; traverse_ref accepts an array to fetch several refs together. Runtime validates every action against its signed allowlist. ${cards}`,
+    description: `Run one typed Atlas read with action+args, or action workflow with args:{} plus step1+step2 and optional step3. ${QUERY_BATCH_GUIDANCE} Each step puts id/action and its action fields directly in the step object. Use exact refs such as $search.items[0].symbol_id or $window.traversal_ref.ref; traverse_ref accepts an array to fetch several refs together. Runtime validates every action against its signed allowlist. ${cards}`,
     inputSchema: {
       type: "object",
       properties: {
         action: { type: "string", enum: advertisedActions },
-        args: researcherActionArgsSchema(),
+        args: advertisedSchema(researcherActionArgsSchema()),
         step1: workflowStep,
         step2: workflowStep,
         step3: workflowStep,

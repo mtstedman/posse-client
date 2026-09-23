@@ -802,7 +802,7 @@
 /**
  * @typedef {Object} CodeSkeletonData
  * @property {string} repo_rel_path
- * @property {string} content                 One declaration per row: source range, compact signature, and optional [symbolId=…] selectors; canonical IDs are replaced by short session handles at the typed MCP boundary. Indentation groups members under containers; no bodies or local functions.
+ * @property {string} content                 One declaration per row: source range, compact signature, and optional [symbol_id=…] selectors (the native envelope writes [symbolId=…]; the typed facade renames it); canonical IDs are replaced by short session handles at the typed MCP boundary. Indentation groups members under containers; no bodies or local functions.
  * @property {number} totalSymbols            Declaration count after filtering, before output limits.
  * @property {number} returnedSymbols         Complete rows returned.
  * @property {number} omittedSymbols          Rows omitted by output limits; raise maxLines/maxTokens to retrieve more.

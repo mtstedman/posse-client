@@ -143,18 +143,31 @@ export function surveyOutlineSymbols(file, { taskText = "" } = {}) {
 }
 
 /** Render bounded orientation from already-ranked survey files, not source evidence. */
+// Anonymous callbacks (`<anonymous@23:53>`) name nothing a reader can search
+// for or fetch, and example/demo trees are rarely the implementation. In
+// HARD-40 code maps they averaged 3 of 45 listed symbols and whole example
+// files ahead of source. Keep example files (a task may be about them) but
+// list them after source; never list anonymous names.
+const EXAMPLE_PATH_RE = /(?:^|\/)(?:examples?|demos?|samples?)\//i;
+const ANONYMOUS_SYMBOL_RE = /<anonymous@/;
+
 export function surveyFileOutline(files) {
   const lines = [];
   const seen = new Set();
   let chars = 0;
-  for (const file of Array.isArray(files) ? files : []) {
+  const list = Array.isArray(files) ? files : [];
+  const ordered = [
+    ...list.filter((file) => !EXAMPLE_PATH_RE.test(String(file?.path || ""))),
+    ...list.filter((file) => EXAMPLE_PATH_RE.test(String(file?.path || ""))),
+  ];
+  for (const file of ordered) {
     const filePath = String(file?.path || "").trim();
     if (!filePath || seen.has(filePath)) continue;
     seen.add(filePath);
     let line = `- ${filePath}`;
     if (line.length > 480) continue;
     const names = [...new Set((Array.isArray(file.outlineSymbols) ? file.outlineSymbols : Array.isArray(file.symbols) ? file.symbols : [])
-      .map(symbolName).filter(Boolean))];
+      .map(symbolName).filter((name) => name && !ANONYMOUS_SYMBOL_RE.test(name)))];
     let shown = 0;
     for (const name of names) {
       const suffix = `${shown ? ", " : ": "}${name}`;

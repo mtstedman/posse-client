@@ -476,6 +476,11 @@ export class SourceCoverageOwner {
       if (Number(row.job_id) !== this.jobId || Number(row.attempt_id) !== this.attemptId) return [];
       const coverage = rowDetail(row);
       if (!coverage || !isReusableCoverageState(coverage.delivery_state)) return [];
+      // Evidence-only coverage is citable and accounted, but never subtracted
+      // from a later read. A one-line lens match or a small native read would
+      // otherwise carve holes in the next window, handing back fragments
+      // instead of the coherent region that was asked for.
+      if (coverage.suppressive === false) return [];
       if (coverage.repository_identity !== this.repositoryIdentity) return [];
       if (coverage.source_version !== fresh.sourceVersion) return [];
       if (normalizePath(coverage.repo_rel_path) !== relative) return [];
@@ -785,13 +790,15 @@ export class SourceCoverageOwner {
     deliveryState = "delivered",
     completeSymbolSelector = null,
     tool = "code.window",
+    suppressive = true,
   } = {}) {
     const prepared = this.prepareData(data, args, { tool });
-    return this.#materializePreparedData(data, args, { origin, deliveryState, completeSymbolSelector, tool }, prepared);
+    return this.#materializePreparedData(data, args, { origin, deliveryState, completeSymbolSelector, tool, suppressive }, prepared);
   }
 
   #materializePreparedData(data, args, {
     origin = "primary", deliveryState = "delivered", completeSymbolSelector = null, tool = "code.window",
+    suppressive = true,
   }, prepared) {
     if (!prepared) return null;
     const { fresh, startLine, endLine, content, contentSha256, selectorFingerprint } = prepared;
@@ -800,6 +807,7 @@ export class SourceCoverageOwner {
     const existing = this.#rows().find((row) => {
       const coverage = rowDetail(row);
       return coverage?.delivery_state === deliveryState
+        && (coverage.suppressive === false) === (suppressive === false)
         && coverage.repository_identity === this.repositoryIdentity
         && coverage.source_version === fresh.sourceVersion
         && normalizePath(coverage.repo_rel_path) === fresh.relative
@@ -928,6 +936,7 @@ export class SourceCoverageOwner {
         delivery_state: deliveryState,
         tool,
         origin,
+        ...(suppressive === false ? { suppressive: false } : {}),
         agent_call_id: this.agentCallId,
         stored_chars: content.length,
         returned_chars: deliveryState === "delivered" ? content.length : 0,
