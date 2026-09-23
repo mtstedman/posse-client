@@ -261,6 +261,18 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
   }
   if (!metadataOnly && action === "symbol.search") {
     const query = String(args?.query || "").trim();
+    // A result that found nothing should say what was searched, so the reader
+    // can tell an absent name from a query the scope never covers.
+    if (Array.isArray(parsed.items) && parsed.items.length === 0 && query) {
+      const scope = String(args?.scope || "").trim().toLowerCase() || "either";
+      const searched = scope === "name"
+        ? "declaration names"
+        : (scope === "body" ? "declaration bodies" : "declaration names and bodies");
+      parsed.no_match_reason = `No ${searched} matched ${JSON.stringify(query)} with scope ${scope}`
+        + `${args?.semantic === true ? " and semantic ranking" : ""}.`
+        + (scope === "body" ? " Body scope matches source text inside declarations, not prose about behavior." : "");
+      removedDefaultFields -= 1;
+    }
     const exactNameRequest = String(args?.scope || "").trim().toLowerCase() === "name"
       && args?.semantic !== true
       && /^[A-Za-z_$][A-Za-z0-9_$.:#-]*$/u.test(query)

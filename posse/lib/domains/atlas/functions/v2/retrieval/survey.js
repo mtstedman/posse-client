@@ -66,12 +66,26 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
     .filter(Boolean)
     .slice(0, MAX_DIG_TERMS);
   const maxFiles = clampInt(params.maxFiles, MAX_SURVEY_FILES, 1, MAX_SURVEY_FILES);
-  const { paths, prefixTruncated, symbolFilterFallback = false } = await collectSurveyPaths({
+  let { paths, prefixTruncated, symbolFilterFallback = false } = await collectSurveyPaths({
     view,
     requested,
     maxFiles,
     symbols: digTerms,
   });
+  // identifiers_to_find selects indexed declaration names. A usage, a phrase or
+  // a qualified spelling matches none of them, and answering with nothing spends
+  // the caller's call to say so. Survey the requested scope instead and name the
+  // identifiers that were not declarations in it.
+  let identifiersNotDeclared = [];
+  if (paths.length === 0 && digTerms.length > 0) {
+    const unfiltered = await collectSurveyPaths({ view, requested, maxFiles, symbols: [] });
+    if (unfiltered.paths.length > 0) {
+      paths = unfiltered.paths;
+      prefixTruncated = unfiltered.prefixTruncated;
+      symbolFilterFallback = true;
+      identifiersNotDeclared = digTerms;
+    }
+  }
   if (paths.length === 0) {
     return okEnvelope({
       action,
@@ -82,8 +96,9 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
         callMap: { edges: [], inbound: [], outbound: [], unresolved: [], edgesTruncated: false, inboundTruncated: false, outboundTruncated: false },
         metrics: { fileCount: 0, symbolCount: 0, internalEdgeCount: 0, inboundCount: 0, outboundCount: 0, unresolvedCount: 0 },
         truncated: prefixTruncated,
+        ...(digTerms.length > 0 ? { identifiers_not_declared_here: digTerms } : {}),
         warnings: [digTerms.length > 0
-          ? `No indexed symbols matched ${digTerms.slice(0, 5).join(", ")} under: ${requested.slice(0, 5).join(", ")}.`
+          ? `No indexed declaration named ${digTerms.slice(0, 5).join(", ")} under: ${requested.slice(0, 5).join(", ")}, and no file is indexed under that scope. identifiers_to_find matches declaration names, not usages or phrases.`
           : `No indexed files matched: ${requested.slice(0, 5).join(", ")}.`],
       },
     });
@@ -148,8 +163,9 @@ export async function codeSurvey({ view, versionId, params = {}, repoRoot }) {
   if (prefixTruncated) result.truncated = true;
   if (symbolFilterFallback) {
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
-    warnings.push(`No indexed symbols matched ${digTerms.slice(0, 5).join(", ")}; returning ranked scope files.`);
+    warnings.push(`No indexed declaration is named ${digTerms.slice(0, 5).join(", ")}; identifiers_to_find matches declaration names, not usages or phrases. Returning the ranked scope files instead.`);
     result.warnings = warnings;
+    if (identifiersNotDeclared.length > 0) result.identifiers_not_declared_here = identifiersNotDeclared;
   }
   const evidence = await nativePathEvidence({ view, repoRoot, paths, requested, terms: digTerms });
   const pathAmbiguity = /** @type {Record<string, unknown> | null} */ (evidence.pathAmbiguity || null);
