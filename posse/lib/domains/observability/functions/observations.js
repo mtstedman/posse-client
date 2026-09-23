@@ -819,10 +819,18 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         const atlasCitationFetch = isResearchAtlasCitationFetchAction(detail?.action);
         if (!atlasExploration && !atlasCitationFetch) continue;
         if (isRefundedInfrastructureFailure(row, detail)) continue;
-        const batchId = detail.research_physical_batch_version === 1
-          && detail.transport === "mcp_owner" ? String(detail.research_physical_batch_id || "") : "";
-        if (!batchId || !physicalBatches.has(batchId)) physicalCallCount += 1;
-        if (batchId) physicalBatches.add(batchId);
+        // The owner assigns one physical step per admitted call and reuses it
+        // for everything that call fans out to, including a recovery re-issue
+        // that mints a fresh batch id. Counting distinct steps therefore
+        // charges the call once; batch identity remains the fallback for rows
+        // recorded before steps were carried.
+        const ownerRow = detail.transport === "mcp_owner";
+        const step = Number.isSafeInteger(detail.physical_call_step) ? detail.physical_call_step : null;
+        const batchId = detail.research_physical_batch_version === 1 && ownerRow
+          ? String(detail.research_physical_batch_id || "") : "";
+        const key = ownerRow && step != null ? `step:${step}` : (batchId ? `batch:${batchId}` : "");
+        if (!key || !physicalBatches.has(key)) physicalCallCount += 1;
+        if (key) physicalBatches.add(key);
         if (atlasCitationFetch) continue;
         if (detail?.symbol_followup_discounted === true) symbolFollowupsDiscounted += 1;
         const explorationStep = explorationStepForDetail(detail);
