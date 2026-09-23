@@ -414,6 +414,42 @@ export function numberedReadCoverageHunks(text, { path } = {}) {
   return hunks.map(({ lines, ...hunk }) => ({ ...hunk, content: lines.join("\n") }));
 }
 
+/**
+ * Contiguous source runs from grouped search output. Search rows are exact
+ * repository lines, so what they show is delivered source: recording it lets a
+ * claim anchored on a search hit be cited. Coverage from search is
+ * evidence-only and never suppresses a later read of the same region.
+ *
+ * Format, from renderGroupedSearchRows: a `File: <path>` header, then rows of
+ * `> <line>\t<text>` for matches and `  <line>\t<text>` for context, with
+ * `--` between non-adjacent runs.
+ *
+ * @param {string} text
+ * @returns {Array<{repo_rel_path: string, startLine: number, endLine: number, content: string}>}
+ */
+export function searchResultCoverageHunks(text) {
+  if (typeof text !== "string" || !text) return [];
+  const hunks = [];
+  let repoRelPath = "";
+  let current = null;
+  for (const row of text.split("\n")) {
+    const header = /^File:\s+(\S[\s\S]*?)\s*$/u.exec(row);
+    if (header) { repoRelPath = header[1]; current = null; continue; }
+    const match = /^[>\s]\s(\d+)\t([\s\S]*)$/u.exec(row);
+    if (!match || !repoRelPath) { current = null; continue; }
+    const line = Number(match[1]);
+    if (!Number.isSafeInteger(line) || line < 1) { current = null; continue; }
+    if (current && current.repo_rel_path === repoRelPath && current.endLine + 1 === line) {
+      current.endLine = line;
+      current.lines.push(match[2]);
+      continue;
+    }
+    current = { repo_rel_path: repoRelPath, startLine: line, endLine: line, lines: [match[2]] };
+    hunks.push(current);
+  }
+  return hunks.map(({ lines, ...hunk }) => ({ ...hunk, content: lines.join("\n") }));
+}
+
 function visitSourceData(result, toolArgs, visit, { toolName = "code.window" } = {}) {
   const parsed = parsedMcpTextResult(result);
   if (!parsed) return result;

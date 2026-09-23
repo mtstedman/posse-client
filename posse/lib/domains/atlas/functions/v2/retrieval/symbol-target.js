@@ -119,6 +119,22 @@ function symbolRefRecoveryBearers(matches) {
  *
  * @param {{ view: import("../contracts/api.js").View, symbolRef: {name:string,file?:string,kind?:string,exportedOnly?:boolean}, file?: string }} request
  */
+/**
+ * Identity of one indexed declaration: two rows for the same name in the same
+ * file are different bearers when they start at different lines.
+ *
+ * @param {{content_hash?: string, local_id?: number, range_start_line?: number}} symbol
+ * @returns {string}
+ */
+function symbolTargetIdentity(symbol) {
+  return [
+    String(symbol?.content_hash || ""),
+    String(symbol?.local_id ?? ""),
+    String(symbol?.range_start_line ?? ""),
+  ].join(":");
+}
+
+
 export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   const name = String(symbolRef?.name || "").trim();
   if (!name) return { status: "invalid_symbol_ref", targets: [] };
@@ -191,6 +207,23 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
       bearers: [...bearers.values()].sort(),
       targets: matches,
     };
+  }
+  // One name can be borne twice in one file: a TypeScript interface beside the
+  // const that implements it, a declaration beside its definition. Keeping only
+  // the first match per path silently answered with whichever sorted first,
+  // which is how a caller asking for a value received a three-line type. Report
+  // every bearer instead; the caller gets all of them, not a coin flip.
+  if (requestedFile) {
+    const inFile = matches.filter((symbol) => symbol.repo_rel_path === requestedFile);
+    const distinct = new Map(inFile.map((symbol) => [symbolTargetIdentity(symbol), symbol]));
+    if (distinct.size > 1) {
+      return {
+        status: "ambiguous_symbol_ref",
+        requestedFile,
+        bearers: [...bearers.values()].sort(),
+        targets: [...distinct.values()].sort(compareSymbolTargets),
+      };
+    }
   }
   const byPath = new Map();
   for (const match of matches) {

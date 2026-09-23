@@ -690,6 +690,20 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
         AND observation_type IN (${placeholders})
       ORDER BY id ASC
     `).all(...scopeParams, ...RESEARCH_EXPLORATION_OBSERVATION_TYPES);
+    // One Atlas call can leave two observations: the owner's, which carries the
+    // transport, the assigned physical step and any batch identity, and a
+    // provider-side echo that carries none of them. Counting both inflated the
+    // physical budget, and the echo also escaped batch de-duplication, so a
+    // batched read was charged per item. Where the owner recorded anything, it
+    // is authoritative; otherwise the untagged rows are all there is.
+    const ownerRecordedAtlasCall = explorationRows.some((row) => {
+      if (row.observation_type !== "tool.atlas") return false;
+      try {
+        return String(JSON.parse(String(row.detail_json || "{}"))?.transport || "") === "mcp_owner";
+      } catch {
+        return false;
+      }
+    });
     let explorationCount = 0;
     let physicalCallCount = 0;
     const physicalBatches = new Set();
@@ -800,6 +814,7 @@ export function researchExplorationObservationStatus({ jobId = null, attemptId =
       try {
         const detail = JSON.parse(String(row.detail_json || "{}"));
         if (detail?.executed === false) continue;
+        if (ownerRecordedAtlasCall && String(detail?.transport || "") !== "mcp_owner") continue;
         const atlasExploration = isResearchAtlasExplorationAction(detail?.action);
         const atlasCitationFetch = isResearchAtlasCitationFetchAction(detail?.action);
         if (!atlasExploration && !atlasCitationFetch) continue;

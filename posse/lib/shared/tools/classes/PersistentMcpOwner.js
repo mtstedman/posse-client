@@ -166,6 +166,7 @@ import {
 import {
   materializeDisplayedSourceCoverage,
   numberedReadCoverageHunks,
+  searchResultCoverageHunks,
   sourceCoverageIsSuppressive,
   prepareSourceCoverage,
   sourceCoverageOwnerForSession,
@@ -6158,8 +6159,14 @@ export class PersistentMcpOwner {
         // A native read delivers exact source too. Record what it showed in the
         // same coverage ledger the Atlas reads use, so a later Atlas read over
         // those lines is recognised as already delivered.
-        if (requested.suite === "tools" && requested.name === "read_file" && mcpToolCallSuccess(response)) {
-          await this._recordNativeReadCoverage(session, message?.params?.arguments || {}, response.result);
+        if (requested.suite === "tools" && mcpToolCallSuccess(response)
+          && ["read_file", "search_files"].includes(requested.name)) {
+          await this._recordNativeReadCoverage(
+            session,
+            message?.params?.arguments || {},
+            response.result,
+            requested.name,
+          );
         }
         const physicalCallCeiling = researchSynthesisPolicyFor(session).maxPhysicalCalls;
         if (gatewayAdmission.tracked && response?.result && !resolveAtlasResearchRuntimeGuidance()) {
@@ -6392,21 +6399,25 @@ export class PersistentMcpOwner {
   // no context-headroom reservation. Custody only records the delivered lines,
   // and SourceCoverageOwner verifies every byte against the current file, so a
   // stale, clipped, or non-source read simply records nothing.
-  async _recordNativeReadCoverage(session, toolArgs, result) {
+  async _recordNativeReadCoverage(session, toolArgs, result, tool = "read_file") {
     const boot = session?.bootConfig || {};
     if (String(boot.role || "") !== "researcher" || !Number.isSafeInteger(Number(boot.attemptId))) return;
     const text = (Array.isArray(result?.content) ? result.content : [])
       .filter((part) => part?.type === "text" && typeof part.text === "string")
       .map((part) => part.text).join("\n");
-    const hunks = numberedReadCoverageHunks(text, { path: toolArgs?.path });
+    // Search rows carry their own file headers; a numbered read is one file.
+    const hunks = tool === "search_files"
+      ? searchResultCoverageHunks(text)
+      : numberedReadCoverageHunks(text, { path: toolArgs?.path });
     if (hunks.length === 0) return;
     const owner = sourceCoverageOwnerForSession(session, boot);
     const redactedSources = new Map();
     for (const hunk of hunks) {
       try {
         await owner.materializeDisplayedData(hunk, { file: hunk.repo_rel_path }, {
-          origin: "native_read", tool: "read_file", redactedSources, completeSymbolSelector: null,
-          suppressive: sourceCoverageIsSuppressive("read_file"),
+          origin: tool === "search_files" ? "native_search" : "native_read",
+          tool, redactedSources, completeSymbolSelector: null,
+          suppressive: sourceCoverageIsSuppressive(tool),
         });
       } catch { /* Custody is best-effort: a read must never fail on accounting. */ }
     }
