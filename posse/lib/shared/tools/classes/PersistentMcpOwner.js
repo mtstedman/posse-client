@@ -6161,12 +6161,21 @@ export class PersistentMcpOwner {
         // those lines is recognised as already delivered.
         if (requested.suite === "tools" && mcpToolCallSuccess(response)
           && ["read_file", "search_files"].includes(requested.name)) {
-          await this._recordNativeReadCoverage(
+          const repeated = await this._recordNativeReadCoverage(
             session,
             message?.params?.arguments || {},
             response.result,
             requested.name,
           );
+          if (repeated) {
+            response = {
+              ...response,
+              result: appendOwnerModelControlNotice(response.result, `\n\n${repeated}`, {
+                kind: "native_read_repeated_source",
+                trigger: requested.name,
+              }),
+            };
+          }
         }
         const physicalCallCeiling = researchSynthesisPolicyFor(session).maxPhysicalCalls;
         if (gatewayAdmission.tracked && response?.result && !resolveAtlasResearchRuntimeGuidance()) {
@@ -6409,8 +6418,20 @@ export class PersistentMcpOwner {
     const hunks = tool === "search_files"
       ? searchResultCoverageHunks(text)
       : numberedReadCoverageHunks(text, { path: toolArgs?.path });
-    if (hunks.length === 0) return;
+    if (hunks.length === 0) return null;
     const owner = sourceCoverageOwnerForSession(session, boot);
+    // What this read re-delivers is worth stating, not withholding: a native
+    // read is never refused, and the caller decides whether the context it
+    // already holds is enough.
+    let repeatedLines = 0;
+    const repeatedRefs = new Set();
+    for (const hunk of hunks) {
+      try {
+        const prior = owner.deliveredCoverageWithin(hunk.repo_rel_path, hunk.startLine, hunk.endLine);
+        repeatedLines += prior.lines;
+        for (const ref of prior.refs) repeatedRefs.add(ref);
+      } catch { /* The note is advisory; accounting must never fail a read. */ }
+    }
     const redactedSources = new Map();
     for (const hunk of hunks) {
       try {
@@ -6421,6 +6442,10 @@ export class PersistentMcpOwner {
         });
       } catch { /* Custody is best-effort: a read must never fail on accounting. */ }
     }
+    if (repeatedLines <= 0) return null;
+    const refs = [...repeatedRefs];
+    return `SOURCE ALREADY DELIVERED: ${repeatedLines} of these lines were delivered earlier in this attempt`
+      + `${refs.length > 0 ? ` as ${refs.join(", ")}` : ""}.`;
   }
 
   _refundResearchInfrastructureFailure(session, admission, result, error = null) {

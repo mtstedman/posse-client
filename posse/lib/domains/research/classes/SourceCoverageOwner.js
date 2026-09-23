@@ -681,6 +681,41 @@ export class SourceCoverageOwner {
     }
   }
 
+  /**
+   * Lines of one region that this attempt has already been shown, with the
+   * evidence refs that carry them. Read-only: nothing is withheld on the
+   * strength of it, and a caller is never refused for asking again.
+   *
+   * @param {string} repoRelativePath
+   * @param {number} startLine
+   * @param {number} endLine
+   * @returns {{ lines: number, refs: string[] }}
+   */
+  deliveredCoverageWithin(repoRelativePath, startLine, endLine) {
+    const empty = { lines: 0, refs: [] };
+    if (!this.attemptId) return empty;
+    const relative = normalizePath(repoRelativePath);
+    if (!relative || !Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine)) return empty;
+    if (endLine < startLine) return empty;
+    const fresh = this.#freshSource(relative);
+    if (!fresh) return empty;
+    const covered = new Set();
+    const refs = new Set();
+    for (const row of this.#rows()) {
+      const coverage = rowDetail(row);
+      if (!coverage || !isReusableCoverageState(coverage.delivery_state)) continue;
+      if (coverage.repository_identity !== this.repositoryIdentity) continue;
+      if (normalizePath(coverage.repo_rel_path) !== relative) continue;
+      if (coverage.source_version !== fresh.sourceVersion) continue;
+      const from = Math.max(startLine, Number(coverage.start_line));
+      const to = Math.min(endLine, Number(coverage.end_line));
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to < from) continue;
+      for (let line = from; line <= to; line += 1) covered.add(line);
+      if (coverage.evidence_ref) refs.add(String(coverage.evidence_ref));
+    }
+    return { lines: covered.size, refs: [...refs].slice(0, 4) };
+  }
+
   hasDeliveredCoverageForPath(repoRelativePath) {
     if (!this.attemptId) return false;
     const relative = normalizePath(repoRelativePath);

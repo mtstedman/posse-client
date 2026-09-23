@@ -341,8 +341,13 @@ export async function suppressCoveredSourceInterval(result, coverageOwner, toolA
 // citable at all — one-line lens matches, bounded native reads, search hits —
 // and must never subtract from a later read, or a coherent region comes back
 // as fragments around lines the agent saw once in passing.
+// Evidence-only tools return scattered fragments — a matched line and its
+// neighbours — so treating what they showed as covered would punch holes in a
+// later whole-region read. A native read is not one of them: it delivers a
+// contiguous citable region exactly as an Atlas window does, so its lines
+// suppress a later read of the same region like any other delivered source.
 export const NON_SUPPRESSIVE_SOURCE_TOOLS = new Set([
-  "code.lens", "read_file", "chain_read", "inspect_file", "search_files", "symbol.search",
+  "code.lens", "chain_read", "inspect_file", "search_files", "symbol.search",
 ]);
 
 export function sourceCoverageIsSuppressive(tool) {

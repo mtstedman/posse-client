@@ -5584,6 +5584,10 @@ function recordAtlasTrunkHitRate(packet, context) {
     const citedFiles = citedSourcePaths(packet);
     const pointed = new Set(pointedFiles);
     const hitFiles = citedFiles.filter((file) => pointed.has(file));
+    // Prefetch fetches, redacts and ledgers real source. Whether that work is
+    // reaching the reader, or being paid for twice, is only visible by asking
+    // which prefetched files were read again from the agent's own budget.
+    const prefetchYield = atlasPrefetchReadYield(database, jobId, attemptId);
     const hitRate = citedFiles.length > 0 ? hitFiles.length / citedFiles.length : null;
     const pointedPrecision = pointedFiles.length > 0 ? hitFiles.length / pointedFiles.length : null;
     return recordObservation({
@@ -5605,12 +5609,59 @@ function recordAtlasTrunkHitRate(packet, context) {
         hit_file_count: hitFiles.length,
         hit_rate: hitRate,
         pointed_precision: pointedPrecision,
+        ...prefetchYield,
       },
     });
   } catch {
     return false;
   }
 }
+
+/**
+ * How much of what prefetch delivered the agent then paid to read again.
+ * Read-only telemetry: a prefetched window the agent re-reads is work stored
+ * twice, and a prefetched file it never touches is work with no reader.
+ *
+ * @param {any} database
+ * @param {number} jobId
+ * @param {number|null} attemptId
+ * @returns {Record<string, unknown>}
+ */
+function atlasPrefetchReadYield(database, jobId, attemptId) {
+  try {
+    const rows = database.prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE job_id = ?
+        AND (? IS NULL OR attempt_id = ?)
+        AND observation_type = 'source.coverage'
+      ORDER BY id ASC
+    `).all(jobId, attemptId, attemptId);
+    const prefetched = new Set();
+    const readAgain = new Set();
+    let rereadCalls = 0;
+    for (const row of rows) {
+      let detail = {};
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      const coverage = detail?.coverage && typeof detail.coverage === "object" ? detail.coverage : detail;
+      const sourcePath = canonicalSourcePath(coverage?.repo_rel_path);
+      if (!sourcePath) continue;
+      const origin = String(detail?.origin || coverage?.origin || "");
+      if (origin === "prefetch") { prefetched.add(sourcePath); continue; }
+      if (!prefetched.has(sourcePath)) continue;
+      readAgain.add(sourcePath);
+      rereadCalls += 1;
+    }
+    return {
+      prefetched_file_count: prefetched.size,
+      prefetched_files_read_again: readAgain.size,
+      prefetched_reread_calls: rereadCalls,
+    };
+  } catch {
+    return {};
+  }
+}
+
 
 function citedSourcePaths(packet) {
   const out = [];
