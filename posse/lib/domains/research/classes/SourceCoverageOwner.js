@@ -233,11 +233,29 @@ export class SourceCoverageOwner {
     if (ancestry.length === 0) return [];
     const jobRank = new Map(ancestry.map((row, index) => [row.id, index]));
     const placeholders = ancestry.map(() => "?").join(", ");
+    // Coverage recorded by an attempt that then failed points at source the
+    // model can no longer see: a failed attempt's context is discarded, so its
+    // evidence ref is dangling by construction and suppressing a re-read would
+    // leave the retry with a pointer and no source. The current attempt always
+    // counts, whatever its in-flight status.
     const rows = this.db.prepare(`
-      SELECT id, job_id, attempt_id, detail_json
-      FROM job_observations
-      WHERE work_item_id = ? AND job_id IN (${placeholders}) AND observation_type = ?
-    `).all(this.workItemId, ...ancestry.map((row) => row.id), COVERAGE_OBSERVATION);
+      SELECT o.id, o.job_id, o.attempt_id, o.detail_json
+      FROM job_observations o
+      WHERE o.work_item_id = ? AND o.job_id IN (${placeholders}) AND o.observation_type = ?
+        AND (
+          (o.job_id = ? AND o.attempt_id = ?)
+          OR NOT EXISTS (
+            SELECT 1 FROM job_attempts a
+            WHERE a.id = o.attempt_id AND a.status IN ('failed', 'canceled')
+          )
+        )
+    `).all(
+      this.workItemId,
+      ...ancestry.map((row) => row.id),
+      COVERAGE_OBSERVATION,
+      this.jobId,
+      this.attemptId,
+    );
     return rows.sort((left, right) => {
       const leftCurrentAttempt = left.job_id === this.jobId && left.attempt_id === this.attemptId;
       const rightCurrentAttempt = right.job_id === this.jobId && right.attempt_id === this.attemptId;

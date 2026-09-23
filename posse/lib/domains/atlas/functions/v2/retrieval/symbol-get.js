@@ -15,6 +15,7 @@ import { staleSymbolSource } from "./source-freshness.js";
 const INTERNAL_SYMBOL_GET_REASON = "symbol.get exact indexed body";
 const MAX_SYMBOL_GET_AMBIGUITY_CHOICES = 20;
 const MAX_SYMBOL_GET_AMBIGUITY_PATH_CHARS = 3_000;
+const MAX_CROSS_FILE_CANDIDATES = 5;
 
 /**
  * Read one selected symbol location through the existing bounded source path.
@@ -111,12 +112,39 @@ async function sameFileBearerBodies({
   };
 }
 
+/**
+ * A request that named a file is asking about that file. Candidates from it
+ * come first, then its directory, then the rest of the repository, and the
+ * cross-file tail is capped: a generic name such as `call` otherwise answers a
+ * scoped miss with twenty unrelated bearers from other crates.
+ *
+ * @param {{targets?: any[], requestedFile?: string | null}} selection
+ * @returns {any[]}
+ */
+function rankedSelectionTargets(selection) {
+  const targets = Array.isArray(selection?.targets) ? selection.targets : [];
+  const requestedFile = String(selection?.requestedFile || "").trim();
+  if (!requestedFile || targets.length === 0) return targets;
+  const directory = requestedFile.slice(0, requestedFile.lastIndexOf("/") + 1);
+  const inFile = [];
+  const nearby = [];
+  const elsewhere = [];
+  for (const target of targets) {
+    const file = String(target?.repo_rel_path || "");
+    if (file === requestedFile) inFile.push(target);
+    else if (directory && file.startsWith(directory)) nearby.push(target);
+    else elsewhere.push(target);
+  }
+  return [...inFile, ...nearby, ...elsewhere.slice(0, MAX_CROSS_FILE_CANDIDATES)];
+}
+
+
 function targetSelectionError(selection, selector, versionId) {
   const action = "symbol.get";
   // These are existing indexed addresses, not automatically selected fallbacks.
   // Keep complete candidate objects visible to text-only MCP consumers too.
   const candidates = [];
-  for (const target of selection.targets || []) {
+  for (const target of rankedSelectionTargets(selection)) {
     const id = symbolIdOf(target);
     const candidate = {
       name: target.qualified_name || target.name,

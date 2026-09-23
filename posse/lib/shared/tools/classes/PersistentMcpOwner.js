@@ -3119,15 +3119,24 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 // so a refunded final call reports nothing. Error results consume a slot too.
 // Batch items defer to the combined batch result; a per-attempt flag keeps
 // the notice to one delivery across the Atlas, gateway, and batch paths.
+// Calls held back so a reader can close out instead of meeting the ceiling
+// with nothing left to say.
+const RESEARCH_BUDGET_CLOSEOUT_RESERVE = 2;
+
 function appendResearchBudgetExhaustedNotice(result, admission, session) {
   if (resolveAtlasResearchRuntimeGuidance()) return result;
   if (!admission?.tracked || admission.blocked || admission.physicalBatchId) return result;
   const max = admissionMaxPhysicalCalls(admission);
-  if (!(Number(admission.assignedPhysicalCallStep) >= max)) return result;
-  if (researchWorkBudget(admission)?.remaining !== 0) return result;
+  const remaining = researchWorkBudget(admission)?.remaining;
+  if (!Number.isSafeInteger(remaining)) return result;
+  // Reserve a closeout window: a reader told the budget is gone on its final
+  // admitted call has no capacity left to finish a thought, and an attempt
+  // that ends without a staged report costs every call it already made.
+  if (remaining > RESEARCH_BUDGET_CLOSEOUT_RESERVE) return result;
+  if (remaining === 0 && !(Number(admission.assignedPhysicalCallStep) >= max)) return result;
   const flags = session ? researchNoticeFlagsFor(session) : null;
   if (flags?.budgetExhausted) return result;
-  const next = appendOwnerModelControlNotice(result, `\n\n${researchWorkBudgetExhaustedText(session)}`, {
+  const next = appendOwnerModelControlNotice(result, `\n\n${researchWorkBudgetExhaustedText(session, remaining)}`, {
     kind: "research_budget_exhausted",
     trigger: "physical_call_ceiling",
   });
@@ -3145,8 +3154,11 @@ function agentHandoffCallableName(session) {
   });
 }
 
-function researchWorkBudgetExhaustedText(session) {
-  return buildResearchWorkBudgetExhaustedText({ handoffToolName: agentHandoffCallableName(session) });
+function researchWorkBudgetExhaustedText(session, remaining = 0) {
+  return buildResearchWorkBudgetExhaustedText({
+    handoffToolName: agentHandoffCallableName(session),
+    remaining,
+  });
 }
 
 // Unguided blocked payloads state the same fact: a model that has already
@@ -6121,7 +6133,7 @@ export class PersistentMcpOwner {
             response = { ...response, result };
             recordOwnerModelControlNotice(session, requested.name, {
               kind: "research_budget_exhausted",
-              text: researchWorkBudgetExhaustedText(session),
+              text: researchWorkBudgetExhaustedText(session, researchWorkBudget(gatewayAdmission)?.remaining ?? 0),
               trigger: "physical_call_ceiling",
             });
           }
@@ -6686,7 +6698,7 @@ export class PersistentMcpOwner {
       if (noticedBatchResult !== batchResult) {
         recordOwnerModelControlNotice(args.session, "symbol.get", {
           kind: "research_budget_exhausted",
-          text: researchWorkBudgetExhaustedText(args.session),
+          text: researchWorkBudgetExhaustedText(args.session, researchWorkBudget(batchAdmission)?.remaining ?? 0),
           trigger: "physical_call_ceiling",
         });
       }

@@ -158,6 +158,21 @@ export function compactSkeletonSymbolHandles(text, issueHandle) {
  *   removedDefaultFields: number,
  * } | null}
  */
+
+/**
+ * Identifiers a code.skeleton request narrowed its outline to.
+ *
+ * @param {Record<string, any> | null} args
+ * @returns {string[]}
+ */
+function skeletonIdentifierFilter(args) {
+  const source = args && typeof args === "object" && !Array.isArray(args)
+    ? (args.identifiersToFind ?? args.identifiers_to_find)
+    : null;
+  const values = Array.isArray(source) ? source : (typeof source === "string" ? [source] : []);
+  return values.map((value) => String(value || "").trim()).filter(Boolean);
+}
+
 export function compactResearcherTypedAtlasText(text, { action = null, args = null, metadataOnly = false } = {}) {
   if (typeof text !== "string") return null;
   const suffixAt = text.indexOf("\n\n[");
@@ -226,6 +241,10 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
         delete map.omittedSymbols;
         removedDefaultFields += 1;
       }
+      // An outline narrowed to requested identifiers lists only matching rows,
+      // so without this it reads as the file's complete declaration set and a
+      // caller can conclude the rest of the file holds nothing.
+      if (skeletonIdentifierFilter(args).length > 0) map.filtered_to_identifiers = true;
       for (const [owner, key] of [[map, "_meta"], [parsed, "meta"]]) {
         const meta = owner[key];
         if (!meta || typeof meta !== "object" || Array.isArray(meta)) continue;
