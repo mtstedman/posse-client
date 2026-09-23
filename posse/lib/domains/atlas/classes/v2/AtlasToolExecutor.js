@@ -34,7 +34,7 @@ import {
   applyPathQualityPriors,
   pathQualityPriorsEnabled,
 } from "../../functions/v2/retrieval/path-priors.js";
-import { boundSymbolSearchEnvelope } from "../../functions/v2/retrieval/search.js";
+import { boundSymbolSearchEnvelope, stripSearchDiagnostics } from "../../functions/v2/retrieval/search.js";
 import { projectCompactSymbolRelationships } from "../../functions/v2/retrieval/compact-presentation.js";
 import {
   attachScopeBeam,
@@ -1234,6 +1234,7 @@ export class AtlasToolExecutor {
         const nativeCallMs = Math.max(0, this.#now() - nativeStartedAt);
         const transformStartedAt = this.#now();
         let scopeBeamMs = 0;
+        let searchDiagnostics = null;
         let transformedEnvelope = envelope;
         if (request.action === "symbol.search") {
           transformedEnvelope = applyNativeSymbolSearchPriors(
@@ -1251,6 +1252,7 @@ export class AtlasToolExecutor {
             searchVectorBridge: vectorBridge,
           });
           scopeBeamMs = Math.max(0, this.#now() - scopeBeamStartedAt);
+          searchDiagnostics = stripSearchDiagnostics(transformedEnvelope);
           transformedEnvelope = boundSymbolSearchEnvelope(transformedEnvelope);
         }
         if (request.action === "symbol.callers") {
@@ -1263,6 +1265,7 @@ export class AtlasToolExecutor {
         const resultTransformMs = Math.max(0, this.#now() - transformStartedAt);
         return withExecutorDiagnostics(converted, {
           via: "native_complete",
+          ...(searchDiagnostics ? { search_diagnostics: searchDiagnostics } : {}),
           queue: {
             key: queueInfo.key,
             wait_ms: queueInfo.waitMs,

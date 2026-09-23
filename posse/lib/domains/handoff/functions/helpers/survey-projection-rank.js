@@ -277,12 +277,20 @@ function relationWeight(file, related) {
  * Promote provider-visible survey candidates without changing the stored
  * survey, source evidence, or agent tool surface. The returned file objects
  * are unchanged; only their compact projection order differs.
+ *
+ * A file earns its place by relating to the request: a task-token match, a
+ * call-graph relation to something the request names, or public surface.
+ * Ranking alone never dropped anything, so a fixed-size map was padded with
+ * whatever sorted next — tests, type stubs and unrelated siblings — and a
+ * reader has no way to tell a padded row from an anchor. Files with no
+ * relevance signal are held back when any related file exists; when nothing
+ * relates, the ordered candidates still stand rather than returning nothing.
  */
 export function rankSurveyFilesForProjection(files, { taskText = "", callMap = null } = {}) {
   const rows = Array.isArray(files) ? files.filter((file) => file && String(file.path || "").trim()) : [];
   const requested = taskTokens(taskText);
   const related = relationNames(callMap);
-  return rows
+  const ranked = rows
     .map((file, index) => {
       const publicSurface = publicSurfaceWeight(file.path);
       const taskMatches = taskMatchCount(file, requested);
@@ -297,6 +305,7 @@ export function rankSurveyFilesForProjection(files, { taskText = "", callMap = n
           + Math.max(0, 40 - index),
       };
     })
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .map(({ file }) => file);
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const anchored = ranked.filter((row) => row.promoted);
+  return (anchored.length > 0 ? anchored : ranked).map(({ file }) => file);
 }

@@ -494,6 +494,25 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
       value.calledFrom = calledFrom;
       renamedFields += 1;
     }
+    // A start and an end line are one fact stated twice, in the two longest
+    // key names on a search hit. Written the way the read tools already accept
+    // a range, the pair becomes a value the caller can hand straight back.
+    // Anything already carrying `lines` keeps it: that is line content, not a
+    // range, and it is not this function's to overwrite.
+    if (!Object.hasOwn(value, "lines")) {
+      const startKey = Object.hasOwn(value, "startLine") ? "startLine"
+        : Object.hasOwn(value, "start_line") ? "start_line" : null;
+      const endKey = Object.hasOwn(value, "endLine") ? "endLine"
+        : Object.hasOwn(value, "end_line") ? "end_line" : null;
+      const start = startKey == null ? null : Number(value[startKey]);
+      const end = endKey == null ? null : Number(value[endKey]);
+      if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
+        value.lines = start === end ? String(start) : `${start}-${end}`;
+        delete value[/** @type {string} */ (startKey)];
+        delete value[/** @type {string} */ (endKey)];
+        renamedFields += 1;
+      }
+    }
     // One convention on the agent surface: every remaining camelCase key
     // becomes snake_case after the explicit aliases run. MCP protocol fields
     // are not payload data and keep their wire spelling.

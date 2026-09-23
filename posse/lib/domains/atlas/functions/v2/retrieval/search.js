@@ -420,6 +420,66 @@ async function attachNodeScopeBeam({ envelope, view, versionId, query, limit, re
  * @param {any} envelope
  * @param {number} [maxChars]
  */
+// What a caller keeps from a search: the addresses, and anything that changes
+// what those addresses mean. Everything else native attaches — which backends
+// answered, how deep each candidate pool went, how separated the ranking was,
+// which policy produced it — describes how the search ran. It is ours to read,
+// not the caller's, and it arrived on every single search: a third of the
+// bytes of a result that fit, and nine tenths of one that did not.
+//
+// A name collision is kept, because two symbols sharing a name makes the
+// addresses above ambiguous, and so is any warning or error. So is a
+// degradation notice: a result that is short because a backend was down reads
+// exactly like a result that is short because the repository is, unless it
+// says so.
+//
+// `disambiguation` is the collision table itself, and it was mistaken for
+// telemetry once. It names which of the symbols above share a name, which is
+// what tells a caller that asking for one of them by name will not resolve.
+// Removing it raised same-name `symbol.get` rejections from 2 to 25 across
+// nine HARD-40 cells, so it is result evidence, not commentary on the search.
+const AGENT_SEARCH_META_KEYS = new Set([
+  "warnings", "trust", "error", "errors", "degraded", "disambiguation",
+]);
+
+// Native timings and the legacy ladder never reach an agent either, but the
+// executor reads them off the envelope after this runs, to report how long the
+// call took. Leave them where their own reader expects to find them.
+const EXECUTOR_RESERVED_META_KEYS = new Set(["runtimeTelemetry", "ladderPolicy"]);
+
+/**
+ * Remove the diagnostics from an agent-bound search envelope and hand them
+ * back, so the caller can record them somewhere the agent does not pay for.
+ *
+ * @param {any} envelope
+ * @returns {Record<string, unknown> | null} the removed diagnostics, if any
+ */
+export function stripSearchDiagnostics(envelope) {
+  const meta = envelope?.meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  /** @type {Record<string, unknown>} */
+  const removed = {};
+  for (const key of Object.keys(meta)) {
+    if (AGENT_SEARCH_META_KEYS.has(key) || EXECUTOR_RESERVED_META_KEYS.has(key)) continue;
+    removed[key] = meta[key];
+    delete meta[key];
+  }
+  if (Object.keys(meta).length === 0) delete envelope.meta;
+  return Object.keys(removed).length > 0 ? removed : null;
+}
+
+// Whatever is left still shares one byte rail with the results. `trust` is the
+// collision notice in long form, and native pushes the same sentence into
+// `warnings`, so it is the one thing here that can go without losing a fact.
+// Warnings and degradation notices are kept: they are cheaper than the result
+// they would displace, and a caller who loses them cannot tell a short answer
+// from a broken one.
+const DISCARDABLE_SEARCH_DIAGNOSTICS = ["trust"];
+
+// A warning list is written by the backend and has no length contract, so it
+// is bounded here rather than trusted to stay small.
+const MAX_AGENT_SEARCH_WARNINGS = 3;
+
 export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SEARCH_SELF_BOUND_CHARS) {
   if (!envelope?.data) return envelope;
   const data = envelope.data;
@@ -429,8 +489,11 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
   pruneAgentFileEvidence(data, meta);
   delete meta.scoreScheme;
   if (JSON.stringify(envelope).length <= maxChars) return envelope;
+  if (Array.isArray(meta.warnings) && meta.warnings.length > MAX_AGENT_SEARCH_WARNINGS) {
+    meta.warnings = meta.warnings.slice(0, MAX_AGENT_SEARCH_WARNINGS);
+  }
   if (Array.isArray(data.entities) && JSON.stringify(envelope).length > maxChars) delete data.entities;
-  for (const key of ["warnings", "semantic", "queryPlan", "prefetch"]) {
+  for (const key of DISCARDABLE_SEARCH_DIAGNOSTICS) {
     if (JSON.stringify(envelope).length <= maxChars) break;
     delete meta[key];
   }
@@ -441,6 +504,10 @@ export function boundSymbolSearchEnvelope(envelope, maxChars = CONTEXT_SYMBOL_SE
   while (Array.isArray(data.items) && data.items.length > 1 && JSON.stringify(envelope).length > maxChars) {
     data.items.pop();
     data.truncated = true;
+    // A result list cut to fit the rail is not a list cut for lack of matches.
+    // Asking again with a larger limit returns the same rail-full of results,
+    // so the count is stated for what it is.
+    data.truncatedBy = "result_bytes";
   }
   if (JSON.stringify(envelope).length > maxChars && meta.backendHealth) {
     const health = meta.backendHealth;
