@@ -105,6 +105,7 @@ import {
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
 import { evidenceRefSurface } from "../functions/ref-surface.js";
 import { sourceLineDisplay, compactSourceEvidenceSuffix } from "../functions/source-line-display.js";
+import { SYMBOL_GET_BATCH_POLICY } from "../../../catalog/symbol-get-batch.js";
 import { isSymbolGetBatch, planSymbolGetBatch, combineSymbolGetBatchResults } from "../../../domains/atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { refreshSourceDecisionNavigation } from "../functions/source-decision-points.js";
 import {
@@ -589,6 +590,36 @@ function clampAtlasArgumentCeilings(action, toolArgs) {
 }
 
 export const __testClampAtlasArgumentCeilings = clampAtlasArgumentCeilings;
+export const __testSameFileAmbiguityBatchItems = sameFileAmbiguityBatchItems;
+
+/**
+ * Batch items recovering an ambiguity whose bearers all live in the file the
+ * caller named. Returns null when the error is a different one, when no file
+ * was named, or when a bearer sits outside it.
+ *
+ * @param {any} result
+ * @param {Record<string, any>} toolArgs
+ * @returns {Array<{symbolId: string, file: string}> | null}
+ */
+function sameFileAmbiguityBatchItems(result, toolArgs) {
+  if (result?.isError !== true) return null;
+  const error = result?.structuredContent?.error || result?._meta?.atlasError;
+  if (String(error?.code || "") !== "ambiguous_symbol") return null;
+  const requestedFile = String(
+    toolArgs?.file || toolArgs?.path || toolArgs?.symbolRef?.file || toolArgs?.symbolRef?.path || "",
+  ).trim();
+  if (!requestedFile) return null;
+  const candidates = error?.details?.candidates;
+  if (!Array.isArray(candidates) || candidates.length < 2) return null;
+  if (candidates.length > SYMBOL_GET_BATCH_POLICY.maxItems) return null;
+  const items = [];
+  for (const candidate of candidates) {
+    const symbolId = String(candidate?.symbolId || candidate?.symbol_id || "").trim();
+    if (!symbolId || String(candidate?.file || "") !== requestedFile) return null;
+    items.push({ symbolId, file: requestedFile });
+  }
+  return items;
+}
 
 function isResearchPhysicalWorkRequest(requested) {
   if (!requested) return false;
@@ -6777,7 +6808,8 @@ export class PersistentMcpOwner {
       && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
       && !this._atlasToolCallQueues.has(queueKey);
     if (concurrentResearchRead) {
-      const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt });
+      const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt })
+        .then(message => this._recoverSameFileAmbiguity(message, args, assignedPhysicalCallStep));
       this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current, {
         concurrentRead: true,
       });
@@ -6789,12 +6821,13 @@ export class PersistentMcpOwner {
       .then(async () => {
         const activeReads = [...(this._activeResearchAtlasReads.get(queueKey) || [])];
         if (activeReads.length > 0) await Promise.allSettled(activeReads);
-        return this._executeAtlasToolCallNow({
+        const executed = await this._executeAtlasToolCallNow({
           ...args,
           binding,
           synthesisAdmission,
           enqueuedAt,
         });
+        return this._recoverSameFileAmbiguity(executed, args, assignedPhysicalCallStep);
       });
     this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current);
     const tail = current.catch(() => {});
@@ -6805,6 +6838,38 @@ export class PersistentMcpOwner {
       }
     });
     return current;
+  }
+
+  /**
+   * A name with several declarations inside the one file the caller named is
+   * answerable: every bearer is in that file. Re-issue the read as a batch of
+   * its exact symbolIds on the same physical step, so each body goes through
+   * the per-item source custody that makes it citable. Answering below this
+   * layer would return bodies the evidence ledger never saw.
+   *
+   * @param {any} message
+   * @param {any} args
+   * @param {number|null} assignedPhysicalCallStep
+   */
+  async _recoverSameFileAmbiguity(message, args, assignedPhysicalCallStep) {
+    if (args?.ambiguityRecovery) return message;
+    const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
+    if (effectiveAtlasResearchAction(requested) !== "symbol.get") return message;
+    const toolArgs = args?.toolArgs?.args && typeof args.toolArgs.args === "object"
+      ? args.toolArgs.args
+      : (args?.toolArgs || {});
+    const items = sameFileAmbiguityBatchItems(message?.result, toolArgs);
+    if (!items) return message;
+    const recovered = await this._executeAtlasToolCall({
+      ...args,
+      ambiguityRecovery: true,
+      assignedPhysicalCallStep,
+      toolArgs: {
+        items,
+        ...(toolArgs.maxTokens == null ? {} : { maxTokens: toolArgs.maxTokens }),
+      },
+    });
+    return recovered?.result?.isError === true ? message : (recovered || message);
   }
 
   async _executeAtlasToolCallNow({

@@ -8,7 +8,6 @@ import { symbolIdOf } from "./cards.js";
 import { resolveSymbolBodyTarget, symbolSourceText } from "./symbol-body-resolution.js";
 import { selectSymbolRefTarget, selectSymbolTarget } from "./symbol-target.js";
 import { resolveRequestedIdentifierSymbols } from "./identifier-resolution.js";
-import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch.js";
 import { isSymbolGetBatch, planSymbolGetBatch } from "./symbol-get-batch.js";
 import { staleSymbolSource } from "./source-freshness.js";
 
@@ -58,58 +57,6 @@ async function readSelectedBody({
     repoId,
     config,
   });
-}
-
-/**
- * A name with several declarations inside the one requested file is not an
- * unanswerable request: the caller already named the file, and every bearer is
- * in it. Returning those bodies costs one call; rejecting the request costs
- * that call and a second one to re-select by symbolId.
- *
- * @returns {Promise<any|null>} null when the request cannot be answered this way
- */
-async function sameFileBearerBodies({
-  selection, params, view, versionId, readFile, repoRoot, ledger, repoId, config,
-  hashRefContext, readSymbolBody, storeSourceTraversalRef,
-}) {
-  const requestedFile = String(params.file || params.symbolRef?.file || "").trim();
-  const targets = (selection.targets || []).filter(target => target && symbolIdOf(target));
-  if (!requestedFile || targets.length < 2 || targets.length > SYMBOL_GET_BATCH_POLICY.maxItems) return null;
-  if (!targets.every(target => target.repo_rel_path === requestedFile)) return null;
-  const perSymbol = Math.min(
-    params.maxTokens ?? SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol,
-    SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol,
-  );
-  let items;
-  try {
-    items = await Promise.all(targets.map(target => symbolGet({
-      view,
-      versionId,
-      params: {
-        symbolId: symbolIdOf(target),
-        file: requestedFile,
-        maxTokens: perSymbol,
-        ...(Array.isArray(params.identifiersToFind) ? { identifiersToFind: params.identifiersToFind } : {}),
-      },
-      readFile, repoRoot, ledger, repoId, config, hashRefContext, readSymbolBody, storeSourceTraversalRef,
-    })));
-  } catch {
-    // A bearer whose body cannot be read leaves the caller with the existing
-    // candidate list, which is still actionable.
-    return null;
-  }
-  if (items.some(item => item?.ok !== true)) return null;
-  const name = String(params.symbolRef?.name || params.symbolId || "").trim();
-  return {
-    ok: true,
-    action: "symbol.get",
-    versionId,
-    data: {
-      items,
-      note: `${name} has ${targets.length} declarations in ${requestedFile}; every one is returned, `
-        + "each with its own symbolId.",
-    },
-  };
 }
 
 /**
@@ -389,13 +336,6 @@ export async function symbolGet({
       file: params.file,
     });
   const selector = params.symbolId || params.symbolRef?.name || "";
-  if (selection.status === "ambiguous_symbol_ref") {
-    const bearers = await sameFileBearerBodies({
-      selection, params, view, versionId, readFile, repoRoot, ledger, repoId, config,
-      hashRefContext, readSymbolBody, storeSourceTraversalRef,
-    });
-    if (bearers) return bearers;
-  }
   if (selection.status !== "selected" && selection.status !== "ambiguous") {
     return targetSelectionError(selection, selector, versionId);
   }
