@@ -37,5 +37,6 @@ export const ATLAS_PARSER_VERSION = "atlas-v2-parser-call-ownership-v2";
 // edge-coverage-v5: TypeScript ambient signatures and BOM-aware UTF-16 source
 // decoding.
 // edge-coverage-v6: module-level and anonymous JS callback source ownership.
+// edge-coverage-v7: public named re-export provenance edges.
 // Schema generation 4 changes persisted edge meaning and forces a cold rebuild.
-export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v6";
+export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v7";

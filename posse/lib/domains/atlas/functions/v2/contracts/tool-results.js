@@ -184,6 +184,7 @@
  * @property {SymbolId} symbolId
  * @property {string} name
  * @property {string} [qualifiedName]
+ * @property {string} [exportedFrom]          Repository-relative file that publicly re-exports this symbol.
  * @property {string} kind
  * @property {string} lang
  * @property {SymbolLocation} location

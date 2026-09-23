@@ -573,6 +573,9 @@ function compactSymbolAddress(value, { minimal = false } = {}) {
     ...(!minimal && value?.qualifiedName
       ? { qualifiedName: compactSearchText(value.qualifiedName, 240) }
       : {}),
+    ...(!minimal && value?.exportedFrom
+      ? { exportedFrom: compactSearchText(value.exportedFrom, 320) }
+      : {}),
     kind: compactSearchText(value?.kind, 40),
     location: {
       repo_rel_path: compactSearchText(location?.repo_rel_path, 320),

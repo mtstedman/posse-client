@@ -497,7 +497,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Repository discovery when the target or its location is unknown. Returns bounded symbol addresses. Multiword concepts and code-fragment queries can also return bounded, redacted sourceTextMatches from indexed files after an empty symbol-name lookup. Reuse returned IDs and evidence refs exactly as issued.",
+    description: "Repository discovery when the target or its location is unknown. Returns bounded symbol addresses. exportedFrom names the file that publicly re-exports the symbol when one is indexed. Multiword concepts and code-fragment queries can also return bounded, redacted sourceTextMatches from indexed files after an empty symbol-name lookup. Reuse returned IDs and evidence refs exactly as issued.",
     parameters: {
       type: "object",
       properties: {
@@ -891,7 +891,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with code.window using their file and range.",
+    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with code.window using their file and range.",
     parameters: {
       type: "object",
       properties: {
