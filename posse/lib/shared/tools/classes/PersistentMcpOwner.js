@@ -592,6 +592,7 @@ function clampAtlasArgumentCeilings(action, toolArgs) {
 
 export const __testClampAtlasArgumentCeilings = clampAtlasArgumentCeilings;
 export const __testSameFileAmbiguityBatchItems = sameFileAmbiguityBatchItems;
+export const __testEmptyIdentifierFilterRecovery = emptyIdentifierFilterRecovery;
 
 /**
  * Batch items recovering an ambiguity whose bearers all live in the file the
@@ -602,6 +603,48 @@ export const __testSameFileAmbiguityBatchItems = sameFileAmbiguityBatchItems;
  * @param {Record<string, any>} toolArgs
  * @returns {Array<{symbolId: string, file: string}> | null}
  */
+const IDENTIFIER_FILTER_FIELDS = ["identifiersToFind", "identifiers_to_find", "symbols"];
+
+/**
+ * Identifiers a narrowed outline or survey filtered everything away with.
+ * Returns null when the result carried content, or when nothing was narrowed.
+ *
+ * @param {string} action
+ * @param {any} result
+ * @param {Record<string, any>} toolArgs
+ * @returns {string[] | null}
+ */
+function emptyIdentifierFilterRecovery(action, result, toolArgs) {
+  if (!result || result.isError === true) return null;
+  const requested = [];
+  for (const field of IDENTIFIER_FILTER_FIELDS) {
+    const value = toolArgs?.[field];
+    if (Array.isArray(value)) requested.push(...value.map((entry) => String(entry || "").trim()).filter(Boolean));
+    else if (typeof value === "string" && value.trim()) requested.push(value.trim());
+  }
+  if (requested.length === 0) return null;
+  const first = Array.isArray(result.content) ? result.content[0] : null;
+  if (!first || first.type !== "text" || typeof first.text !== "string") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(first.text.split("\n\n")[0]);
+  } catch {
+    return null;
+  }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  if (!data || typeof data !== "object") return null;
+  if (action === "code.skeleton") {
+    const rows = Array.isArray(result.content) && result.content.length > 1
+      ? String(result.content[1]?.text || "")
+      : String(data.content || "");
+    return rows.trim() ? null : [...new Set(requested)];
+  }
+  const files = Array.isArray(data.files) ? data.files : null;
+  if (files === null || files.length > 0) return null;
+  return [...new Set(requested)];
+}
+
+
 function sameFileAmbiguityBatchItems(result, toolArgs) {
   if (result?.isError !== true) return null;
   const error = result?.structuredContent?.error || result?._meta?.atlasError;
@@ -6854,7 +6897,8 @@ export class PersistentMcpOwner {
       && !this._atlasToolCallQueues.has(queueKey);
     if (concurrentResearchRead) {
       const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt })
-        .then(message => this._recoverSameFileAmbiguity(message, args, assignedPhysicalCallStep));
+        .then(message => this._recoverSameFileAmbiguity(message, args, assignedPhysicalCallStep))
+        .then(message => this._recoverEmptyIdentifierFilter(message, args, assignedPhysicalCallStep));
       this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current, {
         concurrentRead: true,
       });
@@ -6872,7 +6916,8 @@ export class PersistentMcpOwner {
           synthesisAdmission,
           enqueuedAt,
         });
-        return this._recoverSameFileAmbiguity(executed, args, assignedPhysicalCallStep);
+        const recovered = await this._recoverSameFileAmbiguity(executed, args, assignedPhysicalCallStep);
+        return this._recoverEmptyIdentifierFilter(recovered, args, assignedPhysicalCallStep);
       });
     this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current);
     const tail = current.catch(() => {});
@@ -6915,6 +6960,49 @@ export class PersistentMcpOwner {
       },
     });
     return recovered?.result?.isError === true ? message : (recovered || message);
+  }
+
+  /**
+   * An outline or survey narrowed to identifiers that are not declaration
+   * names filters every row away, and the caller is charged a full retrieval
+   * call for an empty result. Re-issue it unnarrowed on the same physical
+   * step and say which identifiers were not declarations there. These reads
+   * are served by the native binary, so the recovery belongs here rather than
+   * in the JavaScript handler.
+   *
+   * @param {any} message
+   * @param {any} args
+   * @param {number|null} assignedPhysicalCallStep
+   */
+  async _recoverEmptyIdentifierFilter(message, args, assignedPhysicalCallStep) {
+    if (args?.identifierFilterRecovery || args?.ambiguityRecovery) return message;
+    const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
+    const action = effectiveAtlasResearchAction(requested);
+    if (!["code.skeleton", "code.survey"].includes(action)) return message;
+    const nested = args?.toolArgs?.args && typeof args.toolArgs.args === "object" && !Array.isArray(args.toolArgs.args);
+    const toolArgs = nested ? args.toolArgs.args : (args?.toolArgs || {});
+    const filtered = emptyIdentifierFilterRecovery(action, message?.result, toolArgs);
+    if (!filtered) return message;
+    const widened = { ...toolArgs };
+    for (const field of IDENTIFIER_FILTER_FIELDS) delete widened[field];
+    const recovered = await this._executeAtlasToolCall({
+      ...args,
+      identifierFilterRecovery: true,
+      assignedPhysicalCallStep,
+      toolArgs: nested ? { ...args.toolArgs, args: widened } : widened,
+    });
+    const result = recovered?.result;
+    if (!result || result.isError === true) return message;
+    return {
+      ...recovered,
+      result: appendOwnerModelControlNotice(
+        result,
+        `\n\nIDENTIFIERS NOT DECLARED HERE: ${filtered.join(", ")}. `
+          + "identifiers_to_find selects indexed declaration names, not usages, phrases or qualified spellings, "
+          + "so the unnarrowed result is returned instead.",
+        { kind: "atlas_identifier_filter_widened", trigger: action },
+      ),
+    };
   }
 
   async _executeAtlasToolCallNow({
