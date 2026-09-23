@@ -555,6 +555,41 @@ function effectiveAtlasResearchAction(requested) {
     : requested.name;
 }
 
+/**
+ * Clamp a count argument that exceeds its advertised ceiling instead of
+ * rejecting the call. Asking for more of the same result is not an invalid
+ * request: rejecting it costs the caller a whole retrieval call and returns
+ * nothing, while maxTokens has always clamped. Selectors, identifiers, and
+ * every non-numeric argument stay strict.
+ *
+ * @param {string} action
+ * @param {Record<string, any>} toolArgs
+ * @returns {{ args: Record<string, any>, clamps: Array<{field: string, requested: number, applied: number}> }}
+ */
+function clampAtlasArgumentCeilings(action, toolArgs) {
+  const clamps = [];
+  const schema = action ? atlasDescriptorSchemaForAction(action) : null;
+  const properties = schema?.properties;
+  if (!properties || !toolArgs || typeof toolArgs !== "object" || Array.isArray(toolArgs)) {
+    return { args: toolArgs, clamps };
+  }
+  const nested = toolArgs.args && typeof toolArgs.args === "object" && !Array.isArray(toolArgs.args);
+  const source = nested ? toolArgs.args : toolArgs;
+  const clamped = { ...source };
+  for (const [field, definition] of Object.entries(properties)) {
+    const ceiling = definition?.maximum;
+    const value = clamped[field];
+    if (typeof ceiling !== "number" || typeof value !== "number" || !Number.isFinite(value)) continue;
+    if (value <= ceiling) continue;
+    clamped[field] = ceiling;
+    clamps.push({ field, requested: value, applied: ceiling });
+  }
+  if (clamps.length === 0) return { args: toolArgs, clamps };
+  return { args: nested ? { ...toolArgs, args: clamped } : clamped, clamps };
+}
+
+export const __testClampAtlasArgumentCeilings = clampAtlasArgumentCeilings;
+
 function isResearchPhysicalWorkRequest(requested) {
   if (!requested) return false;
   if (requested.suite === "atlas") {
@@ -6779,7 +6814,17 @@ export class PersistentMcpOwner {
       return staleGatewayBindingToolResult(message);
     }
     const context = attachTelemetryContext(session, this.bootId, binding?.bootConfig);
-    const requested = requestedToolPolicyName(toolName, toolArgs);
+    let requested = requestedToolPolicyName(toolName, toolArgs);
+    const ceilings = clampAtlasArgumentCeilings(effectiveAtlasResearchAction(requested), toolArgs);
+    if (ceilings.clamps.length > 0) {
+      toolArgs = ceilings.args;
+      requested = requestedToolPolicyName(toolName, toolArgs);
+      providerTransforms = [...providerTransforms, {
+        kind: "atlas_argument_ceiling_clamp",
+        action: effectiveAtlasResearchAction(requested),
+        clamps: ceilings.clamps,
+      }];
+    }
     let coverageReservationsToRelease = [];
     let contextHeadroomReservation = null;
     let coverageObservationCursor = 0;
