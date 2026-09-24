@@ -692,7 +692,7 @@ async function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMer
           const targetLocalId = r.to_content_hash === content_hash
             ? r.to_local_id
             : ledgerRows.targetLocalId(r.to_content_hash, preferred, r.source, r.to_local_id);
-          const candidate = localToGlobal.get(localKey(preferred, targetLocalId));
+          const candidate = targetLocalId == null ? null : localToGlobal.get(localKey(preferred, targetLocalId));
           if (candidate != null) toGid = candidate;
         }
       }
@@ -784,7 +784,7 @@ function layerMergeLangForPath(repo_rel_path) {
  * @returns {{
  *   readSymbols: (content_hash: string, repo_rel_path?: string) => any[],
  *   readEdges: (content_hash: string, repo_rel_path?: string) => any[],
- *   targetLocalId: (content_hash: string, repo_rel_path: string, source: string | null | undefined, local_id: number) => number,
+ *   targetLocalId: (content_hash: string, repo_rel_path: string, source: string | null | undefined, local_id: number) => number | null,
  * }}
  */
 function createLedgerRowReader(ledgerDb, useLayerMerge) {
@@ -850,9 +850,13 @@ function createLedgerRowReader(ledgerDb, useLayerMerge) {
   return {
     readSymbols: (content_hash, repo_rel_path = "") => mergedFor(content_hash, repo_rel_path).symbols,
     readEdges: (content_hash, repo_rel_path = "") => mergedFor(content_hash, repo_rel_path).edges,
+    // Flat (legacy) rows already use view local ids. A layer-merged blob's
+    // ids are a different space: an unmapped layer id stays unresolved
+    // instead of binding to whichever merged symbol shares the raw number.
     targetLocalId: (content_hash, repo_rel_path, source, local_id) => {
       const merged = mergedFor(content_hash, repo_rel_path);
-      return merged.sourceLocalToMerged?.get(sourceLocalKey(source, local_id)) ?? local_id;
+      if (!(merged.sourceLocalToMerged instanceof Map)) return local_id;
+      return merged.sourceLocalToMerged.get(sourceLocalKey(source, local_id)) ?? null;
     },
   };
 }
@@ -1074,10 +1078,11 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayer
         const targetLocalId = r.to_content_hash === content_hash
           ? r.to_local_id
           : ledgerRows.targetLocalId(r.to_content_hash, preferred, r.source, r.to_local_id);
-        if (preferred === onlyPath) {
+        // An unmapped merged target (null) stays unresolved for name resolution.
+        if (targetLocalId != null && preferred === onlyPath) {
           const fresh = localToGlobal.get(String(targetLocalId));
           if (fresh != null) toGid = fresh;
-        } else {
+        } else if (targetLocalId != null) {
           const existing = /** @type {{ global_id: number } | undefined} */ (
             lookupExistingGlobal.get(preferred, targetLocalId)
           );

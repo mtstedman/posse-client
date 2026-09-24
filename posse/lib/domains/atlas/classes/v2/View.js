@@ -15,6 +15,7 @@ import { openViewDbReadOnly, openViewDbReadWrite } from "../../functions/v2/view
 import { runNativeViewRead } from "../../functions/v2/native/view-read.js";
 import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
 import { hydrateNativeBlastRadius, hydrateNativeSlice } from "../../functions/v2/view-slice.js";
+import { callSiteOffset, scipCallSiteMatcher } from "../../functions/v2/ledger/call-site-dedupe.js";
 import {
   normalizeWaitingLaneGeneration,
   waitingLaneGenerationsEqual,
@@ -769,15 +770,12 @@ function materializeLayeredContentHash({ viewDb, ledgerDb, lang, contentHash }) 
  * @param {SqliteDatabase} ledgerDb
  * @param {string} contentHash
  * @param {string} lang
- * @returns {Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>}
+ * @returns {Array<{ id: number, source: "treesitter" | "scip" }>}
  */
 function latestLayersForContentHash(ledgerDb, contentHash, lang) {
-  const metadataSelect = tableHasColumn(ledgerDb, "blob_layers", "metadata_json")
-    ? "metadata_json"
-    : "NULL AS metadata_json";
-  const rows = /** @type {Array<{ id: number, source: string, metadata_json?: string | null }>} */ (
+  const rows = /** @type {Array<{ id: number, source: string }>} */ (
     ledgerDb.prepare(
-      `SELECT id, source, ${metadataSelect}
+      `SELECT id, source
        FROM blob_layers
        WHERE content_hash = ? AND lang = ? AND status = 'indexed'
        ORDER BY indexed_at DESC, id DESC`,
@@ -786,11 +784,7 @@ function latestLayersForContentHash(ledgerDb, contentHash, lang) {
   const bySource = new Map();
   for (const row of rows) {
     if ((row.source === "treesitter" || row.source === "scip") && !bySource.has(row.source)) {
-      bySource.set(row.source, {
-        id: Number(row.id),
-        source: row.source,
-        metadata: layerJson(row.metadata_json),
-      });
+      bySource.set(row.source, { id: Number(row.id), source: row.source });
     }
   }
   return ["treesitter", "scip"].map((source) => bySource.get(source)).filter(Boolean);
@@ -800,7 +794,7 @@ function latestLayersForContentHash(ledgerDb, contentHash, lang) {
  * @param {{
  *   viewDb: SqliteDatabase,
  *   ledgerDb: SqliteDatabase,
- *   layers: Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>,
+ *   layers: Array<{ id: number, source: "treesitter" | "scip" }>,
  *   repoRelPath: string,
  *   contentHash: string,
  *   lang: string,
@@ -858,8 +852,12 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
       } else if (layer.source === "scip") {
         entry.name = row.name || entry.name;
         entry.qualified_name = qualified || entry.qualified_name;
-        entry.signature_hash = stringOrNull(detail?.signature_hash) || entry.signature_hash;
-        entry.signature_text = stringOrNull(detail?.signature_text) || row.signature || entry.signature_text;
+        // Keep the tree-sitter declaration text/hash pair over SCIP's
+        // synthesized "<kind> <qualified>" signature; fill only when absent.
+        if (!entry.signature_text) {
+          entry.signature_hash = stringOrNull(detail?.signature_hash) || entry.signature_hash;
+          entry.signature_text = stringOrNull(detail?.signature_text) || row.signature || null;
+        }
         entry.visibility = stringOrNull(detail?.visibility) || entry.visibility;
         entry.doc = row.doc ?? entry.doc;
       }
@@ -900,11 +898,9 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
     globalByKey.set(key, Number(info.lastInsertRowid));
   }
 
-  const scipCallProofFull = layers.some((layer) => layer.source === "scip" && callProofCoverage(layer) === "full");
-  const edgeRowsByKey = new Map();
+  const candidates = [];
   for (const layer of layers) {
     for (const row of layerEdges(ledgerDb, layer.id)) {
-      if (scipCallProofFull && layer.source === "treesitter" && row.kind === "calls") continue;
       const detail = layerJson(row.detail_json);
       const range = layerJson(row.range_json);
       const fromKey = sourceLocalToKey.get(`${layer.id}:${row.from_local_id}`);
@@ -936,16 +932,32 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
         toContentHash: sameBlob ? contentHash : stringOrNull(detail?.to_content_hash),
         toLocalId: nullableNumber(detail?.to_local_id),
       };
-      const edgeKey = materializedEdgeDedupKey(edgeRow);
-      const existing = edgeRowsByKey.get(edgeKey);
-      if (existing) {
-        if (edgeRow.kind === "calls" && confidenceScore(edgeRow.confidence) > confidenceScore(existing.confidence)) {
-          edgeRowsByKey.set(edgeKey, edgeRow);
-        }
-        continue;
-      }
-      edgeRowsByKey.set(edgeKey, edgeRow);
+      const site = {
+        start: callSiteOffset(range?.range_start ?? detail?.range_start),
+        end: callSiteOffset(range?.range_end ?? detail?.range_end),
+        line: edgeRow.rangeStartLine,
+        name: toName,
+      };
+      candidates.push({ edgeRow, site });
     }
+  }
+  // Drop tree-sitter calls at a SCIP call site, then dedup identical A/B
+  // calls by confidence.
+  const isScipCallSite = scipCallSiteMatcher(
+    candidates.filter(({ edgeRow }) => edgeRow.kind === "calls" && edgeRow.edgeSource === "scip").map(({ site }) => site),
+  );
+  const edgeRowsByKey = new Map();
+  for (const { edgeRow, site } of candidates) {
+    if (edgeRow.kind === "calls" && edgeRow.edgeSource === "treesitter" && isScipCallSite(site)) continue;
+    const edgeKey = materializedEdgeDedupKey(edgeRow);
+    const existing = edgeRowsByKey.get(edgeKey);
+    if (existing) {
+      if (edgeRow.kind === "calls" && confidenceScore(edgeRow.confidence) > confidenceScore(existing.confidence)) {
+        edgeRowsByKey.set(edgeKey, edgeRow);
+      }
+      continue;
+    }
+    edgeRowsByKey.set(edgeKey, edgeRow);
   }
 
   for (const edgeRow of edgeRowsByKey.values()) {
@@ -1014,35 +1026,6 @@ function layerJson(value) {
   } catch {
     return {};
   }
-}
-
-function objectOrEmpty(value) {
-  if (typeof value === "string") return layerJson(value);
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-
-/**
- * @param {SqliteDatabase} db
- * @param {string} table
- * @param {string} column
- */
-function tableHasColumn(db, table, column) {
-  try {
-    const cols = /** @type {Array<{ name: string }>} */ (db.prepare(`PRAGMA table_info(${table})`).all());
-    return cols.some((col) => col.name === column);
-  } catch {
-    return false;
-  }
-}
-
-function callProofCoverage(layer) {
-  const metadata = objectOrEmpty(layer?.metadata);
-  const raw = metadata.call_proof_coverage
-    ?? metadata.callProofCoverage
-    ?? objectOrEmpty(metadata.call_proof).coverage
-    ?? objectOrEmpty(metadata.callProof).coverage;
-  const value = String(raw || "").toLowerCase();
-  return value === "full" || value === "partial" || value === "none" ? value : "none";
 }
 
 function confidenceScore(value) {

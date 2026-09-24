@@ -44,7 +44,13 @@ import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 //       calls only when SCIP coverage is explicit.
 //   v5: strip portable staging prefixes and suppress parameter/type-parameter/
 //       synthetic-meta definitions so SCIP contributes structural gaps only.
-export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v5-structural-symbols";
+//   v6: layer metadata stores call-proof coverage as the `full|partial|none`
+//       level (plus the full proof object under `call_proof`); v4/v5 layers
+//       stringified the native object to "[object Object]". The bump also
+//       re-ingests SCIP layers and rebuilds views for the layer merges'
+//       per-call-site SCIP/tree-sitter call dedupe (which replaced the
+//       per-file full-coverage suppression).
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v6-call-proof-level";
 
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */

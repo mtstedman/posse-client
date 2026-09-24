@@ -1059,15 +1059,32 @@ function normalizeNativeDocumentMetadata(doc) {
   };
   const coverage = doc?.call_proof_coverage ?? doc?.callProofCoverage
     ?? metadata.call_proof_coverage ?? metadata.callProofCoverage;
-  if (coverage != null) {
-    metadata.call_proof_coverage = String(coverage);
-  }
+  delete metadata.callProofCoverage;
+  delete metadata.call_proof_coverage;
+  const proof = plainObject(coverage);
+  if (proof) metadata.call_proof = proof;
+  const level = callProofCoverageLevel(proof ? proof.coverage : coverage);
+  if (level) metadata.call_proof_coverage = level;
   const reasons = doc?.call_proof_unavailable_reasons ?? doc?.callProofUnavailableReasons
     ?? metadata.call_proof_unavailable_reasons ?? metadata.callProofUnavailableReasons;
   if (Array.isArray(reasons)) {
     metadata.call_proof_unavailable_reasons = reasons.map((reason) => String(reason));
   }
   return metadata;
+}
+
+/**
+ * Native rows emit call-proof coverage as `{ coverage, eligible, proven, missed,
+ * reasons? }`; layer metadata records the bare `full|partial|none` level
+ * (informational only; the layer merges dedupe calls per call site). Anything
+ * else is dropped.
+ * @param {unknown} value
+ * @returns {"full" | "partial" | "none" | null}
+ */
+function callProofCoverageLevel(value) {
+  if (typeof value !== "string") return null;
+  const level = value.trim().toLowerCase();
+  return level === "full" || level === "partial" || level === "none" ? level : null;
 }
 
 function metadataObject(value) {

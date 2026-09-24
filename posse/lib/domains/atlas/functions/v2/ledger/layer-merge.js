@@ -19,48 +19,12 @@
 // The output is identity-stable regardless of which layer was written first:
 // the merge always reads base-then-overlay and emits the canonical A+B shape.
 
+import { callSiteOffset, scipCallSiteMatcher } from "./call-site-dedupe.js";
+
 const SOURCE_ORDER = ["treesitter", "scip"];
 
 function parseJson(value) {
   try { return value ? JSON.parse(value) : null; } catch { return null; }
-}
-
-function tableHasColumn(db, table, column) {
-  try {
-    const rows = /** @type {Array<{ name: string }>} */ (db.prepare(`PRAGMA table_info(${table})`).all());
-    return rows.some((row) => row.name === column);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * @param {unknown} value
- * @returns {Record<string, any>}
- */
-function objectOrEmpty(value) {
-  if (typeof value === "string" && value) {
-    const parsed = parseJson(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? /** @type {Record<string, any>} */ (parsed)
-      : {};
-  }
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? /** @type {Record<string, any>} */ (value)
-    : {};
-}
-
-/**
- * @param {{ source?: string, metadata?: Record<string, any> }} layer
- */
-function callProofCoverage(layer) {
-  const metadata = objectOrEmpty(layer.metadata);
-  const raw = metadata.call_proof_coverage
-    ?? metadata.callProofCoverage
-    ?? objectOrEmpty(metadata.call_proof).coverage
-    ?? objectOrEmpty(metadata.callProof).coverage;
-  const value = String(raw || "").toLowerCase();
-  return value === "full" || value === "partial" || value === "none" ? value : "none";
 }
 
 function mergeKey(kind, qualifiedOrName) {
@@ -136,15 +100,12 @@ function edgeDedupKey(edge) {
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {string} contentHash
  * @param {string} lang
- * @returns {Array<{ id: number, source: "treesitter" | "scip", metadata: Record<string, any> }>}
+ * @returns {Array<{ id: number, source: "treesitter" | "scip" }>}
  */
 function latestLayers(ledgerDb, contentHash, lang) {
-  const metadataSelect = tableHasColumn(ledgerDb, "blob_layers", "metadata_json")
-    ? "metadata_json"
-    : "NULL AS metadata_json";
-  const rows = /** @type {Array<{ id: number, source: string, metadata_json?: string | null }>} */ (
+  const rows = /** @type {Array<{ id: number, source: string }>} */ (
     ledgerDb.prepare(
-      `SELECT id, source, ${metadataSelect} FROM blob_layers
+      `SELECT id, source FROM blob_layers
        WHERE content_hash = ? AND lang = ? AND status = 'indexed'
        ORDER BY indexed_at DESC, id DESC`,
     ).all(contentHash, lang)
@@ -152,11 +113,7 @@ function latestLayers(ledgerDb, contentHash, lang) {
   const bySource = new Map();
   for (const r of rows) {
     if ((r.source === "treesitter" || r.source === "scip") && !bySource.has(r.source)) {
-      bySource.set(r.source, {
-        id: Number(r.id),
-        source: r.source,
-        metadata: objectOrEmpty(r.metadata_json),
-      });
+      bySource.set(r.source, { id: Number(r.id), source: r.source });
     }
   }
   return /** @type {any} */ (SOURCE_ORDER.map((s) => bySource.get(s)).filter(Boolean));
@@ -301,8 +258,13 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         const base = byMerged.get(matchId);
         base.name = row.name || base.name;
         base.qualified_name = qualified ?? base.qualified_name;
-        base.signature_hash = detail.signature_hash ?? base.signature_hash;
-        base.signature_text = detail.signature_text ?? row.signature ?? base.signature_text;
+        // The base signature is declaration source text; SCIP's is
+        // synthesized from kind + qualified name. Keep the base text/hash
+        // pair and fill it from the overlay only when the base has no text.
+        if (!base.signature_text) {
+          base.signature_hash = detail.signature_hash ?? base.signature_hash;
+          base.signature_text = detail.signature_text ?? row.signature ?? null;
+        }
         base.visibility = detail.visibility ?? base.visibility;
         base.doc = row.doc ?? base.doc;
         remap.set(`${overlayLayer.id}:${row.local_id}`, matchId);
@@ -331,14 +293,11 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
   }
 
   // Edges: remap from/to ids; keep cross-blob targets raw for buildFrom's
-  // resolver. Dedup identical A/B calls by confidence; when SCIP explicitly
-  // proves full call coverage, drop weaker tree-sitter calls up front.
-  const scipCallProofFull = layers.some((layer) => layer.source === "scip" && callProofCoverage(layer) === "full");
-  const edges = [];
-  const edgeIndexByKey = new Map();
+  // resolver. Drop tree-sitter calls at a SCIP call site, then dedup
+  // identical A/B calls by confidence.
+  const candidates = [];
   for (const layer of layers) {
     for (const row of readLayerEdges(ledgerDb, layer.id)) {
-      if (scipCallProofFull && layer.source === "treesitter" && row.kind === "calls") continue;
       const detail = parseJson(row.detail_json) || {};
       const range = parseJson(row.range_json) || {};
       const fromLocal = remap.get(`${layer.id}:${row.from_local_id}`);
@@ -365,17 +324,33 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         confidence: detail.confidence ?? null,
         source,
       };
-      const key = edgeDedupKey(edge);
-      const existingIndex = edgeIndexByKey.get(key);
-      if (existingIndex != null) {
-        if (edge.kind === "calls" && confidenceScore(edge.confidence) > confidenceScore(edges[existingIndex].confidence)) {
-          edges[existingIndex] = edge;
-        }
-        continue;
-      }
-      edgeIndexByKey.set(key, edges.length);
-      edges.push(edge);
+      const site = {
+        start: callSiteOffset(range.range_start ?? detail.range_start),
+        end: callSiteOffset(range.range_end ?? detail.range_end),
+        line: edge.range_start_line,
+        name: toName,
+      };
+      candidates.push({ edge, site });
     }
+  }
+  const isScipCallSite = scipCallSiteMatcher(
+    candidates.filter(({ edge }) => edge.kind === "calls" && edge.source === "scip").map(({ site }) => site),
+  );
+
+  const edges = [];
+  const edgeIndexByKey = new Map();
+  for (const { edge, site } of candidates) {
+    if (edge.kind === "calls" && edge.source === "treesitter" && isScipCallSite(site)) continue;
+    const key = edgeDedupKey(edge);
+    const existingIndex = edgeIndexByKey.get(key);
+    if (existingIndex != null) {
+      if (edge.kind === "calls" && confidenceScore(edge.confidence) > confidenceScore(edges[existingIndex].confidence)) {
+        edges[existingIndex] = edge;
+      }
+      continue;
+    }
+    edgeIndexByKey.set(key, edges.length);
+    edges.push(edge);
   }
 
   return { symbols, edges, sources: layers.map((l) => l.source), sourceLocalToMerged };
