@@ -301,6 +301,7 @@ export function resolveSharedTrunkConfig(projectDir = process.cwd(), options = {
  */
 export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd(), {
   nativeCapabilityPreflight = null,
+  remoteDefaultBranchResolver = null,
   targetBranchResolver = null,
 } = {}) {
   const repoPath = path.resolve(String(projectDir || process.cwd()));
@@ -334,6 +335,12 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
   let detectedRemoteDefaultBranch;
   if (remoteDefaultBranchCache.has(cacheKey)) {
     detectedRemoteDefaultBranch = remoteDefaultBranchCache.get(cacheKey);
+  } else if (typeof remoteDefaultBranchResolver === "function") {
+    detectedRemoteDefaultBranch = await remoteDefaultBranchResolver(
+      repoPath,
+      Object.freeze({ remote, branch }),
+    );
+    cacheSharedTrunkRemoteDefaultBranch(repoPath, remote, branch, detectedRemoteDefaultBranch);
   } else {
     let advertisedHead;
     try {
