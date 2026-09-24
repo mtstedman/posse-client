@@ -214,6 +214,7 @@ async function runtimeSharedTrunkConfig(projectDir) {
   let config;
   try {
     config = await resolveSharedTrunkConfigRuntime(projectDir, {
+      targetBranchResolver: testOverrides?.resolveTargetBranch || null,
       nativeCapabilityPreflight: async ({ projectDir: root }) => {
         try {
           capabilityEnvelope = await sharedTrunkCapabilities(root);
