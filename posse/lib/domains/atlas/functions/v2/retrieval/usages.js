@@ -80,6 +80,8 @@ export async function symbolUsages({ view, versionId, params }) {
   const usages = rows.slice(0, limit);
   const warnings = await usageWarnings(view, total);
   const usageSummary = summarizeUsageRows(rows);
+  // The storage read is bounded; a capped neighborhood is an index subset.
+  const indexTruncated = neighborhood.truncated === true;
   return okEnvelope({
     action: "symbol.overview",
     versionId,
@@ -93,10 +95,12 @@ export async function symbolUsages({ view, versionId, params }) {
       distinctResolvedFileCount: usageSummary.distinctResolvedFileCount,
       distinctCallerFileCount: usageSummary.distinctCallerFileCount,
       callerFiles: usageSummary.callerFiles,
+      callerFilesTruncated: usageSummary.callerFilesTruncated,
       unresolvedFiles: usageSummary.unresolvedFiles,
       usages,
       total,
-      truncated: total > usages.length,
+      indexTruncated,
+      truncated: total > usages.length || usageSummary.callerFilesTruncated || indexTruncated,
     },
     meta: warnings.length > 0 ? { warnings } : undefined,
   });
@@ -199,8 +203,8 @@ function usageFromEdge(edge, from, resolved) {
 function summarizeUsageRows(rows) {
   const allFiles = new Set();
   const resolvedFiles = new Set();
-  const callerFiles = groupUsageFiles(rows, (row) => row.resolved && row.kind === "calls");
-  const unresolvedFiles = groupUsageFiles(rows, (row) => !row.resolved);
+  const callerGroups = groupUsageFiles(rows, (row) => row.resolved && row.kind === "calls");
+  const unresolvedFiles = groupUsageFiles(rows, (row) => !row.resolved).slice(0, FILE_GROUP_LIMIT);
   for (const row of rows) {
     const path = String(row.repo_rel_path || "").replace(/\\/g, "/");
     if (!path) continue;
@@ -210,8 +214,10 @@ function summarizeUsageRows(rows) {
   return {
     distinctFileCount: allFiles.size,
     distinctResolvedFileCount: resolvedFiles.size,
-    distinctCallerFileCount: callerFiles.length,
-    callerFiles,
+    // The count covers every grouped caller file; only the list is capped.
+    distinctCallerFileCount: callerGroups.length,
+    callerFiles: callerGroups.slice(0, FILE_GROUP_LIMIT),
+    callerFilesTruncated: callerGroups.length > FILE_GROUP_LIMIT,
     unresolvedFiles,
   };
 }
@@ -237,7 +243,6 @@ function groupUsageFiles(rows, predicate) {
   }
   return [...byPath.values()]
     .sort((a, b) => a.repo_rel_path.localeCompare(b.repo_rel_path))
-    .slice(0, FILE_GROUP_LIMIT)
     .map((group) => ({
       repo_rel_path: group.repo_rel_path,
       occurrenceCount: group.occurrenceCount,

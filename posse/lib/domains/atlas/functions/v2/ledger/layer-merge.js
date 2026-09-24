@@ -19,7 +19,7 @@
 // The output is identity-stable regardless of which layer was written first:
 // the merge always reads base-then-overlay and emits the canonical A+B shape.
 
-import { callSiteOffset, scipCallSiteMatcher } from "./call-site-dedupe.js";
+import { callSiteOffset, treesitterCallsAtScipSites } from "./call-site-dedupe.js";
 
 const SOURCE_ORDER = ["treesitter", "scip"];
 
@@ -333,14 +333,14 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
       candidates.push({ edge, site });
     }
   }
-  const isScipCallSite = scipCallSiteMatcher(
-    candidates.filter(({ edge }) => edge.kind === "calls" && edge.source === "scip").map(({ site }) => site),
+  const dropped = treesitterCallsAtScipSites(
+    candidates.map(({ edge, site }) => ({ kind: edge.kind, source: edge.source, site })),
   );
 
   const edges = [];
   const edgeIndexByKey = new Map();
-  for (const { edge, site } of candidates) {
-    if (edge.kind === "calls" && edge.source === "treesitter" && isScipCallSite(site)) continue;
+  for (const [index, { edge }] of candidates.entries()) {
+    if (dropped[index]) continue;
     const key = edgeDedupKey(edge);
     const existingIndex = edgeIndexByKey.get(key);
     if (existingIndex != null) {

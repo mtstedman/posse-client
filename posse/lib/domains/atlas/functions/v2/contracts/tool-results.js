@@ -532,12 +532,14 @@
  * @property {number} rawOccurrenceCount
  * @property {number} distinctFileCount
  * @property {number} distinctResolvedFileCount
- * @property {number} distinctCallerFileCount
+ * @property {number} distinctCallerFileCount  Every grouped caller file; not capped by `callerFiles`.
  * @property {SymbolUsageFileGroup[]} callerFiles
+ * @property {boolean} callerFilesTruncated  `callerFiles` holds fewer groups than `distinctCallerFileCount`.
  * @property {SymbolUsageFileGroup[]} unresolvedFiles
  * @property {SymbolUsageSite[]} usages
  * @property {number} total
- * @property {boolean} truncated
+ * @property {boolean} indexTruncated  The bounded storage read was capped; counts describe an index subset.
+ * @property {boolean} truncated  Usages, caller files, or the index read were cut.
  */
 
 // ============================================================================

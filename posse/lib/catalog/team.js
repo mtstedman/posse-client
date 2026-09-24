@@ -189,12 +189,86 @@ export const TEAM_ATTENTION_FAILURE_REASONS = Object.freeze([
 // setup, snapshot notes, trunk fetch and fast-forward, candidate reset, claim
 // and offer refs) and runs under the Session's coordination-only pulse, which
 // Remote mints with an empty write scope so none of those paths can be
-// used to publish. `git.exec` is pinned only when its argv commits or pushes.
+// used to publish. `git.exec` is pinned only when the subcommand Git runs
+// commits or pushes, or cannot be classified (see the sets below).
 export const TEAM_GRANT_PINNED_GIT_METHODS = Object.freeze([
   "git.commitScopedTransaction",
   "git.trunk.push",
 ]);
-export const TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS = Object.freeze(["commit", "push"]);
+
+// `git.exec` argv classification, mirroring posse-git's session-scope check.
+// Only the subcommand Git actually runs counts, so `stash push` or
+// `log --grep push` is not pinned. Leading global options are skipped by
+// these closed sets; any other leading option is unclassifiable and pinned.
+export const TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS = Object.freeze([
+  "commit",
+  "http-push",
+  "push",
+  "send-pack",
+]);
+export const TEAM_GRANT_GIT_EXEC_GLOBAL_FLAGS = Object.freeze([
+  "-p",
+  "-P",
+  "--bare",
+  "--paginate",
+  "--no-pager",
+  "--no-replace-objects",
+  "--no-optional-locks",
+  "--literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+]);
+// Global options that take a value, as `--name value` or `--name=value`.
+// Git accepts `-C` and `-c` only with a separate value.
+export const TEAM_GRANT_GIT_EXEC_GLOBAL_VALUE_OPTIONS = Object.freeze([
+  "-C",
+  "-c",
+  "--config-env",
+  "--git-dir",
+  "--namespace",
+  "--work-tree",
+]);
+export const TEAM_GRANT_GIT_EXEC_CONFIG_OPTIONS = Object.freeze(["-c", "--config-env"]);
+// Config keys under these sections can define an alias (directly or through
+// an included file), so the subcommand could expand to a push.
+export const TEAM_GRANT_GIT_EXEC_EXPANDING_CONFIG_SECTIONS = Object.freeze([
+  "alias.",
+  "include.",
+  "includeif.",
+]);
+// Git builtins (`git --list-cmds=builtins`, excluding push/commit above and
+// internal helpers). Git never expands an alias named like a builtin, so
+// these cannot publish through config. Any other subcommand may be an alias
+// for a push: posse-git reads the alias config and denies it, and the Node
+// boundary, which reads no config, pins it.
+export const TEAM_GRANT_GIT_EXEC_BUILTIN_COMMANDS = Object.freeze([
+  "add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch",
+  "bugreport", "bundle", "cat-file", "check-attr", "check-ignore",
+  "check-mailmap", "check-ref-format", "checkout", "checkout-index", "cherry",
+  "cherry-pick", "clean", "clone", "column", "commit-graph", "commit-tree",
+  "config", "count-objects", "credential", "credential-cache",
+  "credential-store", "describe", "diagnose", "diff", "diff-files",
+  "diff-index", "diff-tree", "difftool", "fast-export", "fast-import", "fetch",
+  "fetch-pack", "fmt-merge-msg", "for-each-ref", "for-each-repo",
+  "format-patch", "fsck", "fsck-objects", "gc", "get-tar-commit-id", "grep",
+  "hash-object", "help", "hook", "index-pack", "init", "init-db",
+  "interpret-trailers", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo",
+  "mailsplit", "maintenance", "merge", "merge-base", "merge-file",
+  "merge-index", "merge-ours", "merge-recursive", "merge-recursive-ours",
+  "merge-recursive-theirs", "merge-subtree", "merge-tree", "mktag", "mktree",
+  "multi-pack-index", "mv", "name-rev", "notes", "pack-objects",
+  "pack-redundant", "pack-refs", "patch-id", "pickaxe", "prune",
+  "prune-packed", "pull", "range-diff", "read-tree", "rebase", "receive-pack",
+  "reflog", "remote", "remote-ext", "remote-fd", "repack", "replace", "rerere",
+  "reset", "restore", "rev-list", "rev-parse", "revert", "rm", "shortlog",
+  "show", "show-branch", "show-index", "show-ref", "sparse-checkout", "stage",
+  "stash", "status", "stripspace", "switch", "symbolic-ref", "tag",
+  "unpack-file", "unpack-objects", "update-index", "update-ref",
+  "update-server-info", "upload-archive", "upload-pack", "var",
+  "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged",
+  "worktree", "write-tree",
+]);
 
 // Provider adapters that execute file edits only through Posse's mediated tool
 // runtime, where a fresh per-call grant can be bound to the exact path. Claude

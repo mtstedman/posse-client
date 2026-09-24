@@ -18,7 +18,8 @@ import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../sh
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 import { getLivePairingState } from "../../../pairing/functions/state.js";
-import { TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS, TEAM_GRANT_PINNED_GIT_METHODS } from "../../../../catalog/team.js";
+import { TEAM_GRANT_PINNED_GIT_METHODS } from "../../../../catalog/team.js";
+import { gitExecArgsRequireTeamGrant } from "../git-exec-grant-pin.js";
 
 export { GIT_NATIVE_PROTOCOL } from "../../../../catalog/binary.js";
 
@@ -524,8 +525,7 @@ function teamGrantPinnedMethod(method, payload) {
   if (method !== "git.exec" && method !== "git.repo.exec") return false;
   const args = payload && typeof payload === "object" && !Array.isArray(payload)
     ? /** @type {Record<string, unknown>} */ (payload).args : null;
-  return !Array.isArray(args)
-    || args.some((arg) => TEAM_GRANT_PINNED_GIT_EXEC_COMMANDS.includes(String(arg)));
+  return gitExecArgsRequireTeamGrant(args);
 }
 
 /** The local native boundary requires WI pins for every publishing mutation

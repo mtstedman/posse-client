@@ -4,9 +4,11 @@
 
 import { randomBytes } from "node:crypto";
 
+import { SHARED_TRUNK_REMOTE_HEAD_FAILURES } from "../../../catalog/shared-trunk.js";
 import {
   cacheSharedTrunkRemoteDefaultBranch,
   resolveSharedTrunkConfigRuntime,
+  sharedTrunkRemoteHeadError,
 } from "../../git/functions/shared-trunk-config.js";
 import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import {
@@ -44,6 +46,17 @@ function preflightFailure(code, message, detail = {}) {
     message,
     ...detail,
   };
+}
+
+/** The fail-closed failure for a native preflight error that reports a remote
+ * HEAD naming no default branch (posse-git's code-prefixed message), or null. */
+function remoteHeadFailure(error, remote, branch) {
+  const detail = [error?.message, error?.stderr].filter(Boolean).map(String).join("\n");
+  const prefix = Object.keys(SHARED_TRUNK_REMOTE_HEAD_FAILURES)
+    .find((key) => new RegExp(`\\b${key}:`, "u").test(detail));
+  if (!prefix) return null;
+  const headError = sharedTrunkRemoteHeadError(SHARED_TRUNK_REMOTE_HEAD_FAILURES[prefix], remote);
+  return preflightFailure(headError.code, headError.message, { remote, branch });
 }
 
 function authFailure(projectDir, remote, failure, gitExec = adminGitExec) {
@@ -181,6 +194,8 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
   } catch (error) {
     const auth = authFailure(projectDir, config.remote, error, options.gitExec);
     if (auth) return auth;
+    const remoteHead = remoteHeadFailure(error, config.remote, config.branch);
+    if (remoteHead) return remoteHead;
     return preflightFailure(error?.code || "remote_access_failed", error?.message || String(error), {
       remote: config.remote,
       branch: config.branch,

@@ -247,9 +247,10 @@
  *
  * @property {(global_id: number, minConfidence?: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, truncated: boolean }>} symbolCallers
  * @property {(global_id: number, kinds: ("calls" | "references")[], minConfidence?: number) => Promise<{ relationships: Array<{ relationship: "calls" | "references", symbol: ViewSymbol }>, truncated: boolean }>} symbolRelationships
- * @property {(global_id: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, callees: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }> }>} symbolNeighborhood
+ * @property {(global_id: number) => Promise<{ callers: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, callees: Array<{ edge: ViewEdge, symbol: ViewSymbol | null }>, truncated: boolean }>} symbolNeighborhood
  *   Both edge directions with their relevant endpoint symbols bulk-resolved
- *   by the native daemon under one storage read.
+ *   by the native daemon under one storage read. `truncated` marks a
+ *   storage-capped (index subset) read.
  *
  * @property {(name: string) => Promise<ViewEdge[]>} unresolvedReferencesTo
  *   Edges with no internal or external binding and `to_name = name`. Useful

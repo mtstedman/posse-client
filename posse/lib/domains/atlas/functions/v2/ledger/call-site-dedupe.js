@@ -2,20 +2,27 @@
 //
 // Per-edge SCIP/tree-sitter call dedupe for one blob's layer merge.
 //
-// A tree-sitter `calls` edge is dropped iff a SCIP `calls` edge in the same
-// merged blob calls the same callee at the same call site:
-//   (a) both byte ranges are known and overlap
-//       (a.start < b.end && b.start < a.end), or
-//   (b) both start lines are known and equal.
-// Callees compare case-sensitively on the last segment of `to_name` after
-// splitting on '.', '::', '#', '->', with one trailing '!' stripped (Rust
-// macro `assert_eq!` vs SCIP `assert_eq`); an empty callee never matches.
-// The callee check keeps an outer tree-sitter call whose range (the whole
-// call expression, arguments included) merely contains a SCIP call to
-// something else. Missing ranges fall back to (b); a missing line as well
-// keeps the edge. Tree-sitter calls SCIP never recorded are kept, whatever
-// the layer's call-proof coverage says. Posse-bin's native view merge applies
-// the same rule.
+// Matching is one-to-one: each SCIP `calls` edge drops at most one
+// tree-sitter `calls` edge with an equal callee, and each tree-sitter call is
+// dropped at most once. Callees compare case-sensitively on the last segment
+// of `to_name` after splitting on '.', '::', '#', '->', with one trailing '!'
+// stripped (Rust macro `assert_eq!` vs SCIP `assert_eq`); an empty callee
+// never matches. SCIP calls are processed by known start offset (unknown
+// last), then known start line (unknown last), then candidate order. For
+// each, among the still-unmatched same-callee tree-sitter calls:
+//   (a) those whose byte range overlaps the SCIP call's (both known,
+//       a.start < b.end && b.start < a.end) are tried first, taking the
+//       innermost: smallest end - start, then larger start, then earlier
+//       candidate order;
+//   (b) otherwise the first one in candidate order whose known start line
+//       equals the SCIP call's.
+// Tree-sitter call ranges span the whole call expression (arguments and
+// chain receiver included) while SCIP ranges span the callee identifier, so
+// in `q.f(a).f(b)` both tree-sitter `f` calls overlap the inner SCIP `f`;
+// innermost one-to-one matching pairs each SCIP call with its own expression.
+// A tree-sitter call with neither a range nor a line is kept, as is every
+// tree-sitter call SCIP never recorded, whatever the layer's call-proof
+// coverage says. Posse-bin's native view merge applies the same rule.
 
 /**
  * @typedef {{
@@ -48,66 +55,69 @@ export function callSiteOffset(value) {
 }
 
 /**
- * Build a matcher answering "is this tree-sitter call site already a SCIP
- * call site?" for one blob.
+ * Which merge candidates are tree-sitter calls to drop at a SCIP call site.
  *
- * @param {CallSite[]} scipSites
- * @returns {(site: CallSite) => boolean}
+ * @param {Array<{ kind: string, source: string, site: CallSite }>} candidates
+ * @returns {boolean[]} per candidate, whether it is dropped
  */
-export function scipCallSiteMatcher(scipSites) {
-  /** @type {Map<string, Array<{ start: number, end: number }>>} */
-  const rangesByCallee = new Map();
-  /** @type {Set<string>} */
-  const lineCallees = new Set();
-  for (const site of scipSites) {
+export function treesitterCallsAtScipSites(candidates) {
+  const dropped = candidates.map(() => false);
+  /** @type {Map<string, number[]>} */
+  const treesitterByCallee = new Map();
+  /** @type {Array<{ index: number, callee: string }>} */
+  const scipCalls = [];
+  candidates.forEach(({ kind, source, site }, index) => {
+    if (kind !== "calls") return;
     const callee = calleeName(site.name);
-    if (!callee) continue;
-    if (site.start != null && site.end != null) {
-      const ranges = rangesByCallee.get(callee) ?? [];
-      ranges.push({ start: site.start, end: site.end });
-      rangesByCallee.set(callee, ranges);
+    if (!callee) return;
+    if (source === "treesitter") {
+      const indices = treesitterByCallee.get(callee) ?? [];
+      indices.push(index);
+      treesitterByCallee.set(callee, indices);
+    } else if (source === "scip") {
+      scipCalls.push({ index, callee });
     }
-    if (site.line != null) lineCallees.add(`${site.line}\0${callee}`);
+  });
+  scipCalls.sort((left, right) => (
+    compareKnownFirst(candidates[left.index].site.start, candidates[right.index].site.start)
+    || compareKnownFirst(candidates[left.index].site.line, candidates[right.index].site.line)
+    || left.index - right.index
+  ));
+  for (const { index: scipIndex, callee } of scipCalls) {
+    const treesitter = treesitterByCallee.get(callee);
+    if (!treesitter) continue;
+    const scip = candidates[scipIndex].site;
+    let matched = -1;
+    if (scip.start != null && scip.end != null) {
+      let bestSpan = Infinity;
+      let bestStart = -Infinity;
+      for (const index of treesitter) {
+        const { start, end } = candidates[index].site;
+        if (dropped[index] || start == null || end == null) continue;
+        if (!(start < scip.end && scip.start < end)) continue;
+        const span = end - start;
+        if (span < bestSpan || (span === bestSpan && start > bestStart)) {
+          matched = index;
+          bestSpan = span;
+          bestStart = start;
+        }
+      }
+    }
+    if (matched < 0 && scip.line != null) {
+      matched = treesitter.find((index) => !dropped[index] && candidates[index].site.line === scip.line) ?? -1;
+    }
+    if (matched >= 0) dropped[matched] = true;
   }
-  /** @type {Map<string, { starts: number[], prefixMaxEnd: number[] }>} */
-  const overlapIndex = new Map();
-  for (const [callee, ranges] of rangesByCallee) {
-    ranges.sort((left, right) => left.start - right.start);
-    // prefixMaxEnd[i] = max end over ranges[0..i]; ranges starting before a
-    // site's end overlap it iff the largest of their ends exceeds its start.
-    const prefixMaxEnd = [];
-    let maxEnd = -Infinity;
-    for (const range of ranges) {
-      maxEnd = Math.max(maxEnd, range.end);
-      prefixMaxEnd.push(maxEnd);
-    }
-    overlapIndex.set(callee, { starts: ranges.map((range) => range.start), prefixMaxEnd });
-  }
-
-  return (site) => {
-    const callee = calleeName(site.name);
-    if (!callee) return false;
-    const index = overlapIndex.get(callee);
-    if (index && site.start != null && site.end != null) {
-      const count = countBelow(index.starts, site.end);
-      if (count > 0 && index.prefixMaxEnd[count - 1] > site.start) return true;
-    }
-    return site.line != null && lineCallees.has(`${site.line}\0${callee}`);
-  };
+  return dropped;
 }
 
 /**
- * Number of sorted values strictly below `limit`.
- * @param {number[]} sorted
- * @param {number} limit
+ * Ascending order with null (unknown) after every known value.
+ * @param {number | null} left
+ * @param {number | null} right
  */
-function countBelow(sorted, limit) {
-  let low = 0;
-  let high = sorted.length;
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    if (sorted[mid] < limit) low = mid + 1;
-    else high = mid;
-  }
-  return low;
+function compareKnownFirst(left, right) {
+  if (left == null) return right == null ? 0 : 1;
+  if (right == null) return -1;
+  return left - right;
 }

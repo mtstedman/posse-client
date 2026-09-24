@@ -45,6 +45,7 @@ import { isGitCommandFailure } from "../classes/Repo.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { withWorktreeLockAsync } from "./worktree.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { SHARED_TRUNK_PUSH_REFUSALS, SHARED_TRUNK_PUSH_REFUSED_REASONS } from "../../../catalog/shared-trunk.js";
 import {
   gitHubCliAuthRemediation,
   isGitPushAuthenticationFailure,
@@ -581,7 +582,7 @@ function teamProofUnavailable(proof, operation) {
 
 function isParkedCandidateReason(reason) {
   return TEAM_PARKED_CANDIDATE_REASONS.includes(reason)
-    || reason === "shared_trunk_push_refused";
+    || SHARED_TRUNK_PUSH_REFUSED_REASONS.includes(reason);
 }
 
 function ensureUnprovablePublicationGate(operation, proof) {
@@ -635,7 +636,7 @@ function abandonUnprovablePublication(operation, publishedSha, proof) {
 export function sharedTrunkTeamResultNeedsAttention(result) {
   if (!result || result.ok === true) return false;
   return TEAM_ATTENTION_FAILURE_REASONS.includes(String(result.reason || ""))
-    || result.reason === "shared_trunk_push_refused";
+    || SHARED_TRUNK_PUSH_REFUSED_REASONS.includes(String(result.reason || ""));
 }
 
 export function isTransientSharedTrunkMergeResult(result) {
@@ -659,7 +660,7 @@ export function isTransientSharedTrunkMergeResult(result) {
     "parked_candidate_restore_blocked",
     "merge_operational_failure",
     "candidate_validation_unavailable",
-    "shared_trunk_push_refused",
+    ...SHARED_TRUNK_PUSH_REFUSED_REASONS,
     // Team publication deferrals are registered in the catalog. None of them
     // means the work is bad, only that publication is not authorized yet, so
     // all of them defer rather than finalizing the work item and forcing the
@@ -1229,35 +1230,44 @@ function pushRejectionReason(result) {
   return String(result?.reason || result?.blockedReason || result?.blocked_reason || "").trim().toLowerCase();
 }
 
-function ensurePushRefusedGate(config, pushed) {
+/** The remote-refusal kind for a native push outcome, or null. An unknown
+ * outcome is not a refusal: it falls through to publication_ambiguous. */
+function pushRefusal(pushed) {
+  const status = pushStatus(pushed);
+  return Object.hasOwn(SHARED_TRUNK_PUSH_REFUSALS, status) ? SHARED_TRUNK_PUSH_REFUSALS[status] : null;
+}
+
+function ensurePushRefusedGate(config, pushed, refusal) {
   const reason = pushRejectionReason(pushed) || "remote_policy_rejected";
   const existing = getDb().prepare(`
     SELECT id FROM jobs
     WHERE job_type = 'human_input'
       AND status IN ('queued','leased','running','waiting_on_human','blocked')
       AND CASE WHEN json_valid(payload_json)
-        THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_push_refused'
+        THEN json_extract(payload_json, '$.subtype') = ?
           AND json_extract(payload_json, '$.branch') = ?
           AND json_extract(payload_json, '$.reason') = ?
         ELSE 0 END
     ORDER BY id DESC LIMIT 1
-  `).get(config.branch, reason);
+  `).get(refusal.gateSubtype, config.branch, reason);
   if (existing) return existing.id;
+  const remoteReason = String(pushed?.remoteReason || pushed?.remote_reason || "").slice(0, 256);
   return createJob({
     work_item_id: null,
     job_type: "human_input",
-    title: `Shared-trunk push refused for ${config.branch}`,
+    title: `${refusal.title} for ${config.branch}`,
     priority: "urgent",
     max_attempts: 1,
     payload_json: {
-      subtype: "shared_trunk_push_refused",
-      review_type: "shared_trunk_push_refused",
-      question_kind: "shared_trunk_push_refused",
-      questions: ["The remote refused this shared-trunk push. Inspect the branch policy or pre-receive hook, then acknowledge when publication may be retried."],
+      subtype: refusal.gateSubtype,
+      review_type: refusal.gateSubtype,
+      question_kind: refusal.gateSubtype,
+      questions: [refusal.question],
       choices: ["acknowledge"],
       branch: config.branch,
       remote: config.remote,
       reason,
+      ...(remoteReason ? { remote_reason: remoteReason } : {}),
       stderr_excerpt: String(pushed?.stderrExcerpt || pushed?.stderr_excerpt || "").slice(0, 512),
     },
   }).id;
@@ -1874,11 +1884,12 @@ export async function mergeToSharedTrunkAsync({
           operation,
         };
       }
-      if (pushStatus(pushed) === "rejected_policy") {
-        const gateId = ensurePushRefusedGate(config, pushed);
-        operation = transition(operation, { phase: "candidate", lastErrorCode: "shared_trunk_push_refused" });
+      const refusal = pushRefusal(pushed);
+      if (refusal) {
+        const gateId = ensurePushRefusedGate(config, pushed, refusal);
+        operation = transition(operation, { phase: "candidate", lastErrorCode: refusal.reason });
         recordPublicationHealth(config, [operation]);
-        sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_PUSH_REJECTED, `Shared-trunk push refused for WI#${workItemId}`, {
+        sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_PUSH_REJECTED, `${refusal.title} for WI#${workItemId}`, {
           operation_id: operation.operationId,
           gate_job_id: gateId,
           reason: pushRejectionReason(pushed),
@@ -1887,8 +1898,8 @@ export async function mergeToSharedTrunkAsync({
           ok: false,
           deferred: true,
           needsAttention: true,
-          reason: "shared_trunk_push_refused",
-          message: String(pushed.stderrExcerpt || pushed.stderr_excerpt || "The remote refused the shared-trunk push"),
+          reason: refusal.reason,
+          message: String(pushed.stderrExcerpt || pushed.stderr_excerpt || refusal.title),
           gateJobId: gateId,
           operation,
         };

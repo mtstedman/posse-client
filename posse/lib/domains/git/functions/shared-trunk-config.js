@@ -12,6 +12,7 @@ import {
   SHARED_TRUNK_DEFAULTS,
   SHARED_TRUNK_LIMITS,
 } from "../../../catalog/settings.js";
+import { SHARED_TRUNK_REMOTE_HEAD_FAILURES } from "../../../catalog/shared-trunk.js";
 import {
   getAccountRepoSetting,
   getAccountSettingsDataVersion,
@@ -48,6 +49,42 @@ export class SharedTrunkConfigError extends Error {
 
 function fail(code, message) {
   throw new SharedTrunkConfigError(code, message);
+}
+
+/**
+ * The fail-closed error for a remote HEAD that names no default branch.
+ *
+ * @param {string} code one of SHARED_TRUNK_REMOTE_HEAD_FAILURES
+ * @param {string} remote
+ * @returns {SharedTrunkConfigError}
+ */
+export function sharedTrunkRemoteHeadError(code, remote) {
+  const state = code === SHARED_TRUNK_REMOTE_HEAD_FAILURES.REMOTE_DEFAULT_BRANCH_UNBORN
+    ? `The HEAD of remote ${remote} names a branch that does not exist (unborn)`
+    : `The HEAD of remote ${remote} is detached at a commit instead of naming a branch`;
+  return new SharedTrunkConfigError(
+    code,
+    `${state}, so shared trunk cannot determine its default branch. In the remote repository, run `
+      + "`git symbolic-ref HEAD refs/heads/<branch>` naming its default branch (not the shared-trunk branch).",
+  );
+}
+
+/**
+ * Classify `git ls-remote --symref <remote> HEAD` output that names no branch.
+ * An unborn HEAD is not advertised at all; a detached HEAD is advertised with
+ * an object id only. Returns null for any other shape.
+ *
+ * @param {string} output
+ * @returns {string | null}
+ */
+function remoteHeadFailureCode(output) {
+  const lines = output.split("\n");
+  if (!lines.some((line) => line.split("\t")[1] === "HEAD")) {
+    return SHARED_TRUNK_REMOTE_HEAD_FAILURES.REMOTE_DEFAULT_BRANCH_UNBORN;
+  }
+  return lines.some((line) => line.startsWith("ref: "))
+    ? null
+    : SHARED_TRUNK_REMOTE_HEAD_FAILURES.REMOTE_HEAD_DETACHED;
 }
 
 function readBoolean(value, fallback, key) {
@@ -357,8 +394,10 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
       unavailable.cause = error;
       throw unavailable;
     }
-    detectedRemoteDefaultBranch = String(advertisedHead || "")
-      .match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu)?.[1] || null;
+    const advertised = String(advertisedHead || "");
+    detectedRemoteDefaultBranch = advertised.match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu)?.[1] || null;
+    const headFailure = detectedRemoteDefaultBranch ? null : remoteHeadFailureCode(advertised);
+    if (headFailure) throw sharedTrunkRemoteHeadError(headFailure, remote);
     cacheSharedTrunkRemoteDefaultBranch(repoPath, remote, branch, detectedRemoteDefaultBranch);
   }
   const preflightResult = typeof nativeCapabilityPreflight === "function"

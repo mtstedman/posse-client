@@ -15,7 +15,7 @@ import { openViewDbReadOnly, openViewDbReadWrite } from "../../functions/v2/view
 import { runNativeViewRead } from "../../functions/v2/native/view-read.js";
 import { invalidateStorageCacheNativeAsync } from "../../functions/v2/native/storage.js";
 import { hydrateNativeBlastRadius, hydrateNativeSlice } from "../../functions/v2/view-slice.js";
-import { callSiteOffset, scipCallSiteMatcher } from "../../functions/v2/ledger/call-site-dedupe.js";
+import { callSiteOffset, treesitterCallsAtScipSites } from "../../functions/v2/ledger/call-site-dedupe.js";
 import {
   normalizeWaitingLaneGeneration,
   waitingLaneGenerationsEqual,
@@ -392,7 +392,10 @@ export class View {
 
       callees: (global_id) => read("callees", { global_id }),
 
-      symbolNeighborhood: (global_id) => read("symbol_neighborhood", { global_id }),
+      symbolNeighborhood: async (global_id) => {
+        const response = await readResponse("symbol_neighborhood", { global_id });
+        return { ...response.value, truncated: response.truncated };
+      },
       symbolCallers: async (global_id, min_confidence = 0) => {
         const response = await readResponse("symbol_callers", { global_id, min_confidence });
         if (!response.value || typeof response.value !== "object") {
@@ -943,12 +946,12 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
   }
   // Drop tree-sitter calls at a SCIP call site, then dedup identical A/B
   // calls by confidence.
-  const isScipCallSite = scipCallSiteMatcher(
-    candidates.filter(({ edgeRow }) => edgeRow.kind === "calls" && edgeRow.edgeSource === "scip").map(({ site }) => site),
+  const dropped = treesitterCallsAtScipSites(
+    candidates.map(({ edgeRow, site }) => ({ kind: edgeRow.kind, source: edgeRow.edgeSource, site })),
   );
   const edgeRowsByKey = new Map();
-  for (const { edgeRow, site } of candidates) {
-    if (edgeRow.kind === "calls" && edgeRow.edgeSource === "treesitter" && isScipCallSite(site)) continue;
+  for (const [index, { edgeRow }] of candidates.entries()) {
+    if (dropped[index]) continue;
     const edgeKey = materializedEdgeDedupKey(edgeRow);
     const existing = edgeRowsByKey.get(edgeKey);
     if (existing) {
