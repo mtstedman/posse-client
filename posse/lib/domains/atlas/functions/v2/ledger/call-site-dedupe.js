@@ -2,7 +2,7 @@
 //
 // Per-edge SCIP/tree-sitter call dedupe for one blob's layer merge.
 //
-// Matching is one-to-one: each SCIP `calls` edge drops at most one
+// Matching is one-to-one: each claiming SCIP `calls` edge drops at most one
 // tree-sitter `calls` edge with an equal callee, and each tree-sitter call is
 // dropped at most once. Callees compare case-sensitively on the last segment
 // of `to_name` after splitting on '.', '::', '#', '->', with one trailing '!'
@@ -22,7 +22,10 @@
 // innermost one-to-one matching pairs each SCIP call with its own expression.
 // A tree-sitter call with neither a range nor a line is kept, as is every
 // tree-sitter call SCIP never recorded, whatever the layer's call-proof
-// coverage says. Posse-bin's native view merge applies the same rule.
+// coverage says. A SCIP call whose repository moniker the view build could
+// not bind to a unique path (`claims: false`) claims nothing: its tree-sitter
+// call stays for the resolver. Posse-bin's native view merge applies the same
+// rule.
 
 /**
  * @typedef {{
@@ -30,6 +33,7 @@
  *   end: number | null,
  *   line: number | null,
  *   name: string | null | undefined,
+ *   claims?: boolean,
  * }} CallSite
  */
 
@@ -74,7 +78,7 @@ export function treesitterCallsAtScipSites(candidates) {
       const indices = treesitterByCallee.get(callee) ?? [];
       indices.push(index);
       treesitterByCallee.set(callee, indices);
-    } else if (source === "scip") {
+    } else if (source === "scip" && site.claims !== false) {
       scipCalls.push({ index, callee });
     }
   });

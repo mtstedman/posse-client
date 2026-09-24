@@ -50,7 +50,12 @@ import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 //       re-ingests SCIP layers and rebuilds views for the layer merges'
 //       per-call-site SCIP/tree-sitter call dedupe (which replaced the
 //       per-file full-coverage suppression).
-export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v6-call-proof-level";
+//   v7: native rows record each structural definition's moniker and layer
+//       metadata stores them (`scip_definitions`) with the path the document
+//       was indexed at, so views bind SCIP references by moniker and path
+//       (ledger/scip-monikers.js). The bump re-ingests every SCIP layer (and,
+//       through the view fingerprint, rebuilds every view).
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v7-definition-monikers";
 
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */

@@ -356,9 +356,6 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
   };
 }
 
-// Result keys that belong to the MCP envelope rather than the payload.
-const PROTOCOL_FIELDS = new Set(["isError", "structuredContent", "_meta"]);
-
 const TYPED_OUTPUT_FIELD_ALIASES = Object.freeze([
   ["repo_rel_path", "path"],
   ["repoRelPath", "path"],
@@ -514,10 +511,9 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
       }
     }
     // One convention on the agent surface: every remaining camelCase key
-    // becomes snake_case after the explicit aliases run. MCP protocol fields
-    // are not payload data and keep their wire spelling.
+    // becomes snake_case after the explicit aliases run. This text is payload,
+    // never the MCP envelope, so a batch item's isError is data like any other.
     for (const key of Object.keys(value)) {
-      if (PROTOCOL_FIELDS.has(key)) continue;
       const snake = camelToSnakeKey(key);
       if (snake === key) continue;
       value[snake] = mergeFacadeField(value[snake], value[key]);

@@ -128,11 +128,17 @@ function readLayerSymbols(ledgerDb, layerId) {
   );
 }
 
+// Layer edges keep only the external id; the view denormalizes the descriptor
+// like the flat `blob_edges` read does.
 function readLayerEdges(ledgerDb, layerId) {
   return /** @type {any[]} */ (
     ledgerDb.prepare(
-      `SELECT edge_id, kind, from_local_id, to_local_id, to_symbol, range_json, detail_json
-       FROM blob_layer_edges WHERE layer_id = ? ORDER BY edge_id ASC`,
+      `SELECT e.edge_id, e.kind, e.from_local_id, e.to_local_id, e.to_symbol, e.range_json, e.detail_json,
+              es.descriptor AS external_descriptor
+       FROM blob_layer_edges e
+       LEFT JOIN external_symbols es ON es.id = CASE WHEN json_valid(e.detail_json)
+         THEN json_extract(e.detail_json, '$.to_external_id') END
+       WHERE e.layer_id = ? ORDER BY e.edge_id ASC`,
     ).all(layerId)
   );
 }
@@ -191,12 +197,22 @@ function layerLangFor(ledgerDb, contentHash) {
 /**
  * Merge the A/B layers for one content hash into flat-shaped rows.
  *
+ * `scipTargets` is the view build's moniker resolution (`scip-monikers.js`)
+ * of the blob's external SCIP references (`external`) and of those intake
+ * bound to another blob's definition (`definition`). A `bound` target rewrites
+ * the SCIP edge onto that definition (a SCIP-layer local id of
+ * `content_hash`, bound at `repo_rel_path`); an `unbound` one keeps an
+ * external edge external, drops an intake binding, and lets the edge claim no
+ * tree-sitter call; `null` keeps the edge as intake stored it.
+ *
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {string} contentHash
  * @param {string | null} [lang] - derived from the layers when omitted
+ * @param {{ scipTargets?: import("./scip-monikers.js").ScipTargetResolver | null }} [opts]
  * @returns {{ symbols: any[], edges: any[], sources: string[], sourceLocalToMerged: Map<string, number> }}
  */
-export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
+export function mergeLayerRows(ledgerDb, contentHash, lang = null, opts = {}) {
+  const scipTargets = opts.scipTargets ?? null;
   const resolvedLang = lang || layerLangFor(ledgerDb, contentHash);
   if (!resolvedLang) return { symbols: [], edges: [], sources: [], sourceLocalToMerged: new Map() };
   const layers = latestLayers(ledgerDb, contentHash, resolvedLang);
@@ -302,18 +318,45 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
       const range = parseJson(row.range_json) || {};
       const fromLocal = remap.get(`${layer.id}:${row.from_local_id}`);
       if (fromLocal == null) continue; // from-symbol didn't materialize
-      const sameBlob = detail.to_content_hash === contentHash && detail.to_local_id != null;
-      const toLocal = sameBlob
-        ? (remap.get(`${layer.id}:${detail.to_local_id}`) ?? null)
-        : (detail.to_local_id ?? null);
-      const toName = detail.to_name ?? null;
       const source = detail.source || layer.source;
+      let toContentHash = detail.to_content_hash ?? null;
+      let toLocalId = detail.to_local_id ?? null;
+      let toExternalId = detail.to_external_id ?? null;
+      let toRepoRelPath = null;
+      let claimsTreesitterCall = true;
+      let target = null;
+      if (source === "scip" && scipTargets) {
+        if (toExternalId != null) {
+          target = scipTargets.external(toExternalId);
+        } else if (toContentHash && toContentHash !== contentHash && toLocalId != null) {
+          target = scipTargets.definition(toContentHash, toLocalId);
+        }
+      }
+      if (target?.status === "bound") {
+        toContentHash = target.content_hash;
+        toLocalId = target.local_id;
+        toExternalId = null;
+        toRepoRelPath = target.repo_rel_path;
+      } else if (target?.status === "unbound") {
+        claimsTreesitterCall = false;
+        if (toExternalId == null) {
+          toContentHash = null;
+          toLocalId = null;
+        }
+      }
+      const sameBlob = toContentHash === contentHash && toLocalId != null;
+      const toLocal = sameBlob
+        ? (remap.get(`${layer.id}:${toLocalId}`) ?? null)
+        : toLocalId;
+      const toName = detail.to_name ?? null;
       const edge = {
         from_content_hash: contentHash,
         from_local_id: fromLocal,
-        to_content_hash: sameBlob ? contentHash : (detail.to_content_hash ?? null),
+        to_content_hash: sameBlob ? contentHash : toContentHash,
         to_local_id: toLocal,
-        to_external_id: detail.to_external_id ?? null,
+        to_external_id: toExternalId,
+        // A moniker-bound edge is no longer external: it drops the descriptor.
+        external_descriptor: toExternalId != null ? (row.external_descriptor ?? null) : null,
         to_name: toName,
         to_module: detail.to_module ?? null,
         kind: row.kind,
@@ -323,12 +366,14 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null) {
         range_end_line: nullableInt(range.range_end_line),
         confidence: detail.confidence ?? null,
         source,
+        to_repo_rel_path: toRepoRelPath,
       };
       const site = {
         start: callSiteOffset(range.range_start ?? detail.range_start),
         end: callSiteOffset(range.range_end ?? detail.range_end),
         line: edge.range_start_line,
         name: toName,
+        claims: claimsTreesitterCall,
       };
       candidates.push({ edge, site });
     }

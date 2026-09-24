@@ -8,6 +8,7 @@ import { scopeGrantedBy } from "../../permissions/functions/scope-grants.js";
 import { GIT_MUTATE_ROUTE, NATIVE_BINARY_PACKAGE_PATTERN } from "../../../catalog/binary.js";
 import { VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../catalog/process.js";
 import { ParentPulseTokenManager } from "./ParentPulseTokenManager.js";
+import { setResponsiveTimeout } from "../../concurrency/functions/responsive-timeout.js";
 
 const DEFAULT_REFRESH_SKEW_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -527,7 +528,9 @@ export class PulseTokenManager {
     const timeoutMs = Number.isFinite(configuredSeconds) && configuredSeconds > 0
       ? configuredSeconds * 1000
       : this.timeoutMs;
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    // Boot can freeze the event loop past the whole deadline while the remote
+    // has already answered; only responsive time counts against it.
+    const deadline = setResponsiveTimeout(() => ac.abort(), timeoutMs);
     let response;
     try {
       /** @type {Record<string, string | number>} */
@@ -557,7 +560,7 @@ export class PulseTokenManager {
         signal: ac.signal,
       });
     } catch (err) {
-      clearTimeout(timer);
+      deadline.clear();
       if (err?.name === "AbortError") {
         throw pulseError("POSSE_PULSE_TIMEOUT", `heartbeat request timed out after ${timeoutMs}ms`);
       }
@@ -591,7 +594,7 @@ export class PulseTokenManager {
       }
       throw err;
     } finally {
-      clearTimeout(timer);
+      deadline.clear();
     }
     let body;
     try {

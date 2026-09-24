@@ -690,10 +690,27 @@ export class Ledger {
 
   /**
    * @param {Parameters<ScipIndexStore["pruneSupersededScipIndexes"]>[0]} keepIds
+   * @param {Parameters<ScipIndexStore["pruneSupersededScipIndexes"]>[1]} [opts]
    * @returns {ReturnType<ScipIndexStore["pruneSupersededScipIndexes"]>}
    */
-  pruneSupersededScipIndexes(keepIds) {
-    return this.#scipIndex.pruneSupersededScipIndexes(keepIds);
+  pruneSupersededScipIndexes(keepIds, opts) {
+    return this.#scipIndex.pruneSupersededScipIndexes(keepIds, opts);
+  }
+
+  /**
+   * @param {Parameters<ScipIndexStore["pruneIncrementalScipIndexes"]>[0]} keepIds
+   * @param {Parameters<ScipIndexStore["pruneIncrementalScipIndexes"]>[1]} [opts]
+   * @returns {ReturnType<ScipIndexStore["pruneIncrementalScipIndexes"]>}
+   */
+  pruneIncrementalScipIndexes(keepIds, opts) {
+    return this.#scipIndex.pruneIncrementalScipIndexes(keepIds, opts);
+  }
+
+  /**
+   * @returns {ReturnType<ScipIndexStore["collectUnreferencedExternalSymbols"]>}
+   */
+  collectUnreferencedExternalSymbols() {
+    return this.#scipIndex.collectUnreferencedExternalSymbols();
   }
 
   /**

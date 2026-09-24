@@ -923,7 +923,7 @@ function materializeLayeredPath({ viewDb, ledgerDb, layers, repoRelPath, content
         toName,
         toModule: stringOrNull(detail?.to_module),
         toExternalId: nullableNumber(detail?.to_external_id),
-        externalDescriptor: row.to_symbol && String(row.to_symbol).startsWith("external:") ? row.to_symbol : null,
+        externalDescriptor: stringOrNull(row.external_descriptor),
         edgeSource,
         kind: row.kind,
         repoRelPath,
@@ -1009,10 +1009,13 @@ function layerSymbols(ledgerDb, layerId) {
 function layerEdges(ledgerDb, layerId) {
   return /** @type {any[]} */ (
     ledgerDb.prepare(
-      `SELECT layer_id, edge_id, kind, from_local_id, to_local_id, to_symbol, range_json, detail_json
-       FROM blob_layer_edges
-       WHERE layer_id = ?
-       ORDER BY edge_id ASC`,
+      `SELECT e.layer_id, e.edge_id, e.kind, e.from_local_id, e.to_local_id, e.to_symbol,
+              e.range_json, e.detail_json, es.descriptor AS external_descriptor
+       FROM blob_layer_edges e
+       LEFT JOIN external_symbols es ON es.id = CASE WHEN json_valid(e.detail_json)
+         THEN json_extract(e.detail_json, '$.to_external_id') END
+       WHERE e.layer_id = ?
+       ORDER BY e.edge_id ASC`,
     ).all(layerId)
   );
 }

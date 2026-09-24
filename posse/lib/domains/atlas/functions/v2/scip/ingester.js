@@ -285,6 +285,7 @@ export async function ingestScipFile({
     : await scipIndexToRowsNative({ index });
   const convertMs = Date.now() - convertStartedAtMs;
   const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
+  assertNativeRowsCarryDefinitionMonikers(rowDocuments, rowsSpecVersion);
   if (expectedContentHashes && typeof expectedContentHashes === "object") {
     for (const document of rowDocuments) {
       const expected = String(expectedContentHashes[document?.repo_rel_path] || "");
@@ -1070,7 +1071,35 @@ function normalizeNativeDocumentMetadata(doc) {
   if (Array.isArray(reasons)) {
     metadata.call_proof_unavailable_reasons = reasons.map((reason) => String(reason));
   }
+  // Structural definition monikers, recorded with the path this document was
+  // indexed at (even when it defines none): the view build binds SCIP
+  // references to them by path (ledger/scip-monikers.js).
+  const definitions = doc?.scip_definitions ?? doc?.scipDefinitions;
+  if (Array.isArray(definitions)) {
+    metadata.scip_definitions = {
+      repo_rel_path: String(doc?.repo_rel_path ?? doc?.repoRelPath ?? ""),
+      monikers: definitions,
+    };
+  }
   return metadata;
+}
+
+/**
+ * Rows spec v7 layers record definition monikers for view-time binding. An
+ * older native binary omits them, and a layer stored under the v7 config hash
+ * without them would never be re-ingested, so refuse the conversion instead;
+ * the batch fails and the next warm retries it once the binary is current.
+ * @param {Array<{ repo_rel_path?: string, skip_reason?: unknown, metadata?: any }>} rowDocuments
+ * @param {string} rowsSpecVersion
+ */
+export function assertNativeRowsCarryDefinitionMonikers(rowDocuments, rowsSpecVersion) {
+  const missing = rowDocuments.find((document) => !document?.skip_reason
+    && !Array.isArray(document?.metadata?.scip_definitions?.monikers));
+  if (!missing) return;
+  throw new Error(
+    `ATLAS native scip-rows returned no definition monikers for ${missing.repo_rel_path || "(unknown)"}; `
+      + `posse-atlas predates ${rowsSpecVersion} and must be updated before SCIP intake`,
+  );
 }
 
 /**

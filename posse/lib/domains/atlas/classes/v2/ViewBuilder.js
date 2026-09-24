@@ -39,6 +39,12 @@ import { normalizeTreeCompressionMode } from "../../functions/v2/tree-compressio
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
 import { ATLAS_SCIP_ROWS_SPEC_VERSION, normalizeLangFromScip } from "../../functions/v2/scip/to-rows.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
+import {
+  buildScipMonikerIndex,
+  createScipTargets,
+  readLegacySourcesByHash,
+  scipRebindCallers,
+} from "../../functions/v2/ledger/scip-monikers.js";
 import { languageForPath } from "../../functions/v2/parse/language-buckets.js";
 import { ATLAS_PARSER_VERSION } from "../../functions/v2/parser/version.js";
 import { ATLAS_SOURCE_INDEX_POLICY_VERSION } from "../../functions/v2/parser/index-filters.js";
@@ -53,6 +59,10 @@ import { inspectViewMaterialization, removeSqliteFile } from "../../functions/v2
 /** @typedef {import("./Ledger.js").Ledger} Ledger */
 
 const GRAPH_DERIVED_SIGNATURE_META_KEY = "graph_derived_input_signature";
+// Materialization contract for layer-merged SCIP edges. v1: external SCIP
+// references bind by moniker to a unique snapshot definition path, and an
+// unbound repository moniker claims no tree-sitter call (scip-monikers.js).
+const SCIP_VIEW_BINDING_VERSION = "scip-view-binding-v1-moniker-paths";
 const TREE_DERIVED_SIGNATURE_META_KEY = "tree_derived_input_signature";
 const TREE_COMPRESSION_SIGNATURE_META_KEY = "tree_compression_input_signature";
 
@@ -90,6 +100,7 @@ export function viewFingerprintForOptions(options = {}) {
     resolver_contract: ATLAS_RESOLVER_VERSION,
     source_index_policy: ATLAS_SOURCE_INDEX_POLICY_VERSION,
     scip_rows_spec: ATLAS_SCIP_ROWS_SPEC_VERSION,
+    scip_view_binding: SCIP_VIEW_BINDING_VERSION,
     layer_merge: options.layerMerge === true,
     tree_compression_mode: treeCompressionMode,
     tree_compression_max_seeds: treeCompressionMaxSeeds,
@@ -336,23 +347,56 @@ export class ViewBuilder {
     // await the native worker so they run after that commit (each guarding
     // its own writes), and writeMeta commits strictly last. A crash between
     // the commits leaves the view's meta at the OLD ledger_seq, so the next
-    // incremental re-applies the same entries — applyEntry is idempotent
-    // (delete-then-repopulate per path) and the resolver pass only binds
-    // edges that are still unresolved.
+    // incremental re-applies the same entries — applyEntrySymbols and
+    // materializePathEdges are idempotent (delete-then-repopulate per path)
+    // and the resolver pass only binds edges that are still unresolved.
     db.transaction(() => {
       const ledgerDb = ledger._unsafeDb();
+      const layerMerge = current.layer_merge === true || options.layerMerge === true;
+      const legacySourcesByHash = readLegacySourcesByHash(ledgerDb);
+      const currentSnapshot = readPathToBlobMap(db);
+      /** @type {Map<string, string | null>} */
+      const after = new Map();
+      for (const e of entries) after.set(e.repo_rel_path, e.op === "remove" ? null : (e.after_content_hash ?? null));
+      // Unchanged paths keep their rows, but SCIP edges are never
+      // name-resolved: they bind by target hash and path, or by moniker,
+      // against the snapshot. Collect the callers whose bindings these entries
+      // can change while their current targets are still materialized; their
+      // edges are rebuilt below.
+      const callers = scipRebindCallers({
+        viewDb: db,
+        ledgerDb,
+        current: currentSnapshot,
+        after,
+        legacySourcesByHash,
+        layerMerge,
+      });
+      /** @type {Set<string>} */
+      const rematerialize = new Set();
       let applied = 0;
       emitPhase("entries", 0, entries.length);
       for (const e of entries) {
-        const outcome = applyEntry(db, ledgerDb, e, {
-          layerMerge: current.layer_merge === true || options.layerMerge === true,
-        });
+        const outcome = applyEntrySymbols(db, ledgerDb, e, { layerMerge, legacySourcesByHash });
         if (outcome && outcome.skipped) break;
+        rematerialize.add(e.repo_rel_path);
         lastAppliedSeq = e.seq;
         applied++;
         if (applied === entries.length || applied % VIEW_BUILD_CHUNK === 0) {
           emitPhase("entries", applied, entries.length);
         }
+      }
+      for (const caller of callers) rematerialize.add(caller);
+      // Edges materialize after every entry's symbols, against the resulting
+      // snapshot, exactly as a full build would bind them.
+      const snapshot = readPathToBlobMap(db);
+      const ledgerRows = createLedgerRowReader(ledgerDb, layerMerge, {
+        legacySourcesByHash,
+        scipTargets: layerMerge
+          ? createScipTargets(ledgerDb, buildScipMonikerIndex(ledgerDb, snapshot, legacySourcesByHash))
+          : null,
+      });
+      for (const repoRelPath of rematerialize) {
+        materializePathEdges(db, ledgerRows, snapshot, repoRelPath);
       }
     })();
     // New symbols may now satisfy references that were previously
@@ -602,7 +646,13 @@ async function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMer
     blobToPaths.set(h, list);
   }
 
-  const ledgerRows = createLedgerRowReader(ledgerDb, useLayerMerge);
+  const legacySourcesByHash = readLegacySourcesByHash(ledgerDb);
+  const ledgerRows = createLedgerRowReader(ledgerDb, useLayerMerge, {
+    legacySourcesByHash,
+    scipTargets: useLayerMerge
+      ? createScipTargets(ledgerDb, buildScipMonikerIndex(ledgerDb, pathToBlob, legacySourcesByHash))
+      : null,
+  });
   const symbolInsert = prepareViewSymbolInsert(viewDb);
   const updateParent = viewDb.prepare(
     "UPDATE symbols SET parent_global_id = ? WHERE global_id = ?",
@@ -682,13 +732,8 @@ async function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMer
       if (fromGid == null) continue; // edge references a symbol that didn't materialize
       let toGid = null;
       if (r.to_content_hash && r.to_local_id != null) {
-        // Resolve to the target blob's host path. If the target blob
-        // appears at multiple paths in this view, pick the same path as
-        // the from-blob when possible, otherwise the first.
-        const candidatePaths = blobToPaths.get(r.to_content_hash);
-        if (candidatePaths && candidatePaths.length > 0) {
-          const preferred =
-            candidatePaths.find((p) => p === repo_rel_path) ?? candidatePaths[0];
+        const preferred = edgeTargetPath(r, blobToPaths, pathToBlob, repo_rel_path);
+        if (preferred != null) {
           const targetLocalId = r.to_content_hash === content_hash
             ? r.to_local_id
             : ledgerRows.targetLocalId(r.to_content_hash, preferred, r.source, r.to_local_id);
@@ -731,6 +776,27 @@ async function populateSymbolsAndEdges(viewDb, ledgerDb, pathToBlob, useLayerMer
   emit("resolve", 0, 1);
   await runResolverPass(viewDb, pathToBlob);
   emit("resolve", 1, 1);
+}
+
+/**
+ * Where a cross-blob edge target materializes. A moniker-bound SCIP edge
+ * targets its bound path (and nothing when that path no longer holds the
+ * target blob). Otherwise the target blob's path is the edge's own path when
+ * it holds the blob, else the first.
+ *
+ * @param {{ to_content_hash: string, to_repo_rel_path?: string | null }} edge
+ * @param {Map<string, string[]>} blobToPaths
+ * @param {Map<string, string>} pathToBlob
+ * @param {string} fromPath
+ * @returns {string | null}
+ */
+function edgeTargetPath(edge, blobToPaths, pathToBlob, fromPath) {
+  if (edge.to_repo_rel_path) {
+    return pathToBlob.get(edge.to_repo_rel_path) === edge.to_content_hash ? edge.to_repo_rel_path : null;
+  }
+  const candidatePaths = blobToPaths.get(edge.to_content_hash);
+  if (!candidatePaths || candidatePaths.length === 0) return null;
+  return candidatePaths.find((p) => p === fromPath) ?? candidatePaths[0];
 }
 
 /**
@@ -781,13 +847,17 @@ function layerMergeLangForPath(repo_rel_path) {
 /**
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {boolean} useLayerMerge
+ * @param {{
+ *   legacySourcesByHash?: Map<string, Set<string>>,
+ *   scipTargets?: import("../../functions/v2/ledger/scip-monikers.js").ScipTargets | null,
+ * }} [opts]
  * @returns {{
  *   readSymbols: (content_hash: string, repo_rel_path?: string) => any[],
  *   readEdges: (content_hash: string, repo_rel_path?: string) => any[],
  *   targetLocalId: (content_hash: string, repo_rel_path: string, source: string | null | undefined, local_id: number) => number | null,
  * }}
  */
-function createLedgerRowReader(ledgerDb, useLayerMerge) {
+function createLedgerRowReader(ledgerDb, useLayerMerge, opts = {}) {
   const symbolReadStmt = prepareLedgerSymbolReadStmt(ledgerDb);
   const edgeReadStmt = prepareLedgerEdgeReadStmt(ledgerDb);
 
@@ -818,24 +888,20 @@ function createLedgerRowReader(ledgerDb, useLayerMerge) {
   // missing a source the legacy rows still carry (e.g. a tree-sitter layer
   // exists but the SCIP layer was never written). The per-blob choice covers
   // symbols AND edges together so local ids stay in one id space.
-  /** @type {Map<string, Set<string>>} */
-  const legacySourcesByHash = new Map();
-  try {
-    for (const row of /** @type {Array<{ content_hash: string, source: string | null }>} */ (
-      ledgerDb.prepare("SELECT DISTINCT content_hash, source FROM blob_symbols").all()
-    )) {
-      let set = legacySourcesByHash.get(row.content_hash);
-      if (!set) { set = new Set(); legacySourcesByHash.set(row.content_hash, set); }
-      set.add(String(row.source || "treesitter"));
-    }
-  } catch { /* no legacy rows / no source column — fall back only on empty layers */ }
+  const legacySourcesByHash = opts.legacySourcesByHash ?? readLegacySourcesByHash(ledgerDb);
+  const scipTargets = opts.scipTargets ?? null;
 
   const mergedFor = (content_hash, repo_rel_path = "") => {
     const lang = layerMergeLangForPath(repo_rel_path);
-    const cacheKey = `${content_hash}\0${lang || ""}`;
+    // A copy of a blob indexed at another path resolves its SCIP references
+    // differently from the indexed copy (scip-monikers.js).
+    const foreignCopy = scipTargets?.foreignCopy(repo_rel_path) === true;
+    const cacheKey = `${content_hash}\0${lang || ""}\0${foreignCopy ? "foreign" : ""}`;
     let m = mergeCache.get(cacheKey);
     if (m) return m;
-    const merged = mergeLayerRows(ledgerDb, content_hash, lang);
+    const merged = mergeLayerRows(ledgerDb, content_hash, lang, {
+      scipTargets: scipTargets?.forPath(repo_rel_path) ?? null,
+    });
     const legacySources = legacySourcesByHash.get(content_hash);
     const layerSources = new Set(merged.sources || []);
     const layersCoverLegacy = !legacySources
@@ -937,12 +1003,15 @@ function prepareViewEdgeInsert(viewDb) {
 // ============================================================================
 
 /**
+ * Apply one entry's path mapping and symbols. Its edges materialize later,
+ * once every entry's symbols are in place (`materializePathEdges`).
+ *
  * @param {import("better-sqlite3").Database} viewDb
  * @param {import("better-sqlite3").Database} ledgerDb
  * @param {LedgerEntry} entry
- * @param {{ layerMerge?: boolean }} [options]
+ * @param {{ layerMerge?: boolean, legacySourcesByHash?: Map<string, Set<string>> }} [options]
  */
-function applyEntry(viewDb, ledgerDb, entry, options = {}) {
+function applyEntrySymbols(viewDb, ledgerDb, entry, options = {}) {
   const updatePath = viewDb.prepare(
     "INSERT INTO path_to_blob(repo_rel_path, content_hash) VALUES(?, ?) " +
       "ON CONFLICT(repo_rel_path) DO UPDATE SET content_hash = excluded.content_hash",
@@ -976,66 +1045,24 @@ function applyEntry(viewDb, ledgerDb, entry, options = {}) {
   // For add/modify: wipe existing symbols at this path (if any) and
   // re-materialize from the new content_hash. Edges with from_global_id
   // at this path will CASCADE delete; edges pointing INTO this path
-  // become unresolved (SET NULL) automatically per FK.
+  // become unresolved (SET NULL) automatically per FK until their callers
+  // are rematerialized or re-resolved.
   deleteSymbolsAtPath.run(entry.repo_rel_path);
   updatePath.run(entry.repo_rel_path, entry.after_content_hash);
 
-  // Rebuild path_to_blob view (it now has the new mapping) and ask
-  // populateSymbolsAndEdges to re-materialize just this path. We pass
-  // a single-entry map but the helper expects the FULL current map for
-  // accurate cross-blob edge resolution.
-  /** @type {Map<string, string>} */
-  const fullMap = new Map();
-  const rows = /** @type {any[]} */ (
-    viewDb.prepare("SELECT repo_rel_path, content_hash FROM path_to_blob").all()
-  );
-  for (const r of rows) fullMap.set(r.repo_rel_path, r.content_hash);
-
-  // We only want to insert the NEW path's symbols, but cross-blob
-  // resolution needs to see the full map. Use a scoped helper.
-  populateSinglePath(viewDb, ledgerDb, fullMap, entry.repo_rel_path, options.layerMerge === true);
-}
-
-/**
- * Like populateSymbolsAndEdges but only emits symbols + edges for one
- * target path. Cross-blob edge resolution still consults the full map.
- *
- * @param {import("better-sqlite3").Database} viewDb
- * @param {import("better-sqlite3").Database} ledgerDb
- * @param {Map<string, string>} fullPathToBlob
- * @param {string} onlyPath
- * @param {boolean} [useLayerMerge]
- */
-function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayerMerge = false) {
-  const content_hash = fullPathToBlob.get(onlyPath);
-  if (!content_hash) return;
-
-  /** @type {Map<string, string[]>} */
-  const blobToPaths = new Map();
-  for (const [p, h] of fullPathToBlob) {
-    const list = blobToPaths.get(h) || [];
-    list.push(p);
-    blobToPaths.set(h, list);
-  }
-
-  const ledgerRows = createLedgerRowReader(ledgerDb, useLayerMerge);
+  // Symbols do not depend on moniker targets; the edges pass binds them.
+  const ledgerRows = createLedgerRowReader(ledgerDb, options.layerMerge === true, {
+    legacySourcesByHash: options.legacySourcesByHash,
+  });
   const symbolInsert = prepareViewSymbolInsert(viewDb);
   const updateParent = viewDb.prepare(
     "UPDATE symbols SET parent_global_id = ? WHERE global_id = ?",
   );
-  const edgeInsert = prepareViewEdgeInsert(viewDb);
-  // For resolving edges into OTHER paths whose content_hash already
-  // existed in the view, we need to look up their existing global_ids.
-  const lookupExistingGlobal = viewDb.prepare(
-    "SELECT global_id FROM symbols WHERE repo_rel_path = ? AND local_id = ?",
-  );
-
   /** @type {Map<string, number>} */
   const localToGlobal = new Map();
   /** @type {{ global_id: number, parent_local_id: number }[]} */
   const parentBackfill = [];
-
-  const symRows = /** @type {any[]} */ (ledgerRows.readSymbols(content_hash, onlyPath));
+  const symRows = /** @type {any[]} */ (ledgerRows.readSymbols(entry.after_content_hash, entry.repo_rel_path));
   for (const r of symRows) {
     const info = symbolInsert.run(
       r.content_hash,
@@ -1043,7 +1070,7 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayer
       r.kind,
       r.name,
       r.qualified_name,
-      onlyPath,
+      entry.repo_rel_path,
       r.range_start,
       r.range_end,
       r.range_start_line,
@@ -1065,6 +1092,44 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayer
     const parentGid = localToGlobal.get(String(pb.parent_local_id));
     if (parentGid != null) updateParent.run(parentGid, pb.global_id);
   }
+}
+
+/**
+ * Replace the edges of one materialized path, binding them against
+ * `snapshot` (and the reader's moniker targets) as a full build does. A path
+ * no longer in the snapshot has no symbols and therefore no edges.
+ *
+ * @param {import("better-sqlite3").Database} viewDb
+ * @param {ReturnType<typeof createLedgerRowReader>} ledgerRows
+ * @param {Map<string, string>} snapshot
+ * @param {string} onlyPath
+ */
+function materializePathEdges(viewDb, ledgerRows, snapshot, onlyPath) {
+  const content_hash = snapshot.get(onlyPath);
+  if (!content_hash) return;
+
+  /** @type {Map<string, string[]>} */
+  const blobToPaths = new Map();
+  for (const [p, h] of snapshot) {
+    const list = blobToPaths.get(h) || [];
+    list.push(p);
+    blobToPaths.set(h, list);
+  }
+
+  viewDb.prepare(
+    "DELETE FROM edges WHERE from_global_id IN (SELECT global_id FROM symbols WHERE repo_rel_path = ?)",
+  ).run(onlyPath);
+  const edgeInsert = prepareViewEdgeInsert(viewDb);
+  const lookupGlobal = viewDb.prepare(
+    "SELECT global_id FROM symbols WHERE repo_rel_path = ? AND local_id = ?",
+  );
+  /** @type {Map<string, number>} */
+  const localToGlobal = new Map();
+  for (const row of /** @type {Array<{ local_id: number, global_id: number }>} */ (
+    viewDb.prepare("SELECT local_id, global_id FROM symbols WHERE repo_rel_path = ?").all(onlyPath)
+  )) {
+    localToGlobal.set(String(row.local_id), row.global_id);
+  }
 
   const edgeRows = /** @type {any[]} */ (ledgerRows.readEdges(content_hash, onlyPath));
   for (const r of edgeRows) {
@@ -1072,9 +1137,8 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayer
     if (fromGid == null) continue;
     let toGid = null;
     if (r.to_content_hash && r.to_local_id != null) {
-      const candidatePaths = blobToPaths.get(r.to_content_hash);
-      if (candidatePaths && candidatePaths.length > 0) {
-        const preferred = candidatePaths.find((p) => p === onlyPath) ?? candidatePaths[0];
+      const preferred = edgeTargetPath(r, blobToPaths, snapshot, onlyPath);
+      if (preferred != null) {
         const targetLocalId = r.to_content_hash === content_hash
           ? r.to_local_id
           : ledgerRows.targetLocalId(r.to_content_hash, preferred, r.source, r.to_local_id);
@@ -1084,7 +1148,7 @@ function populateSinglePath(viewDb, ledgerDb, fullPathToBlob, onlyPath, useLayer
           if (fresh != null) toGid = fresh;
         } else if (targetLocalId != null) {
           const existing = /** @type {{ global_id: number } | undefined} */ (
-            lookupExistingGlobal.get(preferred, targetLocalId)
+            lookupGlobal.get(preferred, targetLocalId)
           );
           if (existing) toGid = existing.global_id;
         }

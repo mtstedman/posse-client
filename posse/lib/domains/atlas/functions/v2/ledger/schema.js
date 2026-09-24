@@ -124,6 +124,15 @@ export function tableColumnSet(db, table) {
 export const PARSE_REPARSE_FLOOR_META_KEY = "parse_reparse_floor";
 
 /**
+ * Meta key holding the SCIP reclaim anchor: the `scip_indexes` ids and batch
+ * session directories that the last complete full-fileset SCIP session left
+ * (or, before any such session, everything present when incremental reclaim
+ * first ran). Incremental sessions never reclaim anything the anchor names,
+ * so the next full session keeps its skip keys and reusable batch outputs.
+ */
+export const SCIP_RECLAIM_ANCHOR_META_KEY = "scip_reclaim_anchor";
+
+/**
  * @param {Database.Database} db
  * @returns {string | null}
  */

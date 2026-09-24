@@ -8,14 +8,22 @@
 // public contract — including thrown-message text — is unchanged.
 
 import { nowIso } from "../../../functions/v2/ledger/normalize.js";
+import { SCIP_RECLAIM_ANCHOR_META_KEY } from "../../../functions/v2/ledger/schema.js";
+
+/**
+ * @typedef {{ source: "full" | "bootstrap", ids: number[], sessions: string[] }} ScipReclaimAnchor
+ * @typedef {{ deleted: number, schemes: string[], anchor: ScipReclaimAnchor | null }} ScipReclaimResult
+ */
 
 export class ScipIndexStore {
   /** @type {Record<string, import("better-sqlite3").Statement>} */
   #stmt;
   /** @type {import("./Interner.js").Interner} */
   #interner;
-  /** @type {(keepIds: number[]) => { deleted: number, schemes: string[] }} */
-  #pruneTxn;
+  /** @type {(keepIds: number[], anchorSessions: string[]) => ScipReclaimResult} */
+  #pruneFullTxn;
+  /** @type {(keepIds: number[], presentSessions: string[]) => ScipReclaimResult} */
+  #pruneIncrementalTxn;
 
   /**
    * @param {import("better-sqlite3").Database} db
@@ -106,34 +114,55 @@ export class ScipIndexStore {
         `SELECT id, scheme, status FROM scip_indexes
          WHERE id IN (SELECT value FROM json_each(?))`,
       ),
+      scipIndexAllIds: db.prepare(`SELECT id FROM scip_indexes ORDER BY id`),
+      scipReclaimAnchorGet: db.prepare(`SELECT value FROM meta WHERE key = ?`),
+      scipReclaimAnchorPut: db.prepare(
+        `INSERT INTO meta(key, value) VALUES(?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      ),
       scipIndexDeleteSuperseded: db.prepare(
         `DELETE FROM scip_indexes
          WHERE scheme = ? AND id NOT IN (SELECT value FROM json_each(?))`,
       ),
+      // The ledger's only external references: flat `blob_edges` (a foreign
+      // key) and every layer edge, whatever its status (`to_symbol` and
+      // `detail_json` both carry the id). Views copy ids but never read these
+      // rows back, and AUTOINCREMENT ids are never reused.
+      externalSymbolDeleteUnreferenced: db.prepare(
+        `DELETE FROM external_symbols
+         WHERE id NOT IN (
+                 SELECT to_external_id FROM blob_edges WHERE to_external_id IS NOT NULL)
+           AND id NOT IN (
+                 SELECT CAST(json_extract(detail_json, '$.to_external_id') AS INTEGER)
+                 FROM blob_layer_edges
+                 WHERE json_extract(detail_json, '$.to_external_id') IS NOT NULL)
+           AND id NOT IN (
+                 SELECT CAST(substr(to_symbol, 10) AS INTEGER)
+                 FROM blob_layer_edges WHERE to_symbol LIKE 'external:%')`,
+      ),
     };
-    this.#pruneTxn = db.transaction((/** @type {number[]} */ keepIds) => {
-      const keepJson = JSON.stringify(keepIds);
-      const kept = /** @type {Array<{ id: number, scheme: string, status: string }>} */ (
-        this.#stmt.scipIndexSelectKept.all(keepJson)
-      );
-      // Every committed id must still exist: a vanished row means the set is
-      // not the one the session committed, so nothing is provably superseded.
-      if (kept.length !== keepIds.length) return { deleted: 0, schemes: [] };
-      /** @type {Map<string, boolean>} */
-      const completeByScheme = new Map();
-      for (const row of kept) {
-        const scheme = String(row.scheme);
-        completeByScheme.set(scheme, (completeByScheme.get(scheme) ?? true) && row.status === "complete");
-      }
-      let deleted = 0;
-      /** @type {string[]} */
-      const schemes = [];
-      for (const [scheme, complete] of completeByScheme) {
-        if (!complete) continue;
-        deleted += this.#stmt.scipIndexDeleteSuperseded.run(scheme, keepJson).changes;
-        schemes.push(scheme);
-      }
-      return { deleted, schemes: schemes.sort() };
+    this.#pruneFullTxn = db.transaction((
+      /** @type {number[]} */ keepIds,
+      /** @type {string[]} */ anchorSessions,
+    ) => {
+      const pruned = this.#pruneCommittedSchemes(keepIds, []);
+      if (!pruned) return { deleted: 0, schemes: [], anchor: null };
+      // The table a complete full session leaves is the next full session's
+      // reusable state: incremental reclaim must never touch it.
+      const anchor = this.#writeAnchor("full", anchorSessions);
+      return { ...pruned, anchor };
+    });
+    this.#pruneIncrementalTxn = db.transaction((
+      /** @type {number[]} */ keepIds,
+      /** @type {string[]} */ presentSessions,
+    ) => {
+      const anchor = this.#readAnchor();
+      // No trustworthy anchor (a ledger no full session has anchored yet):
+      // everything present now becomes the anchor and nothing is reclaimed.
+      if (!anchor) return { deleted: 0, schemes: [], anchor: this.#writeAnchor("bootstrap", presentSessions) };
+      const pruned = this.#pruneCommittedSchemes(keepIds, anchor.ids);
+      if (!pruned) return { deleted: 0, schemes: [], anchor: null };
+      return { ...pruned, anchor };
     });
   }
 
@@ -403,26 +432,122 @@ export class ScipIndexStore {
   }
 
   /**
-   * Drop the bookkeeping rows a completed SCIP staging session superseded, in
-   * one transaction. `keepIds` is the session's full committed set; for each
-   * scheme among those rows, every other row of that scheme is deleted. A
-   * scheme is left untouched when any of its committed rows is `partial`, and
-   * the whole prune is a no-op when a committed id no longer exists. Schemes
-   * the session did not commit are never touched.
+   * Drop the bookkeeping rows a completed full-fileset SCIP staging session
+   * superseded, in one transaction. `keepIds` is the session's full committed
+   * set; for each scheme among those rows, every other row of that scheme is
+   * deleted. A scheme is left untouched when any of its committed rows is
+   * `partial`, and the whole prune is a no-op (no anchor) when a committed id
+   * no longer exists. Schemes the session did not commit are never touched.
+   * The table left behind becomes the reclaim anchor, together with
+   * `anchorSessions` (the batch session dirs the session reads).
    *
    * @param {number[]} keepIds
-   * @returns {{ deleted: number, schemes: string[] }}
+   * @param {{ anchorSessions?: string[] }} [opts]
+   * @returns {ScipReclaimResult}
    */
-  pruneSupersededScipIndexes(keepIds) {
-    if (!Array.isArray(keepIds)) {
-      throw new TypeError("Ledger.pruneSupersededScipIndexes: keepIds must be an array");
+  pruneSupersededScipIndexes(keepIds, { anchorSessions = [] } = {}) {
+    return this.#pruneFullTxn(
+      normalizeKeepIds(keepIds, "pruneSupersededScipIndexes"),
+      normalizeSessionIds(anchorSessions),
+    );
+  }
+
+  /**
+   * Drop the rows earlier incremental SCIP sessions left behind, after a
+   * completed incremental session committed `keepIds`, in one transaction.
+   * For each scheme among the committed rows (all `complete`), every row that
+   * is neither committed now nor named by the reclaim anchor is deleted: only
+   * the anchor and the latest incremental set survive, so an incremental-only
+   * history stays bounded. Without a readable anchor nothing is deleted and
+   * the current table (plus `presentSessions`) becomes a `bootstrap` anchor.
+   * A vanished committed id makes the call a no-op with `anchor: null`.
+   *
+   * @param {number[]} keepIds
+   * @param {{ presentSessions?: string[] }} [opts]
+   * @returns {ScipReclaimResult}
+   */
+  pruneIncrementalScipIndexes(keepIds, { presentSessions = [] } = {}) {
+    return this.#pruneIncrementalTxn(
+      normalizeKeepIds(keepIds, "pruneIncrementalScipIndexes"),
+      normalizeSessionIds(presentSessions),
+    );
+  }
+
+  /**
+   * Delete, per committed scheme whose committed rows are all complete, every
+   * row outside `keepIds` and `alsoKeep`. Null when a committed id vanished.
+   * Runs inside the caller's transaction.
+   *
+   * @param {number[]} keepIds
+   * @param {number[]} alsoKeep
+   * @returns {{ deleted: number, schemes: string[] } | null}
+   */
+  #pruneCommittedSchemes(keepIds, alsoKeep) {
+    if (keepIds.length === 0) return { deleted: 0, schemes: [] };
+    const kept = /** @type {Array<{ id: number, scheme: string, status: string }>} */ (
+      this.#stmt.scipIndexSelectKept.all(JSON.stringify(keepIds))
+    );
+    // Every committed id must still exist: a vanished row means the set is
+    // not the one the session committed, so nothing is provably superseded.
+    if (kept.length !== keepIds.length) return null;
+    /** @type {Map<string, boolean>} */
+    const completeByScheme = new Map();
+    for (const row of kept) {
+      const scheme = String(row.scheme);
+      completeByScheme.set(scheme, (completeByScheme.get(scheme) ?? true) && row.status === "complete");
     }
-    const ids = [...new Set(keepIds.map((value) => Number(value)))];
-    if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
-      throw new RangeError("Ledger.pruneSupersededScipIndexes: keepIds must be positive integers");
+    const survivorsJson = JSON.stringify([...new Set([...keepIds, ...alsoKeep])]);
+    let deleted = 0;
+    /** @type {string[]} */
+    const schemes = [];
+    for (const [scheme, complete] of completeByScheme) {
+      if (!complete) continue;
+      deleted += this.#stmt.scipIndexDeleteSuperseded.run(scheme, survivorsJson).changes;
+      schemes.push(scheme);
     }
-    if (ids.length === 0) return { deleted: 0, schemes: [] };
-    return this.#pruneTxn(ids);
+    return { deleted, schemes: schemes.sort() };
+  }
+
+  /** @returns {ScipReclaimAnchor | null} */
+  #readAnchor() {
+    const row = /** @type {{ value?: string | null } | undefined} */ (
+      this.#stmt.scipReclaimAnchorGet.get(SCIP_RECLAIM_ANCHOR_META_KEY)
+    );
+    if (!row?.value) return null;
+    try {
+      const parsed = JSON.parse(String(row.value));
+      if (parsed?.source !== "full" && parsed?.source !== "bootstrap") return null;
+      if (!Array.isArray(parsed.ids) || !parsed.ids.every((id) => Number.isSafeInteger(id) && id > 0)) return null;
+      if (!Array.isArray(parsed.sessions) || !parsed.sessions.every((id) => typeof id === "string" && id)) return null;
+      return { source: parsed.source, ids: parsed.ids, sessions: parsed.sessions };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * @param {"full" | "bootstrap"} source
+   * @param {string[]} sessions
+   * @returns {ScipReclaimAnchor}
+   */
+  #writeAnchor(source, sessions) {
+    const ids = /** @type {Array<{ id: number }>} */ (this.#stmt.scipIndexAllIds.all()).map((row) => Number(row.id));
+    const anchor = { source, ids, sessions };
+    this.#stmt.scipReclaimAnchorPut.run(SCIP_RECLAIM_ANCHOR_META_KEY, JSON.stringify(anchor));
+    return anchor;
+  }
+
+  /**
+   * Delete every `external_symbols` row no ledger edge references, in one
+   * statement. A row is bound (committed) before the layer write that
+   * references it; the native layer write re-checks each id inside its own
+   * transaction, so an ingest racing this collection fails that document
+   * instead of committing a dangling target.
+   *
+   * @returns {{ deleted: number }}
+   */
+  collectUnreferencedExternalSymbols() {
+    return { deleted: this.#stmt.externalSymbolDeleteUnreferenced.run().changes };
   }
 
   /**
@@ -496,4 +621,29 @@ export class ScipIndexStore {
 function normalizeHashField(value) {
   const text = value == null ? "" : String(value).trim();
   return text ? text : null;
+}
+
+/**
+ * @param {unknown} keepIds
+ * @param {string} method
+ * @returns {number[]}
+ */
+function normalizeKeepIds(keepIds, method) {
+  if (!Array.isArray(keepIds)) {
+    throw new TypeError(`Ledger.${method}: keepIds must be an array`);
+  }
+  const ids = [...new Set(keepIds.map((value) => Number(value)))];
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new RangeError(`Ledger.${method}: keepIds must be positive integers`);
+  }
+  return ids;
+}
+
+/**
+ * @param {unknown} sessions
+ * @returns {string[]}
+ */
+function normalizeSessionIds(sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  return [...new Set(list.map((value) => String(value || "")).filter(Boolean))].sort();
 }

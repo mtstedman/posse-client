@@ -27,6 +27,7 @@ import { createProtoReader } from "./proto-reader.js";
 import { sanitizeScipOutputFileNative } from "./sanitizer.js";
 import { readScipBatchCoverage, writeScipBatchCoverage } from "./batch-coverage.js";
 import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
+import { resolveTypeScriptBatchProject, writeTypeScriptBatchProject } from "./typescript-batch-project.js";
 import {
   buildFailedStagerMeta,
   buildRecoveredStagerMeta,
@@ -47,6 +48,9 @@ const SCIP_STAGE_GATE = new KeyedAsyncGate({ name: "atlas-scip-stager", maxConcu
 export const DEFAULT_SCIP_COLD_INDEX_TIMEOUT_MS = 600_000;
 const SCIP_STAGING_ORPHAN_GRACE_MS = 660_000;
 const SCIP_BATCH_STAGE_INDEXERS = new Set(["typescript", "python", "php"]);
+// Layout of the isolated batch views. A session staged under another layout
+// produced differently named symbols, so its artifacts are never reused.
+const SCIP_BATCH_VIEW_FORMAT_VERSION = "scip-batch-view-v2-repository-typescript";
 export const DEFAULT_SCIP_BATCH_MAX_FILES = 32;
 // Used only when the repository has no resolvable HEAD (a non-git source tree).
 // Kept stable so symbol identities do not churn between stages of one repo.
@@ -709,7 +713,8 @@ async function findReusableScipBatchOutputs({ scipDir, manifest }) {
 function scipBatchSessionMatchesManifest(state, manifest) {
   const status = String(state?.status || "").trim().toLowerCase();
   if (!new Set(["complete", "partial", "failed"]).has(status)) return false;
-  if (String(state?.filesetHash || "") !== manifest.filesetHash
+  if (state?.batchViewFormat !== SCIP_BATCH_VIEW_FORMAT_VERSION
+    || String(state?.filesetHash || "") !== manifest.filesetHash
     || Number(state?.documentCount) !== manifest.documentCount
     || Number(state?.batchCount) !== manifest.batchCount
     || Number(state?.maxFiles) !== manifest.maxFiles
@@ -803,6 +808,12 @@ export async function stageScipBatches({
   // Resolved once per stage: every batch view is cut from this HEAD, and the
   // isolated views have no `.git` for the indexer to read it from itself.
   const batchProjectVersion = await resolveCurrentHead(root);
+  // One TypeScript project decision per plan and session: every batch view of
+  // the plan extends the same repository configuration.
+  /** @type {Map<unknown, import("./typescript-batch-project.js").TypeScriptBatchProject>} */
+  const batchProjects = new Map(batchPlans
+    .filter((plan) => plan.indexerId === "typescript")
+    .map((plan) => [plan, resolveTypeScriptBatchProject(root, plan)]));
   const reusableBatches = await findReusableScipBatchOutputs({ scipDir: dir, manifest });
   const sessionId = sha256Hex(Buffer.from(
     `${manifest.filesetHash}\0${Date.now()}\0${process.pid}\0${Math.random()}`,
@@ -815,6 +826,7 @@ export async function stageScipBatches({
   );
   const state = {
     sessionId,
+    batchViewFormat: SCIP_BATCH_VIEW_FORMAT_VERSION,
     filesetHash: manifest.filesetHash,
     documentCount: manifest.documentCount,
     batchCount: manifest.batchCount,
@@ -1004,13 +1016,29 @@ export async function stageScipBatches({
         language: batch.plan.indexerId,
         source_languages: sourceLanguagesForPlan(batch.plan),
       });
-      const recovered = await stageScipBatchWithRecovery({
-        root,
-        sessionDir,
-        batch,
-        onProgress,
-        projectVersion: batchProjectVersion,
-      });
+      const project = batchProjects.get(batch.plan) || null;
+      // An unloadable repository tsconfig fails every document identically;
+      // isolating documents would only repeat the same failure.
+      const recovered = project?.mode === "invalid"
+        ? {
+            ok: false,
+            recovered: false,
+            outputs: [],
+            unavailable: batch.documents.map((document) => ({
+              document,
+              reason: "batch_project_invalid",
+              error: project.error,
+            })),
+            error: project.error,
+          }
+        : await stageScipBatchWithRecovery({
+            root,
+            sessionDir,
+            batch,
+            onProgress,
+            projectVersion: batchProjectVersion,
+            project,
+          });
       const result = {
         ok: recovered.ok,
         staged: recovered.outputs.length > 0,
@@ -1157,6 +1185,9 @@ export async function stageScipBatches({
       results,
       sessionId,
       sessionManifestPath,
+      // Sessions whose outputs this one reused: a full session's reclaim
+      // anchor must keep them alongside the session itself.
+      resumedFromSessions: state.resumedFromSessions,
       manifest,
       batchCoverage,
       unavailableDocuments: [...unavailableDocuments.values()].map((document) => ({
@@ -1175,10 +1206,10 @@ export async function stageScipBatches({
 }
 
 /**
- * @param {{ root: string, sessionDir: string, batch: any, onProgress?: ((event: Record<string, any>) => void) | null, projectVersion?: string | null }} args
+ * @param {{ root: string, sessionDir: string, batch: any, onProgress?: ((event: Record<string, any>) => void) | null, projectVersion?: string | null, project?: import("./typescript-batch-project.js").TypeScriptBatchProject | null }} args
  * @returns {Promise<ScipIndexerRunResult & { outputPath: string, sha256?: string }>}
  */
-async function stageScipBatch({ root, sessionDir, batch, onProgress, projectVersion = null }) {
+async function stageScipBatch({ root, sessionDir, batch, onProgress, projectVersion = null, project = null }) {
   const batchName = `batch-${String(batch.batchOrdinal).padStart(5, "0")}`;
   const outputDir = path.join(sessionDir, batchName);
   const outputPath = path.join(outputDir, `${batch.plan.indexerId}.scip`);
@@ -1197,7 +1228,7 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress, projectVers
         return { ok: false, outputPath, error: `source changed while staging ${document.repoRelPath}` };
       }
     }
-    await writeBatchProjectMetadata(root, viewRoot, batch);
+    await writeBatchProjectMetadata(root, viewRoot, batch, project);
     const rewritten = planWithProjectVersion(
       planWithOutputPath(batch.plan, outputPath),
       projectVersion,
@@ -1225,10 +1256,10 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress, projectVers
   }
 }
 
-async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress, projectVersion = null }) {
+async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress, projectVersion = null, project = null }) {
   const attempt = async (candidate) => {
     try {
-      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress, projectVersion });
+      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress, projectVersion, project });
     } catch (error) {
       return { ok: false, outputPath: null, error: formatAtlasError(error) };
     }
@@ -1347,7 +1378,11 @@ function scipRecoveryBatch(parent, documents, suffix) {
   };
 }
 
-async function writeBatchProjectMetadata(root, viewRoot, batch) {
+async function writeBatchProjectMetadata(root, viewRoot, batch, project) {
+  if (batch.plan.indexerId === "typescript" && project?.mode === "repository") {
+    await writeTypeScriptBatchProject({ repoRoot: root, viewRoot, paths: batch.paths, project });
+    return;
+  }
   if (batch.plan.indexerId === "typescript") {
     await fs.promises.writeFile(path.join(viewRoot, "tsconfig.json"), JSON.stringify({
       compilerOptions: { allowJs: true },

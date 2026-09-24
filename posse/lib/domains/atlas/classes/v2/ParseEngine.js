@@ -91,8 +91,7 @@ import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
 import { ensureScipStaged, stageScipBatches } from "../../functions/v2/scip/stager.js";
-import { committedScipIndexIdsForPrune } from "../../functions/v2/scip/index-prune.js";
-import { collectScipBatchSessions } from "../../functions/v2/scip/batch-session-gc.js";
+import { reclaimSupersededScipState } from "../../functions/v2/scip/session-reclaim.js";
 import {
   scipCoverageForIntake,
   scopePathsForScipSourceLanguages,
@@ -606,9 +605,10 @@ export class ParseEngine {
    * Each ready artifact is acknowledged by the serialized intake queue; the
    * stager keeps at most the configured number of unacknowledged batches.
    *
-   * `pruneSuperseded` marks `paths` as the full repository fileset: only then
-   * can a completed session replace every older bookkeeping row of the
-   * schemes it committed. Incremental sessions cover a subset and never prune.
+   * `reclaim` says what `paths` covers once the session completes: `full`
+   * (the whole repository fileset) replaces every older bookkeeping row of
+   * the schemes it committed and anchors what it leaves; `incremental` (a
+   * subset) reclaims only what earlier incremental sessions left.
    *
    * @param {AtlasWarmJobResult} base
    * @param {AtlasWarmPurpose} purpose
@@ -616,7 +616,7 @@ export class ParseEngine {
    * @param {{
    *   onBatchReady?: ((file: string, info: Record<string, any>) => Promise<unknown> | unknown) | null,
    *   onFileUnavailable?: ((info: Record<string, any>) => Promise<unknown> | unknown) | null,
-   *   pruneSuperseded?: boolean,
+   *   reclaim?: "full" | "incremental",
    * }} [opts]
    */
   async #stageScipBatches(base, purpose, paths, opts = {}) {
@@ -725,7 +725,7 @@ export class ParseEngine {
       }
       /** @type {any} */ (base).scip_batch_session = staged.sessionId || null;
       /** @type {any} */ (base).scip_batches_staged = staged.files?.length || 0;
-      if (opts.pruneSuperseded === true) await this.#reclaimSupersededScipState(staged, intakeReports);
+      if (opts.reclaim) await this.#reclaimSupersededScipState(staged, intakeReports, opts.reclaim);
       return staged.files || [];
     } catch (err) {
       logAtlasError(`[Warmer.#stageScipBatches] stageScipBatches(${this.#scipDir}) threw:`, err);
@@ -739,41 +739,58 @@ export class ParseEngine {
   }
 
   /**
-   * Reclaim what a completed full-fileset session superseded: the
-   * `scip_indexes` rows of the schemes it committed, and the batch session
-   * directories it no longer references. Both are bookkeeping or reusable
-   * cache only, so a failure leaves the previous state intact and the next
-   * completed session retries it.
+   * Reclaim the `scip_indexes` rows and batch session directories a completed
+   * session superseded (see session-reclaim.js), and after a complete
+   * full-fileset session the `external_symbols` rows no ledger edge references
+   * any more. All are bookkeeping or reusable cache only, so a failure leaves
+   * the previous state intact and the next completed session retries it.
    *
-   * @param {Parameters<typeof committedScipIndexIdsForPrune>[0]["staged"] & { sessionId?: string | null }} staged
+   * @param {Parameters<typeof reclaimSupersededScipState>[0]["staged"]} staged
    * @param {Array<any>} intakeReports
+   * @param {"full" | "incremental"} scope
    */
-  async #reclaimSupersededScipState(staged, intakeReports) {
-    const keepIds = committedScipIndexIdsForPrune({ staged, intakeReports });
-    if (!keepIds) return;
-    if (keepIds.length > 0) {
+  async #reclaimSupersededScipState(staged, intakeReports, scope) {
+    const reclaimed = await reclaimSupersededScipState({
+      ledger: this.#ledger,
+      scipDir: this.#scipDir,
+      staged,
+      intakeReports,
+      scope,
+    });
+    if (reclaimed.rowError) {
+      logAtlasError("[Warmer.#reclaimSupersededScipState] prune failed; superseded rows kept:", reclaimed.rowError);
+    }
+    const pruned = reclaimed.rows;
+    if (pruned && pruned.deleted > 0) {
+      this.#emitProgress({
+        kind: "line",
+        stream: "system",
+        stage: "scip",
+        text: `pruned ${pruned.deleted} superseded SCIP index record${pruned.deleted === 1 ? "" : "s"} (${pruned.schemes.join(", ")})`,
+      });
+    }
+    // Only a complete full-fileset session re-binds every external moniker,
+    // so only it may drop external_symbols rows no ledger edge references.
+    if (scope === "full" && !reclaimed.skipped) {
       try {
-        const pruned = this.#ledger.pruneSupersededScipIndexes(keepIds);
-        if (pruned.deleted > 0) {
+        const collected = this.#ledger.collectUnreferencedExternalSymbols();
+        if (collected.deleted > 0) {
           this.#emitProgress({
             kind: "line",
             stream: "system",
             stage: "scip",
-            text: `pruned ${pruned.deleted} superseded SCIP index record${pruned.deleted === 1 ? "" : "s"} (${pruned.schemes.join(", ")})`,
+            text: `removed ${collected.deleted} unreferenced external symbol${collected.deleted === 1 ? "" : "s"}`,
           });
         }
       } catch (err) {
-        logAtlasError("[Warmer.#reclaimSupersededScipState] prune failed; superseded rows kept:", err);
+        logAtlasError("[Warmer.#reclaimSupersededScipState] external symbol collection failed; rows kept:", err);
       }
     }
-    const gc = await collectScipBatchSessions({
-      scipDir: this.#scipDir,
-      currentSessionId: String(staged?.sessionId || ""),
-    });
-    for (const failure of gc.failed) {
+    const gc = reclaimed.sessions;
+    for (const failure of gc?.failed || []) {
       logAtlasError(`[Warmer.#reclaimSupersededScipState] SCIP batch session ${failure.session} kept; delete failed:`, failure.error);
     }
-    if (gc.removed.length > 0) {
+    if (gc && gc.removed.length > 0) {
       this.#emitProgress({
         kind: "line",
         stream: "system",
@@ -1253,6 +1270,7 @@ export class ParseEngine {
               try {
                 if (useBatchedScipStaging()) {
                   await this.#stageScipBatches(base, "main-incremental", paths, {
+                    reclaim: "incremental",
                     onBatchReady: (file, info) => scipQueue.add(file, info),
                     onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
                       documents: [], source_languages: [],
@@ -1302,7 +1320,7 @@ export class ParseEngine {
                 if (useBatchedScipStaging()) {
                   await this.#stageScipBatches(base, "main-full", paths, {
                     // A truncated walk staged a subset, not the full fileset.
-                    pruneSuperseded: base.truncated !== true,
+                    reclaim: base.truncated === true ? "incremental" : "full",
                     onBatchReady: (file, info) => scipQueue.add(file, info),
                     onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
                       documents: [], source_languages: [],

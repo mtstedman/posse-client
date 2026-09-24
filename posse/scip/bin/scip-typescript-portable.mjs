@@ -40,19 +40,25 @@ function isSourcePath(relative) {
   return sourceExtensions.has(path.extname(normalized).toLowerCase());
 }
 
-function batchProjectFiles() {
+function batchProject() {
   try {
     const project = JSON.parse(fs.readFileSync(path.join(repoRoot, "tsconfig.json"), "utf8"));
-    if (!Array.isArray(project?.files) || project.files.length === 0) return [];
-    return project.files
+    if (!Array.isArray(project?.files) || project.files.length === 0) return { files: [], rootDirs: [] };
+    const files = project.files
       .map((value) => String(value || "").replaceAll("\\", "/"))
       .filter((relative) => relative
         && !path.isAbsolute(relative)
         && !relative.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
         && isSourcePath(relative))
       .filter((relative) => fs.statSync(path.join(repoRoot, relative), { throwIfNoEntry: false })?.isFile());
+    // A repository-aware batch view maps itself onto the repository so its
+    // imports into other batches resolve to the real repository files.
+    const rootDirs = Array.isArray(project?.compilerOptions?.rootDirs)
+      ? project.compilerOptions.rootDirs.map((value) => String(value || "")).filter((value) => path.isAbsolute(value))
+      : [];
+    return { files, rootDirs };
   } catch {
-    return [];
+    return { files: [], rootDirs: [] };
   }
 }
 
@@ -85,7 +91,7 @@ function filesystemSourceFiles() {
 
 let candidates;
 let isolatedBatch = false;
-const batchFiles = batchProjectFiles();
+const { files: batchFiles, rootDirs } = batchProject();
 if (batchFiles.length > 0) {
   // Batch views are created beneath <repo>/.posse, so Git can successfully
   // resolve the PARENT worktree from their cwd. The explicit files manifest is
@@ -141,6 +147,7 @@ try {
       strict: false,
       target: "ES2022",
       useDefineForClassFields: false,
+      ...(rootDirs.length > 0 ? { rootDirs } : {}),
     },
     files: selected.map((relative) => path.join(repoRoot, relative)),
   }, null, 2)}\n`, "utf8");

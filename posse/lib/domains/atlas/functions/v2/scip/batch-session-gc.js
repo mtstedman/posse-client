@@ -3,10 +3,11 @@
 // Batch session directory GC. Every SCIP batch staging session writes
 // `<scipDir>/batches/<sessionId>/` (manifest + one `.scip` per batch) and
 // nothing removed them, so the scip dir grew by a full artifact set per
-// session. After a completed full-fileset session, only that session and the
-// sessions its reused batches point into can still be read: batch reuse
-// resolves outputs inside the session that owns the file, and the current
-// manifest names every such owner in `resumedFromSessions`.
+// session. After a completed session, that session and the sessions its reused
+// batches point into can still be read: batch reuse resolves outputs inside
+// the session that owns the file, and the current manifest names every such
+// owner in `resumedFromSessions`. An incremental session additionally retains
+// the reclaim anchor's sessions (the last full session's reusable outputs).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -29,17 +30,48 @@ export const SCIP_BATCH_SESSION_STALE_MS = 24 * 60 * 60 * 1000;
  */
 
 /**
- * Delete the batch session directories the completed session `currentSessionId`
- * no longer references. Fail closed: nothing is deleted unless the current
- * session's own manifest is readable and `complete`, and the batches root is a
- * real directory inside the scip dir. Entries that are not real directories
- * (symlinks included) are never touched. A failed delete is reported and the
- * rest continue; the next completed session retries it.
+ * The session directory names under `<scipDir>/batches` (real directories
+ * only), `[]` when there is no batches root yet, or null when the root cannot
+ * be proven to be a readable directory inside the scip dir.
  *
- * @param {{ scipDir: string, currentSessionId: string, nowMs?: number }} input
+ * @param {string} scipDir
+ * @returns {Promise<string[] | null>}
+ */
+export async function listScipBatchSessionIds(scipDir) {
+  if (!scipDir) return null;
+  const batchesRoot = path.join(scipDir, "batches");
+  try {
+    await fs.promises.lstat(batchesRoot);
+  } catch (err) {
+    return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT" ? [] : null;
+  }
+  if (await checkBatchesRoot(scipDir, batchesRoot)) return null;
+  try {
+    const entries = await fs.promises.readdir(batchesRoot, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete the batch session directories the completed session `currentSessionId`
+ * no longer references. `retainedSessionIds` names further sessions that must
+ * survive (the reclaim anchor's). Fail closed: nothing is deleted unless the
+ * current session's own manifest is readable and `complete`, and the batches
+ * root is a real directory inside the scip dir. Entries that are not real
+ * directories (symlinks included) are never touched. A failed delete is
+ * reported and the rest continue; the next completed session retries it.
+ *
+ * @param {{ scipDir: string, currentSessionId: string, retainedSessionIds?: string[], nowMs?: number }} input
  * @returns {Promise<ScipBatchSessionGcResult>}
  */
-export async function collectScipBatchSessions({ scipDir, currentSessionId, nowMs = Date.now() }) {
+export async function collectScipBatchSessions({
+  scipDir,
+  currentSessionId,
+  retainedSessionIds = [],
+  nowMs = Date.now(),
+}) {
   /** @type {ScipBatchSessionGcResult} */
   const result = { removed: [], kept: [], failed: [], skipped: null };
   const current = String(currentSessionId || "");
@@ -47,26 +79,15 @@ export async function collectScipBatchSessions({ scipDir, currentSessionId, nowM
     return { ...result, skipped: "no_current_session" };
   }
   const batchesRoot = path.join(scipDir, "batches");
-  try {
-    const stat = await fs.promises.lstat(batchesRoot);
-    if (!stat.isDirectory()) return { ...result, skipped: "batches_root_not_directory" };
-    const [realScipDir, realBatchesRoot] = await Promise.all([
-      fs.promises.realpath(scipDir),
-      fs.promises.realpath(batchesRoot),
-    ]);
-    if (realBatchesRoot !== path.join(realScipDir, "batches")) {
-      return { ...result, skipped: "batches_root_escapes_scip_dir" };
-    }
-  } catch {
-    return { ...result, skipped: "batches_root_unreadable" };
-  }
+  const rootProblem = await checkBatchesRoot(scipDir, batchesRoot);
+  if (rootProblem) return { ...result, skipped: rootProblem };
 
   const currentManifest = await readSessionManifest(path.join(batchesRoot, current));
   if (!currentManifest || currentManifest.state?.status !== "complete"
     || String(currentManifest.state?.sessionId || current) !== current) {
     return { ...result, skipped: "current_session_not_complete" };
   }
-  const referenced = new Set([current]);
+  const referenced = new Set([current, ...retainedSessionIds.map((sessionId) => String(sessionId))]);
   for (const sessionId of Array.isArray(currentManifest.state?.resumedFromSessions)
     ? currentManifest.state.resumedFromSessions
     : []) {
@@ -102,6 +123,29 @@ export async function collectScipBatchSessions({ scipDir, currentSessionId, nowM
     }
   }
   return result;
+}
+
+/**
+ * Null when `batchesRoot` is a real directory at `<scipDir>/batches`, else the
+ * reason nothing under it may be touched.
+ *
+ * @param {string} scipDir
+ * @param {string} batchesRoot
+ * @returns {Promise<string | null>}
+ */
+async function checkBatchesRoot(scipDir, batchesRoot) {
+  try {
+    const stat = await fs.promises.lstat(batchesRoot);
+    if (!stat.isDirectory()) return "batches_root_not_directory";
+    const [realScipDir, realBatchesRoot] = await Promise.all([
+      fs.promises.realpath(scipDir),
+      fs.promises.realpath(batchesRoot),
+    ]);
+    if (realBatchesRoot !== path.join(realScipDir, "batches")) return "batches_root_escapes_scip_dir";
+    return null;
+  } catch {
+    return "batches_root_unreadable";
+  }
 }
 
 /**

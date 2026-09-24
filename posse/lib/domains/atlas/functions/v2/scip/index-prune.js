@@ -1,10 +1,11 @@
 // @ts-check
 //
 // Superseded `scip_indexes` bookkeeping. A completed SCIP staging session
-// that covered the full repository fileset commits one row per artifact; any
-// other row of the same scheme describes an older fileset, config or indexer
-// and can only serve as a stale skip key. This decides whether a session's
-// intake proves a complete replacement, and which ids it committed.
+// commits one row per artifact; after a full-fileset session any other row of
+// the same scheme describes an older fileset, config or indexer and can only
+// serve as a stale skip key (an incremental session reclaims less, see
+// session-reclaim.js). This decides whether a session's intake proves a
+// complete session, and which ids it committed.
 
 /**
  * @typedef {{ ok?: boolean, failed_documents?: unknown[], scip_index_id?: number | null }} ScipIntakeReport

@@ -270,16 +270,8 @@ export function buildResearchCitationFetchGateText({ reason = "before_synthesis"
 // bare "agent_handoff" left one Atlas497 researcher ending its turn in prose.
 export const RESEARCH_WORK_BUDGET_EXHAUSTED_PREFIX = "RESEARCH WORK BUDGET EXHAUSTED:";
 
-export const RESEARCH_WORK_BUDGET_CLOSEOUT_PREFIX = "RESEARCH WORK BUDGET CLOSING:";
-
-export function buildResearchWorkBudgetExhaustedText({ handoffToolName = "", remaining = 0 } = {}) {
-  // Announcing exhaustion only on the last admitted call tells the caller the
-  // budget is gone at the moment it can no longer act on that. Stating the
-  // remaining count while calls are left lets a reader close out its own way.
-  const left = Number.isSafeInteger(remaining) && remaining > 0 ? remaining : 0;
-  const fact = left > 0
-    ? `${RESEARCH_WORK_BUDGET_CLOSEOUT_PREFIX} ${left} retrieval ${left === 1 ? "call remains" : "calls remain"} in the work budget. Calls after that return blocked without executing.`
-    : `${RESEARCH_WORK_BUDGET_EXHAUSTED_PREFIX} the retrieval work budget is fully used. Further retrieval and traversal calls will return blocked without executing.`;
+export function buildResearchWorkBudgetExhaustedText({ handoffToolName = "" } = {}) {
+  const fact = `${RESEARCH_WORK_BUDGET_EXHAUSTED_PREFIX} the retrieval work budget is fully used. Further retrieval and traversal calls will return blocked without executing.`;
   const tool = String(handoffToolName || "").trim();
   if (!tool) return fact;
   return `${fact} Next step: call the ${tool} tool with your terminal researcher report. Do not end the turn with prose alone.`;

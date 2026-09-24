@@ -41,6 +41,7 @@ import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
+import { setResponsiveTimeout } from "../../concurrency/functions/responsive-timeout.js";
 import {
   defaultNativeBinRoot,
   installedNativeArtifactVersionsSync,
@@ -507,14 +508,15 @@ export class NativeBinary {
   async #awaitWorkerAuthHandoff(route) {
     const handoff = this._workerAuthHandoffs.get(route);
     if (!handoff) return isValidPulseEnvelope(this._workerAuthState.get(route)?.envelope);
+    /** @type {{ clear: () => void } | null} */
     let handoffTimer = null;
     const delivered = await Promise.race([
       handoff.then((routes) => routes.includes(route)),
       new Promise((resolve) => {
-        handoffTimer = setTimeout(() => resolve(false), WORKER_PULL_GRANT_WAIT_MS);
+        handoffTimer = setResponsiveTimeout(() => resolve(false), WORKER_PULL_GRANT_WAIT_MS);
       }),
     ]);
-    if (handoffTimer) clearTimeout(handoffTimer);
+    handoffTimer?.clear();
     return delivered || isValidPulseEnvelope(this._workerAuthState.get(route)?.envelope);
   }
 
@@ -536,6 +538,7 @@ export class NativeBinary {
 
   async #establishWorkerRouteAuth(route, fallbackPulse = null) {
     const daemon = this.#daemon();
+    /** @type {{ clear: () => void } | null} */
     let timer = null;
     const pulled = new Promise((resolve) => {
       let settled = false;
@@ -543,7 +546,7 @@ export class NativeBinary {
         finish: (value) => {
           if (settled) return;
           settled = true;
-          if (timer) clearTimeout(timer);
+          timer?.clear();
           const current = this._workerAuthWaiters.get(route) || [];
           const remaining = current.filter((candidate) => candidate !== waiter);
           if (remaining.length > 0) this._workerAuthWaiters.set(route, remaining);
@@ -552,22 +555,22 @@ export class NativeBinary {
         },
         claim: () => {
           if (settled) return;
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(() => waiter.finish(false), WORKER_PULL_GRANT_WAIT_MS);
+          timer?.clear();
+          timer = setResponsiveTimeout(() => waiter.finish(false), WORKER_PULL_GRANT_WAIT_MS);
         },
       };
       const waiters = this._workerAuthWaiters.get(route) || [];
       waiters.push(waiter);
       this._workerAuthWaiters.set(route, waiters);
-      timer = setTimeout(() => waiter.finish(false), WORKER_PULL_BOOTSTRAP_WAIT_MS);
+      timer = setResponsiveTimeout(() => waiter.finish(false), WORKER_PULL_BOOTSTRAP_WAIT_MS);
     });
     if (!daemon.ensureStarted()) {
-      if (timer) clearTimeout(timer);
+      timer?.clear();
       this.#resolveWorkerAuthWaiters(route, false);
       return false;
     }
     const granted = await pulled;
-    if (timer) clearTimeout(timer);
+    timer?.clear();
     if (granted) return true;
     if (this._workerPullManaged) return this.#awaitWorkerAuthHandoff(route);
     // Rollout bridge for an already-released worker that predates pull: seed it

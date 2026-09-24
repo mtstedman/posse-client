@@ -697,7 +697,6 @@ function researchNoticeFlagsFor(session) {
       curtain: false,
       extension: false,
       earlyFetchBatching: false,
-      budgetClosing: false,
       budgetExhausted: false,
       thinImplementationGaps: 0,
     };
@@ -1176,13 +1175,9 @@ function projectAtlasModelResult(result, session, toolName, toolArgs = {}) {
 export const __testProjectAtlasModelResult = projectAtlasModelResult;
 
 function normalizeResearcherTypedAtlasResultFieldNames(result, session, toolName, toolArgs = {}) {
-  const policy = sessionToolPolicy(session);
-  if (
-    !usesResearcherAtlasReadSurface(policy, { includeWorkflow: true })
-    || result?.isError === true
-  ) {
-    return result;
-  }
+  // Error results are model-visible too: an all-failed symbol.get batch is
+  // isError at the envelope and still carries a structured header.
+  if (!usesResearcherAtlasReadSurface(sessionToolPolicy(session), { includeWorkflow: true })) return result;
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   const requested = requestedToolPolicyName(toolName, toolArgs);
@@ -1233,7 +1228,7 @@ function batchChildHeaderBlocks(headerText) {
   }
   if (!parsed || !Array.isArray(parsed.items)) return [];
   return parsed.items
-    .map(item => (Array.isArray(item?.content_blocks) ? item.content_blocks[0] : item?.contentBlocks?.[0]))
+    .map(item => (Array.isArray(item?.content_blocks) ? item.content_blocks[0] : null))
     .filter(index => Number.isSafeInteger(index) && index > 0);
 }
 
@@ -3196,35 +3191,23 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 // so a refunded final call reports nothing. Error results consume a slot too.
 // Batch items defer to the combined batch result; a per-attempt flag keeps
 // the notice to one delivery across the Atlas, gateway, and batch paths.
-// How much budget is left when the closing window is announced. The notice is
-// advisory and reserves nothing: every call stays available. At two calls the
-// announcement landed with 92% of the budget already spent and no run changed
-// course, so it names the window while a change of plan is still possible.
-const RESEARCH_BUDGET_CLOSEOUT_RESERVE = 6;
-
+// There is no countdown before exhaustion. A "N calls remain" closing window
+// (six calls out) read as an instruction to stop: Atlas528/530 researchers
+// handed off with the window unspent and left located-but-unread code out of
+// the report. Remaining calls are the reader's to spend.
 function appendResearchBudgetExhaustedNotice(result, admission, session) {
   if (resolveAtlasResearchRuntimeGuidance()) return result;
   if (!admission?.tracked || admission.blocked || admission.physicalBatchId) return result;
   const max = admissionMaxPhysicalCalls(admission);
   const remaining = researchWorkBudget(admission)?.remaining;
-  if (!Number.isSafeInteger(remaining)) return result;
-  // Reserve a closeout window: a reader told the budget is gone on its final
-  // admitted call has no capacity left to finish a thought, and an attempt
-  // that ends without a staged report costs every call it already made.
-  if (remaining > RESEARCH_BUDGET_CLOSEOUT_RESERVE) return result;
-  if (remaining === 0 && !(Number(admission.assignedPhysicalCallStep) >= max)) return result;
+  if (remaining !== 0 || !(Number(admission.assignedPhysicalCallStep) >= max)) return result;
   const flags = session ? researchNoticeFlagsFor(session) : null;
-  // The closing window and exhaustion are different facts and each is worth
-  // saying once. One shared flag let whichever fired first silence the other,
-  // so a budget that jumped straight to zero never announced a closing window
-  // at all.
-  const stage = remaining > 0 ? "budgetClosing" : "budgetExhausted";
-  if (flags?.[stage]) return result;
-  const next = appendOwnerModelControlNotice(result, `\n\n${researchWorkBudgetExhaustedText(session, remaining)}`, {
-    kind: remaining > 0 ? "research_budget_closing" : "research_budget_exhausted",
+  if (flags?.budgetExhausted) return result;
+  const next = appendOwnerModelControlNotice(result, `\n\n${researchWorkBudgetExhaustedText(session)}`, {
+    kind: "research_budget_exhausted",
     trigger: "physical_call_ceiling",
   });
-  if (next !== result && flags) flags[stage] = true;
+  if (next !== result && flags) flags.budgetExhausted = true;
   return next;
 }
 
@@ -3238,11 +3221,8 @@ function agentHandoffCallableName(session) {
   });
 }
 
-function researchWorkBudgetExhaustedText(session, remaining = 0) {
-  return buildResearchWorkBudgetExhaustedText({
-    handoffToolName: agentHandoffCallableName(session),
-    remaining,
-  });
+function researchWorkBudgetExhaustedText(session) {
+  return buildResearchWorkBudgetExhaustedText({ handoffToolName: agentHandoffCallableName(session) });
 }
 
 // Unguided blocked payloads state the same fact: a model that has already
