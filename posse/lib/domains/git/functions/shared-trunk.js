@@ -283,7 +283,11 @@ function isAncestor(projectDir, ancestor, descendant) {
 
 function refSha(projectDir, ref) {
   try {
-    const oid = execGit(["rev-parse", ref], projectDir).trim();
+    const oid = String(
+      testOverrides?.resolveRefSha
+        ? testOverrides.resolveRefSha(projectDir, ref)
+        : execGit(["rev-parse", ref], projectDir),
+    ).trim();
     return SHA_RE.test(oid) ? oid : "";
   } catch {
     return "";

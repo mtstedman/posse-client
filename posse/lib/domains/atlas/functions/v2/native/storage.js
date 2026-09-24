@@ -22,6 +22,11 @@ import {
 } from "../../../../../catalog/atlas.js";
 import { runAtlasNativeMethodAsync } from "./invoke.js";
 
+// Schema initialization may need to read and checkpoint a large existing
+// ledger before it can reply. Keep that work bounded, but do not force it
+// through the daemon transport's short interactive-request default.
+export const DEFAULT_ATLAS_LEDGER_ENSURE_TIMEOUT_MS = 10 * 60_000;
+
 export {
   ATLAS_LEDGER_ENSURE_METHOD,
   ATLAS_LEDGER_WRITE_METHOD,
@@ -39,6 +44,7 @@ export {
 export function ensureLedgerNativeAsync(ledgerPath, opts = {}) {
   return runAtlasNativeMethodAsync(ATLAS_LEDGER_ENSURE_METHOD, { ledger_path: ledgerPath }, {
     idempotent: false,
+    timeoutMs: DEFAULT_ATLAS_LEDGER_ENSURE_TIMEOUT_MS,
     ...opts,
   });
 }
