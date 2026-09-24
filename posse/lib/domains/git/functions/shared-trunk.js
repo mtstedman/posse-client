@@ -269,6 +269,9 @@ function commitExists(projectDir, sha) {
 
 function isAncestor(projectDir, ancestor, descendant) {
   if (!SHA_RE.test(String(ancestor || "")) || !SHA_RE.test(String(descendant || ""))) return false;
+  if (testOverrides?.isAncestor) {
+    return testOverrides.isAncestor(projectDir, ancestor, descendant) === true;
+  }
   try {
     execGit(["merge-base", "--is-ancestor", ancestor, descendant], projectDir);
     return true;
