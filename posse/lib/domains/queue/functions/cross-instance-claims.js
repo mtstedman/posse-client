@@ -12,7 +12,7 @@ import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.
 import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-native.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { logDurableEvent, logEvent } from "./events.js";
-import { readRuntimeStatus, RUNTIME_STATUS_KEYS } from "./runtime-status.js";
+import { readRuntimeStatus, RUNTIME_STATUS_KEYS, updateSharedTrunkRuntimeStatus } from "./runtime-status.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 
 const CLAIM_PROTOCOL = "posse.shared_trunk_claim.v1";
@@ -100,6 +100,7 @@ function normalizeFetchedClaim(raw, {
   if (!payload || payload.protocol !== CLAIM_PROTOCOL) return null;
   const instanceId = boundedString(payload.instance_id);
   const path = normalizePath(payload.path);
+  if (path === "*") return null;
   const scopeKind = normalizeScopeKind(payload.scope_kind, path);
   if (!instanceId || !path || !scopeKind || payload.kind !== "hard") return null;
   if (sharedTrunkClaimKey(path, scopeKind) !== refData.key) return null;
@@ -127,7 +128,7 @@ function normalizeFetchedClaim(raw, {
   };
 }
 
-function expiredFetchedClaim(raw, observedAtMs = Date.now()) {
+function expiredFetchedClaim(raw, observedAtMs = Date.now(), expiryGraceMs = 0) {
   const refData = claimRefAndKey(raw);
   if (!refData) return null;
   const objectOid = boundedString(raw.objectOid || raw.object_oid || raw.oid, 64);
@@ -138,8 +139,27 @@ function expiredFetchedClaim(raw, observedAtMs = Date.now()) {
   const scopeKind = normalizeScopeKind(payload.scope_kind, path);
   const expiresAtMs = Date.parse(payload.expires_at || "");
   if (!path || !scopeKind || sharedTrunkClaimKey(path, scopeKind) !== refData.key) return null;
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs > observedAtMs) return null;
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs + expiryGraceMs > observedAtMs) return null;
   return { claimKey: refData.key, objectOid };
+}
+
+// Preserve the CAS/ownership observation for a structurally valid claim even
+// after its advertised expiry. Cleanup deliberately waits one additional TTL
+// for clock skew; during that grace period the ref still exists and must not be
+// mistaken for an absent key by a new local claim.
+function fetchedClaimLease(raw) {
+  const refData = claimRefAndKey(raw);
+  if (!refData) return null;
+  const objectOid = boundedString(raw.objectOid || raw.object_oid || raw.oid, 64);
+  if (!OBJECT_ID_RE.test(objectOid || "")) return null;
+  const payload = parsePayloadText(raw.payload ?? raw.payloadJson ?? raw.payload_json);
+  if (!payload || payload.protocol !== CLAIM_PROTOCOL || payload.kind !== "hard") return null;
+  const instanceId = boundedString(payload.instance_id);
+  const path = normalizePath(payload.path);
+  const scopeKind = normalizeScopeKind(payload.scope_kind, path);
+  if (!instanceId || !path || path === "*" || !scopeKind
+    || sharedTrunkClaimKey(path, scopeKind) !== refData.key) return null;
+  return { claim_key: refData.key, object_oid: objectOid, instance_id: instanceId };
 }
 
 export function normalizeFetchedSharedTrunkClaims(fetchedClaims, options = {}) {
@@ -226,6 +246,10 @@ function activeLockClaims(activeLocks, instanceId, ttlMin, nowMs = Date.now()) {
   const expiresAt = new Date(nowMs + Math.max(1, Number(ttlMin) || 30) * 60_000).toISOString();
   for (const raw of rows) {
     const path = normalizePath(raw.path);
+    // Whole-repository rows are local scheduler barriers or unknown-scope
+    // fallbacks. Publishing either as an advisory peer veto turns routine
+    // assessment/legacy jobs into a global cross-clone lock.
+    if (path === "*") continue;
     const scopeKind = normalizeScopeKind(raw.lock_kind, path);
     const wiId = Number(raw.work_item_id);
     const jobId = raw.job_id == null ? null : Number(raw.job_id);
@@ -323,6 +347,7 @@ export async function syncCrossInstanceClaims({
   claimSnapshotStartedAt = null,
   activeLocks = { work_items: [], jobs: [] },
   casPush = casPushSharedTrunkClaimNative,
+  signal = null,
 } = {}) {
   if (!config?.enabled || !config?.claimsEnabled) return { attempted: false, skipped: "disabled" };
   const owner = boundedString(instanceId);
@@ -351,22 +376,37 @@ export async function syncCrossInstanceClaims({
     completeSnapshot,
     snapshotStartedAt: claimSnapshotStartedAt,
   });
-  const remoteByKey = new Map(normalized.map((row) => [row.claim_key, row]));
+  const remoteByKey = new Map();
+  for (const raw of boundedFetched) {
+    const lease = fetchedClaimLease(raw);
+    if (lease) remoteByKey.set(lease.claim_key, lease);
+  }
+  for (const row of normalized) remoteByKey.set(row.claim_key, row);
   let expiredReleased = 0;
   let lostRaces = 0;
+  let failures = 0;
   for (const expired of boundedFetched
-    .map((raw) => expiredFetchedClaim(raw, observedAtMs))
+    // A peer's wall clock may be ahead of ours. Require one full configured
+    // TTL of staleness before CAS-deleting its ref, which preserves advisory
+    // safety while still bounding abandoned-ref retention.
+    .map((raw) => expiredFetchedClaim(
+      raw,
+      observedAtMs,
+      Math.max(1, Number(config.claimsTtlMin) || 30) * 60_000,
+    ))
     .filter(Boolean)) {
-    const result = await casPush({
-      cwd: projectDir,
-      remote: config.remote,
-      claimKey: expired.claimKey,
-      expectedOldOid: expired.objectOid,
-      payload: null,
-    });
-    if (result?.available === false) {
-      throw new Error(`Shared-trunk claim capability unavailable: ${result.reason || "unknown"}`);
-    }
+    let result;
+    if (signal?.aborted) { failures += 1; break; }
+    try {
+      result = await casPush({
+        cwd: projectDir,
+        remote: config.remote,
+        claimKey: expired.claimKey,
+        expectedOldOid: expired.objectOid,
+        payload: null,
+      }, { timeoutMs: 30_000, ...(signal ? { signal } : {}) });
+    } catch { failures += 1; continue; }
+    if (result?.available === false) { failures += 1; continue; }
     const status = resultStatus(result);
     if (status === "applied") {
       const local = getDb().prepare(
@@ -377,7 +417,7 @@ export async function syncCrossInstanceClaims({
     } else if (status === "lost_race") {
       lostRaces += 1;
     } else {
-      throw new Error(`Unexpected expired shared-trunk claim cleanup outcome: ${status || "missing"}`);
+      failures += 1;
     }
   }
   const localRows = localClaimRows();
@@ -388,13 +428,24 @@ export async function syncCrossInstanceClaims({
   let released = 0;
 
   for (const [claimKey, claim] of desired) {
-    const remote = remoteByKey.get(claimKey) || null;
+    if (signal?.aborted) { failures += 1; break; }
+    const fetchedRemote = remoteByKey.get(claimKey) || null;
+    const mirroredRemote = fetchedRemote ? null : getDb().prepare(`
+      SELECT claim_key, object_oid, instance_id, expires_at
+      FROM shared_trunk_peer_claims
+      WHERE claim_key = ? AND expires_at > ?
+    `).get(claimKey, new Date(observedAtMs).toISOString());
+    const remote = fetchedRemote || mirroredRemote || null;
     const local = localByKey.get(claimKey) || null;
     if (remote && remote.instance_id !== owner) {
       if (local) deleteLocalClaim(claimKey);
       lostRaces += 1;
       continue;
     }
+    // A page is not an absence proof. Do not recreate or renew an off-page
+    // claim until the keyset cycle completes; the durable mirror above covers
+    // peers seen on earlier pages, while a healthy local lease can wait.
+    if (!completeSnapshot && !fetchedRemote) continue;
     if (
       remote
       && local
@@ -407,16 +458,17 @@ export async function syncCrossInstanceClaims({
     // carries the last OID we successfully published. Use it as the CAS lease
     // instead of attempting an unsafe create.
     const expectedOldOid = remote?.object_oid || local?.object_oid || null;
-    const result = await casPush({
-      cwd: projectDir,
-      remote: config.remote,
-      claimKey,
-      expectedOldOid,
-      payload: claim.payload,
-    });
-    if (result?.available === false) {
-      throw new Error(`Shared-trunk claim capability unavailable: ${result.reason || "unknown"}`);
-    }
+    let result;
+    try {
+      result = await casPush({
+        cwd: projectDir,
+        remote: config.remote,
+        claimKey,
+        expectedOldOid,
+        payload: claim.payload,
+      }, { timeoutMs: 30_000, ...(signal ? { signal } : {}) });
+    } catch { failures += 1; continue; }
+    if (result?.available === false) { failures += 1; continue; }
     const status = resultStatus(result);
     if (status === "lost_race") {
       lostRaces += 1;
@@ -424,34 +476,38 @@ export async function syncCrossInstanceClaims({
       continue;
     }
     if (status !== "applied") {
-      throw new Error(`Unexpected shared-trunk claim publish outcome: ${status || "missing"}`);
+      failures += 1;
+      continue;
     }
     const applied = nativeResult(result);
     const objectOid = applied?.newOid || applied?.new_oid || applied?.objectOid || applied?.object_oid;
     if (!OBJECT_ID_RE.test(String(objectOid || ""))) {
-      throw new Error("Shared-trunk claim publish did not return a valid object id");
+      failures += 1;
+      continue;
     }
     upsertLocalClaim(claim, owner, String(objectOid));
     published += 1;
   }
 
   for (const local of localRows) {
+    if (signal?.aborted) { failures += 1; break; }
     if (desired.has(local.claim_key)) continue;
     const remote = remoteByKey.get(local.claim_key);
     if (remote && (remote.instance_id !== owner || remote.object_oid !== local.object_oid)) {
       deleteLocalClaim(local.claim_key);
       continue;
     }
-    const result = await casPush({
-      cwd: projectDir,
-      remote: config.remote,
-      claimKey: local.claim_key,
-      expectedOldOid: local.object_oid,
-      payload: null,
-    });
-    if (result?.available === false) {
-      throw new Error(`Shared-trunk claim capability unavailable: ${result.reason || "unknown"}`);
-    }
+    let result;
+    try {
+      result = await casPush({
+        cwd: projectDir,
+        remote: config.remote,
+        claimKey: local.claim_key,
+        expectedOldOid: local.object_oid,
+        payload: null,
+      }, { timeoutMs: 30_000, ...(signal ? { signal } : {}) });
+    } catch { failures += 1; continue; }
+    if (result?.available === false) { failures += 1; continue; }
     const status = resultStatus(result);
     if (status === "applied" || status === "lost_race") {
       deleteLocalClaim(local.claim_key);
@@ -459,8 +515,10 @@ export async function syncCrossInstanceClaims({
       else lostRaces += 1;
       continue;
     }
-    throw new Error(`Unexpected shared-trunk claim release outcome: ${status || "missing"}`);
+    failures += 1;
   }
+
+  updateSharedTrunkRuntimeStatus({ claim_sync_failure_count: failures });
 
   if (published || released || expiredReleased || lostRaces || peerRows.length) {
     notifyQueueStateChanged({ reason: "shared_trunk_claims_refreshed" });
@@ -473,6 +531,7 @@ export async function syncCrossInstanceClaims({
     released,
     expiredReleased,
     lostRaces,
+    failures,
   };
 }
 
@@ -539,6 +598,11 @@ export function recordPeerClaimDeferral(job, conflict, { maxDeferMin = 30 } = {}
     `).get(job.id, claim.claim_key);
     let changed = false;
     if (!row || row.claim_identity !== identity) {
+      const jobFirstDeferredAt = db.prepare(`
+        SELECT MIN(first_deferred_at) AS first_deferred_at
+        FROM shared_trunk_claim_deferrals
+        WHERE job_id = ?
+      `).get(job.id)?.first_deferred_at || at;
       db.prepare(`
         INSERT INTO shared_trunk_claim_deferrals (
           job_id, work_item_id, claim_key, claim_identity, first_deferred_at,
@@ -550,8 +614,8 @@ export function recordPeerClaimDeferral(job, conflict, { maxDeferMin = 30 } = {}
           first_deferred_at = excluded.first_deferred_at,
           last_deferred_at = excluded.last_deferred_at,
           hardened_at = NULL
-      `).run(job.id, job.work_item_id, claim.claim_key, identity, at, at);
-      row = { first_deferred_at: at, hardened_at: null };
+      `).run(job.id, job.work_item_id, claim.claim_key, identity, jobFirstDeferredAt, at);
+      row = { first_deferred_at: jobFirstDeferredAt, hardened_at: null };
       changed = true;
     } else {
       db.prepare(`
@@ -602,6 +666,9 @@ export function recordPeerClaimDeferral(job, conflict, { maxDeferMin = 30 } = {}
 export function clearPeerClaimDeferralsForJob(jobId) {
   try {
     const db = getDb();
+    if (!db.prepare("SELECT 1 FROM shared_trunk_claim_deferrals WHERE job_id = ? LIMIT 1").get(Number(jobId))) {
+      return 0;
+    }
     return runImmediateTransaction(db, () => (
       db.prepare("DELETE FROM shared_trunk_claim_deferrals WHERE job_id = ?").run(Number(jobId)).changes
     ));
@@ -614,37 +681,40 @@ export function clearPeerClaimDeferralsForJob(jobId) {
 export function warnForPeerClaimAtToolWrite(job, filePath) {
   const path = normalizePath(filePath);
   if (!job?.id || !path) return null;
-  const conflict = findPeerClaimConflict({ files: [path], createRoots: [] });
-  if (!conflict) return null;
-  const claim = conflict.claim;
-  const db = getDb();
-  const fingerprint = `${job.id}:${claimIdentity(claim)}:${path}`;
-  const recent = db.prepare(`
-    SELECT event_json FROM queue_event_state
-    WHERE job_id = ? AND event_type = ?
-    ORDER BY id DESC LIMIT 1
-  `).get(job.id, EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING);
   try {
-    if (JSON.parse(recent?.event_json || "{}").fingerprint === fingerprint) return conflict;
-  } catch { /* emit a fresh bounded warning */ }
-  try {
-    logDurableEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING,
-      actor_type: EVENT_ACTORS.WORKER,
-      actor_id: `job-${job.id}`,
-      message: `Peer instance ${claim.instance_id} is editing ${path}; a merge conflict is possible`,
-      event_json: JSON.stringify({
-        fingerprint,
-        peer_instance_id: claim.instance_id,
-        peer_work_item_id: claim.work_item_id,
-        path,
-        advisory: true,
-      }),
-    });
+    const conflict = findPeerClaimConflict({ files: [path], createRoots: [] });
+    if (!conflict) return null;
+    const claim = conflict.claim;
+    const db = getDb();
+    const fingerprint = `${job.id}:${claimIdentity(claim)}:${path}`;
+    const recent = db.prepare(`
+      SELECT event_json FROM queue_event_state
+      WHERE job_id = ? AND event_type = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(job.id, EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING);
+    try {
+      if (JSON.parse(recent?.event_json || "{}").fingerprint === fingerprint) return conflict;
+    } catch { /* emit a fresh bounded warning */ }
+    try {
+      logDurableEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING,
+        actor_type: EVENT_ACTORS.WORKER,
+        actor_id: `job-${job.id}`,
+        message: `Peer instance ${claim.instance_id} is editing ${path}; a merge conflict is possible`,
+        event_json: JSON.stringify({
+          fingerprint,
+          peer_instance_id: claim.instance_id,
+          peer_work_item_id: claim.work_item_id,
+          path,
+          advisory: true,
+        }),
+      });
+    } catch { /* telemetry failure does not erase the observed advisory conflict */ }
+    return conflict;
   } catch { /* Advisory telemetry must not refuse an otherwise permitted write. */ }
-  return conflict;
+  return null;
 }
 
 export function sharedTrunkClaimsEnabled() {

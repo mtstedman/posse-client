@@ -769,7 +769,11 @@ export class PlannerRole extends BaseRole {
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
-    const researchBudget = researchPolicy ? `Research budgets: decide within ${researchPolicy.triageMaxTurns} triage turns which questions need research children. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.` : null;
+    const researchBudget = researchPolicy ? [
+      `Research budgets: decide within ${researchPolicy.triageMaxTurns} triage turns which questions need research children. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.`,
+      "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
+      "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; use an evidence source_ref only to traverse beyond shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
+    ].join("\n") : null;
     const remoteInstructions = [contract, researchBudget, contextText]
       .filter((part) => part != null && String(part) !== "")
       .join("\n");
@@ -803,7 +807,7 @@ export class PlannerRole extends BaseRole {
       shortJobTitle,
     } = this.roleDeps();
     const budgetTurns = researchBudgetToMaxTurnsOverride(ctx.researchBudget, "planner");
-    const plannerDispatch = ctx.payload?.planner_dispatch === true || ctx.plannerPacket?.planner_dispatch === true;
+    const plannerDispatch = ctx.plannerPacket?.planner_dispatch === true;
     const dispatchTurns = plannerDispatch && ctx.providerName === "claude" ? PLANNER_DISPATCH_CLAUDE_MAX_TURNS : 0;
     const maxTurns = Math.max(budgetTurns || 0, dispatchTurns) || null;
     return {

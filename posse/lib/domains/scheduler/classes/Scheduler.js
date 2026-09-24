@@ -1515,7 +1515,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -1645,6 +1645,11 @@ export class Scheduler {
         // where a scheduler could otherwise fetch/mutate with an unscoped
         // cached envelope before its first session heartbeat.
         const sessionPoll = await this._sessionMonitor.poll();
+        if (sessionPoll?.teamSubmissionChanged && onTeamSubmissionChange) {
+          this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, {
+            workItemIds: sessionPoll.teamSubmissionWorkItemIds || [],
+          });
+        }
         this._sessionRoutingUnavailable = sessionPoll?.unavailable === true;
         if (sessionPoll?.requestsDrain || sessionPoll?.fatal) {
           pairingDrainRequested = true;
@@ -1659,9 +1664,12 @@ export class Scheduler {
         // this lap therefore sees a trunk no older than the configured
         // cadence. Transport failures are explicitly fail-open inside the
         // poller; merge publication performs its own fail-closed preflight.
-        await this._sharedTrunkPoller.poll({
+        const trunkPoll = await this._sharedTrunkPoller.poll({
           idle: activeWorkers.size === 0 && idleCount > 0,
         });
+        if (trunkPoll?.advanced && onTeamSubmissionChange) {
+          this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
+        }
         if (!sessionPoll?.unavailable) await this._sessionJobRouter.poll();
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
@@ -2149,7 +2157,10 @@ export class Scheduler {
           // runnable job can lease; the poller remains a cheap cadence no-op
           // when the last fetch is already fresh enough.
           if (candidateCount === 0) {
-            await this._sharedTrunkPoller.poll({ idle: false });
+            const activeTrunkPoll = await this._sharedTrunkPoller.poll({ idle: false });
+            if (activeTrunkPoll?.advanced && onTeamSubmissionChange) {
+              this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
+            }
           }
 
           for (const job of candidates) {
@@ -2340,12 +2351,18 @@ export class Scheduler {
 
               const sharedTrunkConfig = this._sharedTrunkPoller?.currentConfig?.();
               if (sharedTrunkConfig?.enabled && sharedTrunkConfig?.claimsEnabled) {
-                const peerConflict = findPeerClaimConflict(jobScope);
+                let peerConflict = null;
+                let advisory = null;
+                try {
+                  peerConflict = findPeerClaimConflict(jobScope);
+                  if (peerConflict) {
+                    advisory = recordPeerClaimDeferral(job, peerConflict, {
+                      maxDeferMin: sharedTrunkConfig.claimDeferMaxMin,
+                    });
+                  }
+                } catch { /* Cross-instance claims are advisory and fail open. */ }
                 if (peerConflict) {
-                  const advisory = recordPeerClaimDeferral(job, peerConflict, {
-                    maxDeferMin: sharedTrunkConfig.claimDeferMaxMin,
-                  });
-                  if (advisory.defer) {
+                  if (advisory?.defer) {
                     const peer = peerConflict.claim;
                     const conflictPath = peerConflict.candidate?.path || peer.path || "unknown";
                     rememberBlockedLock({

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git.js";
+import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { createPairingRemoteClient } from "./remote-client.js";
 import { repositoryFingerprint } from "./git.js";
@@ -38,6 +39,11 @@ const MAX_VERIFIED_GRANT_CACHE_MS = 60_000;
 // shell, image, DB, ATLAS and custom mutation routes fail closed at dispatch.
 const MANAGED_FILE_WRITE_BOUNDARY_READY = true;
 const verifiedGrantCache = new Map();
+const providerProvenanceCache = new Map();
+const PROVIDER_PROVENANCE_CACHE_MS = 5 * 60_000;
+const PROVIDER_PROVENANCE_FAILURE_CACHE_MS = 30_000;
+const MAX_PROVIDER_PROVENANCE_CACHE_ENTRIES = 128;
+const MAX_PROVIDER_PROVENANCE_CANDIDATES = 16;
 
 function fail(reason, message = null) {
   return { ok: false, reason, ...(message ? { message: String(message).slice(0, 240) } : {}) };
@@ -218,6 +224,7 @@ async function resolveGrant({ client, state, workItemId, projectDir, response = 
 
 export function invalidateVerifiedTeamGrantCache() {
   verifiedGrantCache.clear();
+  providerProvenanceCache.clear();
 }
 
 /** Tool-time grant lookup. A signed whole-WI group is cached for at most one
@@ -572,9 +579,13 @@ export async function gateTeamCandidateForPublication({
     });
     if (!scope.ok) return scope;
     const refs = submittedRefPair(state, workItemId, operation.sourceSha, operation.candidateSha);
-    git(["push", "--atomic", state.remote_name,
+    gitPushWithGitHubCliFallback(["push", "--atomic", state.remote_name,
       `${operation.sourceSha}:${refs.workbranch_ref}`,
-      `${operation.candidateSha}:${refs.candidate_ref}`], projectDir);
+      `${operation.candidateSha}:${refs.candidate_ref}`], projectDir, {
+      remote: state.remote_name,
+      gitExecFn: git,
+      fallbackGitExecFn: git,
+    });
     if (advertisedOid(projectDir, state.remote_name, refs.workbranch_ref) !== operation.sourceSha
       || advertisedOid(projectDir, state.remote_name, refs.candidate_ref) !== operation.candidateSha) {
       return fail("team_workbranch_unverifiable");
@@ -698,19 +709,109 @@ export async function verifyTeamPublishedCandidate({
     const trunkRef = `refs/heads/${state.shared_branch}`;
     if (advertisedOid(projectDir, state.remote_name, trunkRef) !== observedOid) return fail("team_trunk_moved");
     if (status.team_publication_mode === TEAM_PUBLICATION_MODE.DIRECT) {
-      return observedOid === row.candidate_oid ? { ok: true, acceptedOid: observedOid }
-        : fail("team_candidate_not_current_trunk");
+      try {
+        git(["merge-base", "--is-ancestor", row.candidate_oid, observedOid], projectDir);
+      } catch {
+        return fail("team_candidate_not_on_trunk");
+      }
+      return { ok: true, acceptedOid: row.candidate_oid, observedOid };
     }
     if (status.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
       const proof = await verifyPublishedTeamPullRequest({ projectDir, submission: row,
         remoteUrl: state.remote_url, targetBranch: state.shared_branch });
-      return proof.ok && proof.branchOid === observedOid && proof.acceptedOid === observedOid
-        ? { ok: true, acceptedOid: proof.acceptedOid, pullNumber: proof.pullNumber }
+      return proof.ok && proof.branchOid === observedOid
+        ? { ok: true, acceptedOid: proof.acceptedOid, observedOid, pullNumber: proof.pullNumber }
         : fail(proof.reason || "team_provider_merge_unverified");
     }
     return fail("team_publication_policy_stale");
   } catch (error) {
     return fail("team_recovery_unavailable", error?.code || error?.message || error);
+  }
+}
+
+/** Prove that every otherwise-unknown commit is a provider merge of one exact
+ * approved Team submission. Generic GitHub identities are never trusted. */
+export async function verifyTeamProviderMergeProvenance({
+  projectDir,
+  commitOids = [],
+  observedOid,
+  signal = null,
+  remoteClientFactory = createPairingRemoteClient,
+} = {}) {
+  let state;
+  try { state = activeState(projectDir); } catch { state = null; }
+  const wanted = new Set((Array.isArray(commitOids) ? commitOids : []).filter((oid) => OID_RE.test(oid || "")));
+  if (!state || state.team_publication_mode !== TEAM_PUBLICATION_MODE.GITHUB_PR
+    || !OID_RE.test(observedOid || "") || wanted.size === 0) return fail("team_provider_provenance_unavailable");
+  const cacheKey = `${state.remote_session_id}\0${state.submission_approval_revision}\0${state.team_publication_revision}\0${observedOid}\0${[...wanted].sort().join(",")}`;
+  const cached = providerProvenanceCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.result;
+  if (cached) providerProvenanceCache.delete(cacheKey);
+  if (signal?.aborted) return fail("team_provider_provenance_unavailable", signal.reason?.message || "aborted");
+  try {
+    const client = remoteClientFactory();
+    const [status, listing, grantResponse] = await Promise.all([
+      client.status(state.relay_token),
+      client.teamSubmissions(state.relay_token, state.remote_session_id),
+      client.teamGrants(state.relay_token, state.remote_session_id),
+    ]);
+    if (status?.session_id !== state.remote_session_id
+      || status.submission_approval_enabled !== true
+      || status.team_publication_mode !== TEAM_PUBLICATION_MODE.GITHUB_PR
+      || !projectionRecords(listing, state)
+      || grantResponse?.contract_version !== 1 || grantResponse.session_id !== state.remote_session_id) {
+      return fail("team_provider_provenance_policy_stale");
+    }
+    const approved = listing.submissions
+      .filter((row) => row.state === TEAM_SUBMISSION_STATES.APPROVED)
+      .sort((left, right) => Date.parse(right.decision_at || 0) - Date.parse(left.decision_at || 0))
+      .slice(0, MAX_PROVIDER_PROVENANCE_CANDIDATES);
+    const proven = new Set();
+    for (const row of approved) {
+      if (signal?.aborted) return fail("team_provider_provenance_unavailable", signal.reason?.message || "aborted");
+      const grant = grantResponse.grants?.find((item) => item.work_item_id === row.work_item_id);
+      if (!grant || grant.originator_instance_id !== row.decision_actor_instance_id
+        || !row.decision_action_id
+        || row.policy_revision !== Number(state.submission_approval_revision)
+        || grant.policy_revision !== row.policy_revision
+        || ![TEAM_GRANT_STATES.ACTIVE, TEAM_GRANT_STATES.MERGED].includes(grant.state)
+        || (grant.state === TEAM_GRANT_STATES.ACTIVE
+          && (grant.revision !== row.grant_revision
+            || grant.current_submission_id !== (row.id || row.submission_id)))
+        || (grant.state === TEAM_GRANT_STATES.MERGED && grant.revision !== row.grant_revision + 1)) continue;
+      if (!fetchExactRef(projectDir, state.remote_name, row.workbranch_ref, row.source_oid)
+        || !fetchExactRef(projectDir, state.remote_name, row.candidate_ref, row.candidate_oid)) continue;
+      const scope = verifyTeamGitScope({
+        projectDir,
+        targetOid: row.target_oid,
+        sourceOid: row.source_oid,
+        candidateOid: row.candidate_oid,
+        effectivePermissions: grant.effective_permissions,
+      });
+      if (!scope.ok) continue;
+      const proof = await verifyPublishedTeamPullRequest({
+        projectDir,
+        submission: row,
+        remoteUrl: state.remote_url,
+        targetBranch: state.shared_branch,
+      });
+      if (proof.ok && proof.branchOid === observedOid && wanted.has(proof.acceptedOid)) {
+        proven.add(proof.acceptedOid);
+      }
+    }
+    const result = proven.size === wanted.size
+      ? { ok: true, provenOids: [...proven] }
+      : fail("team_provider_provenance_unverified");
+    providerProvenanceCache.set(cacheKey, {
+      result,
+      expiresAt: Date.now() + (result.ok ? PROVIDER_PROVENANCE_CACHE_MS : PROVIDER_PROVENANCE_FAILURE_CACHE_MS),
+    });
+    while (providerProvenanceCache.size > MAX_PROVIDER_PROVENANCE_CACHE_ENTRIES) {
+      providerProvenanceCache.delete(providerProvenanceCache.keys().next().value);
+    }
+    return result;
+  } catch (error) {
+    return fail("team_provider_provenance_unavailable", error?.code || error?.message || error);
   }
 }
 
@@ -734,18 +835,12 @@ export async function setTeamSubmissionApproval(enabled, {
   }
   if (!enabled && getDb().prepare(`
     SELECT 1 AS pending FROM shared_trunk_merge_operations
-    WHERE phase IN ('intent','candidate','publish_unknown') LIMIT 1
-  `).get()) {
+    WHERE target_branch = ? AND remote = ?
+      AND (phase IN ('intent','candidate','publish_unknown')
+       OR (phase = 'deferred' AND candidate_sha IS NOT NULL))
+    LIMIT 1
+  `).get(state.shared_branch, state.remote_name)) {
     return fail("unresolved_team_submission");
-  }
-  // Enable the local gate before asking Remote to enable the shared policy.
-  // If the network result is unknown, this host must remain fail-closed.
-  if (enabled) {
-    getDb().prepare(`
-      UPDATE pairing_sessions SET submission_approval_enabled = 1,
-        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-      WHERE id = ? AND phase = 'active' AND role = 'host'
-    `).run(state.id);
   }
   try {
     const client = remoteClientFactory();
@@ -938,18 +1033,14 @@ export async function reconcileTeamFileHandoff({
     const trunkRef = `refs/heads/${state.shared_branch}`;
     const observedTrunkOid = advertisedOid(projectDir, state.remote_name, trunkRef);
     if (!observedTrunkOid) return fail("team_trunk_unverifiable");
-    if (status.team_publication_mode === TEAM_PUBLICATION_MODE.DIRECT
-      && observedTrunkOid !== submission.candidate_oid) {
-      return fail("team_candidate_not_current_trunk");
-    }
-    let acceptedOid = observedTrunkOid;
+    let acceptedOid = submission.candidate_oid;
     if (status.team_publication_mode === TEAM_PUBLICATION_MODE.GITHUB_PR) {
       const proof = await verifyPublishedTeamPullRequest({
         projectDir, submission, remoteUrl: state.remote_url,
         targetBranch: state.shared_branch,
       });
       if (!proof.ok) return fail(proof.reason || "team_provider_handoff_receipt_required");
-      if (proof.branchOid !== observedTrunkOid || proof.acceptedOid !== observedTrunkOid) {
+      if (proof.branchOid !== observedTrunkOid) {
         return fail("team_provider_trunk_moved");
       }
       acceptedOid = proof.acceptedOid;
@@ -961,9 +1052,13 @@ export async function reconcileTeamFileHandoff({
     }
     try {
       git(["merge-base", "--is-ancestor", submission.candidate_oid, acceptedOid], projectDir);
-      git(["merge-base", "--is-ancestor", acceptedOid, observedTrunkOid], projectDir);
     } catch {
       return fail("team_candidate_not_accepted");
+    }
+    try {
+      git(["merge-base", "--is-ancestor", acceptedOid, observedTrunkOid], projectDir);
+    } catch {
+      return fail("team_candidate_not_current_trunk");
     }
     const requestedAt = Date.parse(successor.requested_expires_at || "");
     const requestExpiry = Number.isFinite(requestedAt) ? Math.floor(requestedAt / 1000) : 0;

@@ -58,6 +58,7 @@ export const SETTING_KEYS = Object.freeze({
   PLANNER_RESEARCH_CHILD_TIMEOUT_MS: "planner_research_child_timeout_ms",
   PLANNER_RESEARCH_CHILD_MAX_TURNS: "planner_research_child_max_turns",
   PLANNER_RESEARCH_RESULT_CHARS: "planner_research_result_chars",
+  PLANNER_RESEARCH_EXPAND_CHARS: "planner_research_expand_chars",
   PLANNER_DISPATCH_TRIAGE_MAX_TURNS: "planner_dispatch_triage_max_turns",
   PLANNER_DISPATCH_MODEL_TIER: "planner_dispatch_model_tier",
   PLANNER_DISPATCH_REASONING_EFFORT: "planner_dispatch_reasoning_effort",

@@ -38,6 +38,8 @@ import {
   canonicalEvidenceSourcePath,
   normalizedEvidenceSourceWindows,
 } from "../../../shared/tools/functions/source-evidence.js";
+import { sanitizeResearcherFileList } from "../../planning/functions/planner-helpers.js";
+import { expandResearchBatchEvidence } from "../functions/research-expansion.js";
 
 export { SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 
@@ -112,7 +114,8 @@ function sanitizePacket(packet) {
           claims: (handoff.report?.claims || []).map((claim) => {
             const compactEvidence = (items) => items.map((evidence) => {
               if (!evidence || typeof evidence !== "object") return evidence;
-              const { selector, ref, path, lines, source_start_line, source_end_line } = evidence;
+              const { selector, ref, path, lines, source_start_line, source_end_line,
+                expanded, expanded_ref, source_ref, expansion_reason } = evidence;
               return {
                 ...(selector != null ? { selector } : {}),
                 ...(ref != null ? { ref } : {}),
@@ -120,6 +123,10 @@ function sanitizePacket(packet) {
                 ...(lines != null ? { lines } : {}),
                 ...(source_start_line != null ? { source_start_line } : {}),
                 ...(source_end_line != null ? { source_end_line } : {}),
+                ...(expanded != null ? { expanded } : {}),
+                ...(expanded_ref != null ? { expanded_ref } : {}),
+                ...(source_ref != null ? { source_ref } : {}),
+                ...(expansion_reason != null ? { expansion_reason } : {}),
               };
             });
             if (Array.isArray(claim)) return [claim[0], { ...claim[1], evidence: compactEvidence(claim[1]?.evidence || []) }];
@@ -244,6 +251,20 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
         { stage: "terminal" },
       );
     }
+    const childVisible = hashRefModelVisibility(sourceContext, {
+      visibility: "full",
+      ranges: [{ start: 0, end: source.payload_text.length }],
+      issuedAs: "evidence",
+    });
+    const parentHidden = hashRefModelVisibility(parentContext, { visibility: "hidden", ranges: [] });
+    const surfacedMetadata = {
+      ...(source.metadata || {}),
+      model_visible_scopes: [
+        ...(Array.isArray(source.metadata?.model_visible_scopes) ? source.metadata.model_visible_scopes : []),
+        ...childVisible.model_visible_scopes,
+        ...parentHidden.model_visible_scopes,
+      ],
+    };
     const surfaced = surfaceHashRefForContext(parentContext, {
       ref,
       payloadText: source.payload_text,
@@ -252,14 +273,7 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
       source: source.source,
       note: source.note,
       versionId: source.version_id,
-      metadata: {
-        ...(source.metadata || {}),
-        ...hashRefModelVisibility(parentContext, {
-          visibility: "full",
-          ranges: [{ start: 0, end: source.payload_text.length }],
-          issuedAs: "evidence",
-        }),
-      },
+      metadata: surfacedMetadata,
     }, { ownerScope: "work_item" });
     if (!surfaced?.ok || !surfaced.entry?.ref) {
       throw runtimeError(
@@ -268,10 +282,29 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
         { stage: "terminal" },
       );
     }
-    // The compact report strips excerpts, and the parent is a bounded-traversal
-    // role, so the surfaced evidence row alone is citable but not readable.
-    // Issue the matching traversal capability so fetch_ref/traverse_ref on the
-    // returned selector opens the same text the child cited.
+    // Research children share the parent's attempt. Stamp the attempt-local
+    // owner row as well as the durable work-item copy; otherwise the nearer
+    // child row shadows the durable row and the parent reads a stale ledger.
+    const attemptSurfaced = surfaceHashRefForContext(parentContext, {
+      ref,
+      payloadText: source.payload_text,
+      contentHash: source.content_hash,
+      objectType: source.object_type,
+      source: source.source,
+      note: source.note,
+      versionId: source.version_id,
+      metadata: surfacedMetadata,
+    });
+    if (!attemptSurfaced?.ok) {
+      throw runtimeError(
+        "SUB_AGENT_EVIDENCE_SURFACE_FAILED",
+        `Could not return child evidence ${ref} to the parent attempt`,
+        { stage: "terminal" },
+      );
+    }
+    // The compact report strips excerpts, and the parent has not seen this
+    // payload yet. Issue traversal custody without claiming visibility; the
+    // post-batch expansion stamps only the ranges actually returned.
     issueHashRefTraversalForContext(parentContext, {
       ref: surfaced.entry.ref,
       sourceRef: surfaced.entry.ref,
@@ -608,6 +641,86 @@ function materializeDelegatedRef(selectorValue, context) {
   }
 }
 
+function normalizeResearchAnchors(value, context, label) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 8) {
+    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} must contain at most eight anchors`, { stage: "validation" });
+  }
+  return value.map((raw, index) => {
+    const anchor = exactObject(raw, ["path", "symbol", "ref", "lines"], `${label}[${index}]`);
+    const hasPath = anchor.path != null;
+    const hasRef = anchor.ref != null;
+    if (hasPath === hasRef) {
+      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}] must contain exactly one of path or ref`, { stage: "validation" });
+    }
+    const lines = anchor.lines == null ? null : exactObject(anchor.lines, ["start", "end"], `${label}[${index}].lines`);
+    if (lines && (!Number.isSafeInteger(lines.start) || !Number.isSafeInteger(lines.end)
+      || lines.start < 1 || lines.end < lines.start
+      || lines.end - lines.start + 1 > SUB_AGENT_LIMITS.maxEvidenceLines)) {
+      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].lines must select one to ${SUB_AGENT_LIMITS.maxEvidenceLines} lines`, { stage: "validation" });
+    }
+    if (hasPath) {
+      const sanitized = sanitizeResearcherFileList(
+        [anchor.path],
+        context.projectDir || context.cwd,
+        `${label}[${index}].path`,
+      );
+      if (sanitized.files.length !== 1) {
+        throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].path is not an allowed repo-relative path`, { stage: "validation" });
+      }
+      const symbol = anchor.symbol == null ? null : boundedString(anchor.symbol, `${label}[${index}].symbol`, 200);
+      return {
+        path: sanitized.files[0],
+        ...(symbol ? { symbol } : {}),
+        ...(lines ? { lines: { start: lines.start, end: lines.end } } : {}),
+      };
+    }
+    if (anchor.symbol != null) {
+      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].symbol requires a path anchor`, { stage: "validation" });
+    }
+    if (lines) {
+      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].lines is valid only for a path anchor`, { stage: "validation" });
+    }
+    const evidence = validateMaterializedCursorEvidence(
+      materializeDelegatedRef({ ref: anchor.ref }, context),
+      `${label}[${index}].ref`,
+    );
+    return { ref: evidence.ref, evidence };
+  });
+}
+
+function materializeResearchAnchorsForChild(entry, childContext) {
+  for (const anchor of entry.anchors || []) {
+    if (!anchor.evidence) continue;
+    const evidence = anchor.evidence;
+    const surfaced = surfaceHashRefForContext(childContext, {
+      ref: anchor.ref,
+      payloadText: evidence.excerpt,
+      contentHash: evidence.source_content_sha256,
+      objectType: "materialized_text",
+      source: "tool:dispatch_agent.anchor",
+      note: evidence.provenance?.path || anchor.ref,
+      metadata: {
+        line_semantics: evidence.provenance?.line_semantics || "materialized",
+        ...(evidence.provenance?.path ? { path: evidence.provenance.path } : {}),
+        ...(Array.isArray(evidence.provenance?.source_windows)
+          ? { source_windows: evidence.provenance.source_windows }
+          : {}),
+        ...hashRefModelVisibility(childContext, { visibility: "hidden", ranges: [] }),
+      },
+    }, { ownerScope: "work_item" });
+    if (!surfaced?.ok || !surfaced.entry?.ref) {
+      throw runtimeError("SUB_AGENT_EVIDENCE_SURFACE_FAILED", `Could not delegate research anchor ${anchor.ref}`, { stage: "admission" });
+    }
+    issueHashRefTraversalForContext(childContext, {
+      ref: surfaced.entry.ref,
+      sourceRef: surfaced.entry.ref,
+      selector: { mode: "full" },
+      sourceContentHash: surfaced.entry.content_hash || null,
+    });
+  }
+}
+
 function validateMaterializedCursorEvidence(sourceEvidence, label) {
   const bounded = delegatedEvidenceBounds(sourceEvidence?.excerpt);
   if (bounded.empty) {
@@ -828,13 +941,16 @@ function coverageForEntry(entry, selected = entry.selectedEvidenceCount) {
 }
 
 function publicEntry(entry) {
+  const coverage = entry.profile === RESEARCH_CHILD_PROFILE
+    ? {}
+    : { coverage: entry.coverage };
   if (entry.status === "completed") {
     return {
       id: entry.id,
       handle: entry.handle,
       status: "completed",
       packet: entry.packet,
-      coverage: entry.coverage,
+      ...coverage,
       usage: entry.usage,
     };
   }
@@ -844,7 +960,7 @@ function publicEntry(entry) {
       handle: entry.handle,
       status: entry.status,
       error: entry.error,
-      coverage: entry.coverage,
+      ...coverage,
       ...(entry.usage ? { usage: entry.usage } : {}),
     };
   }
@@ -861,6 +977,7 @@ function publicBatch(batch, { includeResults = false } = {}) {
     status: batch.status,
     requests: batch.entries.map((entry) => ({ id: entry.id, handle: entry.handle, status: entry.status })),
     ...(includeResults ? { results: batch.entries.map(publicEntry) } : {}),
+    ...(includeResults && batch.researchExpansion ? { research_expansion: batch.researchExpansion } : {}),
     ...(!includeResults ? {
       next_action: { tool: "sub_agent", op: "status", default_wait_ms: 1000 },
     } : {}),
@@ -978,6 +1095,11 @@ export class SubAgentRuntime {
     if (entry.childAgentCallId && entry.childAgentCallId !== id) {
       throw runtimeError("SUB_AGENT_CHILD_BINDING_CONFLICT", "Citation dispatch is already bound to another child call", { stage: "admission" });
     }
+    materializeResearchAnchorsForChild(entry, {
+      ...entry.parentContext,
+      agent_call_id: id,
+      agentCallId: id,
+    });
     const binding = { batch, entry };
     entry.childAgentCallId = id;
     this.childBindings.set(id, binding);
@@ -1386,7 +1508,7 @@ export class SubAgentRuntime {
 
     const seenRequests = new Set();
     const normalized = input.requests.map((raw, requestIndex) => {
-      const request = exactObject(raw, ["id", "profile", "intent", "inputs", "budget", "agent_type"], `requests[${requestIndex}]`);
+      const request = exactObject(raw, ["id", "profile", "intent", "inputs", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
       const id = boundedString(request.id, `requests[${requestIndex}].id`, 40);
       if (seenRequests.has(id)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "request ids must be unique", { stage: "validation" });
       seenRequests.add(id);
@@ -1400,7 +1522,11 @@ export class SubAgentRuntime {
           || input.requests.some((item) => item.profile !== RESEARCH_CHILD_PROFILE)) {
           throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Research requires one bounded wait_all batch of research requests", { stage: "validation" });
         }
-        exactObject(request, ["id", "profile", "intent", "budget", "agent_type"], `requests[${requestIndex}]`);
+        exactObject(request, ["id", "profile", "intent", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
+        if (request.agent_type === "web" && request.anchors != null) {
+          throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Repository anchors are supported only for code research children", { stage: "validation" });
+        }
+        const anchors = normalizeResearchAnchors(request.anchors, context, `requests[${requestIndex}].anchors`);
         const budget = request.budget == null ? {} : exactObject(request.budget, ["timeout_ms", "max_turns", "reasoning_effort"], "research budget");
         const effort = budget.reasoning_effort || policy.childReasoningEffort || "medium";
         if (!PLANNER_RESEARCH_EFFORT_VALUES.includes(effort)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research effort", { stage: "validation" });
@@ -1416,7 +1542,7 @@ export class SubAgentRuntime {
           reasoningEffort: PLANNER_RESEARCH_EFFORT_VALUES[Math.min(PLANNER_RESEARCH_EFFORT_VALUES.indexOf(effort), PLANNER_RESEARCH_EFFORT_VALUES.indexOf(policy.effortCeiling))],
           resultChars: policy.resultChars,
           modelTier: policy.childModelTier || null,
-          inputs: [], maxInputs: 0, parentContext: { ...context },
+          anchors, inputs: [], maxInputs: 0, parentContext: { ...context },
         };
       }
       if (request.profile !== "citation_synthesis.v1") {
@@ -1511,6 +1637,20 @@ export class SubAgentRuntime {
         : batch.entries.every((entry) => entry.status === "cancelled")
           ? "cancelled"
           : "settled";
+      try {
+        const expandChars = registration.researchPolicy?.expandChars || 0;
+        const expansion = expandChars > 0
+          ? expandResearchBatchEvidence(batch, {
+              resolveEvidenceSource: resolveChildEvidenceSource,
+              expandChars,
+            })
+          : null;
+        batch.researchExpansion = expansion && (expansion.files.length > 0 || expansion.omitted > 0)
+          ? expansion
+          : null;
+      } catch {
+        batch.researchExpansion = null;
+      }
       return batch;
     });
     if (completion.mode === "wait_all") {
@@ -1546,6 +1686,7 @@ export class SubAgentRuntime {
           requestId: entry.id,
           intent: entry.intent,
           agentType: entry.agentType,
+          anchors: entry.anchors,
           parentContext: entry.parentContext,
           manifest: visibleManifest(entry),
           maxInputs: entry.maxInputs,
@@ -1571,6 +1712,7 @@ export class SubAgentRuntime {
         if (JSON.stringify(compact).length > entry.resultChars) throw runtimeError("SUB_AGENT_RESULT_TOO_LARGE", `Research report exceeds ${entry.resultChars} characters; full report retained`, { stage: "terminal" });
       }
       entry.packet = sanitizePacket(record.packet);
+      entry.sourceContext = research && !result.webPacket ? childContext : entry.parentContext;
       entry.coverage = coverageForEntry(entry, cited.length);
       entry.usage = usageFromChild(result);
       entry.status = "completed";

@@ -309,8 +309,17 @@ export async function inspectTeamPullRequestMerge(input, options = {}) {
     const mergeOid = pull.merge_commit_sha;
     if (!OID_RE.test(mergeOid || "")) return fail("github_merge_unverifiable");
     const commit = await api(`repos/${parsed.repository}/git/commits/${mergeOid}`);
-    if (commit?.sha !== mergeOid || commit?.parents?.length !== 2
-      || commit.parents[0]?.sha !== input.targetOid || commit.parents[1]?.sha !== input.candidateOid) {
+    const exactMerge = commit?.sha === mergeOid && commit?.parents?.length === 2
+      && commit.parents[0]?.sha === input.targetOid && commit.parents[1]?.sha === input.candidateOid;
+    let contentEquivalentMerge = false;
+    if (!exactMerge && commit?.sha === mergeOid && typeof commit?.tree?.sha === "string") {
+      const candidate = await api(`repos/${parsed.repository}/git/commits/${input.candidateOid}`);
+      if (commit.tree.sha === candidate?.tree?.sha) {
+        const targetComparison = await api(`repos/${parsed.repository}/compare/${input.targetOid}...${mergeOid}`);
+        contentEquivalentMerge = ["ahead", "identical"].includes(targetComparison?.status);
+      }
+    }
+    if (!exactMerge && !contentEquivalentMerge) {
       return fail("github_merge_parents_mismatch");
     }
     const branch = await api(branchEndpoint(parsed.repository, parsed.branch));

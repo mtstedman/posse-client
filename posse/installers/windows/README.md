@@ -91,9 +91,10 @@ published SHA-256 checksum before extraction and use. The fallback does not
 require administrator privileges and is reused on later installer runs.
 The generated launcher puts its Node directory on PATH for subprocesses.
 
-Git, Python, ripgrep, Tesseract, ImageMagick, and FFmpeg still use winget when
-missing. Install **App Installer** to provide winget, or provision these tools
-manually if your Windows edition/environment does not include it. Node
+Git, Python, GitHub CLI, ripgrep, Tesseract, ImageMagick, and FFmpeg still use
+winget when missing. GitHub CLI is optional unless you use GitHub-backed push
+authentication or Session provisioning. Install **App Installer** to provide
+winget, or provision these tools manually if your Windows edition/environment does not include it. Node
 fallback alone does not install Git or Python. PHP/Composer are opt-in through
 `-ScipLanguages php` (or `all`).
 

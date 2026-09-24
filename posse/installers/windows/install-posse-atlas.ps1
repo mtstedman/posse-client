@@ -57,7 +57,7 @@
   Don't seed ~/.posse/account.db.
 
 .PARAMETER SkipHostTools
-  Don't install helper CLI tools (rg, tesseract, ImageMagick, ffmpeg, Python,
+  Don't install helper CLI tools (gh, rg, tesseract, ImageMagick, ffmpeg, Python,
   PHP when PHP SCIP is selected). Missing tools are still reported.
 
 .PARAMETER NoInstallNode
@@ -988,6 +988,7 @@ function Step-Packages {
 
   $tools = @(
     [PSCustomObject]@{ Label = "Git";             Test = { Test-Cmd "git" };       WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" },
+    [PSCustomObject]@{ Label = "GitHub CLI";      Test = { Test-Cmd "gh" };        WingetIds = @("GitHub.cli"); Reason = "optional GitHub authentication and Session provisioning" },
     [PSCustomObject]@{ Label = "ripgrep";       Test = { Test-Cmd "rg" };        WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" },
     [PSCustomObject]@{ Label = "Tesseract OCR"; Test = { Test-Cmd "tesseract" }; WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
     [PSCustomObject]@{ Label = "ImageMagick";   Test = { Test-ImageMagick };     WingetIds = @("ImageMagick.ImageMagick", "ImageMagick.Q16-HDRI", "ImageMagick.Q16"); Reason = "image conversion" },

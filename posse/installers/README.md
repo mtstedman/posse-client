@@ -49,7 +49,7 @@ full install fails clearly if no Posse key is available; `--setup-only` /
 | Node.js | Node **24+ and npm**. Both installers automatically provision them when missing or unusable. |
 | Writable storage | A writable home directory, Posse checkout, and target Git repository. Runtime tools and model downloads need additional disk space. |
 | Network | HTTPS access to GitHub, Node/npm registries, your distro repositories, Python/indexer sources, Posse services, and your chosen provider. Model downloads can take much longer than the core install. |
-| System tools | Git, Python 3.9+, and language/build tools. Linux installs missing packages using root or sudo; Windows uses winget for host tools. |
+| System tools | Git, Python 3.9+, optional GitHub CLI, and language/build tools. Linux installs missing packages using root or sudo; Windows uses winget for host tools. |
 | Git identity | Configure `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"` before running jobs that commit. |
 
 Node provisioning is separate from helper-tool installation. `--skip-host-tools`

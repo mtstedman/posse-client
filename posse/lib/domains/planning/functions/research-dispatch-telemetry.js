@@ -26,7 +26,7 @@ export function recordResearchDispatchAudit({ jobId, workItemId, agentCallId, re
   const children = getAgentCalls(jobId).filter((call) => Number(call.parent_agent_call_id) === agentCallId && ["research", "web_research"].includes(call.child_kind));
   const requested = Math.max(requests.length, children.length);
   const requestRejections = requests.flatMap((entry) => (
-    entry?.status === "failed" && !entry?.childAgentCallId
+    entry?.status === "failed" && !entry?.childAgentCallId && !entry?.usage?.agent_call_id
       ? [{
           code: String(entry?.error?.code || "SUB_AGENT_ERROR"),
           stage: entry?.error?.stage || null,

@@ -19,7 +19,8 @@ PRAGMA foreign_keys = ON;
 --  18 = + authoritative cross-instance work-item delegation journal.
 --  19 = + investigating research and claim-review agent-call child kinds.
 --  20 = + Team submission approval policy and publication mode state.
-PRAGMA user_version = 20;
+-- 21 = terminal abandoned shared-trunk merge operations
+PRAGMA user_version = 21;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -1255,7 +1256,7 @@ CREATE TABLE IF NOT EXISTS shared_trunk_merge_operations (
   base_sha TEXT NOT NULL,
   expected_remote_sha TEXT NOT NULL,
   candidate_sha TEXT,
-  phase TEXT NOT NULL CHECK (phase IN ('intent','candidate','publish_unknown','deferred','published')),
+  phase TEXT NOT NULL CHECK (phase IN ('intent','candidate','publish_unknown','deferred','published','abandoned')),
   attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
   version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
   last_error_code TEXT,

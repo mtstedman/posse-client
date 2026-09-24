@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { adminGitExec } from "../../git/functions/admin-git.js";
+import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import {
   clearRuntimeStatus,
@@ -309,10 +310,14 @@ async function promoteFastForwardLocked(projectDir, initialJournal, {
     last_error: null,
   });
   try {
-    exec(targetGitArgs(journal, [
+    gitPushWithGitHubCliFallback(targetGitArgs(journal, [
       "push", `--force-with-lease=refs/heads/${targetBranch}:${target.sha}`,
       remote, `${candidate}:refs/heads/${targetBranch}`,
-    ]), projectDir);
+    ]), projectDir, {
+      remote,
+      gitExecFn: exec,
+      fallbackGitExecFn: exec,
+    });
   } catch (error) {
     journal = markPairingPromotion(journal, { phase: "publish_unknown", last_error: "push_outcome_unknown" });
     // A timeout can occur after the server accepts the push. Re-read the
@@ -476,12 +481,16 @@ async function promoteLocked(projectDir, initialJournal, {
       approved_origin_sha: journal.target_base_sha,
     });
     try {
-      exec(targetGitArgs(journal, [
+      gitPushWithGitHubCliFallback(targetGitArgs(journal, [
         "push",
         `--force-with-lease=refs/heads/${targetBranch}:${journal.target_base_sha}`,
         remote,
         `${journal.candidate_sha}:refs/heads/${targetBranch}`,
-      ]), projectDir);
+      ]), projectDir, {
+        remote,
+        gitExecFn: exec,
+        fallbackGitExecFn: exec,
+      });
     } catch (error) {
       if (approvalRequired) {
         journal = markPairingPromotion(journal, { phase: "publish_unknown", last_error: "push_outcome_unknown" });

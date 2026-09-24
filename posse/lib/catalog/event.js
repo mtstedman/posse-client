@@ -147,6 +147,7 @@ export const EVENT_TYPES = Object.freeze({
 
   // ── shared remote trunk ────────────────────────────────────────────────
   SHARED_TRUNK_ADVANCED: "shared_trunk.advanced",
+  SHARED_TRUNK_OPERATION_ABANDONED: "shared_trunk.operation_abandoned",
   SHARED_TRUNK_CLAIM_DEFERRED: "shared_trunk.claim_deferred",
   SHARED_TRUNK_CLAIM_HARDENED: "shared_trunk.claim_hardened",
   SHARED_TRUNK_CLAIM_SYNC_FAILED: "shared_trunk.claim_sync_failed",

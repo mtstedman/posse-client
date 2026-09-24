@@ -105,7 +105,7 @@ export function normalizePlannerRoleMode(value) {
 export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", roleMode = "normal", assessmentReplan = false, plannerDispatch = false, projectDir = null } = {}) {
   if (!packet) return packet;
   const dispatchPolicy = readPlannerDispatchPolicy({ projectDir });
-  const dispatchEligible = plannerDispatch && !assessmentReplan && ["normal", "primary"].includes(roleMode)
+  const dispatchEligible = plannerDispatch && ["normal", "primary"].includes(roleMode)
     && dispatchPolicy.enabled;
   packet.planner_dispatch = dispatchEligible;
   packet.planner_dispatch_policy = dispatchEligible ? dispatchPolicy : null;
@@ -120,7 +120,7 @@ export function applyPlannerRoleModePolicy(packet, { planningMode = "normal", ro
     packet.agent_coordination = {
       ...(packet.agent_coordination || {}),
       sub_agent_v1: false,
-      dispatch_agent_v1: false,
+      dispatch_agent_v1: dispatchEligible,
     };
   }
   if (planningMode !== "dual_redteam" || roleMode !== "redteam") return packet;

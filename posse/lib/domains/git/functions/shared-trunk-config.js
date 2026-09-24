@@ -12,7 +12,31 @@ import {
   SHARED_TRUNK_DEFAULTS,
   SHARED_TRUNK_LIMITS,
 } from "../../../catalog/settings.js";
-import { getAccountRepoSetting } from "../../settings/functions/account-settings.js";
+import {
+  getAccountRepoSetting,
+  getAccountSettingsDataVersion,
+} from "../../settings/functions/account-settings.js";
+
+const remoteDefaultBranchCache = new Map();
+const MAX_REMOTE_DEFAULT_BRANCH_CACHE_ENTRIES = 128;
+
+function remoteDefaultCacheKey(repoPath, remote, branch) {
+  let settingsRevision = 0;
+  try { settingsRevision = getAccountSettingsDataVersion(); } catch { /* tests may not have an account DB */ }
+  return `${repoPath}\0${settingsRevision}\0${remote}\0${branch}`;
+}
+
+export function cacheSharedTrunkRemoteDefaultBranch(projectDir, remote, branch, defaultBranch) {
+  const repoPath = path.resolve(String(projectDir || process.cwd()));
+  const key = remoteDefaultCacheKey(repoPath, String(remote || ""), String(branch || ""));
+  const value = defaultBranch == null ? "" : String(defaultBranch).trim();
+  remoteDefaultBranchCache.delete(key);
+  if (!value) return;
+  remoteDefaultBranchCache.set(key, value);
+  while (remoteDefaultBranchCache.size > MAX_REMOTE_DEFAULT_BRANCH_CACHE_ENTRIES) {
+    remoteDefaultBranchCache.delete(remoteDefaultBranchCache.keys().next().value);
+  }
+}
 
 export class SharedTrunkConfigError extends Error {
   constructor(code, message) {
@@ -179,6 +203,12 @@ export function resolveSharedTrunkConfig(projectDir = process.cwd(), options = {
     Object.freeze({ branch, remote }),
     "Remote default branch",
   ), remote);
+  if (!detectedRemoteDefaultBranch) {
+    fail(
+      "remote_default_unresolved",
+      `Shared trunk cannot determine the default branch of remote ${remote}.`,
+    );
+  }
   if (detectedRemoteDefaultBranch === branch) {
     fail(
       "remote_default_branch",
@@ -234,6 +264,13 @@ export function resolveSharedTrunkConfig(projectDir = process.cwd(), options = {
       `${SETTING_KEYS.SHARED_TRUNK_CLAIM_DEFER_MAX_MIN} must not exceed ${SETTING_KEYS.SHARED_TRUNK_CLAIMS_TTL_MIN}.`,
     );
   }
+  const claimRenewalMaxSec = Math.max(1, Math.floor(Number(claimsTtlMin) * 60 / 2) - 1);
+  const effectiveFetchIntervalSec = claimsEnabled
+    ? Math.min(Number(fetchIntervalSec), claimRenewalMaxSec)
+    : Number(fetchIntervalSec);
+  const effectiveFetchIntervalIdleSec = claimsEnabled
+    ? Math.max(effectiveFetchIntervalSec, Math.min(Number(fetchIntervalIdleSec), claimRenewalMaxSec))
+    : Number(fetchIntervalIdleSec);
 
   const config = {
     enabled: true,
@@ -241,8 +278,8 @@ export function resolveSharedTrunkConfig(projectDir = process.cwd(), options = {
     remote,
     resolvedTargetBranch,
     detectedRemoteDefaultBranch: detectedRemoteDefaultBranch || null,
-    fetchIntervalSec,
-    fetchIntervalIdleSec,
+    fetchIntervalSec: effectiveFetchIntervalSec,
+    fetchIntervalIdleSec: effectiveFetchIntervalIdleSec,
     pushRetryMax,
     claimsEnabled,
     claimsTtlMin,
@@ -287,13 +324,31 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
     import("./target-branch.js"),
     import("./utils.js"),
   ]);
-  const [resolvedTargetBranch, detectedRemoteDefaultBranch] = await Promise.all([
-    targetBranchModule.resolveTargetBranchAsync(repoPath),
-    gitUtilsModule.gitExecSafeAsync(
-      ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`],
-      repoPath,
-    ),
-  ]);
+  const resolvedTargetBranch = await targetBranchModule.resolveTargetBranchAsync(repoPath);
+  const cacheKey = remoteDefaultCacheKey(repoPath, remote, branch);
+  let detectedRemoteDefaultBranch;
+  if (remoteDefaultBranchCache.has(cacheKey)) {
+    detectedRemoteDefaultBranch = remoteDefaultBranchCache.get(cacheKey);
+  } else {
+    let advertisedHead;
+    try {
+      advertisedHead = await gitUtilsModule.gitExecAsync(
+        ["ls-remote", "--symref", remote, "HEAD"],
+        repoPath,
+        { timeoutMs: 30_000 },
+      );
+    } catch (error) {
+      const unavailable = new SharedTrunkConfigError(
+        "remote_default_unavailable",
+        `Could not query the default branch of remote ${remote}: ${error?.message || error}`,
+      );
+      unavailable.cause = error;
+      throw unavailable;
+    }
+    detectedRemoteDefaultBranch = String(advertisedHead || "")
+      .match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu)?.[1] || null;
+    cacheSharedTrunkRemoteDefaultBranch(repoPath, remote, branch, detectedRemoteDefaultBranch);
+  }
   const preflightResult = typeof nativeCapabilityPreflight === "function"
     ? await nativeCapabilityPreflight({ projectDir: repoPath, remote, branch })
     : nativeCapabilityPreflight;

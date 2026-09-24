@@ -36,7 +36,9 @@ function parseJson(value) {
 function provenanceGateRows() {
   return getDb().prepare(`
     SELECT * FROM jobs
-    WHERE CASE WHEN json_valid(payload_json)
+    WHERE job_type = 'human_input'
+      AND status IN ('queued','leased','running','waiting_on_human','blocked','succeeded')
+      AND CASE WHEN json_valid(payload_json)
       THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_provenance'
       ELSE 0 END
   `).all();
@@ -66,7 +68,10 @@ function applyProvenanceGateDecision() {
   if (accepted && /^[0-9a-f]{40}$/iu.test(String(payload.remote_oid || ""))) {
     updatePairingEnrollment(state.id, { baselineOid: payload.remote_oid, phase: "active" });
   } else {
-    updateSharedTrunkRuntimeStatus({ provenance_gate_rejected: true });
+    updateSharedTrunkRuntimeStatus({
+      provenance_gate_rejected: true,
+      provenance_gate_rejected_oid: payload.remote_oid || null,
+    });
   }
   getDb().prepare("UPDATE jobs SET result_json=? WHERE id=?").run(JSON.stringify({
     ...result,
@@ -78,12 +83,20 @@ function applyProvenanceGateDecision() {
 
 function ensureProvenanceGate(result) {
   const status = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK) || {};
-  if (status.provenance_gate_rejected === true) return null;
+  const remoteOid = result?.remoteSha || result?.newSha || status.remote_sha || null;
+  if (status.provenance_gate_rejected === true
+    && status.provenance_gate_rejected_oid === remoteOid) return null;
+  if (status.provenance_gate_rejected === true) {
+    updateSharedTrunkRuntimeStatus({
+      provenance_gate_rejected: false,
+      provenance_gate_rejected_oid: null,
+      provenance_gate_job_id: null,
+    });
+  }
   const existing = provenanceGateRows().find((job) => (
     ["queued", "leased", "running", "waiting_on_human", "blocked"].includes(job.status)
   ));
   if (existing) return existing;
-  const remoteOid = result?.remoteSha || result?.newSha || status.remote_sha || null;
   const commits = (result?.provenance?.commits || []).slice(0, 32);
   const gate = createJob({
     work_item_id: null,
@@ -130,6 +143,7 @@ export class SharedTrunkPoller {
     log = logEvent,
     readStatus = readRuntimeStatus,
     updateStatus = updateSharedTrunkRuntimeStatus,
+    pollDeadlineMs = 90_000,
   } = {}) {
     this.projectDir = projectDir;
     this._nowMs = nowMs;
@@ -142,6 +156,7 @@ export class SharedTrunkPoller {
     this._log = log;
     this._readStatus = readStatus;
     this._updateStatus = updateStatus;
+    this._pollDeadlineMs = pollDeadlineMs;
     this._nextDueAt = 0;
     this._lastPollAt = null;
     this._inFlight = null;
@@ -171,7 +186,17 @@ export class SharedTrunkPoller {
   }
 
   async _pollOnce({ force = false, idle = false } = {}) {
-    applyProvenanceGateDecision();
+    const pollStartedAt = this._nowMs();
+    try {
+      applyProvenanceGateDecision();
+    } catch (error) {
+      this._log({
+        event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: `Shared-trunk provenance gate reconciliation failed: ${error?.message || error}`,
+        event_json: JSON.stringify({ error: error?.message || String(error), fail_open: true }),
+      });
+    }
     // A failed configuration resolve is held for one cadence window: the run
     // loop calls poll() every lap, and re-resolving (and re-logging) a known
     // bad config per lap is the busy-spin this guard exists to prevent.
@@ -203,13 +228,16 @@ export class SharedTrunkPoller {
       this._lastPollAt = errorNow;
       this._nextDueAt = errorNow + errorIntervalSec * 1000;
       this._configErrorAt = errorNow;
+      const configurationError = err?.code !== "remote_default_unavailable";
       this._log({
         event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,
         actor_type: EVENT_ACTORS.SCHEDULER,
-        message: `Shared-trunk configuration is invalid: ${err?.message || err}`,
-        event_json: JSON.stringify({ error: err?.message || String(err), configuration_error: true }),
+        message: configurationError
+          ? `Shared-trunk configuration is invalid: ${err?.message || err}`
+          : `Shared-trunk configuration probe is unavailable: ${err?.message || err}`,
+        event_json: JSON.stringify({ error: err?.message || String(err), configuration_error: configurationError }),
       });
-      return { attempted: false, unavailable: true, configurationError: true, error: err };
+      return { attempted: false, unavailable: true, configurationError, error: err };
     }
     this._configErrorAt = null;
     this._lastConfig = config;
@@ -255,26 +283,32 @@ export class SharedTrunkPoller {
     // coalesces rather than launching a second fetch.
     this._lastPollAt = now;
     this._nextDueAt = now + intervalSec * 1000;
+    const controller = new AbortController();
+    const remainingDeadlineMs = Math.max(0, this._pollDeadlineMs - (this._nowMs() - pollStartedAt));
+    if (remainingDeadlineMs === 0) {
+      return { attempted: false, unavailable: true, config, reason: "shared_trunk_poll_deadline" };
+    }
+    const deadline = setTimeout(() => controller.abort(new Error("Shared-trunk poll deadline exceeded")), remainingDeadlineMs);
+    deadline.unref?.();
     try {
-      const recovery = await this._reconcile(this.projectDir, {
-        includeClaims: config.claimsEnabled === true,
-        ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
-      });
-      if (recovery?.blocked || recovery?.diverged || (recovery?.unresolved?.length || 0) > 0) {
-        // Blocked recovery halts trunk writes, but its completed claim-
-        // inclusive fetch is still authoritative for the advisory mirror —
-        // without this the peer-claim view ages for as long as one journal
-        // row stays unresolved.
-        await this._reconcileClaims(recovery, recovery?.config || config);
-        return { attempted: true, config, recovery, blocked: true };
-      }
       const result = await this._sync(this.projectDir, {
         includeClaims: config.claimsEnabled === true,
         ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
         ...this._provenanceContext(),
+        signal: controller.signal,
       });
       const effectiveConfig = result?.config || config;
       if (result?.reason === "shared_trunk_provenance_blocked") ensureProvenanceGate(result);
+      if (result?.blocked || result?.diverged || (result?.unresolved?.length || 0) > 0
+        || result?.reason === "unresolved_shared_trunk_operation") {
+        // Blocked recovery halts trunk writes, but its completed claim-
+        // inclusive fetch is still authoritative for the advisory mirror —
+        // without this the peer-claim view ages for as long as one journal
+        // row stays unresolved.
+        await this._reconcileClaims(result, effectiveConfig, controller.signal);
+        await reconcileSessionDelegationCommits(this.projectDir);
+        return { ...result, attempted: true, config: effectiveConfig, blocked: true };
+      }
       if (result?.ok && /^[0-9a-f]{40}$/iu.test(String(result.newSha || ""))) {
         const live = getLivePairingState();
         if (live?.phase === "active" && live.baseline_oid !== result.newSha) {
@@ -282,10 +316,12 @@ export class SharedTrunkPoller {
           updateSharedTrunkRuntimeStatus({ provenance_gate_rejected: false, provenance_gate_job_id: null });
         }
       }
-      await this._reconcileClaims(result, effectiveConfig);
+      await this._reconcileClaims(result, effectiveConfig, controller.signal);
       await reconcileSessionDelegationCommits(this.projectDir);
-      return { ...result, config: effectiveConfig, recovery };
+      return { ...result, config: effectiveConfig };
     } catch (err) {
+      this._claimCursor = null;
+      this._claimCycleStartedAt = null;
       // Fetch/transport is fail-open for job dispatch. The merge coordinator
       // still fails closed before any trunk write.
       this._log({
@@ -295,6 +331,8 @@ export class SharedTrunkPoller {
         event_json: JSON.stringify({ error: err?.message || String(err), fail_open: true }),
       });
       return { attempted: true, unavailable: true, config, error: err };
+    } finally {
+      clearTimeout(deadline);
     }
   }
 
@@ -318,7 +356,7 @@ export class SharedTrunkPoller {
   // snapshot they carry is real). A skipped, lock-busy, or unavailable result
   // never carries the stamp, and treating its empty list as complete would
   // wipe the durable peer-claim mirror.
-  async _reconcileClaims(result, config) {
+  async _reconcileClaims(result, config, signal = null) {
     if (config?.claimsEnabled !== true) return;
     if (result?.fetchCompleted !== true) return;
     if (!this._claimCycleStartedAt || claimNamespace(config) !== this._claimNamespace) {
@@ -350,6 +388,7 @@ export class SharedTrunkPoller {
         claimSnapshotComplete: snapshotComplete,
         claimSnapshotStartedAt: paginationSupported ? this._claimCycleStartedAt : null,
         activeLocks: this._activeLocks(),
+        signal,
       });
       if (paginationSupported && nextCursor) {
         this._claimCursor = nextCursor;
@@ -358,6 +397,8 @@ export class SharedTrunkPoller {
         this._claimCycleStartedAt = null;
       }
     } catch (err) {
+      this._claimCursor = null;
+      this._claimCycleStartedAt = null;
       // Claims are explicitly fail-open. Keep trunk sync success and make
       // the degraded optimization visible without blocking dispatch.
       this._log({

@@ -33,6 +33,10 @@ const POLICY_ENTRIES = [
   { name: "usage", readOnly: true, requiresWritableArtifacts: false },
   { name: "atlas-smoke", readOnly: true, requiresWritableArtifacts: false },
   { name: "shared-trunk-smoke", readOnly: true, requiresWritableArtifacts: false, requiresNativeGit: true },
+  // Listing and provenance reset must remain available when the native helper
+  // is the thing an operator is repairing. The abandon path performs its own
+  // capability-gated fetch/reset before it changes the durable row.
+  { name: "shared-trunk", requiresWritableArtifacts: false },
   { name: "pairing-preflight", aliases: ["shared-trunk-preflight"], requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "pair", requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "session", requiresWritableArtifacts: false, requiresNativeGit: true },

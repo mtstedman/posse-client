@@ -394,7 +394,7 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
     work_item_id: workItem.id,
     job_id: null,
     artifact_type: "response",
-    content_long: buildSyntheticResearchBrief(routing),
+    content_long: buildSyntheticResearchBrief(routing, { plannerDispatch }),
   });
   if (redTeamPlan) {
     const chain = createRedTeamPlanChain({
@@ -408,6 +408,10 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
       budget: deepthinkBudget,
       priority: workItem.priority,
       actorType: "system",
+      ...(plannerDispatch ? {
+        primaryModelTier: modelTier,
+        primaryReasoningEffort: reasoningEffort,
+      } : {}),
     });
     logEvent({
       work_item_id: workItem.id,
@@ -744,21 +748,28 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
     logEvent({ work_item_id: workItem.id, event_type: EVENT_TYPES.PLANNER_DISPATCH_INACTIVE,
       actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: provider ${plannerProvider || "unknown"} has no known MCP tool deadline` });
   }
-  if (dispatchPolicy.enabled && dispatchProviderSupported && !["oneshot", "oneshot_candidate", "web_only_answer"].includes(effectiveRouting.bucket)) {
+  if (dispatchPolicy.enabled && dispatchProviderSupported && !["oneshot", "oneshot_candidate", "no_research", "web_only_answer"].includes(effectiveRouting.bucket)) {
     // This route replaces a research job plus a plan job, not the cheap
     // direct-plan route for trivial items. The planner runs on the configured
     // dispatch tier (strong by default) and its research children on the
     // cheaper child tier, which is the cost split planner-led intake is for.
+    const intakeHints = getWorkItemIntakeHints(workItem);
+    const dispatchSeedFiles = [...new Set([
+      ...(effectiveRouting.candidate_files || []),
+      ...(effectiveRouting.key_files || []),
+      ...(intakeHints.suspected_files || []),
+    ].map(normalizeCandidatePath).filter(Boolean))].slice(0, 12);
+    const dispatchRouting = {
+      ...effectiveRouting,
+      reason: "Planner decides whether research is needed",
+      ...(dispatchSeedFiles.length ? { key_files: dispatchSeedFiles } : {}),
+    };
     const job = createPlanAfterSkippedResearch(workItem, {
-      routing: { ...effectiveRouting, reason: "Planner decides whether research is needed" },
+      routing: dispatchRouting,
       budget: actualBudget, source, redTeamPlan, plannerDispatch: true,
       modelTier: dispatchPolicy.plannerModelTier, reasoningEffort: dispatchPolicy.plannerReasoningEffort,
     });
-    return { kind: "plan", job, routing: effectiveRouting };
-  }
-  if (dispatchPolicy.mode === "planner" && !dispatchPolicy.enabled) {
-    logEvent({ work_item_id: workItem.id, event_type: EVENT_TYPES.PLANNER_DISPATCH_INACTIVE,
-      actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: ${dispatchPolicy.inactiveReason}` });
+    return { kind: "plan", job, routing: dispatchRouting };
   }
   const fanoutMode = effectiveRouting.bucket === "fanout_clear" ? getResearchFanoutMode() : "off";
   if (effectiveRouting.bucket === "oneshot") {

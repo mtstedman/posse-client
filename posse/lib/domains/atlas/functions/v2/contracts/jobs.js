@@ -135,7 +135,7 @@
 /**
  * @typedef {Object} AtlasWarmSkip
  * @property {string} repo_rel_path
- * @property {"unsupported_lang" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "generated_artifact_skip" | "symlink_skip" | "busy" | "infra_unavailable" | "rebuild_required"} reason
+ * @property {"unsupported_lang" | "unsupported_syntax_skip" | "read_error" | "parse_error" | "size_exceeded" | "minified_skip" | "generated_artifact_skip" | "symlink_skip" | "busy" | "infra_unavailable" | "rebuild_required"} reason
  * @property {string} [message]
  */
 
@@ -161,6 +161,11 @@ export const ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS = Object.freeze([
   "size_exceeded",
   "minified_skip",
   "generated_artifact_skip",
+  // Tree-sitter recognized the language but recovered no valid declarations.
+  // The warm path publishes a durable empty layer for the exact content hash,
+  // distinguishing this deterministic syntax mismatch from parser/infra
+  // exceptions, which remain `parse_error` and keep publication fail-closed.
+  "unsupported_syntax_skip",
   // A symlink is excluded rather than dereferenced: Git proves only the
   // committed link text. The path is accounted because the exact view
   // contains no rows derived from it.

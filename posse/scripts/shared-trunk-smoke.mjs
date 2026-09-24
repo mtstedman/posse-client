@@ -198,6 +198,7 @@ export async function runSharedTrunkSmoke({ onProgress = null } = {}) {
       remote,
       branch,
       expectedLocalOid: beforeA,
+      expectedRemoteOid: fetchedA.newOid,
     }), "convergence ff-update");
     if (!new Set(["advanced", "unchanged"]).has(outcome(ffA))) {
       throw new Error(`convergence ff-update returned ${outcome(ffA) || "no outcome"}`);

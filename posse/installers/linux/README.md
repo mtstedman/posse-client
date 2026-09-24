@@ -116,7 +116,8 @@ your deployment and Posse settings if indexing exhausts the container's limits.
 ## What setup handles
 
 - Missing Git, CA certificates, download/extraction tools, process tools,
-  C++/make/pkg-config, Python/pip/venv, and helper CLIs through apt/dnf/yum/pacman/zypper.
+  C++/make/pkg-config, Python/pip/venv, and helper CLIs (including the optional
+  GitHub CLI) through apt/dnf/yum/pacman/zypper.
 - Node 24 through pinned nvm when the current Node/npm pair is unusable. The
   nvm installer script is verified against a SHA-256 embedded in this script
   before it runs, and all downloads are HTTPS-only across redirects. nvm's

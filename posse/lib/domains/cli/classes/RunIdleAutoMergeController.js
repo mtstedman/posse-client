@@ -61,4 +61,16 @@ export class RunIdleAutoMergeController {
   isRunning() {
     return !!this.promise;
   }
+
+  whenIdle(callback) {
+    const pending = this.promise;
+    const invoke = () => {
+      try { callback?.(); } catch { /* scheduler re-drive hints are best-effort */ }
+    };
+    if (!pending) {
+      queueMicrotask(invoke);
+      return;
+    }
+    void pending.then(invoke, invoke);
+  }
 }

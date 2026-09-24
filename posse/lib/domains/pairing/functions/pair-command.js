@@ -5,6 +5,7 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { runSharedTrunkAccessPreflight } from "../../integrations/functions/shared-trunk-preflight.js";
 import { getLiveSchedulerBlockMessage } from "../../queue/functions/locks.js";
+import { listUnresolvedSharedTrunkMergeOperations } from "../../queue/functions/shared-trunk-merge-state.js";
 import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
 import { syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
@@ -774,6 +775,13 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
+  const ambiguous = listUnresolvedSharedTrunkMergeOperations()
+    .filter((operation) => operation.phase === "publish_unknown");
+  if (ambiguous.length > 0) {
+    throw Object.assign(new Error(
+      `Shared-trunk publication ${ambiguous[0].operationId} may already have landed. Inspect it with \`posse shared-trunk ops\` before joining another session.`,
+    ), { code: "shared_trunk_publication_unknown" });
+  }
   const pendingPromotion = readPairingPromotionJournal();
   if (pendingPromotion) {
     throw Object.assign(new Error(
@@ -948,6 +956,13 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
+  const ambiguous = listUnresolvedSharedTrunkMergeOperations()
+    .filter((operation) => operation.phase === "publish_unknown");
+  if (ambiguous.length > 0) {
+    throw Object.assign(new Error(
+      `Shared-trunk publication ${ambiguous[0].operationId} may already have landed. Inspect it with \`posse shared-trunk ops\` before joining another session.`,
+    ), { code: "shared_trunk_publication_unknown" });
+  }
   const pendingPromotion = readPairingPromotionJournal();
   if (pendingPromotion) {
     throw Object.assign(new Error(

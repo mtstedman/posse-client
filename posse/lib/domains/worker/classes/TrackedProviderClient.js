@@ -2,7 +2,6 @@ import { expireUnackedOperatorFeedbackForJob } from "../../queue/functions/agent
 import { recordResearchDispatchAudit } from "../../planning/functions/research-dispatch-telemetry.js";
 import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
 import { runResearchChild } from "../../planning/functions/run-research-child.js";
-import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 // lib/domains/worker/classes/TrackedProviderClient.js
 //
 // Tracked provider-call orchestration extracted from Worker. The Worker still
@@ -1750,9 +1749,12 @@ export class TrackedProviderClient {
       const subAgentEnabled = effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.subAgentV1 === true
         && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.sub_agent_v1 === true
         && opts._subAgentChild !== true;
-      const researchPolicy = readPlannerDispatchPolicy({ projectDir: cwd });
-      const researchEnabled = opts.role === "planner" && effectiveCapabilityOpts.sessionPacket?.planner_dispatch === true
-        && researchPolicy.enabled && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true
+      // Enforce the same immutable policy snapshot that was rendered into the
+      // planner prompt. Re-reading account settings here could make the tool
+      // accept a different budget from the one the planner was told to use.
+      const researchPolicy = effectiveCapabilityOpts?.sessionPacket?.planner_dispatch_policy || null;
+      const researchEnabled = opts.role === "planner" && effectiveCapabilityOpts?.sessionPacket?.planner_dispatch === true
+        && researchPolicy?.enabled === true && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.dispatchAgentV1 === true
         && providerHonorsMcpToolDeadline(providerName);
       if (subAgentEnabled || researchEnabled) {
         unregisterSubAgentParent = subAgentRuntime.registerParent({
@@ -1762,7 +1764,6 @@ export class TrackedProviderClient {
             agentCallId, jobId: job_id, workItemId: work_item_id, attemptId: observationContext?.attempt_id,
             cwd, provider: providerName, tier, model: modelName,
             packet: effectiveCapabilityOpts.sessionPacket, disableAtlas: opts.disableAtlas,
-            disableSystemTools: effectiveCapabilityOpts.disableSystemTools,
           }, { ...request, signal: combinedAbortSignal(abortSignal, request.signal) }),
           authorizedToolSurface: effectiveCapabilityOpts?._remoteToolSurface?.tools
             || effectiveCapabilityOpts?.sessionPacket?.remote_issuance?.tools

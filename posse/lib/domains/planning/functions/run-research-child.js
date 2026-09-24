@@ -8,6 +8,7 @@ import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntim
 // its first read lands near the target instead of a cold search.
 export function researchChildInstructions(parent, request) {
   const hints = parent?.packet?.context_hints || {};
+  const anchors = Array.isArray(request?.anchors) ? request.anchors : [];
   const seeds = [
     ...(Array.isArray(parent?.packet?.research_evidence?.key_files) ? parent.packet.research_evidence.key_files : []),
     ...(Array.isArray(hints.atlas_seed_files) ? hints.atlas_seed_files : []),
@@ -16,12 +17,25 @@ export function researchChildInstructions(parent, request) {
     .map((entry) => (typeof entry === "string" ? entry : entry?.name)).filter((value) => typeof value === "string" && value.trim());
   const uniqueSeeds = [...new Set(seeds)].slice(0, 12);
   const uniqueSymbols = [...new Set(symbols)].slice(0, 12);
+  const workTitle = String(parent?.packet?._raw_payload?.title || parent?.packet?.title || "").trim().slice(0, 300);
+  const workDescription = String(parent?.packet?.project_context || "").trim().slice(0, 600);
+  const anchorLines = anchors.map((anchor) => {
+    if (anchor.ref) return `- ${anchor.ref} (delegated parent evidence; fetch and verify before relying on it)`;
+    const range = anchor.lines ? `:${anchor.lines.start}-${anchor.lines.end}` : "";
+    return `- ${anchor.path}${range}${anchor.symbol ? ` — symbol ${anchor.symbol}` : ""}`;
+  });
   return [
+    ...(workTitle || workDescription ? [
+      "WORK ITEM CONTEXT:",
+      ...(workTitle ? [`Title: ${workTitle}`] : []),
+      ...(workDescription ? [`Description: ${workDescription}`] : []),
+    ] : []),
     `RESEARCH QUESTION:\n${request.intent}`,
     `Budget: at most ${request.maxTurns} tool turns and ${Math.round(request.timeoutMs / 1000)} seconds; if either runs low, submit partial findings and name the gap instead of continuing.`,
     `Compact report character limit: ${request.resultChars}.`,
     ...(uniqueSeeds.length ? [`Starting points (planner seed files, verify before relying on them): ${uniqueSeeds.join(", ")}`] : []),
     ...(uniqueSymbols.length ? [`Seed symbols: ${uniqueSymbols.join(", ")}`] : []),
+    ...(anchorLines.length ? ["Anchors from the planner (verify before relying on them):", ...anchorLines] : []),
   ].join("\n");
 }
 
@@ -44,12 +58,19 @@ export async function runResearchChild(client, parent, request) {
       },
     };
   }
+  const anchors = Array.isArray(request.anchors) ? request.anchors : [];
+  const anchorFiles = anchors.filter((anchor) => anchor?.path).map((anchor) => anchor.path).slice(0, 8);
+  const anchorSymbols = anchors.filter((anchor) => anchor?.symbol).map((anchor) => anchor.symbol).slice(0, 8);
   const packet = {
     recipient: "researcher", job_type: "research", prompt_profile: RESEARCH_CHILD_PROMPT_PROFILE,
     title: intent, work_item_id: parent.workItemId, job_id: parent.jobId, cwd: parent.cwd,
     tool_policy: { allow_read: true, allow_write: false, allow_shell: false, allow_tests: false },
     budgets: { fallback_reads_remaining: maxTurns },
     atlas: parent.packet.atlas || { active: false },
+    context_hints: {
+      ...(anchorFiles.length ? { atlas_seed_files: anchorFiles } : {}),
+      ...(anchorSymbols.length ? { atlas_seed_symbols: anchorSymbols } : {}),
+    },
     agent_coordination: {
       mode: "handoff", agent_handoff_v1: true,
       agent_handoff_compact_v1: false, agent_handoff_compact_v2: false, agent_handoff_compact_v3: false,

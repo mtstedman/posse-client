@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 20;
+export const HOST_SCHEMA_VERSION = 21;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -453,7 +453,7 @@ export function installSharedTrunkMergeOperationSchema(db) {
       base_sha TEXT NOT NULL,
       expected_remote_sha TEXT NOT NULL,
       candidate_sha TEXT,
-      phase TEXT NOT NULL CHECK (phase IN ('intent','candidate','publish_unknown','deferred','published')),
+      phase TEXT NOT NULL CHECK (phase IN ('intent','candidate','publish_unknown','deferred','published','abandoned')),
       attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
       version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
       last_error_code TEXT,
@@ -519,6 +519,58 @@ export function installSharedTrunkMergeOperationSchema(db) {
       ON shared_trunk_claim_deferrals(work_item_id);
   `);
   return true;
+}
+
+export function needsSharedTrunkAbandonedPhaseSchema(db) {
+  const sql = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='shared_trunk_merge_operations'`,
+  ).get()?.sql || "";
+  return !!sql && !sql.includes("'abandoned'");
+}
+
+export function repairSharedTrunkAbandonedPhaseSchema(db) {
+  if (!needsSharedTrunkAbandonedPhaseSchema(db)) return false;
+  const tmpName = "_shared_trunk_merge_operations_abandoned_mig";
+  withForeignKeysDisabled(db, () => db.transaction(() => {
+    db.exec(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
+    db.exec(`
+      CREATE TABLE ${quoteIdent(tmpName)} (
+        operation_id TEXT PRIMARY KEY,
+        work_item_id INTEGER NOT NULL,
+        purpose TEXT NOT NULL CHECK (purpose IN ('final','iterative')),
+        purpose_key TEXT NOT NULL,
+        source_branch TEXT NOT NULL,
+        source_sha TEXT NOT NULL,
+        target_branch TEXT NOT NULL,
+        remote TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        expected_remote_sha TEXT NOT NULL,
+        candidate_sha TEXT,
+        phase TEXT NOT NULL CHECK (phase IN ('intent','candidate','publish_unknown','deferred','published','abandoned')),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+        last_error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+        UNIQUE (work_item_id, purpose, purpose_key)
+      )
+    `);
+    copyCompatibleColumns(db, "shared_trunk_merge_operations", tmpName);
+    db.exec(`DROP TABLE ${quoteIdent("shared_trunk_merge_operations")}`);
+    db.exec(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("shared_trunk_merge_operations")}`);
+    db.exec(`
+      CREATE INDEX idx_shared_trunk_merge_operations_phase
+        ON shared_trunk_merge_operations(phase, updated_at);
+      CREATE INDEX idx_shared_trunk_merge_operations_work_item
+        ON shared_trunk_merge_operations(work_item_id, purpose, updated_at);
+    `);
+  })());
+  return true;
+}
+
+export function __testRepairSharedTrunkAbandonedPhaseSchema(db) {
+  return repairSharedTrunkAbandonedPhaseSchema(db);
 }
 
 export function __testInstallSharedTrunkMergeOperationSchema(db) {

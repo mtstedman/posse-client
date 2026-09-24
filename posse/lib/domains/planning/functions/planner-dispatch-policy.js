@@ -38,7 +38,6 @@ export function normalizePlannerDispatchPolicy(values = {}) {
   return Object.freeze({
     mode,
     enabled,
-    inactiveReason: enabled ? null : "router",
     effortCeiling,
     // Children run at this effort unless the planner asks for another; the
     // ceiling bounds both. The planner itself defaults to high.
@@ -50,6 +49,7 @@ export function normalizePlannerDispatchPolicy(values = {}) {
     ),
     childMaxTurns: normalized[SETTING_KEYS.PLANNER_RESEARCH_CHILD_MAX_TURNS],
     resultChars: normalized[SETTING_KEYS.PLANNER_RESEARCH_RESULT_CHARS],
+    expandChars: normalized[SETTING_KEYS.PLANNER_RESEARCH_EXPAND_CHARS],
     triageMaxTurns: normalized[SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS],
     plannerModelTier: normalized[SETTING_KEYS.PLANNER_DISPATCH_MODEL_TIER],
     plannerReasoningEffort: normalized[SETTING_KEYS.PLANNER_DISPATCH_REASONING_EFFORT],

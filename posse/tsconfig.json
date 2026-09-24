@@ -14,7 +14,8 @@
     ".posse-worktrees",
     "coverage",
     "dist",
-    "node_modules"
+    "node_modules",
+    "scripts/atlas-ab/**"
   ],
   "include": [
     "**/*.js",

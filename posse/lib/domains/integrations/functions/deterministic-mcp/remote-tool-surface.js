@@ -171,6 +171,13 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
   return {
     role: String(bootConfig.role || ""),
     provider: String(bootConfig.providerName || ""),
+    // Remote uses the profile only to select the handoff variant's claim
+    // staging; every report-only profile shares researcher.report.v1, so the
+    // canonical report profile stands in for tight and direct variants.
+    ...(String(bootConfig.role || "").trim().toLowerCase() === "researcher"
+      && bootConfig.agentHandoffReportOnly === true
+      ? { prompt_profile: "researcher_report" }
+      : {}),
     requested_suites: requestedRemoteToolSuites(bootConfig),
     local_capabilities: {
       tools: {

@@ -3,9 +3,12 @@
 export const AGENT_HANDOFF_RECEIPT_NOTIFICATION = "notifications/posse/agent_handoff_receipt";
 export const AGENT_HANDOFF_PROTOCOL = "posse.agent_handoff.v1";
 
+// Remote serves researcher_report_direct with the same researcher.report.v1
+// handoff and claim staging, so it is a report-only handoff profile too.
 const RESEARCHER_REPORT_PROMPT_PROFILES = new Set([
   "researcher_report",
   "researcher_report_tight",
+  "researcher_report_direct",
 ]);
 
 export function usesResearcherReportOnlyHandoff(promptProfile) {

@@ -9,6 +9,7 @@ export default [
       "coverage/**",
       "dist/**",
       "node_modules/**",
+      "scripts/atlas-ab/**",
     ],
   },
   {

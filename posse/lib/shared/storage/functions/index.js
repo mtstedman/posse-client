@@ -28,6 +28,7 @@ import {
   needsQueueForeignKeyOrphanRepair,
   needsWaitingLanePreparationSchema,
   needsSharedTrunkMergeOperationSchema,
+  needsSharedTrunkAbandonedPhaseSchema,
   needsPairingSessionSchema,
   needsPairingSessionPendingPhaseSchema,
   needsPairingSessionPolicySchema,
@@ -41,6 +42,7 @@ import {
   repairQueueForeignKeyOrphans,
   repairWaitingLanePreparationSchema,
   installSharedTrunkMergeOperationSchema,
+  repairSharedTrunkAbandonedPhaseSchema,
   installPairingSessionSchema,
   repairPairingSessionPendingPhaseSchema,
   installPairingSessionPolicySchema,
@@ -62,6 +64,7 @@ export {
   __testRepairQueueForeignKeyOrphans,
   __testRepairWaitingLanePreparationSchema,
   __testInstallSharedTrunkMergeOperationSchema,
+  __testRepairSharedTrunkAbandonedPhaseSchema,
   __testInstallPairingSessionSchema,
   __testRepairPairingSessionPendingPhaseSchema,
   __testInstallPairingSessionPolicySchema,
@@ -2923,6 +2926,12 @@ export function getDb() {
     name: "pairing_submission_approval",
     needs: needsPairingSubmissionApprovalSchema,
     migrate: installPairingSubmissionApprovalSchema,
+  });
+  runHostMigration(_db, {
+    version: 21,
+    name: "shared_trunk_abandoned_phase",
+    needs: needsSharedTrunkAbandonedPhaseSchema,
+    migrate: repairSharedTrunkAbandonedPhaseSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

@@ -12,9 +12,12 @@ import {
   TEAM_TRANSIENT_FAILURE_REASONS,
 } from "../../../catalog/team.js";
 import {
+  abandonSharedTrunkMergeOperation,
   beginSharedTrunkMergeOperation,
+  createJob,
   finalizePublishedSharedTrunkMergeOperation,
   getSharedTrunkMergeOperation,
+  listSharedTrunkMergeOperations,
   listUnresolvedSharedTrunkMergeOperations,
   logEvent,
   notifyQueueStateChanged,
@@ -24,6 +27,7 @@ import {
   updateSharedTrunkRuntimeStatus,
   withMergeLock,
 } from "../../queue/functions/index.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   emitMainAdvanced as emitAtlasV2MainAdvanced,
   isAtlasV2EmissionEnabled,
@@ -41,6 +45,10 @@ import { isGitCommandFailure } from "../classes/Repo.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { withWorktreeLockAsync } from "./worktree.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import {
+  gitHubCliAuthRemediation,
+  isGitPushAuthenticationFailure,
+} from "./git-push-auth.js";
 
 const SHA_RE = /^[0-9a-f]{40,64}$/iu;
 const MAX_PROVENANCE_COMMITS = 256;
@@ -55,26 +63,26 @@ function execGit(args, cwd, options) {
 }
 
 function sharedTrunkCapabilities(projectDir) {
-  return (testOverrides?.capabilities || getSharedTrunkNativeCapabilities)(projectDir);
+  return (testOverrides?.capabilities || getSharedTrunkNativeCapabilities)(projectDir, { timeoutMs: 30_000 });
 }
 
 /** Native options for one trunk call. In an approval-managed Session every
  * trunk mutation is minted under the work item's verified grant; outside one
  * the options stay empty and the call behaves exactly as before. */
-function nativeTrunkOptions(workItemContext) {
-  return workItemContext ? { workItemContext } : {};
+function nativeTrunkOptions(workItemContext, timeoutMs = 30_000, signal = null) {
+  return { ...(workItemContext ? { workItemContext } : {}), timeoutMs, ...(signal ? { signal } : {}) };
 }
 
-function sharedTrunkFetch(args, workItemContext = null) {
-  return (testOverrides?.fetch || fetchSharedTrunkNative)(args, nativeTrunkOptions(workItemContext));
+function sharedTrunkFetch(args, workItemContext = null, signal = null) {
+  return (testOverrides?.fetch || fetchSharedTrunkNative)(args, nativeTrunkOptions(workItemContext, 30_000, signal));
 }
 
-function sharedTrunkFastForward(args, workItemContext = null) {
-  return (testOverrides?.fastForward || ffUpdateSharedTrunkNative)(args, nativeTrunkOptions(workItemContext));
+function sharedTrunkFastForward(args, workItemContext = null, signal = null) {
+  return (testOverrides?.fastForward || ffUpdateSharedTrunkNative)(args, nativeTrunkOptions(workItemContext, 390_000, signal));
 }
 
 function sharedTrunkPush(args, workItemContext = null) {
-  return (testOverrides?.push || pushSharedTrunkNative)(args, nativeTrunkOptions(workItemContext));
+  return (testOverrides?.push || pushSharedTrunkNative)(args, nativeTrunkOptions(workItemContext, 180_000));
 }
 
 /** The verified grant pins for a work item's trunk publication, or null when
@@ -107,6 +115,25 @@ async function teamPublishedProof(args) {
   if (testOverrides?.teamPublishedProof) return testOverrides.teamPublishedProof(args);
   const { verifyTeamPublishedCandidate } = await import("../../pairing/functions/team-submissions.js");
   return verifyTeamPublishedCandidate(args);
+}
+
+async function sessionProvenanceContext() {
+  try {
+    const [{ getLivePairingState }, { readPairingPeerSnapshot }] = await Promise.all([
+      import("../../pairing/functions/state.js"),
+      import("../../pairing/functions/work-items.js"),
+    ]);
+    const state = getLivePairingState();
+    if (!state?.baseline_oid || state.phase !== "active") return null;
+    const snapshot = readPairingPeerSnapshot();
+    return {
+      baselineOid: state.baseline_oid,
+      gitIdentities: (snapshot?.peers || [])
+        .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function nativeResult(envelope) {
@@ -261,6 +288,52 @@ function refSha(projectDir, ref) {
   }
 }
 
+function restoreParkedCandidate(projectDir, operation) {
+  const branchRef = `refs/heads/${operation.targetBranch}`;
+  const actualBranch = (() => {
+    try { return execGit(["symbolic-ref", "--quiet", "--short", "HEAD"], projectDir).trim(); }
+    catch { return ""; }
+  })();
+  if (actualBranch !== operation.targetBranch) {
+    return { ok: false, reason: "wrong_checkout" };
+  }
+  if (refSha(projectDir, branchRef) !== operation.baseSha) {
+    return { ok: false, reason: "local_changed" };
+  }
+  const dirty = execGit(["status", "--porcelain", "--untracked-files=all"], projectDir, { trim: false })
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .filter((line) => {
+      const statusPath = line.slice(3).replace(/\\/gu, "/").replace(/^"|"$/gu, "");
+      return statusPath !== ".posse"
+        && !statusPath.startsWith(".posse/")
+        && statusPath !== ".posse-worktrees"
+        && !statusPath.startsWith(".posse-worktrees/");
+    })
+    .join("\n")
+    .trim();
+  if (dirty) return { ok: false, reason: "dirty" };
+  try {
+    // The ref update is the CAS. Reset then materializes the already-validated
+    // tree/index; moving only the ref would leave the checked-out branch dirty.
+    execGit(["update-ref", branchRef, operation.candidateSha, operation.baseSha], projectDir);
+    execGit(["reset", "--hard", operation.candidateSha], projectDir);
+    if (refSha(projectDir, "HEAD") !== operation.candidateSha) {
+      throw new Error("parked candidate checkout verification failed");
+    }
+    return { ok: true };
+  } catch (error) {
+    // Best-effort rollback is itself compare-and-swap guarded; never overwrite
+    // a concurrent ref move while reporting the restore failure.
+    try {
+      execGit(["update-ref", branchRef, operation.baseSha, operation.candidateSha], projectDir);
+      execGit(["reset", "--hard", operation.baseSha], projectDir);
+    } catch { /* the journal remains a recoverable candidate */ }
+    return { ok: false, reason: "parked_candidate_restore_failed", error };
+  }
+}
+
 function candidateRecoveredFromIntent(projectDir, operation, exec = execGit) {
   const resolveRef = (ref) => {
     try {
@@ -365,7 +438,15 @@ export function verifySharedTrunkProvenance(projectDir, {
     if (!SHA_RE.test(commit.commit)) {
       return { ok: false, reason: "provenance_range_invalid", commits: [] };
     }
-    if (/^Posse-Shared-Trunk-Operation:/mu.test(commit.message) || identities.has(commit.email)) continue;
+    const operationId = commit.message.match(/^Posse-Shared-Trunk-Operation:\s*(\S+)\s*$/mu)?.[1] || null;
+    let journaled = false;
+    if (operationId) {
+      try {
+        const operation = getSharedTrunkMergeOperation(operationId);
+        journaled = operation?.candidateSha === commit.commit;
+      } catch { /* an unverifiable trailer is not provenance */ }
+    }
+    if (journaled || identities.has(commit.email)) continue;
     unknown.push({ commit: commit.commit, email: commit.email || null });
   }
   return unknown.length > 0
@@ -404,6 +485,7 @@ function recordSyncStatus(projectDir, config, {
   success = false,
   diverged = undefined,
   unavailable = false,
+  blockedReason = undefined,
 } = {}) {
   const havePair = typeof localSha === "string" && localSha
     && typeof remoteSha === "string" && remoteSha;
@@ -422,10 +504,12 @@ function recordSyncStatus(projectDir, config, {
     last_attempt_at: timestamp,
     ...(success ? { last_success_at: timestamp } : {}),
     ...(diverged === undefined && !success ? {} : { diverged: diverged === true }),
+    ...(blockedReason !== undefined ? { blocked_reason: blockedReason || null } : {}),
+    ...(success ? { blocked_reason: null } : {}),
   }, { increments: unavailable ? { sync_unavailable_count: 1 } : {} });
 }
 
-function recordPublicationHealth(config, unresolved = []) {
+function recordPublicationHealth(config, unresolved = [], stale = []) {
   const prior = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK) || {};
   const rows = Array.isArray(unresolved) ? unresolved : [];
   const publicationUnresolved = rows.length > 0;
@@ -440,12 +524,21 @@ function recordPublicationHealth(config, unresolved = []) {
     publication_unresolved: publicationUnresolved,
     unresolved_operation_count: rows.length,
     last_error_code: lastErrorCode,
+    stale_operation_count: stale.length,
+    stale_operation_ids: stale.slice(0, 16).map((operation) => operation.operationId),
   });
   if (publicationUnresolved && prior.publication_unresolved !== true) {
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk publication requires reconciliation", {
       publication_unresolved: true,
       unresolved_operation_count: rows.length,
       last_error_code: lastErrorCode,
+    });
+  }
+  if (stale.length > 0 && Number(prior.stale_operation_count || 0) !== stale.length) {
+    sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Stale shared-trunk operations need operator review", {
+      stale_operation_count: stale.length,
+      operation_ids: stale.slice(0, 16).map((operation) => operation.operationId),
+      remediation: "Run `posse shared-trunk ops` and inspect old branch/remote rows.",
     });
   }
 }
@@ -477,9 +570,63 @@ function teamProofUnavailable(proof, operation) {
   };
 }
 
+function isParkedCandidateReason(reason) {
+  return TEAM_PARKED_CANDIDATE_REASONS.includes(reason)
+    || reason === "shared_trunk_push_refused";
+}
+
+function ensureUnprovablePublicationGate(operation, proof) {
+  const existing = getDb().prepare(`
+    SELECT id FROM jobs
+    WHERE job_type = 'human_input'
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_publication_unprovable'
+          AND json_extract(payload_json, '$.operation_id') = ?
+        ELSE 0 END
+    ORDER BY id DESC LIMIT 1
+  `).get(operation.operationId);
+  if (existing) return existing.id;
+  return createJob({
+    work_item_id: operation.workItemId,
+    job_type: "human_input",
+    title: `Review unprovable shared-trunk publication for WI#${operation.workItemId}`,
+    priority: "urgent",
+    max_attempts: 1,
+    payload_json: {
+      subtype: "shared_trunk_publication_unprovable",
+      review_type: "shared_trunk_publication_unprovable",
+      question_kind: "shared_trunk_publication_unprovable",
+      questions: ["The candidate is present on the shared trunk, but its required Team publication proof failed permanently. Inspect the operation before continuing."],
+      choices: ["acknowledge"],
+      operation_id: operation.operationId,
+      candidate_oid: operation.candidateSha,
+      remote_oid: operation.publishedSha,
+      proof_reason: proof?.reason || null,
+    },
+  }).id;
+}
+
+function abandonUnprovablePublication(operation, publishedSha, proof) {
+  const gateJobId = ensureUnprovablePublicationGate({
+    ...operation,
+    publishedSha,
+  }, proof);
+  const abandoned = abandonSharedTrunkMergeOperation(operation.operationId, {
+    expectedVersion: operation.version,
+    lastErrorCode: "team_publication_unprovable",
+  });
+  if (!abandoned) {
+    const error = new Error(`Shared-trunk operation ${operation.operationId} changed concurrently`);
+    error.code = "shared_trunk_operation_stale";
+    throw error;
+  }
+  return { operation: abandoned, gateJobId };
+}
+
 export function sharedTrunkTeamResultNeedsAttention(result) {
   if (!result || result.ok === true) return false;
-  return TEAM_ATTENTION_FAILURE_REASONS.includes(String(result.reason || ""));
+  return TEAM_ATTENTION_FAILURE_REASONS.includes(String(result.reason || ""))
+    || result.reason === "shared_trunk_push_refused";
 }
 
 export function isTransientSharedTrunkMergeResult(result) {
@@ -499,6 +646,11 @@ export function isTransientSharedTrunkMergeResult(result) {
     "fast_forward_blocked",
     "remote_head_unresolved",
     "local_trunk_diverged",
+    "local_candidate_changed",
+    "parked_candidate_restore_blocked",
+    "merge_operational_failure",
+    "candidate_validation_unavailable",
+    "shared_trunk_push_refused",
     // Team publication deferrals are registered in the catalog. None of them
     // means the work is bad, only that publication is not authorized yet, so
     // all of them defer rather than finalizing the work item and forcing the
@@ -550,7 +702,7 @@ export function handleSharedTrunkAdvance(projectDir, {
   return { advanced: true, atlas, paths };
 }
 
-async function fetchRemote(projectDir, config, { includeClaims = false, claimAfter = null, workItemContext = null } = {}) {
+async function fetchRemote(projectDir, config, { includeClaims = false, claimAfter = null, workItemContext = null, signal = null } = {}) {
   let envelope;
   try {
     envelope = await sharedTrunkFetch({
@@ -559,14 +711,18 @@ async function fetchRemote(projectDir, config, { includeClaims = false, claimAft
       branch: config.branch,
       includeClaims: includeClaims === true,
       ...(includeClaims === true && claimAfter ? { claimAfter } : {}),
-    }, workItemContext);
+    }, workItemContext, signal);
   } catch (err) {
+    const auth = sharedTrunkAuthRemediation(projectDir, config, err);
+    if (auth) return { ok: false, unavailable: true, operational: true, ...auth, error: err };
     return { ok: false, unavailable: true, operational: true, reason: err?.code || "fetch_failed", error: err };
   }
   if (nativeUnavailable(envelope)) {
     return { ok: false, unavailable: true, reason: envelope?.reason || "native_capability_unavailable" };
   }
   const result = nativeResult(envelope) || {};
+  const auth = sharedTrunkAuthRemediation(projectDir, config, result);
+  if (auth) return { ok: false, unavailable: true, operational: true, ...auth, result };
   const remoteSha = fetchedRemoteSha(result, config, projectDir);
   if (!remoteSha) return { ok: false, unavailable: false, reason: "remote_head_unresolved", result };
   return {
@@ -586,7 +742,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
   const unresolved = [];
   for (let operation of listUnresolvedSharedTrunkMergeOperations()) {
     if (operation.targetBranch !== config.branch || operation.remote !== config.remote) {
-      unresolved.push(operation);
+      operations.push({ operation, recovered: "stale_configuration" });
       continue;
     }
     // One damaged or concurrently-transitioned row must stay an unresolved
@@ -602,11 +758,36 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
           operation = transition(operation, { phase: "deferred", lastErrorCode: "intent_recovered" });
           operations.push({ operation, recovered: "deferred" });
           continue;
+        } else {
+          const localHead = refSha(projectDir, operation.targetBranch);
+          if (localHead && isAncestor(projectDir, localHead, observed.remoteSha)) {
+            operation = transition(operation, {
+              phase: "deferred",
+              baseSha: observed.remoteSha,
+              expectedRemoteSha: observed.remoteSha,
+              lastErrorCode: "intent_remote_advanced",
+            });
+            operations.push({ operation, recovered: "deferred" });
+            continue;
+          }
         }
       }
       if (operation.candidateSha && isAncestor(projectDir, operation.candidateSha, observed.remoteSha)) {
         const proof = await teamPublishedProof({ projectDir, operation, observedOid: observed.remoteSha });
         if (!proof?.ok) {
+          if (TEAM_FATAL_FAILURE_REASONS.includes(String(proof?.reason || ""))
+            || [
+              "team_approved_submission_missing",
+              "team_approval_receipt_stale",
+              "github_merge_parents_mismatch",
+              "team_candidate_not_on_trunk",
+            ].includes(String(proof?.reason || ""))) {
+            const abandoned = abandonUnprovablePublication(operation, observed.remoteSha, proof);
+            operation = abandoned.operation;
+            const gateJobId = abandoned.gateJobId;
+            operations.push({ operation, recovered: "abandoned_unprovable", reason: proof.reason, gateJobId });
+            continue;
+          }
           unresolved.push(operation);
           operations.push({ operation, recovered: "team_publication_unverified", reason: proof?.reason });
           continue;
@@ -659,7 +840,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
         // checkout for other operations, but keep the candidate identity so
         // the next attempt pushes the approved OID rather than re-merging a
         // new one that would need a new approval.
-        if (TEAM_PARKED_CANDIDATE_REASONS.includes(operation.lastErrorCode)
+        if (isParkedCandidateReason(operation.lastErrorCode)
           && operation.baseSha === observed.remoteSha) {
           operation = transition(operation, {
             phase: "deferred",
@@ -697,7 +878,10 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
       operations.push({ operation, recovered: "error" });
     }
   }
-  recordPublicationHealth(config, unresolved);
+  const stale = operations
+    .filter((entry) => entry.recovered === "stale_configuration")
+    .map((entry) => entry.operation);
+  recordPublicationHealth(config, unresolved, stale);
   return {
     ok: unresolved.length === 0,
     reason: unresolved.length ? "unresolved_shared_trunk_operation" : null,
@@ -734,6 +918,45 @@ export async function reconcileSharedTrunkOperations(projectDir, { includeClaims
   );
 }
 
+export async function abandonSharedTrunkOperation(projectDir, operationId) {
+  const original = getSharedTrunkMergeOperation(operationId);
+  if (!original) return { ok: false, reason: "operation_not_found" };
+  if (["published", "abandoned"].includes(original.phase)) {
+    return { ok: false, reason: `operation_already_${original.phase}`, operation: original };
+  }
+  return underMergeLock(() => withWorktreeLockAsync(projectDir, projectDir, async () => {
+    let operation = getSharedTrunkMergeOperation(operationId);
+    if (!operation || ["published", "abandoned"].includes(operation.phase)) {
+      return { ok: false, reason: operation ? `operation_already_${operation.phase}` : "operation_not_found", operation };
+    }
+    let recoverableCandidate = operation.candidateSha;
+    if (!recoverableCandidate && ["intent", "deferred"].includes(operation.phase)) {
+      recoverableCandidate = candidateRecoveredFromIntent(projectDir, operation);
+      if (recoverableCandidate) {
+        operation = transition(operation, {
+          phase: "candidate",
+          candidateSha: recoverableCandidate,
+          lastErrorCode: "operator_abandon_reset_pending",
+        });
+      }
+    }
+    const actualHead = refSha(projectDir, "HEAD");
+    if (operation.candidateSha && actualHead === operation.candidateSha) {
+      const config = { enabled: true, remote: operation.remote, branch: operation.targetBranch, claimsEnabled: false };
+      const fetched = await fetchRemote(projectDir, config);
+      if (!fetched.ok) return { ...fetched, ok: false, reason: "abandon_reset_fetch_failed", operation };
+      const reset = await strictResetRejected(projectDir, config, operation, fetched.remoteSha);
+      if (!reset.ok) return { ok: false, reason: "abandon_reset_failed", reset, operation };
+    }
+    operation = abandonSharedTrunkMergeOperation(operation.operationId, {
+      expectedVersion: operation.version,
+      lastErrorCode: "operator_abandoned",
+    });
+    if (!operation) return { ok: false, reason: "operation_changed_concurrently" };
+    return { ok: true, operation };
+  }), "shared-trunk-abandon");
+}
+
 /** Private seam for callers that already hold both the merge and worktree lock. */
 export async function syncSharedTrunkAlreadyLocked(projectDir, {
   config,
@@ -742,9 +965,10 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   allowOperationId = null,
   provenance = null,
   workItemContext = null,
+  signal = null,
 } = {}) {
   recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch) });
-  const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter, workItemContext });
+  const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter, workItemContext, signal });
   if (!fetched.ok) {
     if (fetched.unavailable) {
       recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch), unavailable: true });
@@ -757,11 +981,23 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     return { ...fetched, config, fetchedClaims: fetched.fetchedClaims || [] };
   }
   if (provenance?.baselineOid) {
-    const proof = verifySharedTrunkProvenance(projectDir, {
+    let proof = verifySharedTrunkProvenance(projectDir, {
       baselineOid: provenance.baselineOid,
       newSha: fetched.remoteSha,
       gitIdentities: provenance.gitIdentities,
     });
+    if (!proof.ok && proof.reason === "unknown_commit_provenance" && proof.commits.length > 0) {
+      try {
+        const { verifyTeamProviderMergeProvenance } = await import("../../pairing/functions/team-submissions.js");
+        const providerProof = await verifyTeamProviderMergeProvenance({
+          projectDir,
+          commitOids: proof.commits.map((commit) => commit.commit),
+          observedOid: fetched.remoteSha,
+          signal,
+        });
+        if (providerProof?.ok) proof = { ok: true, reason: null, commits: [], provider: providerProof };
+      } catch { /* retain the normal provenance gate */ }
+    }
     if (!proof.ok) {
       updateSharedTrunkRuntimeStatus({
         provenance_blocked: true,
@@ -802,6 +1038,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       fetchedClaims: fetched.fetchedClaims,
       ...claimFetchMetadata(fetched),
       reason: "unresolved_shared_trunk_operation",
+      remediation: "Run `posse shared-trunk ops` and abandon only the operation you have inspected.",
       unresolved: blocking,
     };
   }
@@ -838,7 +1075,8 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       remote: config.remote,
       branch: config.branch,
       expectedLocalOid: oldSha,
-    }, workItemContext);
+      expectedRemoteOid: fetched.remoteSha,
+    }, workItemContext, signal);
   } catch (err) {
     recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha, unavailable: true });
     return { ok: false, unavailable: true, operational: true, config, fetchedClaims: fetched.fetchedClaims, reason: err?.code || "ff_update_failed", error: err };
@@ -865,7 +1103,13 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     return { ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), diverged: true, advanced: false, oldSha, newSha, reason: "local_trunk_diverged" };
   }
   if (status === "blocked") {
-    recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha });
+    const blockedReason = String(ff.reason || "").trim() || null;
+    const gateJobId = ensureFastForwardBlockedGate(config, blockedReason);
+    recordSyncStatus(projectDir, config, {
+      localSha: oldSha,
+      remoteSha: fetched.remoteSha,
+      blockedReason,
+    });
     return {
       ok: false,
       config,
@@ -877,7 +1121,9 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       unavailable: false,
       oldSha,
       newSha,
-      reason: ff.reason || "fast_forward_blocked",
+      reason: "fast_forward_blocked",
+      blockedReason,
+      ...(gateJobId ? { gateJobId, needsAttention: true } : {}),
     };
   }
   if (!(ff.ok === true || ["advanced", "up_to_date", "unchanged", "already_current", "no_change"].includes(status))) {
@@ -923,6 +1169,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
   includeClaims = false,
   claimAfter = null,
   provenance = null,
+  signal = null,
 } = {}) {
   const runtime = await runtimeSharedTrunkConfig(projectDir);
   if (!runtime.config.enabled) {
@@ -951,6 +1198,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
       includeClaims,
       claimAfter,
       provenance,
+      signal,
     })),
     "shared-trunk-sync",
   );
@@ -968,6 +1216,97 @@ function typedPushRejection(result) {
     || ["rejected", "rejected_nonff", "non_fast_forward", "stale_expected_remote"].includes(status);
 }
 
+function pushRejectionReason(result) {
+  return String(result?.reason || result?.blockedReason || result?.blocked_reason || "").trim().toLowerCase();
+}
+
+function ensurePushRefusedGate(config, pushed) {
+  const reason = pushRejectionReason(pushed) || "remote_policy_rejected";
+  const existing = getDb().prepare(`
+    SELECT id FROM jobs
+    WHERE job_type = 'human_input'
+      AND status IN ('queued','leased','running','waiting_on_human','blocked')
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_push_refused'
+          AND json_extract(payload_json, '$.branch') = ?
+          AND json_extract(payload_json, '$.reason') = ?
+        ELSE 0 END
+    ORDER BY id DESC LIMIT 1
+  `).get(config.branch, reason);
+  if (existing) return existing.id;
+  return createJob({
+    work_item_id: null,
+    job_type: "human_input",
+    title: `Shared-trunk push refused for ${config.branch}`,
+    priority: "urgent",
+    max_attempts: 1,
+    payload_json: {
+      subtype: "shared_trunk_push_refused",
+      review_type: "shared_trunk_push_refused",
+      question_kind: "shared_trunk_push_refused",
+      questions: ["The remote refused this shared-trunk push. Inspect the branch policy or pre-receive hook, then acknowledge when publication may be retried."],
+      choices: ["acknowledge"],
+      branch: config.branch,
+      remote: config.remote,
+      reason,
+      stderr_excerpt: String(pushed?.stderrExcerpt || pushed?.stderr_excerpt || "").slice(0, 512),
+    },
+  }).id;
+}
+
+function ensureFastForwardBlockedGate(config, reason) {
+  if (!["wrong_checkout", "dirty", "ignored_path_collision"].includes(reason)) return null;
+  const existing = getDb().prepare(`
+    SELECT id FROM jobs
+    WHERE job_type = 'human_input'
+      AND status IN ('queued','leased','running','waiting_on_human','blocked')
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_fast_forward_blocked'
+          AND json_extract(payload_json, '$.branch') = ?
+          AND json_extract(payload_json, '$.reason') = ?
+        ELSE 0 END
+    ORDER BY id DESC LIMIT 1
+  `).get(config.branch, reason);
+  if (existing) return existing.id;
+  return createJob({
+    work_item_id: null,
+    job_type: "human_input",
+    title: `Shared-trunk checkout blocks ${config.branch}`,
+    priority: "urgent",
+    max_attempts: 1,
+    payload_json: {
+      subtype: "shared_trunk_fast_forward_blocked",
+      review_type: "shared_trunk_fast_forward_blocked",
+      question_kind: "shared_trunk_fast_forward_blocked",
+      questions: ["The shared-trunk checkout cannot fast-forward safely. Inspect and repair the checkout, then acknowledge to retry."],
+      choices: ["acknowledge"],
+      branch: config.branch,
+      remote: config.remote,
+      reason,
+    },
+  }).id;
+}
+
+function sharedTrunkAuthRemediation(projectDir, config, failure) {
+  const status = pushStatus(failure);
+  const detail = {
+    stderr: failure?.stderr,
+    stdout: failure?.stdout,
+    message: [failure?.message, failure?.error, failure?.reason, status]
+      .filter(Boolean)
+      .map(String)
+      .join("\n"),
+  };
+  if (!["auth_failed", "authentication_failed", "unauthorized"].includes(status)
+    && !isGitPushAuthenticationFailure(detail)) return null;
+
+  let remoteUrl = null;
+  try {
+    remoteUrl = execGit(["remote", "get-url", "--push", config.remote], projectDir, { timeoutMs: 5_000 }).trim();
+  } catch { /* retain a host-neutral remediation below */ }
+  return gitHubCliAuthRemediation(remoteUrl);
+}
+
 async function strictResetRejected(projectDir, config, operation, remoteOid = operation.baseSha, workItemContext = null) {
   let envelope;
   try {
@@ -977,7 +1316,7 @@ async function strictResetRejected(projectDir, config, operation, remoteOid = op
       branch: config.branch,
       expectedCandidateOid: operation.candidateSha,
       remoteOid,
-    }, nativeTrunkOptions(workItemContext));
+    }, nativeTrunkOptions(workItemContext, 390_000));
   } catch (err) {
     return { ok: false, reason: err?.code || "reset_rejected_candidate_failed", error: err };
   }
@@ -1017,7 +1356,21 @@ export async function mergeToSharedTrunkAsync({
     return { ok: false, deferred: true, sharedTrunk: true, unavailable: true, reason: runtime.reason, message: "Shared-trunk native capability is unavailable" };
   }
   const config = runtime.config;
-  const team = await teamMergeContext({ projectDir, workItemId: Number(workItemId) });
+  let team;
+  try {
+    team = await teamMergeContext({ projectDir, workItemId: Number(workItemId) });
+  } catch (error) {
+    const blocked = {
+      ok: false,
+      sharedTrunk: true,
+      team: true,
+      unavailable: true,
+      operational: true,
+      reason: error?.code || "team_grant_unavailable",
+      message: error?.message || "Team grant lookup failed",
+    };
+    return { ...blocked, deferred: true };
+  }
   if (!team.ok) {
     const blocked = {
       ...team,
@@ -1029,8 +1382,12 @@ export async function mergeToSharedTrunkAsync({
     return { ...blocked, deferred: isTransientSharedTrunkMergeResult(blocked) };
   }
   const workItemContext = team.workItemContext || null;
+  const provenance = await sessionProvenanceContext();
 
-  const coordinated = await underMergeLock(() => withWorktreeLockAsync(projectDir, projectDir, async () => {
+  const sourceShaAtStart = refSha(projectDir, branch);
+  let coordinated;
+  try {
+    coordinated = await underMergeLock(() => withWorktreeLockAsync(projectDir, projectDir, async () => {
     const sourceSha = refSha(projectDir, branch);
     if (!sourceSha) return { ok: false, reason: "source_head_unresolved", message: `Cannot resolve ${branch}` };
     const key = String(purposeKey || sourceSha);
@@ -1040,8 +1397,12 @@ export async function mergeToSharedTrunkAsync({
       config,
       allowOperationId: existing?.operationId || null,
       workItemContext,
+      provenance,
     });
-    if (!sync.ok) return { ...sync, message: `Shared trunk synchronization failed: ${sync.reason || "unknown synchronization error"}` };
+    if (!sync.ok) {
+      const remediation = sync.remediation ? ` ${sync.remediation}` : "";
+      return { ...sync, message: `Shared trunk synchronization failed: ${sync.reason || "unknown synchronization error"}.${remediation}`.trim() };
+    }
     if (existing) {
       existing = getSharedTrunkMergeOperation(existing.operationId);
       if (existing?.phase === "published") {
@@ -1061,6 +1422,29 @@ export async function mergeToSharedTrunkAsync({
       baseSha,
       expectedRemoteSha: baseSha,
     });
+    if (operation.phase === "abandoned") {
+      return {
+        ok: false,
+        sharedTrunk: true,
+        team: Boolean(workItemContext),
+        deferred: false,
+        needsAttention: true,
+        reason: "operation_abandoned",
+        message: `Shared-trunk operation ${operation.operationId} was abandoned and cannot be resumed.`,
+        operation,
+      };
+    }
+    if (operation.targetBranch !== config.branch || operation.remote !== config.remote) {
+      return {
+        ok: false,
+        sharedTrunk: true,
+        deferred: true,
+        needsAttention: true,
+        reason: "stale_shared_trunk_operation",
+        message: `Operation ${operation.operationId} belongs to ${operation.remote}/${operation.targetBranch}; inspect and abandon it before publishing to ${config.remote}/${config.branch}.`,
+        operation,
+      };
+    }
     // begin() can return a previously deferred row through its durable unique
     // key even though deferred rows are intentionally absent from the
     // unresolved query above. Rebase that resumable intent onto the just-
@@ -1073,15 +1457,40 @@ export async function mergeToSharedTrunkAsync({
     // publishes by OID and the candidate content was validated before it was
     // parked. Anything else drops the stale candidate before rebasing.
     let reusedParkedCandidate = false;
+    let parkedCandidateReason = null;
     if (operation.phase === "deferred" && operation.candidateSha) {
-      const reusable = TEAM_PARKED_CANDIDATE_REASONS.includes(operation.lastErrorCode)
+      const reusable = isParkedCandidateReason(operation.lastErrorCode)
         && operation.baseSha === baseSha
         && operation.sourceSha === sourceSha
         && commitExists(projectDir, operation.candidateSha);
       if (reusable) {
         reusedParkedCandidate = true;
-        operation = transition(operation, { phase: "candidate", lastErrorCode: null });
+        parkedCandidateReason = operation.lastErrorCode;
+        operation = transition(operation, { phase: "candidate", lastErrorCode: parkedCandidateReason });
       } else {
+        let landed = false;
+        try {
+          landed = isAncestor(projectDir, operation.candidateSha, baseSha);
+        } catch (error) {
+          return { ok: false, unavailable: true, reason: "ancestry_unresolved", error, operation };
+        }
+        const proof = landed
+          ? await teamPublishedProof({ projectDir, operation, observedOid: baseSha })
+          : null;
+        if (proof?.ok && proof.legacy !== true) {
+          operation = transition(operation, { phase: "candidate" });
+          operation = finalizePublished(operation, { remoteSha: baseSha, recovered: true });
+          recordPublicationHealth(config, []);
+          return {
+            ok: true,
+            sharedTrunk: true,
+            published: true,
+            recovered: true,
+            mergeHash: operation.candidateSha,
+            targetBranch: config.branch,
+            operation,
+          };
+        }
         operation = transition(operation, { phase: "deferred", candidateSha: null });
       }
     }
@@ -1158,26 +1567,74 @@ export async function mergeToSharedTrunkAsync({
       }
 
       if (operation.phase !== "candidate") {
-        const local = await mergeLocalCandidate({
-          suppressPostMergeEffects: true,
-          worktreeLockAlreadyHeld: true,
-          operationId: operation.operationId,
+        operation = transition(operation, {
+          phase: "intent",
+          candidateSha: null,
+          baseSha,
+          expectedRemoteSha: baseSha,
+          attempt,
+          lastErrorCode: null,
         });
+        let local;
+        try {
+          local = await mergeLocalCandidate({
+            suppressPostMergeEffects: true,
+            worktreeLockAlreadyHeld: true,
+            operationId: operation.operationId,
+          });
+        } catch (error) {
+          operation = transition(operation, { phase: "intent", lastErrorCode: error?.code || "merge_operational_failure" });
+          return { ok: false, unavailable: true, operational: true, reason: error?.code || "merge_operational_failure", error, operation };
+        }
         if (!local?.ok) {
-          operation = transition(operation, {
-            phase: "deferred",
+          const mergeHash = local?.mergeHash && commitExists(projectDir, local.mergeHash)
+            ? local.mergeHash
+            : null;
+          operation = transition(operation, mergeHash ? {
+            phase: "candidate",
+            candidateSha: mergeHash,
+            lastErrorCode: local?.reason || "merge_failed_after_commit",
+          } : {
+            phase: "intent",
             lastErrorCode: local?.deterministicConflict ? "deterministic_conflict" : (local?.reason || "merge_failed"),
           });
-          return { ...local, operation };
+          return { ...local, ...(mergeHash ? { resetPending: true } : {}), operation };
         }
         const candidateSha = local.mergeHash || refSha(projectDir, config.branch);
         if (!candidateSha) return { ok: false, reason: "candidate_head_unresolved", operation };
         operation = transition(operation, { phase: "candidate", candidateSha, attempt, lastErrorCode: null });
+        if (candidateSha === operation.baseSha) {
+          operation = finalizePublished(operation, { remoteSha: operation.baseSha, recovered: true });
+          recordPublicationHealth(config, []);
+          return {
+            ok: true,
+            sharedTrunk: true,
+            published: false,
+            alreadyIntegrated: true,
+            mergeHash: candidateSha,
+            targetBranch: config.branch,
+            operation,
+          };
+        }
       }
 
-      const validation = reusedParkedCandidate
-        ? { ok: true, reusedParkedCandidate: true }
-        : await validateCandidate({ pushBranch: config.branch, effectiveRemote: config.remote });
+      if (reusedParkedCandidate) {
+        const restored = restoreParkedCandidate(projectDir, operation);
+        if (!restored.ok) {
+          operation = transition(operation, { phase: "candidate", lastErrorCode: parkedCandidateReason });
+          return { ok: false, deferred: true, reason: "parked_candidate_restore_blocked", blockedReason: restored.reason, operation };
+        }
+      }
+
+      let validation;
+      try {
+        validation = reusedParkedCandidate
+          ? { ok: true, reusedParkedCandidate: true }
+          : await validateCandidate({ pushBranch: config.branch, effectiveRemote: config.remote });
+      } catch (error) {
+        operation = transition(operation, { phase: "candidate", lastErrorCode: error?.code || "candidate_validation_unavailable" });
+        return { ok: false, unavailable: true, operational: true, reason: error?.code || "candidate_validation_unavailable", error, operation };
+      }
       reusedParkedCandidate = false;
       if (!validation?.ok) {
         const capturedCandidate = operation.candidateSha;
@@ -1308,7 +1765,12 @@ export async function mergeToSharedTrunkAsync({
           operation = transition(operation, { phase: "deferred", lastErrorCode: "push_retry_exhausted" });
           return { ok: false, deferred: true, reason: "push_retry_exhausted", operation };
         }
-        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId, workItemContext });
+        sync = await syncSharedTrunkAlreadyLocked(projectDir, {
+          config,
+          allowOperationId: operation.operationId,
+          workItemContext,
+          provenance,
+        });
         if (!sync.ok) return { ...sync, operation };
         baseSha = sync.newSha || refSha(projectDir, config.branch);
         operation = transition(operation, {
@@ -1356,6 +1818,19 @@ export async function mergeToSharedTrunkAsync({
           newOid: operation.candidateSha,
         }, approval?.workItemContext || workItemContext);
       } catch (err) {
+        const auth = sharedTrunkAuthRemediation(projectDir, config, err);
+        if (auth) {
+          operation = transition(operation, { phase: "candidate", lastErrorCode: auth.reason });
+          recordPublicationHealth(config, [operation]);
+          return {
+            ok: false,
+            unavailable: true,
+            reason: auth.reason,
+            message: auth.message,
+            remediation_commands: auth.commands,
+            operation,
+          };
+        }
         operation = transition(operation, { phase: "publish_unknown", lastErrorCode: err?.code || "push_operational_failure" });
         recordPublicationHealth(config, [operation]);
         return { ok: false, publishUnknown: true, reason: "publication_ambiguous", message: err?.message || String(err), operation };
@@ -1366,6 +1841,49 @@ export async function mergeToSharedTrunkAsync({
         return { ok: false, unavailable: true, publishUnknown: true, reason: pushedEnvelope?.reason || "native_capability_unavailable", operation };
       }
       const pushed = nativeResult(pushedEnvelope) || {};
+      const auth = sharedTrunkAuthRemediation(projectDir, config, pushed);
+      if (auth) {
+        operation = transition(operation, { phase: "candidate", lastErrorCode: auth.reason });
+        recordPublicationHealth(config, [operation]);
+        return {
+          ok: false,
+          unavailable: true,
+          reason: auth.reason,
+          message: auth.message,
+          remediation_commands: auth.commands,
+          operation,
+        };
+      }
+      if (pushRejectionReason(pushed) === "local_changed") {
+        operation = transition(operation, { phase: "candidate", lastErrorCode: "local_candidate_changed" });
+        recordPublicationHealth(config, [operation]);
+        return {
+          ok: false,
+          deferred: true,
+          reason: "local_candidate_changed",
+          message: "The checked-out shared-trunk branch no longer points at the journaled candidate",
+          operation,
+        };
+      }
+      if (pushStatus(pushed) === "rejected_policy") {
+        const gateId = ensurePushRefusedGate(config, pushed);
+        operation = transition(operation, { phase: "candidate", lastErrorCode: "shared_trunk_push_refused" });
+        recordPublicationHealth(config, [operation]);
+        sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_PUSH_REJECTED, `Shared-trunk push refused for WI#${workItemId}`, {
+          operation_id: operation.operationId,
+          gate_job_id: gateId,
+          reason: pushRejectionReason(pushed),
+        }, Number(workItemId));
+        return {
+          ok: false,
+          deferred: true,
+          needsAttention: true,
+          reason: "shared_trunk_push_refused",
+          message: String(pushed.stderrExcerpt || pushed.stderr_excerpt || "The remote refused the shared-trunk push"),
+          gateJobId: gateId,
+          operation,
+        };
+      }
       if (typedPushRejection(pushed)) {
         updateSharedTrunkRuntimeStatus({}, { increments: { push_rejection_count: 1 } });
         sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_PUSH_REJECTED, `Shared-trunk push rejected for WI#${workItemId}`, {
@@ -1411,7 +1929,12 @@ export async function mergeToSharedTrunkAsync({
           recordPublicationHealth(config, []);
           return { ok: false, deferred: true, reason: "push_retry_exhausted", operation };
         }
-        sync = await syncSharedTrunkAlreadyLocked(projectDir, { config, allowOperationId: operation.operationId, workItemContext });
+        sync = await syncSharedTrunkAlreadyLocked(projectDir, {
+          config,
+          allowOperationId: operation.operationId,
+          workItemContext,
+          provenance,
+        });
         if (!sync.ok) return { ...sync, operation };
         baseSha = sync.newSha || refSha(projectDir, config.branch);
         operation = transition(operation, {
@@ -1462,7 +1985,36 @@ export async function mergeToSharedTrunkAsync({
       return { ok: true, sharedTrunk: true, published: true, mergeHash: operation.candidateSha, targetBranch: config.branch, operation };
     }
     return { ok: false, reason: "push_retry_exhausted", operation };
-  }), "shared-trunk-merge", mergeLockAlreadyHeld === true);
+    }), "shared-trunk-merge", mergeLockAlreadyHeld === true);
+  } catch (error) {
+    const operation = listSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
+      .filter((value) => value.purpose === purpose
+        && value.sourceBranch === branch
+        && (!sourceShaAtStart || value.sourceSha === sourceShaAtStart))
+      .at(-1) || null;
+    if (operation?.phase === "published") {
+      return {
+        ok: true,
+        sharedTrunk: true,
+        published: true,
+        recovered: true,
+        mergeHash: operation.candidateSha,
+        targetBranch: config.branch,
+        operation,
+      };
+    }
+    const failed = {
+      ok: false,
+      sharedTrunk: true,
+      unavailable: true,
+      operational: true,
+      reason: error?.code || "merge_operational_failure",
+      message: error?.message || String(error),
+      error,
+      operation,
+    };
+    return { ...failed, deferred: isTransientSharedTrunkMergeResult(failed) };
+  }
   if (!coordinated || typeof coordinated !== "object") return coordinated;
   const result = { ...coordinated, sharedTrunk: true };
   return result.ok ? result : { ...result, deferred: isTransientSharedTrunkMergeResult(result) };
@@ -1472,7 +2024,10 @@ export const __testSharedTrunkInternals = Object.freeze({
   candidateRecoveredFromIntent,
   isAncestor,
   pushStatus,
+  sharedTrunkAuthRemediation,
   typedPushRejection,
+  pushRejectionReason,
+  restoreParkedCandidate,
   reconcileAlreadyLocked,
   setTestOverrides(overrides) {
     assertTestContext("__testSharedTrunkInternals.setTestOverrides");

@@ -540,7 +540,7 @@ function isScopedContractNoResearchCandidate({
   return true;
 }
 
-export function buildSyntheticResearchBrief(routingOrReason = null) {
+export function buildSyntheticResearchBrief(routingOrReason = null, { plannerDispatch = false } = {}) {
   const reason = typeof routingOrReason === "string"
     ? routingOrReason
     : routingOrReason?.reason || "deterministic no_research route";
@@ -552,7 +552,9 @@ export function buildSyntheticResearchBrief(routingOrReason = null) {
     reason,
     key_files: keyFiles,
     related_files: [],
-    constraints: ["Researcher was skipped by deterministic routing; planner should rely on the original work item and intake hints."],
+    constraints: [plannerDispatch
+      ? "No upfront researcher ran; the planner should use the original work item and intake hints for triage, then dispatch bounded research children for unresolved questions."
+      : "Researcher was skipped by deterministic routing; planner should rely on the original work item and intake hints."],
     questions_for_human: false,
     questions: [],
   };

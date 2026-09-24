@@ -544,7 +544,7 @@ export const TOOL_AGENT_CLAIM = {
   type: "function",
   name: "agent_claim",
   description:
-    "Reserve agent_claim for a completed, evidence-backed finding saved before research on other findings continues. Once research is complete, put new, unsaved findings directly in agent_handoff.claims. agent_handoff includes saved claims automatically and validates their evidence; include only new, unsaved findings there. Aim for a complete answer to the section rather than partial notes, and preserve substantive detail. Reuse a stable lowercase id to revise a saved finding, or remove it if later evidence disproves it. Independent saves can run alongside already-needed research reads when their evidence has already been delivered.",
+    "For researcher.report.v1, agent_claim saves a completed, self-contained, evidence-backed finding before research on other findings continues. Once report research is complete, put new, unsaved findings directly in agent_handoff.claims; saved report findings are merged automatically, and terminal claims contain only new findings. Pipeline researchers place optional advisory claims directly in agent_handoff; agent_claim is exclusive to the report profile. Reuse a stable lowercase id to revise a saved finding, or remove it if later evidence disproves it. Independent saves can run alongside already-needed research reads when their evidence has already been delivered.",
   parameters: {
     type: "object",
     properties: {
@@ -1912,12 +1912,35 @@ export const TOOL_SUB_AGENT = {
 export const TOOL_DISPATCH_AGENT = {
   type: "function",
   name: "dispatch_agent",
-  description: "Dispatch an isolated researcher and wait for its evidence-backed result. Select code for repository investigation or web for online research. Supply a self-contained question including scope and facts needed. The administrator bounds child count, effort, turns, and duration.",
+  description: "Dispatch an isolated researcher and wait for its evidence-backed result. Select code for repository investigation or web for online research. Supply a self-contained question including scope and facts needed; code requests may add bounded repository anchors. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
     properties: {
       agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
       question: { type: "string", minLength: 1, maxLength: 2000 },
+      anchors: {
+        type: "array",
+        maxItems: 8,
+        items: {
+          type: "object",
+          properties: {
+            path: { type: "string", minLength: 1, maxLength: 500 },
+            symbol: { type: "string", minLength: 1, maxLength: 200 },
+            ref: { type: "string", pattern: "^#[0-9A-Za-z]{4,12}$" },
+            lines: {
+              type: "object",
+              properties: {
+                start: { type: "integer", minimum: 1 },
+                end: { type: "integer", minimum: 1 },
+              },
+              required: ["start", "end"],
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: false,
+          anyOf: [{ required: ["path"] }, { required: ["ref"] }],
+        },
+      },
       budget: {
         type: "object",
         properties: {
@@ -1935,7 +1958,7 @@ export const TOOL_DISPATCH_AGENT = {
 
 export const TOOL_DISPATCH_AGENT_PLANNER = {
   ...TOOL_DISPATCH_AGENT,
-  description: "Dispatch one focused researcher or a batch of two to three independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question. The administrator bounds child count, effort, turns, and duration.",
+  description: "Dispatch one focused researcher or a batch of two to three independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
     oneOf: [
@@ -1953,6 +1976,7 @@ export const TOOL_DISPATCH_AGENT_PLANNER = {
                 id: { type: "string", minLength: 1, maxLength: 40 },
                 agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
                 question: { type: "string", minLength: 1, maxLength: 2000 },
+                anchors: TOOL_DISPATCH_AGENT.parameters.properties.anchors,
                 budget: TOOL_DISPATCH_AGENT.parameters.properties.budget,
               },
               required: ["id", "agent_type", "question"],

@@ -835,6 +835,18 @@ export class NativeBinary {
         return false;
       }
     });
+    const selectedArtifactExists = downloaded.some((candidate) => {
+      try { return fs.statSync(candidate).isFile(); } catch { return false; }
+    });
+    // An interrupted/legacy refresh can leave an issued-version marker without
+    // the corresponding versioned cache entry. Do not let that marker hide a
+    // flat staged binary that advertises the exact same version; isAvailable()
+    // still verifies its --version output before admitting it. Prefer any
+    // post-selection rebuild, while an older flat artifact remains the final
+    // self-healing fallback while the matching cache entry is absent.
+    if (!selectedArtifactExists) {
+      return newerDevelopmentBuilds.length > 0 ? newerDevelopmentBuilds : direct;
+    }
     // A pull/boot refresh supersedes older flat staging. A developer can still
     // explicitly rebuild or restage afterward, and that newer file wins until
     // the next issued-artifact refresh boundary.

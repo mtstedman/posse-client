@@ -1030,14 +1030,18 @@ export async function stageScipBatches({
       if (!recovered.ok) {
         state.failedBatches.push(batch.batchOrdinal);
         for (const unavailable of recovered.unavailable) {
-          recordUnavailableDocument(unavailable.document, "batch_stage_failed", unavailable.error || recovered.error);
+          recordUnavailableDocument(
+            unavailable.document,
+            unavailable.reason || "batch_stage_failed",
+            unavailable.error || recovered.error,
+          );
         }
         syncUnavailableState();
         await writeBatchSessionManifest(sessionManifestPath, state);
         for (const unavailable of recovered.unavailable) {
           await notifyFileUnavailable(onFileUnavailable, {
             repo_rel_path: unavailable.document.repoRelPath,
-            reason: "batch_stage_failed",
+            reason: unavailable.reason || "batch_stage_failed",
             error: unavailable.error || recovered.error || "SCIP batch staging failed",
           });
         }
@@ -1047,13 +1051,13 @@ export async function stageScipBatches({
       for (const unavailable of recovered.unavailable) {
         recordUnavailableDocument(
           unavailable.document,
-          "batch_document_stage_failed",
+          unavailable.reason || "batch_document_stage_failed",
           unavailable.error || "SCIP document staging failed",
         );
         syncUnavailableState();
         await notifyFileUnavailable(onFileUnavailable, {
           repo_rel_path: unavailable.document.repoRelPath,
-          reason: "batch_document_stage_failed",
+          reason: unavailable.reason || "batch_document_stage_failed",
           error: unavailable.error || "SCIP document staging failed",
         });
       }
@@ -1234,12 +1238,23 @@ async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress,
     return { ok: true, recovered: false, outputs: [{ batch, staged: initial }], unavailable: [], error: null };
   }
   if (batch.documents.length <= 1) {
+    const retry = await attempt(batch);
+    if (retry.ok && retry.outputPath) {
+      return { ok: true, recovered: true, outputs: [{ batch, staged: retry }], unavailable: [], error: null };
+    }
+    const reason = deterministicScipSyntaxFailure(initial.error, retry.error)
+      ? "batch_document_unsupported_syntax"
+      : "batch_document_stage_failed";
     return {
       ok: true,
       recovered: true,
       outputs: [],
-      unavailable: batch.documents.map((document) => ({ document, error: initial.error })),
-      error: initial.error || "SCIP document staging failed",
+      unavailable: batch.documents.map((document) => ({
+        document,
+        reason,
+        error: retry.error || initial.error,
+      })),
+      error: retry.error || initial.error || "SCIP document staging failed",
     };
   }
   emit(onProgress, `SCIP batch ${batch.batchOrdinal + 1} failed; isolating source documents`, {
@@ -1254,9 +1269,20 @@ async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress,
       return { outputs: [{ batch: candidate, staged }], unavailable: [] };
     }
     if (candidate.documents.length <= 1) {
+      const retry = await attempt(candidate);
+      if (retry.ok && retry.outputPath) {
+        return { outputs: [{ batch: candidate, staged: retry }], unavailable: [] };
+      }
+      const reason = deterministicScipSyntaxFailure(staged.error, retry.error)
+        ? "batch_document_unsupported_syntax"
+        : "batch_document_stage_failed";
       return {
         outputs: [],
-        unavailable: candidate.documents.map((document) => ({ document, error: staged.error })),
+        unavailable: candidate.documents.map((document) => ({
+          document,
+          reason,
+          error: retry.error || staged.error,
+        })),
       };
     }
     const midpoint = Math.ceil(candidate.documents.length / 2);
@@ -1287,6 +1313,18 @@ async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress,
     ...recovered,
     error: ok ? null : (initial.error || "SCIP batch staging failed for every isolated document"),
   };
+}
+
+function deterministicScipSyntaxFailure(firstError, secondError) {
+  const first = String(firstError || "").trim();
+  const second = String(secondError || "").trim();
+  if (!first || first !== second) return false;
+  // Only an exact, repeated parser/compiler diagnostic may be discharged by
+  // the complementary Tree-sitter layer. Authentication, transport, resource,
+  // process, and tool-availability failures remain retryable hard failures.
+  const infrastructure = /(?:heartbeat|pulse token|auth(?:entication)? unavailable|timed? out|timeout|out of memory|\benomem\b|\beacces\b|\benoent\b|\bspawn\b|\bsig(?:kill|term|abrt|segv)\b|killed)/iu;
+  if (infrastructure.test(first)) return false;
+  return /(?:syntax\s*error|parse(?:r|error|sourcefile|statement|declaration|expression|variable)|unexpected token)/iu.test(first);
 }
 
 function scipRecoveryBatch(parent, documents, suffix) {

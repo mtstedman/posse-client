@@ -692,9 +692,10 @@ export class ParseEngine {
       for (const document of staged.unavailableDocuments || []) {
         const repoRelPath = String(document?.repo_rel_path || "");
         if (!repoRelPath) continue;
+        const deterministicSyntax = document?.reason === "batch_document_unsupported_syntax";
         base.skipped.push({
           repo_rel_path: repoRelPath,
-          reason: "parse_error",
+          reason: deterministicSyntax ? "unsupported_syntax_skip" : "parse_error",
           message: `SCIP document was not acknowledged (${document.reason || "unavailable"}): ${document.error || "unknown error"}`,
         });
       }
@@ -3104,7 +3105,7 @@ export class ParseEngine {
           } else {
           base.skipped.push({
             repo_rel_path,
-            reason: "parse_error",
+            reason: "unsupported_syntax_skip",
             message: formatAtlasError(err),
           });
           if (!this.#viewLayerMerge || !contentHash || !pathLanguage) continue;

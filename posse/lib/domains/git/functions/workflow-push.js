@@ -11,9 +11,13 @@ import {
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { runHook } from "./hooks.js";
+import { adminGitExec } from "./admin-git-exec.js";
+import { gitPushWithGitHubCliFallback } from "./git-push-auth.js";
 import { gitExec, resolvePushBranch } from "./utils.js";
 import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
 import { resolveSharedTrunkConfigRuntime } from "./shared-trunk-config.js";
+import { SETTING_KEYS, SHARED_TRUNK_DEFAULTS } from "../../../catalog/settings.js";
+import { getAccountRepoSetting } from "../../settings/functions/account-settings.js";
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity } = context;
@@ -142,11 +146,10 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
   let sharedTrunkRoutingProblemLogged = false;
   async function isEnrolledSharedTrunkPair(remote, branch) {
-    // Automatic-publication routing must degrade to the legacy manual
-    // push-offer path — never crash wrap-up, and never cancel the operator's
-    // manual escape hatch — when the enrollment is invalid or the native
-    // contract is unavailable. The merge coordinator independently fails
-    // closed before any trunk write in both situations.
+    // Once a target is configured for shared-trunk publication, a failed
+    // runtime probe must not reopen the legacy direct-push path around the
+    // publication journal. Suppress the offer and let the coordinator report
+    // the actionable configuration or native-contract failure.
     let config;
     try {
       config = await resolveSharedTrunkConfigRuntime(projectDir, {
@@ -162,12 +165,12 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
           logEvent({
             event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,
             actor_type: EVENT_ACTORS.SYSTEM,
-            message: `Shared-trunk push routing degraded to manual offers: ${err?.message || err}`,
+            message: `Shared-trunk push routing is unavailable: ${err?.message || err}`,
             event_json: JSON.stringify({ error: err?.message || String(err), error_code: err?.code || null, push_routing: true }),
           });
         } catch { /* routing must not depend on telemetry */ }
       }
-      return false;
+      return isConfiguredSharedTrunkPushTarget(remote, branch);
     }
     return config.enabled
       && String(remote || "") === config.remote
@@ -192,6 +195,31 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       return { ok: false, reason: "nothing_to_push", state };
     }
     return { ...upsertPushOfferGate(state, { createdBy }), state };
+  }
+
+  function isConfiguredSharedTrunkPushTarget(remote, branch) {
+    const read = (key) => getAccountRepoSetting(key, projectDir);
+    const enabledValue = read(SETTING_KEYS.SHARED_TRUNK_ENABLED);
+    const normalizedEnabled = String(enabledValue ?? "").trim().toLowerCase();
+    const enabled = !normalizedEnabled
+      ? SHARED_TRUNK_DEFAULTS.enabled
+      : ["false", "0", "no", "off"].includes(normalizedEnabled)
+        ? false
+        : true;
+    if (!enabled) return false;
+    const configuredBranch = String(read(SETTING_KEYS.SHARED_TRUNK_BRANCH) ?? SHARED_TRUNK_DEFAULTS.branch).trim();
+    if (String(branch || "") !== configuredBranch) return false;
+    const configuredRemote = String(read(SETTING_KEYS.SHARED_TRUNK_REMOTE) ?? SHARED_TRUNK_DEFAULTS.remote).trim();
+    if (String(remote || "") === configuredRemote) return true;
+    try {
+      const requestedUrl = gitExec(["remote", "get-url", String(remote || "")], projectDir, { timeoutMs: 5_000, nativeParity }).trim();
+      const configuredUrl = gitExec(["remote", "get-url", configuredRemote], projectDir, { timeoutMs: 5_000, nativeParity }).trim();
+      return !!requestedUrl && requestedUrl === configuredUrl;
+    } catch {
+      // The configured branch is enrolled. An unresolved remote identity must
+      // not become a plain push around the publication journal.
+      return true;
+    }
   }
 
   // This is also the shared-trunk publication gate. Keep marker validation and
@@ -251,12 +279,28 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
         pushBranch,
       };
     }
+    if (isConfiguredSharedTrunkPushTarget(effectiveRemote, pushBranch)) {
+      return {
+        ok: false,
+        reason: "shared_trunk_automatic_publication",
+        effectiveRemote,
+        pushBranch,
+      };
+    }
 
     const validation = validatePushCandidate({ pushBranch });
     if (!validation.ok) return validation;
 
     try {
-      gitExec(["push", effectiveRemote, pushBranch], projectDir, { timeoutMs: GIT_MERGE_TIMEOUT_MS, nativeParity });
+      gitPushWithGitHubCliFallback(["push", effectiveRemote, pushBranch], projectDir, {
+        remote: effectiveRemote,
+        gitExecFn: gitExec,
+        // The normal attempt remains on the native Git route. The one-shot gh
+        // credential helper is an operator fallback and requires direct Git so
+        // the helper process can participate in Git's credential protocol.
+        fallbackGitExecFn: adminGitExec,
+        gitOptions: { timeoutMs: GIT_MERGE_TIMEOUT_MS, nativeParity },
+      });
       logEvent({
         event_type: EVENT_TYPES.GIT_PUSHED,
         actor_type: EVENT_ACTORS.HUMAN,

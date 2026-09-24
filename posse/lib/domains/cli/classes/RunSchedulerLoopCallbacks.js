@@ -4,6 +4,8 @@ import { createRunWrapUpTracker } from "../functions/review-session.js";
 import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
 import { logAgentActivity } from "../../queue/functions/events.js";
 
+const MAX_PENDING_TEAM_SUBMISSION_IDS = 256;
+
 function terminalActivityStatus(status) {
   if (status === "succeeded") return { kind: "result", status: "succeeded" };
   if (status === "canceled") return { kind: "result", status: "canceled" };
@@ -42,6 +44,8 @@ export class RunSchedulerLoopCallbacks {
     this.lastPendingReviewBlockerMsg = null;
     this.pendingReviewAutoMergeAttempts = new Set();
     this.backgroundWrapUp = null;
+    this.pendingTeamSubmissionIds = new Set();
+    this.teamSubmissionRetryArmed = false;
   }
 
   callbacks() {
@@ -53,7 +57,46 @@ export class RunSchedulerLoopCallbacks {
       onBackgroundOnly: (state) => this.onBackgroundOnly(state),
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
+      onTeamSubmissionChange: (change) => this.onTeamSubmissionChange(change),
     };
+  }
+
+  onTeamSubmissionChange({ workItemIds = [] } = {}) {
+    for (const id of workItemIds) {
+      if (this.pendingTeamSubmissionIds.size >= MAX_PENDING_TEAM_SUBMISSION_IDS) break;
+      this.pendingTeamSubmissionIds.add(id);
+    }
+    let hasMergeable = false;
+    try {
+      hasMergeable = typeof this.hasAutoMergeableCompletedWorkItems === "function"
+        && this.hasAutoMergeableCompletedWorkItems();
+    } catch { /* keep the scheduler heartbeat path fail-open */ }
+    if (!hasMergeable || !this.idleAutoMerge) return;
+    if (this.idleAutoMerge.isRunning()) {
+      if (!this.teamSubmissionRetryArmed) {
+        this.teamSubmissionRetryArmed = true;
+        this.idleAutoMerge.whenIdle(() => {
+          this.teamSubmissionRetryArmed = false;
+          const pendingIds = [...this.pendingTeamSubmissionIds];
+          this.onTeamSubmissionChange({ workItemIds: pendingIds });
+        });
+      }
+      return;
+    }
+    const pendingIds = [...this.pendingTeamSubmissionIds];
+    this.pendingTeamSubmissionIds.clear();
+    const display = this.getDisplay();
+    this.pendingReviewAutoMergeAttempts.clear();
+    this.idleAutoMerge.start({
+      reason: "Team submission state change",
+      runGc: false,
+      beforeStart: () => {
+        const suffix = pendingIds.length ? ` for ${pendingIds.slice(0, 64).join(", ")}` : "";
+        const message = `Team publication state changed${suffix}; retrying deferred shared-trunk publication.`;
+        if (display) display.addEvent(`${this.C.cyan}${message}${this.C.reset}`);
+        else console.log(`\n  ${this.C.cyan}${message}${this.C.reset}`);
+      },
+    });
   }
 
   onJobStart(job) {

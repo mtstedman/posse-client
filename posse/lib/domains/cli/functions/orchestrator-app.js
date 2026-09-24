@@ -584,6 +584,7 @@ let _localModelsCommandModulePromise = null;
 let _nativeBinariesCommandModulePromise = null;
 let _gateCommandModulePromise = null;
 let _pairingPreflightCommandModulePromise = null;
+let _sharedTrunkCommandModulePromise = null;
 let _pairCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
@@ -674,6 +675,11 @@ async function loadGateCommandModule() {
 async function loadPairingPreflightCommandModule() {
   _pairingPreflightCommandModulePromise ||= import("./pairing-preflight-command.js");
   return _pairingPreflightCommandModulePromise;
+}
+
+async function loadSharedTrunkCommandModule() {
+  _sharedTrunkCommandModulePromise ||= import("./shared-trunk-command.js");
+  return _sharedTrunkCommandModulePromise;
 }
 
 async function loadPairCommandModule() {
@@ -2295,6 +2301,11 @@ async function cmdSharedTrunkSmoke() {
   return cmdSharedTrunkSmokeImpl();
 }
 
+async function cmdSharedTrunk() {
+  const { runSharedTrunkCommand } = await loadSharedTrunkCommandModule();
+  return runSharedTrunkCommand(process.argv.slice(3), { projectDir: PROJECT_DIR });
+}
+
 async function cmdPairingPreflight() {
   const { cmdPairingPreflight: cmdPairingPreflightImpl } = await loadPairingPreflightCommandModule();
   return cmdPairingPreflightImpl({ projectDir: PROJECT_DIR });
@@ -2857,6 +2868,8 @@ ${aliasDiagnostic}
     ${C.dim}             atlas-smoke <repoPath> [query] [provider]${C.reset}
     ${C.cyan}shared-trunk-smoke${C.reset}  Run a disposable two-clone shared-trunk race/claim smoke
     ${C.dim}             shared-trunk-smoke [--json]${C.reset}
+    ${C.cyan}shared-trunk${C.reset}  Inspect or abandon publication journal operations
+    ${C.dim}             shared-trunk ops [--json] | shared-trunk ops abandon <id> | shared-trunk provenance reset${C.reset}
     ${C.cyan}pairing-preflight${C.reset}  Verify this member's shared-remote access
     ${C.dim}             pairing-preflight [--json]${C.reset}
     ${C.cyan}pair${C.reset}       Collaborate across clones on a shared Git side trunk
@@ -2968,6 +2981,7 @@ async function dispatchResolvedCommand(command) {
     usage: cmdUsage,
     "atlas-smoke": cmdAtlasSmoke,
     "shared-trunk-smoke": cmdSharedTrunkSmoke,
+    "shared-trunk": cmdSharedTrunk,
     "pairing-preflight": cmdPairingPreflight,
     "shared-trunk-preflight": cmdPairingPreflight,
     pair: cmdPair,

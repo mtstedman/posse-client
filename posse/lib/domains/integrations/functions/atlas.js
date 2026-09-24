@@ -31,6 +31,7 @@ import { sha256Hex } from "../../atlas/functions/v2/hash.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
 import { readScipBatchCoverage } from "../../atlas/functions/v2/scip/batch-coverage.js";
 import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
+import { scopePathsForScipSourceLanguages } from "../../atlas/functions/v2/scip/source-scope.js";
 import { scipBasenameSourceLanguages } from "../../atlas/functions/v2/scip-progress.js";
 import {
   inspectViewMaterialization,
@@ -1268,21 +1269,46 @@ async function inspectExactScipBatchCoverage({ targetBranch, gitOid, scipDir, ro
     Array.isArray(row?.source_languages) ? row.source_languages : []
   ))));
   if (languages.size === 0) return { ok: false };
-  // A document this generation attempted and could not record is named in the
-  // receipt, and no ledger state can discharge it. Nothing else can: a
-  // document that failed precisely because no indexer examined it has no
-  // layer to fail the sweep below, and it may not even be in the snapshot.
-  // Rejecting here is what keeps it retryable at this exact OID.
-  for (const document of receipt.unavailable_documents || []) {
-    if (!String(document?.repo_rel_path || "")) return { ok: false };
-    const sourceLanguages = uniqueSourceLanguages(document?.source_languages || []);
-    if (sourceLanguages.length > 0 && !sourceLanguages.some((language) => languages.has(language))) continue;
-    return { ok: false };
-  }
   const branch = ledger.getBranch(targetBranch);
   if (!branch) return { ok: false };
   const snapshot = ledger.pathSnapshotAt(targetBranch, ledger.headSeq(targetBranch));
+  const scopedSnapshotPaths = new Set(scopePathsForScipSourceLanguages(
+    [...snapshot.keys()],
+    [...languages],
+  ));
   const covered = new Map();
+  // Unavailable normally means no indexer examined the document and therefore
+  // remains a hard, retryable gap. The one typed exception is a repeatable,
+  // isolated parser/compiler syntax rejection: it may be discharged only by
+  // an exact Tree-sitter layer for the same current path and content hash.
+  for (const document of receipt.unavailable_documents || []) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    if (!repoRelPath) return { ok: false };
+    const sourceLanguages = uniqueSourceLanguages(document?.source_languages || []);
+    if (sourceLanguages.length > 0 && !sourceLanguages.some((language) => languages.has(language))) continue;
+    if (String(document?.reason || "") !== "batch_document_unsupported_syntax") return { ok: false };
+    const contentHash = String(document?.content_hash || "").toLowerCase();
+    if (!contentHash || snapshot.get(repoRelPath) !== contentHash) return { ok: false };
+    const fallbackLayer = ledger.listBlobLayers(contentHash).some((layer) => (
+      layer?.source === "treesitter"
+      && layer?.status === "indexed"
+      && languages.has(String(layer?.lang || "").toLowerCase())
+    ));
+    if (!fallbackLayer) return { ok: false };
+    covered.set(repoRelPath, contentHash);
+  }
+  // A project indexer can discover tracked test/generated sources which Atlas
+  // deliberately excludes from its branch snapshot. There is no SCIP gap to
+  // discharge when the exact published snapshot contains no path owned by the
+  // pending indexer, so an empty complete receipt is sufficient. Keep typed
+  // unavailable rows fail-closed above: they are evidence of attempted work
+  // that failed, not merely an out-of-scope Git-tree discovery.
+  if (scopedSnapshotPaths.size === 0) {
+    return {
+      ok: true,
+      signature: `batch:${sha256Hex(Buffer.from(JSON.stringify(receipt)))}`,
+    };
+  }
   for (const document of receipt.documents) {
     const repoRelPath = String(document?.repo_rel_path || "");
     const contentHash = String(document?.content_hash || "").toLowerCase();
@@ -1311,12 +1337,7 @@ async function inspectExactScipBatchCoverage({ targetBranch, gitOid, scipDir, ro
   }
   if (covered.size === 0) return { ok: false };
   for (const [repoRelPath, contentHash] of snapshot.entries()) {
-    const applies = ledger.listBlobLayers(contentHash).some((layer) => (
-      (layer?.source === "scip" || layer?.source === "treesitter")
-      && layer?.status === "indexed"
-      && languages.has(String(layer?.lang || "").toLowerCase())
-    ));
-    if (applies && covered.get(repoRelPath) !== contentHash) return { ok: false };
+    if (scopedSnapshotPaths.has(repoRelPath) && covered.get(repoRelPath) !== contentHash) return { ok: false };
   }
   return {
     ok: true,

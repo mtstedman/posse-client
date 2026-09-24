@@ -509,16 +509,17 @@ export async function executeDispatchAgent(args, options = {}) {
     args = {
       agent_type: only.agent_type,
       question: only.question,
+      ...(only.anchors == null ? {} : { anchors: only.anchors }),
       ...(only.budget == null ? {} : { budget: only.budget }),
     };
   }
   if (Object.hasOwn(args || {}, "requests")) {
     if (!research) throw runtimeError("RESEARCH_BATCH_DISABLED", "Research batches require an eligible planner", { stage: "admission" });
     if (!Array.isArray(args.requests) || args.requests.length < 2 || args.requests.length > 3) {
-      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain one to three entries", { stage: "validation" });
+      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain two to three entries", { stage: "validation" });
     }
     const requests = args.requests.map((raw, index) => {
-      const request = knownKeysObject(raw, ["id", "agent_type", "question", "budget"], `requests[${index}]`);
+      const request = knownKeysObject(raw, ["id", "agent_type", "question", "anchors", "budget"], `requests[${index}]`);
       if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) {
         throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
       }
@@ -527,6 +528,7 @@ export async function executeDispatchAgent(args, options = {}) {
         profile: RESEARCH_CHILD_PROFILE,
         agent_type: request.agent_type,
         intent: boundedString(request.question, `requests[${index}].question`, 2000),
+        ...(request.anchors == null ? {} : { anchors: request.anchors }),
         ...(request.budget ? { budget: request.budget } : {}),
       };
     });
@@ -536,11 +538,11 @@ export async function executeDispatchAgent(args, options = {}) {
   }
   if (research && args?.agent_type == null) throw runtimeError("RESEARCH_AGENT_TYPE_REQUIRED", "dispatch_agent requires agent_type code or web", { stage: "validation" });
   if (args?.agent_type != null && research) {
-    args = knownKeysObject(args, ["agent_type", "question", "budget"], "dispatch_agent");
+    args = knownKeysObject(args, ["agent_type", "question", "anchors", "budget"], "dispatch_agent");
     if (!RESEARCH_AGENT_TYPES.includes(args.agent_type)) throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
     return await subAgentRuntime.execute({
       protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" },
-      requests: [{ id: "research", profile: RESEARCH_CHILD_PROFILE, agent_type: args.agent_type, intent: args.question, ...(args.budget ? { budget: args.budget } : {}) }],
+      requests: [{ id: "research", profile: RESEARCH_CHILD_PROFILE, agent_type: args.agent_type, intent: args.question, ...(args.anchors == null ? {} : { anchors: args.anchors }), ...(args.budget ? { budget: args.budget } : {}) }],
     }, options);
   }
   if (args?.agent_type != null) {

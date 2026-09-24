@@ -44,6 +44,8 @@ export function createRedTeamPlanChain({
   title = null,
   priority = null,
   actorType = "system",
+  primaryModelTier = "standard",
+  primaryReasoningEffort = null,
 } = {}) {
   if (!workItem?.id) {
     throw new Error("createRedTeamPlanChain requires a work item");
@@ -58,8 +60,9 @@ export function createRedTeamPlanChain({
     title: `${isReplan ? "Replan" : "Plan"} (primary): ${wiTitle}`,
     parent_job_id: parentJob?.id || null,
     priority: priority || parentJob?.priority || workItem.priority || "normal",
-    model_tier: "standard",
-    reasoning_effort: researchBudgetToReasoningEffort(normalizedBudget, "medium"),
+    model_tier: primaryModelTier,
+    reasoning_effort: primaryReasoningEffort
+      || researchBudgetToReasoningEffort(normalizedBudget, "medium"),
     payload_json: planPayload(basePayload, "primary", normalizedBudget, {
       source_research_job_id: parentJob?.job_type === "research" ? parentJob.id : null,
     }),

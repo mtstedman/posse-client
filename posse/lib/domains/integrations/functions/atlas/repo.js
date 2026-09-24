@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { getAtlasIntegrationConfig } from "./config.js";
 import { deriveRepoId, isPathWithin, normalizeAbsolutePath, pathsEqual } from "./shared.js";
-import { gitExec, gitExecAsync } from "../../../git/functions/utils.js";
+import { adminGitExec, adminGitExecAsync } from "../../../git/functions/admin-git-exec.js";
 
 export const _gitRepoInfoCache = new Map();
 
@@ -18,11 +18,11 @@ export function resolveGitRepoInfoFromCwd(cwd) {
       let commonOk = false;
       let gitDirOk = false;
       try {
-        commonStdout = gitExec(["rev-parse", "--path-format=absolute", "--git-common-dir"], normalized, { timeoutMs: 5000 });
+        commonStdout = adminGitExec(["rev-parse", "--path-format=absolute", "--git-common-dir"], normalized, { timeoutMs: 5000 });
         commonOk = true;
       } catch { /* not a git repo */ }
       try {
-        gitDirStdout = gitExec(["rev-parse", "--path-format=absolute", "--git-dir"], normalized, { timeoutMs: 5000 });
+        gitDirStdout = adminGitExec(["rev-parse", "--path-format=absolute", "--git-dir"], normalized, { timeoutMs: 5000 });
         gitDirOk = true;
       } catch { /* not a git repo */ }
       result = gitRepoInfoFromRevParse(
@@ -60,7 +60,7 @@ function gitRepoInfoFromRevParse(commonStdout, gitDirStdout, commonOk, gitDirOk)
 }
 
 function gitRevParseAsync(args, cwd, { signal = null } = {}) {
-  return gitExecAsync(["rev-parse", ...args], cwd, { signal, timeoutMs: 5000 })
+  return adminGitExecAsync(["rev-parse", ...args], cwd, { signal, timeoutMs: 5000 })
     .then((stdout) => ({ ok: true, stdout: String(stdout || "") }))
     .catch(() => ({ ok: false, stdout: "" }));
 }

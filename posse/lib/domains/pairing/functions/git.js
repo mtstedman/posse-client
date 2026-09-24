@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git.js";
+import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
 
 const NETWORK_SCHEMES = new Set(["https:", "http:", "ssh:", "git:"]);
 const NONINTERACTIVE_GIT_ENV = Object.freeze({
@@ -15,6 +16,15 @@ function git(args, projectDir, options = {}) {
     timeoutMs: 60_000,
     env: NONINTERACTIVE_GIT_ENV,
     ...options,
+  });
+}
+
+function push(args, projectDir, remote, options = {}) {
+  return gitPushWithGitHubCliFallback(args, projectDir, {
+    remote,
+    gitExecFn: git,
+    fallbackGitExecFn: git,
+    gitOptions: options,
   });
 }
 
@@ -125,9 +135,7 @@ export function repositoryFingerprint(remoteUrl) {
 
 export function validateRemoteName(remoteName) {
   const value = String(remoteName || "").trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(value)
-    || value.includes("..")
-    || value.endsWith("/")) {
+  if (value.includes("..") || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)) {
     throw Object.assign(new Error(`Invalid Git remote name: ${value || "(empty)"}`), {
       code: "pairing_remote_invalid",
     });
@@ -243,18 +251,18 @@ export function createAndPublishPairingBranch(projectDir, { remote, branch, expe
   }
   git(["switch", "--create", branch], projectDir);
   const oid = git(["rev-parse", "HEAD"], projectDir, { timeoutMs: 5_000 }).trim();
-  git(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir);
+  push(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote);
   return oid;
 }
 
 export function deletePublishedPairingBranch(projectDir, { remote, branch, expectedOid }) {
   const normalizedRemote = validateRemoteName(remote);
-  git([
+  push([
     "push",
     `--force-with-lease=refs/heads/${branch}:${expectedOid}`,
     normalizedRemote,
     `:refs/heads/${branch}`,
-  ], projectDir);
+  ], projectDir, normalizedRemote);
 }
 
 export function findPairingRemote(projectDir, expectedUrl) {
@@ -332,13 +340,13 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
     `+refs/heads/${branch}:${remoteRef}`,
   ], projectDir);
   const remoteOid = git(["rev-parse", "--verify", remoteRef], projectDir, { timeoutMs: 5_000 }).trim();
-  git([
+  push([
     "push",
     "--dry-run",
     `--force-with-lease=refs/heads/${branch}:${remoteOid}`,
     normalizedRemote,
     `${remoteOid}:refs/heads/${branch}`,
-  ], projectDir);
+  ], projectDir, normalizedRemote);
   try {
     git(["merge-base", "HEAD", remoteOid], projectDir, { timeoutMs: 5_000 });
   } catch {

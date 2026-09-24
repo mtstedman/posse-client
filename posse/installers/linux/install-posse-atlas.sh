@@ -94,7 +94,7 @@ Options:
   --no-persist-env        Do not append env sourcing to shell rc files
   --skip-settings         Do not seed ~/.posse/account.db
   --skip-host-tools       Do not install system packages (build toolchain and
-                          helper CLIs: rg, tesseract, ImageMagick, ffmpeg,
+                          helper CLIs: gh, rg, tesseract, ImageMagick, ffmpeg,
                           Python, and PHP only when PHP SCIP is selected).
                           Missing tools are still reported.
   --no-install-node       Do not auto-install Node via nvm when Node 24+ is missing
@@ -873,6 +873,7 @@ host_tools_table() {
     apt-get)
       cat <<'EOT'
 ripgrep|rg|ripgrep
+github-cli|gh|gh
 tesseract|tesseract|tesseract-ocr
 imagemagick|magick_or_convert|imagemagick
 ffmpeg|ffmpeg|ffmpeg
@@ -886,6 +887,7 @@ EOT
     dnf|yum)
       cat <<'EOT'
 ripgrep|rg|ripgrep
+github-cli|gh|gh
 tesseract|tesseract|tesseract
 imagemagick|magick_or_convert|ImageMagick
 ffmpeg|ffmpeg|ffmpeg
@@ -899,6 +901,7 @@ EOT
     pacman)
       cat <<'EOT'
 ripgrep|rg|ripgrep
+github-cli|gh|github-cli
 tesseract|tesseract|tesseract
 imagemagick|magick_or_convert|imagemagick
 ffmpeg|ffmpeg|ffmpeg
@@ -912,6 +915,7 @@ EOT
     zypper)
       cat <<'EOT'
 ripgrep|rg|ripgrep
+github-cli|gh|gh
 tesseract|tesseract|tesseract-ocr
 imagemagick|magick_or_convert|ImageMagick
 ffmpeg|ffmpeg|ffmpeg

@@ -89,6 +89,7 @@ export class SessionMonitor {
     this._lastStatus = null;
     this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
+    this._teamSubmissionSignature = null;
   }
 
   delayUntilDueMs() {
@@ -121,6 +122,7 @@ export class SessionMonitor {
       this._stateId = null;
       this._consecutiveFailures = 0;
       this._scopeCapabilityConfirmed = null;
+      this._teamSubmissionSignature = null;
       this._tokenManager.setSessionContext(null);
       this._clearPeers();
       return { attempted: false, skipped: "no_active_session" };
@@ -135,6 +137,7 @@ export class SessionMonitor {
       this._stateId = state.id;
       this._consecutiveFailures = 0;
       this._scopeCapabilityConfirmed = null;
+      this._teamSubmissionSignature = null;
       this._adoptProcess(state.id, process.pid);
     }
     const instanceId = state.instance_id || ensureBridgeInstanceId(this.projectDir);
@@ -171,6 +174,38 @@ export class SessionMonitor {
       // Changing the policy changes the pulse cache key and clears the native
       // scope proof, even when the same binary was verified earlier this run.
       this._tokenManager.confirmNativeScopeEnforcement(this._scopeCapabilityConfirmed);
+      let teamSubmissionChanged = false;
+      let teamSubmissionWorkItemIds = [];
+      if (teamPolicyEnabled && typeof this._client?.teamSubmissions === "function") {
+        try {
+          const listing = await this._client.teamSubmissions(state.relay_token, state.remote_session_id);
+          if (listing?.contract_version === 1 && listing.session_id === state.remote_session_id
+            && Array.isArray(listing.submissions)) {
+            const projection = listing.submissions
+              .filter((row) => ["pending", "approved", "denied"].includes(String(row.state || "").toLowerCase()))
+              .map((row) => ({
+                submission_id: row.id ?? row.submission_id ?? null,
+                work_item_id: row.work_item_id,
+                state: row.state,
+                grant_revision: row.grant_revision ?? null,
+                policy_revision: row.policy_revision ?? null,
+                decision_action_id: row.decision_action_id ?? null,
+                decision_at: row.decision_at ?? null,
+                candidate_oid: row.candidate_oid ?? null,
+              }))
+              .sort((left, right) => String(left.submission_id).localeCompare(String(right.submission_id)));
+            const signature = JSON.stringify(projection);
+            teamSubmissionChanged = this._teamSubmissionSignature != null
+              && signature !== this._teamSubmissionSignature;
+            if (teamSubmissionChanged) {
+              teamSubmissionWorkItemIds = projection.map((row) => row.work_item_id).filter(Boolean).slice(0, 64);
+            }
+            this._teamSubmissionSignature = signature;
+          }
+        } catch { /* A re-drive hint must not turn a healthy heartbeat fatal. */ }
+      } else {
+        this._teamSubmissionSignature = null;
+      }
       const roster = state.role === "host"
         ? await this._client?.members?.(state.relay_token)
         : null;
@@ -213,6 +248,8 @@ export class SessionMonitor {
       return {
         attempted: true,
         status: projectedStatus,
+        teamSubmissionChanged,
+        teamSubmissionWorkItemIds,
         requestsDrain: status.status !== "active",
       };
     } catch (error) {

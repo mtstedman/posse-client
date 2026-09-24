@@ -13,6 +13,7 @@ export const SHARED_TRUNK_MERGE_PHASES = Object.freeze([
   "publish_unknown",
   "deferred",
   "published",
+  "abandoned",
 ]);
 
 const PURPOSE_SET = new Set(SHARED_TRUNK_MERGE_PURPOSES);
@@ -172,6 +173,21 @@ export function listUnresolvedSharedTrunkMergeOperations({ workItemId = null } =
   return rows.map(decodeOperation);
 }
 
+export function listSharedTrunkMergeOperations({ workItemId = null } = {}) {
+  const db = getDb();
+  const rows = workItemId == null
+    ? db.prepare(`
+        SELECT * FROM shared_trunk_merge_operations
+        ORDER BY created_at, operation_id
+      `).all()
+    : db.prepare(`
+        SELECT * FROM shared_trunk_merge_operations
+        WHERE work_item_id = ?
+        ORDER BY created_at, operation_id
+      `).all(requiredWorkItemId(workItemId));
+  return rows.map(decodeOperation);
+}
+
 export function hasUnresolvedSharedTrunkMergeOperation(workItemId) {
   const row = getDb().prepare(`
     SELECT 1 AS one FROM shared_trunk_merge_operations
@@ -202,6 +218,9 @@ export function transitionSharedTrunkMergeOperation(operationId, {
   return runImmediateTransaction(db, () => {
     const current = selectOperation(db, requiredString(operationId, "operationId"));
     if (!current || current.version !== version) return null;
+    if (current.phase === "abandoned") {
+      throw new Error(`Shared-trunk operation ${current.operationId} is abandoned and cannot transition`);
+    }
     const nextCandidate = candidateSha === undefined ? current.candidateSha : (candidateSha ? String(candidateSha).trim() : null);
     const nextBase = baseSha === undefined ? current.baseSha : requiredString(baseSha, "baseSha");
     const nextExpected = expectedRemoteSha === undefined
@@ -233,6 +252,34 @@ export function transitionSharedTrunkMergeOperation(operationId, {
   });
 }
 
+export function abandonSharedTrunkMergeOperation(operationId, {
+  expectedVersion,
+  lastErrorCode = "operator_abandoned",
+} = {}) {
+  const current = getSharedTrunkMergeOperation(operationId);
+  if (!current) return null;
+  const abandoned = transitionSharedTrunkMergeOperation(operationId, {
+    expectedVersion,
+    phase: "abandoned",
+    lastErrorCode,
+  });
+  if (!abandoned) return null;
+  logDurableEvent({
+    work_item_id: abandoned.workItemId,
+    event_type: EVENT_TYPES.SHARED_TRUNK_OPERATION_ABANDONED,
+    actor_type: EVENT_ACTORS.SYSTEM,
+    message: `Abandoned shared-trunk operation ${abandoned.operationId}`,
+    event_json: JSON.stringify({
+      operation_id: abandoned.operationId,
+      candidate_sha: abandoned.candidateSha,
+      target_branch: abandoned.targetBranch,
+      remote: abandoned.remote,
+      reason: abandoned.lastErrorCode,
+    }),
+  });
+  return abandoned;
+}
+
 /**
  * Atomically record proven publication, durable merge evidence, and final-WI
  * settlement.  Keeping these writes in one SQLite transaction ensures a
@@ -251,6 +298,9 @@ export function finalizePublishedSharedTrunkMergeOperation(operationId, {
     const operation = selectOperation(db, id);
     if (!operation || operation.version !== version) return null;
     if (operation.phase === "published") return operation;
+    if (operation.phase === "abandoned") {
+      throw new Error(`Shared-trunk operation ${id} is abandoned and cannot be published`);
+    }
     if (!["candidate", "publish_unknown"].includes(operation.phase) || !operation.candidateSha) {
       throw new Error(`Shared-trunk operation ${id} has no publishable candidate`);
     }

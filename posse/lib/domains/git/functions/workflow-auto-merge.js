@@ -48,8 +48,7 @@ export function createAutoMergeWorkflowHelpers(context, {
   }
 
   function hasAutoMergeableCompletedWorkItems() {
-    return listEndOfRunMergeableWorkItems()
-      .some((wi) => wi.merge_state !== "merge_failed");
+    return listEndOfRunMergeableWorkItems().length > 0;
   }
 
   let autoMergeCompletedWorkItemsPromise = null;

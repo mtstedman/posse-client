@@ -103,7 +103,7 @@ Remote roles: `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Reserve agent_claim for a completed, evidence-backed finding saved before research on other findings continues. Once research is complete, put new, unsaved findings directly in agent_handoff.claims. agent_handoff includes saved claims automatically and validates their evidence; include only new, unsaved findings there. Aim for a complete answer to the section rather than partial notes, and preserve substantive detail. Reuse a stable lowercase id to revise a saved finding, or remove it if later evidence disproves it. Independent saves can run alongside already-needed research reads when their evidence has already been delivered.
+For researcher.report.v1, agent_claim saves a completed, self-contained, evidence-backed finding before research on other findings continues. Once report research is complete, put new, unsaved findings directly in agent_handoff.claims; saved report findings are merged automatically, and terminal claims contain only new findings. Pipeline researchers place optional advisory claims directly in agent_handoff; agent_claim is exclusive to the report profile. Reuse a stable lowercase id to revise a saved finding, or remove it if later evidence disproves it. Independent saves can run alongside already-needed research reads when their evidence has already been delivered.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -447,11 +447,12 @@ Remote roles: `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Dispatch an isolated researcher and wait for its evidence-backed result. Select code for repository investigation or web for online research. Supply a self-contained question including scope and facts needed. The administrator bounds child count, effort, turns, and duration.
+Dispatch an isolated researcher and wait for its evidence-backed result. Select code for repository investigation or web for online research. Supply a self-contained question including scope and facts needed; code requests may add bounded repository anchors. The administrator bounds child count, effort, turns, and duration.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `agent_type` | `string` | Required | values "code", "web" |  |
+| `anchors` | `array<any>` | Optional | max items 8 |  |
 | `budget` | `object` | Optional |  |  |
 | `question` | `string` | Required | min length 1; max length 2000 |  |
 

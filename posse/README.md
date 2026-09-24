@@ -115,10 +115,11 @@ retain their host coordination and sleep capabilities.
 
 ### Experimental planner dispatch
 
-Set repository settings `planner_dispatch_mode=planner` and
-`agent_coordination_mode=subagents` to enable planner-led intake. The default
-`router` retains the existing upfront research/preflight flow. On the gated route,
-the planner can plan simple work directly or call one tool:
+Set the account setting `planner_dispatch_mode=planner` to enable planner-led
+intake. The separate `agent_coordination_mode` setting still governs citation
+sub-agents. The default `router` retains the existing upfront research/preflight
+flow. On the gated route, the planner can plan simple work directly or call one
+tool:
 
 ```json
 {"agent_type":"code","question":"Find the request validation path and its tests","budget":{"reasoning_effort":"medium","max_turns":12}}
@@ -131,11 +132,12 @@ the parent's transcript or dispatch tools. Existing citation-only `sub_agent`
 behavior remains available to its existing callers; gated planners receive only
 `dispatch_agent` for delegation.
 
-Repository settings bound total children per planner call (default 2), child
-turns (24), timeout (1200 seconds), effort (high), and returned report size
-(12000 characters). The triage turn setting is prompt guidance; child limits are
-runtime-enforced. The separate dispatch MCP timeout (1500 seconds) reserves time
-to return results. Existing child cancellation and stall handling are reused.
+Account settings bound total children per planner call (default 2), child turns
+(24), timeout (1200 seconds), effort (medium by default with a high ceiling),
+and returned report size (12000 characters). The triage turn setting is prompt
+guidance; child limits are runtime-enforced. The separate dispatch MCP timeout
+(1500 seconds) reserves time to return results. Existing child cancellation and
+stall handling are reused.
 
 Monitor Agents shows code/web child rows with their question, progress, tool
 history, provider/model/effort, and completion state. Select a running child and
@@ -145,25 +147,29 @@ usage, questions, and the zero-child decision.
 
 Testing requires the matching `feat/planner-dispatch-framework` remote branch
 for the code-child prompt and capability contract. Use both workbranches with an
-isolated test repository and enable the two settings there. Test a simple direct
+isolated test repository and enable planner dispatch there. Test a simple direct
 plan, a code investigation, a web investigation, a child nudge, and a canceled
-parent. The feature remains off by default. Oneshot and web-only intake retain
-their existing routes; red-team/synthesis and assessment loopbacks cannot dispatch.
+parent. The feature remains off by default. Oneshot, trivial no-research, and
+web-only intake retain their existing routes. A red-team chain's primary planner
+and an assessment replan may dispatch; the critique and synthesis planners cannot.
 
 ## Assessment replanning
 
-An assessor's `needs_replan` verdict returns directly to the standard planner.
+An assessor's `needs_replan` verdict returns directly to the planner. With
+planner dispatch enabled it uses the configured planner tier and may dispatch
+bounded research children; otherwise it uses the standard planner route.
 The planner receives the failed task, its success criteria and test command,
 assessor reasons, original scope/commit, and a record of retained work. Local
 preparation selects a read-only work-item branch snapshot and supplies the commit
 diff when available. Prior research remains historical context; the planner
 checks the affected current source before revising the remaining plan.
 
-Both researcher-dispatch tools are disabled on this route, independently of
-`planner_dispatch_mode`. Stale queued branches are canceled transactionally;
-completed work and implementations awaiting assessment are retained. The existing
-`posse_max_replans` limit counts direct planner cycles and legacy research cycles.
-Already-queued research loopbacks continue through their existing continuation.
+Citation sub-agents remain disabled on this route. The unified research dispatch
+tool is available only when `planner_dispatch_mode=planner`. Stale queued branches
+are canceled transactionally; completed work and implementations awaiting
+assessment are retained. The existing `posse_max_replans` limit counts direct
+planner cycles and legacy research cycles. Already-queued research loopbacks
+continue through their existing continuation.
 
 ## Scope approval
 

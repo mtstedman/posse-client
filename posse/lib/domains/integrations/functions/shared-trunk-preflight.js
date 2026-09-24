@@ -4,7 +4,15 @@
 
 import { randomBytes } from "node:crypto";
 
-import { resolveSharedTrunkConfigRuntime } from "../../git/functions/shared-trunk-config.js";
+import {
+  cacheSharedTrunkRemoteDefaultBranch,
+  resolveSharedTrunkConfigRuntime,
+} from "../../git/functions/shared-trunk-config.js";
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
+import {
+  gitHubCliAuthRemediation,
+  isGitPushAuthenticationFailure,
+} from "../../git/functions/git-push-auth.js";
 import {
   casPushSharedTrunkClaimNative,
   getSharedTrunkNativeCapabilities,
@@ -36,6 +44,29 @@ function preflightFailure(code, message, detail = {}) {
     message,
     ...detail,
   };
+}
+
+function authFailure(projectDir, remote, failure, gitExec = adminGitExec) {
+  const status = resultStatus(failure);
+  const detail = {
+    stderr: failure?.stderr,
+    stdout: failure?.stdout,
+    message: [failure?.message, failure?.error, failure?.reason, status]
+      .filter(Boolean)
+      .map(String)
+      .join("\n"),
+  };
+  if (!["auth_failed", "authentication_failed", "unauthorized"].includes(status)
+    && !isGitPushAuthenticationFailure(detail)) return null;
+  let remoteUrl = null;
+  try {
+    remoteUrl = gitExec(["remote", "get-url", "--push", remote], projectDir, { timeoutMs: 5_000 }).trim();
+  } catch { /* retain host-neutral commands */ }
+  const remediation = gitHubCliAuthRemediation(remoteUrl);
+  return preflightFailure(remediation.reason, remediation.message, {
+    remote,
+    remediation_commands: remediation.commands,
+  });
 }
 
 async function roundTripClaimProbe({ projectDir, config, casPush, randomKey }) {
@@ -148,6 +179,8 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
       branch: config.branch,
     });
   } catch (error) {
+    const auth = authFailure(projectDir, config.remote, error, options.gitExec);
+    if (auth) return auth;
     return preflightFailure(error?.code || "remote_access_failed", error?.message || String(error), {
       remote: config.remote,
       branch: config.branch,
@@ -161,15 +194,20 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
     });
   }
   const remoteCheck = nativeResult(remoteEnvelope) || {};
+  const remoteAuth = authFailure(projectDir, config.remote, remoteCheck, options.gitExec);
+  if (remoteAuth) return remoteAuth;
   const remoteOid = String(remoteCheck.remoteOid || remoteCheck.remote_oid || "").trim();
   const checkedRemote = String(remoteCheck.remote || "").trim();
   const checkedBranch = String(remoteCheck.branch || "").trim();
+  const defaultBranch = String(remoteCheck.defaultBranch || remoteCheck.default_branch || "").trim();
   const writeCheck = String(remoteCheck.writeCheck || remoteCheck.write_check || "").trim();
   if (remoteCheck.readAccess !== true
     || remoteCheck.writeTransportAccess !== true
     || !OID_RE.test(remoteOid)
     || checkedRemote !== config.remote
     || checkedBranch !== config.branch
+    || !defaultBranch
+    || defaultBranch === config.branch
     || writeCheck !== "dry_run_exact_branch_lease") {
     return preflightFailure("remote_access_unproven", "Native preflight did not prove exact-branch remote read/write transport access", {
       remote: config.remote,
@@ -178,10 +216,13 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
   }
 
   let claimProbe = { attempted: false, skipped: "claims_disabled" };
+  cacheSharedTrunkRemoteDefaultBranch(projectDir, config.remote, config.branch, defaultBranch);
   if (config.claimsEnabled === true) {
     try {
       claimProbe = await roundTripClaimProbe({ projectDir, config, casPush, randomKey });
     } catch (error) {
+      const auth = authFailure(projectDir, config.remote, error, options.gitExec);
+      if (auth) return { ...auth, remoteOid };
       return preflightFailure(error?.code || "claim_ref_access_failed", error?.message || String(error), {
         remote: config.remote,
         branch: config.branch,
@@ -200,6 +241,7 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
     ok: true,
     remote: config.remote,
     branch: config.branch,
+    defaultBranch,
     remoteOid,
     checks: {
       nativeContract: true,
