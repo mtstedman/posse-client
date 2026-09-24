@@ -37,7 +37,6 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   "-C",
   "-c",
   "--config-env",
-  "--exec-path",
   "--git-dir",
   "--namespace",
   "--work-tree",
@@ -55,7 +54,6 @@ const GIT_GLOBAL_FLAGS = new Set([
 ]);
 const GIT_GLOBAL_OPTIONS_WITH_EQUALS = [
   "--config-env=",
-  "--exec-path=",
   "--git-dir=",
   "--namespace=",
   "--work-tree=",
@@ -178,11 +176,8 @@ function gitCommandArgs(args = []) {
   let index = 0;
   while (index < argv.length) {
     const arg = argv[index];
-    if (!arg) {
-      index += 1;
-      continue;
-    }
-    if (arg === "--") return argv.slice(index + 1);
+    // Unrecognized leading options (`--exec-path`, `--`, "") stay in place as
+    // the command, so they never classify as read-only.
     if (!arg.startsWith("-")) break;
     if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
       index += 2;

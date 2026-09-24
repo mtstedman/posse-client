@@ -689,6 +689,14 @@ export class Ledger {
   }
 
   /**
+   * @param {Parameters<ScipIndexStore["pruneSupersededScipIndexes"]>[0]} keepIds
+   * @returns {ReturnType<ScipIndexStore["pruneSupersededScipIndexes"]>}
+   */
+  pruneSupersededScipIndexes(keepIds) {
+    return this.#scipIndex.pruneSupersededScipIndexes(keepIds);
+  }
+
+  /**
    * @returns {ReturnType<ScipIndexStore["listScipIndexes"]>}
    */
   listScipIndexes() {

@@ -119,16 +119,12 @@ export async function symbolUsages({ view, versionId, params }) {
  */
 export async function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, examineLimit = 24, sampleLimit = 2 } = {}) {
   const rows = [];
-  try {
-    for (const symbol of (symbols || []).slice(0, examineLimit)) {
-      if (symbol?.global_id == null || !isDefaultVisibleSymbol(symbol)) continue;
-      const { callerCount, callerPathsSample } = await countIncomingCallers(view, symbol, { sampleLimit, distinctPaths: true });
-      if (callerCount > 0) {
-        rows.push({ symbol: symbol.name, calledFromFiles: callerCount, sample: callerPathsSample });
-      }
+  for (const symbol of (symbols || []).slice(0, examineLimit)) {
+    if (symbol?.global_id == null || !isDefaultVisibleSymbol(symbol)) continue;
+    const { callerCount, callerPathsSample } = await countIncomingCallers(view, symbol, { sampleLimit, distinctPaths: true });
+    if (callerCount > 0) {
+      rows.push({ symbol: symbol.name, calledFromFiles: callerCount, sample: callerPathsSample });
     }
-  } catch {
-    // Advisory context; whatever was collected still helps.
   }
   rows.sort((a, b) => b.calledFromFiles - a.calledFromFiles || a.symbol.localeCompare(b.symbol));
   return rows.slice(0, maxSymbols);
@@ -139,7 +135,8 @@ export async function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, exa
  * few distinct caller paths. Shares the exact caller-enumeration + visibility
  * filter that {@link symbolUsages} applies (daemon-resolved neighborhood plus
  * isDefaultVisibleSymbol) so retrieval reachability signals stay consistent
- * with the symbol.overview surface. Best-effort: returns zero on any error.
+ * with the symbol.overview surface. Storage failures propagate: a failed read
+ * is never reported as "no callers".
  *
  * `distinctPaths` counts distinct caller FILES instead of call-site edges —
  * the hub measure for "how much of the codebase routes through this": a
@@ -153,28 +150,27 @@ export async function calledFromBreadcrumbs(view, symbols, { maxSymbols = 6, exa
  */
 export async function countIncomingCallers(view, target, { sampleLimit = 3, distinctPaths = false } = {}) {
   const result = { callerCount: 0, callerPathsSample: /** @type {string[]} */ ([]) };
-  try {
-    if (!view?.query || target?.global_id == null) return result;
-    const seenPaths = new Set();
-    const distinct = distinctPaths ? new Set() : null;
-    const neighborhood = await view.query.symbolNeighborhood(target.global_id);
-    for (const { edge, symbol: from } of neighborhood.callers) {
-      if (!from || !isDefaultVisibleSymbol(from)) continue;
-      const p = String(edge.repo_rel_path || from.repo_rel_path || "").replace(/\\/g, "/") || null;
-      if (distinct) {
-        if (p) distinct.add(p);
-      } else {
-        result.callerCount += 1;
-      }
-      if (p && !seenPaths.has(p) && result.callerPathsSample.length < sampleLimit) {
-        seenPaths.add(p);
-        result.callerPathsSample.push(p);
-      }
-    }
-    if (distinct) result.callerCount = distinct.size;
-  } catch {
-    // Reachability is an advisory signal; degrade to whatever we counted.
+  if (target?.global_id == null) return result;
+  const seenPaths = new Set();
+  const distinct = distinctPaths ? new Set() : null;
+  const neighborhood = await view.query.symbolNeighborhood(target.global_id);
+  if (!Array.isArray(neighborhood?.callers)) {
+    throw new Error("ATLAS symbolNeighborhood returned an invalid caller list");
   }
+  for (const { edge, symbol: from } of neighborhood.callers) {
+    if (!from || !isDefaultVisibleSymbol(from)) continue;
+    const p = String(edge.repo_rel_path || from.repo_rel_path || "").replace(/\\/g, "/") || null;
+    if (distinct) {
+      if (p) distinct.add(p);
+    } else {
+      result.callerCount += 1;
+    }
+    if (p && !seenPaths.has(p) && result.callerPathsSample.length < sampleLimit) {
+      seenPaths.add(p);
+      result.callerPathsSample.push(p);
+    }
+  }
+  if (distinct) result.callerCount = distinct.size;
   return result;
 }
 

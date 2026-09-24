@@ -14,6 +14,8 @@ export class ScipIndexStore {
   #stmt;
   /** @type {import("./Interner.js").Interner} */
   #interner;
+  /** @type {(keepIds: number[]) => { deleted: number, schemes: string[] }} */
+  #pruneTxn;
 
   /**
    * @param {import("better-sqlite3").Database} db
@@ -100,7 +102,39 @@ export class ScipIndexStore {
          FROM scip_indexes
          ORDER BY ingested_at DESC`,
       ),
+      scipIndexSelectKept: db.prepare(
+        `SELECT id, scheme, status FROM scip_indexes
+         WHERE id IN (SELECT value FROM json_each(?))`,
+      ),
+      scipIndexDeleteSuperseded: db.prepare(
+        `DELETE FROM scip_indexes
+         WHERE scheme = ? AND id NOT IN (SELECT value FROM json_each(?))`,
+      ),
     };
+    this.#pruneTxn = db.transaction((/** @type {number[]} */ keepIds) => {
+      const keepJson = JSON.stringify(keepIds);
+      const kept = /** @type {Array<{ id: number, scheme: string, status: string }>} */ (
+        this.#stmt.scipIndexSelectKept.all(keepJson)
+      );
+      // Every committed id must still exist: a vanished row means the set is
+      // not the one the session committed, so nothing is provably superseded.
+      if (kept.length !== keepIds.length) return { deleted: 0, schemes: [] };
+      /** @type {Map<string, boolean>} */
+      const completeByScheme = new Map();
+      for (const row of kept) {
+        const scheme = String(row.scheme);
+        completeByScheme.set(scheme, (completeByScheme.get(scheme) ?? true) && row.status === "complete");
+      }
+      let deleted = 0;
+      /** @type {string[]} */
+      const schemes = [];
+      for (const [scheme, complete] of completeByScheme) {
+        if (!complete) continue;
+        deleted += this.#stmt.scipIndexDeleteSuperseded.run(scheme, keepJson).changes;
+        schemes.push(scheme);
+      }
+      return { deleted, schemes: schemes.sort() };
+    });
   }
 
   /**
@@ -366,6 +400,29 @@ export class ScipIndexStore {
     const ingestedHead = normalizeHashField(fields.ingested_head);
     if (!bytesHash || !ingestedHead) return;
     this.#stmt.scipIndexTouchBytesHash.run(bytesHash, ingestedHead, rowId);
+  }
+
+  /**
+   * Drop the bookkeeping rows a completed SCIP staging session superseded, in
+   * one transaction. `keepIds` is the session's full committed set; for each
+   * scheme among those rows, every other row of that scheme is deleted. A
+   * scheme is left untouched when any of its committed rows is `partial`, and
+   * the whole prune is a no-op when a committed id no longer exists. Schemes
+   * the session did not commit are never touched.
+   *
+   * @param {number[]} keepIds
+   * @returns {{ deleted: number, schemes: string[] }}
+   */
+  pruneSupersededScipIndexes(keepIds) {
+    if (!Array.isArray(keepIds)) {
+      throw new TypeError("Ledger.pruneSupersededScipIndexes: keepIds must be an array");
+    }
+    const ids = [...new Set(keepIds.map((value) => Number(value)))];
+    if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new RangeError("Ledger.pruneSupersededScipIndexes: keepIds must be positive integers");
+    }
+    if (ids.length === 0) return { deleted: 0, schemes: [] };
+    return this.#pruneTxn(ids);
   }
 
   /**

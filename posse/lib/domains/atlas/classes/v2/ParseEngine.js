@@ -91,6 +91,8 @@ import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
 import { ensureScipStaged, stageScipBatches } from "../../functions/v2/scip/stager.js";
+import { committedScipIndexIdsForPrune } from "../../functions/v2/scip/index-prune.js";
+import { collectScipBatchSessions } from "../../functions/v2/scip/batch-session-gc.js";
 import {
   scipCoverageForIntake,
   scopePathsForScipSourceLanguages,
@@ -604,25 +606,47 @@ export class ParseEngine {
    * Each ready artifact is acknowledged by the serialized intake queue; the
    * stager keeps at most the configured number of unacknowledged batches.
    *
+   * `pruneSuperseded` marks `paths` as the full repository fileset: only then
+   * can a completed session replace every older bookkeeping row of the
+   * schemes it committed. Incremental sessions cover a subset and never prune.
+   *
    * @param {AtlasWarmJobResult} base
    * @param {AtlasWarmPurpose} purpose
    * @param {string[]} paths
    * @param {{
    *   onBatchReady?: ((file: string, info: Record<string, any>) => Promise<unknown> | unknown) | null,
    *   onFileUnavailable?: ((info: Record<string, any>) => Promise<unknown> | unknown) | null,
+   *   pruneSuperseded?: boolean,
    * }} [opts]
    */
   async #stageScipBatches(base, purpose, paths, opts = {}) {
     if (!this.#scipPhaseEligible(purpose) || !shouldRunScipPhase(this.#scipMode)) return [];
+    // Every artifact this warm hands to intake (startup snapshot, fallback
+    // whole-project plans, batches) reports its committed bookkeeping row;
+    // the prune below keeps exactly that set.
+    /** @type {Array<any>} */
+    const intakeReports = [];
+    const onBatchReady = typeof opts.onBatchReady === "function"
+      ? async (/** @type {string} */ file, /** @type {Record<string, any>} */ info) => {
+          try {
+            const report = await /** @type {Function} */ (opts.onBatchReady)(file, info);
+            intakeReports.push(report);
+            return report;
+          } catch (err) {
+            intakeReports.push({ ok: false });
+            throw err;
+          }
+        }
+      : null;
     // A normal staged artifact represents the indexer's last full repository
     // view. Feed it into the same bounded intake lane, then let current-path
     // batches refresh any changed files while layer-mode parsing continues.
     const existingFiles = await listScipFiles(this.#scipDir).catch(() => []);
     if (existingFiles.length > 0) {
       for (const [batchOrdinal, file] of existingFiles.entries()) {
-        if (typeof opts.onBatchReady === "function") {
+        if (onBatchReady) {
           const sourceLanguages = scipBasenameSourceLanguages(file);
-          await opts.onBatchReady(file, {
+          await onBatchReady(file, {
             session_id: null,
             batch_ordinal: batchOrdinal,
             batch_count: existingFiles.length,
@@ -674,7 +698,7 @@ export class ParseEngine {
         mode: this.#scipMode,
         config: this.#runtimeConfig,
         onProgress: (event) => this.#emitProgress(event),
-        onBatchReady: opts.onBatchReady || null,
+        onBatchReady,
         onFileUnavailable: opts.onFileUnavailable || null,
       });
       for (const row of staged.results || []) {
@@ -701,6 +725,7 @@ export class ParseEngine {
       }
       /** @type {any} */ (base).scip_batch_session = staged.sessionId || null;
       /** @type {any} */ (base).scip_batches_staged = staged.files?.length || 0;
+      if (opts.pruneSuperseded === true) await this.#reclaimSupersededScipState(staged, intakeReports);
       return staged.files || [];
     } catch (err) {
       logAtlasError(`[Warmer.#stageScipBatches] stageScipBatches(${this.#scipDir}) threw:`, err);
@@ -710,6 +735,51 @@ export class ParseEngine {
         message: `SCIP batch staging failed: ${formatAtlasError(err)}`,
       });
       return [];
+    }
+  }
+
+  /**
+   * Reclaim what a completed full-fileset session superseded: the
+   * `scip_indexes` rows of the schemes it committed, and the batch session
+   * directories it no longer references. Both are bookkeeping or reusable
+   * cache only, so a failure leaves the previous state intact and the next
+   * completed session retries it.
+   *
+   * @param {Parameters<typeof committedScipIndexIdsForPrune>[0]["staged"] & { sessionId?: string | null }} staged
+   * @param {Array<any>} intakeReports
+   */
+  async #reclaimSupersededScipState(staged, intakeReports) {
+    const keepIds = committedScipIndexIdsForPrune({ staged, intakeReports });
+    if (!keepIds) return;
+    if (keepIds.length > 0) {
+      try {
+        const pruned = this.#ledger.pruneSupersededScipIndexes(keepIds);
+        if (pruned.deleted > 0) {
+          this.#emitProgress({
+            kind: "line",
+            stream: "system",
+            stage: "scip",
+            text: `pruned ${pruned.deleted} superseded SCIP index record${pruned.deleted === 1 ? "" : "s"} (${pruned.schemes.join(", ")})`,
+          });
+        }
+      } catch (err) {
+        logAtlasError("[Warmer.#reclaimSupersededScipState] prune failed; superseded rows kept:", err);
+      }
+    }
+    const gc = await collectScipBatchSessions({
+      scipDir: this.#scipDir,
+      currentSessionId: String(staged?.sessionId || ""),
+    });
+    for (const failure of gc.failed) {
+      logAtlasError(`[Warmer.#reclaimSupersededScipState] SCIP batch session ${failure.session} kept; delete failed:`, failure.error);
+    }
+    if (gc.removed.length > 0) {
+      this.#emitProgress({
+        kind: "line",
+        stream: "system",
+        stage: "scip",
+        text: `removed ${gc.removed.length} superseded SCIP batch session director${gc.removed.length === 1 ? "y" : "ies"}`,
+      });
     }
   }
 
@@ -848,7 +918,7 @@ export class ParseEngine {
    * the next artifact read starts immediately while the previous artifact's
    * ledger writes remain serialized on the shared handle.
    *
-   * `add` resolves to this artifact's intake report — `{ ok, failed_documents }`
+   * `add` resolves to this artifact's intake report — `{ ok, failed_documents, scip_index_id }`
    * — on a promise of its own. The shared `tail` still orders the lane and is
    * kept non-rejecting so one failed artifact cannot break the chain, which is
    * exactly why it cannot double as the acknowledgement: the stager needs a
@@ -917,15 +987,23 @@ export class ParseEngine {
                 terminalizeAbsent,
               }));
             }
-            return { ok: true, reason: "already_ingested", failed_documents: completed.failedDocuments };
+            return {
+              ok: true,
+              reason: "already_ingested",
+              failed_documents: completed.failedDocuments,
+              scip_index_id: completed.scipIndexId,
+            };
           }
           let preparedCoverage = null;
           /** @type {Array<{ repo_rel_path: string, content_hash: string, reason: string }>} */
           const failedDocuments = [];
           let artifactRecorded = true;
+          /** @type {number | null} */
+          let scipIndexId = null;
           const ingested = await this.#ingestScipFiles(base, [file], {
             ...opts,
             onFileIntake: (result) => {
+              scipIndexId = Number.isSafeInteger(result?.scip_index_id) ? result.scip_index_id : null;
               for (const document of Array.isArray(result?.failed_documents) ? result.failed_documents : []) {
                 failedDocuments.push({
                   repo_rel_path: String(document?.repo_rel_path || ""),
@@ -951,11 +1029,12 @@ export class ParseEngine {
             preparedFiles: new Map([[key, ready]]),
           });
           const ok = ingested && artifactRecorded;
-          if (ok) completedIntakes.set(key, { bytesHash, coverage: preparedCoverage, failedDocuments });
+          if (ok) completedIntakes.set(key, { bytesHash, coverage: preparedCoverage, failedDocuments, scipIndexId });
           return {
             ok,
             reason: ok ? "ingested" : "intake_failed",
             failed_documents: failedDocuments,
+            scip_index_id: scipIndexId,
           };
         });
       // Keep the ordering tail free of both the report and the rejection.
@@ -1222,6 +1301,8 @@ export class ParseEngine {
               try {
                 if (useBatchedScipStaging()) {
                   await this.#stageScipBatches(base, "main-full", paths, {
+                    // A truncated walk staged a subset, not the full fileset.
+                    pruneSuperseded: base.truncated !== true,
                     onBatchReady: (file, info) => scipQueue.add(file, info),
                     onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
                       documents: [], source_languages: [],

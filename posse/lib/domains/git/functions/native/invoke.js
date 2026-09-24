@@ -317,7 +317,10 @@ const GIT_READ_ONLY_METHODS = new Set([
 ]);
 
 // git.exec must use the encoder's argument policy, not the broader Node Repo
-// scheduling classifier. These tables intentionally match git_core::repo.
+// scheduling classifier. These tables match git_core::repo, except that, like
+// posse-git's session-scope classifier, `--exec-path`, `--` and empty leading
+// arguments are unclassifiable: `--exec-path=<dir>` makes Git run subcommand
+// programs from that directory, so it can never be a read.
 const GIT_EXEC_READ_ONLY_COMMANDS = new Set([
   "blame",
   "cat-file",
@@ -334,7 +337,6 @@ const GIT_EXEC_READ_ONLY_COMMANDS = new Set([
 const GIT_EXEC_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   "-C",
   "-c",
-  "--exec-path",
   "--git-dir",
   "--namespace",
   "--work-tree",
@@ -349,7 +351,6 @@ const GIT_EXEC_GLOBAL_FLAGS = new Set([
   "--noglob-pathspecs",
 ]);
 const GIT_EXEC_GLOBAL_OPTIONS_WITH_EQUALS = [
-  "--exec-path=",
   "--git-dir=",
   "--namespace=",
   "--work-tree=",
@@ -391,6 +392,9 @@ function gitExecOptionName(arg) {
 }
 
 /**
+ * The subcommand argv after known leading global options. An unrecognized
+ * leading option stays in place as the "command", so it is never read-only.
+ *
  * @param {string[]} args
  * @returns {string[] | null}
  */
@@ -398,11 +402,6 @@ function gitExecCommandArgs(args) {
   let index = 0;
   while (index < args.length) {
     const arg = args[index];
-    if (!arg) {
-      index += 1;
-      continue;
-    }
-    if (arg === "--") return args.slice(index + 1);
     if (!arg.startsWith("-")) break;
     if (arg === "-c" || (arg.startsWith("-c") && arg.length > 2) || arg === "-p" || arg === "--paginate") {
       return null;
