@@ -1574,7 +1574,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
             claim: { type: "string", minLength: 1 },
             evidence: {
               type: "array",
-              maxItems: 8,
+              maxItems: 16,
               items: {
                 type: "string",
                 pattern: HANDOFF_SELECTOR_STRING_PATTERN,

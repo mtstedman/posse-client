@@ -14,9 +14,11 @@ function sourceRange(evidence) {
   return { key: JSON.stringify([repository, version, path]), start, end, lines };
 }
 
-// Shorten only a byte-verified repeat whose earlier claim identifies one source.
-// Unique evidence and partial overlaps keep their complete source citation.
-export function renderClaimEvidenceReferences(report, renderSelector) {
+// One record per claim evidence item, aligned with the claim's evidence
+// lanes. `repeatOf` names the earlier claim whose byte-verified single-source
+// range already contains this one; unique evidence and partial overlaps keep
+// repeatOf null and their complete citation.
+export function claimEvidenceReferences(report, renderSelector) {
   const previous = new Map();
   return (report.claims || []).map((claim, claimIndex) => {
     const detail = claim[1] || {};
@@ -25,25 +27,20 @@ export function renderClaimEvidenceReferences(report, renderSelector) {
     const oneSource = sources.length > 0 && sources.every((source) => source?.key === sources[0]?.key)
       && sources[0] != null;
     const additions = [];
-    const rendered = evidence.map((item, index) => {
-      const full = renderSelector(item);
+    const records = evidence.map((item, index) => {
+      const location = renderSelector(item);
       const source = sources[index];
-      if (!source) return full;
-      const earlier = (previous.get(source.key) || []).find((candidate) => (
+      const earlier = source && (previous.get(source.key) || []).find((candidate) => (
         candidate.start <= source.start && candidate.end >= source.end
         && source.lines.every((line, offset) => line === candidate.lines[source.start - candidate.start + offset])
       ));
-      if (earlier) {
-        const short = `L${source.start}-${source.end} (see E${earlier.claimIndex + 1} above)`;
-        if (short.length < full.length) return short;
-      }
-      if (oneSource) additions.push({ ...source, claimIndex });
-      return full;
+      if (source && oneSource && !earlier) additions.push({ ...source, claimIndex });
+      return { evidence: item, location, repeatOf: earlier ? earlier.claimIndex : null };
     });
     for (const addition of additions) {
       if (!previous.has(addition.key)) previous.set(addition.key, []);
       previous.get(addition.key).push(addition);
     }
-    return [...new Set(rendered.filter(Boolean))];
+    return records;
   });
 }

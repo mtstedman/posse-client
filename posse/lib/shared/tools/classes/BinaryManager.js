@@ -43,6 +43,18 @@ import {
 import { NativeBinary } from "./NativeBinary.js";
 
 const NATIVE_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const READINESS_PROBE_ATTEMPTS = 3;
+const READINESS_PROBE_RETRY_DELAY_MS = 500;
+
+/** @param {any} result */
+function isTransientWorkerFailure(result) {
+  return result?.ok !== true && result?.error?.code === "POSSE_NATIVE_WORKER_UNAVAILABLE";
+}
+
+/** @param {number} ms */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * @typedef {object} PulseEnvelopeProvider
@@ -362,7 +374,7 @@ export class BinaryManager {
       const payload = name === "git"
         ? { files: [], roots: ["*"], unknown: true }
         : {};
-      const result = await this.binary(name).run(method, [], {
+      const probe = () => this.binary(name).run(method, [], {
         input: `${JSON.stringify({ protocol, method, payload })}\n`,
         json: true,
         timeoutMs: 15_000,
@@ -371,6 +383,14 @@ export class BinaryManager {
         idempotent: true,
         requiredRoute,
       });
+      // A worker that timed out, lost its transport, or was overloaded on one
+      // ping is not a missing binary: a session boot under load must not fail
+      // on a single slow start. Other failures are final on the first answer.
+      let result = await probe();
+      for (let attempt = 1; attempt < READINESS_PROBE_ATTEMPTS && isTransientWorkerFailure(result); attempt++) {
+        await sleep(READINESS_PROBE_RETRY_DELAY_MS * attempt);
+        result = await probe();
+      }
       if (!result?.ok || result?.json?.ok === false) {
         return {
           ...available,

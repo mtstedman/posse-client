@@ -286,13 +286,19 @@ function relationWeight(file, related) {
  * relevance signal are held back when any related file exists; when nothing
  * relates, the ordered candidates still stand rather than returning nothing.
  */
-export function rankSurveyFilesForProjection(files, { taskText = "", callMap = null } = {}) {
+// Files tree.scope added from repository structure (import hub, entry export)
+// weigh like a public surface so the projection does not drop them.
+const STRUCTURAL_PRIORITY_WEIGHT = 280;
+
+export function rankSurveyFilesForProjection(files, { taskText = "", callMap = null, priorityFiles = [] } = {}) {
   const rows = Array.isArray(files) ? files.filter((file) => file && String(file.path || "").trim()) : [];
   const requested = taskTokens(taskText);
   const related = relationNames(callMap);
+  const priority = new Set((Array.isArray(priorityFiles) ? priorityFiles : []).map((value) => String(value || "").trim()));
   const ranked = rows
     .map((file, index) => {
-      const publicSurface = publicSurfaceWeight(file.path);
+      const publicSurface = Math.max(publicSurfaceWeight(file.path),
+        priority.has(String(file.path).trim()) ? STRUCTURAL_PRIORITY_WEIGHT : 0);
       const taskMatches = taskMatchCount(file, requested);
       const graphWeight = relationWeight(file, related);
       return {

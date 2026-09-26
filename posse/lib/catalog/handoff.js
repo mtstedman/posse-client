@@ -72,6 +72,16 @@ export const AGENT_HANDOFF_LIMITS = Object.freeze({
   maxStructuredMetadataChars: 12000,
 });
 
+// Rendering of a researcher report brief, not part of the model-facing
+// handoff contract. The brief quotes each claim's cited code under the claim.
+// HARD-40 answers cite a median ~1,400 lines (~63k chars); the budget covers
+// that median. Every claim keeps its first excerpt, later selectors fill in
+// claim order, and the rest are listed by location.
+export const RESEARCHER_REPORT_BRIEF_POLICY = Object.freeze({
+  inlineCodeChars: 64000,
+  inlineExcerptLines: 120,
+});
+
 // Researcher report mode intentionally accepts complete long-form prose up to
 // the aggregate call cutoff. Pipeline mode stays compact and uses the normal
 // per-field runtime ceilings. Keep this distinction explicit so schemas,

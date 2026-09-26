@@ -137,6 +137,7 @@ import {
   RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
   RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
   buildResearchWorkBudgetExhaustedText,
+  buildResearchWorkBudgetRemainingText,
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
   buildResearchEarlyFetchBatchingText,
@@ -664,6 +665,70 @@ function sameFileAmbiguityBatchItems(result, toolArgs) {
   }
   return items;
 }
+
+// A name-scope search for one exact identifier is a locator: the caller wants
+// that declaration. Atlas538 PY_HTTPX_3 spent 7 of 28 calls on searches that
+// returned one ~230-char location it then fetched with a second call, and 5
+// on guessed test names that returned nothing.
+const EXACT_NAME_QUERY = /^[A-Za-z_$][A-Za-z0-9_$.:#-]*$/u;
+const NEAREST_NAME_LIMIT = 5;
+
+function exactNameSearchQuery(toolArgs) {
+  if (String(toolArgs?.scope || "").trim().toLowerCase() !== "name") return null;
+  if (toolArgs?.semantic === true) return null;
+  const query = String(toolArgs?.query || "").trim();
+  return EXACT_NAME_QUERY.test(query) ? query : null;
+}
+
+function searchResultItems(result) {
+  if (!result || result.isError === true) return null;
+  const first = Array.isArray(result.content) ? result.content[0] : null;
+  if (!first || first.type !== "text" || typeof first.text !== "string") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(first.text.split("\n\n")[0]);
+  } catch {
+    return null;
+  }
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  return Array.isArray(data?.items) ? data.items : null;
+}
+
+/**
+ * The one declaration an exact name-scope search found, as a symbol.get item.
+ * Returns null unless the search matched exactly one addressable symbol.
+ */
+function exactNameSearchTarget(result, toolArgs) {
+  if (!exactNameSearchQuery(toolArgs)) return null;
+  const items = searchResultItems(result);
+  if (!items || items.length !== 1) return null;
+  const item = items[0] || {};
+  const symbolId = String(item.symbolId || item.symbol_id || item.symbolHandle || "").trim();
+  if (!symbolId) return null;
+  const file = String(item.location?.path || item.path || item.file || item.repo_rel_path || "").trim();
+  return { symbolId, ...(file ? { file } : {}) };
+}
+
+/** Arguments for a near-name search after an exact name matched nothing. */
+function nearestNameSearchArgs(result, toolArgs) {
+  const query = exactNameSearchQuery(toolArgs);
+  if (!query) return null;
+  const items = searchResultItems(result);
+  if (!items || items.length !== 0) return null;
+  return { query, scope: "either", semantic: true, limit: NEAREST_NAME_LIMIT };
+}
+
+// A wrapper call may name its nested action under any key nestedAtlasAction
+// reads; rewrite every key present so the first one read agrees.
+function withNestedAtlasAction(toolArgs, action) {
+  const keys = ["gatewayAction", "targetAction", "actionName", "action"].filter((key) => toolArgs?.[key] != null);
+  const next = { ...toolArgs };
+  for (const key of keys.length > 0 ? keys : ["action"]) next[key] = action;
+  return next;
+}
+
+export const __testExactNameSearchTarget = exactNameSearchTarget;
+export const __testNearestNameSearchArgs = nearestNameSearchArgs;
 
 function isResearchPhysicalWorkRequest(requested) {
   if (!requested) return false;
@@ -3191,16 +3256,30 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 // so a refunded final call reports nothing. Error results consume a slot too.
 // Batch items defer to the combined batch result; a per-attempt flag keeps
 // the notice to one delivery across the Atlas, gateway, and batch paths.
-// There is no countdown before exhaustion. A "N calls remain" closing window
-// (six calls out) read as an instruction to stop: Atlas528/530 researchers
-// handed off with the window unspent and left located-but-unread code out of
-// the report. Remaining calls are the reader's to spend.
+// Within the last six calls every result states the live remaining count: a
+// bare count, no handoff instruction. The instructed countdown read as an
+// order to stop (Atlas528/530 left located code unread); with no count at
+// all, Atlas531 sent 28 of 40 cells into the ceiling mid-batch (93 blocked
+// calls). Stating it once was not enough: a parallel batch is admitted one
+// call at a time, so an early sibling's count went stale as later siblings
+// consumed slots (Atlas533 PY_FLASK_1 read "3 remain" with none left). The
+// batch's last result now carries the true figure.
+const RESEARCH_BUDGET_REMAINING_NOTICE_AT = 6;
+
 function appendResearchBudgetExhaustedNotice(result, admission, session) {
   if (resolveAtlasResearchRuntimeGuidance()) return result;
   if (!admission?.tracked || admission.blocked || admission.physicalBatchId) return result;
   const max = admissionMaxPhysicalCalls(admission);
   const remaining = researchWorkBudget(admission)?.remaining;
-  if (remaining !== 0 || !(Number(admission.assignedPhysicalCallStep) >= max)) return result;
+  if (!Number.isSafeInteger(remaining)) return result;
+  if (remaining > 0) {
+    if (remaining > RESEARCH_BUDGET_REMAINING_NOTICE_AT) return result;
+    return appendOwnerModelControlNotice(result, `\n\n${buildResearchWorkBudgetRemainingText({ remaining })}`, {
+      kind: "research_budget_remaining",
+      trigger: "physical_call_ceiling",
+    });
+  }
+  if (!(Number(admission.assignedPhysicalCallStep) >= max)) return result;
   const flags = session ? researchNoticeFlagsFor(session) : null;
   if (flags?.budgetExhausted) return result;
   const next = appendOwnerModelControlNotice(result, `\n\n${researchWorkBudgetExhaustedText(session)}`, {
@@ -6878,7 +6957,8 @@ export class PersistentMcpOwner {
     if (concurrentResearchRead) {
       const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt })
         .then(message => this._recoverSameFileAmbiguity(message, args, assignedPhysicalCallStep))
-        .then(message => this._recoverEmptyIdentifierFilter(message, args, assignedPhysicalCallStep));
+        .then(message => this._recoverEmptyIdentifierFilter(message, args, assignedPhysicalCallStep))
+        .then(message => this._resolveExactNameSearch(message, args, assignedPhysicalCallStep));
       this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current, {
         concurrentRead: true,
       });
@@ -6897,7 +6977,8 @@ export class PersistentMcpOwner {
           enqueuedAt,
         });
         const recovered = await this._recoverSameFileAmbiguity(executed, args, assignedPhysicalCallStep);
-        return this._recoverEmptyIdentifierFilter(recovered, args, assignedPhysicalCallStep);
+        const widened = await this._recoverEmptyIdentifierFilter(recovered, args, assignedPhysicalCallStep);
+        return this._resolveExactNameSearch(widened, args, assignedPhysicalCallStep);
       });
     this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current);
     const tail = current.catch(() => {});
@@ -6981,6 +7062,67 @@ export class PersistentMcpOwner {
           + "identifiers_to_find selects indexed declaration names, not usages, phrases or qualified spellings, "
           + "so the unnarrowed result is returned instead.",
         { kind: "atlas_identifier_filter_widened", trigger: action },
+      ),
+    };
+  }
+
+  /**
+   * An exact name-scope search is a locator. When it finds exactly one
+   * declaration, fetch that body on the same physical step instead of making
+   * the caller spend a second call on symbol.get; when it finds none, return
+   * the nearest indexed names rather than an empty list. The body is read
+   * through symbol.get here, in the owner, so it carries the per-item source
+   * custody that makes it citable.
+   *
+   * @param {any} message
+   * @param {any} args
+   * @param {number|null} assignedPhysicalCallStep
+   */
+  async _resolveExactNameSearch(message, args, assignedPhysicalCallStep) {
+    if (args?.exactNameRecovery || args?.ambiguityRecovery || args?.identifierFilterRecovery) return message;
+    const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
+    if (effectiveAtlasResearchAction(requested) !== "symbol.search") return message;
+    const nested = args?.toolArgs?.args && typeof args.toolArgs.args === "object" && !Array.isArray(args.toolArgs.args);
+    const toolArgs = nested ? args.toolArgs.args : (args?.toolArgs || {});
+    const query = exactNameSearchQuery(toolArgs);
+    const target = exactNameSearchTarget(message?.result, toolArgs);
+    if (target) {
+      const fetched = await this._executeAtlasToolCall({
+        ...args,
+        exactNameRecovery: true,
+        assignedPhysicalCallStep,
+        toolName: String(args?.toolName || "").replace(/symbol[._]search/u, (match) => match.replace("search", "get")),
+        toolArgs: nested
+          ? { ...withNestedAtlasAction(args.toolArgs, "symbol.get"), args: { items: [target] } }
+          : { items: [target] },
+      });
+      const result = fetched?.result;
+      if (!result || result.isError === true) return message;
+      return {
+        ...fetched,
+        result: appendOwnerModelControlNotice(
+          result,
+          `\n\n${query} has one declaration.`,
+          { kind: "atlas_exact_name_body", trigger: "symbol.search" },
+        ),
+      };
+    }
+    const nearest = nearestNameSearchArgs(message?.result, toolArgs);
+    if (!nearest) return message;
+    const widened = await this._executeAtlasToolCall({
+      ...args,
+      exactNameRecovery: true,
+      assignedPhysicalCallStep,
+      toolArgs: nested ? { ...args.toolArgs, args: nearest } : nearest,
+    });
+    const items = searchResultItems(widened?.result);
+    if (!items || items.length === 0) return message;
+    return {
+      ...widened,
+      result: appendOwnerModelControlNotice(
+        widened.result,
+        `\n\nNo declaration is named ${query}; these are the nearest indexed names.`,
+        { kind: "atlas_nearest_names", trigger: "symbol.search" },
       ),
     };
   }

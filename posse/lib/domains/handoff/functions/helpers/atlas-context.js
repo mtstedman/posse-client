@@ -21,6 +21,7 @@ import {
 } from "../../../queue/functions/hash-refs.js";
 import { chooseSurveyScope, defaultSurveyScopeDeps, MAX_SURVEY_FILES } from "./survey-scope.js";
 import { rankSurveyFilesForProjection, surveyDependencyOutline, surveyFileOutline, surveyOutlineSymbols, thinSurveyDirection } from "./survey-projection-rank.js";
+import { declaredManifestEntries } from "./manifest-entry-points.js";
 import {
   planLifecycleSurveyExpansion,
   resolveLifecycleSurveyTargetSymbolIds,
@@ -1825,6 +1826,23 @@ function _atlasPrefetchCandidateScore(entry, versionFamilies, taskText) {
   return mentioned ? score : score * 0.65;
 }
 
+// Candidates native tree.scope marks from repository structure rather than
+// task wording: prior:prefetch-entrypoint-export marks files other code
+// imports (inbound fan-in), prior:prefetch-fan-in-hub marks the area's
+// most-imported module. Offline replay over HARD-40 and USER-30 found that
+// keeping this connected code first, in native score order, ahead of the
+// basename/task-word classes raised code-map recall of key-cited files from
+// 0.552 to 0.592 (USER-30 0.658 to 0.737, no cell worse).
+const ATLAS_STRUCTURAL_PRIOR_REASONS = new Set([
+  "prior:prefetch-fan-in-hub",
+  "prior:prefetch-entrypoint-export",
+]);
+
+function _atlasStructuralPriorCandidate(entry) {
+  return (Array.isArray(entry?.reasons) ? entry.reasons : [])
+    .some((reason) => ATLAS_STRUCTURAL_PRIOR_REASONS.has(String(reason)));
+}
+
 function _atlasPrefetchCandidateClass(entry, taskText) {
   const candidatePath = String(entry?.path || "").replace(/\\/g, "/");
   const parts = candidatePath.split("/").filter(Boolean);
@@ -1833,8 +1851,11 @@ function _atlasPrefetchCandidateClass(entry, taskText) {
   if (nonProduction) return 5;
   // Public type surfaces are useful for API-shape claims, but they must not
   // displace the runtime owner or terminal implementation from a bounded
-  // survey. Keep them in the candidate set, behind production source.
+  // survey. Keep them in the candidate set, behind production source, even
+  // when widely imported: a structural prior does not lift a type surface.
   if (basename.endsWith(".d.ts") || parts.some((part) => part.toLowerCase() === "types")) return 4;
+  // Connected production code ranks with root entry files, in native order.
+  if (_atlasStructuralPriorCandidate(entry)) return 0;
   const entryLike = parts.length <= 1
     || /^(?:index|main|__init__|__main__)\.[a-z0-9]+$/iu.test(basename);
   // Root and conventional source-root entry files are architectural signals,
@@ -2075,6 +2096,7 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       areaMap: Array.isArray(compression?.areaMap) ? compression.areaMap.slice(0, 16) : [],
       scopeWidening,
       identifierRoutingShadow,
+      structuralFiles: candidates.filter(_atlasStructuralPriorCandidate).map((entry) => entry.path),
     };
   } catch (err) {
     shadowError = String(err?.message || err).slice(0, 300);
@@ -2303,10 +2325,20 @@ async function _attachAtlasTreePrefetchContext(packet, {
   const wideningCallerPaths = Array.isArray(treeScope.scopeWidening)
     ? treeScope.scopeWidening.map((c) => (c && typeof c === "object" ? c.path : c)).filter(Boolean)
     : [];
-  const surveyRankedFiles = expandAtlasParallelEntrySiblings(packet.cwd, _uniqueAtlasPaths(
+  const manifestEntryFiles = packet.recipient === "researcher"
+    ? await _resolveManifestEntryFiles(packet)
+    : [];
+  const rankedSurveyPool = expandAtlasParallelEntrySiblings(packet.cwd, _uniqueAtlasPaths(
     [...(Array.isArray(prefetchTargets.rankedFiles) ? prefetchTargets.rankedFiles : []), ...wideningCallerPaths],
     MAX_SURVEY_FILES,
   ), taskText);
+  // Declared entries join inside the survey's ranked-file cutoff, after the
+  // strongest task-ranked files, so they neither displace those nor fall off.
+  const surveyRankedFiles = _uniqueAtlasPaths([
+    ...rankedSurveyPool.slice(0, MANIFEST_ENTRY_SURVEY_POSITION),
+    ...manifestEntryFiles,
+    ...rankedSurveyPool.slice(MANIFEST_ENTRY_SURVEY_POSITION),
+  ], MAX_SURVEY_FILES);
   const publicEntryLiteralFiles = _boundedParallelEntryLiteralFiles(packet.cwd, surveyRankedFiles, taskText);
   const exactPrefetchPaths = _uniqueAtlasPaths([
     ...prefetchTargets.exactFiles,
@@ -2332,6 +2364,10 @@ async function _attachAtlasTreePrefetchContext(packet, {
       candidateDirs: Array.isArray(treeScope.candidateDirs) ? treeScope.candidateDirs : [],
       seedFiles: prefetchTargets.exactFiles,
       keySymbols: seedSymbols,
+      priorityFiles: _uniqueAtlasPaths([
+        ...(Array.isArray(treeScope.structuralFiles) ? treeScope.structuralFiles : []),
+        ...manifestEntryFiles,
+      ], MAX_SURVEY_FILES),
       focusAdmission: focusedResearcher ? {
         enabled: true,
         treeConfidence: treeScope.confidence,
@@ -2430,6 +2466,7 @@ async function _prefetchAtlasSurvey(packet, {
   candidateDirs,
   seedFiles,
   keySymbols,
+  priorityFiles = [],
   focusAdmission = null,
 }) {
   const startedAt = Date.now();
@@ -2515,6 +2552,7 @@ async function _prefetchAtlasSurvey(packet, {
       retryReason,
       warnings,
       taskText,
+      priorityFiles,
     }, startedAt);
   } catch (err) {
     return _finishAtlasSurveyPrefetch(packet, {
@@ -2681,7 +2719,61 @@ function _finishAtlasSurveyPrefetch(packet, result, startedAt) {
   });
 }
 
+const MANIFEST_ENTRY_SURVEY_POSITION = 8;
+const MANIFEST_ENTRY_SEARCH_LIMIT = 8;
+const MANIFEST_ENTRY_DECLARATION_KINDS = new Set(["function", "method", "class", "def", "async_function"]);
+const manifestEntryCache = new Map();
+
+function _manifestEntryHitPaths(raw) {
+  if (String(raw || "").startsWith("Error:")) return [];
+  const data = atlasResultData("symbol.search", extractAtlasJsonPayload(raw)) || {};
+  const items = [data.items, data.results, data.hits].find(Array.isArray) || [];
+  // A package re-exporting the entry (pytest/__init__.py importing
+  // console_main) is not a second declaration; keep definitions only.
+  return items
+    .filter((item) => MANIFEST_ENTRY_DECLARATION_KINDS.has(String(item?.kind || "").toLowerCase()))
+    .map((item) => String(item?.repo_rel_path || item?.path || item?.location?.path || item?.file || "").trim())
+    .filter(Boolean);
+}
+
+// Resolve the repository's declared entry points to indexed files: declared
+// files directly, declared Python console-script functions through one exact
+// name search each, kept only when a single non-test file declares the name.
+async function _resolveManifestEntryFiles(packet, { execute = _executeAtlasPrefetchForReuse } = {}) {
+  const root = packet?.cwd;
+  if (!root) return [];
+  if (manifestEntryCache.has(root)) return manifestEntryCache.get(root);
+  const declared = declaredManifestEntries(root);
+  const resolved = [...declared.files];
+  for (const entry of declared.symbols) {
+    try {
+      const raw = await execute(packet, "symbol.search",
+        { query: entry.name, scope: "name", semantic: false, limit: MANIFEST_ENTRY_SEARCH_LIMIT },
+        { cwd: root, origin: "prefetch" },
+        { retrievalClass: "broad", gapReason: "manifest_entry_point" });
+      const paths = [...new Set(_manifestEntryHitPaths(raw)
+        .filter((filePath) => !/(?:^|\/)(?:tests?|testing)\/|(?:^|\/)test_[^/]*\.py$/i.test(filePath)))];
+      if (paths.length === 1) resolved.push(paths[0]);
+    } catch {
+      // An unavailable lookup leaves the task-ranked map unchanged.
+    }
+  }
+  const files = _uniqueAtlasPaths(resolved, 8);
+  manifestEntryCache.set(root, files);
+  return files;
+}
+
+export function __testResolveManifestEntryFiles(packet, execute) {
+  assertTestContext("__testResolveManifestEntryFiles");
+  manifestEntryCache.delete(packet?.cwd);
+  return _resolveManifestEntryFiles(packet, { execute });
+}
+
 const MAX_SURVEY_BRIEF_FILES = 10;
+const MAX_SURVEY_RANKED_PATHS = 24;
+// Past the eight mapped files, name up to twelve more ranked files so the map
+// does not read as the area's whole extent. Paths only; no symbols or claims.
+const MAX_CODE_MAP_TAIL_FILES = 12;
 const MAX_SURVEY_BRIEF_EDGES = 8;
 const MAX_SURVEY_BRIEF_SYMBOLS = 8;
 const MAX_SURVEY_MANIFEST_CHARS_PER_FILE = 1200;
@@ -2700,6 +2792,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
   const files = rankSurveyFilesForProjection(originalFiles, {
     taskText: result.taskText,
     callMap,
+    priorityFiles: result.priorityFiles,
   });
   const metrics = result.metrics && typeof result.metrics === "object" ? result.metrics : {};
   const summary = _compactSurveyCallMap(callMap, metrics, { edgeLimit });
@@ -2749,6 +2842,7 @@ function _compactAtlasSurveyPrefetchResult(result, { edgeLimit = MAX_SURVEY_BRIE
     fileCount,
     fileSummaries,
     topFiles: fileSummaries.map((file) => file.path),
+    rankedPaths: files.map((file) => String(file?.path || "").trim()).filter(Boolean).slice(0, MAX_SURVEY_RANKED_PATHS),
     callMapSummary: summary,
     thinDirection,
     traversalRef: result.traversalRef || null,
@@ -3733,10 +3827,15 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
       : (slice?.filePaths || []).map((filePath) => ({ path: filePath })));
     const dependencies = surveyDependencyOutline(slice?.surveyContext?.dependencyBoundaries);
     if (treePaths.length === 0 && roots.length === 0 && files.length === 0 && dependencies.length === 0) return "";
+    const mapped = new Set(files.map((line) => String(line).replace(/^- /, "").split(":")[0]));
+    const tail = (Array.isArray(slice?.surveyContext?.rankedPaths) ? slice.surveyContext.rankedPaths : [])
+      .filter((filePath) => !mapped.has(filePath))
+      .slice(0, MAX_CODE_MAP_TAIL_FILES);
     return [
       atlasHeading("ATLAS CODE MAP"),
       ...(dependencies.length > 0 ? ["Dependency sources:", ...dependencies] : []),
       ...(files.length > 0 ? ["Selected files and symbols (orientation only; not exhaustive):", ...files] : []),
+      ...(files.length > 0 && tail.length > 0 ? [`Also ranked: ${tail.join(", ")}`] : []),
       ...(treePaths.length > 0 ? ["Tree:", ...treePaths.map((treePath) => `- ${treePath}`)] : []),
       ...(roots.length > 0 ? ["Roots:", ...roots.map((symbol) => `- ${symbol}`)] : []),
       ...(edges.length > 0 ? ["Edges:", ...edges.map((edge) => `- ${edge.from} -> ${edge.to}`)] : []),

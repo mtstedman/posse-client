@@ -277,6 +277,18 @@ export function buildResearchWorkBudgetExhaustedText({ handoffToolName = "" } = 
   return `${fact} Next step: call the ${tool} tool with your terminal researcher report. Do not end the turn with prose alone.`;
 }
 
+// A plain remaining-call count, stated once while calls are left. It carries
+// no handoff instruction: "BUDGET CLOSING ... Next step: call agent_handoff"
+// read as an order to stop (Atlas528/530 handed off with calls unspent), while
+// no count at all sent 28 of 40 Atlas531 cells into the ceiling with whole
+// parallel batches blocked (93 wasted calls, cost +13%).
+export const RESEARCH_WORK_BUDGET_REMAINING_PREFIX = "RESEARCH WORK BUDGET:";
+
+export function buildResearchWorkBudgetRemainingText({ remaining = 0 } = {}) {
+  const left = Number.isSafeInteger(remaining) && remaining > 0 ? remaining : 0;
+  return `${RESEARCH_WORK_BUDGET_REMAINING_PREFIX} ${left} retrieval ${left === 1 ? "call remains" : "calls remain"}. Calls beyond that return blocked without executing.`;
+}
+
 export function buildResearchEarlyFetchBatchingText() {
   return [
     "TRAVERSAL BATCHING CHECKPOINT: this exploration traversal contained one ref.",

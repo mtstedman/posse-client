@@ -4,9 +4,25 @@ import { parseBufferNative } from "../native/parser.js";
 import { resolveLanguage } from "../parser/languages/index.js";
 import { ATLAS_IDENTIFIER_BEARER_LIMIT } from "../../../../../catalog/atlas.js";
 
+// Generic arguments on an owner are not part of its name: the index stores
+// Rust methods as `routing.impl.Router<S>.nest`, so `Router::nest` never
+// matched its own row in the requested file (Atlas533 RUST_AXUM_1: 15 misses).
+// Only arguments attached to an identifier are removed, innermost first, so a
+// synthesized name such as `<anonymous@157:157>` keeps its spelling.
+const ATTACHED_GENERIC_ARGUMENTS = /(?<=[\w$])<[^<>]*>/gu;
+
+function withoutGenericArguments(text) {
+  let current = text;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const next = current.replace(ATTACHED_GENERIC_ARGUMENTS, "");
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
 export function normalizedQualifiedIdentifier(value) {
-  return String(value || "")
-    .trim()
+  return withoutGenericArguments(String(value || "").trim())
     .toLowerCase()
     .replace(/\?\./gu, ".")
     .replace(/\[\s*["']?([a-z_$][\w$-]*)["']?\s*\]/giu, ".$1")

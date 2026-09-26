@@ -126,6 +126,18 @@ function symbolRefRecoveryBearers(matches) {
  * @param {{content_hash?: string, local_id?: number, range_start_line?: number}} symbol
  * @returns {string}
  */
+const CONTAINER_KINDS = new Set(["module", "namespace", "file"]);
+
+// A file's module container can share its name with the class it declares
+// (PHP-DI ObjectCreator.php: module s2 at 1-203 beside class s3 at 26-203).
+// Answering with both sent the class text twice, once inside the whole file
+// (Atlas533 PHP_DI_H1: 47% of its delivered lines were repeats). A declaration
+// bearer answers the request; the container is kept only when it is alone.
+function declarationsOverContainers(symbols) {
+  const declarations = symbols.filter((symbol) => !CONTAINER_KINDS.has(String(symbol?.kind || "").toLowerCase()));
+  return declarations.length > 0 ? declarations : symbols;
+}
+
 function symbolTargetIdentity(symbol) {
   return [
     String(symbol?.content_hash || ""),
@@ -214,8 +226,9 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   // which is how a caller asking for a value received a three-line type. Report
   // every bearer instead; the caller gets all of them, not a coin flip.
   if (requestedFile) {
-    const inFile = matches.filter((symbol) => symbol.repo_rel_path === requestedFile);
+    const inFile = declarationsOverContainers(matches.filter((symbol) => symbol.repo_rel_path === requestedFile));
     const distinct = new Map(inFile.map((symbol) => [symbolTargetIdentity(symbol), symbol]));
+    if (distinct.size === 1) return { status: "selected", target: [...distinct.values()][0] };
     if (distinct.size > 1) {
       return {
         status: "ambiguous_symbol_ref",
