@@ -170,11 +170,14 @@ function targetSelectionError(selection, selector, versionId) {
       details: { requested: selector, bearers: selection.bearers || [], ...candidateDetails },
     });
   }
+  const declared = Array.isArray(selection.fileDeclarations) && selection.fileDeclarations.length > 0
+    ? ` ${selection.requestedFile} declares ${selection.fileDeclarations.map((row) => `${row.name} (line ${row.line})`).join(", ")}.`
+    : "";
   return errorEnvelope({
     action,
     versionId,
     code: "symbol_not_found",
-    message: `No symbol found for ${selector}${selection.requestedFile ? ` at ${selection.requestedFile}` : ""}${recovery ? ` with the requested constraints.${recovery}` : ""}`,
+    message: `No symbol found for ${selector}${selection.requestedFile ? ` at ${selection.requestedFile}` : ""}${recovery ? ` with the requested constraints.${recovery}` : "."}${declared}`,
     details: selection.bearers?.length > 0 || candidates.length > 0
       ? { requested: selector, requestedFile: selection.requestedFile || null, bearers: selection.bearers || [], ...candidateDetails }
       : undefined,

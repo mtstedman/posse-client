@@ -34,7 +34,7 @@ import { buildCodexWindowsLaunchEnv, formatSpawnLaunchForError, getCodexLaunchSt
 import { buildCodexExecArgs, cleanupTempDir, collectCodexExtraDirs, makeTempOutputFile, prepareCodexConfigForSpawn } from "./cli-spawn.js";
 import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
-import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicMcpAttachment, buildCodexDeterministicReadConfigOverridesAsync, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
+import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicMcpAttachment, buildCodexDeterministicReadConfigOverridesAsync, buildCodexResearchBootOverrides, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
 import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
@@ -343,6 +343,7 @@ export async function callProvider(promptText, {
     const combinedConfigOverrides = [
       ...memorySuppressionOverrides,
       ...systemToolLockdownOverrides,
+      ...buildCodexResearchBootOverrides({ role }),
       ...deterministicReadMcp.configOverrides,
       ...(atlasServedByGateway || !atlasReadyForMcp ? [] : atlasConfigOverrides),
       ...webTools.configOverrides,

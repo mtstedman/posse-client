@@ -138,6 +138,90 @@ function declarationsOverContainers(symbols) {
   return declarations.length > 0 ? declarations : symbols;
 }
 
+const MAX_NEAREST_FILE_DECLARATIONS = 8;
+
+function segmentsOf(value) {
+  return normalizedQualifiedIdentifier(value).split(".").filter(Boolean);
+}
+
+function isAnonymousDeclaration(symbol) {
+  return /^<anonymous/u.test(String(symbol?.name || ""));
+}
+
+async function visibleFileDeclarations(view, file, exportedOnly) {
+  if (typeof view?.query?.symbolsInFile !== "function") return [];
+  let rows;
+  try {
+    rows = await view.query.symbolsInFile(file);
+  } catch {
+    return [];
+  }
+  return declarationsOverContainers(Array.isArray(rows) ? rows : [])
+    .filter((symbol) => !isAnonymousDeclaration(symbol))
+    .filter((symbol) => !exportedOnly || !["private", "protected"].includes(String(symbol.visibility || "").toLowerCase()));
+}
+
+// A name that misses inside a named file is usually right about the member
+// and wrong about its spelling around it: httpx's Client._build_request_auth
+// is declared on BaseClient, bytes' BytesMut::drop sits in `impl Drop for
+// BytesMut`, express's req.fresh is a defineGetter `fresh`, and a kind hint of
+// "const" named zod's arrow-function _safeParse. When the file declares that
+// member exactly once (or once under the named owner), that declaration is the
+// one asked for.
+function sameFileMemberTarget(fileSymbols, name) {
+  const requested = segmentsOf(name);
+  const member = requested.at(-1);
+  if (!member) return null;
+  const bearers = new Map();
+  for (const symbol of fileSymbols) {
+    const segments = segmentsOf(symbol.qualified_name || symbol.name);
+    if (segments.at(-1) === member) bearers.set(symbolTargetIdentity(symbol), symbol);
+  }
+  const candidates = [...bearers.values()];
+  const owner = requested.length > 1 ? requested.at(-2) : null;
+  if (owner) {
+    const owned = candidates.filter((symbol) => segmentsOf(symbol.qualified_name || symbol.name).slice(0, -1).includes(owner));
+    if (owned.length === 1) return owned[0];
+    if (owned.length > 1) return null;
+  }
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function editDistance(left, right) {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    let diagonal = previous[0];
+    previous[0] = i;
+    for (let j = 1; j <= right.length; j++) {
+      const above = previous[j];
+      previous[j] = Math.min(previous[j] + 1, previous[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return previous[right.length];
+}
+
+// The file's own declarations closest to the missed member name, so the next
+// request can name one that exists instead of guessing again.
+function nearestFileDeclarations(fileSymbols, name) {
+  const member = segmentsOf(name).at(-1);
+  if (!member) return [];
+  const rows = new Map();
+  for (const symbol of fileSymbols) {
+    const display = String(symbol.qualified_name || symbol.name || "").trim();
+    const tail = segmentsOf(display).at(-1);
+    if (!display || !tail || rows.has(display)) continue;
+    const distance = tail.includes(member) || member.includes(tail)
+      ? Math.abs(tail.length - member.length) / 2
+      : editDistance(tail, member);
+    rows.set(display, { name: display, line: Number(symbol.range_start_line || 0), distance: distance / Math.max(tail.length, member.length) });
+  }
+  return [...rows.values()]
+    .sort((a, b) => a.distance - b.distance || a.line - b.line)
+    .slice(0, MAX_NEAREST_FILE_DECLARATIONS)
+    .map(({ name: display, line }) => ({ name: display, line }));
+}
+
 function symbolTargetIdentity(symbol) {
   return [
     String(symbol?.content_hash || ""),
@@ -189,6 +273,13 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
       )).sort(compareSymbolTargets) };
   }
   const matches = uniqueResolutionSymbols(resolution.matches).sort(compareSymbolTargets);
+  let fileDeclarations = [];
+  if (matches.length === 0 && requestedFile) {
+    const fileSymbols = await visibleFileDeclarations(view, requestedFile, symbolRef.exportedOnly === true);
+    const member = sameFileMemberTarget(fileSymbols, name);
+    if (member) return { status: "selected", target: member };
+    fileDeclarations = nearestFileDeclarations(fileSymbols, name);
+  }
   if (matches.length === 0) {
     const recovery = [...eligible];
     if (symbolRef.kind || requestedFile) {
@@ -208,6 +299,7 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
     return {
       status: "symbol_ref_not_found",
       requestedFile,
+      fileDeclarations,
       bearers: symbolRefRecoveryBearers(fallbackResolution.matches || []),
       targets: recoveryTargets.sort(compareSymbolTargets),
     };

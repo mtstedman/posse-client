@@ -1,5 +1,6 @@
 // lib/domains/providers/functions/codex/request-builders.js
 
+import { fileURLToPath } from "node:url";
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { POSSE_MCP_GATEWAY_SERVER_NAME, mcpClientToolDeadlineSec } from "../../../../catalog/mcp.js";
 import { CODEX_CODE_MODE_ROLES, CODEX_NATIVE_BATCHING_ROLES, CODEX_TERMINAL_MCP_SERVER_SUFFIX, CODEX_DIRECT_RESEARCH_TOOLS, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
@@ -613,6 +614,25 @@ export function buildCodexSystemToolLockdownOverrides({
     overrides.push("features.image_generation=false");
   }
   return overrides;
+}
+
+// Codex's built-in base instructions (~18k chars) and skill inventory are
+// written for an interactive coding session: shell and apply_patch habits, git
+// safety, talking to the user, image and skill tooling. A Posse researcher is a
+// read-only, tool-restricted session whose role prompt comes from Posse, and
+// every turn re-sends that boot text. A short research base keeps the parts
+// that apply (autonomy, parallel reads, untrusted file content) and drops the
+// rest, about 4k input tokens per turn.
+export const CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("./research-base-instructions.md", import.meta.url),
+);
+
+export function buildCodexResearchBootOverrides({ role = null } = {}) {
+  if (String(role || "").trim().toLowerCase() !== "researcher") return [];
+  return [
+    "skills.include_instructions=false",
+    `model_instructions_file=${_toTomlLiteral(CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH)}`,
+  ];
 }
 
 export function __testBuildCodexSystemToolLockdownOverrides(options = {}) {
