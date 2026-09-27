@@ -1,3 +1,4 @@
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
   addDependency,
   createJob,
@@ -6,7 +7,6 @@ import {
 import {
   isResearchBudgetDeep,
   normalizeResearchBudget,
-  researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
 
@@ -44,7 +44,7 @@ export function createRedTeamPlanChain({
   title = null,
   priority = null,
   actorType = "system",
-  primaryModelTier = "standard",
+  primaryModelTier = null,
   primaryReasoningEffort = null,
 } = {}) {
   if (!workItem?.id) {
@@ -60,9 +60,9 @@ export function createRedTeamPlanChain({
     title: `${isReplan ? "Replan" : "Plan"} (primary): ${wiTitle}`,
     parent_job_id: parentJob?.id || null,
     priority: priority || parentJob?.priority || workItem.priority || "normal",
-    model_tier: primaryModelTier,
+    model_tier: primaryModelTier || roleExecutionForBudget("plan", normalizedBudget).model_tier,
     reasoning_effort: primaryReasoningEffort
-      || researchBudgetToReasoningEffort(normalizedBudget, "medium"),
+      || roleExecutionForBudget("plan", normalizedBudget).reasoning_effort,
     payload_json: planPayload(basePayload, "primary", normalizedBudget, {
       source_research_job_id: parentJob?.job_type === "research" ? parentJob.id : null,
     }),
@@ -74,8 +74,7 @@ export function createRedTeamPlanChain({
     title: `Plan red-team: ${wiTitle}`,
     parent_job_id: primaryJob.id,
     priority: primaryJob.priority,
-    model_tier: "standard",
-    reasoning_effort: researchBudgetToReasoningEffort(normalizedBudget, "medium"),
+    ...roleExecutionForBudget("plan", normalizedBudget),
     payload_json: planPayload(basePayload, "redteam", normalizedBudget, {
       primary_plan_job_id: primaryJob.id,
       source_research_job_id: parentJob?.job_type === "research" ? parentJob.id : null,
@@ -89,8 +88,7 @@ export function createRedTeamPlanChain({
     title: `${isReplan ? "Replan" : "Plan"} synthesis: ${wiTitle}`,
     parent_job_id: redTeamJob.id,
     priority: primaryJob.priority,
-    model_tier: "standard",
-    reasoning_effort: researchBudgetToReasoningEffort(normalizedBudget, "high"),
+    ...roleExecutionForBudget("plan", normalizedBudget),
     payload_json: planPayload(basePayload, "synth", normalizedBudget, {
       primary_plan_job_id: primaryJob.id,
       red_team_plan_job_id: redTeamJob.id,

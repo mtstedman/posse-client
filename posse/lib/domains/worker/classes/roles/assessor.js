@@ -3,6 +3,7 @@
 // Evaluates job outputs against success criteria.
 // Returns structured verdicts and spawns follow-up jobs.
 
+import { getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import {
   getWorkItem,
   getAttempts,
@@ -144,7 +145,7 @@ export class AssessorRole extends BaseRole {
       allowShell: !!ctx.hasWorktree,
       allowTests: !!ctx.hasWorktree,
       modelTier: ctx.tier,
-      reasoningEffort: job.reasoning_effort || "medium",
+      reasoningEffort: job.reasoning_effort || getDefaultReasoningEffortForRole("assessor"),
       activity: `assessing: ${shortJobTitle(job).slice(0, 40)}`,
       stableContext: ctx.packet?.stable_context || null,
       remoteSystemPrompt: ctx.packet?.remote_system_prompt || null,

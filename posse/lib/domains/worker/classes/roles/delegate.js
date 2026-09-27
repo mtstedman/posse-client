@@ -3,6 +3,7 @@
 // Delegate role handler that assigns providers across queued jobs using
 // deterministic routing and provider-capacity context.
 
+import { getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 import {
   applyDelegation,
@@ -127,7 +128,7 @@ export class DelegateRole extends BaseRole {
       role: this.getRole(),
       allowWrite: false,
       modelTier: ctx.tier,
-      reasoningEffort: job.reasoning_effort || "low",
+      reasoningEffort: job.reasoning_effort || getDefaultReasoningEffortForRole("delegator"),
       activity: `delegating: ${shortJobTitle(job).slice(0, 40)}`,
       skipRolePrompt: true,
     };

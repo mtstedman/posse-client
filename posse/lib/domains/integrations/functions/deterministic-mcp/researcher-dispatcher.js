@@ -4,15 +4,9 @@ import { SYMBOL_GET_BATCH_POLICY } from "../../../../catalog/symbol-get-batch.js
 import { flattenSharedFileItems } from "../../../atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
 
-const DISPATCHER_TOOL_NAME = "atlas.query";
-export function researcherAtlasBatchGuidance({ direct = false } = {}) {
-  return `Run independent, already-needed ${direct ? "Atlas tool calls" : "atlas.query calls"} in parallel in the same turn when all arguments are known. ${direct ? "Pass each tool its own structured arguments;" : "Each call uses its own action+args;"} keep dependent reads sequential. Use a tool's multi-item form only within its declared shared output budget; each item reports its own success or error. After each result, reassess the unresolved evidence gaps. Continue only with a read that can resolve a specific remaining gap. Stop retrieving and hand off when the requested answer is supported; remaining capacity is a safety margin, not a target.`;
+export function researcherAtlasBatchGuidance() {
+  return `Run independent, already-needed Atlas tool calls in parallel in the same turn when all arguments are known. Pass each tool its own structured arguments; keep dependent reads sequential. Use a tool's multi-item form only within its declared shared output budget; each item reports its own success or error. After each result, reassess the unresolved evidence gaps. Continue only with a read that can resolve a specific remaining gap. Stop retrieving and hand off when the requested answer is supported; remaining capacity is a safety margin, not a target.`;
 }
-const QUERY_BATCH_GUIDANCE = researcherAtlasBatchGuidance();
-// Three transformed direct results remain below the Codex MCP client's 48K
-// result clip under the existing per-action paging caps. A larger workflow can
-// be token-cheaper yet silently discard evidence at the client boundary.
-const WORKFLOW_MAX_STEPS = 3;
 const EXCLUDED_ACTIONS = new Set([
   "query",
   "code",
@@ -255,15 +249,6 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
   "memory.surface": Object.freeze({}),
   "memory.get": Object.freeze({}),
 });
-
-function researcherTypedActionRequirementSchema(action) {
-  return {
-    properties: {
-      action: { type: "string", enum: [action] },
-      args: advertisedSchema(TYPED_ACTION_ARG_REQUIREMENTS[action] || {}),
-    },
-  };
-}
 
 const WORKFLOW_ARG_FIELDS = new Set([
   "autoFill",
@@ -585,87 +570,6 @@ export function normalizeResearcherTypedActionArgs(action, args = {}) {
   return { args: normalized, aliases, ...(error ? { error } : {}) };
 }
 
-function researcherWorkflowStepSchema(workflowActions = []) {
-  const actionArgs = advertisedSchema(researcherReadActionArgsSchema({ actions: workflowActions }));
-  return {
-    type: "object",
-    properties: {
-      id: { type: "string", minLength: 1, maxLength: 100 },
-      action: { type: "string", enum: workflowActions },
-      ...actionArgs.properties,
-    },
-    required: ["action"],
-    additionalProperties: false,
-  };
-}
-
-/**
- * Convert the provider-visible fixed workflow slots to the canonical native
- * workflow shape. Codex currently preserves one nested object level in MCP
- * namespace parameters, but drops the object schema inside array items. Fixed
- * slots keep every step argument typed in the actual provider request.
- *
- * @param {Record<string, any>} toolArgs
- * @returns {{ ok: true, args: { steps: Array<{ id?: string, action: string, args: Record<string, any> }>, onError?: "stop" }, aliases: Array<{step: number, from: string, to: string}> } | { ok: false, error: string }}
- */
-export function normalizeResearcherWorkflowFacadeArgs(toolArgs = {}) {
-  if (!toolArgs || typeof toolArgs !== "object" || Array.isArray(toolArgs)) {
-    return { ok: false, error: "workflow input must be an object" };
-  }
-  const allowedOuter = new Set(["action", "args", "step1", "step2", "step3", "onError"]);
-  const unknownOuter = Object.keys(toolArgs).find((key) => !allowedOuter.has(key));
-  if (unknownOuter) return { ok: false, error: `workflow field is not allowed: ${unknownOuter}` };
-  if (!toolArgs.args || typeof toolArgs.args !== "object" || Array.isArray(toolArgs.args)) {
-    return { ok: false, error: "workflow args must be an empty object" };
-  }
-  if (Object.keys(toolArgs.args).length > 0) {
-    return { ok: false, error: "workflow args must be empty; put action fields directly in each step" };
-  }
-  if (toolArgs.onError != null && toolArgs.onError !== "stop") {
-    return { ok: false, error: "workflow onError must be stop" };
-  }
-  const steps = [];
-  const aliases = [];
-  for (let index = 1; index <= WORKFLOW_MAX_STEPS; index += 1) {
-    const key = `step${index}`;
-    const step = toolArgs[key];
-    if (step == null) {
-      if (index <= 2) return { ok: false, error: `workflow ${key} is required` };
-      continue;
-    }
-    if (!step || typeof step !== "object" || Array.isArray(step)) {
-      return { ok: false, error: `workflow ${key} must be an object` };
-    }
-    // Steps carry the advertised snake_case field names; both spellings map
-    // to the same native field, so the allowlist accepts either.
-    const unknownStep = Object.keys(step).find((field) => (
-      field !== "id" && field !== "action"
-      && !WORKFLOW_ARG_FIELDS.has(field)
-      && !WORKFLOW_ARG_FIELDS.has(ADVERTISED_TO_NATIVE.get(field) || "")
-    ));
-    if (unknownStep) return { ok: false, error: `workflow ${key} field is not allowed: ${unknownStep}` };
-    const action = String(step.action || "").trim();
-    if (!action) return { ok: false, error: `workflow ${key} action is required` };
-    const { id, action: _action, ...args } = step;
-    const normalized = normalizeResearcherTypedActionArgs(action, args);
-    if (normalized.error) return { ok: false, error: `workflow ${key}: ${normalized.error}` };
-    aliases.push(...normalized.aliases.map((alias) => ({ step: index, ...alias })));
-    steps.push({
-      ...(id != null ? { id } : {}),
-      action,
-      args: normalized.args,
-    });
-  }
-  return {
-    ok: true,
-    args: {
-      steps,
-      ...(toolArgs.onError != null ? { onError: toolArgs.onError } : {}),
-    },
-    aliases,
-  };
-}
-
 function atlasActionName(name = "") {
   const raw = String(name || "").trim();
   return raw.startsWith("atlas.") ? raw.slice("atlas.".length) : raw;
@@ -681,59 +585,8 @@ function dispatcherActions(atlasTools = []) {
   return actions;
 }
 
-export function buildResearcherDispatcherTool(atlasTools = []) {
-  const actions = dispatcherActions(atlasTools);
-  if (actions.length === 0) return null;
-  const cards = actions.map((action) => `${action}: ${advertiseCardText(ACTION_CARDS[action])}.`).join(" ");
-  return {
-    name: DISPATCHER_TOOL_NAME,
-    description: `Read repository evidence with Atlas. ${QUERY_BATCH_GUIDANCE} Set action and put only its listed fields in args; do not invent fields. Runtime validates the selected action exactly. ${cards}`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: actions },
-        args: { type: "object", additionalProperties: true },
-      },
-      required: ["action", "args"],
-      additionalProperties: false,
-    },
-  };
-}
-
-export function buildResearcherTypedDispatcherTool(atlasTools = [], {
-  purposeGuidance = false,
-  symbolCardGuidance = false,
-} = {}) {
-  const surfacedActions = dispatcherActions(atlasTools);
-  const actions = WORKFLOW_ACTIONS.filter((action) => surfacedActions.includes(action));
-  if (actions.length === 0) return null;
-  const actionCards = {
-    ...(purposeGuidance ? TYPED_ACTION_CARDS : TYPED_TERSE_ACTION_CARDS),
-    ...(symbolCardGuidance ? { "symbol.card": TYPED_DIRECT_SYMBOL_CARD } : {}),
-  };
-  const cards = actions.map((action) => `${action}: ${advertiseCardText(actionCards[action])}.`).join(" ");
-  return {
-    name: DISPATCHER_TOOL_NAME,
-    description: `Read repository evidence with Atlas. ${QUERY_BATCH_GUIDANCE} Put only the selected action's fields in args. Reuse returned symbol_id values for dependent reads. symbol_handle is a compatibility input alias. Source is unavailable through MCP resources. Runtime validates the action and arguments. ${cards}`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: actions },
-        args: advertisedSchema(researcherReadActionArgsSchema({
-          allowSymbolHandles: true,
-          includeWindowReason: false,
-          actions,
-        })),
-      },
-      required: ["action", "args"],
-      additionalProperties: false,
-      oneOf: actions.map(researcherTypedActionRequirementSchema),
-    },
-  };
-}
-
-// Direct tools and the query facade share action cards, parameter definitions,
-// selector requirements and normalization. Only the callable envelope differs.
+// Direct tools share action cards, parameter definitions, selector
+// requirements and normalization with the researcher argument repair.
 export function buildResearcherDirectTools(atlasTools = [], {
   purposeGuidance = false, symbolCardGuidance = false,
 } = {}) {
@@ -765,32 +618,6 @@ export function buildResearcherDirectTools(atlasTools = [], {
   });
 }
 
-export function buildResearcherWorkflowTool(atlasTools = []) {
-  const actions = dispatcherActions(atlasTools);
-  if (actions.length === 0) return null;
-  const workflowActions = WORKFLOW_ACTIONS.filter((action) => actions.includes(action));
-  const advertisedActions = workflowActions.length > 0 ? [...actions, "workflow"] : actions;
-  const cards = actions.map((action) => `${action}: ${advertiseCardText(ACTION_CARDS[action])}.`).join(" ");
-  const workflowStep = researcherWorkflowStepSchema(workflowActions);
-  return {
-    name: DISPATCHER_TOOL_NAME,
-    description: `Run one typed Atlas read with action+args, or action workflow with args:{} plus step1+step2 and optional step3. ${QUERY_BATCH_GUIDANCE} Each step puts id/action and its action fields directly in the step object. Use exact refs such as $search.items[0].symbol_id or $window.traversal_ref.ref; traverse_ref accepts an array to fetch several refs together. Runtime validates every action against its signed allowlist. ${cards}`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: advertisedActions },
-        args: advertisedSchema(researcherActionArgsSchema()),
-        step1: workflowStep,
-        step2: workflowStep,
-        step3: workflowStep,
-        onError: { type: "string", enum: ["stop"] },
-      },
-      required: ["action", "args"],
-      additionalProperties: false,
-    },
-  };
-}
-
 /**
  * The action enum the dispatcher tool advertises for a given allowlist, using
  * the same filters as the tool builders. Used by the owner's nested-action
@@ -807,22 +634,8 @@ export function researcherDispatcherIssuedActions(actionNames, { typed = false }
     : surfaced;
 }
 
-export function researcherWorkflowMaxSteps() {
-  return WORKFLOW_MAX_STEPS;
-}
-
 export function researcherWorkflowActions() {
   return [...WORKFLOW_ACTIONS];
-}
-
-export function applyResearcherDispatcherNativeGuidance(tool = {}) {
-  if (String(tool?.name || "") !== "tools.read_file") return tool;
-  return {
-    ...tool,
-    description: String(tool?.description || "")
-      .replaceAll("code.window", "atlas.query action code.window")
-      .replaceAll("code.lens", "atlas.query action code.lens"),
-  };
 }
 
 const TYPED_SEARCH_DISCOVERY_FIELDS = Object.freeze([

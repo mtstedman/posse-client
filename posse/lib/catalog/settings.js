@@ -153,6 +153,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_SURVEY_BRIEF_EDGE_COUNT: "atlas_survey_brief_edge_count",
   ATLAS_SURVEY_EDGE_CAP: "atlas_survey_edge_cap",
   ATLAS_TOOLS_DISABLED: "atlas_tools_disabled",
+  AGENT_TOOLS_DISABLED: "agent_tools_disabled",
   ATLAS_TREE_COMPRESSION_MODE: "atlas_tree_compression_mode",
   ATLAS_TREE_COMPRESSION_PROVIDER: "atlas_tree_compression_provider",
   ATLAS_TREE_COMPRESSION_MODEL_TIER: "atlas_tree_compression_model_tier",

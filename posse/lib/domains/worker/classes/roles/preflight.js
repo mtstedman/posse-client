@@ -4,6 +4,7 @@
 // deterministic project map and intake context, then returns strict JSON that
 // the worker turns into the next research job.
 
+import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import { BaseRole } from "../BaseRole.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { getWorkItem } from "../../../queue/functions/index.js";
@@ -119,8 +120,8 @@ export class PreflightRole extends BaseRole {
     return {
       role: this.getRole(),
       allowWrite: false,
-      modelTier: ctx.tier || job.model_tier || "cheap",
-      reasoningEffort: job.reasoning_effort || "low",
+      modelTier: ctx.tier || job.model_tier || getDefaultModelTierForRole("preflight"),
+      reasoningEffort: job.reasoning_effort || getDefaultReasoningEffortForRole("preflight"),
       activity: `routing: ${(job.title || "").replace(/^Preflight:\s*/i, "").slice(0, 40)}`,
       skipRolePrompt: true,
       maxTurns: 2,

@@ -3,9 +3,16 @@ import path from "path";
 import { gitExec } from "../../git/functions/utils.js";
 import { normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { SETTINGS_CATALOG, getCatalogEntry } from "./catalog.js";
-import { JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
+import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
 import {
+  normalizeResearchBudget,
+  researchBudgetToReasoningEffort,
+  researchModelTierForBudget,
+} from "../../../shared/policies/functions/role-utils.js";
+import {
+  defaultModelTierForRole,
   defaultReasoningEffortForRole,
+  modelTierSettingKeyForRole,
   providerRoleForJobType,
   reasoningEffortSettingKeyForRole,
 } from "../../providers/functions/roles.js";
@@ -99,6 +106,36 @@ export function getDefaultReasoningEffortForRole(roleOrJobType) {
   } catch {
     return fallback;
   }
+}
+
+export function getDefaultModelTierForRole(roleOrJobType) {
+  const role = providerRoleForJobType(roleOrJobType);
+  const fallback = defaultModelTierForRole(role);
+  try {
+    const configured = String(getSetting(modelTierSettingKeyForRole(role)) || "")
+      .trim()
+      .toLowerCase();
+    return JOB_MODEL_TIERS.includes(configured) ? configured : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// A role's base model tier and reasoning effort after a research (deepthink)
+// budget steps them, for flows that carry no explicit value.
+export function roleExecutionForBudget(roleOrJobType, budget = "normal") {
+  return {
+    model_tier: researchModelTierForBudget(budget, getDefaultModelTierForRole(roleOrJobType)),
+    reasoning_effort: researchBudgetToReasoningEffort(budget, getDefaultReasoningEffortForRole(roleOrJobType)),
+  };
+}
+
+// An inherited effort (a parent or already-created job's value) already
+// reflects its budget, so keep it at a normal budget; any other budget steps
+// from the role base instead of stepping the inherited value twice.
+export function inheritedReasoningEffortForBudget(roleOrJobType, budget, inherited) {
+  if (inherited && normalizeResearchBudget(budget) === "normal") return inherited;
+  return roleExecutionForBudget(roleOrJobType, budget).reasoning_effort;
 }
 
 export function setSetting(key, value, options = {}) {

@@ -66,10 +66,14 @@ import {
   isResearchBudgetDeep as defaultIsResearchBudgetDeep,
   researchBudgetPromptBlock as defaultResearchBudgetPromptBlock,
   researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride,
-  researchBudgetToReasoningEffort as defaultResearchBudgetToReasoningEffort,
   shortJobTitle as defaultShortJobTitle,
   unwrapTaskArray as defaultUnwrapTaskArray,
 } from "../../../../shared/policies/functions/role-utils.js";
+import {
+  getDefaultModelTierForRole,
+  getDefaultReasoningEffortForRole,
+  inheritedReasoningEffortForBudget,
+} from "../../../settings/functions/repository-settings.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
@@ -107,7 +111,7 @@ const DEFAULT_DEPS = {
   logBadInputFailure: () => {},
   researchBudgetPromptBlock: defaultResearchBudgetPromptBlock,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
-  researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
+  inheritedReasoningEffortForBudget,
   ensureAtlasReadRootMounted,
   resolvePlannerReadRoot,
   resolveAssessmentReplanCwd,
@@ -658,9 +662,9 @@ export class PlannerRole extends BaseRole {
       work_item_id: job.work_item_id,
       job_id: job.id,
       title: job.title,
-      model_tier: ctx.tier || job.model_tier || "standard",
+      model_tier: ctx.tier || job.model_tier || getDefaultModelTierForRole("plan"),
       model_name: job._executionModelName || job.model_name || null,
-      reasoning_effort: job.reasoning_effort || "medium",
+      reasoning_effort: job.reasoning_effort || getDefaultReasoningEffortForRole("plan"),
       governance_tier: workItem?.governance_tier || "mvp",
       attempt: {
         count: plannerAttempts.length + 1,
@@ -803,7 +807,7 @@ export class PlannerRole extends BaseRole {
       isDeepthinkTask,
       isResearchBudgetDeep,
       researchBudgetToMaxTurnsOverride,
-      researchBudgetToReasoningEffort,
+      inheritedReasoningEffortForBudget,
       shortJobTitle,
     } = this.roleDeps();
     const budgetTurns = researchBudgetToMaxTurnsOverride(ctx.researchBudget, "planner");
@@ -818,7 +822,7 @@ export class PlannerRole extends BaseRole {
       projectDbWrite: ctx.plannerDbCapability === "write",
       projectDbCapability: ctx.plannerDbCapability || "none",
       modelTier: ctx.tier,
-      reasoningEffort: researchBudgetToReasoningEffort(ctx.researchBudget, job.reasoning_effort || "medium"),
+      reasoningEffort: inheritedReasoningEffortForBudget("plan", ctx.researchBudget, job.reasoning_effort),
       deepthink: isResearchBudgetDeep(ctx.researchBudget) || isDeepthinkTask(ctx.workItem, ctx.payload),
       ...(maxTurns ? { maxTurns } : {}),
       activity: shortJobTitle(job).replace(/^Plan:\s*/i, "").slice(0, 40),

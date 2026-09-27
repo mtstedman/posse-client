@@ -59,7 +59,6 @@ import {
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
 import { validationFailureForAction } from "../../../domains/atlas/functions/v2/retrieval/dispatch.js";
-import { resolveWorkflowRefs } from "../../../domains/atlas/functions/v2/retrieval/workflow.js";
 import {
   COMPACT_STRUCTURE_DEFAULT_MAX_CHARS,
   COMPACT_STRUCTURE_DEFAULT_MAX_FILES,
@@ -67,19 +66,14 @@ import {
 } from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
 import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import {
-  resolveAtlasResearcherDispatcher,
   resolveAtlasResearchRuntimeGuidance,
-  resolveAtlasResearcherTypedDispatcher,
-  resolveAtlasResearcherWorkflow,
   resolveResearchSynthesisPolicySnapshot,
 } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
 import {
   researcherDispatcherIssuedActions,
   normalizeResearcherTypedActionArgs,
-  normalizeResearcherWorkflowFacadeArgs,
   researcherTypedLanguageLeversForRootEntries,
   researcherWorkflowActions,
-  researcherWorkflowMaxSteps,
 } from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 import {
   operatorFeedbackDeliveryForJob,
@@ -1004,24 +998,14 @@ function suiteToolAllowlistPolicy(bootConfig = {}) {
       suites[suiteName] = new Set(names.map((name) => String(name || "").trim()).filter(Boolean));
     }
   }
-  const atlasResearcherWorkflow = String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
-    && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
-    && resolveAtlasResearcherWorkflow();
-  const atlasResearcherTypedDispatcher = String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
-    && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
-    && resolveAtlasResearcherTypedDispatcher();
   return {
     suites,
     source: source ? "token-allowlist" : "missing-token-allowlist",
+    // Every researcher with Atlas gets the direct surface (short symbol
+    // handles, typed-result compaction, field projection, argument repair), on
+    // any provider. Mirrors researcherDirect in the deterministic MCP server.
     atlasResearcherDirect: String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
-      && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
-      && bootConfig?.atlasAvailable !== false
-      && !resolveAtlasResearcherDispatcher() && !atlasResearcherTypedDispatcher && !atlasResearcherWorkflow,
-    atlasResearcherDispatcher: String(bootConfig?.role || "").trim().toLowerCase() === "researcher"
-      && String(bootConfig?.providerName || "").trim().toLowerCase() === "codex"
-      && (resolveAtlasResearcherDispatcher() || atlasResearcherTypedDispatcher || atlasResearcherWorkflow),
-    atlasResearcherTypedDispatcher,
-    atlasResearcherWorkflow,
+      && bootConfig?.atlasAvailable !== false,
   };
 }
 
@@ -1034,10 +1018,8 @@ function sessionToolPolicy(session) {
   return suiteToolAllowlistPolicy(session?.bootConfig || {});
 }
 
-function usesResearcherAtlasReadSurface(policy, { includeWorkflow = false } = {}) {
-  return policy?.atlasResearcherDirect === true
-    || policy?.atlasResearcherTypedDispatcher === true
-    || (includeWorkflow && policy?.atlasResearcherWorkflow === true);
+function usesResearcherAtlasReadSurface(policy) {
+  return policy?.atlasResearcherDirect === true;
 }
 
 function toolAllowedByPolicy(policy, toolName, args = {}) {
@@ -1045,27 +1027,6 @@ function toolAllowedByPolicy(policy, toolName, args = {}) {
   const allowed = policy?.suites?.[requested.suite] || new Set();
   if (requested.suite === "atlas") {
     if (!requested.name || isInternalAtlasAction(requested.name)) return false;
-    if (policy?.atlasResearcherDispatcher === true && requested.name === "query") {
-      if (!requested.nested) {
-        return [...allowed].some((action) => action && !isInternalAtlasAction(action));
-      }
-      if (requested.nested === "workflow") {
-        const normalized = normalizeResearcherWorkflowFacadeArgs(args);
-        if (!normalized.ok) return false;
-        const steps = normalized.args.steps;
-        return policy?.atlasResearcherWorkflow === true
-          && steps.length >= 2
-          && steps.length <= researcherWorkflowMaxSteps()
-          && steps.every((step) => {
-            if (!step || typeof step !== "object" || Array.isArray(step)) return false;
-            const action = normalizeAtlasActionName(step.action);
-            return ATLAS_RESEARCHER_WORKFLOW_ACTIONS.has(action)
-              && !isInternalAtlasAction(action)
-              && allowed.has(action);
-          });
-      }
-      return !isInternalAtlasAction(requested.nested) && allowed.has(requested.nested);
-    }
     if (!allowed.has(requested.name)) return false;
     if (ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name) && requested.nested) {
       return !isInternalAtlasAction(requested.nested) && allowed.has(requested.nested);
@@ -1200,7 +1161,7 @@ function appendResearcherSymbolHandles(result, session, action) {
 function compactResearcherTypedAtlasResult(result, session, toolName, toolArgs = {}) {
   const requested = requestedToolPolicyName(toolName, toolArgs);
   if (
-    !usesResearcherAtlasReadSurface(sessionToolPolicy(session), { includeWorkflow: true })
+    !usesResearcherAtlasReadSurface(sessionToolPolicy(session))
     || result?.isError === true
   ) {
     return result;
@@ -1265,7 +1226,7 @@ export const __testProjectAtlasModelResult = projectAtlasModelResult;
 function normalizeResearcherTypedAtlasResultFieldNames(result, session, toolName, toolArgs = {}) {
   // Error results are model-visible too: an all-failed symbol.get batch is
   // isError at the envelope and still carries a structured header.
-  if (!usesResearcherAtlasReadSurface(sessionToolPolicy(session), { includeWorkflow: true })) return result;
+  if (!usesResearcherAtlasReadSurface(sessionToolPolicy(session))) return result;
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
   const requested = requestedToolPolicyName(toolName, toolArgs);
@@ -1318,156 +1279,6 @@ function batchChildHeaderBlocks(headerText) {
   return parsed.items
     .map(item => (Array.isArray(item?.content_blocks) ? item.content_blocks[0] : null))
     .filter(index => Number.isSafeInteger(index) && index > 0);
-}
-
-const TYPED_FLAT_WINDOW_FIELDS = new Set([
-  "autoFill",
-  "file",
-  "path",
-  "granularity",
-  "identifiersToFind",
-  "maxTokens",
-  "symbolId",
-  "symbolHandle",
-]);
-
-function normalizeResearcherTypedDispatcherEnvelope(policy, toolName, toolArgs = {}) {
-  if (policy?.atlasResearcherTypedDispatcher !== true) {
-    return { toolArgs, transforms: [] };
-  }
-  const requested = requestedToolPolicyName(toolName, toolArgs);
-  if (
-    requested.suite !== "atlas"
-    || requested.name !== "query"
-    || requested.nested
-    || !toolArgs
-    || typeof toolArgs !== "object"
-    || Array.isArray(toolArgs)
-    || Object.prototype.hasOwnProperty.call(toolArgs, "action")
-    || Object.prototype.hasOwnProperty.call(toolArgs, "args")
-  ) {
-    return { toolArgs, transforms: [] };
-  }
-  if (Object.keys(toolArgs).some((field) => !TYPED_FLAT_WINDOW_FIELDS.has(field))) {
-    return { toolArgs, transforms: [] };
-  }
-  const flatArgs = /** @type {Record<string, any>} */ (toolArgs);
-  const hasSymbol = [flatArgs.symbolId, flatArgs.symbolHandle]
-    .some((value) => typeof value === "string" && value.trim() !== "");
-  const anchoredFile = flatArgs.file ?? flatArgs.path;
-  const hasAnchoredFile = typeof anchoredFile === "string"
-    && anchoredFile.trim() !== ""
-    && Array.isArray(flatArgs.identifiersToFind)
-    && flatArgs.identifiersToFind.length > 0;
-  if (hasSymbol === hasAnchoredFile) return { toolArgs, transforms: [] };
-  const inferredAction = hasSymbol ? "symbol.get" : "code.window";
-  return {
-    toolArgs: { action: inferredAction, args: { ...toolArgs } },
-    transforms: [{
-      kind: "atlas_typed_call_cleanup",
-      cleanup: "infer_unambiguous_flat_action",
-      inferred_action: inferredAction,
-    }],
-  };
-}
-
-function normalizeResearcherDispatcherRequest(policy, toolName, toolArgs = {}) {
-  const envelope = normalizeResearcherTypedDispatcherEnvelope(policy, toolName, toolArgs);
-  let normalizedArgs = /** @type {Record<string, any>} */ (envelope.toolArgs);
-  const transforms = [...envelope.transforms];
-  if (policy?.atlasResearcherTypedDispatcher !== true) {
-    return { toolArgs: normalizedArgs, transforms };
-  }
-  const requested = requestedToolPolicyName(toolName, normalizedArgs);
-  if (requested.suite !== "atlas" || requested.name !== "query") {
-    return { toolArgs: normalizedArgs, transforms };
-  }
-  if (!normalizedArgs || typeof normalizedArgs !== "object" || Array.isArray(normalizedArgs)) {
-    return {
-      toolArgs: normalizedArgs,
-      transforms,
-      routingError: "Typed Atlas dispatcher arguments must be an object",
-    };
-  }
-  const hasArgs = Object.prototype.hasOwnProperty.call(normalizedArgs, "args");
-  const hasParameters = Object.prototype.hasOwnProperty.call(normalizedArgs, "parameters");
-  const hasAction = Object.prototype.hasOwnProperty.call(normalizedArgs, "action");
-  // Preserve the existing unambiguous-flat compatibility lane. Ambiguous
-  // flat calls stay untouched for the canonical query executor to validate;
-  // the closed action envelope below is enforced once the model supplies any
-  // envelope field.
-  if (!hasAction && !hasArgs && !hasParameters) {
-    return { toolArgs: normalizedArgs, transforms };
-  }
-  if (hasArgs && hasParameters) {
-    // `args` is the issued canonical envelope. Some providers redundantly
-    // mirror it into the legacy `parameters` alias in parallel calls. Keep
-    // the canonical payload and discard only that unadvertised alias; the
-    // normal args validation below still rejects a malformed canonical value.
-    const { parameters: _parameters, ...rest } = normalizedArgs;
-    normalizedArgs = rest;
-    transforms.push({
-      kind: "atlas_typed_call_cleanup",
-      cleanup: "drop_parameters_alias_when_args_present",
-    });
-  }
-  if (hasParameters && !hasArgs) {
-    if (!normalizedArgs.parameters
-      || typeof normalizedArgs.parameters !== "object"
-      || Array.isArray(normalizedArgs.parameters)) {
-      return {
-        toolArgs: normalizedArgs,
-        transforms,
-        routingError: "Typed Atlas dispatcher parameters alias must be an object",
-      };
-    }
-    const { parameters, ...rest } = normalizedArgs;
-    normalizedArgs = { ...rest, args: parameters };
-    transforms.push({
-      kind: "atlas_typed_call_cleanup",
-      cleanup: "parameters_alias_to_args",
-    });
-  }
-  const unknownField = Object.keys(normalizedArgs)
-    .find((field) => !["action", "args"].includes(field));
-  if (unknownField) {
-    return {
-      toolArgs: normalizedArgs,
-      transforms,
-      routingError: `Typed Atlas dispatcher field is not allowed: ${unknownField}`,
-    };
-  }
-  if (typeof normalizedArgs.action !== "string" || normalizedArgs.action.trim() === "") {
-    return {
-      toolArgs: normalizedArgs,
-      transforms,
-      routingError: "Typed Atlas dispatcher action is required",
-    };
-  }
-  if (!normalizedArgs.args || typeof normalizedArgs.args !== "object" || Array.isArray(normalizedArgs.args)) {
-    return {
-      toolArgs: normalizedArgs,
-      transforms,
-      routingError: "Typed Atlas dispatcher args must be an object",
-    };
-  }
-  const rawAction = String(normalizedArgs.action).trim();
-  const replacement = ATLAS_HISTORICAL_ACTION_ALIASES[rawAction] || null;
-  const issued = replacement ? issuedAtlasActionsForPolicy(policy) : [];
-  if (replacement && issued.includes(replacement)) {
-    normalizedArgs = { ...normalizedArgs, action: replacement };
-    transforms.push({
-      kind: "atlas_typed_call_cleanup",
-      cleanup: "historical_action_alias",
-      requested_action: rawAction,
-      effective_action: replacement,
-    });
-  }
-  return { toolArgs: normalizedArgs, transforms };
-}
-
-export function __testNormalizeResearcherDispatcherRequest(policy, toolName, toolArgs = {}) {
-  return normalizeResearcherDispatcherRequest(policy, toolName, toolArgs);
 }
 
 function normalizeTypedSymbolBodyRoute(action, supplied = {}) {
@@ -1674,44 +1485,13 @@ function normalizePromotedTraversalAlias(session, action, supplied = {}) {
 }
 
 function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, session = null) {
-  const envelope = normalizeResearcherDispatcherRequest(policy, toolName, toolArgs);
-  toolArgs = envelope.toolArgs;
-  const transforms = [...envelope.transforms];
-  if (envelope.routingError) {
-    return { toolName, toolArgs, transforms, routingError: envelope.routingError };
-  }
+  const transforms = [];
   const requested = requestedToolPolicyName(toolName, toolArgs);
   const direct = policy?.atlasResearcherDirect === true
     && requested.suite === "atlas" && ATLAS_RESEARCHER_WORKFLOW_ACTIONS.has(requested.name);
-  if (
-    !direct && (policy?.atlasResearcherDispatcher !== true
-      || requested.suite !== "atlas"
-      || requested.name !== "query"
-      || !requested.nested)
-  ) {
-    return { toolName, toolArgs, transforms };
-  }
-  if (requested.nested === "workflow") {
-    const normalized = normalizeResearcherWorkflowFacadeArgs(toolArgs);
-    if (normalized.ok === false) {
-      return { toolName, toolArgs, transforms, routingError: normalized.error };
-    }
-    if (normalized.aliases.length > 0) {
-      transforms.push({
-        kind: "atlas_typed_field_aliases",
-        aliases: normalized.aliases,
-      });
-    }
-    return {
-      toolName: "atlas.workflow",
-      toolArgs: normalized.args,
-      transforms,
-    };
-  }
-  const action = direct ? requested.name : requested.nested;
-  let supplied = direct ? toolArgs : toolArgs?.args && typeof toolArgs.args === "object" && !Array.isArray(toolArgs.args)
-    ? toolArgs.args
-    : {};
+  if (!direct) return { toolName, toolArgs, transforms };
+  const action = requested.name;
+  let supplied = toolArgs;
   const fieldAliases = normalizeResearcherTypedActionArgs(action, supplied);
   if (fieldAliases.error) {
     return { toolName, toolArgs, transforms, routingError: fieldAliases.error };
@@ -1883,55 +1663,6 @@ function researcherWorkflowStepOutput(result = null) {
   };
 }
 
-const RESEARCHER_WORKFLOW_TERMINAL_CONTROL_KINDS = new Set([
-  "memory_tool_terminal",
-  "memory_tool_terminal_rejection",
-  "operator_feedback_delivery",
-  "research_citation_fetch_gate",
-  "research_closeout",
-  "research_closeout_gate",
-  "research_final_fetch_batch",
-]);
-
-function researcherWorkflowMustStopAfterResult(result = null) {
-  return (result?.[OWNER_MODEL_CONTROL_NOTICES] || []).some((notice) => (
-    RESEARCHER_WORKFLOW_TERMINAL_CONTROL_KINDS.has(String(notice?.kind || ""))
-  ));
-}
-
-function researcherWorkflowInputProblem(toolArgs = {}) {
-  const allowedKeys = new Set(["steps", "onError"]);
-  const unknownKey = Object.keys(toolArgs || {}).find((key) => !allowedKeys.has(key));
-  if (unknownKey) return `workflow field is not allowed: ${unknownKey}`;
-  if (toolArgs.onError != null && toolArgs.onError !== "stop") return "workflow onError must be stop";
-  const steps = Array.isArray(toolArgs.steps) ? toolArgs.steps : [];
-  if (steps.length < 2 || steps.length > researcherWorkflowMaxSteps()) {
-    return `workflow requires 2-${researcherWorkflowMaxSteps()} steps`;
-  }
-  const ids = new Set();
-  for (let index = 0; index < steps.length; index += 1) {
-    const step = steps[index];
-    if (!step || typeof step !== "object" || Array.isArray(step)) return `workflow step ${index} must be an object`;
-    const stepKeys = new Set(["id", "action", "args", "maxResponseTokens"]);
-    const unknownStepKey = Object.keys(step).find((key) => !stepKeys.has(key));
-    if (unknownStepKey) return `workflow step ${index} field is not allowed: ${unknownStepKey}`;
-    if (step.maxResponseTokens != null) return `workflow step ${index} maxResponseTokens is not supported by the owner-routed facade`;
-    const action = normalizeAtlasActionName(step.action);
-    if (!ATLAS_RESEARCHER_WORKFLOW_ACTIONS.has(action)) return `workflow step ${index} action is not allowed: ${action}`;
-    if (!step.args || typeof step.args !== "object" || Array.isArray(step.args)) return `workflow step ${index} args must be an object`;
-    if (action === "traverse_ref" && Number(step.args.limit || 0) > 20_000) {
-      return `workflow step ${index} traverse_ref limit exceeds 20000`;
-    }
-    if (step.id != null) {
-      const id = String(step.id || "").trim();
-      if (!id) return `workflow step ${index} id must be non-empty`;
-      if (ids.has(id)) return `workflow step id must be unique: ${id}`;
-      ids.add(id);
-    }
-  }
-  return "";
-}
-
 function filterToolsListMessage(message, policy) {
   const tools = message?.result?.tools;
   if (!Array.isArray(tools)) return message;
@@ -2005,19 +1736,14 @@ function recordProviderIssuedToolSurface(session, message) {
       names,
       tool_count: names.length,
       action_enum: actionEnum,
-      action_enum_source: names.includes("atlas.query") ? "dispatcher_schema" : "atlas_tool_names",
+      action_enum_source: "atlas_tool_names",
       schema_sha256: schemaSha256,
       schema_chars: canonical.length,
       effective_policy: {
         disable_system_tools: boot.disableSystemTools === true,
         atlas_available: boot.atlasAvailable === true,
         traversal_coverage_required: coverageRequired,
-        typed_dispatcher: policy.atlasResearcherTypedDispatcher === true,
         direct: policy.atlasResearcherDirect === true,
-        workflow: policy.atlasResearcherWorkflow === true,
-        dispatcher: policy.atlasResearcherDispatcher === true
-          && policy.atlasResearcherTypedDispatcher !== true
-          && policy.atlasResearcherWorkflow !== true,
       },
       limits: { ...researchSynthesisPolicyFor(session) },
       projections: usesResearcherAtlasReadSurface(policy)
@@ -2124,12 +1850,10 @@ function issuedAtlasActionsForPolicy(policy) {
   const grantable = [...allowed]
     .map((action) => String(action || "").trim())
     .filter((action) => action && !isInternalAtlasAction(action) && !ATLAS_NESTED_ACTION_WRAPPERS.has(action));
-  if (policy?.atlasResearcherDispatcher === true || policy?.atlasResearcherDirect === true) {
-    // Mirror the advertised dispatcher enum exactly: the model never saw
+  if (policy?.atlasResearcherDirect === true) {
+    // Mirror the advertised direct tool set exactly: the model never saw
     // wrappers, excluded compatibility routes, or card-less actions.
-    return researcherDispatcherIssuedActions(grantable, {
-      typed: usesResearcherAtlasReadSurface(policy, { includeWorkflow: true }),
-    }).sort();
+    return researcherDispatcherIssuedActions(grantable, { typed: true }).sort();
   }
   return grantable.sort();
 }
@@ -2149,7 +1873,7 @@ function nestedAtlasActionDenial(policy, toolName, args = {}) {
   if (!nested || nested === "workflow") return null;
   const allowed = policy?.suites?.atlas || new Set();
   const wrapperReachable = requested.name === "query"
-    ? (policy?.atlasResearcherDispatcher === true || allowed.has("query"))
+    ? allowed.has("query")
     : allowed.has(requested.name);
   if (!wrapperReachable) return null;
   const issued = issuedAtlasActionsForPolicy(policy);
@@ -5715,12 +5439,7 @@ export class PersistentMcpOwner {
             return;
           }
         }
-        const normalizedProviderRequest = normalizeResearcherDispatcherRequest(
-          policy,
-          providerToolName,
-          rawProviderToolArgs,
-        );
-        const providerToolArgs = normalizedProviderRequest.toolArgs;
+        const providerToolArgs = rawProviderToolArgs;
         const managedRequest = requestedToolPolicyName(providerToolName, providerToolArgs);
         if (!teamManagedToolAdmitted(managedRequest.suite, managedRequest.name, {
           transport: "persistent-mcp",
@@ -5733,25 +5452,6 @@ export class PersistentMcpOwner {
             message: mcpToolResultMessage(message, mcpToolErrorPayload(
               "Team approval mode does not permit this tool route",
               { code: "team_tool_route_blocked" },
-            )),
-          });
-          return;
-        }
-        if (normalizedProviderRequest.routingError) {
-          recordDeniedToolCall(session, providerToolName, providerToolArgs, policy, message, {
-            code: "invalid_arguments",
-            reason: normalizedProviderRequest.routingError,
-          });
-          sendJson(res, 200, {
-            ok: true,
-            bootId: this.bootId,
-            sessionId: id,
-            message: mcpToolResultMessage(message, mcpToolErrorPayload(
-              normalizedProviderRequest.routingError,
-              {
-                code: "invalid_arguments",
-                message: normalizedProviderRequest.routingError,
-              },
             )),
           });
           return;
@@ -5772,7 +5472,6 @@ export class PersistentMcpOwner {
           providerToolArgs,
           session,
         );
-        routedTool.transforms.unshift(...normalizedProviderRequest.transforms);
         const toolName = routedTool.toolName;
         const toolArgs = routedTool.toolArgs;
         if (routedTool.routingError) {
@@ -6153,39 +5852,15 @@ export class PersistentMcpOwner {
           return;
         }
         if (requested.suite === "atlas") {
-          const workflowRequest = policy?.atlasResearcherWorkflow === true
-            && requested.name === "workflow";
-          let response = workflowRequest
-            ? await this._executeResearcherWorkflowCall({
-                message,
-                session,
-                toolArgs,
-                delegatedEvidence,
-              })
-            : await this._executeAtlasToolCall({
-                message,
-                session,
-                toolName,
-                toolArgs,
-                providerTransforms: routedTool.transforms,
-                delegatedEvidence,
-                assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
-              });
-          if (workflowRequest && response?.result) {
-            let workflowResult = projectAtlasModelResult(
-              response.result,
-              session,
-              "atlas.workflow",
-              toolArgs,
-            );
-            for (const transform of routedTool.transforms) {
-              workflowResult = annotateOwnerResultTransform(workflowResult, transform);
-            }
-            response = {
-              ...response,
-              result: workflowResult,
-            };
-          }
+          const response = await this._executeAtlasToolCall({
+            message,
+            session,
+            toolName,
+            toolArgs,
+            providerTransforms: routedTool.transforms,
+            delegatedEvidence,
+            assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
+          });
           if (rejectAgentHandoffForLaterTool(
             session?.bootConfig?.agentCallId,
             requested.name || toolName,
@@ -6697,152 +6372,6 @@ export class PersistentMcpOwner {
       batch.idleTimer.unref?.();
     };
     void request.then(release, release);
-  }
-
-  async _executeResearcherWorkflowCall({
-    message,
-    session,
-    toolArgs,
-    delegatedEvidence = false,
-  }) {
-    const startedAt = Date.now();
-    const problem = researcherWorkflowInputProblem(toolArgs);
-    if (problem) {
-      const result = mcpToolErrorPayload(`Invalid typed Atlas workflow: ${problem}`);
-      recordOwnerToolObservation({
-        session,
-        toolName: "atlas.workflow",
-        toolArgs,
-        result,
-        durationMs: Date.now() - startedAt,
-        executor: { via: "researcher_typed_workflow", stage: "validation" },
-      });
-      return mcpToolResultMessage(message, result);
-    }
-
-    const steps = toolArgs.steps;
-    const priorResults = [];
-    const priorById = new Map();
-    const results = [];
-    for (let index = 0; index < steps.length; index += 1) {
-      const step = steps[index];
-      const action = normalizeAtlasActionName(step.action);
-      let resolvedArgs;
-      try {
-        resolvedArgs = resolveWorkflowRefs(step.args, priorResults, priorById);
-      } catch (err) {
-        const error = String(err?.message || err || "workflow reference resolution failed");
-        const result = mcpToolErrorPayload(`Typed Atlas workflow step ${index} (${action}) failed before execution: ${error}`);
-        recordOwnerToolObservation({
-          session,
-          toolName: "atlas.workflow",
-          toolArgs,
-          result,
-          durationMs: Date.now() - startedAt,
-          executor: { via: "researcher_typed_workflow", stage: "reference_resolution", step: index, action },
-        });
-        return mcpToolResultMessage(message, result);
-      }
-
-      const innerMessage = {
-        jsonrpc: "2.0",
-        id: `${String(message?.id ?? "workflow")}:${index}`,
-        method: "tools/call",
-        params: { name: `atlas.${action}`, arguments: resolvedArgs },
-      };
-      const response = await this._executeAtlasToolCall({
-        message: innerMessage,
-        session,
-        toolName: `atlas.${action}`,
-        toolArgs: resolvedArgs,
-        delegatedEvidence,
-      });
-      const innerResult = response?.result && typeof response.result === "object"
-        ? response.result
-        : mcpToolErrorPayload(`Typed Atlas workflow step ${index} (${action}) returned no MCP result`);
-      const output = researcherWorkflowStepOutput(innerResult);
-      const entry = {
-        stepIndex: index,
-        ...(step.id ? { id: String(step.id) } : {}),
-        action,
-        status: innerResult.isError === true ? "error" : "ok",
-        result: output.value,
-        ...(output.remainder ? { remainder: output.remainder } : {}),
-      };
-      results.push(entry);
-      if (innerResult.isError === true) {
-        return mcpToolResultMessage(message, {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              ok: false,
-              action: "workflow",
-              failedStep: index,
-              results,
-            }),
-          }],
-          isError: true,
-          _meta: {
-            atlasResearcherWorkflow: {
-              version: 1,
-              status: "error",
-              stepsRequested: steps.length,
-              stepsExecuted: results.length,
-            },
-          },
-        });
-      }
-      priorResults.push(output.value);
-      if (step.id) priorById.set(String(step.id), output.value);
-      if (researcherWorkflowMustStopAfterResult(innerResult)) {
-        return mcpToolResultMessage(message, {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              ok: true,
-              action: "workflow",
-              stopped: true,
-              reason: "owner_control_notice",
-              results,
-            }),
-          }],
-          isError: false,
-          _meta: {
-            atlasResearcherWorkflow: {
-              version: 1,
-              status: "stopped",
-              stepsRequested: steps.length,
-              stepsExecuted: results.length,
-            },
-          },
-        });
-      }
-    }
-
-    appendRunTelemetry("diagnostics", {
-      kind: "mcp.owner.atlas_researcher_workflow",
-      ...attachTelemetryContext(session, this.bootId),
-      outcome: "ok",
-      duration_ms: Date.now() - startedAt,
-      steps_requested: steps.length,
-      steps_executed: results.length,
-      actions: results.map((entry) => entry.action),
-    });
-    return mcpToolResultMessage(message, {
-      content: [{
-        type: "text",
-        text: JSON.stringify({ ok: true, action: "workflow", results }),
-      }],
-      isError: false,
-      _meta: {
-        atlasResearcherWorkflow: {
-          version: 1,
-          status: "ok",
-          stepsRequested: steps.length,
-          stepsExecuted: results.length,
-        },
-      },
-    });
   }
 
   async _executeAtlasToolCall(args) {

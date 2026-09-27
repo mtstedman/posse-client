@@ -42,10 +42,12 @@ import {
   isResearchBudgetDeep,
   maxResearchBudget,
   normalizeResearchBudget,
-  researchModelTierForBudget,
   resolveResearchBudgetForRouting,
-  researchBudgetToReasoningEffort,
 } from "../../../../shared/policies/functions/role-utils.js";
+import {
+  inheritedReasoningEffortForBudget,
+  roleExecutionForBudget,
+} from "../../../settings/functions/repository-settings.js";
 import { spawnFromRole as spawnQueueJobFromRole } from "../../../queue/functions/spawn-guard.js";
 import { ResearchSession } from "../../../research/classes/ResearchSession.js";
 import { researchReturnsFinalReport } from "../../../research/functions/output-routing.js";
@@ -659,8 +661,7 @@ export function spawnResearchAfterPreflight(worker, preflightJob, output, { fall
     title: `Research: ${wiTitle}`,
     parent_job_id: preflightJob.id,
     priority: preflightJob.priority,
-    model_tier: researchModelTierForBudget(researchBudget),
-    reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+    ...roleExecutionForBudget("research", researchBudget),
     payload_json: JSON.stringify({
       deepthink_budget: researchBudget,
       deepthink: isResearchBudgetDeep(researchBudget),
@@ -837,7 +838,7 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
           parent_job_id: humanJob.id,
           priority: researchJob.priority,
           model_tier: researchJob.model_tier,
-          reasoning_effort: researchBudgetToReasoningEffort(researchBudget, researchJob.reasoning_effort || "medium"),
+          reasoning_effort: inheritedReasoningEffortForBudget("research", researchBudget, researchJob.reasoning_effort),
           payload_json: JSON.stringify({
             _is_loopback: true,
             _clarification_round: nextRound,
@@ -898,7 +899,7 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
       parent_job_id: researchJob.id,
       priority: researchJob.priority,
       model_tier: researchJob.model_tier,
-      reasoning_effort: researchBudgetToReasoningEffort(selfResolveBudget, "high"),
+      reasoning_effort: roleExecutionForBudget("research", selfResolveBudget).reasoning_effort,
       payload_json: JSON.stringify({
         _is_loopback: true,
         _self_resolve: true,
@@ -978,7 +979,7 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
         parent_job_id: humanJob.id,
         priority: researchJob.priority,
         model_tier: researchJob.model_tier,
-        reasoning_effort: researchBudgetToReasoningEffort(researchBudget, researchJob.reasoning_effort || "medium"),
+        reasoning_effort: inheritedReasoningEffortForBudget("research", researchBudget, researchJob.reasoning_effort),
         payload_json: JSON.stringify({
           _is_loopback: true,
           _clarification_round: nextRound,
@@ -1062,10 +1063,9 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
     title: researchPayload.replan_reason ? `Replan: ${wiTitle}` : `Plan: ${wiTitle}`,
     parent_job_id: researchJob.id,
     priority: researchJob.priority,
-    model_tier: dispatchPolicy.enabled ? dispatchPolicy.plannerModelTier : "standard",
-    reasoning_effort: dispatchPolicy.enabled
-      ? dispatchPolicy.plannerReasoningEffort
-      : researchBudgetToReasoningEffort(researchBudget, "medium"),
+    ...(dispatchPolicy.enabled
+      ? { model_tier: dispatchPolicy.plannerModelTier, reasoning_effort: dispatchPolicy.plannerReasoningEffort }
+      : roleExecutionForBudget("plan", researchBudget)),
     payload_json: JSON.stringify(basePlanPayload),
   });
   if (terminalHumanGate) addDependency(planJob.id, terminalHumanGate.id, "hard");

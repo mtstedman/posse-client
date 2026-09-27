@@ -1,3 +1,4 @@
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { installCliWarningFilter } from "./warnings.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
@@ -1532,8 +1533,7 @@ async function cmdImage() {
     job_type: "artificer",
     title: `Generate: ${title.slice(0, 70)}`,
     priority: "normal",
-    model_tier: "standard",
-    reasoning_effort: "medium",
+    ...roleExecutionForBudget("artificer"),
     provider,
     payload_json: JSON.stringify({
       task_spec: [

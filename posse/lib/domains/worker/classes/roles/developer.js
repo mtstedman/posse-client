@@ -3,6 +3,7 @@
 // Developer role handler for scoped repo mutations, checkpoint capture, and
 // one-shot context expansion during implementation work.
 
+import { getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
@@ -315,7 +316,7 @@ export class DeveloperRole extends BaseRole {
       // --dangerously-skip-permissions for a no-scope dev session.
       autoApprove: false,
       modelTier: ctx.tier,
-      reasoningEffort: job.reasoning_effort || "medium",
+      reasoningEffort: job.reasoning_effort || getDefaultReasoningEffortForRole("dev"),
       activity: `executing job #${job.id}: ${shortJobTitle(job).slice(0, 40)}`,
       fallbackReads: ctx.fallbackReads,
       taskMode: ctx.taskMode,

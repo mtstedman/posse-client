@@ -1,3 +1,4 @@
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
   addDependency,
   createJob,
@@ -9,10 +10,8 @@ import {
   updateJobStatus,
 } from "../../queue/functions/index.js";
 import {
-  defaultResearchModelTier,
   isResearchBudgetDeep,
   normalizeResearchBudget,
-  researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import {
   parseFanoutJobPayload,
@@ -103,10 +102,6 @@ export function synthBudgetForResearchFanout(budget, branches = []) {
   return normalized;
 }
 
-function synthReasoningFallback(synthBudget) {
-  return synthBudget === "normal" ? "medium" : "high";
-}
-
 export function logFanoutSkipped({
   workItem,
   job,
@@ -176,8 +171,7 @@ export function createResearchFanoutJobs({
       title: `Research (${branch.label}): ${wiTitle}`,
       parent_job_id: parentJob?.id || null,
       priority: shadow ? "low" : (workItem.priority || parentJob?.priority || "normal"),
-      model_tier: defaultResearchModelTier(),
-      reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+      ...roleExecutionForBudget("research", researchBudget),
       payload_json: JSON.stringify(fanoutPayload({
         ...extraPayload,
         role_mode: "child",
@@ -207,8 +201,7 @@ export function createResearchFanoutJobs({
       title: `Research synthesis: ${wiTitle}`,
       parent_job_id: parentJob?.id || null,
       priority: shadow ? "low" : (workItem.priority || parentJob?.priority || "normal"),
-      model_tier: defaultResearchModelTier(),
-      reasoning_effort: researchBudgetToReasoningEffort(synthBudget, synthReasoningFallback(synthBudget)),
+      ...roleExecutionForBudget("research", synthBudget),
       payload_json: JSON.stringify(fanoutPayload({
         ...extraPayload,
         role_mode: "synth",

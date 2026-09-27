@@ -2,6 +2,7 @@
 //
 // Planner task compilation extracted from worker.js.
 
+import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../settings/functions/repository-settings.js";
 import fs from "fs";
 import path from "path";
 import { PLANNER_ALLOWED_JOB_TYPES } from "../../../catalog/job.js";
@@ -1172,7 +1173,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         };
         const usedTierSynonym = typeof t.model_tier === "string" && Object.hasOwn(TIER_SYNONYMS, t.model_tier);
         const rawTier = usedTierSynonym ? normalizeTierAlias(t.model_tier) : t.model_tier;
-        const modelTier = VALID_TIERS.has(rawTier) ? rawTier : "standard";
+        const modelTier = VALID_TIERS.has(rawTier) ? rawTier : getDefaultModelTierForRole(jobType);
       const plannerComplexityScore = normalizePlannerScore(t.planner_complexity_score ?? t.complexity);
       const plannerRiskScore = normalizePlannerScore(t.planner_risk_score ?? t.risk);
       const plannerVerificationScore = normalizePlannerScore(t.planner_failure_cost_score ?? t.verification_difficulty);
@@ -1181,7 +1182,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
         const usedEffortSynonym = typeof t.reasoning_effort === "string" && Object.hasOwn(EFFORT_SYNONYMS, t.reasoning_effort);
         const rawEffort = usedEffortSynonym ? EFFORT_SYNONYMS[t.reasoning_effort] : t.reasoning_effort;
-        const baseReasoningEffort = VALID_EFFORTS.has(rawEffort) ? rawEffort : "medium";
+        const baseReasoningEffort = VALID_EFFORTS.has(rawEffort) ? rawEffort : getDefaultReasoningEffortForRole(jobType);
         const taskHasExplicitBudget = t.deepthink_budget != null || t.research_budget != null || t.deepthink != null;
         const taskBudgetSource = t.deepthink_budget != null
           ? "deepthink_budget"

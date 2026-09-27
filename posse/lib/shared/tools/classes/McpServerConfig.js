@@ -46,7 +46,7 @@ import { persistentMcpOwner } from "./PersistentMcpOwner.js";
 import { McpServer } from "./McpServer.js";
 import { McpGate } from "./McpGate.js";
 import { withoutAtlasMemoryTools } from "../../policies/functions/memory-mode.js";
-import { resolveAtlasDisabledTools, resolveAtlasCodeLensCallable } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
+import { resolveAgentDisabledTools, resolveAtlasDisabledTools, resolveAtlasCodeLensCallable } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -434,8 +434,12 @@ function assertJobSurfaceWithinAgentGate(role, providerName, gateBootConfig = {}
   const gateAllowlist = normalizeSuiteToolAllowlist(gateBootConfig.toolAllowlist);
   const missing = [];
   const gateToolNames = new Set(gateAllowlist.tools || []);
+  // agent_tools_disabled removed these from the gate on purpose. They are a
+  // narrowing, not an escalation: the provider projection intersects the Job
+  // issuance with the gate, so they never reach the provider.
+  const operatorDisabledTools = resolveAgentDisabledTools().tools;
   for (const name of issued.toolAllowlist.tools || []) {
-    if (!gateToolNames.has(name)) missing.push(`tools.${name}`);
+    if (!gateToolNames.has(name) && !operatorDisabledTools.has(name)) missing.push(`tools.${name}`);
   }
   // The reusable gate is minted after local feature availability (for
   // example ATLAS memory and code-lens settings) has narrowed the remote
@@ -1128,16 +1132,18 @@ export class McpServerConfig {
     if (opts.coordinationChild === true) {
       bootPayload.toolAllowlist = { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] };
     }
-    const disabledAtlasTools = resolveAtlasDisabledTools();
+    const disabledAgentTools = resolveAgentDisabledTools();
+    const disabledAtlasTools = new Set([...resolveAtlasDisabledTools(), ...disabledAgentTools.atlas]);
     if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");
-    if (disabledAtlasTools.size > 0) {
+    if (disabledAtlasTools.size > 0 || disabledAgentTools.tools.size > 0) {
       const issuedEntries = Array.isArray(issuedSurface?.tool_surface)
         ? issuedSurface.tool_surface
         : (Array.isArray(issuedSurface?.tools) ? issuedSurface.tools : []);
       bootPayload.toolAllowlist = {
-        // Keep the local role projection as the upper bound for deterministic
-        // tools. Only the ATLAS lane is being narrowed in this branch.
-        tools: bootPayload.toolAllowlist?.tools || expectedMcpToolNames(role, bootPayload),
+        // The local role projection stays the upper bound for deterministic
+        // tools; the testing toggle only narrows it.
+        tools: (bootPayload.toolAllowlist?.tools || expectedMcpToolNames(role, bootPayload))
+          .filter((name) => !disabledAgentTools.tools.has(String(name || "").toLowerCase())),
         atlas: issuedToolNamesForSuite(issuedEntries, "atlas")
           .filter((name) => !disabledAtlasTools.has(String(name || "").toLowerCase())),
       };

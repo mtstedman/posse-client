@@ -25,6 +25,7 @@ import {
 } from "../../providers/functions/model-catalog.js";
 import {
   PROVIDER_ROLE_SETTING_DEFS,
+  ROLE_MODEL_TIER_SETTING_DEFS,
   ROLE_REASONING_EFFORT_SETTING_DEFS,
 } from "../../providers/functions/roles.js";
 
@@ -151,6 +152,7 @@ export const SETTINGS_CATALOG = [
   // before using the hardcoded default.
   ...PROVIDER_ROLE_SETTING_DEFS,
   ...ROLE_REASONING_EFFORT_SETTING_DEFS,
+  ...ROLE_MODEL_TIER_SETTING_DEFS,
   { key: "delegation_mode",     default: "js", options: DELEGATION_MODE_VALUES, description: "Delegation engine mode: js or ml" },
 
   // ── Model selection (empty = use provider tier default) ──────────────────
@@ -401,6 +403,7 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_scip_cold_index_timeout_ms", default: "1800000",         numeric: { integer: true, min: 1000 }, description: "Maximum time to wait when a SCIP language has no canonical output or the previous staging attempt failed (default 30min — first-index on a large repo can take a while)" },
   { key: "atlas_scip_restage_policy",     default: "smart",              options: ATLAS_SCIP_RESTAGE_POLICY_VALUES, description: "SCIP restage policy: never, missing, smart, or always" },
   { key: "atlas_tools_disabled", default: "",                    description: "Comma-separated atlas action names removed from newly minted agent contracts (ablation gate; e.g. code.survey,symbol.card). Empty disables nothing." },
+  { key: "agent_tools_disabled", default: "",                    description: "Testing toggle for every issued agent tool: comma-separated names removed from newly minted agent contracts. Plain or tools.-prefixed names remove native tools (read_file, search_files, list_files); dotted or atlas.-prefixed names remove Atlas actions (code.lens, atlas.symbol.get). agent_handoff and sub_agent_next_input stay issued. Empty disables nothing." },
   { key: "atlas_search_result_paging", default: "on",             options: ["off", "on"], description: "Bounded-ingress paging for symbol.search results: keep the top of the ranked payload inline (10K char cap) and page the remainder behind a traversal_ref. On (default) is a transport invariant — unbounded search was a primary retained-input regression; off is an operator escape hatch." },
   { key: "atlas_result_ref_paging",       default: "on",                 options: ["off", "on"], description: "Window/lens result ref-paging (TOKEN-LEVERS L3b): when a code.window/code.lens result exceeds atlas_result_ref_paging_min_chars, keep the top-ranked portion inline (code.lens: top matches; code.window: head lines) and page the remainder behind a traversal_ref stub. ADOPTED run41 (7C/2P/0W vs 4C/5P/0W for +2.4% cost); flip off to restore full inline results." },
   { key: "atlas_result_ref_paging_min_chars", default: "12000",          numeric: { integer: true, min: 2000 }, description: "Char threshold above which L3b pages a window/lens result (default 12000, set from run36 Stage-0 distribution: code.window p50 6.7k/p90 13.1k, code.lens p50 13.3k/p90 24.3k)." },
@@ -413,9 +416,6 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_answer_contract_tight",   default: "on",                 options: ["off", "on"], description: "Tight researcher answer contract (TOKEN-LEVERS L2): report/question research jobs use the researcher_report_tight remote prompt profile (hard answer budget, citation-dense, no narrative padding). ADOPTED run39 (answer chars -49%, cost -34%, median hits unchanged); flip off to restore the standard researcher_report profile. Requires a posse-remote build that ships the tight profile." },
   { key: "atlas_gateway_dedup_advertise", default: "on",                 options: ["off", "on"], description: "Gateway de-advertisement (TOKEN-LEVERS L5a): on the owner-hot gateway path, drop the four ATLAS gateway wrappers (query/code/repo/agent) from the advertised tools/list since the individual per-action tools are already advertised. ADOPTED after the Stage 5A dispatch smoke and payload gate; flip off to advertise the wrappers again. Dispatch is always retained." },
   { key: "atlas_researcher_schema_diet", default: "on",  options: ["off", "on"], adminVisible: false, description: "Researcher-only provider schema diet (default on since atlas551/552): use concise top-level semantics, description-free input fields, and no advertised fetch_ref compatibility alias while preserving runtime validation, canonical dispatch, and all JSON Schema constraints." },
-  { key: "atlas_researcher_dispatcher", default: "off",                 options: ["off", "on"], adminVisible: false, description: "Experimental Codex researcher-only Atlas dispatcher: advertise one action-routed repository-read tool, retain canonical runtime validation and provider guidance, and suppress unissued native Codex utilities." },
-  { key: "atlas_researcher_typed_dispatcher", default: "off",           options: ["off", "on"], adminVisible: false, description: "Legacy name for the Codex researcher-only atlas.query facade. When enabled, it consolidates individually routed Atlas MCP actions behind one closed action/args schema; it does not dispatch agents, subagents, or planners." },
-  { key: "atlas_researcher_workflow", default: "off",                   options: ["off", "on"], adminVisible: false, description: "Experimental Codex researcher-only typed Atlas facade: add a bounded dependent-read workflow whose nested canonical actions must all be present in the signed role allowlist." },
   { key: "atlas_prose_dedup",             default: "on",                 options: ["off", "on"], description: "Policy-prose dedup (TOKEN-LEVERS L5b): the runtime role contract lists routed tools and compact cross-tool routing guidance instead of repeating handoff prefetch/fallback policy and provider schema semantics. ADOPTED after the Stage 5A contract gate; flip off to restore the full compatibility contract." },
   { key: "atlas_scip_max_age_hours",      default: String(ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT), numeric: { integer: true, min: 0 }, description: "Maximum age in hours before smart SCIP restage refreshes an otherwise unchanged index" },
   { key: "atlas_phases",                  default: ATLAS_PHASE_VALUES.join(","), options: ATLAS_PHASE_VALUES, multi: true, description: "ATLAS phases: research, planning, assessment, dev" },

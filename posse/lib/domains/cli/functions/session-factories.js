@@ -70,10 +70,7 @@ import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { inferWiMode } from "../../intake/functions/mode-inference.js";
 import { nonInteractiveHumanInputAnswerForPayload, scopeModeHumanInputAnswerForPayload, SCOPE_APPROVAL_MODES } from "../../../catalog/human-input.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
-import {
-  defaultResearchModelTier,
-  researchBudgetToReasoningEffort,
-} from "../../../shared/policies/functions/role-utils.js";
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
   checkRemotePromptBundleReadiness,
   checkRemotePromptCompilerReadiness,
@@ -375,8 +372,7 @@ export async function createRunSessionDeps(bootDeps) {
     listActiveFileLocks,
     collectDirtyState: helpers.collectDirtyState || helpers._collectDirtyState,
     collectDirtyStateAsync: helpers.collectDirtyStateAsync,
-    defaultResearchModelTier,
-    researchBudgetToReasoningEffort,
+    roleExecutionForBudget,
     researchPayload,
     autoMergeCompletedWorkItems: helpers.autoMergeCompletedWorkItems,
     hasAutoMergeableCompletedWorkItems: helpers.hasAutoMergeableCompletedWorkItems,

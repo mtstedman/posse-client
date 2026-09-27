@@ -1,11 +1,11 @@
 import { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { ToolCatalog } from "../classes/ToolCatalog.js";
-import { CLAUDE_NATIVE_TOOL_NAMES, ToolContract } from "../classes/ToolContract.js";
+import { CLAUDE_NATIVE_TOOL_NAMES, ToolContract, unknownClaudeNativeTools } from "../classes/ToolContract.js";
 import { projectDbEffectivePermissions } from "./toolkit/project-db/config.js";
 import { projectDbQuerySummaryForPermissions } from "./toolkit/project-db/schema.js";
 
 export { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
-export { CLAUDE_NATIVE_TOOL_NAMES };
+export { CLAUDE_NATIVE_TOOL_NAMES, unknownClaudeNativeTools };
 
 export function buildExecutionContract(opts = {}) {
   return filterProjectDbTool(ToolContract.build(opts).toJSON(), opts);

@@ -31,7 +31,7 @@ import {
   runImmediateTransaction,
 } from "./common.js";
 import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
-import { getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
+import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
 import {
@@ -1102,8 +1102,6 @@ export function requeueWorkItemAfterRejection(id, { description = null, feedback
         job_type: "plan",
         title: `Replan after review rejection: ${(current.title || `WI#${id}`).slice(0, 80)}`,
         priority: current.priority || "normal",
-        model_tier: "standard",
-        reasoning_effort: "medium",
         payload_json: JSON.stringify({
           task_spec: nextDescription || current.title || `Replan WI#${id}`,
           replan_after_review_rejection: true,
@@ -1478,7 +1476,7 @@ export function createJob({
   title,
   parent_job_id = null,
   priority = "normal",
-  model_tier = "standard",
+  model_tier = null,
   reasoning_effort = null,
   provider = null,
   token_budget_input = null,
@@ -1500,6 +1498,9 @@ export function createJob({
   const resolvedReasoningEffort = reasoning_effort == null
     ? getDefaultReasoningEffortForRole(job_type)
     : reasoning_effort;
+  const resolvedModelTier = model_tier == null
+    ? getDefaultModelTierForRole(job_type)
+    : model_tier;
   const serializedPayload = typeof payload_json === "object" && payload_json !== null
     ? JSON.stringify(payload_json)
     : payload_json;
@@ -1525,7 +1526,7 @@ export function createJob({
     `);
     const info = stmt.run(
       work_item_id, job_type, title, parent_job_id,
-      priority, model_tier, resolvedReasoningEffort, provider,
+      priority, resolvedModelTier, resolvedReasoningEffort, provider,
       token_budget_input, token_budget_output, context_budget_chars,
       max_attempts,
       serializedPayload,

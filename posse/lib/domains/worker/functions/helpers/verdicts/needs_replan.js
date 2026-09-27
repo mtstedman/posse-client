@@ -1,5 +1,6 @@
 // lib/domains/worker/functions/helpers/verdicts/needs_replan.js
 
+import { roleExecutionForBudget } from "../../../../settings/functions/repository-settings.js";
 import { REPLAN_CANCELABLE_JOB_TYPES, STALE_CANCELABLE_JOB_STATUSES } from "../../../../../catalog/job.js";
 import {
   isDeferredImplementationAssessmentJob,
@@ -171,8 +172,9 @@ export function handle(job, verdict, ctx) {
       title: `Replan: ${wiTitle}`,
       parent_job_id: job.id,
       priority: job.priority,
-      model_tier: dispatchPolicy.enabled ? dispatchPolicy.plannerModelTier : "standard",
-      reasoning_effort: dispatchPolicy.enabled ? dispatchPolicy.plannerReasoningEffort : "medium",
+      ...(dispatchPolicy.enabled
+        ? { model_tier: dispatchPolicy.plannerModelTier, reasoning_effort: dispatchPolicy.plannerReasoningEffort }
+        : roleExecutionForBudget("plan")),
       payload_json: JSON.stringify({
         _is_loopback: true,
         _assessment_replan: true,

@@ -44,13 +44,26 @@ export function maxResearchBudget(...budgets) {
   return best || "normal";
 }
 
-export function defaultResearchModelTier() {
-  return "strong";
+// A research budget steps a role's base up or down one rung per level:
+// low = one below, normal = the base, high = one above, xhigh = two above,
+// clamped to each ladder.
+const RESEARCH_BUDGET_STEP = Object.freeze({ low: -1, normal: 0, high: 1, xhigh: 2 });
+const MODEL_TIER_LADDER = Object.freeze(["cheap", "standard", "strong"]);
+const REASONING_EFFORT_LADDER = Object.freeze(["low", "medium", "high"]);
+
+function stepLadder(ladder, base, fallback, step) {
+  const baseIndex = ladder.indexOf(String(base || "").trim().toLowerCase());
+  const index = baseIndex >= 0 ? baseIndex : ladder.indexOf(fallback);
+  return ladder[Math.max(0, Math.min(ladder.length - 1, index + step))];
 }
 
-export function researchModelTierForBudget(budget, fallback = defaultResearchModelTier()) {
-  const normalized = normalizeResearchBudget(budget);
-  return normalized === "low" ? "standard" : fallback;
+export function stepModelTier(base, step) {
+  return stepLadder(MODEL_TIER_LADDER, base, "standard", step);
+}
+
+export function researchModelTierForBudget(budget, base = "standard") {
+  const step = RESEARCH_BUDGET_STEP[normalizeResearchBudget(budget)];
+  return stepLadder(MODEL_TIER_LADDER, base, "standard", step);
 }
 
 export function resolveResearchBudgetForRouting(baseBudget, routingBudget, {
@@ -79,11 +92,9 @@ export function getResearchBudget(workItem, payload = null) {
   return "normal";
 }
 
-export function researchBudgetToReasoningEffort(budget, fallback = "medium") {
-  const normalized = normalizeResearchBudget(budget);
-  if (normalized === "low") return "low";
-  if (normalized === "high" || normalized === "xhigh") return "high";
-  return fallback || "medium";
+export function researchBudgetToReasoningEffort(budget, base = "medium") {
+  const step = RESEARCH_BUDGET_STEP[normalizeResearchBudget(budget)];
+  return stepLadder(REASONING_EFFORT_LADDER, base, "medium", step);
 }
 
 export function researchBudgetToMaxTurnsOverride(budget, role = "researcher", opts = {}) {

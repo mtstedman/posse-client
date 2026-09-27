@@ -20,7 +20,7 @@ export function buildCodexResearchMcpGuidance(executionContract, coreDeclaration
     nativeBatching && !directResearcherAtlas ? "Run independent, already-needed tool calls in parallel in the same turn when their arguments and authorization are known. Keep dependent operations sequential. A tool's multi-item form follows its own declared execution and error contract. Keep scope requests, sub-agent control, and terminal handoff separate from other calls." : null,
     atlas && !directAtlas ? `Atlas actions such as code.window are action values passed to ${atlas}; put the selected action's fields in args. They are not separate callable tools.` : null,
     directAtlas ? "Atlas reads are individually declared tools. Call the issued tool name with its structured parameters, without an action/args wrapper." : null,
-    directResearcherAtlas ? researcherAtlasBatchGuidance({ direct: true }) : null,
+    directResearcherAtlas ? researcherAtlasBatchGuidance() : null,
     handoff ? `Submit the completed report directly through ${handoff} with structured arguments, without preparation acknowledgements or an executor wrapper. Keep terminal submission separate from other tool calls. If validation rejects it, repair the reported fields using delivered evidence and preserve unchanged claims.` : null,
     nativeBatching ? null : `CORE MCP RETRIEVAL DECLARATIONS (name, description, parameters):\n${JSON.stringify(coreDeclarations)}`,
   ].filter(Boolean).join("\n");

@@ -1,6 +1,6 @@
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
-import { getProviderForRole } from "../../settings/functions/repository-settings.js";
+import { getDefaultModelTierForRole, getProviderForRole, roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 // Outer wrapper around the pure routing classifier in ./routing.js.
 // Handles the "live" side effects: caching the project map onto the
 // work item, logging telemetry events, and turning a routing decision
@@ -48,9 +48,8 @@ import { researchPayload } from "./payload.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
   normalizeResearchBudget,
-  researchModelTierForBudget,
   resolveResearchBudgetForRouting,
-  researchBudgetToReasoningEffort,
+  stepModelTier,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
@@ -386,7 +385,7 @@ export function classifyResearchForRouting({
   return routing;
 }
 
-export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null, plannerDispatch = false, modelTier = "cheap", reasoningEffort = null } = {}) {
+export function createPlanAfterSkippedResearch(workItem, { routing, budget = "normal", source = null, redTeamPlan = false, parentJob = null, plannerDispatch = false, modelTier = null, reasoningEffort = null } = {}) {
   const deepthinkBudget = normalizeResearchBudget(budget);
   const reason = routing?.reason || "deterministic no_research route";
   updateWorkItemResearchSkip(workItem.id, { skipped: true, reason });
@@ -436,8 +435,9 @@ export function createPlanAfterSkippedResearch(workItem, { routing, budget = "no
     title: `Plan: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
     parent_job_id: parentJob?.id || null,
     priority: workItem.priority,
-    model_tier: modelTier,
-    reasoning_effort: reasoningEffort || researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
+    // A plan that skipped research runs one tier below the planner base.
+    model_tier: modelTier || stepModelTier(roleExecutionForBudget("plan", deepthinkBudget).model_tier, -1),
+    reasoning_effort: reasoningEffort || roleExecutionForBudget("plan", deepthinkBudget).reasoning_effort,
     payload_json: JSON.stringify(researchPayload({
       research_skipped: true,
         ...(plannerDispatch ? { planner_dispatch: true } : {}),
@@ -546,8 +546,7 @@ export function createOneshotDevJob(workItem, {
         title: `Research: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
         parent_job_id: parentJob?.id || null,
         priority: workItem.priority,
-        model_tier: researchModelTierForBudget(researchBudget),
-        reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+        ...roleExecutionForBudget("research", researchBudget),
         payload_json: JSON.stringify(researchPayload({
           ...redTeamPlanningPayload(redTeamPlan),
           oneshot_demoted: true,
@@ -600,7 +599,7 @@ export function createOneshotDevJob(workItem, {
     title: `One-shot: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
     parent_job_id: parentJob?.id || null,
     priority: workItem.priority,
-    model_tier: "standard",
+    model_tier: getDefaultModelTierForRole("dev"),
     reasoning_effort: reasoningEffort,
     planner_risk_score: 1,
     payload_json: JSON.stringify({
@@ -714,8 +713,7 @@ export function createPreflightResearchJob(workItem, {
     job_type: "preflight",
     title: `Preflight: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
     priority: workItem.priority,
-    model_tier: "cheap",
-    reasoning_effort: "low",
+    ...roleExecutionForBudget("preflight"),
     payload_json: JSON.stringify(researchPayload({
       project_map: metadata.research_project_map || getProjectMapForResearchRouting(projectDir),
       routing: routing || null,
@@ -876,8 +874,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
       job_type: "research",
       title: `Research: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
       priority: workItem.priority,
-      model_tier: researchModelTierForBudget(actualBudget),
-      reasoning_effort: researchBudgetToReasoningEffort(actualBudget, "medium"),
+      ...roleExecutionForBudget("research", actualBudget),
       payload_json: JSON.stringify(researchPayload({
         ...redTeamPlanningPayload(redTeamPlan),
         web_only_answer: true,
@@ -912,8 +909,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
     job_type: "research",
     title: `Research: ${(workItem.title || `WI#${workItem.id}`).slice(0, 60)}`,
     priority: workItem.priority,
-    model_tier: researchModelTierForBudget(actualBudget),
-    reasoning_effort: researchBudgetToReasoningEffort(actualBudget, "medium"),
+    ...roleExecutionForBudget("research", actualBudget),
     payload_json: JSON.stringify(researchPayload({
       ...redTeamPlanningPayload(redTeamPlan),
     }, actualBudget)),

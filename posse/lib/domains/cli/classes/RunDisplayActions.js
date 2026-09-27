@@ -119,8 +119,7 @@ export class RunDisplayActions {
     skipJob,
     refreshWorkItemStatus,
     runLiveReview,
-    defaultResearchModelTier = () => "strong",
-    researchBudgetToReasoningEffort,
+    roleExecutionForBudget,
     researchPayload,
     refreshDisplaySnapshotsForQueue = () => {},
     approvePlan = approvePlanGate,
@@ -156,8 +155,7 @@ export class RunDisplayActions {
     this.skipJob = skipJob;
     this.refreshWorkItemStatus = refreshWorkItemStatus;
     this.runLiveReview = runLiveReview;
-    this.defaultResearchModelTier = defaultResearchModelTier;
-    this.researchBudgetToReasoningEffort = researchBudgetToReasoningEffort;
+    this.roleExecutionForBudget = roleExecutionForBudget;
     this.researchPayload = researchPayload;
     this.refreshDisplaySnapshotsForQueue = refreshDisplaySnapshotsForQueue;
     this.approvePlan = approvePlan;
@@ -489,8 +487,7 @@ export class RunDisplayActions {
       job_type: "artificer",
       title: `Generate: ${title.slice(0, 70)}`,
       priority: "normal",
-      model_tier: "standard",
-      reasoning_effort: "medium",
+      ...this.roleExecutionForBudget("artificer"),
       provider: imgProvider,
       payload_json: JSON.stringify(buildImageInjectionPayload({ prompt, outputRoot })),
     });
@@ -636,8 +633,7 @@ export class RunDisplayActions {
       job_type: "research",
       title: `Ask: ${title.slice(0, 60)}`,
       priority: "normal",
-      model_tier: this.defaultResearchModelTier(),
-      reasoning_effort: this.researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
+      ...this.roleExecutionForBudget("research", deepthinkBudget),
       payload_json: JSON.stringify(this.researchPayload({}, deepthinkBudget)),
     });
   }

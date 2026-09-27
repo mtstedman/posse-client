@@ -6,11 +6,6 @@ import { POSSE_MCP_GATEWAY_SERVER_NAME, mcpClientToolDeadlineSec } from "../../.
 import { CODEX_CODE_MODE_ROLES, CODEX_NATIVE_BATCHING_ROLES, CODEX_TERMINAL_MCP_SERVER_SUFFIX, CODEX_DIRECT_RESEARCH_TOOLS, CODEX_RESEARCHER_EXCLUDED_TOOL_NAMESPACES, CODEX_RESEARCHER_TRANSPORT_LIMITS } from "../../../../catalog/tool-surface/provider-attachments.js";
 import { buildDisabledAtlasAttachment, buildAtlasMcpServerConfig, getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerConfigAsync, roleUsesDeterministicReadMcp, releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
-import {
-  resolveAtlasResearcherDispatcher,
-  resolveAtlasResearcherTypedDispatcher,
-  resolveAtlasResearcherWorkflow,
-} from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
@@ -76,10 +71,6 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
   nativeBatchingCatalog = String(role || "").trim().toLowerCase() === "researcher"
     ? process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || null : null,
   nativeBatching = true,
-  atlasResearcherDispatcher = String(role || "").trim().toLowerCase() === "researcher"
-    && (resolveAtlasResearcherDispatcher()
-      || resolveAtlasResearcherTypedDispatcher()
-      || resolveAtlasResearcherWorkflow()),
 } = {}) {
   const serverKey = _toCodexConfigKey(serverConfig.name || POSSE_MCP_GATEWAY_SERVER_NAME);
   const toolNames = Array.isArray(serverConfig.tools) ? serverConfig.tools : [];
@@ -126,7 +117,6 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
         lazyTools: [],
         lazyDiscoveryEnabled: false,
         atlasTools: [],
-        atlasResearcherDispatcher: false,
         requiredTools: [],
         contractTools: [],
         configOverrides: [],
@@ -253,7 +243,6 @@ export function buildCodexDeterministicMcpAttachment(serverConfig, {
     // call, while DB and future optional services may opt into it here.
     lazyDiscoveryEnabled: lazyTools.length > 0,
     atlasTools,
-    atlasResearcherDispatcher: atlasResearcherDispatcher === true,
     requiredTools: Array.isArray(serverConfig.requiredTools) ? serverConfig.requiredTools : [],
     contractTools,
     configOverrides,

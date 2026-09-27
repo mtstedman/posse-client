@@ -18,9 +18,6 @@ const REQUIRED_ROLE_CONTRACTS = Object.freeze({
 const REQUIRED_PROMPT_RULES = Object.freeze([
   "runtime-isolation",
   "capability-discipline",
-  "reasoning/high",
-  "reasoning/deep",
-  "reasoning/low",
 ]);
 
 function probePacket({ cwd = process.cwd(), providerName = "claude" } = {}) {

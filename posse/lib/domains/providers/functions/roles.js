@@ -6,7 +6,7 @@ import {
   JOB_TYPE_ROLE_REGISTRY,
   JOB_TYPE_TO_PROVIDER_ROLE,
 } from "../../../catalog/provider.js";
-import { JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
+import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
 
 export {
   PROVIDER_ROLE_NAMES,
@@ -21,6 +21,10 @@ export function providerSettingKeyForRole(role) {
 
 export function reasoningEffortSettingKeyForRole(role) {
   return `reasoning_effort_${role}`;
+}
+
+export function modelTierSettingKeyForRole(role) {
+  return `model_tier_${role}`;
 }
 
 export function providerRoleForJobType(jobTypeOrRole = "dev") {
@@ -60,12 +64,45 @@ export const PROVIDER_ROLE_SETTING_DEFS = Object.freeze(
   }))
 );
 
+// Each role's base reasoning effort and model tier. They fill in wherever a
+// flow has no explicit value; research budgets (deepthink) step up or down
+// from them, while explicit job values, risk policy, planner-dispatch
+// settings, and harness pins still take precedence.
+const ROLE_BASE_REASONING_EFFORTS = Object.freeze({
+  dev: "medium",
+  artificer: "medium",
+  researcher: "high",
+  planner: "medium",
+  preflight: "low",
+  assessor: "medium",
+  delegator: "low",
+});
+
+const ROLE_BASE_MODEL_TIERS = Object.freeze({
+  dev: "standard",
+  artificer: "standard",
+  researcher: "standard",
+  planner: "standard",
+  preflight: "cheap",
+  assessor: "cheap",
+  delegator: "cheap",
+});
+
 export const ROLE_REASONING_EFFORT_SETTING_DEFS = Object.freeze(
   PROVIDER_ROLE_NAMES.map((role) => Object.freeze({
     key: reasoningEffortSettingKeyForRole(role),
-    default: role === "preflight" ? "low" : "medium",
+    default: ROLE_BASE_REASONING_EFFORTS[role] || "medium",
     options: JOB_REASONING_EFFORTS,
-    description: `Default reasoning strength for new ${role} jobs; explicit job and workflow overrides take precedence`,
+    description: `Base reasoning strength for ${role} calls; deepthink budgets step from it, and explicit job and workflow overrides take precedence`,
+  }))
+);
+
+export const ROLE_MODEL_TIER_SETTING_DEFS = Object.freeze(
+  PROVIDER_ROLE_NAMES.map((role) => Object.freeze({
+    key: modelTierSettingKeyForRole(role),
+    default: ROLE_BASE_MODEL_TIERS[role] || "standard",
+    options: JOB_MODEL_TIERS,
+    description: `Base model tier for ${role} calls; deepthink budgets step from it, and explicit job and workflow overrides take precedence`,
   }))
 );
 
@@ -74,4 +111,11 @@ export function defaultReasoningEffortForRole(role) {
   return ROLE_REASONING_EFFORT_SETTING_DEFS.find((entry) => (
     entry.key === reasoningEffortSettingKeyForRole(normalized)
   ))?.default || "medium";
+}
+
+export function defaultModelTierForRole(role) {
+  const normalized = providerRoleForJobType(role);
+  return ROLE_MODEL_TIER_SETTING_DEFS.find((entry) => (
+    entry.key === modelTierSettingKeyForRole(normalized)
+  ))?.default || "standard";
 }

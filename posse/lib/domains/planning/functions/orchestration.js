@@ -7,6 +7,7 @@
 // Argv-derived flags (redTeamPlan, iterateRedTeam) and PROJECT_DIR
 // arrive as parameters so this module never closes over CLI globals.
 
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
   addDependency,
@@ -41,8 +42,6 @@ import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import { researchPayload } from "../../research/functions/payload.js";
 import {
   getResearchBudget,
-  researchModelTierForBudget,
-  researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
@@ -169,8 +168,7 @@ export function spawnIterativeNextPass(wi, state, { projectDir, redTeamPlan = fa
     job_type: "research",
     title: `Research (iterate ${passNumber}): ${wiTitle}`,
     priority: wi.priority,
-    model_tier: researchModelTierForBudget(deepthinkBudget),
-    reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "medium"),
+    ...roleExecutionForBudget("research", deepthinkBudget),
     payload_json: JSON.stringify(researchPayload({
       _is_loopback: true,
       _iterate_pass: passNumber,
@@ -207,8 +205,7 @@ export function spawnIterativeNextPass(wi, state, { projectDir, redTeamPlan = fa
       title: `Iterate (${mode} pass ${passNumber}): ${wiTitle}`,
       parent_job_id: reResearchJob.id,
       priority: wi.priority,
-      model_tier: "standard",
-      reasoning_effort: researchBudgetToReasoningEffort(deepthinkBudget, "high"),
+      ...roleExecutionForBudget("plan", deepthinkBudget),
       payload_json: JSON.stringify(planPayload),
     });
     addDependency(planJob.id, reResearchJob.id, "hard");

@@ -54,13 +54,13 @@ export const PROJECT_DB_SETTING_DEFS = Object.freeze([
 // silently acquire separate policy tables.
 export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
   Object.freeze({ role: "coordination", label: "Coordination", keys: Object.freeze(["agent_coordination_mode", ...PLANNER_DISPATCH_SETTING_KEYS]) }),
-  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["reasoning_effort_researcher", "base_turns_researcher", "max_output_tokens_researcher"]) }),
-  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["reasoning_effort_planner", "base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
-  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["reasoning_effort_dev", "base_turns_dev", "max_output_tokens_dev"]) }),
-  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["reasoning_effort_artificer", "max_output_tokens_artificer"]) }),
-  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["reasoning_effort_preflight", "max_output_tokens_preflight"]) }),
-  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["reasoning_effort_assessor", "base_turns_assessor", "max_output_tokens_assessor"]) }),
-  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "reasoning_effort_delegator", "max_output_tokens_delegator"]) }),
+  Object.freeze({ role: "researcher", label: "Researcher", keys: Object.freeze(["reasoning_effort_researcher", "model_tier_researcher", "base_turns_researcher", "max_output_tokens_researcher"]) }),
+  Object.freeze({ role: "planner", label: "Planner", keys: Object.freeze(["reasoning_effort_planner", "model_tier_planner", "base_turns_planner", "max_output_tokens_planner", "planner_max_tasks", "planner_under_scoped_broad_gate"]) }),
+  Object.freeze({ role: "dev", label: "Dev", keys: Object.freeze(["reasoning_effort_dev", "model_tier_dev", "base_turns_dev", "max_output_tokens_dev"]) }),
+  Object.freeze({ role: "artificer", label: "Artificer", keys: Object.freeze(["reasoning_effort_artificer", "model_tier_artificer", "max_output_tokens_artificer"]) }),
+  Object.freeze({ role: "preflight", label: "Preflight", keys: Object.freeze(["reasoning_effort_preflight", "model_tier_preflight", "max_output_tokens_preflight"]) }),
+  Object.freeze({ role: "assessor", label: "Assessor", keys: Object.freeze(["reasoning_effort_assessor", "model_tier_assessor", "base_turns_assessor", "max_output_tokens_assessor"]) }),
+  Object.freeze({ role: "delegator", label: "Delegator", keys: Object.freeze(["delegation_mode", "reasoning_effort_delegator", "model_tier_delegator", "max_output_tokens_delegator"]) }),
 ]);
 
 export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
@@ -493,6 +493,8 @@ export function humanizeSettingKey(settingKey = "") {
   if (roleOutputTokens) return `${roleLabel(roleOutputTokens[1])} output token limit`;
   const roleReasoningEffort = displayKey.match(/^reasoning_effort_(.+)$/);
   if (roleReasoningEffort) return `${roleLabel(roleReasoningEffort[1])} reasoning strength`;
+  const roleModelTier = displayKey.match(/^model_tier_(.+)$/);
+  if (roleModelTier) return `${roleLabel(roleModelTier[1])} model tier`;
   const roleProviders = displayKey.match(/^provider_(.+)$/);
   if (roleProviders) return `${roleLabel(roleProviders[1])} providers`;
 
@@ -609,6 +611,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Researcher",
     keys: Object.freeze([
       "reasoning_effort_researcher",
+      "model_tier_researcher",
       "base_turns_researcher",
       "max_output_tokens_researcher",
     ]),
@@ -619,6 +622,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Planner",
     keys: Object.freeze([
       "reasoning_effort_planner",
+      "model_tier_planner",
       "base_turns_planner",
       "max_output_tokens_planner",
       "planner_max_tasks",
@@ -631,6 +635,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Dev",
     keys: Object.freeze([
       "reasoning_effort_dev",
+      "model_tier_dev",
       "base_turns_dev",
       "max_output_tokens_dev",
     ]),
@@ -641,6 +646,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Artificer",
     keys: Object.freeze([
       "reasoning_effort_artificer",
+      "model_tier_artificer",
       "max_output_tokens_artificer",
     ]),
   },
@@ -650,6 +656,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Preflight",
     keys: Object.freeze([
       "reasoning_effort_preflight",
+      "model_tier_preflight",
       "max_output_tokens_preflight",
     ]),
   },
@@ -659,6 +666,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     label: "Assessor",
     keys: Object.freeze([
       "reasoning_effort_assessor",
+      "model_tier_assessor",
       "base_turns_assessor",
       "max_output_tokens_assessor",
     ]),
@@ -670,6 +678,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     keys: Object.freeze([
       "delegation_mode",
       "reasoning_effort_delegator",
+      "model_tier_delegator",
       "max_output_tokens_delegator",
     ]),
   },
@@ -848,6 +857,7 @@ export const SETTINGS_GROUPS = Object.freeze([
       "atlas_gateway_dedup_advertise",
       "atlas_prose_dedup",
       "atlas_tools_disabled",
+      "agent_tools_disabled",
       "atlas_code_lens_callable",
       "atlas_view_layer_merge",
       "atlas_shadow_guardrails",
@@ -1043,12 +1053,19 @@ export const TUNING_SETTING_KEYS = new Set([
   "planner_max_tasks",
   "planner_under_scoped_broad_gate",
   "reasoning_effort_researcher",
+  "model_tier_researcher",
   "reasoning_effort_planner",
+  "model_tier_planner",
   "reasoning_effort_dev",
+  "model_tier_dev",
   "reasoning_effort_artificer",
+  "model_tier_artificer",
   "reasoning_effort_preflight",
+  "model_tier_preflight",
   "reasoning_effort_assessor",
+  "model_tier_assessor",
   "reasoning_effort_delegator",
+  "model_tier_delegator",
   "base_turns_researcher",
   "base_turns_planner",
   "base_turns_dev",

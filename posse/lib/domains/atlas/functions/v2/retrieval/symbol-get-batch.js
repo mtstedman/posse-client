@@ -139,8 +139,11 @@ function nestedBatchHeaderBlocks(blocks) {
 }
 
 export function combineSymbolGetBatchResults(results, overflow = {}) {
+  // One selector with nothing excluded needs no batch envelope: its own header
+  // is already the first block, exactly as for an unbatched call.
+  if (results.length === 1 && Object.keys(overflow).length === 0) return results[0];
   const content = [{ type: "text", text: "" }];
-  const items = results.map((result, index) => {
+  const items = results.map((result) => {
     const offset = content.length;
     const blocks = Array.isArray(result?.content) ? result.content : [];
     const nestedHeaders = nestedBatchHeaderBlocks(blocks);
@@ -161,10 +164,10 @@ export function combineSymbolGetBatchResults(results, overflow = {}) {
       }
     }
     const isError = result?.isError === true;
+    // Items keep request order, so their position is the index; only a failed
+    // item says so explicitly.
     return {
-      index,
-      isError,
-      ...(isError ? { errorCode: batchItemErrorCode(result) } : {}),
+      ...(isError ? { isError, errorCode: batchItemErrorCode(result) } : {}),
       contentBlocks: Array.from({ length: content.length - offset }, (_, i) => offset + i),
     };
   });

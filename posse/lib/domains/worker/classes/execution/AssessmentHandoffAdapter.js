@@ -1,3 +1,4 @@
+import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import path from "path";
 import {
   acquireAssessmentBarrier,
@@ -227,7 +228,7 @@ export class AssessmentHandoffAdapter {
     const assessReasoningEffortOverride = typeof cleanPayload?._assess_reasoning_effort === "string"
       ? cleanPayload._assess_reasoning_effort
       : null;
-    const assessmentReasoningEffort = harnessAssessorEffort() || assessReasoningEffortOverride || "medium";
+    const assessmentReasoningEffort = harnessAssessorEffort() || assessReasoningEffortOverride || getDefaultReasoningEffortForRole("assessor");
     const assessmentSource = loadAssessmentSource(job.id);
     if (!assessmentSource.ok) {
       const missing = new Error(`Assessment evidence is unavailable: ${assessmentSource.reason}`);
@@ -326,7 +327,7 @@ export class AssessmentHandoffAdapter {
     const assessAttemptCount = assessAttempt.attemptCount || (Number(assessmentSource.attempt?.attempt_number || 0) + 1);
     const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
     const effectiveTier = provider.escalateTier(
-      assessModelTierOverride || "cheap",
+      assessModelTierOverride || getDefaultModelTierForRole("assessor"),
       assessAttemptCount,
       { resolveModel: resolveAssessModel },
     );

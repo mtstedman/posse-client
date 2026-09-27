@@ -3,6 +3,7 @@
 // Recovery-oriented developer role used for assessor follow-up jobs. It runs
 // through BaseRole's hook pipeline while reusing the dev provider lane.
 
+import { getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import fs from "fs";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
@@ -402,7 +403,7 @@ export class FixRole extends BaseRole {
       // --dangerously-skip-permissions for a no-scope fix session.
       autoApprove: false,
       modelTier: ctx.tier,
-      reasoningEffort: job.reasoning_effort || "medium",
+      reasoningEffort: job.reasoning_effort || getDefaultReasoningEffortForRole("dev"),
       activity: `fixing job #${job.id}: ${shortJobTitle(job).slice(0, 40)}`,
       fallbackReads: ctx.fixFallbackReads,
       taskMode: ctx.fixTaskMode,

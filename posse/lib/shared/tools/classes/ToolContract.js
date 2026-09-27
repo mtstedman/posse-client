@@ -52,6 +52,22 @@ const CLAUDE_AMBIENT_TOOLS = [
   "RemoteTrigger",
   "TaskOutput",
   "TaskStop",
+  // Claude Code 2.1.283 built-ins outside the lists above. With MCP attached,
+  // the CLI surface is "all built-ins minus disallowedTools", so any built-in
+  // missing here reaches the model: DesignSync, ReportFindings, ScheduleWakeup
+  // and Workflow (plus ListAgents, grouped with coordination) added ~14.5k
+  // tokens to every Posse Claude call.
+  "DesignSync",
+  "ReportFindings",
+  "ScheduleWakeup",
+  "Workflow",
+  "Skill",
+  "SendFeedback",
+  "LSP",
+  "EndConversation",
+  "Artifact",
+  "ArtifactComments",
+  "ArtifactData",
 ].join(",");
 const CLAUDE_NATIVE_COORDINATION_TOOLS = [
   "Agent",
@@ -65,6 +81,7 @@ const CLAUDE_NATIVE_COORDINATION_TOOLS = [
   "TaskGet",
   "TaskList",
   "TaskUpdate",
+  "ListAgents",
 ];
 export const CLAUDE_NATIVE_TOOL_NAMES = Object.freeze([
   "Read",
@@ -81,6 +98,16 @@ export const CLAUDE_NATIVE_TOOL_NAMES = Object.freeze([
   ...CLAUDE_AMBIENT_TOOLS.split(",").filter((name) => !CLAUDE_NATIVE_COORDINATION_TOOLS.includes(name)),
 ]);
 const ALL_CLAUDE_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_NAMES.join(",");
+
+// Built-in names a Claude CLI session reports (stream-json init `tools`) that
+// Posse's catalog does not know, so no denylist can remove them. MCP tools are
+// excluded. A non-empty result means a newer Claude Code added a built-in.
+export function unknownClaudeNativeTools(tools = []) {
+  const known = new Set(CLAUDE_NATIVE_TOOL_NAMES);
+  return (Array.isArray(tools) ? tools : [])
+    .map((name) => String(name || ""))
+    .filter((name) => name && !name.startsWith("mcp__") && !known.has(name));
+}
 const ASSESSOR_CLAUDE_NATIVE_DISALLOW = `Read,Glob,Grep,Bash,Write,Edit,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,${CLAUDE_AMBIENT_TOOLS}`;
 const CLAUDE_NATIVE_TEAM_DISALLOW = CLAUDE_AMBIENT_TOOLS
   .split(",")

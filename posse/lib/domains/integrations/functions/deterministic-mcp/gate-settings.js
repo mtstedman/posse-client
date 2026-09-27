@@ -31,12 +31,6 @@ export const ATLAS_GATEWAY_DEDUP_ADVERTISE_DEFAULT = false;
 
 export const ATLAS_RESEARCHER_SCHEMA_DIET_SETTING = "atlas_researcher_schema_diet";
 export const ATLAS_RESEARCHER_SCHEMA_DIET_DEFAULT = true;
-export const ATLAS_RESEARCHER_DISPATCHER_SETTING = "atlas_researcher_dispatcher";
-export const ATLAS_RESEARCHER_DISPATCHER_DEFAULT = false;
-export const ATLAS_RESEARCHER_TYPED_DISPATCHER_SETTING = "atlas_researcher_typed_dispatcher";
-export const ATLAS_RESEARCHER_TYPED_DISPATCHER_DEFAULT = false;
-export const ATLAS_RESEARCHER_WORKFLOW_SETTING = "atlas_researcher_workflow";
-export const ATLAS_RESEARCHER_WORKFLOW_DEFAULT = false;
 export const ATLAS_RESEARCH_RUNTIME_GUIDANCE_SETTING = "atlas_research_runtime_guidance";
 export const ATLAS_RESEARCH_RUNTIME_GUIDANCE_DEFAULT = true;
 
@@ -48,39 +42,6 @@ export function resolveAtlasResearcherSchemaDiet() {
     );
   } catch {
     return ATLAS_RESEARCHER_SCHEMA_DIET_DEFAULT;
-  }
-}
-
-export function resolveAtlasResearcherDispatcher() {
-  try {
-    return parseBoolean(
-      getAccountSetting(ATLAS_RESEARCHER_DISPATCHER_SETTING),
-      ATLAS_RESEARCHER_DISPATCHER_DEFAULT,
-    );
-  } catch {
-    return ATLAS_RESEARCHER_DISPATCHER_DEFAULT;
-  }
-}
-
-export function resolveAtlasResearcherTypedDispatcher() {
-  try {
-    return parseBoolean(
-      getAccountSetting(ATLAS_RESEARCHER_TYPED_DISPATCHER_SETTING),
-      ATLAS_RESEARCHER_TYPED_DISPATCHER_DEFAULT,
-    );
-  } catch {
-    return ATLAS_RESEARCHER_TYPED_DISPATCHER_DEFAULT;
-  }
-}
-
-export function resolveAtlasResearcherWorkflow() {
-  try {
-    return parseBoolean(
-      getAccountSetting(ATLAS_RESEARCHER_WORKFLOW_SETTING),
-      ATLAS_RESEARCHER_WORKFLOW_DEFAULT,
-    );
-  } catch {
-    return ATLAS_RESEARCHER_WORKFLOW_DEFAULT;
   }
 }
 
@@ -138,6 +99,35 @@ export function resolveAtlasDisabledTools() {
   } catch {
     return new Set();
   }
+}
+
+export const AGENT_TOOLS_DISABLED_SETTING = "agent_tools_disabled";
+// A contract without its terminal tool cannot finish; these stay issued.
+const PROTECTED_AGENT_TOOLS = new Set(["agent_handoff", "sub_agent_next_input"]);
+
+// Testing toggle for every issued tool: comma/space-separated names removed
+// from newly minted agent contracts. A plain or `tools.`-prefixed name
+// (read_file, search_files, list_files) removes a native tool; a dotted or
+// `atlas.`-prefixed name (code.lens, atlas.symbol.get) removes an Atlas action.
+// Removing a name from the list re-enables the tool. Empty disables nothing.
+export function resolveAgentDisabledTools() {
+  const disabled = { tools: new Set(), atlas: new Set() };
+  let raw = "";
+  try {
+    raw = String(getAccountSetting(AGENT_TOOLS_DISABLED_SETTING) ?? "").trim();
+  } catch {
+    return disabled;
+  }
+  for (const part of raw.split(/[\s,;]+/)) {
+    const name = part.trim().toLowerCase();
+    if (!name) continue;
+    if (name.startsWith("atlas.")) disabled.atlas.add(name.slice("atlas.".length));
+    else if (name.startsWith("tools.")) disabled.tools.add(name.slice("tools.".length));
+    else if (name.includes(".")) disabled.atlas.add(name);
+    else disabled.tools.add(name);
+  }
+  for (const name of PROTECTED_AGENT_TOOLS) disabled.tools.delete(name);
+  return disabled;
 }
 
 export function resolveAtlasCodeLensCallable() {

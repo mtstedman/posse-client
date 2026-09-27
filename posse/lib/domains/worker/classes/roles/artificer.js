@@ -3,6 +3,7 @@
 // Artificer role handler for artifact-producing tasks such as reports,
 // generated content, and image outputs written into artifact roots.
 
+import { getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import fs from "fs";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -270,7 +271,7 @@ export class ArtificerRole extends BaseRole {
       sessionInstructions: ctx.packet?.prompt || null,
       autoApprove: !ctx.artRoots,
       modelTier: ctx.tier,
-      reasoningEffort: job.reasoning_effort || "medium",
+      reasoningEffort: job.reasoning_effort || getDefaultReasoningEffortForRole("artificer"),
       activity: `producing job #${job.id}: ${shortJobTitle(job).slice(0, 40)}`,
       fallbackReads: ctx.fallbackReads,
       taskMode: ctx.taskMode,

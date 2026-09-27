@@ -1,3 +1,4 @@
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
   addDependency,
   createJob,
@@ -228,8 +229,7 @@ export function createApprovedSuggestionFollowUp({
     title: `Improvement: ${trimForTitle(suggestionText, 80)}`,
     parent_job_id: sourceJobId,
     priority,
-    model_tier: "standard",
-    reasoning_effort: "medium",
+    ...roleExecutionForBudget("dev"),
     payload_json: JSON.stringify(payload),
   });
   if (sourceJobId != null) addDependency(job.id, sourceJobId, "hard");

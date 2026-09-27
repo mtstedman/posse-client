@@ -10,7 +10,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { getSetting } from "../../../queue/functions/index.js";
-import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock, unknownClaudeNativeTools } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
@@ -211,6 +211,8 @@ export const capabilities = Object.freeze({
 });
 
 // ─── Model Tier Config ──────────────────────────────────────────────────────
+
+const CLAUDE_CLI_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 // Maps the DB schema's model_tier + reasoning_effort to concrete Claude settings.
 // Model overrides come from Posse settings, not shell env.
@@ -422,6 +424,13 @@ export async function callProvider(promptText, {
     }
     if (priorSessionHandle) {
       args.push("--resume", String(priorSessionHandle));
+    }
+
+    // Reasoning effort is a CLI session setting on every route, native
+    // controls included, as Codex's model_reasoning_effort is.
+    const cliEffort = String(reasoningEffort || "").trim().toLowerCase();
+    if (CLAUDE_CLI_EFFORT_LEVELS.has(cliEffort)) {
+      args.push("--effort", cliEffort);
     }
 
     // Runtime agents must not load user/project settings. The per-job loader
@@ -641,11 +650,9 @@ export async function callProvider(promptText, {
       throw setupErr;
     }
 
-    // ── Thinking / reasoning effort ─────────────────────────────────────
-    // Remote owns normal provider-independent reasoning directives. Native
-    // controls bypass Remote and retain their explicit prompt-based effort
-    // translation so the raw benchmark route still receives its requested
-    // budget.
+    // ── Execution contract ──────────────────────────────────────────────
+    // Remote owns normal provider-independent directives; native controls
+    // bypass Remote and receive only this fixed read-only contract.
     const contractBlock = nativeColdBoot
       ? [
           "Execution contract:",
@@ -700,17 +707,12 @@ export async function callProvider(promptText, {
       cleanupSetupFiles();
       throw setupErr;
     }
-    const basePrompt = promptText;
-    let finalPrompt = basePrompt;
-    if (nativeColdBoot && deepthink) {
-      finalPrompt = `[ultrathink] Deep-think budget is enabled for this task. Take the extra time needed to inspect the codebase carefully and synthesize before concluding.\n\n${basePrompt}`;
-    } else if (nativeColdBoot && (tierConfig.thinking || reasoningEffort === "high")) {
-      finalPrompt = `[ultrathink] This is a complex task requiring deep reasoning.\n\n${basePrompt}`;
-    } else if (nativeColdBoot && reasoningEffort === "low") {
-      finalPrompt = `Be direct and efficient. Skip detailed analysis — just execute the task.\n\n${basePrompt}`;
-    }
+    // Effort travels only as the --effort CLI flag; the prompt carries no
+    // thinking keywords, so native controls and Posse calls run at the same
+    // requested effort.
+    const finalPrompt = promptText;
 
-    // Log the fully-assembled user-message prompt (contract + thinking prefix
+    // Log the fully-assembled user-message prompt (contract
     // + handoff packet content) along with BOTH the paths of the system
     // prompt files AND their concatenated contents. Without the contents,
     // grepping the prompt log for role-prompt text (e.g. "You are the
@@ -1029,7 +1031,21 @@ export async function callProvider(promptText, {
     let latestSessionHandle = null;
     const streamTelemetry = new ClaudeStreamTelemetry();
 
+    // The CLI reports its loaded tool surface once, at session start. A built-in
+    // Posse does not catalog cannot be denied and silently costs every turn.
+    let checkedInitTools = false;
+    function warnOnUnknownNativeTools(message) {
+      if (checkedInitTools || message?.type !== "system" || message?.subtype !== "init") return;
+      checkedInitTools = true;
+      const unknown = unknownClaudeNativeTools(message.tools);
+      if (unknown.length === 0) return;
+      const line = `Claude CLI loaded built-in tools Posse cannot deny: ${unknown.join(", ")} — add them to the Claude native tool catalog`;
+      if (directOutput) process.stdout.write(`${color}|${C.reset} ${C.yellow}${line}${C.reset}\n`);
+      else onLine?.(`${C.yellow}${line}${C.reset}`);
+    }
+
     function observeStreamTelemetry(message) {
+      warnOnUnknownNativeTools(message);
       for (const summary of streamTelemetry.observe(message)) {
         for (const line of summary.split(/\r?\n/).filter(Boolean)) {
           if (directOutput) process.stdout.write(`${color}|${C.reset} [thinking] ${line}\n`);

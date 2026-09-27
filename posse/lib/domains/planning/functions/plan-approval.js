@@ -47,9 +47,8 @@ import {
 import {
   getResearchBudget,
   isResearchBudgetDeep,
-  researchModelTierForBudget,
-  researchBudgetToReasoningEffort,
 } from "../../../shared/policies/functions/role-utils.js";
+import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { operationalCommandApprovalRequest } from "../../worker/functions/helpers/test-execution-receipt.js";
 
@@ -638,8 +637,7 @@ export function respawnAfterRejection(wiId, { feedback = null, rejectedArtifactI
       job_type: "research",
       title: `Research (after plan rejection): ${(wi.title || "").slice(0, 60)}`,
       priority: wi.priority || "normal",
-      model_tier: researchModelTierForBudget(researchBudget),
-      reasoning_effort: researchBudgetToReasoningEffort(researchBudget, "medium"),
+      ...roleExecutionForBudget("research", researchBudget),
       payload_json: JSON.stringify({
         deepthink_budget: researchBudget,
         deepthink: isResearchBudgetDeep(researchBudget),

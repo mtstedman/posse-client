@@ -45,9 +45,13 @@ import {
   maxTurnsOverrideFromPayload as defaultMaxTurnsOverrideFromPayload,
   researchBudgetFromDeepthink,
   researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride,
-  researchBudgetToReasoningEffort as defaultResearchBudgetToReasoningEffort,
   shortJobTitle as defaultShortJobTitle,
 } from "../../../../shared/policies/functions/role-utils.js";
+import {
+  getDefaultModelTierForRole,
+  getDefaultReasoningEffortForRole,
+  inheritedReasoningEffortForBudget,
+} from "../../../settings/functions/repository-settings.js";
 import {
   spawnFailureForRole,
   spawnSuccessForRole,
@@ -83,7 +87,7 @@ const DEFAULT_DEPS = {
   loadNudges: () => "",
   maxTurnsOverrideFromPayload: defaultMaxTurnsOverrideFromPayload,
   researchBudgetToMaxTurnsOverride: defaultResearchBudgetToMaxTurnsOverride,
-  researchBudgetToReasoningEffort: defaultResearchBudgetToReasoningEffort,
+  inheritedReasoningEffortForBudget,
   requestWaitingLaneResearchDemand,
   captureWaitingLaneResearchHotPaths,
   shortJobTitle: defaultShortJobTitle,
@@ -530,9 +534,9 @@ export class ResearcherRole extends BaseRole {
       work_item_id: job.work_item_id,
       job_id: job.id,
       title: job.title,
-      model_tier: ctx.tier || job.model_tier || "standard",
+      model_tier: ctx.tier || job.model_tier || getDefaultModelTierForRole("research"),
       model_name: job._executionModelName || job.model_name || null,
-      reasoning_effort: job.reasoning_effort || "medium",
+      reasoning_effort: job.reasoning_effort || getDefaultReasoningEffortForRole("research"),
       prompt_profile: promptProfile,
       research_role_mode: roleMode,
       research_budget: researchBudget,
@@ -731,7 +735,7 @@ export class ResearcherRole extends BaseRole {
       isResearchBudgetDeep,
       maxTurnsOverrideFromPayload,
       researchBudgetToMaxTurnsOverride,
-      researchBudgetToReasoningEffort,
+      inheritedReasoningEffortForBudget,
       shortJobTitle,
     } = this.roleDeps();
     const researchBudget = ctx.researchBudget || "normal";
@@ -760,7 +764,7 @@ export class ResearcherRole extends BaseRole {
       promptProfile: ctx.promptProfile || researchPromptProfile(roleMode, { reportMode: !!ctx.researchReportMode }),
       allowWrite: false,
       modelTier: ctx.tier,
-      reasoningEffort: researchBudgetToReasoningEffort(researchBudget, job.reasoning_effort || "medium"),
+      reasoningEffort: inheritedReasoningEffortForBudget("research", researchBudget, job.reasoning_effort),
       deepthink: isResearchBudgetDeep(researchBudget),
       ...(effectiveMaxTurns ? { maxTurns: effectiveMaxTurns } : {}),
       activity: `${activityPrefix}: ${shortJobTitle(job).replace(/^Research(?:\s*\((?:self-resolve|follow-up|[^)]*)\))?:\s*/i, "").slice(0, 40)}`,
