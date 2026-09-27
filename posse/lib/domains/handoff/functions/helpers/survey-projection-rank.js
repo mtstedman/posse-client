@@ -151,6 +151,20 @@ export function surveyOutlineSymbols(file, { taskText = "" } = {}) {
 const EXAMPLE_PATH_RE = /(?:^|\/)(?:examples?|demos?|samples?)\//i;
 const ANONYMOUS_SYMBOL_RE = /<anonymous@/;
 
+// Indexed qualified names repeat their own module path (httpx/_exceptions.py
+// lists httpx._exceptions.RequestError.__init__; src/bytes_mut.rs lists
+// bytes_mut.impl.BytesMut...). The line already names the file, so the map
+// shows each symbol relative to it, which also leaves room for more names.
+function fileRelativeSymbolName(name, filePath) {
+  const segments = String(filePath || "").replace(/\.[^./]+$/u, "").split("/").filter(Boolean);
+  while (segments.length > 0 && ["__init__", "index", "mod"].includes(segments.at(-1))) segments.pop();
+  for (let start = 0; start < segments.length; start++) {
+    const prefix = `${segments.slice(start).join(".")}.`;
+    if (name.startsWith(prefix) && name.length > prefix.length) return name.slice(prefix.length);
+  }
+  return name;
+}
+
 export function surveyFileOutline(files) {
   const lines = [];
   const seen = new Set();
@@ -167,7 +181,8 @@ export function surveyFileOutline(files) {
     let line = `- ${filePath}`;
     if (line.length > 480) continue;
     const names = [...new Set((Array.isArray(file.outlineSymbols) ? file.outlineSymbols : Array.isArray(file.symbols) ? file.symbols : [])
-      .map(symbolName).filter((name) => name && !ANONYMOUS_SYMBOL_RE.test(name)))];
+      .map(symbolName).filter((name) => name && !ANONYMOUS_SYMBOL_RE.test(name))
+      .map((name) => fileRelativeSymbolName(name, filePath)))];
     let shown = 0;
     for (const name of names) {
       const suffix = `${shown ? ", " : ": "}${name}`;

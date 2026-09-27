@@ -4,6 +4,21 @@ export function isSymbolGetBatch(args) {
   return args?.items != null || args?.symbols != null;
 }
 
+// A batch item may itself name one file and several symbols, the same shape the
+// top-level file+symbols form takes (Atlas553 PHP_SYMFONY_CONSOLE_3 sent three
+// such batches and each failed whole). Expand it into one item per name.
+export function flattenSharedFileItems(items) {
+  if (!Array.isArray(items)) return items;
+  return items.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item) || !Array.isArray(item.symbols) || item.items != null) return [item];
+    const { symbols, file, ...rest } = item;
+    if (typeof file !== "string" || !file.trim()) return [item];
+    return symbols.map((name) => (typeof name === "string" && name.trim()
+      ? { ...rest, symbolRef: { name, file } }
+      : { invalid: true }));
+  });
+}
+
 export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForId = null} = {}) {
   const sharedFile = args?.symbols != null;
   const field = sharedFile ? "symbols" : "items";
@@ -25,7 +40,7 @@ export function planSymbolGetBatch(args, {resolveSymbolId = null, sourcePathForI
     typeof name === "string" && name.trim()
       ? { symbolRef: { name, file: args.file } }
       : { invalid: true }
-  )) : args.items;
+  )) : flattenSharedFileItems(args.items);
   // A budget above the per-symbol cap is applied at the cap, not refused: a
   // refusal spends a whole retrieval call on nothing (Atlas533 TS_PATTERN_1
   // asked for 16000). Only a budget that is not a positive integer fails.

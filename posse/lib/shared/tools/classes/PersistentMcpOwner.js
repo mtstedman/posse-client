@@ -1232,9 +1232,32 @@ function compactResearcherTypedAtlasResult(result, session, toolName, toolArgs =
 }
 
 function projectAtlasModelResult(result, session, toolName, toolArgs = {}) {
-  return normalizeResearcherTypedAtlasResultFieldNames(
+  const projected = normalizeResearcherTypedAtlasResultFieldNames(
     omitAtlasCacheMetadata(result), session, toolName, toolArgs,
   );
+  const capped = toolArgs && typeof toolArgs === "object" ? SOFT_CAPPED_ARGUMENTS.get(toolArgs) : null;
+  return capped
+    ? appendOwnerModelControlNotice(projected, `\n\n${capped}`, { kind: "atlas_soft_cap", trigger: toolName })
+    : projected;
+}
+
+// A list argument over its schema cap is truncated to the cap, not refused: a
+// refusal spends a whole call on nothing (atlas555 PY_HTTPX_3 sent code.survey
+// 20 identifiers against a cap of 16). The result says what was dropped.
+const SOFT_CAPPED_ARGUMENTS = new WeakMap();
+const SOFT_CAP_FIELDS = new Set(["identifiersToFind", "symbols", "paths"]);
+
+function softCapArrayArguments(schema, toolArgs) {
+  if (!toolArgs || typeof toolArgs !== "object" || Array.isArray(toolArgs)) return;
+  const properties = schema?.properties || {};
+  const notes = [];
+  for (const [field, value] of Object.entries(toolArgs)) {
+    const limit = properties[field]?.maxItems;
+    if (!SOFT_CAP_FIELDS.has(field) || !Array.isArray(value) || !Number.isSafeInteger(limit) || value.length <= limit) continue;
+    toolArgs[field] = value.slice(0, limit);
+    notes.push(`${field} listed ${value.length} entries; the first ${limit} were used and ${value.slice(limit).join(", ")} were not.`);
+  }
+  if (notes.length > 0) SOFT_CAPPED_ARGUMENTS.set(toolArgs, notes.join(" "));
 }
 
 export const __testProjectAtlasModelResult = projectAtlasModelResult;
@@ -2782,6 +2805,7 @@ function researcherTypedArgumentRepair(session, toolName, toolArgs = {}) {
   if (requested.suite !== "atlas" || !requested.name || requested.name === "query") return null;
   const schema = atlasDescriptorSchemaForAction(requested.name);
   if (!schema) return null;
+  softCapArrayArguments(schema, toolArgs);
   const validation = validateToolArguments({ parameters: schema }, toolArgs);
   if (validation.ok) return null;
   const failure = requested.name === "code.window"

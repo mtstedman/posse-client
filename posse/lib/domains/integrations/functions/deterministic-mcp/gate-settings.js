@@ -30,7 +30,7 @@ export const ATLAS_GATEWAY_DEDUP_ADVERTISE_SETTING = "atlas_gateway_dedup_advert
 export const ATLAS_GATEWAY_DEDUP_ADVERTISE_DEFAULT = false;
 
 export const ATLAS_RESEARCHER_SCHEMA_DIET_SETTING = "atlas_researcher_schema_diet";
-export const ATLAS_RESEARCHER_SCHEMA_DIET_DEFAULT = false;
+export const ATLAS_RESEARCHER_SCHEMA_DIET_DEFAULT = true;
 export const ATLAS_RESEARCHER_DISPATCHER_SETTING = "atlas_researcher_dispatcher";
 export const ATLAS_RESEARCHER_DISPATCHER_DEFAULT = false;
 export const ATLAS_RESEARCHER_TYPED_DISPATCHER_SETTING = "atlas_researcher_typed_dispatcher";

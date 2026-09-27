@@ -737,6 +737,42 @@ export function createDeterministicToolkit({
     }
   }
 
+  // Entries beside a missing path, nearest first. `close` marks a plural,
+  // singular or one-letter slip (`tests` for `test`).
+  function nearestExistingSiblings(missingPath) {
+    const parent = path.dirname(missingPath);
+    const wanted = path.basename(missingPath).toLowerCase();
+    let names;
+    try {
+      names = fs.readdirSync(parent, { withFileTypes: true }).filter((entry) => !entry.name.startsWith(".")).map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+    const distance = (a, b) => {
+      const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= a.length; i++) {
+        let diagonal = row[0];
+        row[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+          const above = row[j];
+          row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+          diagonal = above;
+        }
+      }
+      return row[b.length];
+    };
+    return names
+      .map((name) => {
+        const lower = name.toLowerCase();
+        const d = distance(lower, wanted);
+        const close = wanted.length >= 3 && (lower === `${wanted}s` || `${lower}s` === wanted || d <= 1);
+        return { path: path.join(parent, name), d, close };
+      })
+      .filter((entry) => entry.d <= Math.max(2, Math.floor(wanted.length / 2)))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 5);
+  }
+
   function execSearchFiles(args, cwd, scopePredicates) {
     if (!args || typeof args.pattern !== "string") return "Error: pattern is required and must be a string.";
 
@@ -765,7 +801,21 @@ export function createDeterministicToolkit({
       }
       const hiddenErr = agentHiddenPathError(cwd, searchPath, args.path || ".");
       if (hiddenErr) return `Error: ${hiddenErr}`;
-      if (!fs.existsSync(searchPath)) return `Error: Directory not found: ${toDisplayPath(cwd, searchPath)}`;
+      if (!fs.existsSync(searchPath)) {
+        const nearby = args._pathRepaired ? [] : nearestExistingSiblings(searchPath);
+        const close = nearby.filter((entry) => entry.close);
+        const [only] = close;
+        const listed = nearby.slice(0, 5).map((entry) => toDisplayPath(cwd, entry.path));
+        const notFound = `Error: Directory not found: ${toDisplayPath(cwd, searchPath)}${listed.length > 0 ? `. Nearby: ${listed.join(", ")}` : ""}`;
+        if (close.length === 1) {
+          const repaired = path.relative(cwd, only.path) || ".";
+          return Promise.resolve(execSearchFiles({ ...args, path: repaired, _pathRepaired: true }, cwd, scopePredicates))
+            .then((result) => (String(result).startsWith("Error:")
+              ? notFound
+              : `${toDisplayPath(cwd, searchPath)} does not exist; searched ${toDisplayPath(cwd, only.path)}.\n${result}`));
+        }
+        return notFound;
+      }
       const isDir = fs.existsSync(searchPath) && fs.statSync(searchPath).isDirectory();
       if (!isDir && isSensitiveEnvFileOrTargetPath(searchPath)) {
         return "Error: Access to .env files is blocked. Use documented config examples or code paths instead.";
@@ -819,6 +869,19 @@ export function createDeterministicToolkit({
       if (result.status !== 0) {
         const stderr = compactRipgrepStderr(result.stderr);
         if (/regex parse error|error parsing regex|PCRE2|invalid regex/i.test(stderr)) {
+          // A pattern that does not parse is usually code text with a bare
+          // parenthesis (`update_from(`). Match grouping characters literally,
+          // then the whole pattern, instead of spending the caller's turn.
+          if (!args.literal && !args._patternRepaired) {
+            const escaped = args.pattern.replace(/(?<!\\)[()[\]]/g, (ch) => `\\${ch}`);
+            const literal = () => Promise.resolve(execSearchFiles({ ...args, literal: true, _patternRepaired: true }, cwd, scopePredicates))
+              .then((result) => `The pattern is not a valid regex; it was searched as literal text.\n${result}`);
+            if (escaped === args.pattern) return literal();
+            return Promise.resolve(execSearchFiles({ ...args, pattern: escaped, _patternRepaired: true }, cwd, scopePredicates))
+              .then((result) => (String(result).startsWith("Error: Invalid ripgrep pattern")
+                ? literal()
+                : `The pattern is not a valid regex; its parentheses and brackets were matched as literal characters.\n${result}`));
+          }
           return `Error: Invalid ripgrep pattern - ${stderr || "unknown parse error"}`;
         }
         return `Error: search_files ripgrep failed (${result.status ?? "unknown"}) - ${sanitizeAbsolutePathsInText(stderr, cwd) || "unknown error"}`;

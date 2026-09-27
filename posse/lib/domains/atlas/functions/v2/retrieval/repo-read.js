@@ -85,9 +85,10 @@ export function readRepoFileResult(repoRoot, repoRelPath, { targetSource = "file
       );
     }
     if (notFound) {
+      const sameName = filesNamedLike(root, relPath);
       return failure(
         "file_not_found",
-        `Could not read ${relPath}: the path does not exist in the active checkout`,
+        `Could not read ${relPath}: the path does not exist in the active checkout${sameName.length > 0 ? `. Files with that name: ${sameName.join(", ")}` : ""}`,
         "rejected",
         "not_found",
       );
@@ -106,7 +107,14 @@ export function readRepoFileResult(repoRoot, repoRelPath, { targetSource = "file
     return ioFailure(error, failure, relPath);
   }
   if (!stat.isFile()) {
-    return failure("not_a_file", `Could not read ${relPath}: the path is not a regular file`, "rejected", "not_a_file");
+    return failure(
+      "not_a_file",
+      stat.isDirectory()
+        ? `Could not read ${relPath}: it is a directory; this read takes one file path`
+        : `Could not read ${relPath}: the path is not a regular file`,
+      "rejected",
+      "not_a_file",
+    );
   }
 
   try {
@@ -121,4 +129,49 @@ function ioFailure(error, failure, relPath) {
     return failure("permission_denied", `Could not read ${relPath}: permission denied`, "failed", "permission_denied");
   }
   return failure("file_read_failed", `Could not read ${relPath}: repository file I/O failed`, "failed", String(error?.code || "io_error").toLowerCase());
+}
+
+const SAME_NAME_WALK_LIMIT = 40_000;
+const SAME_NAME_SKIP_DIRS = new Set([".git", "node_modules", ".posse", "target", "vendor", "dist", "build", "__pycache__"]);
+
+// A misremembered directory (packages/common/helpers/x.ts for
+// packages/core/helpers/x.ts) otherwise costs a search call to recover. List
+// repository files that share the missing path's file name, bounded.
+function filesNamedLike(root, relPath) {
+  const wanted = path.basename(String(relPath || ""));
+  if (!wanted) return [];
+  const found = [];
+  const stack = [root];
+  let visited = 0;
+  while (stack.length > 0 && found.length < 50 && visited < SAME_NAME_WALK_LIMIT) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      visited += 1;
+      if (entry.isDirectory()) {
+        if (!SAME_NAME_SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) stack.push(path.join(dir, entry.name));
+      } else if (entry.isFile() && entry.name === wanted) {
+        found.push(path.relative(root, path.join(dir, entry.name)).split(path.sep).join("/"));
+        if (found.length >= 50) break;
+      }
+    }
+  }
+  const requested = String(relPath).split("/").slice(0, -1);
+  const shared = (candidate) => {
+    const parts = candidate.split("/").slice(0, -1);
+    let count = 0;
+    for (const part of parts) if (requested.includes(part)) count += 1;
+    return count;
+  };
+  return found
+    .map((candidate) => ({ candidate, shared: shared(candidate) }))
+    .filter((row) => row.shared > 0 || requested.length === 0)
+    .sort((a, b) => b.shared - a.shared || a.candidate.localeCompare(b.candidate))
+    .slice(0, 3)
+    .map((row) => row.candidate);
 }

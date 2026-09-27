@@ -1,6 +1,7 @@
 // @ts-check
 import { camelToSnakeKey } from "../../../../catalog/field-case.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../catalog/symbol-get-batch.js";
+import { flattenSharedFileItems } from "../../../atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
 
 const DISPATCHER_TOOL_NAME = "atlas.query";
@@ -533,6 +534,7 @@ export function normalizeResearcherTypedActionArgs(action, args = {}) {
   const normalized = nativeArgNames({ ...args });
   const aliases = [];
   if (action === "symbol.get" && Array.isArray(normalized.items)) {
+    normalized.items = flattenSharedFileItems(normalized.items);
     const selected = normalized.items.slice(0, SYMBOL_GET_BATCH_POLICY.maxItems);
     if (selected.some(item => !item || typeof item !== "object" || item.items != null || item.symbols != null)) {
       return {args: normalized, aliases, error: "symbol.get batch items must be scalar selectors"};
