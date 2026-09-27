@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { teamManagedToolAdmitted } from "../../../domains/pairing/functions/team-managed-write.js";
 
 import { appendResearchWorkBudget, isResearchWorkBudgetBlock, researchWorkBudget } from "../../../domains/research/functions/work-budget.js";
-import { compactResearchSearchResult } from "../functions/research-search-presentation.js";
+import { compactResearchSearchResult, compactResearchSearchRows } from "../functions/research-search-presentation.js";
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
 import { SUB_AGENT_EVIDENCE_OUTCOMES, isSubAgentEvidenceSafeNativeTool, isSubAgentEvidenceSafeAtlasTool } from "../../../catalog/sub-agent.js";
@@ -688,6 +688,23 @@ function searchResultItems(result) {
   return Array.isArray(data?.items) ? data.items : null;
 }
 
+// The unique-hit shortcut saves a call when the body is what the locator was
+// looking for. A large declaration (a whole class, or a long function) is not:
+// fetching it put 16-24k characters into context that every later turn re-read
+// (ASK-30: HTTPAdapter 500 lines, Response, executeEndpoint). Above this span the
+// search hit itself is returned so the caller reads only what it needs.
+const EXACT_NAME_BODY_MAX_LINES = 120;
+
+function searchItemLineSpan(item) {
+  const compact = /:(\d+(?:-\d+)?)$/u.exec(String(item?.at || ""));
+  const lines = item?.location?.lines ?? item?.lines ?? compact?.[1];
+  const match = /^(\d+)(?:-(\d+))?$/u.exec(String(Array.isArray(lines) ? lines.join("-") : lines ?? "").trim());
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2] ?? match[1]);
+  return end >= start ? { start, end, count: end - start + 1 } : null;
+}
+
 /**
  * The one declaration an exact name-scope search found, as a symbol.get item.
  * Returns null unless the search matched exactly one addressable symbol.
@@ -699,7 +716,12 @@ function exactNameSearchTarget(result, toolArgs) {
   const item = items[0] || {};
   const symbolId = String(item.symbolId || item.symbol_id || item.symbolHandle || "").trim();
   if (!symbolId) return null;
-  const file = String(item.location?.path || item.path || item.file || item.repo_rel_path || "").trim();
+  const file = String(item.location?.path || item.path || item.file || item.repo_rel_path
+    || String(item.at || "").replace(/:\d+(?:-\d+)?$/u, "") || "").trim();
+  const span = searchItemLineSpan(item);
+  if (span && span.count > EXACT_NAME_BODY_MAX_LINES) {
+    return { oversized: true, kind: String(item.kind || "declaration"), span };
+  }
   return { symbolId, ...(file ? { file } : {}) };
 }
 
@@ -6639,6 +6661,17 @@ export class PersistentMcpOwner {
     const toolArgs = nested ? args.toolArgs.args : (args?.toolArgs || {});
     const query = exactNameSearchQuery(toolArgs);
     const target = exactNameSearchTarget(message?.result, toolArgs);
+    if (target?.oversized) {
+      return {
+        ...message,
+        result: appendOwnerModelControlNotice(
+          message.result,
+          `\n\n${query} has one declaration (${target.kind}, lines ${target.span.start}-${target.span.end}); `
+            + `its ${target.span.count}-line body was not fetched. Read only the parts you need.`,
+          { kind: "atlas_exact_name_oversized", trigger: "symbol.search" },
+        ),
+      };
+    }
     if (target) {
       const fetched = await this._executeAtlasToolCall({
         ...args,
@@ -7260,6 +7293,9 @@ export class PersistentMcpOwner {
         toolName,
         toolArgs,
       ));
+      if (String(session?.bootConfig?.role || "") === "researcher" && requested.name === "symbol.search") {
+        result = composed("search_rows", compactResearchSearchRows(result));
+      }
       for (const transform of providerTransforms) {
         result = composed("transform_annotations", annotateOwnerResultTransform(result, transform));
       }
