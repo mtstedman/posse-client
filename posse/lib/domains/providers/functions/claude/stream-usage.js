@@ -1,5 +1,5 @@
 import { stripAnsi } from "../../../../shared/format/functions/ansi.js";
-import { resolvePricing } from "../../../billing/functions/pricing.js";
+import { estimateCallCost } from "../../../billing/functions/pricing.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 
 // ─── Token Usage Parsing ─────────────────────────────────────────────────────
@@ -140,14 +140,42 @@ export function __testExtractClaudeToolUsesFromStreamMessage(msg) {
   return _extractClaudeToolUsesFromStreamMessage(msg);
 }
 
-export function _estimateClaudeApiEquivalentCostUsd({ modelName, modelTier, usage = {}, stderrTokens = {} } = {}) {
-  const rates = resolvePricing({ provider: "claude", modelName, modelTier });
-  if (!rates || rates.source === "none") return null;
+// Sums the raw cache-write TTL split (usage.cache_creation.ephemeral_{5m,1h}
+// _input_tokens). Returns null when no usage carries it, so pricing applies its
+// Claude default rather than reading a missing split as zero.
+function claudeCacheCreationSplit(usages = []) {
+  let split = null;
+  for (const usage of usages) {
+    const creation = usage?.cache_creation;
+    if (!creation || typeof creation !== "object") continue;
+    const writes5m = _usageNumberOrNull(creation.ephemeral_5m_input_tokens);
+    const writes1h = _usageNumberOrNull(creation.ephemeral_1h_input_tokens);
+    if (writes5m == null && writes1h == null) continue;
+    split ??= { cacheCreation5mTokens: 0, cacheCreation1hTokens: 0 };
+    split.cacheCreation5mTokens += writes5m ?? 0;
+    split.cacheCreation1hTokens += writes1h ?? 0;
+  }
+  return split;
+}
+
+export function _estimateClaudeApiEquivalentCostUsd({ modelName, modelTier, usage = {}, stderrTokens = {}, segments = [] } = {}) {
   const regularInput = Math.max(0, _usageNumberOrNull(usage.input_tokens) ?? stderrTokens.input ?? 0);
   const cacheCreationInput = Math.max(0, _usageNumberOrNull(usage.cache_creation_input_tokens) ?? 0);
   const cacheReadInput = Math.max(0, _usageNumberOrNull(usage.cache_read_input_tokens) ?? 0);
   const output = Math.max(0, _usageNumberOrNull(usage.output_tokens) ?? stderrTokens.output ?? 0);
-  const billableInputUnits = regularInput + (cacheCreationInput * 1.25) + (cacheReadInput * 0.10);
-  const cost = ((billableInputUnits * rates.inputPerM) + (output * rates.outputPerM)) / 1_000_000;
-  return Number.isFinite(cost) ? cost : null;
+  // Per-message segments keep the TTL split; the aggregate usage is the fallback.
+  const split = claudeCacheCreationSplit((Array.isArray(segments) ? segments : []).map((segment) => segment?.usage))
+    ?? claudeCacheCreationSplit([usage]);
+  const priced = estimateCallCost({
+    provider: "claude",
+    modelName,
+    modelTier,
+    inputTokens: regularInput + cacheCreationInput + cacheReadInput,
+    cachedInputTokens: cacheReadInput,
+    cacheCreationInputTokens: cacheCreationInput,
+    ...split,
+    outputTokens: output,
+  });
+  if (priced.source === "none") return null;
+  return Number.isFinite(priced.costUsd) ? priced.costUsd : null;
 }

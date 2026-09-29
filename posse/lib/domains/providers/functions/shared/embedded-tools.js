@@ -58,6 +58,7 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
       role: contract?.role,
       compactCompletion: contract?.agentHandoffCompactV1 === true,
       compactV3: contract?.agentHandoffCompactV3 === true,
+      researchInvestigation: contract?.researchInvestigation === true,
     });
     if (schema) map[name] = schema;
   }

@@ -170,7 +170,7 @@ Remote roles: `artificer`, `assessor`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Execute a supported read-only inspection utility and return stdout+stderr. Supported utilities include cat, head, tail, ls, find, wc, file, du, diff, grep, rg, echo, pwd, and whoami. On Windows this runs through PowerShell when shell features are needed; use PowerShell-compatible inspection syntax. Verification, version-history operations, and workspace changes are handled by separately issued capabilities.
+Execute a supported read-only inspection utility and return stdout+stderr. Supported utilities include cat, head, tail, ls, find, wc, file, du, diff, grep, rg, echo, pwd, and whoami. Runs in the job's working directory, so use relative paths; cd, file redirects, sed, sort, and git are unavailable. On Windows this runs through PowerShell when shell features are needed; use PowerShell-compatible inspection syntax. Verification, version-history operations, and workspace changes are handled by separately issued capabilities.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -275,7 +275,7 @@ Use when one file or symbol is known but relevant identifiers, usages, or branch
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `contextLines` | `integer` | Optional | min 0; max 8 | Context lines around each match, from 0 through 8. Use code.window for a bounded source read. |
+| `contextLines` | `integer` | Optional | min 0; max 8 | Context lines around each match, from 0 through 8. Use an exact-source read for a bounded range. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path fallback when you have a file but not an opaque symbolId. |
 | `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
@@ -294,7 +294,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with code.window using their file and range.
+Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with an exact-source read using their file and range.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1165,7 +1165,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.
+Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque traversal_ref is returned only when more content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

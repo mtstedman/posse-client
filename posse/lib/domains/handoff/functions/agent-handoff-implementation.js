@@ -120,6 +120,7 @@ const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materializ
 const EVIDENCE_CLEANUP = Symbol("agent_handoff_evidence_cleanup");
 const SHAPE_NORMALIZATIONS = Symbol("agent_handoff_shape_normalizations");
 const MAX_SHAPE_NORMALIZATIONS = 64;
+const PLANNER_TARGET_DERIVED_RULE = "target_derived_from_task_role";
 
 function noteShapeNormalization(context, fieldPath, rule) {
   const notes = context?.[SHAPE_NORMALIZATIONS];
@@ -3088,6 +3089,40 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
   };
 }
 
+const PLANNER_TARGET_BY_TASK_ROLE = Object.freeze({
+  dev: Object.freeze({ kind: "agent", role: "dev" }),
+  artificer: Object.freeze({ kind: "agent", role: "artificer" }),
+  human_input: Object.freeze({ kind: "system", role: "human_input" }),
+  promote: Object.freeze({ kind: "system", role: "promote" }),
+});
+
+// A planner.plan.v1 handoff that names its task role but omits target is the
+// same routing the compact tasks path derives (dev/artificer -> agent,
+// human_input/promote -> system). Derive it instead of bouncing the plan; a
+// missing, unknown, or conflicting role still fails validation as before.
+function derivePlannerHandoffTargets(args, { role = "", context = null } = {}) {
+  const source = plainObject(args);
+  if (String(role || "").trim().toLowerCase() !== "planner" || !source) return args;
+  if (source.profile !== "planner.plan.v1" || !Array.isArray(source.handoffs)) return args;
+  const roleKeys = compatibilityAliasKeys("plannerTaskRole");
+  let changed = false;
+  const handoffs = source.handoffs.map((raw, index) => {
+    const entry = plainObject(raw);
+    if (!entry || entry.target != null) return raw;
+    const named = roleKeys
+      .filter((key) => entry[key] != null)
+      .map((key) => (typeof entry[key] === "string" ? entry[key].trim().toLowerCase() : null));
+    const distinct = [...new Set(named)];
+    if (distinct.length !== 1 || !distinct[0] || !Object.hasOwn(PLANNER_TARGET_BY_TASK_ROLE, distinct[0])) return raw;
+    const derived = { ...entry, target: { ...PLANNER_TARGET_BY_TASK_ROLE[distinct[0]] } };
+    for (const key of roleKeys) delete derived[key];
+    noteShapeNormalization(context, `handoffs[${index}].target`, PLANNER_TARGET_DERIVED_RULE);
+    changed = true;
+    return derived;
+  });
+  return changed ? { ...source, handoffs } : args;
+}
+
 function firstAssessorText(...values) {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value.trim();
@@ -4248,7 +4283,10 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   });
   for (const note of shaped.normalizations) noteShapeNormalization(materializationContext, note.path, note.rule);
   const normalizedArgs = normalizeSemanticAgentHandoffArgs(
-    normalizePlannerAgentHandoffArgs(shaped.value, { role: normalizedRole }),
+    derivePlannerHandoffTargets(
+      normalizePlannerAgentHandoffArgs(shaped.value, { role: normalizedRole }),
+      { role: normalizedRole, context: materializationContext },
+    ),
     { role: normalizedRole, context: materializationContext },
   );
   const serialized = JSON.stringify(normalizedArgs ?? null);
@@ -4587,6 +4625,29 @@ export function materializeAgentHandoff(args, options = {}) {
       });
     } catch {
       // Shape telemetry must never turn an accepted handoff into a retry.
+    }
+    const derivedTargets = shapeNotes
+      .filter((note) => note.rule === PLANNER_TARGET_DERIVED_RULE)
+      .map((note) => {
+        const index = Number(/^handoffs\[(\d+)\]/.exec(note.path)?.[1]);
+        const handoff = Number.isInteger(index) ? packet.handoffs?.[index] : null;
+        return { path: note.path, id: handoff?.id ?? null, target: handoff?.target ?? null };
+      });
+    if (derivedTargets.length > 0) {
+      try {
+        const context = options?.context || {};
+        recordObservation({
+          ...(context.db ? { db: context.db } : {}),
+          work_item_id: context.work_item_id ?? context.workItemId ?? null,
+          job_id: context.job_id ?? context.jobId ?? null,
+          attempt_id: context.attempt_id ?? context.attemptId ?? null,
+          observation_type: "agent_handoff.target_derived",
+          summary: `Derived ${derivedTargets.length} planner handoff target(s) from the task role`,
+          detail: { count: derivedTargets.length, derived: derivedTargets },
+        });
+      } catch {
+        // Repair telemetry must never turn an accepted handoff into a retry.
+      }
     }
   }
   if (ignoredFieldCount > 0) {

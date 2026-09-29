@@ -25,6 +25,8 @@ export const HASH_REF_LANE_SET = new Set(HASH_REF_LANES);
 export const HASH_REF_LANE_LIST_SQL = HASH_REF_LANES.map((value) => `'${value}'`).join(",");
 
 export const HASH_REF_ALIAS_PATTERN = /^#[0-9a-z]{4,12}$/;
+// Longest alias HASH_REF_ALIAS_PATTERN admits ("#" plus twelve characters).
+export const HASH_REF_ALIAS_MAX_CHARS = 13;
 export const HASH_REF_SELECTOR_PATTERN = /^(#[0-9a-z]{4,12})(?::l?(\d+)-l?(\d+))?$/i;
 
 export function normalizeHashRefAlias(value) {

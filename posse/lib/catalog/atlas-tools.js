@@ -254,7 +254,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "traverse_ref": {
     type: "function",
     name: "atlas_traverse_ref",
-    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque next_traversal_ref is returned only when more content remains.",
+    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque traversal_ref is returned only when more content remains.",
     parameters: {
       type: "object",
       properties: {
@@ -891,7 +891,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with code.window using their file and range.",
+    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with an exact-source read using their file and range.",
     parameters: {
       type: "object",
       properties: {
@@ -966,7 +966,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
         identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText." },
-        contextLines: { type: "integer", minimum: 0, maximum: 8, description: "Context lines around each match, from 0 through 8. Use code.window for a bounded source read." },
+        contextLines: { type: "integer", minimum: 0, maximum: 8, description: "Context lines around each match, from 0 through 8. Use an exact-source read for a bounded range." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },

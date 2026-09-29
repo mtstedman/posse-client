@@ -198,6 +198,9 @@ function normalizeContractShape(contract = {}) {
     fallbackReads: optionalNonNegativeNumber(contract.fallbackReads),
     agentHandoffCompactV1: contract.agentHandoffCompactV1 === true,
     agentHandoffCompactV3: contract.agentHandoffCompactV3 === true,
+    // Remote-issued research investigation selects the research-child
+    // agent_handoff and planner dispatch_agent schemas on embedded surfaces.
+    ...(contract.researchInvestigation === true ? { researchInvestigation: true } : {}),
     atlasCodeWindowPolicy,
     scope: {
       modifyFiles: Array.isArray(contract?.scope?.modifyFiles) ? [...contract.scope.modifyFiles] : [],
@@ -209,6 +212,53 @@ function normalizeContractShape(contract = {}) {
     issuedToolSurface,
     tools,
   };
+}
+
+const EXACT_NAME_EXAMPLE_PREFERENCE = Object.freeze({
+  tools: ["read_file", "search_files", "list_files"],
+  atlas: ["symbol.get", "code.window", "symbol.search"],
+});
+
+// Claude Code rejects a tool name it was not given before the call reaches
+// MCP ("No such tool available"), so a guessed Codex-style or canonical name
+// cannot be aliased server-side. Prompts name tools canonically; show the
+// mapping to the callable names with two tools actually issued to this call.
+function renderClaudeExactToolNameGuidance(contract = {}, toolRenderer) {
+  if (String(contract?.provider || "").trim().toLowerCase() !== "claude") return [];
+  if (!toolRenderer || typeof toolRenderer.tryRenderIssued !== "function") return [];
+  const bySuite = { tools: [], atlas: [] };
+  for (const tool of Array.isArray(contract?.tools) ? contract.tools : []) {
+    const canonical = canonicalToolName(tool);
+    const suite = String(tool?.suite || "").trim() === "atlas" || String(tool?.access || "").trim() === "atlas"
+      ? "atlas"
+      : "tools";
+    const callable = canonical ? toolRenderer.tryRenderIssued(tool) : null;
+    if (!callable) continue;
+    const reference = suite === "atlas" ? `atlas.${canonical}` : canonical;
+    if (callable === reference || bySuite[suite].some((entry) => entry.canonical === canonical)) continue;
+    bySuite[suite].push({ canonical, callable, reference });
+  }
+  const ordered = (suite) => {
+    const preference = EXACT_NAME_EXAMPLE_PREFERENCE[suite];
+    return [...bySuite[suite]].sort((a, b) => {
+      const rank = (entry) => {
+        const index = preference.indexOf(entry.canonical);
+        return index === -1 ? preference.length : index;
+      };
+      return rank(a) - rank(b);
+    });
+  };
+  const tools = ordered("tools");
+  const atlas = ordered("atlas");
+  const examples = tools.length > 0 && atlas.length > 0
+    ? [tools[0], atlas[0]]
+    : [...tools, ...atlas].slice(0, 2);
+  if (examples.length === 0) return [];
+  const callables = examples.map((entry) => `\`${entry.callable}\``).join(", ");
+  const references = examples.map((entry) => `\`${entry.reference}\``).join(" / ");
+  return [
+    `Tool names: call tools only by their exact listed names (for example ${callables}); this prompt refers to ${examples.length === 1 ? "it" : "them"} as ${references}.`,
+  ];
 }
 
 function optionalNonNegativeNumber(value) {
@@ -250,6 +300,7 @@ export class ToolContract {
       issuedSurface: contract,
     });
     return [
+      ...renderClaudeExactToolNameGuidance(contract, renderer),
       ...renderAtlasGuidance(contract),
       ...renderToolBatchingGuidance(contract, renderer),
     ].join("\n");
@@ -590,6 +641,7 @@ export class ToolContract {
     issuedToolSurface = null,
     agentHandoffCompactV1 = false,
     agentHandoffCompactV3 = false,
+    researchInvestigation = false,
     atlasCodeWindowPolicy = null,
   } = {}) {
     const toolNames = includeBaseTools
@@ -625,6 +677,7 @@ export class ToolContract {
       fallbackReads: optionalNonNegativeNumber(fallbackReads),
       agentHandoffCompactV1: agentHandoffCompactV1 === true,
       agentHandoffCompactV3: agentHandoffCompactV3 === true,
+      researchInvestigation: researchInvestigation === true,
       atlasCodeWindowPolicy,
       issuedToolSurface: Array.isArray(issuedToolSurface) ? issuedToolSurface : null,
       scope: {

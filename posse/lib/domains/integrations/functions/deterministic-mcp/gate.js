@@ -278,8 +278,8 @@ export function isFallbackAtlasPrefetchStatus(status) {
   return true;
 }
 
-export function buildLockedToolError(toolName, { args = {}, cwd = null, scopeKey = null, atlasNameStyle = "dotted" } = {}) {
-  return _getGate(scopeKey).buildLockedToolError(toolName, { args, cwd, atlasNameStyle });
+export function buildLockedToolError(toolName, { args = {}, cwd = null, scopeKey = null, atlasNameStyle = "dotted", issuedAtlasActions = null } = {}) {
+  return _getGate(scopeKey).buildLockedToolError(toolName, { args, cwd, atlasNameStyle, issuedAtlasActions });
 }
 
 export function __resetGateForTests() {

@@ -30,6 +30,7 @@ export function projectFunctionToolSurface(contract = {}, toolDefinitions = []) 
       role: contract?.role,
       compactCompletion: contract?.agentHandoffCompactV1 === true,
       compactV3: contract?.agentHandoffCompactV3 === true,
+      researchInvestigation: contract?.researchInvestigation === true,
     })?.name || "").trim();
     const providerSurfaceName = [schemaName, canonicalName]
       .find((name) => name && definitionsByName.has(name));

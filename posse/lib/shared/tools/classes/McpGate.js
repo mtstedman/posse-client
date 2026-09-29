@@ -34,6 +34,7 @@ function gateError(code, message) {
  * @property {Record<string, any>} [claims]
  * @property {Record<string, any>} [contractBootConfig]
  * @property {Record<string, any> | null} [remoteToolSurface]
+ * @property {{ tools?: Iterable<string>, atlas?: Iterable<string> } | null} [operatorDisabledTools]
  * @property {any} [owner]
  * @property {Record<string, any>} [ownerSession]
  */
@@ -102,6 +103,14 @@ export class McpGate {
   /** @type {Record<string, any> | null} */
   remoteToolSurface;
 
+  /**
+   * Tools the operator's agent_tools_disabled setting removed from this gate
+   * at mint. Frozen with the gate so a later setting change cannot make an
+   * issued-but-withheld tool look like an escalation on a reused Agent.
+   * @type {{ tools: readonly string[], atlas: readonly string[] }}
+   */
+  operatorDisabledTools;
+
   /** @type {any} */
   owner;
 
@@ -126,6 +135,7 @@ export class McpGate {
     claims,
     contractBootConfig,
     remoteToolSurface = null,
+    operatorDisabledTools = null,
     owner,
     ownerSession,
   } = {}) {
@@ -143,6 +153,10 @@ export class McpGate {
     const frozenClaims = freezeJson(claims);
     const frozenContract = freezeJson(contractBootConfig);
     const frozenSurface = remoteToolSurface ? freezeJson(remoteToolSurface) : null;
+    const frozenDisabled = Object.freeze({
+      tools: Object.freeze([...new Set([...(operatorDisabledTools?.tools || [])].map(String))].sort()),
+      atlas: Object.freeze([...new Set([...(operatorDisabledTools?.atlas || [])].map(String))].sort()),
+    });
     const frozenOwnerSession = Object.freeze({
       sessionId: ownerSession.sessionId,
       ownerBootId: ownerSession.bootId || ownerSession.ownerBootId || null,
@@ -157,6 +171,7 @@ export class McpGate {
       claims: { value: frozenClaims, enumerable: true, configurable: false, writable: false },
       contractBootConfig: { value: frozenContract, enumerable: true, configurable: false, writable: false },
       remoteToolSurface: { value: frozenSurface, enumerable: true, configurable: false, writable: false },
+      operatorDisabledTools: { value: frozenDisabled, enumerable: false, configurable: false, writable: false },
       owner: { value: owner, enumerable: false, configurable: false, writable: false },
       ownerSession: { value: frozenOwnerSession, enumerable: true, configurable: false, writable: false },
       token: {

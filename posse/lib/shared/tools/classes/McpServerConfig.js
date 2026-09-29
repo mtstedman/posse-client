@@ -32,6 +32,7 @@ import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integ
 import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
 import { repositoryID } from "../../../domains/automation/functions/paths.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
+import { recordObservation } from "../../../domains/observability/functions/observations.js";
 import {
   issuedToolNamesForSuite,
   intersectProjectDbCapabilities,
@@ -416,7 +417,9 @@ function requiredProviderProjectionTools(role, bootPayload = {}) {
   return [];
 }
 
-function assertJobSurfaceWithinAgentGate(role, providerName, gateBootConfig = {}, remoteSurface = null) {
+function assertJobSurfaceWithinAgentGate(role, providerName, gateBootConfig = {}, remoteSurface = null, {
+  operatorDisabledTools = [],
+} = {}) {
   if (!isRegisteredRemoteToolSurface(remoteSurface)) {
     const error = new Error("Per-job MCP tool issuance is not a trusted Posse Remote surface");
     error.code = "POSSE_AGENT_MCP_JOB_SURFACE_UNTRUSTED";
@@ -436,10 +439,12 @@ function assertJobSurfaceWithinAgentGate(role, providerName, gateBootConfig = {}
   const gateToolNames = new Set(gateAllowlist.tools || []);
   // agent_tools_disabled removed these from the gate on purpose. They are a
   // narrowing, not an escalation: the provider projection intersects the Job
-  // issuance with the gate, so they never reach the provider.
-  const operatorDisabledTools = resolveAgentDisabledTools().tools;
+  // issuance with the gate, so they never reach the provider. The set is the
+  // gate's mint-time snapshot, never the live setting: a reused Agent keeps
+  // the gate it was minted with after the operator changes the setting.
+  const withheldTools = new Set(operatorDisabledTools);
   for (const name of issued.toolAllowlist.tools || []) {
-    if (!gateToolNames.has(name) && !operatorDisabledTools.has(name)) missing.push(`tools.${name}`);
+    if (!gateToolNames.has(name) && !withheldTools.has(name)) missing.push(`tools.${name}`);
   }
   // The reusable gate is minted after local feature availability (for
   // example ATLAS memory and code-lens settings) has narrowed the remote
@@ -462,6 +467,49 @@ function assertJobSurfaceWithinAgentGate(role, providerName, gateBootConfig = {}
     throw error;
   }
   return remoteSurface;
+}
+
+function compactHandoffContractFlags(source = null) {
+  const value = source && typeof source === "object" ? source : {};
+  const compactV1 = value.compactV1 === true || value.agent_handoff_compact_v1 === true;
+  const compactV2 = compactV1 && (value.compactV2 === true || value.agent_handoff_compact_v2 === true);
+  const compactV3 = compactV2 && (value.compactV3 === true || value.agent_handoff_compact_v3 === true);
+  return { compact_v1: compactV1, compact_v2: compactV2, compact_v3: compactV3 };
+}
+
+// The reusable gate's signed agent_handoff contract decides which handoff
+// schema the provider sees, while the per-Job issuance decides which handoff
+// prompt renders. A mismatch is recorded, not refused: the gate stays the
+// authority and the Job still runs.
+function recordJobHandoffContractDrift(role, bootPayload = {}, gate = null, jobSurface = null) {
+  try {
+    const gateSource = gate?.claims?.capabilities?.agentHandoffContract
+      || gate?.contractBootConfig?.agentHandoffContract
+      || gate?.remoteToolSurface?.coordination
+      || null;
+    const gateContract = compactHandoffContractFlags(gateSource);
+    const jobCoordination = jobSurface?.coordination?.agent_handoff_v1 === true ? jobSurface.coordination : null;
+    const jobContract = compactHandoffContractFlags(jobCoordination);
+    const drifted = Object.keys(jobContract).filter((key) => jobContract[key] !== gateContract[key]);
+    if (drifted.length === 0) return false;
+    return recordObservation({
+      work_item_id: bootPayload.workItemId ?? null,
+      job_id: bootPayload.jobId ?? null,
+      attempt_id: bootPayload.attemptId ?? null,
+      observation_type: "mcp.handoff_contract_drift",
+      summary: `Per-job agent_handoff contract differs from the ${role || "agent"} gate (${drifted.join(", ")}); the gate contract governs the issued schema`,
+      detail: {
+        role: role || bootPayload.role || null,
+        provider: bootPayload.providerName || null,
+        agent_id: gate?.id ?? null,
+        gate_contract: gateContract,
+        job_contract: jobContract,
+        drifted,
+      },
+    });
+  } catch {
+    return false;
+  }
 }
 
 function logMcpBootTelemetry(kind, role, bootPayload = {}, extra = {}) {
@@ -637,6 +685,7 @@ function buildDeterministicMcpBootPayload(role, {
   agentCallId = null,
   promptChars = 0,
   fallbackReads = null,
+  researchWorkBudgetCalls = null,
   assessorMaxToolCalls = null,
   atlasPrefetchStatus = null,
   atlasAvailable = null,
@@ -733,6 +782,12 @@ function buildDeterministicMcpBootPayload(role, {
       assessorMaxToolCalls: assessorMaxToolCalls != null && assessorMaxToolCalls !== ""
         && Number.isFinite(Number(assessorMaxToolCalls))
         ? Math.max(1, Math.floor(Number(assessorMaxToolCalls)))
+        : null,
+      // A research child's granted retrieval call budget; it only narrows the
+      // researcher physical-call rail. Unset stays unset.
+      researchWorkBudgetCalls: researchWorkBudgetCalls != null && researchWorkBudgetCalls !== ""
+        && Number.isFinite(Number(researchWorkBudgetCalls)) && Number(researchWorkBudgetCalls) >= 1
+        ? Math.floor(Number(researchWorkBudgetCalls))
         : null,
       atlasAvailable: atlasEnabled,
       atlasGateEnabled,
@@ -1132,7 +1187,7 @@ export class McpServerConfig {
     if (opts.coordinationChild === true) {
       bootPayload.toolAllowlist = { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] };
     }
-    const disabledAgentTools = resolveAgentDisabledTools();
+    const disabledAgentTools = resolveAgentDisabledTools({ role });
     const disabledAtlasTools = new Set([...resolveAtlasDisabledTools(), ...disabledAgentTools.atlas]);
     if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");
     if (disabledAtlasTools.size > 0 || disabledAgentTools.tools.size > 0) {
@@ -1210,6 +1265,7 @@ export class McpServerConfig {
       claims,
       contractBootConfig: contractBootPayload,
       remoteToolSurface: contractBootPayload.remoteToolSurface,
+      operatorDisabledTools: { tools: disabledAgentTools.tools, atlas: disabledAtlasTools },
       owner: persistentMcpOwner,
       ownerSession: registration,
     });
@@ -1378,8 +1434,12 @@ export class McpServerConfig {
             bootPayload.providerName,
             opts.mcpGate.contractBootConfig,
             opts.remoteToolSurface,
+            { operatorDisabledTools: opts.mcpGate.operatorDisabledTools?.tools || [] },
           )
         : null;
+      if (suppliedJobSurface) {
+        recordJobHandoffContractDrift(role, bootPayload, opts.mcpGate, suppliedJobSurface);
+      }
       remoteResolution = coordinationChildGate
         ? {
             surface: opts.mcpGate.remoteToolSurface,

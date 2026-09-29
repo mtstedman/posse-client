@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
+  WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE,
   WEB_RESEARCH_LIMITS,
   WEB_RESEARCH_PROTOCOL,
 } from "../../../catalog/web-research.js";
@@ -15,6 +16,7 @@ import { getSetting } from "../../queue/functions/index.js";
 import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
+import { recordObservation } from "../../observability/functions/observations.js";
 
 function runtimeError(code, message, { retryable = false, stage = "runtime" } = {}) {
   const error = /** @type {Error & {code: string, retryable: boolean, stage: string}} */ (new Error(message));
@@ -57,6 +59,12 @@ function knownKeysObject(value, keys, label) {
     throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `${label} must be an object`, { stage: "validation" });
   }
   return Object.fromEntries(Object.entries(value).filter(([key]) => keys.includes(key)));
+}
+
+function isPlainObject(value) {
+  const prototype = value && typeof value === "object" ? Object.getPrototypeOf(value) : null;
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && (prototype === Object.prototype || prototype === null);
 }
 
 function boundedString(value, label, max, { optional = false } = {}) {
@@ -309,15 +317,26 @@ export class WebResearchRuntime {
     const packet = normalizeHandoff(args);
     if (dispatch.resultChars != null) {
       // The parent receives a compact report bounded by its research policy.
-      // Reject here, while the child can still shorten and resubmit, instead of
-      // discarding the whole child after it settles.
+      // An oversized handoff is accepted and noted: the sub-agent runtime trims
+      // the delivered report deterministically, whereas a rejection here would
+      // cost the child another full-context turn.
       const compactChars = JSON.stringify(packet).length;
       if (compactChars > dispatch.resultChars) {
-        throw runtimeError(
-          "WEB_RESEARCH_HANDOFF_TOO_LARGE",
-          `web_research_handoff is ${compactChars} characters; the compact report limit is ${dispatch.resultChars}. Shorten claims, summary, or gaps and resubmit.`,
-          { stage: "terminal" },
-        );
+        try {
+          recordObservation({
+            ...dispatch.observationContext,
+            observation_type: WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE,
+            summary: `Accepted a ${compactChars}-character web_research_handoff over the ${dispatch.resultChars}-character report limit`,
+            detail: {
+              child_agent_call_id: childId,
+              chars: compactChars,
+              result_chars: dispatch.resultChars,
+              findings: packet.findings.length,
+            },
+          });
+        } catch {
+          // Telemetry must not reject an accepted handoff.
+        }
       }
     }
     dispatch.packet = packet;
@@ -424,6 +443,11 @@ export class WebResearchRuntime {
       controller: new AbortController(),
       coordinatedDispatchId,
       resultChars: Number.isSafeInteger(budget?.resultChars) && budget.resultChars > 0 ? budget.resultChars : null,
+      observationContext: {
+        work_item_id: runtimeContext.work_item_id ?? runtimeContext.workItemId ?? null,
+        job_id: runtimeContext.job_id ?? runtimeContext.jobId ?? null,
+        attempt_id: runtimeContext.attempt_id ?? runtimeContext.attemptId ?? null,
+      },
     };
     const forwardAbort = () => dispatch.controller.abort(signal.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });
@@ -501,6 +525,30 @@ export async function executeDispatchAgent(args, options = {}) {
   options = { ...options, context };
   const parentId = Number(context.agentCallId ?? context.agent_call_id);
   const research = subAgentRuntime.parents.get(parentId)?.researchPolicy?.enabled;
+  // Providers that flatten the planner schema's oneOf send one budget beside
+  // requests[]. Fold it into every request that has none rather than drop it.
+  const foldedBudgetRequests = [];
+  if (Array.isArray(args?.requests) && isPlainObject(args.budget)) {
+    const shared = args.budget;
+    args = {
+      ...args,
+      requests: args.requests.map((request, index) => {
+        if (!isPlainObject(request) || request.budget != null) return request;
+        foldedBudgetRequests.push(typeof request.id === "string" && request.id.trim() ? request.id.trim() : `requests[${index}]`);
+        return { ...request, budget: { ...shared } };
+      }),
+    };
+    delete args.budget;
+  }
+  const withFoldRepair = (result) => (foldedBudgetRequests.length > 0 && result && typeof result === "object"
+    ? {
+        ...result,
+        repairs: [
+          { field: "budget", action: "folded_into_requests", request_ids: foldedBudgetRequests },
+          ...(Array.isArray(result.repairs) ? result.repairs : []),
+        ],
+      }
+    : result);
   // A one-entry batch is the single dispatch written the long way: unwrap it
   // instead of bouncing the planner for the shape.
   if (Array.isArray(args?.requests) && args.requests.length === 1
@@ -532,18 +580,18 @@ export async function executeDispatchAgent(args, options = {}) {
         ...(request.budget ? { budget: request.budget } : {}),
       };
     });
-    return await subAgentRuntime.execute({
+    return withFoldRepair(await subAgentRuntime.execute({
       protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" }, requests,
-    }, options);
+    }, options));
   }
   if (research && args?.agent_type == null) throw runtimeError("RESEARCH_AGENT_TYPE_REQUIRED", "dispatch_agent requires agent_type code or web", { stage: "validation" });
   if (args?.agent_type != null && research) {
     args = knownKeysObject(args, ["agent_type", "question", "anchors", "budget"], "dispatch_agent");
     if (!RESEARCH_AGENT_TYPES.includes(args.agent_type)) throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
-    return await subAgentRuntime.execute({
+    return withFoldRepair(await subAgentRuntime.execute({
       protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" },
       requests: [{ id: "research", profile: RESEARCH_CHILD_PROFILE, agent_type: args.agent_type, intent: args.question, ...(args.anchors == null ? {} : { anchors: args.anchors }), ...(args.budget ? { budget: args.budget } : {}) }],
-    }, options);
+    }, options));
   }
   if (args?.agent_type != null) {
     args = knownKeysObject(args, ["agent_type", "question"], "dispatch_agent");

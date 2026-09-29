@@ -737,6 +737,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     agentCallId: context.agentCallId ?? opts.agentCallId ?? null,
     promptChars: opts.promptChars || 0,
     fallbackReads: opts.fallbackReads ?? null,
+    researchWorkBudgetCalls: opts.researchWorkBudgetCalls ?? null,
     assessorMaxToolCalls: opts.assessorMaxToolCalls ?? null,
     modelName: context.modelName || opts.modelName || null,
     providerSessionId: `agent-call:${context.agentCallId ?? opts.agentCallId ?? "unknown"}`,
@@ -1865,7 +1866,7 @@ export class TrackedProviderClient {
               [
                 `WEB RESEARCH QUESTION:\n${question}`,
                 ...(budgetLine ? [`Budget: ${budgetLine}; if it runs low, submit partial findings and name the gap.`] : []),
-                ...(Number.isSafeInteger(budget?.resultChars) ? [`Compact report character limit: ${budget.resultChars} (web_research_handoff is rejected above it).`] : []),
+                ...(Number.isSafeInteger(budget?.resultChars) ? [`Compact report character limit: ${budget.resultChars} (a longer report is trimmed from the end before the planner sees it).`] : []),
               ].join("\n"),
               { providerName },
             );

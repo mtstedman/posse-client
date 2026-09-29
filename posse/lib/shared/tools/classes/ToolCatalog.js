@@ -64,11 +64,16 @@ export class ToolCatalog {
     return getCanonicalToolCatalogEntry(key) || null;
   }
 
-  static getSchema(name, { role = null, compactCompletion = false, compactV3 = false } = {}) {
+  static getSchema(name, {
+    role = null,
+    compactCompletion = false,
+    compactV3 = false,
+    researchInvestigation = false,
+  } = {}) {
     const entry = this.get(name);
     if (entry) {
       if (role) {
-        return getToolSchemaForRole(name, role, { compactCompletion, compactV3 });
+        return getToolSchemaForRole(name, role, { compactCompletion, compactV3, researchInvestigation });
       }
       return entry.schema || null;
     }

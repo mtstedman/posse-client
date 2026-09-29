@@ -426,7 +426,7 @@ export function createGetBriefExecutor() {
         count: fullPaths.length,
         paths: fullPaths,
         note: fullPaths.length
-          ? "Source bodies are NOT included here. Call read_file on one of these paths only when you need a specific implementation; otherwise plan from the brief above."
+          ? "Source bodies are NOT included here. Read one of these paths with an issued read tool only when you need a specific implementation; otherwise plan from the brief above."
           : "No full source files were staged for this work item.",
       },
     });

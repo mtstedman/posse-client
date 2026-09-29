@@ -32,6 +32,38 @@ function effectiveAtlasAction(action, args = {}) {
   return nested ? stripAtlasPrefix(nested) : normalized;
 }
 
+function normalizeIssuedAtlasAction(name) {
+  const raw = String(name || "").trim();
+  if (raw.startsWith("atlas_")) return raw.slice("atlas_".length).replace(/_/g, ".");
+  return stripAtlasPrefix(raw).replace(/_/g, ".");
+}
+
+// Model-visible redirect for a denied indexed-source read. It names only the
+// exact-source tools this recipient was issued: a planner is never issued
+// code.window, and naming it there invites calls to a tool that does not
+// exist. Without a known issued set the redirect stays tool-neutral.
+function indexedSourceReadGuidance(issuedAtlasActions, label) {
+  const issued = new Set(
+    (issuedAtlasActions instanceof Set ? [...issuedAtlasActions] : (Array.isArray(issuedAtlasActions) ? issuedAtlasActions : []))
+      .map(normalizeIssuedAtlasAction)
+      .filter(Boolean),
+  );
+  const clauses = [];
+  if (issued.has("code.window")) {
+    clauses.push(
+      "use code.window in file mode with anchors (a fitting file returns whole)",
+      "follow its continuation handle for withheld ranges",
+    );
+  }
+  if (issued.has("symbol.get")) clauses.push("use symbol.get for complete declaration bodies");
+  if (issued.has("code.lens")) clauses.push("use code.lens");
+  if (clauses.length === 0) return `Use an issued ${label} exact-source tool.`;
+  const series = clauses.length === 1
+    ? clauses[0]
+    : `${clauses.slice(0, -1).join(", ")}, or ${clauses[clauses.length - 1]}`;
+  return `${series.charAt(0).toUpperCase()}${series.slice(1)}.`;
+}
+
 function isUnavailableUnlockReason(reason) {
   const normalized = String(reason || "");
   return normalized.startsWith("atlas_")
@@ -273,12 +305,12 @@ export class ToolGate {
     return { allowed: false, reason: "global_atlas_first_required" };
   }
 
-  buildLockedToolError(toolName, { args = {}, cwd = null, atlasNameStyle = "dotted" } = {}) {
+  buildLockedToolError(toolName, { args = {}, cwd = null, atlasNameStyle = "dotted", issuedAtlasActions = null } = {}) {
     void atlasNameStyle;
     const label = this.atlasLabel || "ATLAS";
     const decision = this.checkNativeToolAllowed(toolName, args, { cwd });
     if (decision.reason === "atlas_indexed_read_disallowed") {
-      return `${label} indexed source ${decision.target} cannot be read with ${toolName}. Use code.window in file mode with anchors (a fitting file returns whole), follow its continuation handle for withheld ranges, or use code.lens.`;
+      return `${label} indexed source ${decision.target} cannot be read with ${toolName}. ${indexedSourceReadGuidance(issuedAtlasActions, label)}`;
     }
     const indexedReadTargets = nativeIndexedReadTargets(toolName, args, { cwd });
     const lockedIndexedTargets = indexedReadTargets

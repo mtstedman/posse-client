@@ -31,8 +31,8 @@ export function researchChildInstructions(parent, request) {
       ...(workDescription ? [`Description: ${workDescription}`] : []),
     ] : []),
     `RESEARCH QUESTION:\n${request.intent}`,
-    `Budget: at most ${request.maxTurns} tool turns and ${Math.round(request.timeoutMs / 1000)} seconds; if either runs low, submit partial findings and name the gap instead of continuing.`,
-    `Compact report character limit: ${request.resultChars}.`,
+    `Budget: at most ${request.maxTurns} retrieval calls (reads beyond ${request.maxTurns} are blocked; agent_handoff is always available) and ${Math.round(request.timeoutMs / 1000)} seconds; if either runs low, submit partial findings and name the gap instead of continuing.`,
+    `Compact report character limit: ${request.resultChars} (a longer report is trimmed from the end before the planner sees it).`,
     ...(uniqueSeeds.length ? [`Starting points (planner seed files, verify before relying on them): ${uniqueSeeds.join(", ")}`] : []),
     ...(uniqueSymbols.length ? [`Seed symbols: ${uniqueSymbols.join(", ")}`] : []),
     ...(anchorLines.length ? ["Anchors from the planner (verify before relying on them):", ...anchorLines] : []),
@@ -90,12 +90,16 @@ export async function runResearchChild(client, parent, request) {
   // at the planner's price (live 2026-09-18: a Fable child on tier standard).
   const childTier = request.modelTier || parent.tier;
   const inheritedModel = request.modelTier ? null : parent.model;
+  // The child's budget is a retrieval-call count enforced by the researcher
+  // physical-call rail (researchWorkBudgetCalls). The provider's own turn
+  // limit sits two turns above it so the rail's closing notice and the
+  // terminal agent_handoff turn land before a CLI hard stop.
   return await client.call(prompt, {
     role: "researcher", modelTier: childTier, modelName: inheritedModel,
-    reasoningEffort, activity: intent, maxTurns, maxOutputTokens: 4096,
+    reasoningEffort, activity: intent, maxTurns: Number.isSafeInteger(maxTurns) ? maxTurns + 2 : maxTurns, maxOutputTokens: 4096,
     allowWrite: false, allowShell: false, allowTests: false, projectDbCapability: "none", projectDbWrite: false,
     disableAtlas: parent.disableAtlas, disableSystemTools: true,
-    fallbackReads: maxTurns, skipRolePrompt: true, recyclingMode: "fresh",
+    fallbackReads: maxTurns, researchWorkBudgetCalls: maxTurns, skipRolePrompt: true, recyclingMode: "fresh",
     sessionPacket: packet, remoteSystemPrompt: packet.remote_system_prompt,
     allowedProviders: [parent.provider], abortSignal: signal,
     _researchChild: true, _parentAgentCallId: parent.agentCallId, _childKind: AGENT_CALL_CHILD_KINDS.RESEARCH,

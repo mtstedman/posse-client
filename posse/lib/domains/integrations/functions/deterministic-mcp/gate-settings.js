@@ -109,8 +109,12 @@ const PROTECTED_AGENT_TOOLS = new Set(["agent_handoff", "sub_agent_next_input"])
 // from newly minted agent contracts. A plain or `tools.`-prefixed name
 // (read_file, search_files, list_files) removes a native tool; a dotted or
 // `atlas.`-prefixed name (code.lens, atlas.symbol.get) removes an Atlas action.
-// Removing a name from the list re-enables the tool. Empty disables nothing.
-export function resolveAgentDisabledTools() {
+// A `<role>:` prefix (researcher:tools.read_file) limits the entry to gates
+// minted for that role; unprefixed entries apply to every role. Entries for
+// other or unknown roles are ignored. Removing a name from the list
+// re-enables the tool. Empty disables nothing. Protected terminal tools stay
+// issued whatever the prefix.
+export function resolveAgentDisabledTools({ role = null } = {}) {
   const disabled = { tools: new Set(), atlas: new Set() };
   let raw = "";
   try {
@@ -118,9 +122,18 @@ export function resolveAgentDisabledTools() {
   } catch {
     return disabled;
   }
-  for (const part of raw.split(/[\s,;]+/)) {
-    const name = part.trim().toLowerCase();
+  const targetRole = String(role || "").trim().toLowerCase();
+  // Bind "researcher: read_file" as one scoped entry: split on whitespace
+  // alone, the bare name would otherwise apply to every role.
+  for (const part of raw.replace(/\s*:\s*/g, ":").split(/[\s,;]+/)) {
+    let name = part.trim().toLowerCase();
     if (!name) continue;
+    const colon = name.indexOf(":");
+    if (colon >= 0) {
+      const entryRole = name.slice(0, colon);
+      name = name.slice(colon + 1);
+      if (!entryRole || !name || entryRole !== targetRole) continue;
+    }
     if (name.startsWith("atlas.")) disabled.atlas.add(name.slice("atlas.".length));
     else if (name.startsWith("tools.")) disabled.tools.add(name.slice("tools.".length));
     else if (name.includes(".")) disabled.atlas.add(name);
@@ -159,8 +172,9 @@ export function resolveResearchSynthesisMaxPhysicalCalls() {
 // Frozen policy for one session. Callers store the result on the session and
 // never re-resolve it, so a setting change mid-attempt cannot move the rail
 // between reservation, admission, closing warnings, and telemetry.
-export function resolveResearchSynthesisPolicySnapshot() {
+export function resolveResearchSynthesisPolicySnapshot({ workBudgetCalls = null } = {}) {
   return researchSynthesisPolicySnapshot({
     maxPhysicalCalls: resolveResearchSynthesisMaxPhysicalCalls(),
+    workBudgetCalls,
   });
 }

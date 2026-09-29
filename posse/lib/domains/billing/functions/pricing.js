@@ -16,24 +16,39 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { getRemotePricingMap } from "../../providers/functions/model-catalog-store.js";
 import { providerLongContextRateMultipliers } from "../../../catalog/provider-economics.js";
 
-// Anthropic prompt-caching: writing to the cache costs 1.25x the base input
-// rate (5-minute TTL, Posse's default). Mirrors the authoritative Claude cost
-// path (providers/claude/stream-usage.js). Only Claude reports cache-creation
-// tokens, so this premium is a no-op for other providers.
-const CACHE_CREATION_MULTIPLIER = 1.25;
+// Anthropic prompt-caching: a cache write costs a TTL-dependent premium over
+// the base input rate — 1.25x for a 5-minute entry, 2.0x for a 1-hour entry.
+// Callers holding the raw split (usage.cache_creation.ephemeral_{5m,1h}_input_tokens)
+// pass it and each lane is priced exactly. Unsplit Claude writes default to
+// the 1-hour rate: Posse reaches Claude only through the Claude Code CLI on
+// subscription OAuth, and every observed call wrote 1-hour entries (29.4M
+// write tokens over 4,662 messages, zero at 5m), so the 5-minute rate would
+// under-report. Other providers report no cache writes, so their 1.25x
+// default is a no-op.
+const CACHE_WRITE_5M_MULTIPLIER = 1.25;
+const CACHE_WRITE_1H_MULTIPLIER = 2.0;
 
 // Defaults as of September 2026. Rates in USD per million input/output tokens.
 // Operators can override any row via the provider_pricing table (admin CLI).
 // These are best-effort — keep them conservative so we don't under-report.
 const DEFAULT_PRICING = Object.freeze({
-  // Anthropic (claude)
-  "claude:fable":             { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
+  // Anthropic (claude). Bare aliases price the model the Claude Code CLI
+  // resolves them to on first-party auth (fable -> claude-fable-5-1, opus ->
+  // claude-opus-5-5, sonnet -> claude-sonnet-5, haiku -> claude-haiku-4-5);
+  // older versions keep explicit rows so the family fallback can't reach them.
+  "claude:fable":             { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 0.25 },
+  "claude:claude-fable-5-1":  { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 0.25 },
   "claude:claude-fable-5":    { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
   "claude:haiku":             { tier: "cheap",    input: 1.00,  output: 5.00,  cachedInput: 0.10 },
-  "claude:sonnet":            { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
-  "claude:opus":              { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "claude:claude-haiku-4-5":  { tier: "cheap",    input: 1.00,  output: 5.00,  cachedInput: 0.10 },
+  "claude:sonnet":            { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "claude:opus":              { tier: "strong",   input: 4.00,  output: 20.00, cachedInput: 0.20 },
+  "claude:claude-opus-5-5":   { tier: "strong",   input: 4.00,  output: 20.00, cachedInput: 0.20 },
   "claude:claude-opus-5":     { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
-  "claude:claude-sonnet-5":   { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
+  "claude:claude-sonnet-5":   { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "claude:claude-sonnet-4-6": { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
+  "claude:claude-sonnet-4-5": { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
+  "claude:claude-sonnet-4":   { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
   "claude:claude-opus-4-8":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
   "claude:claude-opus-4-7":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
   "claude:claude-opus-4-6":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
@@ -298,11 +313,30 @@ export function resolvePricing({ provider, modelName, modelTier } = {}) {
 }
 
 /**
+ * Price cache-write tokens in base-input-equivalent units. The optional TTL
+ * split is clamped into the write total (1-hour first, the dearer lane); any
+ * write tokens the split does not cover take the provider's default rate.
+ */
+function cacheWriteInputUnits({ provider, cacheCreationInput, cacheCreation5mTokens = null, cacheCreation1hTokens = null }) {
+  const writes1h = Math.min(cacheCreationInput, Math.max(0, Number(cacheCreation1hTokens) || 0));
+  const writes5m = Math.min(cacheCreationInput - writes1h, Math.max(0, Number(cacheCreation5mTokens) || 0));
+  const unsplit = cacheCreationInput - writes1h - writes5m;
+  const defaultMultiplier = normalizeProvider(provider) === "claude"
+    ? CACHE_WRITE_1H_MULTIPLIER
+    : CACHE_WRITE_5M_MULTIPLIER;
+  return (writes1h * CACHE_WRITE_1H_MULTIPLIER)
+    + (writes5m * CACHE_WRITE_5M_MULTIPLIER)
+    + (unsplit * defaultMultiplier);
+}
+
+/**
  * Estimate USD cost for a single call given token counts. If the call row
  * already carries cost_estimate_usd and it's non-negative, we prefer that value
  * (the provider may have reported a more authoritative figure at call time).
+ * cacheCreation5mTokens / cacheCreation1hTokens are the optional TTL split of
+ * cacheCreationInputTokens (see CACHE_WRITE_*_MULTIPLIER).
  */
-export function estimateCallCost({ provider, modelName, modelTier, inputTokens = 0, outputTokens = 0, cachedInputTokens = 0, cacheCreationInputTokens = 0, knownCostUsd = null, longContextInputTokens = null } = {}) {
+export function estimateCallCost({ provider, modelName, modelTier, inputTokens = 0, outputTokens = 0, cachedInputTokens = 0, cacheCreationInputTokens = 0, cacheCreation5mTokens = null, cacheCreation1hTokens = null, knownCostUsd = null, longContextInputTokens = null } = {}) {
   if (knownCostUsd != null && Number.isFinite(Number(knownCostUsd)) && Number(knownCostUsd) >= 0) {
     return { costUsd: Number(knownCostUsd), source: "known" };
   }
@@ -325,9 +359,10 @@ export function estimateCallCost({ provider, modelName, modelTier, inputTokens =
     resolvePricing({ provider, modelName, modelTier }),
     { provider, modelName, inputTokens: rateInput }
   );
+  const cacheWriteUnits = cacheWriteInputUnits({ provider, cacheCreationInput, cacheCreation5mTokens, cacheCreation1hTokens });
   const cost = (
     (uncachedInput * rates.inputPerM)
-    + (cacheCreationInput * rates.inputPerM * CACHE_CREATION_MULTIPLIER)
+    + (cacheWriteUnits * rates.inputPerM)
     + (cachedInput * rates.cachedInputPerM)
     + (output * rates.outputPerM)
   ) / 1_000_000;
@@ -341,7 +376,7 @@ export function estimateCallCost({ provider, modelName, modelTier, inputTokens =
  * raw input/output tokens remain the provider-reported counts, while
  * billableInputTokens shows the cached-input discount in token units.
  */
-export function estimateBillableInputTokens({ provider, modelName, modelTier, inputTokens = 0, cachedInputTokens = 0, cacheCreationInputTokens = 0, longContextInputTokens = null } = {}) {
+export function estimateBillableInputTokens({ provider, modelName, modelTier, inputTokens = 0, cachedInputTokens = 0, cacheCreationInputTokens = 0, cacheCreation5mTokens = null, cacheCreation1hTokens = null, longContextInputTokens = null } = {}) {
   const input = Math.max(0, Number(inputTokens) || 0);
   const rateInput = longContextInputTokens == null
     ? input
@@ -364,7 +399,7 @@ export function estimateBillableInputTokens({ provider, modelName, modelTier, in
   // Cache-write tokens bill at a premium; reflect that in billable units so the
   // displayed figure tracks estimateCallCost.
   const billableInputTokens = uncachedInput
-    + (cacheCreationInput * CACHE_CREATION_MULTIPLIER)
+    + cacheWriteInputUnits({ provider, cacheCreationInput, cacheCreation5mTokens, cacheCreation1hTokens })
     + (cachedInput * cacheDiscountRatio);
   return {
     billableInputTokens,

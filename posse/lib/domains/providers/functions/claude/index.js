@@ -34,6 +34,8 @@ import {
   refreshUsageSummary,
 } from "./usage-summary.js";
 import { buildClaudeNativeSubagentTelemetry, parseClaudeTaskNotification } from "./native-subagent-telemetry.js";
+import { extractClaudeUnknownToolResults, nearestIssuedClaudeToolName } from "./unknown-tool-names.js";
+import { recordObservation } from "../../../observability/functions/observations.js";
 import {
   getClaudeCommandAsync,
   getClaudeInfo,
@@ -813,6 +815,7 @@ export async function callProvider(promptText, {
             output_tokens: estimatedOutputTokens,
             cache_creation_input_tokens: _usageNumberOrNull(interactiveUsage.cache_creation_input_tokens) ?? undefined,
             cache_read_input_tokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens) ?? undefined,
+            cache_creation: interactiveUsage.cache_creation ?? undefined,
           };
           const apiEquivalentCostUsd = _estimateClaudeApiEquivalentCostUsd({
             modelName: modelToUse,
@@ -1044,8 +1047,50 @@ export async function callProvider(promptText, {
       else onLine?.(`${C.yellow}${line}${C.reset}`);
     }
 
+    // Claude Code refuses a tool name it was not given before the call reaches
+    // MCP, so the refusal is visible only here, as a tool_result error.
+    let initToolNames = [];
+    const seenUnknownToolResults = new Set();
+    function observeUnknownToolNames(message) {
+      if (message?.type === "system" && message?.subtype === "init" && Array.isArray(message.tools)) {
+        initToolNames = message.tools.map((name) => String(name || "")).filter(Boolean);
+        return;
+      }
+      for (const refusal of extractClaudeUnknownToolResults(message)) {
+        const toolUse = refusal.toolUseId
+          ? toolUses.find((entry) => entry.id === refusal.toolUseId) || null
+          : null;
+        const attempted = refusal.attempted || toolUse?.tool || null;
+        const key = refusal.toolUseId || `${attempted}\0${_providerTurnSequence}`;
+        if (seenUnknownToolResults.has(key)) continue;
+        seenUnknownToolResults.add(key);
+        const issuedNames = [
+          ...initToolNames,
+          ...(executionContract?.tools || []).map((tool) => tool?.providerSurfaceName || tool?.surfaceName),
+        ];
+        const nearestIssued = attempted ? nearestIssuedClaudeToolName(attempted, issuedNames) : null;
+        const turn = toolUse?.providerTurnIndex ?? (_providerTurnSequence || null);
+        recordObservation({
+          work_item_id: workItemId ?? null,
+          job_id: jobId ?? null,
+          attempt_id: attemptId ?? null,
+          observation_type: "provider.unknown_tool_name",
+          summary: `Claude called unissued tool ${attempted || "(unnamed)"}${nearestIssued ? ` (nearest issued: ${nearestIssued})` : ""}`,
+          detail: {
+            provider: "claude",
+            role,
+            attempted,
+            nearest_issued: nearestIssued,
+            turn,
+            tool_use_id: refusal.toolUseId,
+          },
+        });
+      }
+    }
+
     function observeStreamTelemetry(message) {
       warnOnUnknownNativeTools(message);
+      observeUnknownToolNames(message);
       for (const summary of streamTelemetry.observe(message)) {
         for (const line of summary.split(/\r?\n/).filter(Boolean)) {
           if (directOutput) process.stdout.write(`${color}|${C.reset} [thinking] ${line}\n`);
@@ -1547,6 +1592,7 @@ export async function callProvider(promptText, {
         modelTier,
         usage,
         stderrTokens,
+        segments: captured.segments,
       });
       latestSessionHandle = extractClaudeSessionHandleFromStreamMessage(resultData) || latestSessionHandle;
 

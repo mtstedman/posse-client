@@ -410,6 +410,10 @@ export function createBashExecutor({
   spawnSyncImpl = spawnSync,
   execSyncImpl = execSync,
   execFileSyncImpl = execFileSync,
+  // Optional advisory hook: invoked with the authorization outcome for every
+  // bash call so the MCP caller can record `bash.command_repaired` /
+  // `bash.policy_denied` observations. Must never throw into the executor.
+  onAuthorization = null,
 } = {}) {
   return function execBash(args, cwd, scopePredicates = null) {
     const cmd = args.command;
@@ -417,11 +421,24 @@ export function createBashExecutor({
       ? scopePredicates.policy
       : new MutationPolicy({ cwd });
     const auth = policy.authorizeBash(cmd);
+    if (typeof onAuthorization === "function") {
+      try {
+        onAuthorization({
+          command: cmd,
+          ok: auth.ok,
+          reasonClass: auth.reasonClass ?? null,
+          repairs: Array.isArray(auth.repairs) ? auth.repairs : [],
+          repairedCommand: auth.ok ? (auth.command ?? cmd) : null,
+        });
+      } catch { /* advisory telemetry must not break the tool */ }
+    }
     if (!auth.ok) return auth.error;
+    // Execute the REPAIRED command (benign redirects stripped, no-op cd removed).
+    const runCommand = auth.command ?? cmd;
     const timeout = Math.min(args.timeout || 60000, 120000);
     const maxBuffer = 1024 * 1024;
     try {
-      const result = execBashCommand(cmd, {
+      const result = execBashCommand(runCommand, {
         cwd,
         timeout,
         maxBuffer,

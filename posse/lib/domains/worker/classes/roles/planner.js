@@ -222,12 +222,12 @@ export class PlannerRole extends BaseRole {
         ? [
             "ATLAS COMPACT HANDOFF ROUTING:",
             "Do not add dev_brief to a compact agent_handoff task. Posse derives the downstream dev brief from the task's scope and claims.",
-            "Existing-code evidence is a strong default, not a plan validity requirement. When the research packet or your own exact-source ATLAS results expose evidence relevant to a task, attach concise claims with the proof/support selectors advertised by the issued schema. Posse materializes those claims into that task's downstream dev brief so the developer can start from the evidence instead of repeating repository discovery.",
+            "Existing-code evidence is a strong default, not a plan validity requirement. When the research packet or your own exact-source ATLAS results expose evidence relevant to a task, attach concise claims with the evidence selectors advertised by the issued schema. Posse materializes those claims into that task's downstream dev brief so the developer can start from the evidence instead of repeating repository discovery.",
             "Claims may stay empty for genuinely new work or when no reliable source evidence is available. Never invent, pad, or guess citations merely to populate a task.",
             "A file name, manifest entry, skeleton, or remembered line range is navigation rather than surfaced source evidence. Before citing a path selector, expose that exact range in this agent call with an issued exact-source ATLAS or read tool. If a useful selector is rejected as not surfaced, expose the task-relevant range and retry; do not discard available evidence merely to bypass selector validation.",
-            "When ATLAS returns an evidence_ref, cite that ref directly. If you use create_ref to narrow existing evidence, pass source_ref plus lines instead of copying source text into text; the server-side slice preserves file/line custody for the developer. Inline text chunks are prose and cannot prove source coordinates.",
-            "Use claim plus optional proof, support, decoy, and the synthesis field named by the issued schema. Do not emit an unadvertised compatibility alias.",
-            "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Proof and support selectors are deterministically resolved, range-validated, and auto-expanded into the developer call when available; decoy selectors remain labeled routing context.",
+            "When ATLAS returns an evidence_ref, cite that ref directly. To narrow it, cite the ref with a line range (#ref:Lstart-Lend) instead of copying source text; the selector preserves file/line custody for the developer. Inline text chunks are prose and cannot prove source coordinates.",
+            "Use claim plus optional evidence, decoy, and summary as named by the issued schema. Do not emit an unadvertised compatibility alias.",
+            "Hash refs may appear in narrative fields, task scope, or success criteria as compact opaque references. Evidence selectors are deterministically resolved, range-validated, and auto-expanded into the developer call when available; decoy selectors remain labeled routing context.",
             "",
           ].join("\n")
         : [
@@ -236,7 +236,7 @@ export class PlannerRole extends BaseRole {
           "Shape: dev_brief: { source: \"atlas\", summary, key_files, related_files, planner_file_priorities, proof, support, decoy }.",
           "Use the same file fields as researcher output: key_files, related_files, and planner_file_priorities. Tailor them to this one dev task; do not copy the whole research brief or repeat task requirements in summary.",
           "Carry each task-relevant research hash ref into exactly one dev_brief proof/support/decoy lane. Refs may also appear in task_spec or success_criteria as compact opaque references; those narrative occurrences are not expanded. Posse auto-expands available proof/support evidence into the developer call so directly relevant planner findings do not require rediscovery. Decoy refs are not auto-expanded and must include a short why.",
-          "When narrowing existing evidence with create_ref, use source_ref plus lines rather than copying code into text so the derived ref retains exact source coordinates.",
+          "When narrowing existing evidence, cite the ref with a line range (#ref:Lstart-Lend) rather than copying code into text so the selector retains exact source coordinates.",
           "",
           ].join("\n")
       : "";
@@ -601,7 +601,10 @@ export class PlannerRole extends BaseRole {
       availableSkillsBlock,
       "One-time test intake for code tasks:",
       "- Identify one narrow existing repository-declared test command per dev/fix task and set test_command on that task.",
-      "- When the research brief supplies verification_targets, preserve one applicable exact command on the corresponding task; do not replace a targeted security or regression check with unrelated generic verification.",
+      // A skipped research phase leaves no brief to supply verification_targets.
+      ...(researchSkipped
+        ? []
+        : ["- When the research brief supplies verification_targets, preserve one applicable exact command on the corresponding task; do not replace a targeted security or regression check with unrelated generic verification."]),
       "- Prefer a package/manifest script or a single recognized test runner. Do not compose shell pipelines, setup steps, or cleanup commands.",
       "- Existing repository test/check shell wrappers are valid by exact path (for example tests/check.sh); invoke executable wrappers directly, or use bash/sh for a non-executable wrapper.",
       "- Migration, build, code-generation, server-start, and deploy commands are not tests. Select an existing test/check command that validates their behavior; if none exists, omit test_command.",
@@ -674,6 +677,10 @@ export class PlannerRole extends BaseRole {
       },
       success_criteria: Array.isArray(payload.success_criteria) ? payload.success_criteria : [],
       test_command: payload.test_command || null,
+      // Remote renders its brief-dependent planner lines only when an upstream
+      // researcher brief exists; skipped research (planner-first dispatch and
+      // the no-research route) has none.
+      research_brief_available: !researchSkipped,
     });
     const atlasHandoffBlock = renderAtlasHandoffSections(plannerPacket);
 
@@ -683,10 +690,9 @@ export class PlannerRole extends BaseRole {
       ? [
         "PLANNER-LED INTAKE:",
         "  No upfront research ran. The routing record below is a starting point, not the complete input.",
-        "  Your own reads are for orientation within the triage turn budget: confirm the entry points and",
-        "  the shape of the change. When settling the plan needs reads beyond that budget, or reads across",
-        "  several files or subsystems, dispatch bounded research children for those questions instead of",
-        "  reading on yourself; give each child one self-contained question and the paths you already know.",
+        "  Spend the triage budget stated under Research budgets on orientation reads, then dispatch bounded",
+        "  research children for the questions still open; give each child one self-contained question and",
+        "  the paths you already know.",
         "  Zero children is right only when the triage reads already settle every open question. Produce",
         "  one terminal plan grounded in evidence you or your children read.",
         "  Do not call get_brief solely to reload the synthetic routing record.",
@@ -774,9 +780,9 @@ export class PlannerRole extends BaseRole {
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
     const researchBudget = researchPolicy ? [
-      `Research budgets: decide within ${researchPolicy.triageMaxTurns} triage turns which questions need research children. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.`,
+      `Research budgets: your triage budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls) of your own orientation reads to confirm the entry points and the shape of the change; within it, decide which open questions need research children, and dispatch them instead of reading beyond it yourself, especially for reads across several files or subsystems. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.`,
       "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
-      "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; use an evidence source_ref only to traverse beyond shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
+      "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; traverse the evidence ref only to read beyond the shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
     ].join("\n") : null;
     const remoteInstructions = [contract, researchBudget, contextText]
       .filter((part) => part != null && String(part) !== "")

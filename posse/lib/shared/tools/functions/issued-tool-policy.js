@@ -751,6 +751,8 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
   const requestedFallbackReads = optionalNonNegativeInteger(attachment.fallbackReads);
   const signedAssessorMaxToolCalls = optionalPositiveInteger(signed.assessorMaxToolCalls);
   const requestedAssessorMaxToolCalls = optionalPositiveInteger(attachment.assessorMaxToolCalls);
+  const signedResearchWorkBudgetCalls = optionalPositiveInteger(signed.researchWorkBudgetCalls);
+  const requestedResearchWorkBudgetCalls = optionalPositiveInteger(attachment.researchWorkBudgetCalls);
   return {
     ...signed,
     role: runtimeRole,
@@ -773,6 +775,13 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
       : (requestedAssessorMaxToolCalls == null
           ? signedAssessorMaxToolCalls
           : Math.min(signedAssessorMaxToolCalls, requestedAssessorMaxToolCalls)),
+    // A research child's retrieval budget only narrows the researcher rail,
+    // so the narrower of the signed and attached values applies.
+    researchWorkBudgetCalls: signedResearchWorkBudgetCalls == null
+      ? requestedResearchWorkBudgetCalls
+      : (requestedResearchWorkBudgetCalls == null
+          ? signedResearchWorkBudgetCalls
+          : Math.min(signedResearchWorkBudgetCalls, requestedResearchWorkBudgetCalls)),
     modelName: String(attachment.modelName || ""),
     // Context-budget checkpoints key their session as `agent-call:<id>`
     // (TrackedProviderClient publish sites); an attachment that doesn't carry

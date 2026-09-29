@@ -296,7 +296,7 @@ function recordIssuedToolSurfaceObservation({
       schema_sha256: schemaSha256,
       schema_chars: canonical.length,
       effective_policy: effectivePolicy,
-      limits: { ...resolveResearchSynthesisPolicySnapshot() },
+      limits: { ...currentResearchSynthesisPolicySnapshot() },
       projections,
       instructions_sha256: instructions ? sha256Hex(instructions) : null,
       role: roleName,
@@ -1228,6 +1228,32 @@ async function resolveAtlasAllowedActions() {
   return _atlasAllowedActions;
 }
 
+// Atlas actions issued to this session, for model-visible text only. Uses the
+// boot allowlist or a remote catalog already loaded for this session's
+// request; never fetches. The owner-hot unscoped superset is not a session
+// issuance, so it yields null and callers fall back to tool-neutral wording.
+function issuedAtlasActionsForModelText() {
+  if (!atlasAvailable || (ownerHotGateway && !mcpMessageSessionScoped)) return null;
+  if (hasTokenToolAllowlist()) return tokenToolAllowlistForSuite("atlas");
+  // An empty local route defers to the remote catalog when one is enabled.
+  if (_atlasAllowedActions?.size > 0 || !remoteToolCatalogEnabled()) return _atlasAllowedActions;
+  let catalog = preloadedRemoteToolCatalog();
+  if (!catalog && _remoteToolCatalogCache && _remoteToolSurfaceRequest
+    && _remoteToolCatalogCache.key === remoteToolCatalogCacheKey(_remoteToolSurfaceRequest)) {
+    catalog = _remoteToolCatalogCache.catalog;
+  }
+  return catalog && Array.isArray(catalog.tools) ? new Set(remoteAtlasRouteTools(catalog)) : null;
+}
+
+// Names only the issued members of the indexed-source read redirect.
+function issuedIndexedSourceReadPhrase(issuedAtlasActions) {
+  const names = [];
+  if (issuedAtlasActions?.has("code.window")) names.push("code.window in file mode", "its continuation handle");
+  if (issuedAtlasActions?.has("code.lens")) names.push("code.lens");
+  if (names.length === 0) return "an issued Atlas exact-source tool";
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`;
+}
+
 function appendToolLog(entry = {}) {
   if (!toolLogPath) return;
   try {
@@ -1407,7 +1433,7 @@ async function generateImageWithinScope(args = {}) {
 // tools. Command execution belongs to the assessor, so DEV must not receive a
 // generic shell escape hatch that can bypass the test/check role boundary.
 let allowBash = ownerHotGateway || ["artificer", "assessor"].includes(roleName);
-let execBash = allowBash ? createBashExecutor() : null;
+let execBash = allowBash ? createBashExecutor({ onAuthorization: recordBashPolicyObservation }) : null;
 // Opt-in project DB access: advertised + attached only when this repo has it
 // configured (enabled + a db type + a grant usable by this session's
 // capability lane — write sessions take the full grant, read sessions need
@@ -1581,7 +1607,7 @@ function readFileSchemaForCurrentBoot() {
   const changedSourceUse = writeEnabled
     ? "verification after source changed during this run"
     : "exact source that changed after Atlas retrieval";
-  const atlasUseDescription = `While the Atlas-first source gate is active, non-indexed reads default to and are capped at ${ATLAS_CHAIN_READ_MAX_LINES} lines. Use this tool only for documentation, configuration, manifests, other non-source artifacts, ${changedSourceUse}, or the Atlas unavailable/strikeout escape hatch. For other indexed source, use code.window in file mode, its continuation handle, or code.lens.`;
+  const atlasUseDescription = `While the Atlas-first source gate is active, non-indexed reads default to and are capped at ${ATLAS_CHAIN_READ_MAX_LINES} lines. Use this tool only for documentation, configuration, manifests, other non-source artifacts, ${changedSourceUse}, or the Atlas unavailable/strikeout escape hatch. For other indexed source, use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())}.`;
   return {
     ...TOOL_READ_FILE,
     description: `${TOOL_READ_FILE.description} ${atlasUseDescription}`,
@@ -2323,6 +2349,14 @@ function researchCitationFetchGate(toolName) {
   return null;
 }
 
+// A research child's granted retrieval budget lowers its rail, so closeout
+// texts count against the budget the child was told.
+function currentResearchSynthesisPolicySnapshot() {
+  return resolveResearchSynthesisPolicySnapshot({
+    workBudgetCalls: isResearcherRole ? bootConfig?.researchWorkBudgetCalls ?? null : null,
+  });
+}
+
 // Closeout texts name the handoff tool exactly as this provider exposes it.
 function embeddedAgentHandoffCallableName() {
   return renderAgentHandoffCallableName({
@@ -2340,7 +2374,7 @@ function buildResearchSynthesisRequiredMessage({ includeCurrentCall = false } = 
     jobId: mcpJobId,
     attemptId: mcpAttemptId,
   });
-  const maxPhysicalCalls = resolveResearchSynthesisPolicySnapshot().maxPhysicalCalls;
+  const maxPhysicalCalls = currentResearchSynthesisPolicySnapshot().maxPhysicalCalls;
   const physicalCalls = Math.max(0, Number(observed.call_steps || 0))
     + (includeCurrentCall ? 1 : 0);
   return buildResearchSynthesisRequiredText({
@@ -2351,6 +2385,45 @@ function buildResearchSynthesisRequiredMessage({ includeCurrentCall = false } = 
     finalTraversalAvailable: physicalCalls < maxPhysicalCalls,
     handoffToolName: embeddedAgentHandoffCallableName(),
   });
+}
+
+// Record read-only bash policy outcomes so audits can separate real denials
+// (a genuine mutation/escape attempt) from false positives, and can see when a
+// command was auto-repaired (benign `>/dev/null` stripped, no-op `cd <cwd>`
+// removed) before it ran. Advisory only: never break the bash call.
+function recordBashPolicyObservation({ command, ok, reasonClass, repairs, repairedCommand } = {}) {
+  try {
+    const original = String(command || "");
+    if (Array.isArray(repairs) && repairs.length > 0) {
+      _recordObservation({
+        work_item_id: mcpWorkItemId ?? null,
+        job_id: mcpJobId ?? null,
+        attempt_id: mcpAttemptId ?? null,
+        observation_type: "bash.command_repaired",
+        summary: `bash command auto-repaired (${repairs.join(", ")})`,
+        detail: {
+          repairs,
+          original: original.slice(0, 500),
+          repaired: String(repairedCommand ?? "").slice(0, 500),
+        },
+      });
+    }
+    if (!ok) {
+      _recordObservation({
+        work_item_id: mcpWorkItemId ?? null,
+        job_id: mcpJobId ?? null,
+        attempt_id: mcpAttemptId ?? null,
+        observation_type: "bash.policy_denied",
+        summary: `bash command denied by read-only policy (${reasonClass || "unknown"})`,
+        detail: {
+          reason_class: reasonClass || "unknown",
+          command: original.slice(0, 500),
+        },
+      });
+    }
+  } catch {
+    // Bash policy telemetry is advisory and must not break a tool result.
+  }
 }
 
 // Parity with the owner path's recordOwnerModelControlNotice: every
@@ -3203,7 +3276,7 @@ function applyRuntimeBootConfig(nextConfig = {}, {
     bootConfig.allowShell === true
     && ["dev", "artificer", "assessor"].includes(roleName)
   );
-  execBash = allowBash ? createBashExecutor() : null;
+  execBash = allowBash ? createBashExecutor({ onAuthorization: recordBashPolicyObservation }) : null;
   scopePredicates = buildScopePredicates(workspaceCwd, {
     modifyFiles: Array.isArray(bootConfig.scopedFiles) ? bootConfig.scopedFiles : [],
     createFiles: Array.isArray(bootConfig.createFiles) ? bootConfig.createFiles : [],
@@ -4032,7 +4105,7 @@ async function handleRequest(msg) {
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS tool ${toolName} is intentionally not exposed. Use code.window in file mode, its continuation handle, or code.lens for indexed source. Deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.`,
+            text: `ATLAS tool ${toolName} is intentionally not exposed. Use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())} for indexed source. Deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.`,
           }],
           isError: true,
         }));
@@ -4148,7 +4221,12 @@ async function handleRequest(msg) {
         args = applyNativeReadLineLimit(args, gateDecision);
         // Continue to the native handler below.
       } else {
-        const errorText = buildLockedToolError(toolName, { args, cwd: workspaceCwd, scopeKey: gateScopeKey });
+        const errorText = buildLockedToolError(toolName, {
+          args,
+          cwd: workspaceCwd,
+          scopeKey: gateScopeKey,
+          issuedAtlasActions: issuedAtlasActionsForModelText(),
+        });
         const transientControl = TRANSIENT_ATLAS_GATE_CONTROL_REASONS.has(gateDecision.reason);
         appendToolLog({
           event: "tool_gated",

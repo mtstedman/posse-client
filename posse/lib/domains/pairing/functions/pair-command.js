@@ -853,8 +853,11 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         remote: sessionRemote,
         branch: sharedBranch,
         expectedUrl: sessionUrl,
+        baseBranch: provisioned ? defaultBranch : null,
       });
-      if (provisioned) setGitHubDefaultBranch(provisioned.repository, sharedBranch, { cwd: root });
+      // The session repository's default is the trunk it was cut from; the
+      // shared branch stays a side branch, as shared-trunk preflight requires.
+      if (provisioned) setGitHubDefaultBranch(provisioned.repository, defaultBranch, { cwd: root });
       configurePairingSettings(root, { remote: sessionRemote, branch: sharedBranch });
       const preflight = await runSharedTrunkAccessPreflight(root);
       if (!preflight.ok) {

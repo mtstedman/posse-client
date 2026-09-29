@@ -5,7 +5,14 @@
 
 export const RESEARCH_CHILD_PROFILE = "research_investigation.v1";
 export const RESEARCH_CHILD_PROMPT_PROFILE = "researcher_code_child";
+// A research child's full compact report, surfaced to the parent when the
+// delivered copy had to be trimmed to the planner's result cap.
+export const RESEARCH_REPORT_OBJECT_TYPE = "research_report";
 export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
+export const SUB_AGENT_OBSERVATION_TYPES = Object.freeze({
+  RESULT_TRIMMED: "sub_agent.result_trimmed",
+  RESEARCH_UNCITED_REPORT: "sub_agent.research_uncited_report",
+});
 export const SUB_AGENT_EVIDENCE_OUTCOMES = Object.freeze({
   DELIVERED: "evidence_delivered",
   COVERED: "covered",

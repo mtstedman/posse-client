@@ -1,6 +1,7 @@
 // @ts-check
 
 export const WEB_RESEARCH_PROTOCOL = "posse.web_research.v1";
+export const WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE = "web_research.handoff_oversized";
 
 export const WEB_RESEARCH_LIMITS = Object.freeze({
   maxQuestionChars: 2_000,

@@ -1,3 +1,4 @@
+import { HASH_REF_ALIAS_MAX_CHARS } from "../../../catalog/hash-store.js";
 import { SUB_AGENT_LIMITS } from "../../../catalog/sub-agent.js";
 import {
   materializeAgentHandoffEvidenceSelector,
@@ -9,6 +10,27 @@ import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-re
 import { normalizedEvidenceSourceWindows } from "../../../shared/tools/functions/source-evidence.js";
 
 const MAX_EXPANDED_FILES = 12;
+const MAX_EXPANSION_REASON_CHARS = 48;
+
+// Expansion annotates each cited evidence occurrence in place after the
+// child's compact report was fitted to the planner's result cap. The reason
+// is bounded to JSON-safe characters so that growth has a fixed ceiling.
+function expansionReason(error) {
+  const raw = String(error?.message || "source_unavailable").replace(/[^\w .:/#-]+/g, " ").trim();
+  return (raw || "source_unavailable").slice(0, MAX_EXPANSION_REASON_CHARS);
+}
+
+// Worst-case characters one evidence occurrence gains from expansion: either
+// expanded/expanded_ref/source_ref, or expanded=false with its reason.
+export function researchExpansionAnnotationChars() {
+  const refChars = HASH_REF_ALIAS_MAX_CHARS + 2;
+  const expanded = ',"expanded":true'.length
+    + ',"expanded_ref":'.length + refChars
+    + ',"source_ref":'.length + refChars;
+  const omitted = ',"expanded":false'.length
+    + ',"expansion_reason":'.length + MAX_EXPANSION_REASON_CHARS + 2;
+  return Math.max(expanded, omitted);
+}
 
 function claimDetail(claim) {
   return Array.isArray(claim) ? claim[1] : claim;
@@ -209,7 +231,7 @@ export function expandResearchBatchEvidence(batch, {
             candidate.occurrences.push(occurrence);
             occurrence.candidate = candidate;
           } catch (error) {
-            markFailure(occurrence, String(error?.message || "source_unavailable").slice(0, 80));
+            markFailure(occurrence, expansionReason(error));
           }
         }
       }

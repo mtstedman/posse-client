@@ -167,6 +167,13 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
     backend: bootConfig.atlasAvailable === true ? "v2" : "",
   };
   if (memoryCount != null) atlasCapabilities.memory_count = memoryCount;
+  // Only an investigating researcher receives the research-child report
+  // schema instead of a compact handoff. A planner also carries
+  // researchInvestigation (for its dispatch_agent schema) but still hands off
+  // through the compact planner contract its prompt renders.
+  const investigatingResearcher = bootConfig.researchInvestigation === true
+    && String(bootConfig.role || "").trim().toLowerCase() === "researcher";
+  const compactAgentHandoff = bootConfig.agentHandoff === true && !investigatingResearcher;
 
   return {
     role: String(bootConfig.role || ""),
@@ -193,9 +200,9 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
       atlas: atlasCapabilities,
       coordination: {
         agent_handoff_v1: bootConfig.agentHandoff === true,
-        agent_handoff_compact_v1: bootConfig.agentHandoff === true && bootConfig.researchInvestigation !== true,
-        agent_handoff_compact_v2: bootConfig.agentHandoff === true && bootConfig.researchInvestigation !== true,
-        agent_handoff_compact_v3: bootConfig.agentHandoff === true && bootConfig.researchInvestigation !== true,
+        agent_handoff_compact_v1: compactAgentHandoff,
+        agent_handoff_compact_v2: compactAgentHandoff,
+        agent_handoff_compact_v3: compactAgentHandoff,
         sub_agent_v1: bootConfig.subAgent === true,
         dispatch_agent_v1: bootConfig.dispatchAgent === true,
         research_investigation_v1: bootConfig.researchInvestigation === true,

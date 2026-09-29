@@ -56,27 +56,50 @@ const configuredPhysicalCallCeiling = validateResearchSynthesisPhysicalCallCeili
 export const RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS = configuredPhysicalCallCeiling
   ?? DEFAULT_RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
 
+// A research child's retrieval budget (the call count the planner granted it)
+// only ever narrows the physical rail, so any positive count up to the global
+// ceiling is valid; anything else is ignored.
+export function validateResearchWorkBudgetCalls(value) {
+  if (value == null || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS_LIMIT) return null;
+  return parsed;
+}
+
 /**
  * Immutable per-session snapshot of every research admission limit. Consumers
  * must read limits from one snapshot rather than mixing module constants with
- * a session-specific physical ceiling.
+ * a session-specific physical ceiling. A research child's `workBudgetCalls`
+ * lowers the physical ceiling to its budget, so closing notices and remaining
+ * counts are stated against the budget the child was told.
  *
- * @param {{ maxPhysicalCalls?: number | string | null }} [overrides]
+ * @param {{ maxPhysicalCalls?: number | string | null, workBudgetCalls?: number | string | null }} [overrides]
  */
-export function researchSynthesisPolicySnapshot({ maxPhysicalCalls = null } = {}) {
+export function researchSynthesisPolicySnapshot({ maxPhysicalCalls = null, workBudgetCalls = null } = {}) {
+  const ceiling = validateResearchSynthesisPhysicalCallCeiling(maxPhysicalCalls)
+    ?? RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
+  const workBudget = validateResearchWorkBudgetCalls(workBudgetCalls);
   return Object.freeze({
     minExplorationSteps: RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
     staleExplorationSteps: RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
     maxExplorationSteps: RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
-    maxPhysicalCalls: validateResearchSynthesisPhysicalCallCeiling(maxPhysicalCalls)
-      ?? RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
+    maxPhysicalCalls: workBudget == null ? ceiling : Math.min(ceiling, workBudget),
+    ...(workBudget == null ? {} : { workBudgetCalls: workBudget }),
     curtainCallRemainingSteps: RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
     defaultMaxPhysicalCalls: DEFAULT_RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
   });
 }
 
+// A value below the configurable range can only come from a research child's
+// work budget, which narrows the rail and is honored; an out-of-range value
+// above it never widens the rail.
 function effectiveMaxPhysicalCalls(value) {
-  return validateResearchSynthesisPhysicalCallCeiling(value) ?? RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
+  const configured = validateResearchSynthesisPhysicalCallCeiling(value);
+  if (configured != null) return configured;
+  const narrowed = validateResearchWorkBudgetCalls(value);
+  return narrowed != null && narrowed < RESEARCH_SYNTHESIS_MIN_PHYSICAL_CALLS
+    ? narrowed
+    : RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS;
 }
 export const RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS = 6;
 // Atlas137: close at the base ceiling. Eligibility for a future extension may

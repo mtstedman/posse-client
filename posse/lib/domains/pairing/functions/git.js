@@ -229,10 +229,21 @@ export function validateBranchName(projectDir, branch) {
   return normalized;
 }
 
-export function createAndPublishPairingBranch(projectDir, { remote, branch, expectedUrl = null }) {
+// `baseBranch` publishes the same starting commit under the repository's
+// trunk name before the pairing branch. A provisioned session repository is
+// empty, and its default branch must be that trunk, never the shared side
+// branch: shared-trunk preflight refuses a side trunk that is the remote's
+// default branch.
+export function createAndPublishPairingBranch(projectDir, { remote, branch, expectedUrl = null, baseBranch = null }) {
   const normalizedRemote = validateRemoteName(remote);
   if (expectedUrl != null) assertPairingRemoteTargets(projectDir, normalizedRemote, expectedUrl);
   validateBranchName(projectDir, branch);
+  if (baseBranch != null) validateBranchName(projectDir, baseBranch);
+  if (baseBranch === branch) {
+    throw Object.assign(new Error(`Pairing branch ${branch} cannot also be the session trunk`), {
+      code: "pairing_branch_is_trunk",
+    });
+  }
   const localRef = `refs/heads/${branch}`;
   const remoteRef = `refs/heads/${branch}`;
   try {
@@ -251,6 +262,11 @@ export function createAndPublishPairingBranch(projectDir, { remote, branch, expe
   }
   git(["switch", "--create", branch], projectDir);
   const oid = git(["rev-parse", "HEAD"], projectDir, { timeoutMs: 5_000 }).trim();
+  if (baseBranch != null) {
+    const baseRef = `refs/heads/${baseBranch}`;
+    const baseExisting = git(["ls-remote", "--heads", normalizedRemote, baseRef], projectDir).trim();
+    if (!baseExisting) push(["push", normalizedRemote, `${oid}:${baseRef}`], projectDir, normalizedRemote);
+  }
   push(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote);
   return oid;
 }

@@ -3696,7 +3696,9 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
     : (Array.isArray(sc.files) ? sc.files.length : 0);
   if (fileCount > 0) lines.push(`  files covered: ${fileCount}${sc.truncated ? " (survey hit file cap)" : ""}`);
   if (fileCount > 0) {
-    lines.push("  structure already visible: do not call code.skeleton for surveyed files unless a named omitted/bounded fact requires surveyGap; go directly to code.window for exact code and issue independent exact-code calls together.");
+    // Rendered before issuance is known (packet.atlas.tools is empty under
+    // remote issuance), so name no exact-source tool the recipient may lack.
+    lines.push("  structure already visible for surveyed files: do not call code.skeleton for them unless a named omitted/bounded fact requires surveyGap; read exact code with an issued exact-source tool and issue independent reads together.");
   }
   const publicEntryPaths = _surveyParallelPublicEntryPaths(sc, packet);
   if (publicEntryPaths.length > 0) {

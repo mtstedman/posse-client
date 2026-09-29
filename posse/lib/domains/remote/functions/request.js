@@ -681,6 +681,7 @@ export function buildRemoteCompileRequest(packet, instructions, {
       ...(researchBudget ? { research_budget: researchBudget } : {}),
       ...(packet?.fanout_context ? { fanout: packet.fanout_context } : {}),
       ...(shellPolicyHint ? { shell_policy_hint: shellPolicyHint } : {}),
+      ...(packet?.research_brief_available === false ? { research_brief_available: false } : {}),
       memory_mode: memoryEnabled ? "on" : "off",
     },
   };

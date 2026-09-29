@@ -195,6 +195,8 @@ export function summarizeUsageSegments(agentCallId, {
       totals.longContextTierInputTokens += count(segment.input_tokens);
     }
     if (exact) {
+      // Segments carry no cache-write TTL split, so Claude writes take pricing's
+      // 1-hour default, matching cost_estimate_usd for Posse's 1-hour writes.
       const priced = estimateCallCost({
         provider: segment.provider,
         modelName: segment.model_name,

@@ -28,7 +28,10 @@ const NODE_TEST_MUTATING_FLAGS = new Set(["--test-reporter-destination", "--test
 const PYTHON_BUILD_OUTPUT_FLAGS = new Set(["--outdir"]);
 const SORT_OUTPUT_FLAGS = new Set(["-o", "--output", "-t", "--temporary-directory"]);
 const SORT_COMMAND_FLAGS = new Set(["--compress-program"]);
-const RIPGREP_COMMAND_FLAGS = new Set(["--pre"]);
+// Flags that make a search tool run another program: ripgrep's preprocessor and
+// hostname helper, and the `--filter` hooks of a ugrep installed as `grep`.
+const RIPGREP_COMMAND_FLAGS = new Set(["--pre", "--hostname-bin"]);
+const GREP_COMMAND_FLAGS = new Set(["--filter", "--filter-magic-label"]);
 const GIT_UNSAFE_READ_FLAGS = new Set(["-c", "--config-env", "--ext-diff", "--textconv", "--output"]);
 const FILE_MUTATING_FLAGS = new Set(["-c", "--compile"]);
 const FIXER_FLAGS = new Set(["--fix", "--write"]);
@@ -167,6 +170,9 @@ function blockedBashArgumentReason(command) {
   if (commandName === "rg" && hasFlag(lower.slice(1), RIPGREP_COMMAND_FLAGS)) {
     return "ripgrep external preprocessor";
   }
+  if (commandName === "grep" && hasFlag(lower.slice(1), GREP_COMMAND_FLAGS)) {
+    return "grep external filter command";
+  }
   if (commandName === "git" && hasFlag(lower.slice(1), GIT_UNSAFE_READ_FLAGS)) {
     return "git external configuration or output flag";
   }
@@ -177,6 +183,117 @@ function blockedBashArgumentReason(command) {
 }
 
 const PRIVATE_BASH_PATH_PARTS = new Set([".git", ".claude", ".codex", ".posse", ".posse-worktrees", ".posse-test-suites"]);
+
+// grep/rg flags whose VALUE is a filename glob, not a path to read. Their value
+// only constrains which files inside the (separately vetted) search roots are
+// matched, so it must not itself be treated as a readable path — otherwise a
+// legitimate `--exclude-dir=.git` is flagged private and `--exclude-dir=node_modules`
+// (a symlink) is flagged as a boundary escape.
+const GLOB_FILTER_FLAGS = new Set(["--include", "--exclude", "--exclude-dir", "--glob", "--iglob", "-g"]);
+
+// Return a copy of `command` with the CONTENTS of every quoted span replaced by
+// a placeholder while preserving byte offsets, so the mutating-word / redirect /
+// background scans see only the shell-significant structure and never a word
+// that merely appears inside a quoted grep pattern (e.g. `"2>/dev/null"`,
+// `"a->b"`, `"...confirm..."`, or a literal `&`). With maskDouble:false the
+// contents of double-quoted spans are kept verbatim, because a real shell still
+// performs `$()`, backtick and `$VAR` expansion inside double quotes — those
+// checks must see through single quotes only.
+function maskQuoted(command, { maskDouble = true } = {}) {
+  let out = "";
+  let quote = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (quote) {
+      if (quote === '"' && ch === "\\" && i + 1 < command.length) { out += maskDouble ? "__" : ch + command[i + 1]; i += 1; continue; }
+      if (ch === quote) { quote = null; out += ch; continue; }
+      out += (quote === "'" || maskDouble) ? "_" : ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) { out += ch + command[i + 1]; i += 1; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+// `>/dev/null`, `1>/dev/null`, `2>/dev/null` and `&>/dev/null` are pure output
+// suppression, not workspace writes. They are STRIPPED (not merely allowed):
+// the Windows PowerShell fallback would otherwise try to create a file literally
+// named \dev\null. Only unquoted occurrences are stripped — a quoted `2>/dev/null`
+// inside a grep pattern must survive untouched.
+const BENIGN_NULL_REDIRECT_RE = /\s*(?:[12]?>|&>)\s*\/dev\/null(?=\s|$|[;|&)])/g;
+function stripBenignRedirects(command, repairs) {
+  const masked = maskQuoted(command);
+  let out = "";
+  let last = 0;
+  let m;
+  BENIGN_NULL_REDIRECT_RE.lastIndex = 0;
+  while ((m = BENIGN_NULL_REDIRECT_RE.exec(masked))) {
+    out += command.slice(last, m.index);
+    last = m.index + m[0].length;
+    repairs.push("stripped_null_redirect");
+  }
+  return out + command.slice(last);
+}
+
+// The bash process cwd is already the job worktree, so a one-argument
+// `cd <own cwd>` is a no-op. Recognise it only when the target resolves to the
+// cwd both lexically and through realpath, so a symlinked sibling worktree
+// cannot masquerade as the cwd. Bare `cd`, `cd -`, `cd ~`, `cd ..`, and any
+// other target stay unrecognised (and therefore blocked downstream).
+function isNoopCdToCwd(policy, sub) {
+  const words = shellWords(sub);
+  if (shellCommandName(words[0]) !== "cd" || words.length !== 2) return false;
+  const target = cleanShellPathToken(words[1]);
+  if (!target || target.startsWith("-") || target.startsWith("~")) return false;
+  const lexical = path.isAbsolute(target) ? path.resolve(target) : path.resolve(policy.cwd, target);
+  if (lexical !== policy.cwd) return false;
+  try { return fs.realpathSync(lexical) === fs.realpathSync(policy.cwd); } catch { return false; }
+}
+
+// Like splitShellSubcommands, but records the operator that JOINS each segment
+// to the previous one so removed segments can be dropped and the survivors
+// re-joined verbatim (used to strip a no-op `cd <cwd>` from the command that is
+// actually executed).
+function splitShellSubcommandsWithJoins(command) {
+  const text = String(command || "");
+  const parts = [];
+  let current = "";
+  let quote = null;
+  let pendingJoin = "";
+  const push = (nextJoin) => { parts.push({ seg: current, join: pendingJoin }); current = ""; pendingJoin = nextJoin; };
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      current += ch;
+      if (ch === "\\" && quote === "\"" && i + 1 < text.length) current += text[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") { quote = ch; current += ch; continue; }
+    if (ch === "\\" && i + 1 < text.length) { current += ch + text[++i]; continue; }
+    if (ch === ";") { push(";"); continue; }
+    if (ch === "&" && text[i + 1] === "&") { push("&&"); i += 1; continue; }
+    if (ch === "|" && text[i + 1] === "|") { push("||"); i += 1; continue; }
+    if (ch === "|") { push("|"); continue; }
+    current += ch;
+  }
+  parts.push({ seg: current, join: pendingJoin });
+  return parts;
+}
+
+function removeNoopCdSubcommands(policy, command) {
+  const parts = splitShellSubcommandsWithJoins(command);
+  const kept = parts.filter((part) => !isNoopCdToCwd(policy, part.seg.trim()));
+  if (kept.length === parts.length) return command;
+  let out = "";
+  kept.forEach((part, index) => {
+    const seg = part.seg.trim();
+    out = index === 0 ? seg : `${out} ${part.join} ${seg}`;
+  });
+  return out.trim();
+}
 
 function resolvedExistingPrefix(filePath) {
   let probe = filePath;
@@ -199,10 +316,42 @@ function pathIsInside(root, candidate) {
 
 function readonlyBashPathReason(policy, command) {
   const words = shellWords(command);
+  const cmdName = shellCommandName(words[0]);
+  const isSearch = cmdName === "grep" || cmdName === "rg";
+  // grep/rg with an explicit pattern SOURCE (-e/--regexp, -f/--file, or rg
+  // --files) consume no positional as the pattern, so the first positional is a
+  // real path to vet. Everything else treats the first non-option positional as
+  // the (non-path) search pattern.
+  const preDashDash = words.indexOf("--") > 0 ? words.indexOf("--") : undefined;
+  const explicitPatternSource = isSearch && words.slice(1, preDashDash).some((token) =>
+    /^--(?:regexp|file|files)(?:=|$)/.test(token)
+    || (/^-[A-Za-z0-9]*[ef]/.test(token) && !token.startsWith("--")));
+  let patternSkipped = !isSearch || explicitPatternSource;
+  let skipNext = false;
+  let endOfOptions = false;
   for (const token of words.slice(1)) {
-    const values = [token];
+    if (skipNext) { skipNext = false; continue; }
+    // `--` ends option parsing: every later word is an operand, and words like
+    // `-e` after it are literal patterns, not flags.
+    if (token === "--" && !endOfOptions) { endOfOptions = true; continue; }
+    const optionLike = !endOfOptions && token.startsWith("-");
+    if (!patternSkipped && !optionLike) {
+      // The first positional of grep/rg is the search PATTERN, not a path — so
+      // skip it. But a token carrying glob metacharacters is expanded by the
+      // shell before the tool sees it and may resolve to an option-like or
+      // out-of-boundary path, so it must still be vetted below.
+      patternSkipped = true;
+      if (!/[*?[\]{}]/.test(token)) continue;
+    }
+    if (!endOfOptions && isSearch && (token === "--regexp" || /^-[A-Za-z0-9]*e$/.test(token))) { skipNext = true; continue; }
+    if (!endOfOptions && isSearch && token.startsWith("--regexp=")) continue;
     const equals = token.indexOf("=");
-    if (equals >= 0 && equals < token.length - 1) values.push(token.slice(equals + 1));
+    const flagName = optionLike ? (equals > 0 ? token.slice(0, equals) : token) : "";
+    // A filename-glob filter flag: its value constrains matched filenames inside
+    // the search roots, it is not itself a path to read.
+    if (GLOB_FILTER_FLAGS.has(flagName)) { if (equals < 0) skipNext = true; continue; }
+    const values = [token];
+    if (optionLike && equals >= 0 && equals < token.length - 1) values.push(token.slice(equals + 1));
     for (const rawValue of values) {
       const value = cleanShellPathToken(rawValue);
       if (!value || value === "-" || /^\d+$/.test(value) || /^\d*>&\d+$/.test(value)) continue;
@@ -211,13 +360,21 @@ function readonlyBashPathReason(policy, command) {
       if (/^~(?:[^/]*\/|$)/.test(normalized)) {
         return `shell home expansion is outside the workspace read boundary: ${value}`;
       }
-      if (parts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))) {
-        return `private workspace path is not readable through bash: ${value}`;
-      }
       const hasTraversal = parts.includes("..");
       const absolute = path.isAbsolute(value);
       const lexical = absolute ? path.resolve(value) : path.resolve(policy.cwd, value);
       const exists = fs.existsSync(lexical);
+      // Private path parts are checked RELATIVE to the cwd when the absolute
+      // path lands inside the cwd, so the agent's own worktree segments (its
+      // `.posse-worktrees/wi-N` cwd) do not trip the private-part filter while
+      // still catching the OWN worktree's `.git`/`.posse` internals and any
+      // sibling worktree reached by `..` or an absolute path.
+      const privateParts = absolute && pathIsInside(policy.cwd, lexical)
+        ? path.relative(policy.cwd, lexical).replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase())
+        : parts;
+      if (privateParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))) {
+        return `private workspace path is not readable through bash: ${value}`;
+      }
       if (!absolute && /[*?\[\]{}]/.test(value) && typeof fs.globSync === "function") {
         for (const match of fs.globSync(value, { cwd: policy.cwd })) {
           const expanded = path.resolve(policy.cwd, match);
@@ -763,57 +920,84 @@ export class MutationPolicy {
   // rejection messages steer mutations to write_file/edit_file, and a
   // regression test pins that writes stay blocked. No options are accepted so
   // callers can't be misled into expecting an allowWrite knob to work.
+  // Returns `{ ok, subcommands, command, repairs }` on success: `command` is the
+  // REPAIRED command the caller must actually execute (benign `>/dev/null`
+  // redirects stripped, a no-op `cd <cwd>` removed) and `repairs` lists the
+  // repair kinds applied. On denial it returns `{ ok:false, error, reasonClass }`
+  // so audits can separate real denials from false positives.
   authorizeBash(command) {
-    const cmd = String(command || "");
-    if (!cmd || typeof command !== "string") {
-      return { ok: false, error: "Error: No command provided." };
+    const original = String(command || "");
+    if (!original || typeof command !== "string") {
+      return { ok: false, error: "Error: No command provided.", reasonClass: "empty" };
     }
-    if (/[\r\n]/.test(cmd) || /<\(|>\(/.test(cmd) || /(^|[^&])&([^&]|$)/.test(cmd)) {
-      return { ok: false, error: "Error: Newlines, process substitution, and background shell operators are not allowed in sandboxed bash." };
+    const repairs = [];
+    // Newlines are rejected outright below, so only strip redirects otherwise.
+    const cmd = /[\r\n]/.test(original) ? original : stripBenignRedirects(original, repairs);
+    // Structural scans see quoted spans as placeholders so a metacharacter that
+    // merely lives inside a grep pattern is not mistaken for shell syntax.
+    const masked = maskQuoted(cmd);
+    // `$()`, backticks and `$VAR` still expand inside double quotes, so those
+    // checks see through single quotes only.
+    const maskedSingle = maskQuoted(cmd, { maskDouble: false });
+    // A `\d*>&\d+` fd-dup (e.g. `2>&1`) is not a background operator; mask it out
+    // before the background `&` scan.
+    const bgScan = masked.replace(/\d*>&\d+/g, "__");
+    if (/[\r\n]/.test(cmd) || /<\(|>\(/.test(masked) || /(^|[^&])&([^&]|$)/.test(bgScan)) {
+      return { ok: false, error: "Error: Newlines, process substitution, and background shell operators are not allowed in sandboxed bash.", reasonClass: "shell_operator" };
     }
     if (isSensitiveEnvCommand(cmd)) {
-      return { ok: false, error: "Error: Access to .env files is blocked. Use documented config examples or code paths instead." };
+      return { ok: false, error: "Error: Access to .env files is blocked. Use documented config examples or code paths instead.", reasonClass: "sensitive_env" };
     }
     if (isAgentHiddenReadCommand(cmd)) {
-      return { ok: false, error: agentHiddenReadCommandError() };
+      return { ok: false, error: agentHiddenReadCommandError(), reasonClass: "hidden_read" };
     }
-    if (/\$\(|`/.test(cmd)) {
-      return { ok: false, error: `Error: Subshell expressions ($() and backticks) are not allowed in sandboxed bash: ${cmd.slice(0, 100)}` };
+    if (/\$\(|`/.test(maskedSingle)) {
+      return { ok: false, error: `Error: Subshell expressions ($() and backticks) are not allowed in sandboxed bash: ${cmd.slice(0, 100)}`, reasonClass: "subshell" };
     }
-    if (SHELL_VARIABLE_EXPANSION_RE.test(cmd)) {
-      return { ok: false, error: `Error: Shell variable expansion is not allowed in sandboxed bash: ${cmd.slice(0, 100)}` };
+    if (SHELL_VARIABLE_EXPANSION_RE.test(maskedSingle)) {
+      return { ok: false, error: `Error: Shell variable expansion is not allowed in sandboxed bash: ${cmd.slice(0, 100)}`, reasonClass: "var_expansion" };
+    }
+    // SECURITY (X1): unquoted brace expansion `{a,b}`/`{a..b}` and ANSI-C /
+    // locale `$'…'`/`$"…"` quoting are shell rewrites that any operator routes
+    // through /bin/sh. On hosts where /bin/sh is bash they turn a vetted-looking
+    // command into deletes or arbitrary exec (e.g. `find . {-delete,-print}`,
+    // `rg . $'--pre=sh'`), so they are rejected on the quote-masked command.
+    if (/\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(masked) || /\$['"]/.test(masked)) {
+      return { ok: false, error: `Error: Shell brace expansion and ANSI-C/locale quoting are not allowed in sandboxed bash: ${cmd.slice(0, 100)}`, reasonClass: "brace_or_ansi_c" };
     }
     const subcommands = splitShellSubcommands(cmd);
     for (const sub of subcommands) {
       if (BLOCKED_ALWAYS.test(sub)) {
-        return { ok: false, error: `Error: Command blocked by safety filter: ${sub.slice(0, 100)}` };
+        return { ok: false, error: `Error: Command blocked by safety filter: ${sub.slice(0, 100)}`, reasonClass: "blocked_always" };
       }
     }
-    if (BLOCKED_MUTATING_COMMAND.test(cmd) || BLOCKED_INLINE_SCRIPT_WRITE.test(cmd)) {
-      return { ok: false, error: `Error: Mutating command blocked - the shell is limited to read-only inspection utilities. Use an issued scoped tool for execution or workspace changes: ${cmd.slice(0, 100)}` };
+    if (BLOCKED_MUTATING_COMMAND.test(masked) || BLOCKED_INLINE_SCRIPT_WRITE.test(cmd)) {
+      return { ok: false, error: `Error: Mutating command blocked - the shell is limited to read-only inspection utilities. Use an issued scoped tool for execution or workspace changes: ${cmd.slice(0, 100)}`, reasonClass: "mutating" };
     }
 
     for (const sub of subcommands) {
+      if (isNoopCdToCwd(this, sub)) { repairs.push("noop_cd_to_cwd"); continue; }
       const blockedArgReason = blockedBashArgumentReason(sub);
       if (blockedArgReason) {
-        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - the shell is limited to read-only inspection utilities. Use an issued scoped tool for execution or workspace changes: ${sub.slice(0, 100)}` };
+        return { ok: false, error: `Error: Mutating bash argument blocked (${blockedArgReason}) - the shell is limited to read-only inspection utilities. Use an issued scoped tool for execution or workspace changes: ${sub.slice(0, 100)}`, reasonClass: "mutating_arg" };
       }
       const blockedPathReason = readonlyBashPathReason(this, sub);
       if (blockedPathReason) {
-        return { ok: false, error: `Error: Read-only bash path blocked (${blockedPathReason}). Use the issued scoped file tools.` };
+        return { ok: false, error: `Error: Read-only bash path blocked (${blockedPathReason}). Use the issued scoped file tools.`, reasonClass: "path" };
       }
       const syntax = scopedSyntaxCommand(this, sub);
       if (syntax.recognized) {
         if (syntax.error) {
-          return { ok: false, error: `Error: ${syntax.error}. Use the issued scoped-check tool for the declared scope.` };
+          return { ok: false, error: `Error: ${syntax.error}. Use the issued scoped-check tool for the declared scope.`, reasonClass: "syntax" };
         }
         continue;
       }
       if (!READONLY_BASH_ALLOWLIST.test(sub)) {
-        return { ok: false, error: `Error: Command not in allowlist - bash is restricted to read-only inspection utilities. Use the issued frozen-test or scoped-check tools for execution: ${sub.slice(0, 100)}` };
+        return { ok: false, error: `Error: Command not in allowlist - bash is restricted to read-only inspection utilities. Use the issued frozen-test or scoped-check tools for execution: ${sub.slice(0, 100)}`, reasonClass: "not_allowlisted" };
       }
     }
-    return { ok: true, subcommands };
+    const finalCommand = repairs.includes("noop_cd_to_cwd") ? removeNoopCdSubcommands(this, cmd) : cmd;
+    return { ok: true, subcommands, command: finalCommand, repairs: [...new Set(repairs)] };
   }
 
   scopedDeleteTargets(jobOrPayload = {}, payloadMaybe = null) {

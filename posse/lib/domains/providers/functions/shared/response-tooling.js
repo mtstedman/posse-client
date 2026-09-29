@@ -31,6 +31,7 @@ function bashReadOnly(extra = "") {
     ...TOOL_BASH,
     description:
       "Execute a supported READ-ONLY inspection utility. Supported utilities include cat, head, tail, ls, find, wc, file, du, diff, grep, rg, echo, pwd, and whoami. " +
+      "Runs in the job's working directory, so use relative paths; cd, file redirects, sed, sort, and git are unavailable. " +
       "On Windows, use PowerShell-compatible inspection syntax. Verification, version-history operations, and workspace changes use separately issued capabilities." +
       (extra ? " " + extra : ""),
   };
@@ -134,7 +135,12 @@ export function createOpenAiCompatibleTooling({ buildImageTool } = {}) {
     if (isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(name)) {
       const gateDecision = checkNativeToolAllowed(name, gateArgs, { cwd, scopeKey: gateScopeKey });
       if (!gateDecision.allowed) {
-        return buildGateLockedToolError(name, { args: gateArgs, cwd, scopeKey: gateScopeKey, atlasNameStyle: "embedded" });
+        // The redirect names only tools this contract issued; without a
+        // contract the issued set is unknown and the text stays neutral.
+        const issuedAtlasActions = executionContract
+          ? (executionContract.tools || []).map((tool) => String(tool?.canonicalName || tool?.name || "")).filter(Boolean)
+          : null;
+        return buildGateLockedToolError(name, { args: gateArgs, cwd, scopeKey: gateScopeKey, atlasNameStyle: "embedded", issuedAtlasActions });
       }
       const limitedArgs = applyNativeReadLineLimit(gateArgs, gateDecision);
       if (limitedArgs !== gateArgs) executionArgsStr = JSON.stringify(limitedArgs);

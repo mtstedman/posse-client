@@ -95,11 +95,14 @@ import {
   prepareSubAgentHandoff,
   sealSubAgentHandoff,
   subAgentCompletionSignal,
+  subAgentRuntime,
 } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
 import { evidenceRefSurface } from "../functions/ref-surface.js";
 import { sourceLineDisplay, compactSourceEvidenceSuffix } from "../functions/source-line-display.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../catalog/symbol-get-batch.js";
+import { PLANNER_DISPATCH_SETTINGS } from "../../../catalog/planner-dispatch.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { isSymbolGetBatch, planSymbolGetBatch, combineSymbolGetBatchResults } from "../../../domains/atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { refreshSourceDecisionNavigation } from "../functions/source-decision-points.js";
 import {
@@ -142,6 +145,7 @@ import {
   isResearchAtlasExplorationAction,
   researchSynthesisDecision,
   researchSynthesisExplorationCeiling,
+  validateResearchWorkBudgetCalls,
 } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
@@ -526,6 +530,123 @@ export function __testSubAgentRoutingEnabled(toolNames = []) {
     suites: { tools: new Set(toolNames.map((name) => String(name))) },
   });
 }
+
+// Planner triage budget. The setting is stated in turns; the owner sees calls,
+// and planners measured ~1.81 calls per turn (median 2), so the call threshold
+// is two per budgeted turn. The notice is advisory: no call is ever refused.
+const PLANNER_TRIAGE_CALLS_PER_TURN = 2;
+const PLANNER_TRIAGE_DEFAULT_TURNS = Number(PLANNER_DISPATCH_SETTINGS
+  .find((entry) => entry.key === SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS)?.default) || 6;
+const PLANNER_TRIAGE_UNCOUNTED_TOOLS = new Set([
+  "tools.dispatch_agent",
+  "tools.agent_handoff",
+  "tools.ack_operator_feedback",
+]);
+
+function createPlannerTriageState() {
+  return { calls: 0, dispatched: false, noticeIssued: false };
+}
+
+function plannerTriageEnabled(session, policy) {
+  const boot = session?.bootConfig || {};
+  return String(boot.role || "").trim().toLowerCase() === "planner"
+    && boot.researchInvestigation === true
+    && policy?.suites?.tools?.has("dispatch_agent") === true;
+}
+
+// Read the triage budget from the policy frozen for this planner call (the one
+// its prompt rendered), falling back to the catalog default.
+function plannerTriageThresholdCalls(agentCallId) {
+  const configured = Number(subAgentRuntime.parents.get(Number(agentCallId))?.researchPolicy?.triageMaxTurns);
+  const turns = Number.isSafeInteger(configured) && configured > 0 ? configured : PLANNER_TRIAGE_DEFAULT_TURNS;
+  return { turns, calls: turns * PLANNER_TRIAGE_CALLS_PER_TURN };
+}
+
+function plannerTriageNoticeText(turns) {
+  return `\n\nTriage budget reached (~${turns} turn${turns === 1 ? "" : "s"} of orientation reads). `
+    + "Dispatch research children for the open questions or hand off the plan now; "
+    + "further reads here are at planner cost.";
+}
+
+function plannerTriageSessionState(session, policy) {
+  if (!session || !plannerTriageEnabled(session, policy)) return null;
+  if (!session._plannerTriage) session._plannerTriage = createPlannerTriageState();
+  return session._plannerTriage;
+}
+
+// Count one successful planner call; returns the one-shot notice text when the
+// budget is crossed, otherwise "". The caller appends it to the tool result.
+// Only a dispatch_agent call that succeeded ends counting: a failed dispatch
+// leaves the planner reading on its own, which is what the notice is for.
+function notePlannerTriageCall(session, policy, requested, { record = recordObservation } = {}) {
+  const state = plannerTriageSessionState(session, policy);
+  if (!state) return "";
+  if (`${requested?.suite}.${requested?.name}` === "tools.dispatch_agent") {
+    state.dispatched = true;
+    return "";
+  }
+  if (state.dispatched || state.noticeIssued) return "";
+  if (PLANNER_TRIAGE_UNCOUNTED_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
+  state.calls += 1;
+  const boot = session.bootConfig || {};
+  const threshold = plannerTriageThresholdCalls(boot.agentCallId);
+  if (state.calls < threshold.calls) return "";
+  state.noticeIssued = true;
+  try {
+    record({
+      work_item_id: boot.workItemId ?? null,
+      job_id: boot.jobId ?? null,
+      attempt_id: boot.attemptId ?? null,
+      observation_type: "planner.triage_budget_exceeded",
+      summary: `Planner triage budget reached after ${state.calls} call(s) without dispatching research`,
+      detail: {
+        calls: state.calls,
+        threshold: threshold.calls,
+        triage_max_turns: threshold.turns,
+        tool: `${requested?.suite}.${requested?.name}`,
+        agent_call_id: boot.agentCallId ?? null,
+      },
+    });
+  } catch {
+    // The notice is advisory; telemetry must not break the tool result.
+  }
+  return plannerTriageNoticeText(threshold.turns);
+}
+
+function appendPlannerTriageNotice(response, session, policy, requested, toolName) {
+  if (!mcpToolCallSuccess(response)) return response;
+  const notice = notePlannerTriageCall(session, policy, requested);
+  const finalized = appendToolResultText(response, notice, {
+    kind: "planner_triage_budget",
+    trigger: "planner_triage_threshold",
+  });
+  if (finalized !== response) {
+    recordOwnerModelControlNotice(session, toolName, {
+      kind: "planner_triage_budget",
+      text: notice,
+      trigger: "planner_triage_threshold",
+    });
+  }
+  return finalized;
+}
+
+export function __testPlannerTriageSequence({
+  role = "planner",
+  researchInvestigation = true,
+  tools = ["dispatch_agent", "agent_handoff", "read_file"],
+  agentCallId = null,
+} = {}, calls = []) {
+  const session = { bootConfig: { role, researchInvestigation, agentCallId } };
+  const policy = { suites: { tools: new Set(tools.map((name) => String(name))) } };
+  const observations = [];
+  const record = (entry) => { observations.push(entry); return true; };
+  const notices = calls.map((call) => {
+    const requested = { suite: String(call?.suite || "tools"), name: String(call?.name || "") };
+    if (call?.ok === false) return "";
+    return notePlannerTriageCall(session, policy, requested, { record });
+  });
+  return { notices, observations, state: session._plannerTriage || null };
+}
 const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
 const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
@@ -796,11 +917,23 @@ function researchNoticeFlagsFor(session) {
 // gateway restart recreates session objects for the same attempt.
 const RESEARCH_POLICY_SNAPSHOT_LIMIT = 2000;
 const researchPolicySnapshots = new Map();
+function researchWorkBudgetCallsFor(boot = {}) {
+  return String(boot.role || "") === "researcher"
+    ? validateResearchWorkBudgetCalls(boot.researchWorkBudgetCalls)
+    : null;
+}
+
 function researchSynthesisPolicyFor(session) {
-  const key = researchBudgetKey(session?.bootConfig || {});
+  const boot = session?.bootConfig || {};
+  // A research child's granted retrieval budget lowers its own rail; the key
+  // carries it so a child can never share a parent's snapshot.
+  const workBudgetCalls = researchWorkBudgetCallsFor(boot);
+  const key = workBudgetCalls == null
+    ? researchBudgetKey(boot)
+    : `${researchBudgetKey(boot)}:budget-${workBudgetCalls}`;
   let policy = researchPolicySnapshots.get(key);
   if (!policy) {
-    policy = resolveResearchSynthesisPolicySnapshot();
+    policy = resolveResearchSynthesisPolicySnapshot({ workBudgetCalls });
     researchPolicySnapshots.set(key, policy);
     while (researchPolicySnapshots.size > RESEARCH_POLICY_SNAPSHOT_LIMIT) {
       researchPolicySnapshots.delete(researchPolicySnapshots.keys().next().value);
@@ -4282,6 +4415,7 @@ class PersistentMcpSession {
     this._atlasGateEventSeq = 0;
     this._atlasGateEvents = [];
     this._subAgentRouting = createSubAgentRoutingState();
+    this._plannerTriage = null;
     this._atlasSymbolHandles = null;
     this._atlasPromotedTraversalRefs = new Set();
     this._activeToolRequests = new Map();
@@ -4346,6 +4480,7 @@ class PersistentMcpSession {
         this._atlasGateEventSeq = 0;
         this._atlasGateEvents = [];
         this._subAgentRouting = createSubAgentRoutingState();
+        this._plannerTriage = null;
         this._atlasSymbolHandles = null;
       }
     }
@@ -5809,6 +5944,22 @@ export class PersistentMcpOwner {
                 duration_ms: Date.now() - startedAt,
               },
             });
+            if (Array.isArray(result?.repairs) && result.repairs.length > 0) {
+              // Repaired arguments are accepted, not rejected; record them
+              // beside the error lane so argument drift stays visible.
+              recordObservation({
+                work_item_id: session?.bootConfig?.workItemId ?? null,
+                job_id: session?.bootConfig?.jobId ?? null,
+                attempt_id: session?.bootConfig?.attemptId ?? null,
+                observation_type: `tool.${requested.name}.repaired`,
+                summary: `${requested.name} accepted ${result.repairs.length} repaired argument(s)`,
+                detail: {
+                  repairs: result.repairs.slice(0, 24),
+                  batch_id: result?.batch_id || null,
+                  parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
+                },
+              });
+            }
             noteSubAgentRoutingSuccess(
               routingState,
               requested,
@@ -5816,6 +5967,9 @@ export class PersistentMcpOwner {
               result,
               subAgentRoutingContext(session),
             );
+            // This path answers directly, so a completed dispatch ends the
+            // planner's triage count here rather than in the notice hook.
+            if (requested.name === "dispatch_agent") notePlannerTriageCall(session, policy, requested);
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -5914,17 +6068,20 @@ export class PersistentMcpOwner {
                 subAgentRoutingContext(session),
               )
             : "";
-          const finalizedResponse = appendToolResultText(response, reminder, {
+          const routedResponse = appendToolResultText(response, reminder, {
             kind: "sub_agent_routing_checkpoint",
             trigger: "parent_evidence_threshold",
           });
-          if (finalizedResponse !== response) {
+          if (routedResponse !== response) {
             recordOwnerModelControlNotice(session, requested.name || toolName, {
               kind: "sub_agent_routing_checkpoint",
               text: reminder,
               trigger: "parent_evidence_threshold",
             });
           }
+          const finalizedResponse = delegatedEvidence
+            ? routedResponse
+            : appendPlannerTriageNotice(routedResponse, session, policy, requested, requested.name || toolName);
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
@@ -6106,6 +6263,9 @@ export class PersistentMcpOwner {
               trigger: "parent_evidence_threshold",
             });
           }
+        }
+        if (!delegatedEvidence) {
+          response = appendPlannerTriageNotice(response, session, policy, requested, requested.name);
         }
       }
       if (message.method === "tools/call" && mcpToolCallSuccess(response)) {

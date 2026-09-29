@@ -1,4 +1,4 @@
-import { RESEARCH_CHILD_PROFILE } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, RESEARCH_REPORT_OBJECT_TYPE, SUB_AGENT_OBSERVATION_TYPES } from "../../../catalog/sub-agent.js";
 import { PLANNER_RESEARCH_EFFORT_VALUES, RESEARCH_AGENT_TYPES } from "../../../catalog/planner-dispatch.js";
 // @ts-check
 
@@ -39,9 +39,16 @@ import {
   normalizedEvidenceSourceWindows,
 } from "../../../shared/tools/functions/source-evidence.js";
 import { sanitizeResearcherFileList } from "../../planning/functions/planner-helpers.js";
-import { expandResearchBatchEvidence } from "../functions/research-expansion.js";
+import { expandResearchBatchEvidence, researchExpansionAnnotationChars } from "../functions/research-expansion.js";
+import {
+  compactResearchEvidenceItem,
+  fitResearchReport,
+  markUncitedResearchClaims,
+} from "../functions/research-report.js";
+import { recordObservation } from "../../observability/functions/observations.js";
 
 export { SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
+export { researchFindingHasEvidence } from "../functions/research-report.js";
 
 const DEFAULT_REGISTRY_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_SETTLED_BATCH_RETENTION_MS = 60_000;
@@ -112,23 +119,7 @@ function sanitizePacket(packet) {
         report: {
           ...handoff.report,
           claims: (handoff.report?.claims || []).map((claim) => {
-            const compactEvidence = (items) => items.map((evidence) => {
-              if (!evidence || typeof evidence !== "object") return evidence;
-              const { selector, ref, path, lines, source_start_line, source_end_line,
-                expanded, expanded_ref, source_ref, expansion_reason } = evidence;
-              return {
-                ...(selector != null ? { selector } : {}),
-                ...(ref != null ? { ref } : {}),
-                ...(path != null ? { path } : {}),
-                ...(lines != null ? { lines } : {}),
-                ...(source_start_line != null ? { source_start_line } : {}),
-                ...(source_end_line != null ? { source_end_line } : {}),
-                ...(expanded != null ? { expanded } : {}),
-                ...(expanded_ref != null ? { expanded_ref } : {}),
-                ...(source_ref != null ? { source_ref } : {}),
-                ...(expansion_reason != null ? { expansion_reason } : {}),
-              };
-            });
+            const compactEvidence = (items) => items.map(compactResearchEvidenceItem);
             if (Array.isArray(claim)) return [claim[0], { ...claim[1], evidence: compactEvidence(claim[1]?.evidence || []) }];
             return { ...claim, evidence: compactEvidence(claim?.evidence || []) };
           }),
@@ -205,14 +196,6 @@ function authorizedEvidenceContains(input, start, end, sourcePath = null) {
     ));
   }
   return start >= Number(input?.lines?.start) && end <= Number(input?.lines?.end);
-}
-
-// A research finding cites evidence in any of the shapes the handoff
-// validator accepts: object lanes or a [text, detail] tuple with lanes.
-export function researchFindingHasEvidence(claim) {
-  const detail = Array.isArray(claim) ? claim[1] : claim;
-  if (!detail || typeof detail !== "object") return false;
-  return ["evidence", "proof", "support"].some((lane) => Array.isArray(detail[lane]) && detail[lane].length > 0);
 }
 
 function validateChildEvidenceScope(packet, authorizedEvidence) {
@@ -338,6 +321,97 @@ function resolveChildEvidenceSource(sourceContext, ref) {
     if (entry && entry.entry_kind === "materialized" && entry.payload_text != null) return entry;
   }
   return null;
+}
+
+function recordResearchChildObservation(context, observationType, summary, detail) {
+  try {
+    recordObservation({
+      work_item_id: context?.work_item_id ?? context?.workItemId ?? null,
+      job_id: context?.job_id ?? context?.jobId ?? null,
+      attempt_id: context?.attempt_id ?? context?.attemptId ?? null,
+      observation_type: observationType,
+      summary,
+      detail,
+    });
+  } catch {
+    // Telemetry must not affect a completed research result.
+  }
+}
+
+// The planner has no tool to read another call's handoff row, so a trimmed
+// report's full copy is surfaced to the parent as its own ref: hidden until
+// the parent traverses it, like the child evidence it cites.
+function surfaceResearchReportToParent(parentContext, compact, { requestId, childAgentCallId }) {
+  const payloadText = JSON.stringify(compact, null, 2);
+  const surfaced = surfaceHashRefForContext(parentContext, {
+    payloadText,
+    objectType: RESEARCH_REPORT_OBJECT_TYPE,
+    source: "tool:dispatch_agent.report",
+    note: `Full research report for child ${requestId}`,
+    metadata: {
+      line_semantics: "materialized",
+      research_request_id: requestId,
+      child_agent_call_id: positiveId(childAgentCallId),
+      ...hashRefModelVisibility(parentContext, { visibility: "hidden", ranges: [] }),
+    },
+  }, { ownerScope: "work_item" });
+  if (!surfaced?.ok || !surfaced.entry?.ref) return null;
+  const traversal = issueHashRefTraversalForContext(parentContext, {
+    ref: surfaced.entry.ref,
+    sourceRef: surfaced.entry.ref,
+    selector: { mode: "full" },
+    sourceContentHash: surfaced.entry.content_hash || null,
+  });
+  return traversal?.ok ? surfaced.entry.ref : null;
+}
+
+// The committed report already cost a full child run, so it is delivered
+// rather than discarded: uncited findings are marked unverified, and a report
+// over the planner's cap is trimmed deterministically with the full copy kept
+// behind a traversable ref.
+function deliverableResearchPacket(entry, compact, childAgentCallId) {
+  const context = entry.parentContext || {};
+  const marking = markUncitedResearchClaims(compact);
+  if (marking.uncited > 0) {
+    recordResearchChildObservation(
+      context,
+      SUB_AGENT_OBSERVATION_TYPES.RESEARCH_UNCITED_REPORT,
+      `Research child ${entry.id} returned ${marking.uncited} of ${marking.total} finding(s) without evidence`,
+      {
+        request_id: entry.id,
+        child_agent_call_id: positiveId(childAgentCallId),
+        claims: marking.total,
+        uncited_claims: marking.uncited,
+        prior_outcome: marking.priorOutcome,
+        outcome: marking.packet.outcome ?? null,
+        outcome_forced: marking.outcomeForced,
+      },
+    );
+  }
+  const fit = fitResearchReport(marking.packet, {
+    maxChars: entry.resultChars,
+    evidenceAllowance: entry.expandEvidence ? researchExpansionAnnotationChars() : 0,
+    resolveFullReportRef: () => surfaceResearchReportToParent(context, marking.packet, {
+      requestId: entry.id,
+      childAgentCallId,
+    }),
+  });
+  if (fit.trimmed) {
+    recordResearchChildObservation(
+      context,
+      SUB_AGENT_OBSERVATION_TYPES.RESULT_TRIMMED,
+      `Trimmed research child ${entry.id} report from ${fit.trimmed.chars_before} to ${fit.trimmed.chars_after} characters`,
+      {
+        request_id: entry.id,
+        child_agent_call_id: positiveId(childAgentCallId),
+        result_chars: entry.resultChars,
+        ...fit.trimmed,
+        steps: fit.steps,
+        fits: fit.fits,
+      },
+    );
+  }
+  return fit.packet;
 }
 
 // Admission/control failures (a busy sibling lane, capacity, the parent
@@ -639,6 +713,57 @@ function materializeDelegatedRef(selectorValue, context) {
   } catch (error) {
     throw delegatedRefMaterializationError(error, selector.ref);
   }
+}
+
+const RESEARCH_BUDGET_KEYS = Object.freeze(["timeout_ms", "max_turns", "reasoning_effort"]);
+
+// A research budget arrives from a model. A stray key, a numeric string, or an
+// unknown effort is repaired and noted instead of rejected: a rejection costs
+// the planner a whole turn, and every repaired value falls back to (or stays
+// clamped by) the planner's research policy.
+function normalizeResearchBudget(value, policy, requestId, repairs) {
+  if (value == null) return {};
+  const note = (field, action, detail = {}) => repairs.push({ request_id: requestId, field, action, ...detail });
+  const prototype = value && typeof value === "object" ? Object.getPrototypeOf(value) : null;
+  if (typeof value !== "object" || Array.isArray(value) || (prototype !== Object.prototype && prototype !== null)) {
+    note("budget", "ignored", { reason: "not_an_object" });
+    return {};
+  }
+  const budget = {};
+  for (const key of Object.keys(value)) {
+    if (!RESEARCH_BUDGET_KEYS.includes(key)) note(`budget.${String(key).slice(0, 60)}`, "ignored", { reason: "unknown_key" });
+  }
+  for (const field of ["timeout_ms", "max_turns"]) {
+    const raw = value[field];
+    if (raw == null) continue;
+    if (Number.isSafeInteger(raw) && raw > 0) {
+      budget[field] = raw;
+      continue;
+    }
+    const text = typeof raw === "string" ? raw.trim() : "";
+    const number = typeof raw === "number" ? raw : (/^\d+(?:\.\d+)?$/.test(text) ? Number(text) : Number.NaN);
+    const integer = Math.floor(number);
+    if (Number.isSafeInteger(integer) && integer > 0) {
+      budget[field] = integer;
+      note(`budget.${field}`, "coerced", { to: integer });
+    } else {
+      note(`budget.${field}`, "ignored", { reason: "invalid_number" });
+    }
+  }
+  const effort = value.reasoning_effort;
+  if (effort != null) {
+    const normalized = typeof effort === "string" ? effort.trim().toLowerCase() : "";
+    if (PLANNER_RESEARCH_EFFORT_VALUES.includes(normalized)) {
+      budget.reasoning_effort = normalized;
+      if (normalized !== effort) note("budget.reasoning_effort", "coerced", { to: normalized });
+    } else {
+      note("budget.reasoning_effort", "defaulted", {
+        reason: "invalid_effort",
+        to: policy?.childReasoningEffort || "medium",
+      });
+    }
+  }
+  return budget;
 }
 
 function normalizeResearchAnchors(value, context, label) {
@@ -978,6 +1103,7 @@ function publicBatch(batch, { includeResults = false } = {}) {
     requests: batch.entries.map((entry) => ({ id: entry.id, handle: entry.handle, status: entry.status })),
     ...(includeResults ? { results: batch.entries.map(publicEntry) } : {}),
     ...(includeResults && batch.researchExpansion ? { research_expansion: batch.researchExpansion } : {}),
+    ...(batch.repairs?.length > 0 ? { repairs: batch.repairs } : {}),
     ...(!includeResults ? {
       next_action: { tool: "sub_agent", op: "status", default_wait_ms: 1000 },
     } : {}),
@@ -1362,18 +1488,11 @@ export class SubAgentRuntime {
     if (entry.sealed) throw runtimeError("SUB_AGENT_CURSOR_SEALED", "Citation child already submitted its terminal handoff", { stage: "terminal" });
     if (entry.profile === RESEARCH_CHILD_PROFILE) {
       if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Research child must return a research report", { stage: "terminal" });
-      const claims = packet?.handoffs?.[0]?.report?.claims || [];
-      // Findings arrive as {claim, evidence|proof|support} objects or as
-      // [text, {evidence|proof|support}] tuples. Reading only `.evidence` on
-      // the raw object bounced children that cited under another lane or in
-      // tuple form (live 2026-09-18: two rejections of a child that had made
-      // 17 Atlas reads). A report is refused only when no finding carries any
-      // selector; partially cited findings reach the planner marked as such.
-      const cited = claims.filter(researchFindingHasEvidence);
-      if (packet.outcome !== "failed" && cited.length === 0) {
-        throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Each research finding requires visible evidence selectors", { stage: "terminal" });
-      }
-      if (JSON.stringify(packet).length > entry.resultChars) throw runtimeError("SUB_AGENT_RESULT_TOO_LARGE", `Compact research report must fit ${entry.resultChars} characters`, { stage: "terminal" });
+      // Citation and size are settled on the committed report after the child
+      // exits, never here: these raw arguments precede selector validation,
+      // and a rejection costs the child a whole full-context turn. Uncited
+      // findings reach the planner marked unverified, and an oversized report
+      // is trimmed deterministically (see #runEntry).
       return true;
     }
     if (entry.consumedEvidence.length === 0 && packet?.outcome !== "failed") {
@@ -1507,6 +1626,7 @@ export class SubAgentRuntime {
     }
 
     const seenRequests = new Set();
+    const repairs = [];
     const normalized = input.requests.map((raw, requestIndex) => {
       const request = exactObject(raw, ["id", "profile", "intent", "inputs", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
       const id = boundedString(request.id, `requests[${requestIndex}].id`, 40);
@@ -1527,12 +1647,9 @@ export class SubAgentRuntime {
           throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Repository anchors are supported only for code research children", { stage: "validation" });
         }
         const anchors = normalizeResearchAnchors(request.anchors, context, `requests[${requestIndex}].anchors`);
-        const budget = request.budget == null ? {} : exactObject(request.budget, ["timeout_ms", "max_turns", "reasoning_effort"], "research budget");
-        const effort = budget.reasoning_effort || policy.childReasoningEffort || "medium";
-        if (!PLANNER_RESEARCH_EFFORT_VALUES.includes(effort)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research effort", { stage: "validation" });
-        for (const field of ["timeout_ms", "max_turns"]) {
-          if (budget[field] != null && (!Number.isSafeInteger(budget[field]) || budget[field] <= 0)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `Invalid ${field}`, { stage: "validation" });
-        }
+        const budget = normalizeResearchBudget(request.budget, policy, id, repairs);
+        const effort = [budget.reasoning_effort, policy.childReasoningEffort]
+          .find((value) => PLANNER_RESEARCH_EFFORT_VALUES.includes(value)) || "medium";
         return {
           id, profile: RESEARCH_CHILD_PROFILE, agentType: request.agent_type,
 
@@ -1541,6 +1658,9 @@ export class SubAgentRuntime {
           maxTurns: Math.min(policy.childMaxTurns, budget.max_turns || policy.childMaxTurns),
           reasoningEffort: PLANNER_RESEARCH_EFFORT_VALUES[Math.min(PLANNER_RESEARCH_EFFORT_VALUES.indexOf(effort), PLANNER_RESEARCH_EFFORT_VALUES.indexOf(policy.effortCeiling))],
           resultChars: policy.resultChars,
+          // Expansion later annotates this child's cited evidence in place, so
+          // the report fit reserves room for it.
+          expandEvidence: request.agent_type === "code" && (Number(policy.expandChars) || 0) > 0,
           modelTier: policy.childModelTier || null,
           anchors, inputs: [], maxInputs: 0, parentContext: { ...context },
         };
@@ -1604,6 +1724,7 @@ export class SubAgentRuntime {
       signalled: false,
       acknowledged: false,
       requestDigest: digest,
+      repairs,
       parentClosed: false,
       entries: normalized.map((request) => ({
         ...request,
@@ -1707,11 +1828,9 @@ export class SubAgentRuntime {
       const cited = research ? packetEvidence(record.packet) : validateChildEvidenceScope(record.packet, entry.consumedEvidence);
       const childContext = { ...entry.parentContext, agent_call_id: result.agentCallId, agentCallId: result.agentCallId };
       surfaceChildPacketEvidenceToParent(record.packet, entry.parentContext, research && !result.webPacket ? childContext : entry.parentContext);
-      if (research) {
-        const compact = sanitizePacket(record.packet);
-        if (JSON.stringify(compact).length > entry.resultChars) throw runtimeError("SUB_AGENT_RESULT_TOO_LARGE", `Research report exceeds ${entry.resultChars} characters; full report retained`, { stage: "terminal" });
-      }
-      entry.packet = sanitizePacket(record.packet);
+      entry.packet = research
+        ? deliverableResearchPacket(entry, sanitizePacket(record.packet), result.agentCallId)
+        : sanitizePacket(record.packet);
       entry.sourceContext = research && !result.webPacket ? childContext : entry.parentContext;
       entry.coverage = coverageForEntry(entry, cited.length);
       entry.usage = usageFromChild(result);

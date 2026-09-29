@@ -120,6 +120,7 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
   const agentCallId = numberOrNull(bootConfig.agentCallId);
   const promptChars = numberOrNull(bootConfig.promptChars);
   const fallbackReads = numberOrNull(bootConfig.fallbackReads);
+  const researchWorkBudgetCalls = numberOrNull(bootConfig.researchWorkBudgetCalls);
   const assessorMaxToolCalls = numberOrNull(bootConfig.assessorMaxToolCalls);
   const role = stringOrNull(bootConfig.role);
   const providerName = stringOrNull(bootConfig.providerName);
@@ -145,6 +146,7 @@ export function buildMcpOAuthClaimsFromBootConfig(bootConfig = {}) {
       agentCallId,
       promptChars,
       fallbackReads,
+      researchWorkBudgetCalls,
       assessorMaxToolCalls,
       disableSystemTools: bootConfig.disableSystemTools === true,
       coordinationChild: bootConfig.coordinationChild === true,
@@ -239,6 +241,7 @@ export function bootConfigFromMcpOAuthClaims(claims = {}) {
     agentCallId: numberOrNull(capabilities.agentCallId),
     promptChars: numberOrNull(capabilities.promptChars) || 0,
     fallbackReads: numberOrNull(capabilities.fallbackReads),
+    researchWorkBudgetCalls: numberOrNull(capabilities.researchWorkBudgetCalls),
     assessorMaxToolCalls: numberOrNull(capabilities.assessorMaxToolCalls),
     disableSystemTools: capabilities.disableSystemTools === true,
     coordinationChild: capabilities.coordinationChild === true,

@@ -462,6 +462,7 @@ export async function callProvider(promptText, {
     issuedToolSurface: issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy),
     agentHandoffCompactV1: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
     agentHandoffCompactV3: _remoteIssuedPolicy?.coordination?.agentHandoffCompactV3 === true,
+    researchInvestigation: _remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
     atlasCodeWindowPolicy: atlasAttachment?.codeWindowPolicy || null,
     needsImageGeneration,
     scopedFiles,

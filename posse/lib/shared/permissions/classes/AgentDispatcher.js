@@ -413,6 +413,9 @@ export class AgentDispatcher {
     agentHandoff = false,
     agentHandoffReportOnly = false,
     subAgent = false,
+    dispatchAgent = false,
+    webResearchHandoff = false,
+    researchInvestigation = false,
     coordinationChild = false,
     atlasAvailable = true,
     coordinationChildPermitId = null,
@@ -467,6 +470,12 @@ export class AgentDispatcher {
       agentHandoff,
       agentHandoffReportOnly,
       subAgent,
+      // Dispatched agents (research, web, and citation children) mint their
+      // gate here; dropping these flags minted a research child's gate without
+      // research investigation, so it was issued the generic agent_handoff.
+      dispatchAgent,
+      webResearchHandoff,
+      researchInvestigation,
       coordinationChild,
       atlasAvailable,
       coordinationChildPermitId,

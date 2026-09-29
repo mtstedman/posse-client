@@ -2443,6 +2443,7 @@ export const TOOL_BASH = {
   name: "bash",
   description:
     "Execute a supported read-only inspection utility and return stdout+stderr. Supported utilities include cat, head, tail, ls, find, wc, file, du, diff, grep, rg, echo, pwd, and whoami. " +
+    "Runs in the job's working directory, so use relative paths; cd, file redirects, sed, sort, and git are unavailable. " +
     "On Windows this runs through PowerShell when shell features are needed; use PowerShell-compatible inspection syntax. " +
     "Verification, version-history operations, and workspace changes are handled by separately issued capabilities.",
   parameters: {
