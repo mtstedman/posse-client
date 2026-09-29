@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git.js";
@@ -43,7 +44,23 @@ export function assertCleanPairingCheckout(projectDir) {
   }
 }
 
-export function currentCheckout(projectDir) {
+// original_head of a checkout created empty for a session join: there is no
+// commit to return to, so leaving keeps the last shared state instead.
+export const FRESH_CHECKOUT_HEAD = "0".repeat(40);
+// Entries an otherwise empty folder may hold: Posse creates its own state
+// directory before the join command runs.
+const FRESH_CHECKOUT_ALLOWED_ENTRIES = new Set([".posse", ".DS_Store"]);
+
+function headIsUnborn(projectDir) {
+  try {
+    git(["rev-parse", "--verify", "--quiet", "HEAD"], projectDir, { timeoutMs: 5_000 });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+export function currentCheckout(projectDir, { allowUnborn = false } = {}) {
   let branch;
   try {
     branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"], projectDir, { timeoutMs: 5_000 });
@@ -52,10 +69,37 @@ export function currentCheckout(projectDir) {
     error.code = "pairing_detached_head";
     throw error;
   }
+  if (allowUnborn && headIsUnborn(projectDir)) return { branch: branch.trim(), head: FRESH_CHECKOUT_HEAD };
   return {
     branch: branch.trim(),
     head: git(["rev-parse", "HEAD"], projectDir, { timeoutMs: 5_000 }).trim(),
   };
+}
+
+// A member may join from an empty folder: the session repository holds the
+// full history and admission grants the member's session key access to it, so
+// no clone of the host's own repository is needed. Returns the new root.
+export function initializeFreshPairingCheckout(projectDir) {
+  const root = path.resolve(projectDir);
+  const entries = fs.existsSync(root) ? fs.readdirSync(root) : [];
+  const unexpected = entries.filter((entry) => !FRESH_CHECKOUT_ALLOWED_ENTRIES.has(entry));
+  if (unexpected.length > 0) {
+    throw Object.assign(new Error(
+      "Join a session from an empty folder, or from a clean clone of the session's repository",
+    ), { code: "pairing_folder_not_empty" });
+  }
+  fs.mkdirSync(root, { recursive: true });
+  git(["init", "--quiet"], root, { timeoutMs: 10_000 });
+  fs.appendFileSync(path.join(root, ".git", "info", "exclude"), "\n.posse/\n", "utf8");
+  return root;
+}
+
+// Undo initializeFreshPairingCheckout after a join that never checked anything
+// out, so the folder is empty again for the next attempt.
+export function discardFreshPairingCheckout(root) {
+  if (!headIsUnborn(root)) return false;
+  fs.rmSync(path.join(root, ".git"), { recursive: true, force: true });
+  return true;
 }
 
 function trimRepoPath(value) {
@@ -271,6 +315,19 @@ export function createAndPublishPairingBranch(projectDir, { remote, branch, expe
   return oid;
 }
 
+// True when the local pairing branch holds commits beyond `baseOid`. A missing
+// branch or base holds nothing to lose.
+export function pairingBranchHasOwnCommits(projectDir, branch, baseOid) {
+  if (!branch || !baseOid) return false;
+  try {
+    git(["rev-parse", "--verify", `refs/heads/${branch}`], projectDir, { timeoutMs: 5_000 });
+  } catch {
+    return false;
+  }
+  const count = git(["rev-list", "--count", `${baseOid}..refs/heads/${branch}`], projectDir, { timeoutMs: 5_000 });
+  return Number(String(count).trim()) > 0;
+}
+
 export function deletePublishedPairingBranch(projectDir, { remote, branch, expectedOid }) {
   const normalizedRemote = validateRemoteName(remote);
   push([
@@ -363,12 +420,16 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
     normalizedRemote,
     `${remoteOid}:refs/heads/${branch}`,
   ], projectDir, normalizedRemote);
-  try {
-    git(["merge-base", "HEAD", remoteOid], projectDir, { timeoutMs: 5_000 });
-  } catch {
-    throw Object.assign(new Error("This checkout does not share Git history with the paired repository"), {
-      code: "pairing_repository_history_mismatch",
-    });
+  // A checkout created empty for this join has no history yet; it takes the
+  // session's history as its own.
+  if (!headIsUnborn(projectDir)) {
+    try {
+      git(["merge-base", "HEAD", remoteOid], projectDir, { timeoutMs: 5_000 });
+    } catch {
+      throw Object.assign(new Error("This checkout does not share Git history with the paired repository"), {
+        code: "pairing_repository_history_mismatch",
+      });
+    }
   }
 
   let localOid = null;
@@ -399,8 +460,19 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
   return remoteOid;
 }
 
-export function restoreOriginalBranch(projectDir, branch) {
+export function restoreOriginalBranch(projectDir, branch, { originalHead = null } = {}) {
   assertCleanPairingCheckout(projectDir);
+  if (originalHead === FRESH_CHECKOUT_HEAD) {
+    // A checkout created empty for the join never had this branch: keep the
+    // last shared state under it, or leave an unborn checkout as it is.
+    if (headIsUnborn(projectDir)) return;
+    try {
+      git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], projectDir, { timeoutMs: 5_000 });
+    } catch {
+      git(["switch", "--create", String(branch)], projectDir);
+      return;
+    }
+  }
   git(["switch", String(branch)], projectDir);
 }
 

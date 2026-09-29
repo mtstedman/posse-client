@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import readline from "node:readline";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
@@ -21,7 +20,10 @@ import {
   createAndPublishPairingBranch,
   currentCheckout,
   deletePublishedPairingBranch,
+  discardFreshPairingCheckout,
   findPairingRemote,
+  initializeFreshPairingCheckout,
+  pairingBranchHasOwnCommits,
   pairingTemporaryRemoteName,
   preflightAndCheckoutPairingBranch,
   removeTemporaryRemote,
@@ -75,6 +77,13 @@ import {
   restoreRepositorySsh,
   setGitHubDefaultBranch,
 } from "./github-session.js";
+import {
+  HOST_CONSOLE_HELP,
+  createHostConsole,
+  diffPairingMembers,
+  parseHostConsoleLine,
+  shortId,
+} from "./host-console.js";
 
 // This is both the lease heartbeat and the peer-work sync cadence. Five
 // seconds keeps the terminal feed live without turning queue changes into one
@@ -89,25 +98,6 @@ const PAIRING_SETTING_KEYS = Object.freeze([
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function installHostPairingHotkeys(input, { onGraceful, onForce }) {
-  if (!input?.isTTY || typeof input.setRawMode !== "function") return () => {};
-  const wasRaw = input.isRaw === true;
-  const wasPaused = input.isPaused?.() === true;
-  readline.emitKeypressEvents(input);
-  input.setRawMode(true);
-  input.resume();
-  const onKeypress = (_text, key = {}) => {
-    if (key.ctrl && key.name === "c") onForce();
-    else if (!key.ctrl && !key.meta && key.name === "g") onGraceful();
-  };
-  input.on("keypress", onKeypress);
-  return () => {
-    input.off("keypress", onKeypress);
-    if (!wasRaw) input.setRawMode(false);
-    if (wasPaused) input.pause();
-  };
 }
 
 function safeError(error) {
@@ -416,7 +406,7 @@ async function restoreLocalPairing(projectDir, state) {
       // Stop new shared-trunk publications before changing checkout state.
       setSetting(SETTING_KEYS.SHARED_TRUNK_ENABLED, "false", { projectDir });
       restoreRepositorySsh(projectDir, state.original_ssh_command);
-      restoreOriginalBranch(projectDir, state.original_branch);
+      restoreOriginalBranch(projectDir, state.original_branch, { originalHead: state.original_head });
       restorePairingSettings(projectDir, state.originalSettings);
       if (state.added_remote_name) {
         removeTemporaryRemote(projectDir, {
@@ -456,7 +446,7 @@ async function unpair(projectDir, remoteClient, state = getLivePairingState()) {
   return { ok: local.ok, local, remote, role: state.role };
 }
 
-function printPeerActivityChanges(C, status, seen, { json = false } = {}) {
+function printPeerActivityChanges(C, status, seen, { json = false, log = console.log } = {}) {
   const changes = diffPairingPeerActivity(status?.peers, seen);
   for (const change of changes) {
     if (json) {
@@ -473,11 +463,61 @@ function printPeerActivityChanges(C, status, seen, { json = false } = {}) {
     const entityLabel = change.entity_type === "job"
       ? `job #${entity.id}${entity.work_item_id ? ` (WI#${entity.work_item_id})` : ""} ${entity.job_type}`
       : `WI#${entity.id}`;
-    console.log(
+    log(
       `  ${C.dim}[pair peer · read-only]${C.reset} ${change.peer.label} ${verb} `
       + `${C.cyan}${entityLabel}${C.reset} `
       + `${entity.status}: ${entity.title}`,
     );
+  }
+}
+
+function memberLabel(member) {
+  return `${shortId(member?.id)}${member?.instance_id ? ` on ${shortId(member.instance_id)}` : ""}`;
+}
+
+function printMemberChanges(log, C, events, { json = false } = {}) {
+  for (const event of events) {
+    const member = event.member || {};
+    if (json) {
+      log(JSON.stringify({
+        event: "pairing_member",
+        kind: event.kind,
+        member_id: member.id || null,
+        state: member.state || null,
+        instance_id: member.instance_id || null,
+      }));
+      continue;
+    }
+    if (event.kind === "pending") {
+      log(`  ${C.yellow}[session]${C.reset} ${C.bold}Join request${C.reset} from ${memberLabel(member)}. `
+        + "Ask them for the 4-character countersign on their screen, type it here and press Enter.");
+    } else if (event.kind === "joined") {
+      log(`  ${C.green}[session]${C.reset} ${memberLabel(member)} joined`);
+    } else {
+      log(`  ${C.dim}[session]${C.reset} ${memberLabel(member)} ${member.state === "kicked" ? "was removed" : "left"}`);
+    }
+  }
+}
+
+function printHostConsoleStatus(log, C, state, status, members, sessionCode) {
+  const pending = members.filter((member) => member.state === "pending");
+  const admitted = members.filter((member) => member.state === "admitted");
+  log(`  ${C.bold}Session${C.reset} ${sessionCode ? `${C.cyan}${sessionCode}${C.reset} · ` : ""}`
+    + `branch ${state?.shared_branch || "?"} · ${status?.status || "starting"}`
+    + `${status?.enrollment_open === false ? " · invites closed" : ""}`);
+  log(`  Connected: ${admitted.length ? admitted.map(memberLabel).join(", ") : "nobody yet"}`);
+  if (pending.length) {
+    log(`  ${C.yellow}Waiting for admission:${C.reset} ${pending.map(memberLabel).join(", ")} (type their countersign)`);
+  }
+}
+
+function printHostConsoleMembers(log, members) {
+  if (members.length === 0) {
+    log("  No members yet.");
+    return;
+  }
+  for (const member of members) {
+    log(`  ${shortId(member.id)}  ${member.state}/${member.role || "member"}  ${shortId(member.instance_id)}`);
   }
 }
 
@@ -486,22 +526,77 @@ async function monitorPairing(remoteClient, stateId, {
   C,
   json = false,
   input = process.stdin,
+  output = process.stdout,
+  sessionCode = null,
 } = {}) {
   let forceRequested = false;
   let gracefulRequested = false;
   let consecutiveFailures = 0;
   let lastTeamHandoffPollAt = 0;
   const seenPeerActivity = new Map();
+  const seenMembers = new Map();
+  let latestStatus = null;
+  let latestMembers = [];
   const stop = () => { forceRequested = true; };
+  // Closing the terminal must close and integrate like Ctrl+C. Output to the
+  // gone terminal is dropped rather than allowed to crash the shutdown.
+  const hangup = () => {
+    for (const stream of [process.stdout, process.stderr]) stream.on("error", () => {});
+    forceRequested = true;
+  };
   const stateAtStart = getPairingState(stateId);
-  const removeHotkeys = stateAtStart?.role === "host"
-    ? installHostPairingHotkeys(input, {
-        onGraceful: () => { gracefulRequested = true; },
-        onForce: () => { forceRequested = true; },
+  let log = (text = "") => console.log(text);
+  const runHostConsoleCommand = async (parsed) => {
+    const state = getPairingState(stateId);
+    try {
+      if (parsed.kind === "empty") return;
+      if (parsed.kind === "invalid") {
+        log(`  ${C.yellow}${parsed.message}${C.reset}`);
+      } else if (parsed.kind === "help") {
+        for (const line of HOST_CONSOLE_HELP) log(`  ${C.dim}${line}${C.reset}`);
+      } else if (parsed.kind === "status") {
+        printHostConsoleStatus(log, C, state, latestStatus, latestMembers, sessionCode);
+      } else if (parsed.kind === "members") {
+        printHostConsoleMembers(log, latestMembers);
+      } else if (parsed.kind === "admit") {
+        log(`  ${C.cyan}[session]${C.reset} admitting ${parsed.code}...`);
+        const admitted = await admitPairingMember({ state, code: parsed.code, projectDir, remoteClient });
+        log(`  ${C.green}[session]${C.reset} admitted ${admitted.countersign}`
+          + `${admitted.member ? ` (${memberLabel(admitted.member)})` : ""}; their checkout switches to ${state.shared_branch}`);
+      } else if (parsed.kind === "kick") {
+        const matches = latestMembers.filter((member) => String(member.id).startsWith(parsed.id));
+        if (matches.length !== 1) {
+          log(`  ${C.yellow}[session]${C.reset} ${matches.length ? "Several" : "No"} members match "${parsed.id}"; type members to see ids`);
+          return;
+        }
+        await kickPairingMember({ state, memberId: matches[0].id, projectDir, remoteClient });
+        log(`  ${C.yellow}[session]${C.reset} removed ${memberLabel(matches[0])}`);
+      }
+    } catch (error) {
+      log(`  ${C.yellow}[session]${C.reset} ${safeError(error)}`);
+    }
+  };
+  let commandChain = Promise.resolve();
+  const hostConsole = stateAtStart?.role === "host" && !json
+    ? createHostConsole({
+        input,
+        output,
+        onLine: (line) => {
+          const parsed = parseHostConsoleLine(line);
+          if (parsed.kind === "close") {
+            gracefulRequested = true;
+            return;
+          }
+          // One command at a time; a slow admit must not interleave with a kick.
+          commandChain = commandChain.then(() => runHostConsoleCommand(parsed));
+        },
+        onInterrupt: () => { forceRequested = true; },
       })
-    : () => {};
+    : null;
+  if (hostConsole) log = hostConsole.print;
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  process.once("SIGHUP", hangup);
   try {
     while (!forceRequested && !gracefulRequested && !pairingProcessShouldStop(stateId)) {
       const state = getPairingState(stateId);
@@ -554,13 +649,23 @@ async function monitorPairing(remoteClient, stateId, {
             projectDir, remoteClientFactory: () => remoteClient,
           });
           if (handoff.handedOff && !json) {
-            console.log(`  ${C.green}[session handoff]${C.reset} ${handoff.predecessorWorkItemId} -> ${handoff.successorWorkItemId} (${handoff.acceptedOid.slice(0, 8)})`);
+            log(`  ${C.green}[session handoff]${C.reset} ${handoff.predecessorWorkItemId} -> ${handoff.successorWorkItemId} (${handoff.acceptedOid.slice(0, 8)})`);
           }
           if (Array.isArray(handoff.expiredSuccessors) && handoff.expiredSuccessors.length && !json) {
-            console.log(`  ${C.yellow}[session handoff]${C.reset} expired stale file request(s) ${handoff.expiredSuccessors.join(", ")}; the member must request again`);
+            log(`  ${C.yellow}[session handoff]${C.reset} expired stale file request(s) ${handoff.expiredSuccessors.join(", ")}; the member must request again`);
           }
         }
-        printPeerActivityChanges(C, status, seenPeerActivity, { json });
+        printPeerActivityChanges(C, status, seenPeerActivity, { json, log });
+        latestStatus = status;
+        if (state.role === "host") {
+          try {
+            const listed = await remoteClient.members(state.relay_token, { pendingOnly: false });
+            latestMembers = Array.isArray(listed?.members) ? listed.members : [];
+            printMemberChanges(log, C, diffPairingMembers(latestMembers, seenMembers), { json });
+          } catch {
+            // The member list is display only; the heartbeat above is the lease.
+          }
+        }
         consecutiveFailures = 0;
       } catch (error) {
         if ([401, 403].includes(Number(error?.status))) {
@@ -582,10 +687,11 @@ async function monitorPairing(remoteClient, stateId, {
       reason: gracefulRequested ? "graceful_close" : forceRequested ? "force_close" : "local_leave",
     };
   } finally {
-    removeHotkeys();
+    hostConsole?.close();
     clearPairingPeerSnapshot();
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGHUP", hangup);
   }
 }
 
@@ -896,9 +1002,12 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       console.log(`  Invite link: ${C.cyan}posse://session?token=${encodeURIComponent(started.code)}${C.reset}`);
       console.log(`  Shared branch: ${sharedBranch}`);
       console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
-      console.log(`  ${C.dim}[g] graceful close + integrate   [Ctrl+C] force close + integrate${C.reset}\n`);
+      console.log(`  Join requests appear below. Type a member's countersign and press Enter to admit them.`);
+      console.log(`  ${C.dim}Commands: status · members · kick <id> · close (graceful close + integrate) · help · [Ctrl+C] force close + integrate${C.reset}\n`);
     }
-    const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
+    const outcome = await monitorPairing(remoteClient, state.id, {
+      projectDir: root, C, json, sessionCode: started.code,
+    });
     if (["graceful_close", "force_close", "draining", "closed", "expired"].includes(outcome.reason)) {
       const liveState = getPairingState(state.id);
       const promotion = await finishHostShutdown(root, remoteClient, liveState, {
@@ -956,7 +1065,25 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       code: "pairing_code_required",
     });
   }
-  const root = repositoryRoot(projectDir);
+  // Outside any Git checkout the member joins from an empty folder and takes
+  // the session repository's history once admitted.
+  let root;
+  let freshCheckout = false;
+  try {
+    root = repositoryRoot(projectDir);
+  } catch {
+    root = initializeFreshPairingCheckout(projectDir);
+    freshCheckout = true;
+  }
+  try {
+    return await runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, json });
+  } catch (error) {
+    if (freshCheckout) discardFreshPairingCheckout(root);
+    throw error;
+  }
+}
+
+async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, json }) {
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
   const ambiguous = listUnresolvedSharedTrunkMergeOperations()
@@ -972,7 +1099,7 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       `Pairing integration ${pendingPromotion.session_id || "(unknown)"} must finish before joining another session`,
     ), { code: "pairing_promotion_already_pending" });
   }
-  const original = currentCheckout(root);
+  const original = currentCheckout(root, { allowUnborn: freshCheckout });
   const resolved = validatePairingRemoteResponse("resolve", await remoteClient.resolve(code));
   const metadata = resolved?.repository || {};
   if (repositoryFingerprint(metadata.url) !== String(metadata.fingerprint || "").toLowerCase()) {
@@ -1102,7 +1229,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
         session_id: joined.session_id,
       }));
     } else {
-      console.log(`\n  ${C.green}Paired.${C.reset} Switched to ${sharedBranch}.`);
+      console.log(freshCheckout
+        ? `\n  ${C.green}Paired.${C.reset} Checked out ${sharedBranch} from the session repository into ${root}.`
+        : `\n  ${C.green}Paired.${C.reset} Switched to ${sharedBranch}.`);
       console.log(`  ${C.dim}This pairing session stays connected until the host closes it, Ctrl-C, or \`posse pair leave\`.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
@@ -1120,7 +1249,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
       const result = await unpair(root, remoteClient, getPairingState(state.id));
       if (!result.ok) throw Object.assign(new Error(result.local.message), { code: result.local.code });
       if (!json && ["draining", "closed", "expired"].includes(outcome.reason)) {
-        console.log(`  Host pairing ${outcome.reason}; switched back to ${original.branch}.\n`);
+        console.log(freshCheckout
+          ? `  Host pairing ${outcome.reason}; this folder keeps the last shared state on ${original.branch}.\n`
+          : `  Host pairing ${outcome.reason}; switched back to ${original.branch}.\n`);
       }
     }
     return { ok: true, role: "member", outcome: outcome.reason };
@@ -1246,13 +1377,10 @@ async function runStatus({
   return result;
 }
 
-async function runAdmit({ projectDir, remoteClient, code, C, json }) {
-  const state = getLivePairingState();
-  if (!state || state.role !== "host" || !state.relay_token) {
-    throw Object.assign(new Error("This clone is not hosting a live session"), {
-      code: "pairing_host_session_required",
-    });
-  }
+// Admit the pending member whose countersign the host typed, then grant its
+// session key write access to the throwaway repository. A member whose key
+// cannot be installed is removed again rather than left admitted without git.
+async function admitPairingMember({ state, code, projectDir, remoteClient }) {
   if (!code) {
     throw Object.assign(new Error("A 4-character countersign is required: posse session admit <CODE>"), {
       code: "pairing_countersign_required",
@@ -1275,7 +1403,25 @@ async function runAdmit({ projectDir, remoteClient, code, C, json }) {
       throw error;
     }
   }
-  const result = { ok: true, admitted: true, countersign: String(code).toUpperCase() };
+  return { ok: true, admitted: true, countersign: String(code).toUpperCase(), member: admitted.admitted_member || null };
+}
+
+async function kickPairingMember({ state, memberId, projectDir, remoteClient }) {
+  if (state.temporary_repository) {
+    removeGitHubMemberDeployKeys(state.temporary_repository, memberId, { cwd: repositoryRoot(projectDir) });
+  }
+  return validatePairingRemoteResponse("status", await remoteClient.kick(state.relay_token, memberId));
+}
+
+async function runAdmit({ projectDir, remoteClient, code, C, json }) {
+  const state = getLivePairingState();
+  if (!state || state.role !== "host" || !state.relay_token) {
+    throw Object.assign(new Error("This clone is not hosting a live session"), {
+      code: "pairing_host_session_required",
+    });
+  }
+  const admitted = await admitPairingMember({ state, code, projectDir, remoteClient });
+  const result = { ok: admitted.ok, admitted: admitted.admitted, countersign: admitted.countersign };
   if (json) console.log(JSON.stringify(result));
   else console.log(`\n  ${C.green}Admitted session member ${result.countersign}.${C.reset}\n`);
   return result;
@@ -1576,6 +1722,20 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
         result,
       };
     }
+    if (state?.role === "host" && state.phase !== "left" && !state.remote_session_id
+      && (!journal || journal.session_id === state.id)
+      && !pairingBranchHasOwnCommits(root, state.shared_branch, state.original_head)) {
+      // The host died before the Remote registered the session: no member could
+      // have joined or pushed, and there is no credential to close it with. Undo
+      // it locally instead of integrating through the Remote.
+      if (journal) clearPairingPromotionJournal();
+      const restored = await restoreLocalPairing(root, state);
+      const cleanup = state.temporary_repository
+        ? cleanupGitHubSessionRepository(state.temporary_repository, { cwd: root })
+        : null;
+      if (!json) reportRepositoryCleanupFailure(C, cleanup);
+      return { ok: restored.ok, attempted: true, recovered: restored.ok, unregistered: true, restored, cleanup };
+    }
     if (state?.role === "host" && state.phase !== "left") {
       const client = remoteClientFactory();
       // A journal frozen for this session already names its strategy; recovery
@@ -1629,4 +1789,4 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
   }
 }
 
-export const __testPairingCommandInternals = Object.freeze({ installHostPairingHotkeys });
+export const __testPairingCommandInternals = Object.freeze({ monitorPairing, printMemberChanges });
