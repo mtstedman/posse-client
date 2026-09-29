@@ -151,7 +151,8 @@ export class DisplayBottomInputRenderer {
     // ── Session command mode ──
     if (this._inputMode === "session") {
       lines.push("");
-      lines.push(` ${C.cyan}${C.bold}◇ Session Command${C.reset}  ${C.dim}admit, kick, scope, policy, invite, drain, close, keep, inject:${C.reset}`);
+      const commands = this.sessionCommandHint || "admit, kick, scope, policy, invite, drain, close, keep, inject";
+      lines.push(` ${C.cyan}${C.bold}◇ Session Command${C.reset}  ${C.dim}${commands}:${C.reset}`);
       lines.push("");
       const cursor = this._spinIdx % 2 === 0 ? "\u2588" : "\u258c";
       const maxBuf = width - 5;

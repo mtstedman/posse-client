@@ -3,14 +3,25 @@
 // keeps membership, scope revocation, presence, and close/drain transitions
 // current from inside the scheduler loop.
 
+import {
+  SESSION_LINK_OWNERS,
+  SESSION_SYNC_STATES,
+  sessionLeaseSec,
+} from "../../../catalog/session-sync.js";
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { repositoryFingerprint } from "../../pairing/functions/git.js";
 import { getSharedTrunkNativeCapabilities } from "../../git/functions/shared-trunk-native.js";
+import { diffPairingMembers } from "../../pairing/functions/session-console.js";
 import {
   createPairingRemoteClient,
   validatePairingRemoteResponse,
 } from "../../pairing/functions/remote-client.js";
+import {
+  recordSessionLinkFailure,
+  recordSessionLinkSuccess,
+} from "../../pairing/functions/session-link.js";
+import { readSessionSync } from "../../pairing/functions/session-sync.js";
 import {
   adoptPairingProcess,
   getLivePairingState,
@@ -24,10 +35,14 @@ import {
 import {
   clearPairingPeerSnapshot,
   collectPairingPresence,
+  readPairingPeerSnapshot,
   writePairingPeerSnapshot,
 } from "../../pairing/functions/work-items.js";
 
 export const SESSION_HEARTBEAT_MS = 5_000;
+// The sync indicator is DB-only, but the run loop can lap far faster than
+// anything it reads changes.
+export const SESSION_SYNC_FEED_MIN_INTERVAL_MS = 2_000;
 
 function sessionChanged(message) {
   return Object.assign(new Error(message), { code: "pairing_session_changed" });
@@ -66,6 +81,8 @@ export class SessionMonitor {
     clearPeers = clearPairingPeerSnapshot,
     tokenManager = pulseTokenManager,
     capabilityCheck = getSharedTrunkNativeCapabilities,
+    recordLinkSuccess = recordSessionLinkSuccess,
+    recordLinkFailure = recordSessionLinkFailure,
   } = {}) {
     this.projectDir = projectDir;
     this._nowMs = nowMs;
@@ -81,6 +98,8 @@ export class SessionMonitor {
     this._clearPeers = clearPeers;
     this._tokenManager = tokenManager;
     this._capabilityCheck = capabilityCheck;
+    this._recordLinkSuccess = recordLinkSuccess;
+    this._recordLinkFailure = recordLinkFailure;
     this._nextDueAt = 0;
     this._client = null;
     this._stateId = null;
@@ -90,6 +109,9 @@ export class SessionMonitor {
     this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
     this._teamSubmissionSignature = null;
+    this._lastRoster = null;
+    this._seenMembers = new Map();
+    this._membersPrimed = false;
   }
 
   delayUntilDueMs() {
@@ -123,6 +145,7 @@ export class SessionMonitor {
       this._consecutiveFailures = 0;
       this._scopeCapabilityConfirmed = null;
       this._teamSubmissionSignature = null;
+      this._resetRoster();
       this._tokenManager.setSessionContext(null);
       this._clearPeers();
       return { attempted: false, skipped: "no_active_session" };
@@ -138,6 +161,7 @@ export class SessionMonitor {
       this._consecutiveFailures = 0;
       this._scopeCapabilityConfirmed = null;
       this._teamSubmissionSignature = null;
+      this._resetRoster();
       this._adoptProcess(state.id, process.pid);
     }
     const instanceId = state.instance_id || ensureBridgeInstanceId(this.projectDir);
@@ -206,9 +230,22 @@ export class SessionMonitor {
       } else {
         this._teamSubmissionSignature = null;
       }
-      const roster = state.role === "host"
-        ? await this._client?.members?.(state.relay_token)
-        : null;
+      // The roster is display-only: a failed listing keeps the last one and
+      // never turns a successful heartbeat into an unavailable session.
+      let memberEvents = [];
+      if (state.role === "host" && typeof this._client?.members === "function") {
+        try {
+          const listed = await this._client.members(state.relay_token);
+          if (Array.isArray(listed?.members)) {
+            this._lastRoster = listed.members;
+            const events = diffPairingMembers(listed.members, this._seenMembers);
+            // The first listing is the baseline, not news.
+            memberEvents = this._membersPrimed ? events : [];
+            this._membersPrimed = true;
+          }
+        } catch { /* keep the last roster */ }
+      }
+      const roster = this._lastRoster;
       const nextScope = status.scope_set || {};
       const scopeChanged = JSON.stringify(nextScope) !== JSON.stringify(state.scopeSet || {});
       this._updateEnrollment(state.id, {
@@ -240,7 +277,14 @@ export class SessionMonitor {
         invalidateVerifiedTeamGrantCache();
       }
       this._touch(state.id);
-      const projectedStatus = roster ? { ...status, members: roster.members || [] } : status;
+      this._recordLinkSuccess({
+        stateId: state.id,
+        owner: SESSION_LINK_OWNERS.SCHEDULER,
+        pid: process.pid,
+        leaseSec: sessionLeaseSec(state.role),
+        nowMs: this._nowMs(),
+      });
+      const projectedStatus = roster ? { ...status, members: roster } : status;
       this._writePeers(projectedStatus);
       this._lastStatus = projectedStatus;
       this._consecutiveFailures = 0;
@@ -248,6 +292,7 @@ export class SessionMonitor {
       return {
         attempted: true,
         status: projectedStatus,
+        memberEvents,
         teamSubmissionChanged,
         teamSubmissionWorkItemIds,
         requestsDrain: status.status !== "active",
@@ -255,6 +300,14 @@ export class SessionMonitor {
     } catch (error) {
       this._consecutiveFailures += 1;
       this._unavailable = true;
+      this._recordLinkFailure({
+        stateId: state.id,
+        owner: SESSION_LINK_OWNERS.SCHEDULER,
+        pid: process.pid,
+        leaseSec: sessionLeaseSec(state.role),
+        error,
+        nowMs: this._nowMs(),
+      });
       if ([401, 403].includes(Number(error?.status)) || error?.code === "pairing_session_changed") {
         this._tokenManager.clearAuthentication();
       }
@@ -267,9 +320,16 @@ export class SessionMonitor {
     }
   }
 
+  _resetRoster() {
+    this._lastRoster = null;
+    this._seenMembers = new Map();
+    this._membersPrimed = false;
+  }
+
   stop() {
     this._client = null;
     this._stateId = null;
+    this._resetRoster();
     this._lastStatus = null;
     this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
@@ -280,4 +340,66 @@ export class SessionMonitor {
 
 export function createSessionMonitor(options = {}) {
   return new SessionMonitor(options);
+}
+
+/**
+ * Turns scheduler session polls into run-display feed events: member
+ * requests, joins and departures from the roster the monitor already fetched,
+ * and sync indicator STATE transitions (never every age tick). Evaluation reads
+ * SQLite rows only and never throws into the run loop.
+ *
+ * @returns events shaped { kind: "member", event, member } or
+ *   { kind: "sync", sync }
+ */
+export class SessionEventFeed {
+  constructor({
+    nowMs = () => Date.now(),
+    getState = getLivePairingState,
+    readSync = readSessionSync,
+    readSnapshot = readPairingPeerSnapshot,
+    minIntervalMs = SESSION_SYNC_FEED_MIN_INTERVAL_MS,
+  } = {}) {
+    this._nowMs = nowMs;
+    this._getState = getState;
+    this._readSync = readSync;
+    this._readSnapshot = readSnapshot;
+    this._minIntervalMs = minIntervalMs;
+    this._lastEvalAt = Number.NEGATIVE_INFINITY;
+    this._sessionId = null;
+    this._lastSyncState = null;
+  }
+
+  collect({ sessionPoll = null } = {}) {
+    const events = (Array.isArray(sessionPoll?.memberEvents) ? sessionPoll.memberEvents : [])
+      .map((change) => ({ kind: "member", event: change.kind, member: change.member || {} }));
+    if (sessionPoll?.skipped === "no_active_session") {
+      this._sessionId = null;
+      this._lastSyncState = null;
+      return events;
+    }
+    const now = this._nowMs();
+    if (!sessionPoll?.attempted && now - this._lastEvalAt < this._minIntervalMs) return events;
+    this._lastEvalAt = now;
+    try {
+      const state = this._getState();
+      if (!state || state.phase !== "active") return events;
+      if (state.id !== this._sessionId) {
+        this._sessionId = state.id;
+        this._lastSyncState = null;
+      }
+      const sync = this._readSync({ state, snapshot: this._readSnapshot(), nowMs: now })?.sync;
+      // This feed runs inside the scheduler, which is the fetch owner; a
+      // "not syncing" reading here is only its status row not written yet.
+      if (!sync || sync.state === SESSION_SYNC_STATES.NOT_SYNCING || sync.state === this._lastSyncState) {
+        return events;
+      }
+      this._lastSyncState = sync.state;
+      events.push({ kind: "sync", sync });
+    } catch { /* the feed is display-only */ }
+    return events;
+  }
+}
+
+export function createSessionEventFeed(options = {}) {
+  return new SessionEventFeed(options);
 }

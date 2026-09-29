@@ -40,6 +40,20 @@ export function getPairingState(id, db = getDb()) {
   return parseState(db.prepare("SELECT * FROM pairing_sessions WHERE id = ?").get(String(id)));
 }
 
+/** Branch and session remote of every ended session whose branch is not live again. */
+export function listEndedPairingTargets(db = getDb()) {
+  return db.prepare(`
+    SELECT DISTINCT shared_branch AS branch, remote_name AS remote FROM pairing_sessions
+    WHERE phase = 'left'
+      AND shared_branch IS NOT NULL AND shared_branch <> ''
+      AND shared_branch NOT IN (
+        SELECT shared_branch FROM pairing_sessions
+        WHERE phase IN (${LIVE_PHASES_SQL}) AND shared_branch IS NOT NULL
+      )
+    ORDER BY shared_branch, remote_name
+  `).all();
+}
+
 export function createPairingState({
   role,
   remoteName,
@@ -55,7 +69,7 @@ export function createPairingState({
   return runImmediateTransaction(db, () => {
     const live = getLivePairingState(db);
     if (live) {
-      const error = new Error(`This clone is already paired as ${live.role} (${live.phase}). Run \`posse pair leave\` first.`);
+      const error = new Error(`This clone is already paired as ${live.role} (${live.phase}). Run \`posse session leave\` first.`);
       error.code = "pairing_already_active";
       throw error;
     }
@@ -193,6 +207,25 @@ export function adoptPairingProcess(id, processPid = process.pid, db = getDb()) 
     WHERE id = ? AND phase = 'active'
   `).run(pid, String(id));
   return getPairingState(id, db);
+}
+
+/**
+ * Take heartbeat ownership back from `fromPid`, but only while it still owns
+ * the session: a scheduler that adopted in between is never displaced.
+ * @returns {boolean} true when this call adopted the session.
+ */
+export function readoptPairingProcess(id, { fromPid = null, toPid = process.pid } = {}, db = getDb()) {
+  const pid = Number(toPid);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new TypeError("pairing process pid must be a positive integer");
+  }
+  const expected = fromPid == null ? null : Number(fromPid);
+  const result = db.prepare(`
+    UPDATE pairing_sessions
+    SET process_pid = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE id = ? AND phase = 'active' AND process_pid IS ?
+  `).run(pid, String(id), expected);
+  return result.changes > 0;
 }
 
 export function pairingOwnerProcessIsAlive(

@@ -220,6 +220,7 @@ export class Display {
     // ── Callbacks (set by orchestrator) ──
     this.onInject = null;       // (description: string) => void
     this.onSessionCommand = null; // (command: string) => Promise<void> | void
+    this.sessionCommandHint = null; // role-specific `u` command list
     this.onKill = null;         // (jobId: number) => void
     this.onKillWI = null;       // (wiId: number) => void
     this.onSkipJob = null;      // (jobId: number) => void

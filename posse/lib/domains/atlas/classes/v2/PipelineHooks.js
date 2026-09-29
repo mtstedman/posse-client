@@ -482,6 +482,49 @@ function cancelQueuedWiWarmJobs(db, workItemId, reason) {
 }
 
 /**
+ * Retire queued main-refresh warms for a branch that no longer exists, such as
+ * a pairing session's shared branch after the session ends. The integrated
+ * result reaches the target branch through its own main-advanced warm.
+ * @returns {number} warm jobs canceled
+ */
+export function cancelQueuedBranchWarmJobs(branch, reason = "branch_retired") {
+  const target = String(branch || "").trim();
+  if (!target) return 0;
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT id, payload_json
+    FROM jobs
+    WHERE job_type = ?
+      AND status = 'queued'
+      AND work_item_id IS NULL
+    ORDER BY id ASC
+  `).all(ATLAS_WARM_JOB_TYPE);
+  const ts = nowIso();
+  const update = db.prepare(`
+    UPDATE jobs
+    SET status = 'canceled',
+        finished_at = ?,
+        last_error = NULL,
+        result_json = ?,
+        updated_at = ?
+    WHERE id = ?
+      AND status = 'queued'
+  `);
+  let canceled = 0;
+  for (const row of rows) {
+    const payload = parseJsonObject(row.payload_json, {});
+    if (payload.purpose !== "main-incremental" || String(payload.branch || "") !== target) continue;
+    canceled += update.run(
+      ts,
+      JSON.stringify({ skipped: reason, retired_by_atlas: true }),
+      ts,
+      row.id,
+    ).changes;
+  }
+  return canceled;
+}
+
+/**
  * Write the events-table row + enqueue the atlas_warm job in a single
  * transaction. Designed to be called from any posse code path that wants
  * to emit an ATLAS v2 pipeline event.

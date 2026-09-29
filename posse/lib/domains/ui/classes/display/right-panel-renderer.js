@@ -10,6 +10,7 @@ import { normalizeAgentActivitySummary } from "../../../../catalog/event.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../../catalog/bridge.js";
 import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import { humanGateStateAllowsAnswer } from "../../../../catalog/human-input.js";
+import { formatPeerSyncRow } from "../../../pairing/functions/sync-state.js";
 import { getAgentActivityEvents, getHumanGate, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
@@ -441,6 +442,15 @@ function monitorToolRowParts(row = {}) {
   return { module: "tool", command: tool, info: summary };
 }
 
+const SESSION_PEER_SYNC_ROWS = 8;
+
+// The derived session sync indicator; "trunk <status>" only for a summary
+// written before the indicator existed.
+function sessionSyncLabel(session) {
+  const label = typeof session?.sync?.label === "string" ? session.sync.label : "";
+  return label ? _sanitizeDisplayLine(label) : `trunk ${session?.trunk_health?.status || "pending"}`;
+}
+
 export class DisplayRightPanelRenderer {
 
 
@@ -454,7 +464,7 @@ export class DisplayRightPanelRenderer {
 
     const lines = [
       session
-        ? ` ${C.magenta}${C.bold}\u2197 Session${C.reset} ${C.dim}\u00b7 ${session.role} \u00b7 ${session.phase} \u00b7 ${session.compute_policy} \u00b7 trunk ${session.trunk_health?.status || "pending"} \u00b7 ${session.peer_count} peer${session.peer_count === 1 ? "" : "s"}${session.pending_count ? ` \u00b7 ${session.pending_count} pending` : ""}${C.reset}`
+        ? ` ${C.magenta}${C.bold}\u2197 Session${C.reset} ${C.dim}\u00b7 ${session.role} \u00b7 ${session.phase} \u00b7 ${session.compute_policy} \u00b7 ${sessionSyncLabel(session)} \u00b7 ${session.peer_count} peer${session.peer_count === 1 ? "" : "s"}${session.pending_count ? ` \u00b7 ${session.pending_count} pending` : ""}${C.reset}`
         : ` ${C.magenta}${C.bold}\u2197 Paired work${C.reset} ${C.dim}\u00b7 ${peerRows.length} WI \u00b7 read-only${C.reset}`,
     ];
     const detailCapacity = Math.max(1, maxRows - 1);
@@ -1765,9 +1775,16 @@ export class DisplayRightPanelRenderer {
     if (session) {
       const enrollment = session.enrollment_open ? "invite open" : "invite closed";
       contentLines.push(` ${C.magenta}${C.bold}Session${C.reset} ${session.role}/${session.phase} \u00b7 ${session.compute_policy} \u00b7 ${enrollment}`);
-      contentLines.push(` ${C.dim}${_sanitizeDisplayLine(session.branch)} \u00b7 trunk ${session.trunk_health?.status || "pending"} \u00b7 ${session.peer_count} peer(s) \u00b7 ${session.pending_count} pending \u00b7 ${session.delegations?.length || 0} delegated${C.reset}`);
+      contentLines.push(` ${C.dim}${_sanitizeDisplayLine(session.branch)} \u00b7 ${sessionSyncLabel(session)} \u00b7 ${session.peer_count} peer(s) \u00b7 ${session.pending_count} pending \u00b7 ${session.delegations?.length || 0} delegated${C.reset}`);
       if (session.trunk_health?.provenance_gate_job_id) {
         contentLines.push(` ${C.yellow}Provenance review: gate #${session.trunk_health.provenance_gate_job_id}${C.reset}`);
+      }
+      const peersSync = Array.isArray(session.peers_sync) ? session.peers_sync : [];
+      for (const peer of peersSync.slice(0, SESSION_PEER_SYNC_ROWS)) {
+        contentLines.push(`   ${C.magenta}\u2502${C.reset} ${C.dim}${fit(_sanitizeDisplayLine(formatPeerSyncRow(peer)), Math.max(8, width - 6))}${C.reset}`);
+      }
+      if (peersSync.length > SESSION_PEER_SYNC_ROWS) {
+        contentLines.push(`   ${C.magenta}\u2502${C.reset} ${C.dim}+${peersSync.length - SESSION_PEER_SYNC_ROWS} more peer(s)${C.reset}`);
       }
       contentLines.push("");
     }

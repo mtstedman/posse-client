@@ -135,12 +135,13 @@ import {
   recoverOrphanedReviewJobs,
 } from "../functions/headless-recovery.js";
 import { createSharedTrunkPoller } from "../functions/shared-trunk-poller.js";
-import { createSessionMonitor } from "../functions/session-monitor.js";
+import { createSessionEventFeed, createSessionMonitor } from "../functions/session-monitor.js";
 import {
   createSessionJobRouter,
   sessionOriginatorConcurrencyBlocked,
 } from "../../queue/functions/session-job-router.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { pairingPeerTrunkHints } from "../../pairing/functions/work-items.js";
 import {
   readWaitingLanePreparationConcurrency,
   reconcileWaitingLaneJobCompletion,
@@ -1515,7 +1516,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -1581,6 +1582,7 @@ export class Scheduler {
     this._sessionMonitor = createSessionMonitor({
       projectDir: this.projectDir,
     });
+    const sessionEventFeed = onSessionEvent ? createSessionEventFeed() : null;
     this._sessionJobRouter = createSessionJobRouter({
       projectDir: this.projectDir,
     });
@@ -1664,11 +1666,23 @@ export class Scheduler {
         // this lap therefore sees a trunk no older than the configured
         // cadence. Transport failures are explicitly fail-open inside the
         // poller; merge publication performs its own fail-closed preflight.
+        // Peer trunk-head adverts from the relay can only pull the next
+        // fetch of the shared branch earlier; a failed heartbeat keeps the
+        // previous hints and a closed session clears them.
+        const trunkHints = sessionPoll?.status
+          ? pairingPeerTrunkHints(sessionPoll.status.peers || [])
+          : (sessionPoll?.skipped === "no_active_session" ? [] : undefined);
         const trunkPoll = await this._sharedTrunkPoller.poll({
           idle: activeWorkers.size === 0 && idleCount > 0,
+          ...(trunkHints ? { hints: trunkHints } : {}),
         });
         if (trunkPoll?.advanced && onTeamSubmissionChange) {
           this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
+        }
+        // Member joins/leaves and sync-state transitions for the run feed,
+        // read after this lap's heartbeat and fetch.
+        for (const event of sessionEventFeed?.collect({ sessionPoll }) || []) {
+          this._invokeCallback("onSessionEvent", onSessionEvent, event);
         }
         if (!sessionPoll?.unavailable) await this._sessionJobRouter.poll();
 

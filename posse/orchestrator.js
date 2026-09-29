@@ -91,10 +91,16 @@ const recordFatalCrash = (kind, err) => {
 };
 // Durable, stream-level guard: attach 'error' listeners so a broken-pipe write
 // never even becomes an uncaughtException. Covers ALL raw stdout/stderr writes,
-// not just known console.log sites.
+// not just known console.log sites. A terminal window that was closed fails
+// writes with EIO rather than EPIPE; it is the same detached consumer (a
+// session host closing its terminal must still integrate and clean up).
 for (const stream of [process.stdout, process.stderr]) {
-  try { stream.on("error", (err) => { if (isBrokenPipe(err)) noteBrokenPipeOnce("stream"); else recordFatalCrash("stream", err); }); }
-  catch { /* best effort */ }
+  try {
+    stream.on("error", (err) => {
+      if (isBrokenPipe(err) || err?.code === "EIO") noteBrokenPipeOnce("stream");
+      else recordFatalCrash("stream", err);
+    });
+  } catch { /* best effort */ }
 }
 process.on("uncaughtException", (err) => recordFatalCrash("uncaughtException", err));
 process.on("unhandledRejection", (reason) => recordFatalCrash("unhandledRejection", reason));

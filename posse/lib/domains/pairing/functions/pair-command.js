@@ -1,13 +1,26 @@
 import { randomUUID } from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import {
+  SESSION_LINK_OWNERS,
+  SESSION_SYNC_GLYPHS,
+  SESSION_SYNC_POLICY,
+  SESSION_SYNC_STATES,
+  sessionLeaseSec,
+} from "../../../catalog/session-sync.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { runSharedTrunkAccessPreflight } from "../../integrations/functions/shared-trunk-preflight.js";
-import { getLiveSchedulerBlockMessage } from "../../queue/functions/locks.js";
+import {
+  getLiveSchedulerBlockMessage,
+  getSchedulerLockInfo,
+} from "../../queue/functions/locks.js";
+import { readRuntimeStatus, RUNTIME_STATUS_KEYS } from "../../queue/functions/runtime-status.js";
 import { listUnresolvedSharedTrunkMergeOperations } from "../../queue/functions/shared-trunk-merge-state.js";
 import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
-import { syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
+import { cancelSharedTrunkGatesForBranch, syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
+import { createSharedTrunkPoller } from "../../scheduler/functions/shared-trunk-poller.js";
+import { cancelQueuedBranchWarmJobs } from "../../atlas/classes/v2/PipelineHooks.js";
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import {
   createPairingRemoteClient,
@@ -18,11 +31,13 @@ import {
   assertPairingRemoteTargets,
   assertCleanPairingCheckout,
   createAndPublishPairingBranch,
+  checkoutSharedBranchForClose,
   currentCheckout,
   deletePublishedPairingBranch,
   discardFreshPairingCheckout,
   findPairingRemote,
   initializeFreshPairingCheckout,
+  localBranchHead,
   pairingBranchHasOwnCommits,
   pairingTemporaryRemoteName,
   preflightAndCheckoutPairingBranch,
@@ -38,16 +53,29 @@ import {
   createPairingState,
   getLivePairingState,
   getPairingState,
+  listEndedPairingTargets,
   markPairingPhase,
   pairingOwnerProcessIsAlive,
   pairingProcessShouldStop,
+  readoptPairingProcess,
   touchPairingState,
   updatePairingEnrollment,
 } from "./state.js";
 import {
+  clearSessionHold,
+  readSessionHoldStatus,
+  requestSessionResume,
+  setSessionHold,
+  SESSION_HOLD_STATES,
+} from "./session-hold.js";
+import { readSessionLink, recordSessionLinkFailure, recordSessionLinkSuccess } from "./session-link.js";
+import { readSessionSync, sessionFetchOwnerAlive } from "./session-sync.js";
+import { formatPeerSyncRow, formatSyncAge, sessionSyncFeedLabel } from "./sync-state.js";
+import {
   clearPairingPeerSnapshot,
   collectPairingPresence,
   diffPairingPeerActivity,
+  pairingPeerTrunkHints,
   readPairingPeerSnapshot,
   writePairingPeerSnapshot,
 } from "./work-items.js";
@@ -60,6 +88,11 @@ import {
 } from "./promotion.js";
 import { waitForPairingSchedulerStop } from "./shutdown.js";
 import {
+  activeSessionCloseClaim,
+  claimSessionClose,
+  releaseSessionClose,
+} from "./session-close-claim.js";
+import {
   teamPolicyRegression,
   teamPolicyRegressionMessage,
 } from "./team-policy.js";
@@ -70,6 +103,7 @@ import {
   configureRepositorySessionSsh,
   githubRepositoryName,
   prepareSessionSshIdentity,
+  githubSessionRepositoryName,
   provisionGitHubSessionRepository,
   readLocalSshCommand,
   removeGitHubMemberDeployKeys,
@@ -78,17 +112,20 @@ import {
   setGitHubDefaultBranch,
 } from "./github-session.js";
 import {
-  HOST_CONSOLE_HELP,
-  createHostConsole,
+  createSessionConsole,
+  describeSessionWriteScope,
   diffPairingMembers,
-  parseHostConsoleLine,
+  parseSessionConsoleLine,
+  sessionConsoleHelp,
+  sessionMemberLabel,
   shortId,
-} from "./host-console.js";
+} from "./session-console.js";
 
 // This is both the lease heartbeat and the peer-work sync cadence. Five
 // seconds keeps the terminal feed live without turning queue changes into one
 // remote request apiece.
 const HEARTBEAT_MS = 5_000;
+const HEARTBEAT_RETRY_MS = 2_000;
 const PAIRING_SETTING_KEYS = Object.freeze([
   SETTING_KEYS.TARGET_BRANCH,
   SETTING_KEYS.SHARED_TRUNK_BRANCH,
@@ -297,6 +334,8 @@ export function parsePairArgs(argv = []) {
     ["kick", [2, 2]], ["invite", [2, 2]], ["scope", [3, 3]], ["policy", [2, 2]],
     ["publication", [2, 2]],
     ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
+    // A hold reason is free text: every word after `hold` belongs to it.
+    ["hold", [1, Number.MAX_SAFE_INTEGER]], ["resume", [1, 1]],
   ]);
   if (actionLengths.has(first)) {
     const [minimumLength, maximumLength] = actionLengths.get(first);
@@ -313,7 +352,7 @@ export function parsePairArgs(argv = []) {
     }
     parsed = {
       action: first === "close" ? "leave" : first,
-      code: positional[1] ? inviteToken(positional[1]) : null,
+      code: positional[1] && first !== "hold" ? inviteToken(positional[1]) : null,
       json,
       remote,
       branch,
@@ -323,7 +362,10 @@ export function parsePairArgs(argv = []) {
     if (approvedSourceOid && approvedOriginOid) parsed.approval = {
       sourceOid: approvedSourceOid, originOid: approvedOriginOid,
     };
-    if (positional[2]) parsed.value = positional[2];
+    if (first === "hold") {
+      const reason = positional.slice(1).join(" ").trim();
+      if (reason) parsed.reason = reason;
+    } else if (positional[2]) parsed.value = positional[2];
   } else {
     if (positional.length > 1) {
       throw Object.assign(new Error(`Unexpected pairing argument: ${positional[1]}`), {
@@ -396,6 +438,18 @@ function assertPairingSchedulerStopped() {
   });
 }
 
+// An ended session's branch is gone: its repair gates and refresh jobs would
+// otherwise sit queued forever and be advertised to later sessions. Starting a
+// session also sweeps branches of sessions that ended before this existed.
+function retireEndedSessionQueueRows(targets = listEndedPairingTargets()) {
+  for (const { branch, remote } of targets) {
+    try {
+      cancelSharedTrunkGatesForBranch(branch, "pairing session ended", { remote });
+      cancelQueuedBranchWarmJobs(branch, "pairing_session_ended");
+    } catch { /* stale queue rows are cosmetic; session changes must not fail on them */ }
+  }
+}
+
 async function restoreLocalPairing(projectDir, state) {
   if (!state || state.phase === "left") return { ok: true, alreadyLeft: true };
   markPairingPhase(state.id, "leaving");
@@ -417,6 +471,7 @@ async function restoreLocalPairing(projectDir, state) {
     });
     if (state.credential_directory) removeSessionCredentialDirectory(state.credential_directory);
     markPairingPhase(state.id, "left");
+    retireEndedSessionQueueRows([{ branch: state.shared_branch, remote: state.remote_name }]);
     pulseTokenManager.setSessionContext(null);
     return { ok: true };
   } catch (error) {
@@ -435,15 +490,61 @@ async function leaveRemoteBestEffort(remoteClient, state) {
   }
 }
 
+// The merge lock never waits: a routine fetch holding it for a moment makes a
+// close-time sync or promotion report merge_in_progress. Those retry briefly.
+const MERGE_LOCK_RETRY_DELAYS_MS = Object.freeze([1_000, 2_000, 3_000, 5_000, 8_000]);
+
+async function retryWhileMergeLockBusy(operation, { delays = MERGE_LOCK_RETRY_DELAYS_MS, wait = sleep } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await operation();
+    const busy = result?.reason === "merge_in_progress";
+    if (!busy || attempt >= delays.length) return result;
+    await wait(delays[attempt]);
+  }
+}
+
+// A member keeps the session's final state: before leaving, fast-forward the
+// shared branch once more while the session repository and this member's
+// session credentials still exist. Best effort; a blocked or failed sync
+// leaves the last synced state in place.
+async function takeFinalMemberSync(projectDir, state) {
+  if (state?.role !== "member" || !["active", "leaving"].includes(state.phase)) return null;
+  try {
+    const synced = await retryWhileMergeLockBusy(
+      () => syncSharedTrunkFromOrigin(projectDir, { raiseBlockedGate: false }),
+    );
+    if (!synced.ok) {
+      return { ok: false, reason: synced.blockedReason || synced.reason || "sync_failed" };
+    }
+    return { ok: true, advanced: synced.advanced === true, head: localBranchHead(projectDir, state.shared_branch) };
+  } catch (error) {
+    return { ok: false, reason: safeError(error) };
+  }
+}
+
+const MEMBER_EXIT_REASONS = Object.freeze({
+  draining: "The host closed the session",
+  closed: "The session was closed",
+  expired: "The session expired",
+});
+
+function describeFinalMemberSync(finalSync) {
+  if (!finalSync) return null;
+  if (!finalSync.ok) return `Could not take the session's final state (${finalSync.reason}); this folder keeps what it last synced.`;
+  const head = finalSync.head ? ` (${finalSync.head.slice(0, 7)})` : "";
+  return finalSync.advanced ? `Took the session's final state${head}.` : `Already had the session's final state${head}.`;
+}
+
 async function unpair(projectDir, remoteClient, state = getLivePairingState()) {
   clearPairingPeerSnapshot();
   if (!state) return { ok: true, alreadyLeft: true };
+  const finalSync = await takeFinalMemberSync(projectDir, state);
   pulseTokenManager.clearAuthentication();
   pulseTokenManager.setSessionContext(null);
   markPairingPhase(state.id, "leaving");
   const remote = await leaveRemoteBestEffort(remoteClient, state);
   const local = await restoreLocalPairing(projectDir, getPairingState(state.id));
-  return { ok: local.ok, local, remote, role: state.role };
+  return { ok: local.ok, local, remote, role: state.role, finalSync };
 }
 
 function printPeerActivityChanges(C, status, seen, { json = false, log = console.log } = {}) {
@@ -472,7 +573,7 @@ function printPeerActivityChanges(C, status, seen, { json = false, log = console
 }
 
 function memberLabel(member) {
-  return `${shortId(member?.id)}${member?.instance_id ? ` on ${shortId(member.instance_id)}` : ""}`;
+  return sessionMemberLabel(member);
 }
 
 function printMemberChanges(log, C, events, { json = false } = {}) {
@@ -499,16 +600,67 @@ function printMemberChanges(log, C, events, { json = false } = {}) {
   }
 }
 
-function printHostConsoleStatus(log, C, state, status, members, sessionCode) {
-  const pending = members.filter((member) => member.state === "pending");
-  const admitted = members.filter((member) => member.state === "admitted");
-  log(`  ${C.bold}Session${C.reset} ${sessionCode ? `${C.cyan}${sessionCode}${C.reset} · ` : ""}`
-    + `branch ${state?.shared_branch || "?"} · ${status?.status || "starting"}`
-    + `${status?.enrollment_open === false ? " · invites closed" : ""}`);
-  log(`  Connected: ${admitted.length ? admitted.map(memberLabel).join(", ") : "nobody yet"}`);
-  if (pending.length) {
-    log(`  ${C.yellow}Waiting for admission:${C.reset} ${pending.map(memberLabel).join(", ")} (type their countersign)`);
+function describeSessionHold(hold) {
+  const ttlSec = Math.max(0, Math.round((Date.parse(hold?.expires_at) - Date.parse(hold?.set_at)) / 1000));
+  let owner = true;
+  try {
+    owner = sessionFetchOwnerAlive({ stateId: hold?.state_id });
+  } catch { /* the hint is advisory */ }
+  return `Held this checkout for ${formatSyncAge(ttlSec)}${hold?.reason ? ` (${hold.reason})` : ""}: `
+    + "fetches continue, fast-forwards and publications wait. Type resume to lift it."
+    + (owner ? "" : " Nothing is syncing this folder right now; the hold applies once the session console or posse go runs.");
+}
+
+function describeSessionResume(result) {
+  if (result?.ok && result.resumed) return "Hold lifted; this checkout catches up now.";
+  if (result?.reason === "not_held") return "This checkout is not held.";
+  if (result?.reason === "no_active_session") return "This clone is not in a live session.";
+  return `Resume failed: ${result?.reason || "unknown error"}`;
+}
+
+function printSessionSyncRows(log, C, derived, { observing = false, listedInstanceIds = new Set() } = {}) {
+  const sync = derived?.sync;
+  log(`  Sync: ${sync ? sync.label : `${SESSION_SYNC_GLYPHS[SESSION_SYNC_STATES.UNKNOWN]} unknown`}`
+    + `${observing ? ` ${C.dim}(posse go owns the session)${C.reset}` : ""}`);
+  for (const peer of derived?.peers_sync || []) {
+    if (listedInstanceIds.has(String(peer.instance_id || ""))) continue;
+    log(`    ${C.dim}peer${C.reset} ${formatPeerSyncRow(peer)}`);
   }
+}
+
+// The host sees each admitted member once: the machine label it advertises
+// (when it has heartbeated) with its sync state, else its member id.
+function hostMemberRow(member, peersByInstance) {
+  const peer = peersByInstance.get(String(member.instance_id || ""));
+  if (!peer) return `${memberLabel(member)} · connecting`;
+  return `${formatPeerSyncRow({ ...peer, role: null })} (member ${shortId(member.id)})`;
+}
+
+function printSessionConsoleStatus(log, C, {
+  state, status, members, sessionCode, derived, observing,
+}) {
+  const host = state?.role === "host";
+  log(`  ${C.bold}Session${C.reset} ${sessionCode ? `${C.cyan}${sessionCode}${C.reset} · ` : ""}`
+    + `${host ? "you are hosting" : "you are a member"} · branch ${state?.shared_branch || "?"} · ${status?.status || state?.phase || "starting"}`
+    + `${host && status?.enrollment_open === false ? " · invites closed" : ""}`);
+  const listedInstanceIds = new Set();
+  if (host) {
+    const pending = members.filter((member) => member.state === "pending");
+    const admitted = members.filter((member) => member.state === "admitted");
+    const peersByInstance = new Map((derived?.peers_sync || []).map((peer) => [String(peer.instance_id || ""), peer]));
+    if (admitted.length === 0) log("  Connected: nobody yet");
+    else log(`  Connected (${admitted.length}):`);
+    for (const member of admitted) {
+      listedInstanceIds.add(String(member.instance_id || ""));
+      log(`    ${hostMemberRow(member, peersByInstance)}`);
+    }
+    if (pending.length) {
+      log(`  ${C.yellow}Waiting for admission:${C.reset} ${pending.map(memberLabel).join(", ")} (type their countersign)`);
+    }
+  } else {
+    log(`  You can change: ${describeSessionWriteScope(status?.scope_set || state?.scopeSet)}`);
+  }
+  printSessionSyncRows(log, C, derived, { observing, listedInstanceIds });
 }
 
 function printHostConsoleMembers(log, members) {
@@ -521,6 +673,113 @@ function printHostConsoleMembers(log, members) {
   }
 }
 
+function pidProvablyDead(pid, kill) {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try {
+    kill(pid, 0);
+    return false;
+  } catch (error) {
+    // Only ESRCH proves the process is gone; EPERM and platform errors do not.
+    return error?.code === "ESRCH";
+  }
+}
+
+// A live scheduler lock means posse go may own the session heartbeat. The lock
+// outlives a killed process for up to its lease, so a holder whose own runtime
+// row names a PID that is provably gone no longer counts.
+function schedulerLockHolderLive(kill) {
+  if (!getLiveSchedulerBlockMessage("main")) return false;
+  let lock;
+  try {
+    lock = getSchedulerLockInfo("main");
+  } catch {
+    return true;
+  }
+  if (!lock) return false;
+  const status = readRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER);
+  if (!status || status.owner_id !== lock.owner_id) return true;
+  return !pidProvablyDead(Number(status.process_pid), kill);
+}
+
+// After releasing the scheduler lock, a posse go still owns the session only
+// while it provably heartbeats: its link row names it and attempted within a
+// few beats. One sitting in its wrap-up screen, or a dead or reused pid, has
+// stopped, and the Remote lease would lapse unless the console takes over.
+function schedulerStillHeartbeating(state, pid, nowMs) {
+  const link = readSessionLink({ stateId: state?.id });
+  if (link?.owner !== SESSION_LINK_OWNERS.SCHEDULER || Number(link.owner_pid) !== pid) return false;
+  const attemptMs = Date.parse(String(link.last_attempt_at || ""));
+  return Number.isFinite(attemptMs) && nowMs - attemptMs <= SESSION_SYNC_POLICY.LINK_SILENT_AFTER_MS;
+}
+
+// A drain request older than this belongs to a close that died with its
+// process; it no longer keeps the console from taking the session back.
+const DRAIN_REQUEST_FRESH_MS = 10 * 60_000;
+
+// A close in progress belongs to whichever process started it: a live close
+// claim, or a recent graceful-drain request whose closer has not claimed yet.
+function sessionCloseInProgress(state, kill, nowMs) {
+  const claim = activeSessionCloseClaim({ stateId: state?.id, kill });
+  if (claim) return { ownerPid: Number(claim.owner_pid) || null };
+  const drain = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_DRAIN_REQUEST);
+  const requestedMs = Date.parse(String(drain?.requested_at || ""));
+  if (drain && Number.isFinite(requestedMs) && nowMs - requestedMs <= DRAIN_REQUEST_FRESH_MS) {
+    return { ownerPid: null };
+  }
+  return null;
+}
+
+/**
+ * Who heartbeats the session right now: this console ("self"), a posse go
+ * that holds the scheduler lock or still heartbeats ("scheduler"), a close in
+ * progress in another process ("closing"), or nobody ("vacant": this console
+ * takes the session back).
+ */
+function consoleSessionOwnership(state, kill, nowMs = Date.now()) {
+  const pid = Number(state?.process_pid);
+  if (pid === process.pid) return "self";
+  if (schedulerLockHolderLive(kill)) return "scheduler";
+  if (Number.isSafeInteger(pid) && pid > 0 && !pidProvablyDead(pid, kill)
+    && schedulerStillHeartbeating(state, pid, nowMs)) return "scheduler";
+  if (sessionCloseInProgress(state, kill, nowMs)) return "closing";
+  return "vacant";
+}
+
+// GitHub can take a few seconds to honor a deploy key it has just accepted,
+// and a member's first fetch runs the moment it is admitted. An auth rejection
+// then is retried for a bounded window instead of failing the whole join.
+const SESSION_KEY_RETRY_DELAYS_MS = Object.freeze([2_000, 3_000, 5_000, 8_000, 13_000, 20_000]);
+
+function sessionKeyNotYetAccepted(error) {
+  return /Permission denied \(publickey\)|Repository not found|Could not read from remote repository/iu
+    .test(String(error?.message || ""));
+}
+
+async function retryWhileSessionKeyPropagates(operation, {
+  delays = SESSION_KEY_RETRY_DELAYS_MS,
+  onWait = () => {},
+  wait = sleep,
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= delays.length || !sessionKeyNotYetAccepted(error)) throw error;
+      onWait(attempt + 1, delays[attempt]);
+      await wait(delays[attempt]);
+    }
+  }
+}
+
+function leaseLapsedError(error, leaseSec) {
+  const message = `Session heartbeats failed for longer than the Remote's ${leaseSec}s lease: ${safeError(error)}`;
+  return Object.assign(new Error(message), {
+    code: error?.code || "pairing_heartbeat_lease_lapsed",
+    status: error?.status,
+    cause: error,
+  });
+}
+
 async function monitorPairing(remoteClient, stateId, {
   projectDir = process.cwd(),
   C,
@@ -528,15 +787,44 @@ async function monitorPairing(remoteClient, stateId, {
   input = process.stdin,
   output = process.stdout,
   sessionCode = null,
+  heartbeatMs = HEARTBEAT_MS,
+  retryMs = HEARTBEAT_RETRY_MS,
+  tickMs = 250,
+  nowMs = () => Date.now(),
+  kill = process.kill.bind(process),
+  trunkPoller = null,
 } = {}) {
   let forceRequested = false;
   let gracefulRequested = false;
-  let consecutiveFailures = 0;
   let lastTeamHandoffPollAt = 0;
   const seenPeerActivity = new Map();
   const seenMembers = new Map();
   let latestStatus = null;
   let latestMembers = [];
+  let latestSync = null;
+  let lastSyncState = null;
+  // While posse go owns the session this console only observes: it never
+  // heartbeats, fetches, or writes the peer snapshot, so exactly one local
+  // process speaks for this clone.
+  let observing = false;
+  let observedOwner = null;
+  let detached = false;
+  // While it owns the session this console also keeps the checkout synced:
+  // posse go exits when its queue is empty, and someone with nothing queued
+  // must still get the others' work. A person's own checkout is often
+  // mid-edit, so a blocked fast-forward is shown rather than raised as a gate.
+  // posse go takes the poller over while it runs.
+  const consolePoller = trunkPoller || createSharedTrunkPoller({
+    projectDir,
+    sync: (dir, options) => syncSharedTrunkFromOrigin(dir, { ...options, raiseBlockedGate: false }),
+  });
+  let consolePoll = null;
+  // Set once the loop has ended: nothing may start another poll while this
+  // process closes, leaves or hands over.
+  let stopping = false;
+  // Monitoring starts right after the Remote accepted this clone, which counts
+  // as the first proof that the lease is live.
+  let lastHeartbeatOkMs = nowMs();
   const stop = () => { forceRequested = true; };
   // Closing the terminal must close and integrate like Ctrl+C. Output to the
   // gone terminal is dropped rather than allowed to crash the shutdown.
@@ -545,24 +833,92 @@ async function monitorPairing(remoteClient, stateId, {
     forceRequested = true;
   };
   const stateAtStart = getPairingState(stateId);
+  const role = stateAtStart?.role === "host" ? "host" : "member";
+  const leaseSec = sessionLeaseSec(role);
   let log = (text = "") => console.log(text);
-  const runHostConsoleCommand = async (parsed) => {
+  const emit = (event, text) => {
+    if (json) log(JSON.stringify(event));
+    else log(text);
+  };
+  const readSync = (state) => {
+    try {
+      return readSessionSync({ state, snapshot: readPairingPeerSnapshot(), nowMs: nowMs() });
+    } catch {
+      return null;
+    }
+  };
+  const reportSyncTransition = (state) => {
+    latestSync = readSync(state);
+    const sync = latestSync?.sync;
+    if (!sync || sync.state === lastSyncState) return;
+    // Nothing is known before the first fetch completes; say nothing yet.
+    if (lastSyncState == null && sync.state === SESSION_SYNC_STATES.UNKNOWN) return;
+    lastSyncState = sync.state;
+    emit(
+      { event: "pairing_sync", state: sync.state, label: sync.label, reasons: sync.reasons },
+      `  ${C.cyan}[sync]${C.reset} ${sessionSyncFeedLabel(sync)}`,
+    );
+  };
+  const pollTrunk = (status = null, { force = false } = {}) => {
+    if (consolePoll || stopping || observing) return;
+    // Another process closing the session needs the merge lock for its final
+    // sync; a console fetch holding it would fail that close.
+    try {
+      if (sessionCloseInProgress(getPairingState(stateId), kill, nowMs())) return;
+    } catch { /* an unreadable claim row: skip this lap */ return; }
+    const hints = status ? pairingPeerTrunkHints(status.peers || []) : undefined;
+    consolePoll = consolePoller.poll({ force, ...(hints ? { hints } : {}) })
+      .catch(() => null)
+      .finally(() => {
+        consolePoll = null;
+        try {
+          const current = getPairingState(stateId);
+          if (current && !observing && !stopping) reportSyncTransition(current);
+        } catch { /* the feed line is advisory */ }
+      });
+  };
+  const refreshHostMembers = async (state) => {
+    if (state.role !== "host") return;
+    try {
+      const listed = await remoteClient.members(state.relay_token, { pendingOnly: false });
+      latestMembers = Array.isArray(listed?.members) ? listed.members : [];
+      printMemberChanges(log, C, diffPairingMembers(latestMembers, seenMembers), { json });
+    } catch {
+      // The member list is display only; the heartbeat is the lease.
+    }
+  };
+  const runSessionConsoleCommand = async (parsed) => {
     const state = getPairingState(stateId);
     try {
       if (parsed.kind === "empty") return;
       if (parsed.kind === "invalid") {
         log(`  ${C.yellow}${parsed.message}${C.reset}`);
       } else if (parsed.kind === "help") {
-        for (const line of HOST_CONSOLE_HELP) log(`  ${C.dim}${line}${C.reset}`);
+        for (const line of sessionConsoleHelp(role, { observing })) log(`  ${C.dim}${line}${C.reset}`);
       } else if (parsed.kind === "status") {
-        printHostConsoleStatus(log, C, state, latestStatus, latestMembers, sessionCode);
+        latestSync = readSync(state) || latestSync;
+        // While observing, the scheduler's snapshot is the freshest relay view.
+        const status = (observing ? readPairingPeerSnapshot() : null) || latestStatus;
+        printSessionConsoleStatus(log, C, {
+          state, status, members: latestMembers, sessionCode, derived: latestSync, observing,
+        });
       } else if (parsed.kind === "members") {
         printHostConsoleMembers(log, latestMembers);
+      } else if (parsed.kind === "hold") {
+        const held = setSessionHold({ stateId, reason: parsed.reason || null });
+        log(held.ok
+          ? `  ${C.cyan}[sync]${C.reset} ${describeSessionHold(held.hold)}`
+          : `  ${C.yellow}[sync]${C.reset} Hold not set: ${held.reason}`);
+      } else if (parsed.kind === "resume") {
+        const resumed = requestSessionResume({ stateId });
+        log(`  ${resumed.ok && resumed.resumed ? C.cyan : C.yellow}[sync]${C.reset} ${describeSessionResume(resumed)}`);
+        if (resumed.ok && resumed.resumed && !observing) pollTrunk(latestStatus);
       } else if (parsed.kind === "admit") {
         log(`  ${C.cyan}[session]${C.reset} admitting ${parsed.code}...`);
         const admitted = await admitPairingMember({ state, code: parsed.code, projectDir, remoteClient });
-        log(`  ${C.green}[session]${C.reset} admitted ${admitted.countersign}`
-          + `${admitted.member ? ` (${memberLabel(admitted.member)})` : ""}; their checkout switches to ${state.shared_branch}`);
+        log(`  ${C.green}[session]${C.reset} admitted ${admitted.member ? `${memberLabel(admitted.member)} with ` : ""}`
+          + `${admitted.countersign}; they are checking out ${state.shared_branch}`);
+        await refreshHostMembers(state);
       } else if (parsed.kind === "kick") {
         const matches = latestMembers.filter((member) => String(member.id).startsWith(parsed.id));
         if (matches.length !== 1) {
@@ -571,37 +927,90 @@ async function monitorPairing(remoteClient, stateId, {
         }
         await kickPairingMember({ state, memberId: matches[0].id, projectDir, remoteClient });
         log(`  ${C.yellow}[session]${C.reset} removed ${memberLabel(matches[0])}`);
+        await refreshHostMembers(state);
       }
     } catch (error) {
       log(`  ${C.yellow}[session]${C.reset} ${safeError(error)}`);
     }
   };
   let commandChain = Promise.resolve();
-  const hostConsole = stateAtStart?.role === "host" && !json
-    ? createHostConsole({
+  const sessionConsole = !json
+    ? createSessionConsole({
         input,
         output,
         onLine: (line) => {
-          const parsed = parseHostConsoleLine(line);
+          const parsed = parseSessionConsoleLine(line, { role });
           if (parsed.kind === "close") {
-            gracefulRequested = true;
+            if (observing || schedulerLockHolderLive(kill)) {
+              log(`  ${C.yellow}[session]${C.reset} posse go owns the session; close from the run screen (u → close), or stop posse go first.`);
+            } else {
+              gracefulRequested = true;
+            }
             return;
           }
           // One command at a time; a slow admit must not interleave with a kick.
-          commandChain = commandChain.then(() => runHostConsoleCommand(parsed));
+          commandChain = commandChain.then(() => runSessionConsoleCommand(parsed));
         },
         onInterrupt: () => { forceRequested = true; },
+        onHangup: () => hangup(),
       })
     : null;
-  if (hostConsole) log = hostConsole.print;
+  if (sessionConsole) log = sessionConsole.print;
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   process.once("SIGHUP", hangup);
+  const waitForNextLap = async (ms) => {
+    for (let elapsed = 0; elapsed < ms; elapsed += tickMs) {
+      if (forceRequested || gracefulRequested || pairingProcessShouldStop(stateId)) break;
+      await sleep(tickMs);
+    }
+  };
   try {
     while (!forceRequested && !gracefulRequested && !pairingProcessShouldStop(stateId)) {
-      const state = getPairingState(stateId);
-      if (Number(state?.process_pid) !== process.pid && getLiveSchedulerBlockMessage("main")) {
-        return { reason: "scheduler_handoff" };
+      let state = getPairingState(stateId);
+      let ownership = consoleSessionOwnership(state, kill, nowMs());
+      if (ownership === "vacant") {
+        // posse go stopped heartbeating (exited, or sits in its wrap-up
+        // screen): take the heartbeat back unless another process adopted the
+        // session (or it ended) since it was read.
+        const link = readSessionLink({ stateId });
+        if (!readoptPairingProcess(stateId, { fromPid: state?.process_pid ?? null })) {
+          await waitForNextLap(tickMs);
+          continue;
+        }
+        ownership = "self";
+        state = getPairingState(stateId);
+        if (observing) {
+          observing = false;
+          // The lease runs from the last heartbeat that actually succeeded,
+          // whichever process sent it.
+          const lastOkMs = Date.parse(String(link?.last_ok_at || ""));
+          lastHeartbeatOkMs = Number.isFinite(lastOkMs) ? lastOkMs : nowMs();
+          emit(
+            { event: "pairing_owner", owner: "console" },
+            `  ${C.green}[session]${C.reset} posse go stopped heartbeating; this console owns the session again`,
+          );
+        }
+      }
+      if (ownership === "scheduler" || ownership === "closing") {
+        const ownerLabel = ownership === "closing" ? "closing" : "scheduler";
+        if (!observing || observedOwner !== ownerLabel) {
+          observing = true;
+          observedOwner = ownerLabel;
+          emit(
+            { event: "pairing_owner", owner: ownerLabel },
+            ownership === "closing"
+              ? `  ${C.yellow}[session]${C.reset} the session is closing in another process; this console stays attached`
+              : `  ${C.cyan}[session]${C.reset} posse go now owns the session; this console stays attached`,
+          );
+        }
+        // Read-only view of what the scheduler maintains.
+        const snapshot = readPairingPeerSnapshot();
+        if (snapshot) printPeerActivityChanges(C, snapshot, seenPeerActivity, { json, log });
+        await refreshHostMembers(state);
+        reportSyncTransition(state);
+        await waitForNextLap(heartbeatMs);
+        continue;
       }
       let status;
       try {
@@ -640,6 +1049,10 @@ async function monitorPairing(remoteClient, stateId, {
           invalidateVerifiedTeamGrantCache();
         }
         touchPairingState(stateId);
+        lastHeartbeatOkMs = nowMs();
+        recordSessionLinkSuccess({
+          stateId, owner: SESSION_LINK_OWNERS.CONSOLE, leaseSec, nowMs: lastHeartbeatOkMs,
+        });
         writePairingPeerSnapshot(status);
         if (state.role === "host" && status.submission_approval_enabled === true
           && Date.now() - lastTeamHandoffPollAt >= 15_000) {
@@ -657,45 +1070,65 @@ async function monitorPairing(remoteClient, stateId, {
         }
         printPeerActivityChanges(C, status, seenPeerActivity, { json, log });
         latestStatus = status;
-        if (state.role === "host") {
-          try {
-            const listed = await remoteClient.members(state.relay_token, { pendingOnly: false });
-            latestMembers = Array.isArray(listed?.members) ? listed.members : [];
-            printMemberChanges(log, C, diffPairingMembers(latestMembers, seenMembers), { json });
-          } catch {
-            // The member list is display only; the heartbeat above is the lease.
-          }
-        }
-        consecutiveFailures = 0;
+        await refreshHostMembers(state);
+        if (status.status === "active") pollTrunk(status);
       } catch (error) {
+        recordSessionLinkFailure({ stateId, owner: SESSION_LINK_OWNERS.CONSOLE, leaseSec, error, nowMs: nowMs() });
         if ([401, 403].includes(Number(error?.status))) {
           pulseTokenManager.clearAuthentication();
           throw error;
         }
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= 4) throw error;
-        await sleep(2_000);
+        // Keep retrying for as long as the Remote would still hold this
+        // clone's lease; only a lapsed lease ends the console.
+        if (nowMs() - lastHeartbeatOkMs > leaseSec * 1000) throw leaseLapsedError(error, leaseSec);
+        // Git sync does not depend on the relay; keep the checkout current.
+        pollTrunk();
+        reportSyncTransition(state);
+        await waitForNextLap(retryMs);
         continue;
       }
+      reportSyncTransition(state);
       if (status.status !== "active") return { reason: status.status, status };
-      for (let elapsed = 0; elapsed < HEARTBEAT_MS; elapsed += 250) {
-        if (forceRequested || gracefulRequested || pairingProcessShouldStop(stateId)) break;
-        await sleep(250);
-      }
+      await waitForNextLap(heartbeatMs);
+    }
+    // Ctrl+C or a closed terminal detaches a console while posse go owns the
+    // session, including while it is still starting and has not adopted yet;
+    // it never force-closes a session posse go is running.
+    if ((forceRequested || gracefulRequested) && (observing || schedulerLockHolderLive(kill))) {
+      detached = true;
+      if (!json) log(`  ${C.dim}[session] console detached; posse go keeps the session${C.reset}`);
+      return { reason: "scheduler_handoff", detached: true };
     }
     return {
       reason: gracefulRequested ? "graceful_close" : forceRequested ? "force_close" : "local_leave",
     };
   } finally {
-    hostConsole?.close();
-    clearPairingPeerSnapshot();
+    stopping = true;
+    sessionConsole?.close();
+    // Leaving (and its final sync) must not race this console's last poll or
+    // a command still queued behind a slow admit.
+    await commandChain.catch(() => {});
+    if (consolePoll) {
+      consolePoller.abortInFlight?.("The session console is exiting");
+      await consolePoll;
+    }
+    // The scheduler owns the peer snapshot while it runs.
+    if (!observing && !detached) clearPairingPeerSnapshot();
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     process.removeListener("SIGHUP", hangup);
   }
 }
 
-function printActive(C, state, status = null) {
+function readSessionSyncBestEffort(state) {
+  try {
+    return readSessionSync({ state, snapshot: readPairingPeerSnapshot() });
+  } catch {
+    return null;
+  }
+}
+
+function printActive(C, state, status = null, derived = null) {
   console.log(`\n  ${C.bold}Posse pairing${C.reset}`);
   console.log(`  Role: ${state.role}`);
   console.log(`  Branch: ${state.shared_branch}`);
@@ -704,6 +1137,7 @@ function printActive(C, state, status = null) {
   if (status && Number.isFinite(status.active_members)) {
     console.log(`  Connected members: ${status.active_members}`);
   }
+  if (derived) printSessionSyncRows((text) => console.log(text), C, derived);
   const peers = status?.peers || [];
   const peerItems = peers.flatMap((peer) => (
     (peer.work_items || []).map((workItem) => ({ peer, workItem }))
@@ -766,7 +1200,24 @@ async function waitForRemoteMembersToLeave(remoteClient, state, {
   return status;
 }
 
-async function finishHostShutdown(root, remoteClient, state, {
+// Every close path (console, `u → close`, `posse session close`, crash
+// recovery) funnels here; the claim keeps two of them from integrating the
+// same session at once.
+async function finishHostShutdown(root, remoteClient, state, options = {}) {
+  const claim = claimSessionClose({ stateId: state.id });
+  if (!claim.ok) {
+    throw Object.assign(new Error(claim.ownerPid
+      ? `Another process (pid ${claim.ownerPid}) is already closing this session; let it finish`
+      : "Could not claim the session close; try again"), { code: claim.reason });
+  }
+  try {
+    return await closeClaimedHostSession(root, remoteClient, state, options);
+  } finally {
+    releaseSessionClose({ stateId: state.id });
+  }
+}
+
+async function closeClaimedHostSession(root, remoteClient, state, {
   graceful,
   C,
   json,
@@ -775,6 +1226,12 @@ async function finishHostShutdown(root, remoteClient, state, {
   keepBranch = false,
   historyPreserving = false,
 } = {}) {
+  // A hold stops applying once the close claim exists; clearing it here makes
+  // the release visible, since held merges must reach the final sync.
+  if (readSessionHoldStatus({ stateId: state.id }).state !== SESSION_HOLD_STATES.NONE) {
+    clearSessionHold({ stateId: state.id });
+    if (!json) console.log(`  ${C.yellow}[sync]${C.reset} Released this checkout's hold so held work is included in the integration.`);
+  }
   // Persist the chosen close action before the journal exists. Crash recovery
   // recomputes the promotion strategy from this column, and a journal frozen
   // with a strategy the column does not name can never be resumed.
@@ -799,7 +1256,11 @@ async function finishHostShutdown(root, remoteClient, state, {
   } else {
     const remote = await leaveRemoteBestEffort(remoteClient, state);
     if (remote?.error) throw Object.assign(new Error(remote.error), { code: remote.code });
-    if (!json) console.log(`\n  ${C.yellow}Forced close started.${C.reset} Stopping paired clients.`);
+    if (!json) {
+      console.log(reason === "host_crash_recovery"
+        ? `\n  ${C.yellow}Recovering the interrupted session on ${state.shared_branch}.${C.reset} Stopping paired clients and freezing its work for integration.`
+        : `\n  ${C.yellow}Forced close started.${C.reset} Stopping paired clients.`);
+    }
   }
 
   await waitForRemoteMembersToLeave(remoteClient, state, {
@@ -815,15 +1276,23 @@ async function finishHostShutdown(root, remoteClient, state, {
   if (journal) journal = markPairingPromotion(journal, { phase: "clients_drained" });
 
   const peerSnapshot = readPairingPeerSnapshot();
-  const synced = await syncSharedTrunkFromOrigin(root, {
+  if (checkoutSharedBranchForClose(root, state.shared_branch) && !json) {
+    console.log(`  ${C.dim}[pair close] switched back to ${state.shared_branch} to take the final sync${C.reset}`);
+  }
+  const synced = await retryWhileMergeLockBusy(() => syncSharedTrunkFromOrigin(root, {
     provenance: state.baseline_oid ? {
       baselineOid: state.baseline_oid,
       gitIdentities: (peerSnapshot?.peers || [])
         .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []),
     } : null,
-  });
+  }));
   if (!synced.ok) {
-    throw Object.assign(new Error(`Final shared-trunk sync failed: ${synced.reason || "unknown error"}`), {
+    const blocked = synced.reason === "fast_forward_blocked"
+      ? ` (${synced.blockedReason === "dirty"
+        ? `${state.shared_branch} has uncommitted changes; commit or stash them, then run \`posse session integrate\``
+        : `${synced.blockedReason || "the checkout could not be fast-forwarded"}; switch to ${state.shared_branch} with a clean checkout, then run \`posse session integrate\``})`
+      : "";
+    throw Object.assign(new Error(`Final shared-trunk sync failed: ${synced.reason || "unknown error"}${blocked}`), {
       code: "pairing_shutdown_sync_failed",
       result: synced,
     });
@@ -841,13 +1310,13 @@ async function finishHostShutdown(root, remoteClient, state, {
       sourceUrl: state.remote_url,
     };
   }
-  const promoted = await promotePairingTrunk(root, {
+  const promoted = await retryWhileMergeLockBusy(() => promotePairingTrunk(root, {
     journal,
     publish: publish && journal?.approval_required !== true,
     onProgress: (message) => {
       if (!json) console.log(`  ${C.cyan}[pair integrate]${C.reset} ${message}`);
     },
-  });
+  }));
   if (!promoted.ok) {
     throw Object.assign(new Error(promoted.reason || "Pairing promotion deferred"), {
       code: promoted.reason || "pairing_promotion_deferred",
@@ -858,7 +1327,9 @@ async function finishHostShutdown(root, remoteClient, state, {
       if (journal?.approval_required === true) {
         console.log(`  ${C.yellow}${promoted.strategy === "fast-forward" ? "History-preserving" : "Squash"} candidate frozen${C.reset}\n  Candidate OID: ${promoted.mergeHash}\n  Origin base OID: ${promoted.targetBaseOid}\n  Approve with: posse session integrate --approve-source-oid ${promoted.mergeHash} --approve-origin-oid ${promoted.targetBaseOid}\n`);
       } else {
-        console.log(`  ${C.yellow}Integration candidate preserved${C.reset}; run \`posse session integrate\` to publish it.\n`);
+        console.log(`  ${C.yellow}The session's work is committed on local ${promoted.targetBranch} (${String(promoted.mergeHash || "").slice(0, 8)}) but not published.${C.reset}\n`
+          + `  Run \`posse session integrate\` to publish it to ${promoted.remote || "origin"}/${promoted.targetBranch}, `
+          + "or `posse session abandon-integration` to drop it.\n");
       }
     }
     return promoted;
@@ -870,7 +1341,9 @@ async function finishHostShutdown(root, remoteClient, state, {
   const cleanup = state.temporary_repository
     ? cleanupGitHubSessionRepository(state.temporary_repository, { cwd: root })
     : null;
-  if (!json && publish) {
+  if (!json && promoted.skipped === "already_up_to_date") {
+    console.log(`  ${C.green}Session closed.${C.reset} It added nothing ${promoted.targetBranch} lacks, so there was nothing to integrate.\n`);
+  } else if (!json && publish) {
     console.log(`  ${C.green}Integrated and published${C.reset} ${promoted.sourceBranch} -> ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
   }
   if (!json) reportRepositoryCleanupFailure(C, cleanup);
@@ -881,6 +1354,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
+  retireEndedSessionQueueRows();
   const ambiguous = listUnresolvedSharedTrunkMergeOperations()
     .filter((operation) => operation.phase === "publish_unknown");
   if (ambiguous.length > 0) {
@@ -891,7 +1365,8 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
   const pendingPromotion = readPairingPromotionJournal();
   if (pendingPromotion) {
     throw Object.assign(new Error(
-      `Pairing integration ${pendingPromotion.session_id || "(unknown)"} must finish before another session starts`,
+      `The previous session's integration (${pendingPromotion.source_branch || pendingPromotion.session_id || "unknown"}) has not finished. `
+        + "Run `posse session integrate` to publish it, or `posse session abandon-integration` to drop it, then start the session again.",
     ), { code: "pairing_promotion_already_pending" });
   }
   const original = currentCheckout(root);
@@ -930,6 +1405,11 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
   let started = null;
   try {
     if (githubRepositoryName(url)) {
+      // Record the repository before creating it, so a host killed in between
+      // still leaves recovery the name to delete.
+      updatePairingEnrollment(state.id, {
+        temporaryRepository: githubSessionRepositoryName(githubOwner, state.id),
+      });
       provisioned = provisionGitHubSessionRepository({
         projectDir: root,
         sessionId: state.id,
@@ -1003,7 +1483,8 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       console.log(`  Shared branch: ${sharedBranch}`);
       console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
       console.log(`  Join requests appear below. Type a member's countersign and press Enter to admit them.`);
-      console.log(`  ${C.dim}Commands: status · members · kick <id> · close (graceful close + integrate) · help · [Ctrl+C] force close + integrate${C.reset}\n`);
+      console.log(`  ${C.dim}Commands: status · members · kick <id> · hold [reason] · resume · close (graceful close + integrate) · help · [Ctrl+C] force close + integrate${C.reset}`);
+      console.log(`  ${C.dim}This console keeps this folder in sync with the members' work. While \`posse go\` runs it hands the session over and takes it back when posse go exits.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: started.code,
@@ -1029,7 +1510,16 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
     }
     return { ok: true, role: "host", outcome: outcome.reason };
   } catch (error) {
-    if (!started && publishedOid) {
+    // Once the Remote registered the session, members may have published work
+    // that exists only in the session repository. Keep the repository, the
+    // checkout, and the pairing state; the next posse command's crash recovery
+    // freezes an integration candidate from them instead of deleting it.
+    if (started) {
+      error.message = `${safeError(error)}\n  The session repository and local pairing state were kept; `
+        + "run any posse command here to recover, then `posse session integrate`.";
+      throw error;
+    }
+    if (publishedOid) {
       try {
         await withWorktreeLockAsync(root, root, () => deletePublishedPairingBranch(root, {
           remote: sessionRemote,
@@ -1040,10 +1530,6 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         // The leased delete is best-effort; never delete a branch that moved.
       }
     }
-    if (started?.host_token) await leaveRemoteBestEffort(remoteClient, {
-      ...getPairingState(state.id),
-      relay_token: started.host_token,
-    });
     const restored = await restoreLocalPairing(root, getPairingState(state.id));
     const cleanup = provisioned
       ? cleanupGitHubSessionRepository(provisioned.repository, { cwd: root })
@@ -1086,6 +1572,7 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
 async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, json }) {
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
+  retireEndedSessionQueueRows();
   const ambiguous = listUnresolvedSharedTrunkMergeOperations()
     .filter((operation) => operation.phase === "publish_unknown");
   if (ambiguous.length > 0) {
@@ -1096,7 +1583,8 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
   const pendingPromotion = readPairingPromotionJournal();
   if (pendingPromotion) {
     throw Object.assign(new Error(
-      `Pairing integration ${pendingPromotion.session_id || "(unknown)"} must finish before joining another session`,
+      `The previous session's integration (${pendingPromotion.source_branch || pendingPromotion.session_id || "unknown"}) has not finished. `
+        + "Run `posse session integrate` to publish it, or `posse session abandon-integration` to drop it, then join again.",
     ), { code: "pairing_promotion_already_pending" });
   }
   const original = currentCheckout(root, { allowUnborn: freshCheckout });
@@ -1128,7 +1616,9 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
     sharedBranch,
     originalBranch: original.branch,
     originalHead: original.head,
-    originalSettings: snapshotPairingSettings(root),
+    // An empty folder had no settings of its own; rows keyed by this path are
+    // leftovers (a deleted folder's killed session) and must not be restored.
+    originalSettings: freshCheckout ? {} : snapshotPairingSettings(root),
     instanceId,
     originalSshCommand: readLocalSshCommand(root),
   });
@@ -1198,21 +1688,35 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
       // This fetch + leased dry-run push is the per-user repo-access gate.
       // Admission only activates the relay credential; the member is not
       // counted live until this preflight succeeds and monitoring begins.
-      baselineOid = preflightAndCheckoutPairingBranch(root, {
+      // GitHub accepts a new deploy key unevenly for a while: one request can
+      // succeed and the next still fail, so every network step retries.
+      let keyWaitAnnounced = false;
+      const onKeyWait = (attempt, waitMs) => {
+        if (json) return;
+        if (!keyWaitAnnounced) {
+          keyWaitAnnounced = true;
+          console.log(`  ${C.dim}Waiting for GitHub to accept this clone's session key...${C.reset}`);
+        } else {
+          console.log(`  ${C.dim}still waiting (retry in ${Math.round(waitMs / 1000)}s)${C.reset}`);
+        }
+      };
+      baselineOid = await retryWhileSessionKeyPropagates(() => preflightAndCheckoutPairingBranch(root, {
         remote: pairingRemote.remote,
         branch: sharedBranch,
         expectedUrl: metadata.url,
-      });
+      }), { onWait: onKeyWait });
       configurePairingSettings(root, { remote: pairingRemote.remote, branch: sharedBranch });
-      const preflight = await runSharedTrunkAccessPreflight(root, {
-        requireScopeEnforcement: true,
-        onCapabilities: (capabilities) => {
-          pulseTokenManager.confirmNativeScopeEnforcement(capabilities?.scopeEnforcement === true);
-        },
-      });
-      if (!preflight.ok) {
-        throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
-      }
+      await retryWhileSessionKeyPropagates(async () => {
+        const preflight = await runSharedTrunkAccessPreflight(root, {
+          requireScopeEnforcement: true,
+          onCapabilities: (capabilities) => {
+            pulseTokenManager.confirmNativeScopeEnforcement(capabilities?.scopeEnforcement === true);
+          },
+        });
+        if (!preflight.ok) {
+          throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
+        }
+      }, { onWait: onKeyWait });
     });
     updatePairingEnrollment(state.id, {
       remoteSessionId: joined.session_id,
@@ -1232,9 +1736,13 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
       console.log(freshCheckout
         ? `\n  ${C.green}Paired.${C.reset} Checked out ${sharedBranch} from the session repository into ${root}.`
         : `\n  ${C.green}Paired.${C.reset} Switched to ${sharedBranch}.`);
-      console.log(`  ${C.dim}This pairing session stays connected until the host closes it, Ctrl-C, or \`posse pair leave\`.${C.reset}\n`);
+      console.log(`  ${C.dim}You stay in the session until the host closes it, you press Ctrl+C, or you run \`posse session leave\`.${C.reset}`);
+      console.log(`  ${C.dim}This console keeps the folder in sync with the session. Commands: status · hold [reason] · resume · help.${C.reset}`);
+      console.log(`  ${C.dim}To run queued work, start \`posse go\` in another terminal; this console hands the session to it while it runs.${C.reset}\n`);
     }
-    const outcome = await monitorPairing(remoteClient, state.id, { projectDir: root, C, json });
+    const outcome = await monitorPairing(remoteClient, state.id, {
+      projectDir: root, C, json, sessionCode: String(code).trim().toUpperCase(),
+    });
     if (outcome.reason === "scheduler_handoff") {
       return { ok: true, role: "member", outcome: outcome.reason };
     }
@@ -1248,10 +1756,13 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
       });
       const result = await unpair(root, remoteClient, getPairingState(state.id));
       if (!result.ok) throw Object.assign(new Error(result.local.message), { code: result.local.code });
-      if (!json && ["draining", "closed", "expired"].includes(outcome.reason)) {
+      if (!json) {
+        console.log(`\n  ${MEMBER_EXIT_REASONS[outcome.reason] || "You left the session"}.`);
+        const finalSync = describeFinalMemberSync(result.finalSync);
+        if (finalSync) console.log(`  ${finalSync}`);
         console.log(freshCheckout
-          ? `  Host pairing ${outcome.reason}; this folder keeps the last shared state on ${original.branch}.\n`
-          : `  Host pairing ${outcome.reason}; switched back to ${original.branch}.\n`);
+          ? `  This folder keeps the session's work on branch ${original.branch}.\n`
+          : `  Switched back to ${original.branch}; the session's work stays on ${sharedBranch}.\n`);
       }
     }
     return { ok: true, role: "member", outcome: outcome.reason };
@@ -1333,6 +1844,19 @@ async function runStatus({
     else console.log(`\n  Pairing recovery ${restored.ok ? `restored ${state.original_branch}` : `is blocked: ${restored.message}`}.\n`);
     return result;
   }
+  if (!pairingProcessIsAlive(state) && state.role === "host" && readPairingPromotionJournal()) {
+    // The integration still needs this session's key and remote to finish;
+    // integrate or abandon-integration restores the checkout afterwards.
+    clearPairingPeerSnapshot();
+    const journal = readPairingPromotionJournal();
+    const result = { ok: true, paired: false, ended: "host_exited", integration_pending: true, phase: journal.phase };
+    if (json) console.log(JSON.stringify(result));
+    else {
+      console.log(`\n  No live session. The last one (${journal.source_branch || state.shared_branch}) ended unexpectedly;`
+        + " its work waits for `posse session integrate` (or `posse session abandon-integration`).\n");
+    }
+    return result;
+  }
   if (!pairingProcessIsAlive(state)) {
     clearPairingPeerSnapshot();
     const recovered = await unpair(
@@ -1348,7 +1872,8 @@ async function runStatus({
       remote: recovered.remote,
     };
     if (json) console.log(JSON.stringify(result));
-    else console.log(`\n  Pairing monitor exited; ${recovered.ok ? `switched back to ${state.original_branch}` : recovered.local.message}.\n`);
+    else if (!recovered.ok) console.log(`\n  The session's console is gone, and restoring this checkout is blocked: ${recovered.local.message}.\n`);
+    else console.log(`\n  No live session: its console is gone. Switched back to ${state.original_branch}.\n`);
     return result;
   }
   const client = remoteClient || remoteClientFactory();
@@ -1371,9 +1896,18 @@ async function runStatus({
     return result;
   }
   if (status) writePairingPeerSnapshot(status);
-  const result = { ok: true, paired: true, role: state.role, phase: state.phase, status };
+  const derived = readSessionSyncBestEffort(state);
+  const result = {
+    ok: true,
+    paired: true,
+    role: state.role,
+    phase: state.phase,
+    status,
+    sync: derived?.sync || null,
+    peers_sync: derived?.peers_sync || [],
+  };
   if (json) console.log(JSON.stringify(result));
-  else printActive(C, state, status);
+  else printActive(C, state, status, derived);
   return result;
 }
 
@@ -1491,6 +2025,25 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
   return result;
 }
 
+// Hold and resume only touch this clone's database: the scheduler's poller
+// applies them, so they need neither the Remote nor native Git.
+function runSessionHoldCommand({ action, reason = null, C, json }) {
+  const result = action === "hold"
+    ? setSessionHold({ reason })
+    : requestSessionResume();
+  if (json) {
+    console.log(JSON.stringify(result));
+  } else if (action === "hold") {
+    console.log(result.ok
+      ? `\n  ${C.cyan}${describeSessionHold(result.hold).replace("Type resume", "Run `posse session resume`")}${C.reset}\n`
+      : `\n  ${C.yellow}Hold not set: ${result.reason === "no_active_session" ? "this clone is not in a live session" : result.reason}.${C.reset}\n`);
+  } else {
+    console.log(`\n  ${result.ok && result.resumed ? C.cyan : C.yellow}${describeSessionResume(result)}${C.reset}\n`);
+  }
+  if (!result.ok) process.exitCode = 1;
+  return result;
+}
+
 async function runPendingIntegration({ projectDir, action, C, json, approval = null, silent = false }) {
   const root = repositoryRoot(projectDir);
   const journal = readPairingPromotionJournal();
@@ -1526,14 +2079,14 @@ async function runPendingIntegration({ projectDir, action, C, json, approval = n
       `Integration requires --approve-source-oid ${journal.candidate_sha} --approve-origin-oid ${journal.target_base_sha}`,
     ), { code: "pairing_promotion_approval_required" });
   }
-  const promoted = await promotePairingTrunk(root, {
+  const promoted = await retryWhileMergeLockBusy(() => promotePairingTrunk(root, {
     journal,
     publish: true,
     approval,
     onProgress: (message) => {
       if (!json && !silent) console.log(`  ${C.cyan}[session integrate]${C.reset} ${message}`);
     },
-  });
+  }));
   if (!promoted.ok) return promoted;
   const state = getLivePairingState();
   const restored = state ? await restoreLocalPairing(root, state) : { ok: true, alreadyLeft: true };
@@ -1542,7 +2095,9 @@ async function runPendingIntegration({ projectDir, action, C, json, approval = n
     : null;
   const result = { ...promoted, restored, cleanup };
   if (!silent && json) console.log(JSON.stringify(result));
-  else if (!silent) console.log(`\n  ${C.green}Session integration published${C.reset} ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
+  else if (!silent && promoted.skipped === "already_up_to_date") {
+    console.log(`\n  ${C.green}Nothing to publish:${C.reset} ${promoted.targetBranch} already has the session's work. Cleaned up.\n`);
+  } else if (!silent) console.log(`\n  ${C.green}Session integration published${C.reset} ${promoted.targetBranch} (${promoted.mergeHash.slice(0, 8)}).\n`);
   if (!silent && !json) reportRepositoryCleanupFailure(C, cleanup);
   return result;
 }
@@ -1584,7 +2139,7 @@ export async function runPairingCommand(argv = [], {
 } = {}) {
   const args = parsePairArgs(argv);
   let client = remoteClient;
-  if (!client && !["status", "integrate", "abandon-integration"].includes(args.action)) {
+  if (!client && !["status", "integrate", "abandon-integration", "hold", "resume"].includes(args.action)) {
     try {
       client = remoteClientFactory();
     } catch (error) {
@@ -1595,6 +2150,7 @@ export async function runPairingCommand(argv = [], {
   if (args.action === "host") return runHost({ ...args, projectDir, remoteClient: client, C });
   if (args.action === "join") return runJoin({ ...args, projectDir, remoteClient: client, C });
   if (args.action === "admit") return runAdmit({ ...args, projectDir, remoteClient: client, C });
+  if (["hold", "resume"].includes(args.action)) return runSessionHoldCommand({ ...args, C });
   if (["integrate", "abandon-integration"].includes(args.action)) {
     return runPendingIntegration({ ...args, projectDir, C });
   }
@@ -1667,7 +2223,10 @@ export async function runPairingCommand(argv = [], {
   else if (state.role === "host" && result.ok) {
     // finishHostShutdown already printed the integration result.
   }
-  else if (result.ok) console.log(`\n  Unpaired; switched back to ${state.original_branch}.\n`);
+  else if (result.ok) {
+    const finalSync = describeFinalMemberSync(result.finalSync);
+    console.log(`\n  Left the session; switched back to ${state.original_branch}.${finalSync ? `\n  ${finalSync}` : ""}\n`);
+  }
   else console.error(`\n  ${C.red}Unpair restore blocked:${C.reset} ${result.local.message}\n`);
   if (!result.ok) process.exitCode = 1;
   return result;
@@ -1714,6 +2273,9 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
       await waitForPairingSchedulerStop({ state, graceful: false });
       const client = remoteClientFactory();
       const result = await unpair(root, client, state);
+      if (!json && result.ok) {
+        console.log(`  Left the interrupted session on ${state.shared_branch}; switched back to ${state.original_branch}.`);
+      }
       return {
         ok: result.ok,
         attempted: true,
@@ -1754,11 +2316,13 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
           ? frozenStrategy === "fast-forward"
           : state.close_action === "integrate-fast-forward",
       });
-      if (promotion.kept) return { ok: true, attempted: true, recovered: true, promotion };
+      if (promotion.kept || promotion.skipped) return { ok: true, attempted: true, recovered: true, promotion };
       return {
         ok: false,
         attempted: true,
         pending: true,
+        // finishHostShutdown already told the operator what to run.
+        reported: !json,
         code: "pairing_integration_required",
         message: "Session integration candidate is ready; run `posse session integrate` or `posse session abandon-integration`",
         promotion,
@@ -1789,4 +2353,7 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
   }
 }
 
-export const __testPairingCommandInternals = Object.freeze({ monitorPairing, printMemberChanges });
+export const __testPairingCommandInternals = Object.freeze({
+  monitorPairing, printMemberChanges, finishHostShutdown, retryWhileSessionKeyPropagates,
+  retireEndedSessionQueueRows, retryWhileMergeLockBusy,
+});

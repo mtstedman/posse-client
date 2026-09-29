@@ -33,12 +33,51 @@ export function repositoryRoot(projectDir) {
   return path.resolve(git(["rev-parse", "--show-toplevel"], projectDir, { timeoutMs: 5_000 }));
 }
 
+// Posse's own runtime folders never count as changes. Pairing commands do not
+// run the artifact boot that normally excludes them, so a first pairing in a
+// fresh repo would refuse its own state. Only these are excluded (locally, in
+// .git/info/exclude): the clean check must not hide a project's own db/ or
+// logs/ folders, which the broader runtime ignore list also covers.
+const PAIRING_RUNTIME_EXCLUDES = Object.freeze([".posse/", ".posse-worktrees/", ".posse-test-suites/"]);
+
+export function excludePosseRuntimeFolders(projectDir) {
+  try {
+    const root = repositoryRoot(projectDir);
+    const commonDir = path.resolve(root, git(["rev-parse", "--git-common-dir"], root, { timeoutMs: 5_000 }).trim());
+    const file = path.join(commonDir, "info", "exclude");
+    const lines = fs.existsSync(file) ? fs.readFileSync(file, "utf8").split(/\r?\n/u) : [];
+    const present = new Set(lines.map((line) => line.trim()));
+    const missing = PAIRING_RUNTIME_EXCLUDES.filter((entry) => !present.has(entry) && !present.has(`/${entry}`));
+    if (missing.length === 0) return false;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const separator = lines.length > 0 && lines[lines.length - 1] !== "" ? "\n" : "";
+    fs.appendFileSync(file, `${separator}${missing.join("\n")}\n`, "utf8");
+    return true;
+  } catch {
+    return false; // the status check still decides
+  }
+}
+
 export function assertCleanPairingCheckout(projectDir) {
-  const status = git(["status", "--porcelain=v1", "--untracked-files=normal"], projectDir, {
+  excludePosseRuntimeFolders(projectDir);
+  // Porcelain v2 lines never start with whitespace, so the trimmed output
+  // still parses: "1"/"2"/"u" changed entries end with the path, "?" is
+  // untracked (renames carry "path\toriginal").
+  const status = git(["status", "--porcelain=v2", "--untracked-files=normal"], projectDir, {
     timeoutMs: 10_000,
   });
-  if (status.trim()) {
-    const error = new Error("Pairing requires a clean checkout. Commit or stash local changes first.");
+  const pathFields = { 1: 8, 2: 9, u: 10 };
+  const dirty = status.split("\n").map((line) => {
+    if (line.startsWith("? ")) return line.slice(2);
+    const fields = pathFields[line[0]];
+    return fields ? line.split(" ").slice(fields).join(" ").split("\t")[0] : "";
+  }).filter(Boolean);
+  if (dirty.length > 0) {
+    const shown = dirty.slice(0, 5).join(", ") + (dirty.length > 5 ? `, and ${dirty.length - 5} more` : "");
+    const gitignoreHint = dirty.includes(".gitignore")
+      ? " (.gitignore may hold the ignore block Posse adds; commit it)"
+      : "";
+    const error = new Error(`Pairing requires a clean checkout. Commit or stash these first: ${shown}${gitignoreHint}.`);
     error.code = "pairing_checkout_dirty";
     throw error;
   }
@@ -90,7 +129,7 @@ export function initializeFreshPairingCheckout(projectDir) {
   }
   fs.mkdirSync(root, { recursive: true });
   git(["init", "--quiet"], root, { timeoutMs: 10_000 });
-  fs.appendFileSync(path.join(root, ".git", "info", "exclude"), "\n.posse/\n", "utf8");
+  excludePosseRuntimeFolders(root);
   return root;
 }
 
@@ -458,6 +497,35 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
     git(["switch", "--create", branch, "--track", `${normalizedRemote}/${branch}`], projectDir);
   }
   return remoteOid;
+}
+
+// The close-time final sync fast-forwards the checked-out shared branch. After
+// a crash the user may have switched away (for example back to main); a clean
+// checkout is switched back first so the close can finish. Returns whether a
+// switch happened; a dirty checkout is left for the sync to report.
+/** The local commit of `branch`, or null when it does not exist. */
+export function localBranchHead(projectDir, branch) {
+  try {
+    return git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], projectDir, { timeoutMs: 5_000 }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function checkoutSharedBranchForClose(projectDir, branch) {
+  let current = "";
+  try {
+    current = git(["symbolic-ref", "--quiet", "--short", "HEAD"], projectDir, { timeoutMs: 5_000 }).trim();
+  } catch { /* detached: let the sync report it */ }
+  if (!branch || current === branch) return false;
+  try {
+    git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], projectDir, { timeoutMs: 5_000 });
+    assertCleanPairingCheckout(projectDir);
+  } catch {
+    return false;
+  }
+  git(["switch", String(branch)], projectDir);
+  return true;
 }
 
 export function restoreOriginalBranch(projectDir, branch, { originalHead = null } = {}) {

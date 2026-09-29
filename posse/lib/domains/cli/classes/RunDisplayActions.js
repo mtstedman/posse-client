@@ -23,28 +23,47 @@ import {
 import { createWorkItemTransitionExecutor } from "../../bridge/functions/work-item-actions.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { requestSessionResume, setSessionHold } from "../../pairing/functions/session-hold.js";
+import { readSessionSync } from "../../pairing/functions/session-sync.js";
+import { formatPeerSyncRow } from "../../pairing/functions/sync-state.js";
+import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 
-export function parseSessionTuiCommand(command) {
+const SESSION_TUI_COMMANDS = Object.freeze({
+  host: Object.freeze([
+    "admit", "kick", "scope", "policy", "invite", "members", "pending",
+    "status", "hold", "resume", "drain", "close", "keep", "inject",
+  ]),
+  member: Object.freeze(["status", "hold", "resume"]),
+});
+
+/** The `u` prompt's command list for this clone's session role. */
+export function sessionTuiCommandHint(role = "host") {
+  return (SESSION_TUI_COMMANDS[role] || SESSION_TUI_COMMANDS.member).join(", ");
+}
+
+export function parseSessionTuiCommand(command, { role = "host" } = {}) {
   const input = String(command || "").trim();
   if (!input) throw new Error("Enter a session command");
   const [rawAction] = input.split(/\s+/u);
   const action = rawAction.toLowerCase();
-  if (action === "inject") return { inject: input.slice(rawAction.length).trim() };
-  if (action === "keep" || input.toLowerCase() === "keep-branch close") {
-    return { argv: ["close", "--keep-branch"] };
+  const allowedForRole = SESSION_TUI_COMMANDS[role] || SESSION_TUI_COMMANDS.member;
+  const keepBranch = action === "keep" || input.toLowerCase() === "keep-branch close";
+  if (!allowedForRole.includes(keepBranch ? "keep" : action)) {
+    throw new Error(`Session commands: ${sessionTuiCommandHint(role)}`);
   }
+  // Hold, resume and status are local to this clone: no Remote call.
+  if (action === "hold") return { hold: { reason: input.slice(rawAction.length).trim() || null } };
+  if (action === "resume") return { resume: true };
+  if (action === "status") return { status: true };
+  if (action === "inject") return { inject: input.slice(rawAction.length).trim() };
+  if (keepBranch) return { argv: ["close", "--keep-branch"] };
   if (action === "drain") return { argv: ["close"] };
   if (action === "scope") {
     const match = input.match(/^scope\s+(\S+)\s+([\s\S]+)$/iu);
     if (!match) throw new Error("Use: scope <member-id> <json>");
     return { argv: ["scope", match[1], match[2].trim()] };
   }
-  const argv = input.split(/\s+/u);
-  const allowed = new Set(["admit", "kick", "policy", "invite", "members", "pending", "close"]);
-  if (!allowed.has(action)) {
-    throw new Error("Session commands: admit, kick, scope, policy, invite, members, pending, drain, close, keep, inject");
-  }
-  return { argv };
+  return { argv: input.split(/\s+/u) };
 }
 
 function firstPromptAnswer(answers = []) {
@@ -199,22 +218,53 @@ export class RunDisplayActions {
     this.display.onReviewPending = () => this.reviewPending();
     this.display.onAsk = (question) => this.ask(question);
     this.display.onAnswerJob = (jobId) => this.answerJob(jobId);
-    if (getLivePairingState()?.role === "host") {
+    const pairing = getLivePairingState();
+    if (pairing) {
       this.display.onSessionCommand = (command) => this.sessionCommand(command);
+      this.display.sessionCommandHint = sessionTuiCommandHint(pairing.role);
     }
     return this;
   }
 
   async sessionCommand(command) {
-    const parsed = parseSessionTuiCommand(command);
+    const pairing = getLivePairingState();
+    if (!pairing) throw new Error("This clone is not in a live session");
+    const parsed = parseSessionTuiCommand(command, { role: pairing.role });
     if (Object.hasOwn(parsed, "inject")) {
       if (!parsed.inject) throw new Error("Use: inject <work item description>");
       this.inject(parsed.inject);
       return;
     }
+    if (parsed.hold || parsed.resume || parsed.status) {
+      this.localSessionCommand(parsed, pairing);
+      this.refreshDisplaySnapshotsForQueue();
+      return;
+    }
     const { runPairingCommand } = await import("../../pairing/functions/pair-command.js");
     await runPairingCommand(parsed.argv, { projectDir: this.projectDir, C: this.C });
     this.refreshDisplaySnapshotsForQueue();
+  }
+
+  localSessionCommand(parsed, pairing) {
+    const event = (text, color = this.C.cyan) => this.display.addEvent?.(`${color}${text}${this.C.reset}`);
+    if (parsed.hold) {
+      const held = setSessionHold({ stateId: pairing.id, reason: parsed.hold.reason });
+      if (!held.ok) throw new Error(`Hold not set: ${held.reason}`);
+      const minutes = Math.round((Date.parse(held.hold.expires_at) - Date.parse(held.hold.set_at)) / 60_000);
+      event(`[sync] Held this checkout for ${minutes}m${held.hold.reason ? ` (${held.hold.reason})` : ""}; fetches continue, fast-forwards wait. u → resume lifts it.`);
+      return;
+    }
+    if (parsed.resume) {
+      const resumed = requestSessionResume({ stateId: pairing.id });
+      if (!resumed.ok) throw new Error(`Resume failed: ${resumed.reason}`);
+      event(resumed.resumed
+        ? "[sync] Hold lifted; the next poll fast-forwards this checkout."
+        : "[sync] This checkout is not held.", resumed.resumed ? this.C.cyan : this.C.yellow);
+      return;
+    }
+    const derived = readSessionSync({ state: pairing, snapshot: readPairingPeerSnapshot() });
+    event(`[session] ${pairing.role} · ${pairing.shared_branch} · ${derived?.sync?.label || "? unknown"}`);
+    for (const peer of derived?.peers_sync || []) event(`[session]   peer ${formatPeerSyncRow(peer)}`, this.C.dim);
   }
 
   getLiveReviewPromise() {

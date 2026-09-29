@@ -154,7 +154,16 @@ function fetchSourceBranch(projectDir, journal, exec = git) {
     .replace(/[^a-zA-Z0-9-]/gu, "")
     .slice(0, 64) || "recovery";
   const sourceRef = `refs/posse/pairing-sources/${suffix}`;
-  exec(["fetch", "--no-tags", sourceUrl, `+refs/heads/${branch}:${sourceRef}`], projectDir);
+  try {
+    exec(["fetch", "--no-tags", sourceUrl, `+refs/heads/${branch}:${sourceRef}`], projectDir);
+  } catch (error) {
+    // A frozen candidate was built from the source already fetched here. Once
+    // the session's repository or key is gone (the session ended), that copy
+    // is the source; before a freeze, a fresh fetch is required.
+    const kept = SHA_RE.test(String(journal.candidate_sha || "")) ? refSha(projectDir, sourceRef, exec) : null;
+    if (!kept) throw error;
+    return { remoteRef: sourceRef, sha: kept, fetched: false };
+  }
   const sha = refSha(projectDir, sourceRef, exec);
   if (!sha) {
     throw Object.assign(new Error(`Could not resolve the session source branch ${branch} after fetch`), {
@@ -231,7 +240,7 @@ async function promoteFastForwardLocked(projectDir, initialJournal, {
   const source = fetchSourceBranch(projectDir, journal, exec);
   let target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
   const frozen = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;
-  if (!frozen && source.sha === target.sha) {
+  if (!frozen && isAncestor(projectDir, source.sha, target.sha, exec)) {
     clearPairingPromotionJournal();
     return { ok: true, skipped: "already_up_to_date", sourceBranch, targetBranch,
       remote, strategy: "fast-forward", mergeHash: target.sha, sourceOid: source.sha };
@@ -389,6 +398,12 @@ async function promoteLocked(projectDir, initialJournal, {
       throw promotionError("pairing_promotion_candidate_moved", "Local target moved after the squash candidate was frozen");
     }
 
+    // A session that added nothing origin lacks has nothing to integrate.
+    if (!candidate && isAncestor(projectDir, source.sha, target.sha, exec)) {
+      clearPairingPromotionJournal();
+      return { ok: true, skipped: "already_up_to_date", sourceBranch, targetBranch,
+        remote, strategy: "squash", mergeHash: target.sha, sourceOid: source.sha };
+    }
     if (candidate && current === candidate && journal.target_base_sha === target.sha) {
       onProgress(`Retrying preserved pairing promotion ${candidate.slice(0, 8)}`);
     } else {
@@ -420,6 +435,12 @@ async function promoteLocked(projectDir, initialJournal, {
         });
       }
       const nextCandidate = merged.mergeHash || refSha(projectDir, targetBranch, exec);
+      if (nextCandidate === target.sha) {
+        // The squash changed nothing (the session's commits cancel out).
+        clearPairingPromotionJournal();
+        return { ok: true, skipped: "already_up_to_date", sourceBranch, targetBranch,
+          remote, strategy: "squash", mergeHash: target.sha, sourceOid: source.sha };
+      }
       preserveCandidate(projectDir, journal.session_id, nextCandidate, exec);
       journal = markPairingPromotion(journal, {
         phase: "candidate",

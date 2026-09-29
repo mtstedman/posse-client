@@ -17,6 +17,11 @@ function safeSessionPart(value) {
   return String(value || "session").replace(/[^a-zA-Z0-9-]/gu, "").slice(0, 48) || "session";
 }
 
+/** The throwaway repository a session's host creates: known before it exists. */
+export function githubSessionRepositoryName(owner, sessionId) {
+  return `${owner}/posse-session-${safeSessionPart(sessionId).toLowerCase()}`;
+}
+
 export function githubRepositoryName(remoteUrl) {
   const locator = canonicalRepositoryLocator(remoteUrl);
   const [host, ...parts] = locator.split("/");
@@ -188,7 +193,7 @@ export function provisionGitHubSessionRepository({
     });
   }
   const owner = verifiedOwner || assertGitHubCliReady(projectDir, options).owner;
-  const repository = `${owner}/posse-session-${safeSessionPart(sessionId).toLowerCase()}`;
+  const repository = githubSessionRepositoryName(owner, sessionId);
   run("gh", [
     "repo", "create", repository, "--private", "--disable-issues", "--disable-wiki",
     "--description", "Temporary private Posse collaboration trunk",
@@ -255,6 +260,10 @@ export function cleanupGitHubSessionRepository(repository, options = {}) {
     run("gh", ["repo", "delete", repository, "--yes"], options);
     return { ok: true, deleted: true, repository };
   } catch (error) {
+    // Recorded before it was created: a host that died first never made it.
+    if (/Could not resolve to a Repository|HTTP 404|Not Found/iu.test(`${error?.message || ""} ${error?.stderr || ""}`)) {
+      return { ok: true, deleted: false, absent: true, repository };
+    }
     return {
       ok: false,
       deleted: false,

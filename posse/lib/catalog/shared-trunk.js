@@ -53,3 +53,18 @@ export const SHARED_TRUNK_REMOTE_HEAD_FAILURES = Object.freeze({
   REMOTE_DEFAULT_BRANCH_UNBORN: "remote_default_branch_unborn",
   REMOTE_HEAD_DETACHED: "remote_head_detached",
 });
+
+// Merge-lock owner suffixes (`merge-<pid>-<suffix>`) of the shared-trunk
+// coordinator. Status surfaces read the lock row to tell a publication in
+// progress from the poller's routine fetch/fast-forward and recovery passes.
+export const SHARED_TRUNK_MERGE_LOCK_OWNERS = Object.freeze({
+  SYNC: "shared-trunk-sync",
+  RECONCILE: "shared-trunk-reconcile",
+  MERGE: "shared-trunk-merge",
+  ABANDON: "shared-trunk-abandon",
+});
+
+export const SHARED_TRUNK_NON_PUBLISHING_LOCK_OWNERS = Object.freeze([
+  SHARED_TRUNK_MERGE_LOCK_OWNERS.SYNC,
+  SHARED_TRUNK_MERGE_LOCK_OWNERS.RECONCILE,
+]);

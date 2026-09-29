@@ -2,6 +2,7 @@ import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
+import { SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
 
 export const PAIRING_AUTH_ROUTE = "pairing:session";
 export const PAIRING_PROTOCOL = "posse.pairing.v1";
@@ -86,7 +87,11 @@ function validatePolicies(endpoint, payload, status) {
 function validateScopeSet(endpoint, scopeSet, status) {
   if (scopeSet == null) return;
   const scope = recordPayload(endpoint, scopeSet, status);
-  const write = recordPayload(endpoint, scope.write || {}, status);
+  // A scope with no write section grants no writes (Remotes before v27 stored
+  // members that way). The write guard already fails closed on it, so it must
+  // not also fail the heartbeat that keeps the member in the session.
+  if (scope.write == null) return;
+  const write = recordPayload(endpoint, scope.write, status);
   for (const field of ["files", "roots"]) {
     if (!Array.isArray(write[field]) || write[field].length > 256
       || write[field].some((value) => typeof value !== "string" || !value || value.length > 1024)) {
@@ -123,6 +128,16 @@ function validatePeers(endpoint, response, status) {
   }
   for (const value of response.peers) {
     const peer = recordPayload(endpoint, value, status);
+    // Advisory sync hints relayed by newer Remotes. One peer's malformed hint
+    // must never fail the heartbeat for everyone, so both normalize to null.
+    peer.trunk_head = typeof peer.trunk_head === "string" && TRUNK_HEAD_PATTERN.test(peer.trunk_head)
+      ? peer.trunk_head
+      : null;
+    peer.last_seen_age_sec = Number.isSafeInteger(peer.last_seen_age_sec)
+      && peer.last_seen_age_sec >= 0
+      && peer.last_seen_age_sec <= SESSION_SYNC_POLICY.PEER_LAST_SEEN_MAX_SEC
+      ? peer.last_seen_age_sec
+      : null;
     requiredString(endpoint, peer, "instance_id", { maxLength: 128, status });
     requiredString(endpoint, peer, "label", { maxLength: 160, status });
     if (peer.git_identities == null) peer.git_identities = [];
@@ -314,10 +329,21 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
   return response;
 }
 
+// Remote error codes whose remedy is local, with the message the operator
+// needs instead of the relay's terse text.
+const REMOTE_ERROR_MESSAGES = Object.freeze({
+  pairing_instance_conflicts_with_host:
+    "This folder's Posse instance id matches the session host's (was .posse copied from the host?). "
+    + "Join from a fresh empty folder.",
+});
+
 function responseError(body, status) {
-  const message = String(body?.error?.message || body?.message || `HTTP ${status}`);
+  const code = String(body?.error?.code || "pairing_remote_error");
+  const message = Object.hasOwn(REMOTE_ERROR_MESSAGES, code)
+    ? REMOTE_ERROR_MESSAGES[code]
+    : String(body?.error?.message || body?.message || `HTTP ${status}`);
   const error = new Error(message);
-  error.code = String(body?.error?.code || "pairing_remote_error");
+  error.code = code;
   error.status = status;
   return error;
 }

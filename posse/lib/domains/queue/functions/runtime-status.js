@@ -27,6 +27,15 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   // Durable host-side integration journal. Recovery owns this until the
   // frozen side trunk is proven published to the original trunk.
   PAIRING_PROMOTION: "pairing_promotion",
+  // Pairing relay link health, written by whichever local process owns the
+  // session heartbeat (pair console or scheduler). Read by the sync indicator.
+  SESSION_LINK: "session_link",
+  // Per-checkout hold: freezes this clone's shared-trunk fast-forward and
+  // defers its publications while fetch/reconcile keep running.
+  SESSION_HOLD: "session_hold",
+  // The one process closing and integrating the session (pairing
+  // session-close-claim.js); a claim whose process is gone no longer counts.
+  SESSION_CLOSING: "session_closing",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".
@@ -107,6 +116,41 @@ export function updateSharedTrunkRuntimeStatus(patch = {}, { increments = {} } =
     });
   } catch {
     return null;
+  }
+}
+
+/**
+ * Transactional read-modify-write for one runtime_status row. `mutate`
+ * receives the parsed current object (or null) and returns the next object,
+ * or null to delete the row. Best-effort like every status write: a failure
+ * returns { ok: false } instead of throwing into the caller.
+ */
+export function updateRuntimeStatus(key, mutate) {
+  try {
+    const db = getDb();
+    return runImmediateTransaction(db, () => {
+      let current = null;
+      try {
+        const row = db.prepare("SELECT value_json FROM runtime_status WHERE key = ?").get(String(key));
+        const parsed = row ? JSON.parse(row.value_json || "{}") : null;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed;
+      } catch { /* a malformed row is replaced by the mutation's result */ }
+      const next = mutate(current);
+      if (next == null) {
+        db.prepare("DELETE FROM runtime_status WHERE key = ?").run(String(key));
+        return { ok: true, value: null };
+      }
+      db.prepare(`
+        INSERT INTO runtime_status (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `).run(String(key), JSON.stringify(next), now());
+      return { ok: true, value: next };
+    });
+  } catch {
+    return { ok: false, value: null };
   }
 }
 

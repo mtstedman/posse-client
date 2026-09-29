@@ -16,6 +16,7 @@ import {
   beginSharedTrunkMergeOperation,
   createJob,
   finalizePublishedSharedTrunkMergeOperation,
+  forceUpdateJobStatus,
   getSharedTrunkMergeOperation,
   listSharedTrunkMergeOperations,
   listUnresolvedSharedTrunkMergeOperations,
@@ -23,6 +24,7 @@ import {
   notifyQueueStateChanged,
   readRuntimeStatus,
   RUNTIME_STATUS_KEYS,
+  setJobResult,
   transitionSharedTrunkMergeOperation,
   updateSharedTrunkRuntimeStatus,
   withMergeLock,
@@ -45,7 +47,11 @@ import { isGitCommandFailure } from "../classes/Repo.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { withWorktreeLockAsync } from "./worktree.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
-import { SHARED_TRUNK_PUSH_REFUSALS, SHARED_TRUNK_PUSH_REFUSED_REASONS } from "../../../catalog/shared-trunk.js";
+import {
+  SHARED_TRUNK_MERGE_LOCK_OWNERS,
+  SHARED_TRUNK_PUSH_REFUSALS,
+  SHARED_TRUNK_PUSH_REFUSED_REASONS,
+} from "../../../catalog/shared-trunk.js";
 import {
   gitHubCliAuthRemediation,
   isGitPushAuthenticationFailure,
@@ -116,6 +122,22 @@ async function teamPublishedProof(args) {
   if (testOverrides?.teamPublishedProof) return testOverrides.teamPublishedProof(args);
   const { verifyTeamPublishedCandidate } = await import("../../pairing/functions/team-submissions.js");
   return verifyTeamPublishedCandidate(args);
+}
+
+/** The active per-checkout session hold, or null. Advisory: an unreadable
+ * hold row never blocks publication. */
+async function activeSessionHold() {
+  try {
+    if (testOverrides && Object.hasOwn(testOverrides, "sessionHold")) {
+      return typeof testOverrides.sessionHold === "function"
+        ? testOverrides.sessionHold()
+        : testOverrides.sessionHold;
+    }
+    const { readActiveSessionHold } = await import("../../pairing/functions/session-hold.js");
+    return readActiveSessionHold();
+  } catch {
+    return null;
+  }
 }
 
 async function sessionProvenanceContext() {
@@ -489,6 +511,12 @@ function sharedTrunkEvent(eventType, message, json = {}, workItemId = null) {
   });
 }
 
+/** Bounded, token-shaped sync failure code for the persisted health row. */
+function syncErrorCode(value, fallback) {
+  const code = String(value || "").trim().replace(/[^A-Za-z0-9_.:-]+/gu, "_").slice(0, 80);
+  return code || fallback;
+}
+
 function recordSyncStatus(projectDir, config, {
   localSha = undefined,
   remoteSha = undefined,
@@ -496,6 +524,11 @@ function recordSyncStatus(projectDir, config, {
   diverged = undefined,
   unavailable = false,
   blockedReason = undefined,
+  // A completed fetch of the named shared branch. Stamps fetch freshness and
+  // clears the previous sync failure; a later step may record a new one.
+  fetchOk = false,
+  // A sync step failed. Only a success or a completed fetch clears it.
+  errorCode = undefined,
 } = {}) {
   const havePair = typeof localSha === "string" && localSha
     && typeof remoteSha === "string" && remoteSha;
@@ -513,6 +546,11 @@ function recordSyncStatus(projectDir, config, {
     ...(havePair ? { ahead_count: aheadCount, behind_count: behindCount } : {}),
     last_attempt_at: timestamp,
     ...(success ? { last_success_at: timestamp } : {}),
+    ...(fetchOk || success ? { last_sync_error_code: null, last_sync_error_at: null } : {}),
+    ...(fetchOk ? { last_fetch_ok_at: timestamp } : {}),
+    ...(errorCode !== undefined
+      ? { last_sync_error_code: syncErrorCode(errorCode, "sync_failed"), last_sync_error_at: timestamp }
+      : {}),
     ...(diverged === undefined && !success ? {} : { diverged: diverged === true }),
     ...(blockedReason !== undefined ? { blocked_reason: blockedReason || null } : {}),
     ...(success ? { blocked_reason: null } : {}),
@@ -914,7 +952,7 @@ export async function reconcileSharedTrunkOperations(projectDir, { includeClaims
     return { ok: true, skipped: "disabled", unavailable: false, config: runtime.config, operations: [], unresolved: [] };
   }
   if (runtime.unavailable) {
-    recordSyncStatus(projectDir, runtime.config, { unavailable: true });
+    recordSyncStatus(projectDir, runtime.config, { unavailable: true, errorCode: runtime.reason });
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk reconciliation unavailable", {
       remote: runtime.config.remote,
       branch: runtime.config.branch,
@@ -924,7 +962,7 @@ export async function reconcileSharedTrunkOperations(projectDir, { includeClaims
   }
   return underMergeLock(
     () => withWorktreeLockAsync(projectDir, projectDir, () => reconcileAlreadyLocked(projectDir, runtime.config, { includeClaims, claimAfter })),
-    "shared-trunk-reconcile",
+    SHARED_TRUNK_MERGE_LOCK_OWNERS.RECONCILE,
   );
 }
 
@@ -964,7 +1002,7 @@ export async function abandonSharedTrunkOperation(projectDir, operationId) {
     });
     if (!operation) return { ok: false, reason: "operation_changed_concurrently" };
     return { ok: true, operation };
-  }), "shared-trunk-abandon");
+  }), SHARED_TRUNK_MERGE_LOCK_OWNERS.ABANDON);
 }
 
 /** Private seam for callers that already hold both the merge and worktree lock. */
@@ -976,20 +1014,42 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   provenance = null,
   workItemContext = null,
   signal = null,
+  // Session hold (poller path only): fetch, provenance, reconciliation and
+  // claims still run, but this checkout is not fast-forwarded. Merges and the
+  // close-time final sync never pass it.
+  holdFastForward = false,
+  // A person's own checkout (the session console syncs it) is routinely
+  // dirty; a blocked fast-forward there is shown, not raised as a gate.
+  raiseBlockedGate = true,
 } = {}) {
   recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch) });
   const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter, workItemContext, signal });
   if (!fetched.ok) {
     if (fetched.unavailable) {
-      recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch), unavailable: true });
+      recordSyncStatus(projectDir, config, {
+        localSha: refSha(projectDir, config.branch),
+        unavailable: true,
+        errorCode: syncErrorCode(fetched.reason, "fetch_failed"),
+      });
       sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk fetch unavailable", {
         remote: config.remote,
         branch: config.branch,
         reason: fetched.reason,
       });
+    } else {
+      recordSyncStatus(projectDir, config, { errorCode: syncErrorCode(fetched.reason, "fetch_failed") });
     }
     return { ...fetched, config, fetchedClaims: fetched.fetchedClaims || [] };
   }
+  // The named shared branch was fetched: origin's head is now known exactly,
+  // whatever provenance, recovery or fast-forward decide below. The local head
+  // is recorded with it so ahead/behind describe this exact pair; otherwise the
+  // previous pair's counts would still claim "0 behind" until a fast-forward.
+  recordSyncStatus(projectDir, config, {
+    localSha: refSha(projectDir, `refs/heads/${config.branch}`) || null,
+    remoteSha: fetched.remoteSha,
+    fetchOk: true,
+  });
   if (provenance?.baselineOid) {
     let proof = verifySharedTrunkProvenance(projectDir, {
       baselineOid: provenance.baselineOid,
@@ -1047,6 +1107,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       fetchCompleted: true,
       fetchedClaims: fetched.fetchedClaims,
       ...claimFetchMetadata(fetched),
+      remoteSha: fetched.remoteSha,
       reason: "unresolved_shared_trunk_operation",
       remediation: "Run `posse shared-trunk ops` and abandon only the operation you have inspected.",
       unresolved: blocking,
@@ -1074,12 +1135,34 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     };
   }
   const oldSha = refSha(projectDir, config.branch);
+  if (holdFastForward === true) {
+    // Frozen checkout: record the exact distance to the fetched origin ref so
+    // the indicator can show it, but neither move the branch nor claim a
+    // synchronization success.
+    recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha });
+    return {
+      ok: true,
+      held: true,
+      config,
+      fetchCompleted: true,
+      fetchedClaims: fetched.fetchedClaims,
+      ...claimFetchMetadata(fetched),
+      advanced: false,
+      oldSha,
+      newSha: oldSha,
+      remoteSha: fetched.remoteSha,
+      diverged: false,
+      unavailable: false,
+    };
+  }
   const lastSignaledSha = firstString(
     readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK),
     ["last_signaled_sha"],
   );
   let ffEnvelope;
   try {
+    // The native fast-forward reports wrong_checkout first, then treats an
+    // already-current checkout as unchanged whatever its working tree holds.
     ffEnvelope = await sharedTrunkFastForward({
       cwd: projectDir,
       remote: config.remote,
@@ -1088,11 +1171,21 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       expectedRemoteOid: fetched.remoteSha,
     }, workItemContext, signal);
   } catch (err) {
-    recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha, unavailable: true });
+    recordSyncStatus(projectDir, config, {
+      localSha: oldSha,
+      remoteSha: fetched.remoteSha,
+      unavailable: true,
+      errorCode: syncErrorCode(err?.code, "ff_update_failed"),
+    });
     return { ok: false, unavailable: true, operational: true, config, fetchedClaims: fetched.fetchedClaims, reason: err?.code || "ff_update_failed", error: err };
   }
   if (nativeUnavailable(ffEnvelope)) {
-    recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha, unavailable: true });
+    recordSyncStatus(projectDir, config, {
+      localSha: oldSha,
+      remoteSha: fetched.remoteSha,
+      unavailable: true,
+      errorCode: syncErrorCode(ffEnvelope?.reason, "native_capability_unavailable"),
+    });
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk fast-forward unavailable", {
       remote: config.remote,
       branch: config.branch,
@@ -1110,11 +1203,11 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       local_sha: oldSha || null,
       remote_sha: fetched.remoteSha,
     });
-    return { ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), diverged: true, advanced: false, oldSha, newSha, reason: "local_trunk_diverged" };
+    return { ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), remoteSha: fetched.remoteSha, diverged: true, advanced: false, oldSha, newSha, reason: "local_trunk_diverged" };
   }
   if (status === "blocked") {
     const blockedReason = String(ff.reason || "").trim() || null;
-    const gateJobId = ensureFastForwardBlockedGate(config, blockedReason);
+    const gateJobId = raiseBlockedGate ? ensureFastForwardBlockedGate(config, blockedReason) : null;
     recordSyncStatus(projectDir, config, {
       localSha: oldSha,
       remoteSha: fetched.remoteSha,
@@ -1131,13 +1224,18 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       unavailable: false,
       oldSha,
       newSha,
+      remoteSha: fetched.remoteSha,
       reason: "fast_forward_blocked",
       blockedReason,
       ...(gateJobId ? { gateJobId, needsAttention: true } : {}),
     };
   }
   if (!(ff.ok === true || ["advanced", "up_to_date", "unchanged", "already_current", "no_change"].includes(status))) {
-    recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha });
+    recordSyncStatus(projectDir, config, {
+      localSha: oldSha,
+      remoteSha: fetched.remoteSha,
+      errorCode: "unexpected_fast_forward_outcome",
+    });
     return {
       ok: false,
       config,
@@ -1149,6 +1247,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       unavailable: false,
       oldSha,
       newSha,
+      remoteSha: fetched.remoteSha,
       reason: status ? `unexpected_fast_forward_outcome:${status}` : "unexpected_fast_forward_outcome",
     };
   }
@@ -1169,6 +1268,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     advanced,
     oldSha,
     newSha,
+    remoteSha: fetched.remoteSha,
     diverged: false,
     unavailable: false,
   };
@@ -1180,6 +1280,8 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
   claimAfter = null,
   provenance = null,
   signal = null,
+  holdFastForward = false,
+  raiseBlockedGate = true,
 } = {}) {
   const runtime = await runtimeSharedTrunkConfig(projectDir);
   if (!runtime.config.enabled) {
@@ -1194,7 +1296,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
     };
   }
   if (runtime.unavailable) {
-    recordSyncStatus(projectDir, runtime.config, { unavailable: true });
+    recordSyncStatus(projectDir, runtime.config, { unavailable: true, errorCode: runtime.reason });
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk sync unavailable", {
       remote: runtime.config.remote,
       branch: runtime.config.branch,
@@ -1209,8 +1311,10 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
       claimAfter,
       provenance,
       signal,
+      holdFastForward: holdFastForward === true,
+      raiseBlockedGate: raiseBlockedGate !== false,
     })),
-    "shared-trunk-sync",
+    SHARED_TRUNK_MERGE_LOCK_OWNERS.SYNC,
   );
 }
 
@@ -1271,6 +1375,43 @@ function ensurePushRefusedGate(config, pushed, refusal) {
       stderr_excerpt: String(pushed?.stderrExcerpt || pushed?.stderr_excerpt || "").slice(0, 512),
     },
   }).id;
+}
+
+const SHARED_TRUNK_GATE_SUBTYPES = Object.freeze([
+  "shared_trunk_fast_forward_blocked",
+  "shared_trunk_provenance",
+  ...Object.values(SHARED_TRUNK_PUSH_REFUSALS).map((refusal) => refusal.gateSubtype),
+]);
+
+/**
+ * Cancel the open shared-trunk gates for `branch`. A pairing session's branch
+ * stops existing when the session ends; a gate asking someone to repair it
+ * would otherwise stay queued forever and be advertised to later sessions.
+ * @returns {number} gates canceled
+ */
+export function cancelSharedTrunkGatesForBranch(branch, reason, { remote = null } = {}) {
+  const target = String(branch || "").trim();
+  if (!target) return 0;
+  // With a remote, only that remote's gates: another shared trunk may use the
+  // same branch name.
+  const remoteName = String(remote || "").trim() || null;
+  const rows = getDb().prepare(`
+    SELECT id FROM jobs
+    WHERE job_type = 'human_input'
+      AND status IN ('queued','waiting_on_human','blocked')
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.branch') = ?
+          AND (? IS NULL OR json_extract(payload_json, '$.remote') = ?)
+          AND json_extract(payload_json, '$.subtype') IN (${SHARED_TRUNK_GATE_SUBTYPES.map(() => "?").join(",")})
+        ELSE 0 END
+  `).all(target, remoteName, remoteName, ...SHARED_TRUNK_GATE_SUBTYPES);
+  let canceled = 0;
+  for (const row of rows) {
+    if (!forceUpdateJobStatus(row.id, "canceled", { expectedStatuses: ["queued", "waiting_on_human", "blocked"] })) continue;
+    setJobResult(row.id, { canceled: true, reason: String(reason || "branch retired").slice(0, 200) });
+    canceled += 1;
+  }
+  return canceled;
 }
 
 function ensureFastForwardBlockedGate(config, reason) {
@@ -1365,8 +1506,21 @@ export async function mergeToSharedTrunkAsync({
   if (!Number.isSafeInteger(Number(workItemId)) || Number(workItemId) <= 0) {
     return { ok: false, deferred: true, sharedTrunk: true, reason: "work_item_required", message: "Shared-trunk merge requires a work item id" };
   }
+  // A held checkout is frozen on purpose: defer before any lock, fetch or
+  // candidate so the completed work stays mergeable and publishes on resume.
+  const hold = await activeSessionHold();
+  if (hold) {
+    return {
+      ok: false,
+      sharedTrunk: true,
+      deferred: true,
+      skipped: "session_hold",
+      reason: "session_hold",
+      message: "Shared-trunk merge deferred while this checkout is held; resume the session to publish.",
+    };
+  }
   if (runtime.unavailable) {
-    recordSyncStatus(projectDir, runtime.config, { unavailable: true });
+    recordSyncStatus(projectDir, runtime.config, { unavailable: true, errorCode: runtime.reason });
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk merge unavailable", {
       remote: runtime.config.remote,
       branch: runtime.config.branch,
@@ -2005,7 +2159,7 @@ export async function mergeToSharedTrunkAsync({
       return { ok: true, sharedTrunk: true, published: true, mergeHash: operation.candidateSha, targetBranch: config.branch, operation };
     }
     return { ok: false, reason: "push_retry_exhausted", operation };
-    }), "shared-trunk-merge", mergeLockAlreadyHeld === true);
+    }), SHARED_TRUNK_MERGE_LOCK_OWNERS.MERGE, mergeLockAlreadyHeld === true);
   } catch (error) {
     const operation = listSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
       .filter((value) => value.purpose === purpose

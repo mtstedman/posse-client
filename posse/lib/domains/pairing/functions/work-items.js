@@ -1,11 +1,17 @@
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { BACKGROUND_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import {
+  SESSION_SYNC_POLICY,
+  SESSION_SYNC_STATES,
+  TRUNK_HEAD_PATTERN,
+} from "../../../catalog/session-sync.js";
 import { stripAnsi } from "../../../shared/format/functions/ansi.js";
 import { getBridgeLabel } from "../../bridge/functions/auth.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { adminGitExec } from "../../git/functions/admin-git.js";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
+import { readSessionSync } from "./session-sync.js";
 import { getLivePairingState } from "./state.js";
 import { listJobs, listWorkItems } from "../../queue/functions/index.js";
 import {
@@ -86,6 +92,44 @@ export function collectPairingJobs({ limit = PAIRING_JOB_LIMIT } = {}) {
     }));
 }
 
+/**
+ * The shared-trunk head this clone has observed on the session remote, as a
+ * peer hint: the persisted fetched/published origin head, only while the
+ * shared trunk is the live session's branch. A held checkout advertises its
+ * own (older) head instead, so peers see it as behind rather than synced, but
+ * only when it has no unpublished commits: a local head that is ahead of
+ * origin names work no peer can fetch. A database read; never Git.
+ */
+export function pairingPresenceTrunkHead(state = getLivePairingState()) {
+  if (!state?.shared_branch) return null;
+  const status = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK);
+  if (status?.enabled !== true || status.branch !== state.shared_branch) return null;
+  const head = typeof status.remote_sha === "string" ? status.remote_sha : "";
+  if (!TRUNK_HEAD_PATTERN.test(head)) return null;
+  // A diverged or blocked checkout holds no head peers could compare against.
+  if (status.diverged === true || status.blocked_reason) return null;
+  // Advertise what the checkout actually holds: when it lags origin (held, or a
+  // fast-forward that has not happened yet) peers must see it as behind. Never
+  // the local head while it carries unpublished work: that stays private, and
+  // origin's head (which the checkout contains) is advertised instead.
+  const local = typeof status.local_sha === "string" ? status.local_sha : "";
+  const ahead = status.ahead_count;
+  if (local !== head && TRUNK_HEAD_PATTERN.test(local) && Number.isSafeInteger(ahead) && ahead === 0) {
+    return local;
+  }
+  return head;
+}
+
+function peerTrunkHead(value) {
+  return typeof value === "string" && TRUNK_HEAD_PATTERN.test(value) ? value : null;
+}
+
+function peerLastSeenAgeSec(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= SESSION_SYNC_POLICY.PEER_LAST_SEEN_MAX_SEC
+    ? value
+    : null;
+}
+
 export function collectPairingPresence(projectDir = process.cwd()) {
   let gitIdentities = [];
   try {
@@ -102,12 +146,17 @@ export function collectPairingPresence(projectDir = process.cwd()) {
       headroom: providers.map(providerHeadroom),
     };
   } catch { /* capability absence is explicit and routes work locally */ }
+  let trunkHead = null;
+  try {
+    trunkHead = pairingPresenceTrunkHead();
+  } catch { /* an unreadable status row advertises no head */ }
   return {
     label: boundedText(getBridgeLabel(projectDir), 160),
     work_items: collectPairingWorkItems(),
     jobs: collectPairingJobs(),
     git_identities: gitIdentities,
     capabilities,
+    trunk_head: trunkHead,
   };
 }
 
@@ -146,6 +195,8 @@ function boundedPeer(peer) {
     capabilities: peer?.capabilities && typeof peer.capabilities === "object"
       ? peer.capabilities
       : {},
+    trunk_head: peerTrunkHead(peer?.trunk_head),
+    last_seen_age_sec: peerLastSeenAgeSec(peer?.last_seen_age_sec),
   };
 }
 
@@ -168,7 +219,7 @@ export function writePairingPeerSnapshot(status, { at = new Date().toISOString()
       }))
       .filter((member) => member.id && member.instance_id),
     peers: (Array.isArray(status?.peers) ? status.peers : [])
-      .slice(0, 50)
+      .slice(0, SESSION_SYNC_POLICY.PEER_SNAPSHOT_MAX_PEERS)
       .map(boundedPeer)
       .filter((peer) => peer.instance_id),
   };
@@ -189,6 +240,39 @@ export function readPairingPeerSnapshot({
 
 export function clearPairingPeerSnapshot() {
   return clearRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_PEERS);
+}
+
+/**
+ * Peer trunk-head hints for SharedTrunkPoller.poll({ hints }): one entry per
+ * peer that advertises a valid full head.
+ * @returns {Array<{ instance_id: string, role: string, trunk_head: string }>}
+ */
+export function pairingPeerTrunkHints(peers = readPairingPeerSnapshot()?.peers) {
+  return (Array.isArray(peers) ? peers : [])
+    .slice(0, SESSION_SYNC_POLICY.PEER_SNAPSHOT_MAX_PEERS)
+    .map((peer) => ({
+      instance_id: boundedText(peer?.instance_id, 160),
+      role: boundedText(peer?.role, 20),
+      trunk_head: peerTrunkHead(peer?.trunk_head),
+    }))
+    .filter((hint) => hint.instance_id && hint.trunk_head);
+}
+
+// Compatibility projection of the derived indicator for surfaces that still
+// read `trunk_health.status`. Unlike the old sticky rule, "healthy" now
+// requires a proven, fresh sync.
+function trunkHealthStatus(sync) {
+  if (!sync) return "pending";
+  switch (sync.state) {
+    case SESSION_SYNC_STATES.SYNCED:
+      return "healthy";
+    case SESSION_SYNC_STATES.BLOCKED:
+      return sync.reasons?.[0] || "blocked";
+    case SESSION_SYNC_STATES.UNKNOWN:
+      return "pending";
+    default:
+      return String(sync.state).replaceAll("_", "-");
+  }
 }
 
 export function pairingSessionSummary(snapshot = readPairingPeerSnapshot()) {
@@ -216,6 +300,10 @@ export function pairingSessionSummary(snapshot = readPairingPeerSnapshot()) {
       updated_at: boundedText(row.updated_at, 40),
     }));
   } catch { /* session summaries remain available before the delegation migration */ }
+  let derived = null;
+  try {
+    derived = readSessionSync({ state, snapshot });
+  } catch { /* the indicator degrades to unknown; the summary stays available */ }
   return {
     session_id: state.remote_session_id,
     role: state.role,
@@ -228,16 +316,10 @@ export function pairingSessionSummary(snapshot = readPairingPeerSnapshot()) {
     pending_count: members.filter((member) => member.state === "pending").length,
     peer_count: snapshot?.peers?.length || 0,
     delegations,
+    sync: derived?.sync || null,
+    peers_sync: derived?.peers_sync || [],
     trunk_health: {
-      status: trunk.provenance_blocked === true
-        ? "provenance-review"
-        : trunk.diverged === true
-          ? "diverged"
-          : trunk.publication_unresolved === true
-            ? "publication-blocked"
-            : trunk.last_success_at
-              ? "healthy"
-              : "pending",
+      status: trunkHealthStatus(derived?.sync),
       ahead_count: Math.max(0, Number(trunk.ahead_count) || 0),
       behind_count: Math.max(0, Number(trunk.behind_count) || 0),
       last_success_at: boundedText(trunk.last_success_at, 40) || null,

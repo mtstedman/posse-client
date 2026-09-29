@@ -2678,7 +2678,7 @@ const COMMAND_USAGE = {
     console.log(`\n  Opens or joins multi-user collaboration across separate clones on one shared Git side trunk.`);
     console.log(`  Live participants see bounded, read-only peer WI/job summaries outside their local queue.`);
     console.log(`  Each clone keeps its own queue and database; peer activity is never scheduled locally.`);
-    console.log(`  Host hotkeys: ${C.cyan}g${C.reset} gracefully drains and integrates; ${C.cyan}Ctrl+C${C.reset} forces close and integration.`);
+    console.log(`  The host console takes typed commands: ${C.cyan}close${C.reset} drains and integrates; ${C.cyan}Ctrl+C${C.reset} forces close and integration.`);
     console.log(`  ${C.dim}This does not expose a phone/web control bridge; use \`posse serve --pair\` for that.${C.reset}\n`);
   },
   session: () => {
@@ -2693,11 +2693,14 @@ const COMMAND_USAGE = {
     console.log(`    posse session policy each-member|capability-routing|host-only`);
     console.log(`    posse session publication direct|github-pr`);
     console.log(`    posse session status`);
+    console.log(`    posse session hold [reason]`);
+    console.log(`    posse session resume`);
     console.log(`    posse session leave|close [--keep-branch|--history-preserving]`);
     console.log(`    posse session integrate [--approve-source-oid SHA --approve-origin-oid SHA]`);
     console.log(`    posse session abandon-integration`);
     console.log(`\n  Opens or joins a shared Posse collaboration session.`);
-    console.log(`  Joiners wait for the host to confirm their four-character countersign.\n`);
+    console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
+    console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.\n`);
   },
   unpair: () => {
     console.log(`\n  Usage: posse unpair [--json]`);
@@ -2759,7 +2762,7 @@ export async function main() {
     }
   }
   const commandPolicy = ["pair", "session"].includes(command)
-      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy"].includes(pairSubcommand)
+      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy", "hold", "resume"].includes(pairSubcommand)
     ? { ...baseCommandPolicy, requiresNativeGit: false }
     : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
@@ -2793,8 +2796,19 @@ export async function main() {
   if (!isHelpCommand(command)) {
     const { recoverInterruptedPairing } = await loadPairCommandModule();
     const recovery = await recoverInterruptedPairing(PROJECT_DIR, { C });
+    // Session commands that resolve a ready integration, or refuse to start
+    // with their own explanation of it, would only repeat this warning. A
+    // recovery that failed still reports its cause.
+    const sessionReportsPending = recovery.reported === true
+      || (recovery.code === "pairing_integration_required"
+        && ["pair", "session"].includes(command)
+        && (["", "host", "join", "integrate", "abandon-integration"].includes(pairSubcommand)
+          || /^[a-z0-9]{5}-[a-z0-9]{5}$/u.test(pairSubcommand)
+          || pairSubcommand.startsWith("posse://")));
     if (recovery.attempted && !recovery.ok) {
-      console.error(`  ${C.yellow}Pairing recovery remains pending:${C.reset} ${recovery.message}`);
+      if (!sessionReportsPending) {
+        console.error(`  ${C.yellow}Pairing recovery remains pending:${C.reset} ${recovery.message}`);
+      }
       if (!commandPolicy.readOnly && !["pair", "session", "unpair"].includes(commandPolicy.name)) {
         throw Object.assign(new Error("Resolve the pending pairing recovery before starting new work"), {
           code: recovery.code || "pairing_recovery_pending",
@@ -2876,7 +2890,7 @@ ${aliasDiagnostic}
     ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
     ${C.dim}             Host: g gracefully drains/integrates; Ctrl+C forces close/integration; unlike serve, pair does not connect phone/web clients${C.reset}
     ${C.cyan}session${C.reset}    Host or join the shared session model (preferred; pair is an alias)
-    ${C.dim}             session host|join|admit|status|members|pending|kick|scope|policy|publication|invite|leave|close|integrate|abandon-integration${C.reset}
+    ${C.dim}             session host|join|admit|status|hold|resume|members|pending|kick|scope|policy|publication|invite|leave|close|integrate|abandon-integration${C.reset}
     ${C.cyan}unpair${C.reset}     Leave pairing; host drains and integrates, members restore locally
     ${C.cyan}atlas${C.reset}        Atlas admin commands
     ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}

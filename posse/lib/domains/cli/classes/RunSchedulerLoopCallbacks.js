@@ -3,8 +3,17 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
 import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
 import { logAgentActivity } from "../../queue/functions/events.js";
+import { SESSION_SYNC_STATES } from "../../../catalog/session-sync.js";
+import { sessionMemberLabel } from "../../pairing/functions/session-console.js";
+import { sessionSyncFeedLabel } from "../../pairing/functions/sync-state.js";
 
 const MAX_PENDING_TEAM_SUBMISSION_IDS = 256;
+const SYNC_ATTENTION_STATES = new Set([
+  SESSION_SYNC_STATES.DISCONNECTED,
+  SESSION_SYNC_STATES.BLOCKED,
+  SESSION_SYNC_STATES.DIVERGED,
+  SESSION_SYNC_STATES.STALE,
+]);
 
 function terminalActivityStatus(status) {
   if (status === "succeeded") return { kind: "result", status: "succeeded" };
@@ -58,7 +67,36 @@ export class RunSchedulerLoopCallbacks {
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
       onTeamSubmissionChange: (change) => this.onTeamSubmissionChange(change),
+      onSessionEvent: (event) => this.onSessionEvent(event),
     };
+  }
+
+  // Session roster changes and sync-state transitions from the scheduler's
+  // SessionMonitor, as run feed events.
+  onSessionEvent(event = {}) {
+    let text = null;
+    let color = this.C.cyan;
+    if (event.kind === "member") {
+      const label = sessionMemberLabel(event.member);
+      if (event.event === "pending") {
+        text = `[session] Join request from ${label}; admit with u → admit <COUNTERSIGN>`;
+        color = this.C.yellow;
+      } else if (event.event === "joined") {
+        text = `[session] ${label} joined`;
+        color = this.C.green;
+      } else if (event.event === "left") {
+        text = `[session] ${label} ${event.member?.state === "kicked" ? "was removed" : "left"}`;
+        color = this.C.dim;
+      }
+    } else if (event.kind === "sync" && event.sync) {
+      text = `[sync] ${sessionSyncFeedLabel(event.sync)}`;
+      if (event.sync.state === SESSION_SYNC_STATES.SYNCED) color = this.C.green;
+      else if (SYNC_ATTENTION_STATES.has(event.sync.state)) color = this.C.yellow;
+    }
+    if (!text) return;
+    const display = this.getDisplay();
+    if (display) display.addEvent(`${color}${text}${this.C.reset}`);
+    else console.log(`  ${color}${text}${this.C.reset}`);
   }
 
   onTeamSubmissionChange({ workItemIds = [] } = {}) {
